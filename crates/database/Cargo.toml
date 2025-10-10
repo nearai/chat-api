@@ -43,6 +43,7 @@ tracing = "0.1"
 anyhow = "1.0"
 
 config = { path = "../config" }
+services = { path = "../services" }
 
 # For database migrations
 refinery = { version = "0.8", features = ["tokio-postgres"] }

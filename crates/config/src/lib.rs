@@ -1,3 +1,6 @@
+use serde::Deserialize;
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct DatabaseConfig {
     pub host: String,
     pub port: u16,
@@ -7,4 +10,85 @@ pub struct DatabaseConfig {
     pub max_connections: u32,
     pub tls_enabled: bool,
     pub tls_ca_cert_path: Option<String>,
+}
+
+impl Default for DatabaseConfig {
+    fn default() -> Self {
+        Self {
+            host: std::env::var("DATABASE_HOST").unwrap_or_else(|_| "localhost".to_string()),
+            port: std::env::var("DATABASE_PORT")
+                .ok()
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(5432),
+            database: std::env::var("DATABASE_NAME").unwrap_or_else(|_| "chat_api".to_string()),
+            username: std::env::var("DATABASE_USER").unwrap_or_else(|_| "postgres".to_string()),
+            password: std::env::var("DATABASE_PASSWORD").unwrap_or_else(|_| "postgres".to_string()),
+            max_connections: std::env::var("DATABASE_MAX_CONNECTIONS")
+                .ok()
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(10),
+            tls_enabled: std::env::var("DATABASE_TLS_ENABLED")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(false),
+            tls_ca_cert_path: std::env::var("DATABASE_TLS_CA_CERT_PATH").ok(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct OAuthConfig {
+    pub google_client_id: String,
+    pub google_client_secret: String,
+    pub github_client_id: String,
+    pub github_client_secret: String,
+    pub redirect_uri: String,
+}
+
+impl Default for OAuthConfig {
+    fn default() -> Self {
+        Self {
+            google_client_id: std::env::var("GOOGLE_CLIENT_ID").unwrap_or_default(),
+            google_client_secret: std::env::var("GOOGLE_CLIENT_SECRET").unwrap_or_default(),
+            github_client_id: std::env::var("GITHUB_CLIENT_ID").unwrap_or_default(),
+            github_client_secret: std::env::var("GITHUB_CLIENT_SECRET").unwrap_or_default(),
+            redirect_uri: std::env::var("REDIRECT_URI")
+                .unwrap_or_else(|_| "http://localhost:8080".to_string()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ServerConfig {
+    pub host: String,
+    pub port: u16,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            host: std::env::var("SERVER_HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
+            port: std::env::var("SERVER_PORT")
+                .ok()
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(8080),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct Config {
+    pub database: DatabaseConfig,
+    pub oauth: OAuthConfig,
+    pub server: ServerConfig,
+}
+
+impl Config {
+    pub fn from_env() -> Self {
+        Self {
+            database: DatabaseConfig::default(),
+            oauth: OAuthConfig::default(),
+            server: ServerConfig::default(),
+        }
+    }
 }

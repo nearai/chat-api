@@ -1,68 +1,103 @@
-use crate::auth::ports::{Session, SessionId, User, UserId};
-use crate::organization::Organization;
-use crate::workspace::{ApiKey, Workspace};
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 
-/// Errors that can occur during user service operations
-#[derive(Debug, thiserror::Error)]
-pub enum UserServiceError {
-    #[error("User not found")]
-    UserNotFound,
+use crate::types::UserId;
 
-    #[error("Session not found")]
-    SessionNotFound,
-
-    #[error("Unauthorized: {0}")]
-    Unauthorized(String),
-
-    #[error("Invalid parameters: {0}")]
-    InvalidParams(String),
-
-    #[error("Internal error: {0}")]
-    InternalError(String),
-
-    #[error("Organization already exists")]
-    OrganizationAlreadyExists,
-}
-
-/// Response from quick setup containing all created resources
+/// Represents a user in the system
 #[derive(Debug, Clone)]
-pub struct QuickSetupResult {
-    pub organization: Organization,
-    pub workspace: Workspace,
-    pub api_key: ApiKey,
+pub struct User {
+    pub id: UserId,
+    pub email: String,
+    pub name: Option<String>,
+    pub avatar_url: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
-/// Service trait for user profile and session management
-#[async_trait]
-pub trait UserServiceTrait: Send + Sync {
-    /// Get a user by their ID
-    async fn get_user(&self, user_id: UserId) -> Result<User, UserServiceError>;
+/// OAuth provider types
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OAuthProvider {
+    Google,
+    Github,
+}
 
-    /// Update a user's profile
+/// Represents a linked OAuth account
+#[derive(Debug, Clone)]
+pub struct LinkedOAuthAccount {
+    pub provider: OAuthProvider,
+    pub provider_user_id: String,
+    pub linked_at: DateTime<Utc>,
+}
+
+/// Detailed user profile with linked accounts
+#[derive(Debug, Clone)]
+pub struct UserProfile {
+    pub user: User,
+    pub linked_accounts: Vec<LinkedOAuthAccount>,
+}
+
+/// Repository trait for user-related data operations
+#[async_trait]
+pub trait UserRepository: Send + Sync {
+    /// Get user by ID
+    async fn get_user(&self, user_id: UserId) -> anyhow::Result<Option<User>>;
+
+    /// Get user by email
+    async fn get_user_by_email(&self, email: &str) -> anyhow::Result<Option<User>>;
+
+    /// Create a new user
+    async fn create_user(
+        &self,
+        email: String,
+        name: Option<String>,
+        avatar_url: Option<String>,
+    ) -> anyhow::Result<User>;
+
+    /// Update user information
+    async fn update_user(
+        &self,
+        user_id: UserId,
+        name: Option<String>,
+        avatar_url: Option<String>,
+    ) -> anyhow::Result<User>;
+
+    /// Delete a user
+    async fn delete_user(&self, user_id: UserId) -> anyhow::Result<()>;
+
+    /// Get linked OAuth accounts for a user
+    async fn get_linked_accounts(&self, user_id: UserId)
+        -> anyhow::Result<Vec<LinkedOAuthAccount>>;
+
+    /// Link an OAuth account to a user
+    async fn link_oauth_account(
+        &self,
+        user_id: UserId,
+        provider: OAuthProvider,
+        provider_user_id: String,
+    ) -> anyhow::Result<()>;
+
+    /// Find user by OAuth provider and provider user ID
+    async fn find_user_by_oauth(
+        &self,
+        provider: OAuthProvider,
+        provider_user_id: &str,
+    ) -> anyhow::Result<Option<UserId>>;
+}
+
+/// Service trait for user-related operations
+#[async_trait]
+pub trait UserService: Send + Sync {
+    /// Get user profile by ID
+    async fn get_user_profile(&self, user_id: UserId) -> anyhow::Result<UserProfile>;
+
+    /// Update user profile
     async fn update_profile(
         &self,
         user_id: UserId,
-        display_name: Option<String>,
+        name: Option<String>,
         avatar_url: Option<String>,
-    ) -> Result<User, UserServiceError>;
+    ) -> anyhow::Result<User>;
 
-    /// Get all sessions for a user
-    async fn get_user_sessions(&self, user_id: UserId) -> Result<Vec<Session>, UserServiceError>;
-
-    /// Revoke a specific session (with authorization check)
-    async fn revoke_session(
-        &self,
-        user_id: UserId,
-        session_id: SessionId,
-    ) -> Result<bool, UserServiceError>;
-
-    /// Revoke all sessions for a user
-    async fn revoke_all_sessions(&self, user_id: UserId) -> Result<usize, UserServiceError>;
-
-    /// Quick setup: Create organization, workspace, and API key for a user
-    ///
-    /// This is a convenience method that creates all resources needed for a user to get started.
-    /// The organization name is derived from the user's email (e.g., "user@example.com" -> "user-org").
-    async fn quick_setup(&self, user_id: UserId) -> Result<QuickSetupResult, UserServiceError>;
+    /// Delete user account
+    async fn delete_account(&self, user_id: UserId) -> anyhow::Result<()>;
 }

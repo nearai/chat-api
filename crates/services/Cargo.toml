@@ -26,6 +26,7 @@ reqwest = { version = "0.12", features = ["json", "stream"] }
 url = "2.5"
 bytes = "1.5"
 tokio-stream = "0.1"
+tokio-postgres = { version = "0.7", features = ["with-uuid-1"] }
 # MCP protocol
 rmcp = { version = "0.6", features = [
     "client",
@@ -34,6 +35,10 @@ rmcp = { version = "0.6", features = [
 ] }
 hex = "0.4"
 dstack-sdk = "0.1"
+utoipa = { version = "5", optional = true }
+
+[features]
+utoipa = ["dep:utoipa"]
 
 [dev-dependencies]
 tokio-test = "0.4"

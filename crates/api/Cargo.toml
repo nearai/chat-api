@@ -17,6 +17,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tokio = { version = "1", features = ["full"] }
 anyhow = "1.0"
+dotenvy = "0.15"
 
 # Authentication dependencies
 tower = { version = "0.5", features = ["util"] }
@@ -24,10 +25,17 @@ tower-http = { version = "0.6", features = ["cors"] }
 uuid = { version = "1.5", features = ["v4"] }
 url = "2.5"
 chrono = { version = "0.4", features = ["serde"] }
+sha2 = "0.10"
 # For TypedHeader support
 headers = "0.4"
 # OpenAPI documentation generation
 utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid"] }
+utoipa-swagger-ui = { version = "9", features = ["axum"] }
+
+# Internal dependencies
+services = { path = "../services", features = ["utoipa"] }
+database = { path = "../database" }
+config = { path = "../config" }
 
 [dev-dependencies]
 axum-test = "18"

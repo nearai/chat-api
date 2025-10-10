@@ -21,13 +21,25 @@ services:
   api:
     build: .
     ports:
-      - "3000:3000"
+      - "8080:8080"
     environment:
-      CONFIG_FILE: config/docker.yaml
-      RUST_LOG: debug
+      # Database
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_NAME: chat_api
+      DATABASE_USER: postgres
+      DATABASE_PASSWORD: postgres
+      # Server
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: 8080
+      # OAuth - Set these with your credentials
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
+      # Logging
+      RUST_LOG: info,api=debug,services=debug,database=debug
       RUST_BACKTRACE: "1"
-    volumes:
-      - ./config:/app/config:ro
     depends_on:
       postgres:
         condition: service_healthy
