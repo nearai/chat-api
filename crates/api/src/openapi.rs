@@ -27,6 +27,7 @@ use utoipa::OpenApi;
         crate::models::UserProfileResponse,
         crate::models::AuthResponse,
         crate::models::ErrorResponse,
+        crate::error::ApiErrorResponse,
     )),
     modifiers(&SecurityAddon),
     tags(

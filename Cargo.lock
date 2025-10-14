@@ -451,22 +451,25 @@ name = "api"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "axum-extra",
  "axum-test",
+ "bytes",
  "chrono",
  "config",
  "database",
  "dotenvy",
  "futures",
  "headers",
+ "http",
+ "reqwest",
  "serde",
  "serde_json",
  "services",
  "sha2",
  "tokio",
  "tokio-stream",
- "tokio-test",
  "tower",
  "tower-http",
  "tracing",
@@ -4355,6 +4358,7 @@ dependencies = [
  "futures",
  "futures-util",
  "hex",
+ "http",
  "oauth2",
  "rand 0.9.2",
  "reqwest",
@@ -5137,9 +5141,9 @@ checksum = "1dccffe3ce07af9386bfd29e80c0ab1a8205a2fc34e4bcd40364df902cfa8f3f"
 
 [[package]]
 name = "typetag"
-version = "0.2.20"
+version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73f22b40dd7bfe8c14230cf9702081366421890435b2d625fa92b4acc4c3de6f"
+checksum = "be2212c8a9b9bcfca32024de14998494cf9a5dfa59ea1b829de98bac374b86bf"
 dependencies = [
  "erased-serde",
  "inventory",
@@ -5150,9 +5154,9 @@ dependencies = [
 
 [[package]]
 name = "typetag-impl"
-version = "0.2.20"
+version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35f5380909ffc31b4de4f4bdf96b877175a016aa2ca98cee39fcfd8c4d53d952"
+checksum = "27a7a9b72ba121f6f1f6c3632b85604cac41aedb5ddc70accbebb6cac83de846"
 dependencies = [
  "proc-macro2",
  "quote",

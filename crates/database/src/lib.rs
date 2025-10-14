@@ -4,7 +4,8 @@ pub mod repositories;
 
 pub use pool::{create_pool, DbPool};
 pub use repositories::{
-    PostgresOAuthRepository, PostgresSessionRepository, PostgresUserRepository,
+    PostgresConversationRepository, PostgresOAuthRepository, PostgresSessionRepository,
+    PostgresUserRepository,
 };
 
 use anyhow::Result;
@@ -16,6 +17,7 @@ pub struct Database {
     user_repository: Arc<PostgresUserRepository>,
     session_repository: Arc<PostgresSessionRepository>,
     oauth_repository: Arc<PostgresOAuthRepository>,
+    conversation_repository: Arc<PostgresConversationRepository>,
 }
 
 impl Database {
@@ -24,12 +26,14 @@ impl Database {
         let user_repository = Arc::new(PostgresUserRepository::new(pool.clone()));
         let session_repository = Arc::new(PostgresSessionRepository::new(pool.clone()));
         let oauth_repository = Arc::new(PostgresOAuthRepository::new(pool.clone()));
+        let conversation_repository = Arc::new(PostgresConversationRepository::new(pool.clone()));
 
         Self {
             pool,
             user_repository,
             session_repository,
             oauth_repository,
+            conversation_repository,
         }
     }
 
@@ -62,5 +66,10 @@ impl Database {
     /// Get the OAuth repository
     pub fn oauth_repository(&self) -> Arc<PostgresOAuthRepository> {
         self.oauth_repository.clone()
+    }
+
+    /// Get the conversation repository
+    pub fn conversation_repository(&self) -> Arc<PostgresConversationRepository> {
+        self.conversation_repository.clone()
     }
 }

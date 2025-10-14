@@ -1,14 +1,14 @@
 use axum::{
     extract::{Query, State},
     http::StatusCode,
-    response::{IntoResponse, Redirect, Response},
+    response::Redirect,
     routing::get,
     Json, Router,
 };
 use serde::Deserialize;
 use services::SessionId;
 
-use crate::{models::*, state::AppState};
+use crate::{error::ApiError, models::*, state::AppState};
 
 /// Query parameters for OAuth callback
 #[derive(Debug, Deserialize)]
@@ -33,34 +33,27 @@ pub struct OAuthInitQuery {
     ),
     responses(
         (status = 302, description = "Redirect to Google OAuth"),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
+        (status = 502, description = "OAuth provider error", body = crate::error::ApiErrorResponse)
     )
 )]
 pub async fn google_login(
     State(app_state): State<AppState>,
     Query(params): Query<OAuthInitQuery>,
-) -> Result<Redirect, Response> {
+) -> Result<Redirect, ApiError> {
     let redirect_uri = params
         .redirect_uri
         .unwrap_or_else(|| format!("{}/v1/auth/callback", app_state.redirect_uri));
 
-    match app_state
+    let auth_url = app_state
         .oauth_service
         .get_authorization_url(services::auth::ports::OAuthProvider::Google, redirect_uri)
         .await
-    {
-        Ok(auth_url) => Ok(Redirect::temporary(&auth_url)),
-        Err(e) => {
+        .map_err(|e| {
             tracing::error!("Failed to generate Google authorization URL: {}", e);
-            Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Failed to initiate OAuth flow".to_string(),
-                }),
-            )
-                .into_response())
-        }
-    }
+            ApiError::oauth_provider_error("Google")
+        })?;
+
+    Ok(Redirect::temporary(&auth_url))
 }
 
 /// Handler for unified OAuth callback (works for all providers)
@@ -74,47 +67,33 @@ pub async fn google_login(
     ),
     responses(
         (status = 200, description = "Successfully authenticated", body = AuthResponse),
-        (status = 401, description = "Authentication failed", body = ErrorResponse)
+        (status = 401, description = "Authentication failed", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
     )
 )]
 pub async fn oauth_callback(
     State(app_state): State<AppState>,
     Query(params): Query<OAuthCallbackQuery>,
-) -> Result<Json<AuthResponse>, Response> {
+) -> Result<Json<AuthResponse>, ApiError> {
     // The provider is determined from the state stored in the database
-    match app_state
+    let session = app_state
         .oauth_service
         .handle_callback_unified(params.code, params.state)
         .await
-    {
-        Ok(session) => {
-            let token = session.token.ok_or_else(|| {
-                tracing::error!("Session token not returned from service");
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: "Failed to create session".to_string(),
-                    }),
-                )
-                    .into_response()
-            })?;
-
-            Ok(Json(AuthResponse {
-                token,
-                expires_at: session.expires_at.to_rfc3339(),
-            }))
-        }
-        Err(e) => {
+        .map_err(|e| {
             tracing::error!("OAuth callback failed: {}", e);
-            Err((
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse {
-                    error: "Authentication failed".to_string(),
-                }),
-            )
-                .into_response())
-        }
-    }
+            ApiError::oauth_failed()
+        })?;
+
+    let token = session.token.ok_or_else(|| {
+        tracing::error!("Session token not returned from service");
+        ApiError::internal_server_error("Failed to create session")
+    })?;
+
+    Ok(Json(AuthResponse {
+        token,
+        expires_at: session.expires_at.to_rfc3339(),
+    }))
 }
 
 /// Handler for initiating Github OAuth flow
@@ -127,34 +106,27 @@ pub async fn oauth_callback(
     ),
     responses(
         (status = 302, description = "Redirect to Github OAuth"),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
+        (status = 502, description = "OAuth provider error", body = crate::error::ApiErrorResponse)
     )
 )]
 pub async fn github_login(
     State(app_state): State<AppState>,
     Query(params): Query<OAuthInitQuery>,
-) -> Result<Redirect, Response> {
+) -> Result<Redirect, ApiError> {
     let redirect_uri = params
         .redirect_uri
         .unwrap_or_else(|| format!("{}/v1/auth/callback", app_state.redirect_uri));
 
-    match app_state
+    let auth_url = app_state
         .oauth_service
         .get_authorization_url(services::auth::ports::OAuthProvider::Github, redirect_uri)
         .await
-    {
-        Ok(auth_url) => Ok(Redirect::temporary(&auth_url)),
-        Err(e) => {
+        .map_err(|e| {
             tracing::error!("Failed to generate Github authorization URL: {}", e);
-            Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Failed to initiate OAuth flow".to_string(),
-                }),
-            )
-                .into_response())
-        }
-    }
+            ApiError::oauth_provider_error("Github")
+        })?;
+
+    Ok(Redirect::temporary(&auth_url))
 }
 
 /// Handler for logout
@@ -167,7 +139,7 @@ pub async fn github_login(
     ),
     responses(
         (status = 204, description = "Successfully logged out"),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
     ),
     security(
         ("session_token" = [])
@@ -176,20 +148,17 @@ pub async fn github_login(
 pub async fn logout(
     State(app_state): State<AppState>,
     Query(session_id): Query<SessionId>,
-) -> Result<StatusCode, Response> {
-    match app_state.oauth_service.revoke_session(session_id).await {
-        Ok(_) => Ok(StatusCode::NO_CONTENT),
-        Err(e) => {
+) -> Result<StatusCode, ApiError> {
+    app_state
+        .oauth_service
+        .revoke_session(session_id)
+        .await
+        .map_err(|e| {
             tracing::error!("Failed to revoke session: {}", e);
-            Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Failed to logout".to_string(),
-                }),
-            )
-                .into_response())
-        }
-    }
+            ApiError::logout_failed()
+        })?;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Create OAuth router with all routes

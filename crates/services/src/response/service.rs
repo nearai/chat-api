@@ -1,0 +1,98 @@
+use async_trait::async_trait;
+use bytes::Bytes;
+use http::{HeaderMap, Method};
+
+use super::ports::{OpenAIProxyService, ProxyError, ProxyResponse};
+
+/// Generic proxy service that forwards any request to OpenAI's API
+pub struct OpenAIProxy {
+    api_key: String,
+    base_url: String,
+    http_client: reqwest::Client,
+}
+
+impl OpenAIProxy {
+    pub fn new(api_key: String) -> Self {
+        Self {
+            api_key,
+            base_url: "https://api.openai.com/v1".to_string(),
+            http_client: reqwest::Client::new(),
+        }
+    }
+
+    pub fn with_base_url(mut self, base_url: String) -> Self {
+        self.base_url = base_url;
+        self
+    }
+}
+
+#[async_trait]
+impl OpenAIProxyService for OpenAIProxy {
+    async fn forward_request(
+        &self,
+        method: Method,
+        path: &str,
+        mut headers: HeaderMap,
+        body: Option<Bytes>,
+    ) -> Result<ProxyResponse, ProxyError> {
+        // Ensure path doesn't start with a slash
+        let clean_path = path.trim_start_matches('/');
+        let url = format!("{}/{}", self.base_url, clean_path);
+
+        // Build the request
+        let mut request_builder = self
+            .http_client
+            .request(method, &url)
+            .header("Authorization", format!("Bearer {}", self.api_key));
+
+        // Forward all headers from the client (except Authorization which we set above)
+        headers.remove("authorization");
+        headers.remove("host"); // Don't forward host header
+
+        for (key, value) in headers.iter() {
+            request_builder = request_builder.header(key, value);
+        }
+
+        // Add body if present
+        if let Some(body_bytes) = body {
+            request_builder = request_builder.body(body_bytes);
+        }
+
+        // Send the request
+        let response = request_builder
+            .send()
+            .await
+            .map_err(|e| ProxyError::ApiError(e.to_string()))?;
+
+        // Extract status and headers
+        let status = response.status().as_u16();
+        let response_headers = response.headers().clone();
+
+        // Get the body as a stream (don't buffer it)
+        let body_stream = response.bytes_stream();
+
+        Ok(ProxyResponse {
+            status,
+            headers: response_headers,
+            body: Box::pin(body_stream),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_service_creation() {
+        let service = OpenAIProxy::new("test-api-key".to_string());
+        assert_eq!(service.base_url, "https://api.openai.com/v1");
+    }
+
+    #[tokio::test]
+    async fn test_service_with_custom_base_url() {
+        let service = OpenAIProxy::new("test-api-key".to_string())
+            .with_base_url("https://custom.api.com/v1".to_string());
+        assert_eq!(service.base_url, "https://custom.api.com/v1");
+    }
+}

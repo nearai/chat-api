@@ -6,7 +6,7 @@ use axum::{middleware::from_fn_with_state, Router};
 
 use crate::{middleware::AuthState, state::AppState};
 
-/// Create the main API router with all routes under /v1
+/// Create the main API router with all routes
 pub fn create_router(app_state: AppState) -> Router {
     // Create auth state for middleware
     let auth_state = AuthState {
@@ -18,13 +18,20 @@ pub fn create_router(app_state: AppState) -> Router {
 
     // User routes (requires authentication)
     let user_routes = users::create_user_router().layer(from_fn_with_state(
+        auth_state.clone(),
+        crate::middleware::auth_middleware,
+    ));
+
+    // API proxy routes (requires authentication)
+    let api_routes = api::create_api_router().layer(from_fn_with_state(
         auth_state,
         crate::middleware::auth_middleware,
     ));
 
-    // Combine all routes under /v1
+    // Combine all routes
     Router::new()
         .nest("/v1/auth", auth_routes)
         .nest("/v1/users", user_routes)
+        .merge(api_routes) // Merge instead of nest since api routes already have /v1 prefix
         .with_state(app_state)
 }

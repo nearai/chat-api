@@ -76,11 +76,27 @@ impl Default for ServerConfig {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct OpenAIConfig {
+    pub api_key: String,
+    pub base_url: Option<String>,
+}
+
+impl Default for OpenAIConfig {
+    fn default() -> Self {
+        Self {
+            api_key: std::env::var("OPENAI_API_KEY").unwrap_or_default(),
+            base_url: std::env::var("OPENAI_BASE_URL").ok(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct Config {
     pub database: DatabaseConfig,
     pub oauth: OAuthConfig,
     pub server: ServerConfig,
+    pub openai: OpenAIConfig,
 }
 
 impl Config {
@@ -89,6 +105,7 @@ impl Config {
             database: DatabaseConfig::default(),
             oauth: OAuthConfig::default(),
             server: ServerConfig::default(),
+            openai: OpenAIConfig::default(),
         }
     }
 }

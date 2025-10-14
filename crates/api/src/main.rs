@@ -1,5 +1,10 @@
 use api::{create_router, ApiDoc, AppState};
-use services::{auth::OAuthServiceImpl, user::UserServiceImpl};
+use services::{
+    auth::OAuthServiceImpl,
+    conversation::service::ConversationServiceImpl,
+    response::service::OpenAIProxy,
+    user::UserServiceImpl,
+};
 use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use utoipa::OpenApi;
@@ -46,6 +51,7 @@ async fn main() -> anyhow::Result<()> {
     let user_repo = db.user_repository();
     let session_repo = db.session_repository();
     let oauth_repo = db.oauth_repository();
+    let conversation_repo = db.conversation_repository();
 
     // Create services
     tracing::info!("Initializing services...");
@@ -62,11 +68,24 @@ async fn main() -> anyhow::Result<()> {
 
     let user_service = Arc::new(UserServiceImpl::new(user_repo));
 
+    // Initialize OpenAI proxy service
+    let mut proxy_service = OpenAIProxy::new(config.openai.api_key.clone());
+    if let Some(base_url) = config.openai.base_url.clone() {
+        proxy_service = proxy_service.with_base_url(base_url);
+    }
+    let proxy_service = Arc::new(proxy_service);
+
+    // Initialize conversation service
+    let conversation_service = Arc::new(ConversationServiceImpl::new(conversation_repo));
+
     // Create application state
     let app_state = AppState {
         oauth_service: oauth_service as Arc<dyn services::auth::ports::OAuthService>,
         user_service: user_service as Arc<dyn services::user::ports::UserService>,
         session_repository: session_repo,
+        proxy_service: proxy_service as Arc<dyn services::response::ports::OpenAIProxyService>,
+        conversation_service: conversation_service
+            as Arc<dyn services::conversation::ports::ConversationService>,
         redirect_uri: config.oauth.redirect_uri.clone(),
     };
 

@@ -1,15 +1,17 @@
 use axum::{
     extract::{Request, State},
-    http::StatusCode,
     middleware::Next,
-    response::Response,
+    response::{IntoResponse, Response},
 };
 use chrono::Utc;
 use services::{SessionId, UserId};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
-/// Authenticated user information
+use crate::error::ApiError;
+
+/// Authenticated user information inserted into request extensions by the auth middleware.
+/// Extract in route handlers using `Extension<AuthenticatedUser>`
 #[derive(Debug, Clone)]
 pub struct AuthenticatedUser {
     pub user_id: UserId,
@@ -34,7 +36,7 @@ pub async fn auth_middleware(
     State(state): State<AuthState>,
     mut request: Request,
     next: Next,
-) -> Result<Response, StatusCode> {
+) -> Result<Response, Response> {
     // Try to extract authentication from Authorization header
     let auth_header = request
         .headers()
@@ -50,7 +52,7 @@ pub async fn auth_middleware(
             // Validate token format (should start with sess_ and be the right length)
             if !token.starts_with("sess_") || token.len() != 37 {
                 tracing::warn!("Invalid session token format");
-                return Err(StatusCode::UNAUTHORIZED);
+                return Err(ApiError::invalid_token().into_response());
             }
 
             // Hash the token and look it up
@@ -58,11 +60,11 @@ pub async fn auth_middleware(
             authenticate_session_by_token(&state, token_hash).await
         } else {
             tracing::warn!("Authorization header does not start with 'Bearer '");
-            Err(StatusCode::UNAUTHORIZED)
+            Err(ApiError::invalid_auth_header())
         }
     } else {
         tracing::warn!("No authorization header found");
-        Err(StatusCode::UNAUTHORIZED)
+        Err(ApiError::missing_auth_header())
     };
 
     match auth_result {
@@ -71,7 +73,7 @@ pub async fn auth_middleware(
             request.extensions_mut().insert(user);
             Ok(next.run(request).await)
         }
-        Err(status) => Err(status),
+        Err(err) => Err(err.into_response()),
     }
 }
 
@@ -79,7 +81,7 @@ pub async fn auth_middleware(
 async fn authenticate_session_by_token(
     state: &AuthState,
     token_hash: String,
-) -> Result<AuthenticatedUser, StatusCode> {
+) -> Result<AuthenticatedUser, ApiError> {
     // Look up the session by token hash
     let session = state
         .session_repository
@@ -87,17 +89,17 @@ async fn authenticate_session_by_token(
         .await
         .map_err(|e| {
             tracing::error!("Failed to get session: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
+            ApiError::internal_server_error("Failed to authenticate session")
         })?
         .ok_or_else(|| {
             tracing::warn!("Session not found");
-            StatusCode::UNAUTHORIZED
+            ApiError::session_not_found()
         })?;
 
     // Check if session is expired
     if session.expires_at < Utc::now() {
         tracing::warn!("Session expired: {}", session.session_id);
-        return Err(StatusCode::UNAUTHORIZED);
+        return Err(ApiError::session_expired());
     }
 
     Ok(AuthenticatedUser {
