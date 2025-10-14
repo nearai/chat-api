@@ -78,3 +78,51 @@ impl From<services::user::ports::UserProfile> for UserProfileResponse {
         }
     }
 }
+
+/// Cloud-API gateway attestation (forwarded from dependency)
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ApiGatewayAttestation {
+    /// Intel TDX quote in hex format
+    pub quote: String,
+    /// Event log in hex format
+    pub event_log: String,
+}
+
+/// Model attestation from VLLM inference providers
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ModelAttestation {
+    /// Cryptographic signing address (ECDSA or Ed25519)
+    pub signing_address: String,
+
+    /// Base64-encoded Intel TDX quote from model host
+    pub intel_quote: String,
+
+    /// JSON string containing NVIDIA GPU attestation
+    pub nvidia_payload: String,
+
+    /// TDX event log
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_log: Option<serde_json::Value>,
+
+    /// Additional TDX/tappd info
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub info: Option<serde_json::Value>,
+}
+
+/// Complete attestation report combining all layers
+///
+/// This report proves the entire trust chain:
+/// 1. This chat-api service runs in a TEE (your_gateway_attestation)
+/// 2. The cloud-api dependency runs in a TEE (cloud_api_gateway_attestation)  
+/// 3. The model inference providers run on trusted hardware (model_attestations)
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CombinedAttestationReport {
+    /// This chat-api's own CPU attestation (proves this service runs in a TEE)
+    pub chat_api_gateway_attestation: ApiGatewayAttestation,
+
+    /// Cloud-API's gateway attestation (the intermediate service we depend on)
+    pub cloud_api_gateway_attestation: ApiGatewayAttestation,
+
+    /// Model provider attestations (can be multiple when routing to different models)
+    pub model_attestations: Vec<ModelAttestation>,
+}

@@ -1,4 +1,5 @@
 pub mod api;
+pub mod attestation;
 pub mod oauth;
 pub mod users;
 
@@ -15,6 +16,9 @@ pub fn create_router(app_state: AppState) -> Router {
 
     // OAuth routes (public, no auth required)
     let auth_routes = oauth::create_oauth_router();
+
+    // Attestation routes (public, no auth required)
+    let attestation_routes = attestation::create_attestation_router();
 
     // User routes (requires authentication)
     let user_routes = users::create_user_router().layer(from_fn_with_state(
@@ -33,5 +37,6 @@ pub fn create_router(app_state: AppState) -> Router {
         .nest("/v1/auth", auth_routes)
         .nest("/v1/users", user_routes)
         .merge(api_routes) // Merge instead of nest since api routes already have /v1 prefix
+        .merge(attestation_routes) // Merge attestation routes (already have /v1 prefix)
         .with_state(app_state)
 }

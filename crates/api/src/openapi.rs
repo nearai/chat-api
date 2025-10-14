@@ -19,6 +19,8 @@ use utoipa::OpenApi;
         crate::routes::oauth::logout,
         // User endpoints
         crate::routes::users::get_current_user,
+        // Attestation endpoints
+        crate::routes::attestation::get_attestation_report,
     ),
     components(schemas(
         // Request/Response models
@@ -28,11 +30,16 @@ use utoipa::OpenApi;
         crate::models::AuthResponse,
         crate::models::ErrorResponse,
         crate::error::ApiErrorResponse,
+        // Attestation models
+        crate::models::ApiGatewayAttestation,
+        crate::models::ModelAttestation,
+        crate::models::CombinedAttestationReport,
     )),
     modifiers(&SecurityAddon),
     tags(
         (name = "Auth", description = "OAuth authentication endpoints"),
-        (name = "Users", description = "User profile management endpoints")
+        (name = "Users", description = "User profile management endpoints"),
+        (name = "attestation", description = "Attestation reporting endpoints for TEE verification")
     )
 )]
 pub struct ApiDoc;
