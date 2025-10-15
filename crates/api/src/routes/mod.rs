@@ -68,6 +68,7 @@ pub fn create_router_with_cors(app_state: AppState, allowed_origins: Vec<String>
                 axum::http::header::AUTHORIZATION,
                 axum::http::header::CONTENT_TYPE,
                 axum::http::header::ACCEPT,
+                axum::http::HeaderName::from_static("ngrok-skip-browser-warning"),
             ])
             .allow_credentials(true);
 
