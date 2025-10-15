@@ -223,12 +223,13 @@ impl OAuthServiceImpl {
     }
 
     /// Internal implementation that handles the callback with a pre-validated state
+    /// Returns (UserSession, frontend_callback_url)
     async fn handle_callback_impl(
         &self,
         provider: OAuthProvider,
         code: String,
         oauth_state: OAuthState,
-    ) -> anyhow::Result<UserSession> {
+    ) -> anyhow::Result<(UserSession, Option<String>)> {
         // Build client for token exchange
         let (client_id, client_secret, auth_url, token_url) = match provider {
             OAuthProvider::Google => (
@@ -286,7 +287,7 @@ impl OAuthServiceImpl {
 
         tracing::info!("User {} logged in via {:?}", user_id, provider);
 
-        Ok(session)
+        Ok((session, oauth_state.frontend_callback))
     }
 }
 
@@ -296,6 +297,7 @@ impl OAuthService for OAuthServiceImpl {
         &self,
         provider: OAuthProvider,
         redirect_uri: String,
+        frontend_callback: Option<String>,
     ) -> anyhow::Result<String> {
         let (client_id, client_secret, auth_url, token_url, scopes) = match provider {
             OAuthProvider::Google => (
@@ -332,6 +334,7 @@ impl OAuthService for OAuthServiceImpl {
             state: csrf_token.secret().to_string(),
             provider,
             redirect_uri,
+            frontend_callback,
             created_at: Utc::now(),
         };
 
@@ -340,26 +343,6 @@ impl OAuthService for OAuthServiceImpl {
             .await?;
 
         Ok(auth_url.to_string())
-    }
-
-    async fn handle_callback(
-        &self,
-        provider: OAuthProvider,
-        code: String,
-        state: String,
-    ) -> anyhow::Result<UserSession> {
-        // Verify and consume the state
-        let oauth_state = self
-            .oauth_repository
-            .consume_oauth_state(&state)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Invalid or expired OAuth state"))?;
-
-        if oauth_state.provider != provider {
-            return Err(anyhow::anyhow!("Provider mismatch"));
-        }
-
-        self.handle_callback_impl(provider, code, oauth_state).await
     }
 
     async fn refresh_token(
@@ -430,7 +413,7 @@ impl OAuthService for OAuthServiceImpl {
         &self,
         code: String,
         state: String,
-    ) -> anyhow::Result<UserSession> {
+    ) -> anyhow::Result<(UserSession, Option<String>)> {
         // First, look up the state to determine the provider
         let oauth_state = self
             .oauth_repository

@@ -12,6 +12,7 @@ pub struct OAuthState {
     pub state: String,
     pub provider: OAuthProvider,
     pub redirect_uri: String,
+    pub frontend_callback: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -93,22 +94,16 @@ pub trait OAuthService: Send + Sync {
         &self,
         provider: OAuthProvider,
         redirect_uri: String,
+        frontend_callback: Option<String>,
     ) -> anyhow::Result<String>;
 
-    /// Exchange authorization code for access token and user info
-    async fn handle_callback(
-        &self,
-        provider: OAuthProvider,
-        code: String,
-        state: String,
-    ) -> anyhow::Result<UserSession>;
-
     /// Unified callback handler that determines provider from state
+    /// Returns (UserSession, frontend_callback_url)
     async fn handle_callback_unified(
         &self,
         code: String,
         state: String,
-    ) -> anyhow::Result<UserSession>;
+    ) -> anyhow::Result<(UserSession, Option<String>)>;
 
     /// Refresh an access token
     async fn refresh_token(

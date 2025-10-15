@@ -1,9 +1,7 @@
-use api::{create_router, ApiDoc, AppState};
+use api::{create_router_with_cors, ApiDoc, AppState};
 use services::{
-    auth::OAuthServiceImpl,
-    conversation::service::ConversationServiceImpl,
-    response::service::OpenAIProxy,
-    user::UserServiceImpl,
+    auth::OAuthServiceImpl, conversation::service::ConversationServiceImpl,
+    response::service::OpenAIProxy, user::UserServiceImpl,
 };
 use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -89,8 +87,8 @@ async fn main() -> anyhow::Result<()> {
         redirect_uri: config.oauth.redirect_uri.clone(),
     };
 
-    // Create router
-    let app = create_router(app_state)
+    // Create router with CORS support
+    let app = create_router_with_cors(app_state, config.cors.allowed_origins.clone())
         .merge(SwaggerUi::new("/docs").url("/api-docs/openapi.json", ApiDoc::openapi()));
 
     // Start server

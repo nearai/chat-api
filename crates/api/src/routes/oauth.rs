@@ -3,12 +3,12 @@ use axum::{
     http::StatusCode,
     response::Redirect,
     routing::get,
-    Json, Router,
+    Router,
 };
 use serde::Deserialize;
 use services::SessionId;
 
-use crate::{error::ApiError, models::*, state::AppState};
+use crate::{error::ApiError, state::AppState};
 
 /// Query parameters for OAuth callback
 #[derive(Debug, Deserialize)]
@@ -21,6 +21,7 @@ pub struct OAuthCallbackQuery {
 #[derive(Debug, Deserialize)]
 pub struct OAuthInitQuery {
     pub redirect_uri: Option<String>,
+    pub frontend_callback: Option<String>,
 }
 
 /// Handler for initiating Google OAuth flow
@@ -29,7 +30,8 @@ pub struct OAuthInitQuery {
     path = "/v1/auth/google",
     tag = "Auth",
     params(
-        ("redirect_uri" = Option<String>, Query, description = "Optional redirect URI after authentication")
+        ("redirect_uri" = Option<String>, Query, description = "Optional OAuth redirect URI (usually your API callback)"),
+        ("frontend_callback" = Option<String>, Query, description = "Frontend URL to redirect to after authentication")
     ),
     responses(
         (status = 302, description = "Redirect to Google OAuth"),
@@ -46,7 +48,11 @@ pub async fn google_login(
 
     let auth_url = app_state
         .oauth_service
-        .get_authorization_url(services::auth::ports::OAuthProvider::Google, redirect_uri)
+        .get_authorization_url(
+            services::auth::ports::OAuthProvider::Google,
+            redirect_uri,
+            params.frontend_callback,
+        )
         .await
         .map_err(|e| {
             tracing::error!("Failed to generate Google authorization URL: {}", e);
@@ -66,7 +72,7 @@ pub async fn google_login(
         ("state" = String, Query, description = "State parameter for CSRF protection")
     ),
     responses(
-        (status = 200, description = "Successfully authenticated", body = AuthResponse),
+        (status = 302, description = "Redirect to frontend with token"),
         (status = 401, description = "Authentication failed", body = crate::error::ApiErrorResponse),
         (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
     )
@@ -74,9 +80,10 @@ pub async fn google_login(
 pub async fn oauth_callback(
     State(app_state): State<AppState>,
     Query(params): Query<OAuthCallbackQuery>,
-) -> Result<Json<AuthResponse>, ApiError> {
+) -> Result<Redirect, ApiError> {
     // The provider is determined from the state stored in the database
-    let session = app_state
+    // Returns (session, frontend_callback_url)
+    let (session, frontend_callback) = app_state
         .oauth_service
         .handle_callback_unified(params.code, params.state)
         .await
@@ -90,10 +97,21 @@ pub async fn oauth_callback(
         ApiError::internal_server_error("Failed to create session")
     })?;
 
-    Ok(Json(AuthResponse {
-        token,
-        expires_at: session.expires_at.to_rfc3339(),
-    }))
+    // Use frontend_callback from OAuth state, or fall back to FRONTEND_URL env var
+    let frontend_url = frontend_callback.unwrap_or_else(|| {
+        std::env::var("FRONTEND_URL").unwrap_or_else(|_| "http://localhost:3000".to_string())
+    });
+
+    tracing::info!("Redirecting to frontend: {}", frontend_url);
+
+    let callback_url = format!(
+        "{}/auth/callback?token={}&expires_at={}",
+        frontend_url,
+        urlencoding::encode(&token),
+        urlencoding::encode(&session.expires_at.to_rfc3339())
+    );
+
+    Ok(Redirect::temporary(&callback_url))
 }
 
 /// Handler for initiating Github OAuth flow
@@ -102,7 +120,8 @@ pub async fn oauth_callback(
     path = "/v1/auth/github",
     tag = "Auth",
     params(
-        ("redirect_uri" = Option<String>, Query, description = "Optional redirect URI after authentication")
+        ("redirect_uri" = Option<String>, Query, description = "Optional OAuth redirect URI (usually your API callback)"),
+        ("frontend_callback" = Option<String>, Query, description = "Frontend URL to redirect to after authentication")
     ),
     responses(
         (status = 302, description = "Redirect to Github OAuth"),
@@ -119,7 +138,11 @@ pub async fn github_login(
 
     let auth_url = app_state
         .oauth_service
-        .get_authorization_url(services::auth::ports::OAuthProvider::Github, redirect_uri)
+        .get_authorization_url(
+            services::auth::ports::OAuthProvider::Github,
+            redirect_uri,
+            params.frontend_callback,
+        )
         .await
         .map_err(|e| {
             tracing::error!("Failed to generate Github authorization URL: {}", e);

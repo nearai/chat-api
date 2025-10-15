@@ -91,12 +91,31 @@ impl Default for OpenAIConfig {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct CorsConfig {
+    pub allowed_origins: Vec<String>,
+}
+
+impl Default for CorsConfig {
+    fn default() -> Self {
+        Self {
+            allowed_origins: std::env::var("CORS_ALLOWED_ORIGINS")
+                .unwrap_or_else(|_| "http://localhost:3000".to_string())
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct Config {
     pub database: DatabaseConfig,
     pub oauth: OAuthConfig,
     pub server: ServerConfig,
     pub openai: OpenAIConfig,
+    pub cors: CorsConfig,
 }
 
 impl Config {
@@ -106,6 +125,7 @@ impl Config {
             oauth: OAuthConfig::default(),
             server: ServerConfig::default(),
             openai: OpenAIConfig::default(),
+            cors: CorsConfig::default(),
         }
     }
 }

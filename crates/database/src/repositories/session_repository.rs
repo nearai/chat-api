@@ -61,7 +61,10 @@ impl SessionRepository for PostgresSessionRepository {
         })
     }
 
-    async fn get_session_by_token_hash(&self, token_hash: String) -> anyhow::Result<Option<UserSession>> {
+    async fn get_session_by_token_hash(
+        &self,
+        token_hash: String,
+    ) -> anyhow::Result<Option<UserSession>> {
         let client = self.pool.get().await?;
 
         let row = client

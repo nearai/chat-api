@@ -28,12 +28,13 @@ impl OAuthRepository for PostgresOAuthRepository {
 
         client
             .execute(
-                "INSERT INTO oauth_states (state, provider, redirect_uri, created_at) 
-                 VALUES ($1, $2, $3, $4)",
+                "INSERT INTO oauth_states (state, provider, redirect_uri, frontend_callback, created_at) 
+                 VALUES ($1, $2, $3, $4, $5)",
                 &[
                     &state.state,
                     &provider_str,
                     &state.redirect_uri,
+                    &state.frontend_callback,
                     &state.created_at,
                 ],
             )
@@ -53,7 +54,7 @@ impl OAuthRepository for PostgresOAuthRepository {
             .query_opt(
                 "DELETE FROM oauth_states 
                  WHERE state = $1 
-                 RETURNING state, provider, redirect_uri, created_at",
+                 RETURNING state, provider, redirect_uri, frontend_callback, created_at",
                 &[&state],
             )
             .await?;
@@ -72,7 +73,8 @@ impl OAuthRepository for PostgresOAuthRepository {
                 state: r.get(0),
                 provider,
                 redirect_uri: r.get(2),
-                created_at: r.get(3),
+                frontend_callback: r.get(3),
+                created_at: r.get(4),
             }
         }))
     }
