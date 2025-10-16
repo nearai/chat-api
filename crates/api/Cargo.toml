@@ -30,6 +30,7 @@ chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"
 bytes = "1.5"
 http = "1.0"
+flate2 = "1.0"
 # For TypedHeader support
 headers = "0.4"
 # OpenAPI documentation generation

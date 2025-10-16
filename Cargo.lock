@@ -460,6 +460,7 @@ dependencies = [
  "config",
  "database",
  "dotenvy",
+ "flate2",
  "futures",
  "headers",
  "http",

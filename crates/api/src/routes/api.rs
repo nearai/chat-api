@@ -7,9 +7,11 @@ use axum::{
     Json, Router,
 };
 use bytes::Bytes;
+use flate2::read::GzDecoder;
 use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use services::UserId;
+use std::io::Read;
 
 use crate::middleware::auth::AuthenticatedUser;
 
@@ -50,7 +52,7 @@ async fn create_conversation(
         user.user_id,
         user.session_id
     );
-    
+
     // Extract body
     let body_bytes = axum::body::to_bytes(request.into_body(), usize::MAX)
         .await
@@ -74,17 +76,25 @@ async fn create_conversation(
         body_bytes.len(),
         user.user_id
     );
-    
+
     if let Ok(body_str) = std::str::from_utf8(&body_bytes) {
         tracing::debug!("Request body: {}", body_str);
     }
 
-    tracing::debug!("Forwarding conversation creation request to OpenAI for user_id={}", user.user_id);
-    
+    tracing::debug!(
+        "Forwarding conversation creation request to OpenAI for user_id={}",
+        user.user_id
+    );
+
     // Forward to OpenAI
     let proxy_response = state
         .proxy_service
-        .forward_request(Method::POST, "conversations", headers.clone(), Some(body_bytes))
+        .forward_request(
+            Method::POST,
+            "conversations",
+            headers.clone(),
+            Some(body_bytes),
+        )
         .await
         .map_err(|e| {
             tracing::error!(
@@ -133,7 +143,22 @@ async fn create_conversation(
     // If successful, parse response and track conversation
     if status >= 200 && status < 300 {
         tracing::debug!("Parsing successful conversation creation response");
-        if let Ok(response_json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
+
+        // Decompress if gzipped
+        let decompressed_bytes = match decompress_if_gzipped(&body_bytes, &response_headers) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::error!(
+                    "Failed to decompress response for user_id={}: {}",
+                    user.user_id,
+                    e
+                );
+                body_bytes.to_vec()
+            }
+        };
+
+        if let Ok(response_json) = serde_json::from_slice::<serde_json::Value>(&decompressed_bytes)
+        {
             tracing::debug!("Response JSON parsed successfully");
             if let Some(conversation_id) = response_json.get("id").and_then(|v| v.as_str()) {
                 tracing::info!(
@@ -141,7 +166,7 @@ async fn create_conversation(
                     conversation_id,
                     user.user_id
                 );
-                
+
                 // Track conversation in database
                 tracing::debug!("Tracking conversation {} in database", conversation_id);
                 if let Err(e) = state
@@ -164,10 +189,19 @@ async fn create_conversation(
                     );
                 }
             } else {
-                tracing::warn!("No conversation ID found in OpenAI response for user_id={}", user.user_id);
+                tracing::warn!(
+                    "No conversation ID found in OpenAI response for user_id={}",
+                    user.user_id
+                );
             }
         } else {
-            tracing::warn!("Failed to parse OpenAI response as JSON for user_id={}", user.user_id);
+            tracing::warn!(
+                "Failed to parse OpenAI response as JSON for user_id={}",
+                user.user_id
+            );
+            if let Ok(text) = String::from_utf8(decompressed_bytes.clone()) {
+                tracing::debug!("Response body: {}", text);
+            }
         }
     } else {
         tracing::warn!(
@@ -205,11 +239,8 @@ async fn list_conversations(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
 ) -> Result<Json<Vec<ConversationResponse>>, Response> {
-    tracing::info!(
-        "list_conversations called for user_id={}",
-        user.user_id
-    );
-    
+    tracing::info!("list_conversations called for user_id={}", user.user_id);
+
     let conversations = state
         .conversation_service
         .list_conversations(user.user_id)
@@ -234,7 +265,7 @@ async fn list_conversations(
         conversations.len(),
         user.user_id
     );
-    
+
     for conv in &conversations {
         tracing::debug!(
             "Conversation: id={}, title={:?}, created={}, updated={}",
@@ -274,17 +305,17 @@ async fn proxy_handler(
         user.user_id,
         user.session_id
     );
-    
+
     // Extract body bytes
     let body_bytes = extract_body_bytes(request).await?;
-    
+
     tracing::debug!(
         "Extracted request body: {} bytes for {} /v1/{}",
         body_bytes.len(),
         method,
         path
     );
-    
+
     if body_bytes.len() > 0 {
         if let Ok(body_str) = std::str::from_utf8(&body_bytes) {
             tracing::debug!("Request body content: {}", body_str);
@@ -310,7 +341,7 @@ async fn proxy_handler(
         path,
         user.user_id
     );
-    
+
     // Forward the request to OpenAI
     let proxy_response = state
         .proxy_service
@@ -332,7 +363,7 @@ async fn proxy_handler(
             )
                 .into_response()
         })?;
-    
+
     tracing::info!(
         "Received response from OpenAI: status={} for {} /v1/{} (user_id={})",
         proxy_response.status,
@@ -387,9 +418,36 @@ async fn extract_body_bytes(request: Request) -> Result<Bytes, Response> {
             )
                 .into_response()
         })?;
-    
-    tracing::debug!("Successfully extracted {} bytes from request body", result.len());
+
+    tracing::debug!(
+        "Successfully extracted {} bytes from request body",
+        result.len()
+    );
     Ok(result)
+}
+
+/// Decompress gzip-encoded bytes if needed
+fn decompress_if_gzipped(bytes: &[u8], headers: &HeaderMap) -> Result<Vec<u8>, std::io::Error> {
+    // Check if content-encoding is gzip
+    if let Some(encoding) = headers.get("content-encoding") {
+        if let Ok(encoding_str) = encoding.to_str() {
+            if encoding_str.contains("gzip") {
+                tracing::debug!("Response is gzip-encoded, decompressing...");
+                let mut decoder = GzDecoder::new(bytes);
+                let mut decompressed = Vec::new();
+                decoder.read_to_end(&mut decompressed)?;
+                tracing::debug!(
+                    "Decompressed {} bytes to {} bytes",
+                    bytes.len(),
+                    decompressed.len()
+                );
+                return Ok(decompressed);
+            }
+        }
+    }
+
+    // Not gzipped, return as-is
+    Ok(bytes.to_vec())
 }
 
 /// Track a conversation from a response creation request
@@ -398,8 +456,11 @@ async fn track_conversation_from_request(
     user_id: UserId,
     body: &Bytes,
 ) -> anyhow::Result<()> {
-    tracing::debug!("Attempting to track conversation from /responses request for user_id={}", user_id);
-    
+    tracing::debug!(
+        "Attempting to track conversation from /responses request for user_id={}",
+        user_id
+    );
+
     // Parse the request body to extract conversation_id if present
     #[derive(Deserialize)]
     struct ResponseRequest {
@@ -413,22 +474,28 @@ async fn track_conversation_from_request(
                 conversation_id,
                 user_id
             );
-            
+
             state
                 .conversation_service
                 .track_conversation(&conversation_id, user_id, None)
                 .await?;
-            
+
             tracing::info!(
                 "Successfully tracked conversation {} from /responses for user_id={}",
                 conversation_id,
                 user_id
             );
         } else {
-            tracing::debug!("No conversation_id found in /responses request body for user_id={}", user_id);
+            tracing::debug!(
+                "No conversation_id found in /responses request body for user_id={}",
+                user_id
+            );
         }
     } else {
-        tracing::debug!("Failed to parse /responses request body for user_id={}", user_id);
+        tracing::debug!(
+            "Failed to parse /responses request body for user_id={}",
+            user_id
+        );
     }
 
     Ok(())
