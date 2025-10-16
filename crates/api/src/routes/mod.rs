@@ -4,7 +4,7 @@ pub mod oauth;
 pub mod users;
 
 use axum::{middleware::from_fn_with_state, Router};
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{Any, CorsLayer};
 
 use crate::{middleware::AuthState, state::AppState};
 
@@ -46,35 +46,13 @@ pub fn create_router_with_cors(app_state: AppState, allowed_origins: Vec<String>
         .merge(attestation_routes) // Merge attestation routes (already have /v1 prefix)
         .with_state(app_state);
 
-    // Add CORS layer if origins are specified
-    if !allowed_origins.is_empty() {
-        tracing::info!("CORS enabled for origins: {:?}", allowed_origins);
+    tracing::info!("CORS enabled for origins: {:?}", allowed_origins);
 
-        let cors = CorsLayer::new()
-            .allow_origin(
-                allowed_origins
-                    .iter()
-                    .filter_map(|origin| origin.parse().ok())
-                    .collect::<Vec<_>>(),
-            )
-            .allow_methods([
-                axum::http::Method::GET,
-                axum::http::Method::POST,
-                axum::http::Method::PUT,
-                axum::http::Method::DELETE,
-                axum::http::Method::OPTIONS,
-            ])
-            .allow_headers([
-                axum::http::header::AUTHORIZATION,
-                axum::http::header::CONTENT_TYPE,
-                axum::http::header::ACCEPT,
-                axum::http::HeaderName::from_static("ngrok-skip-browser-warning"),
-            ])
-            .allow_credentials(true);
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any)
+        .expose_headers(Any);
 
-        router.layer(cors)
-    } else {
-        tracing::warn!("CORS not configured - frontend requests may be blocked");
-        router
-    }
+    router.layer(cors)
 }
