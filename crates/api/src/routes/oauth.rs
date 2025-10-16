@@ -42,22 +42,34 @@ pub async fn google_login(
     State(app_state): State<AppState>,
     Query(params): Query<OAuthInitQuery>,
 ) -> Result<Redirect, ApiError> {
+    tracing::info!(
+        "Google OAuth login initiated - redirect_uri: {:?}, frontend_callback: {:?}",
+        params.redirect_uri,
+        params.frontend_callback
+    );
+
     let redirect_uri = params
         .redirect_uri
+        .clone()
         .unwrap_or_else(|| format!("{}/v1/auth/callback", app_state.redirect_uri));
+
+    tracing::debug!("Using OAuth redirect_uri: {}", redirect_uri);
 
     let auth_url = app_state
         .oauth_service
         .get_authorization_url(
             services::auth::ports::OAuthProvider::Google,
-            redirect_uri,
-            params.frontend_callback,
+            redirect_uri.clone(),
+            params.frontend_callback.clone(),
         )
         .await
         .map_err(|e| {
             tracing::error!("Failed to generate Google authorization URL: {}", e);
             ApiError::oauth_provider_error("Google")
         })?;
+
+    tracing::info!("Google OAuth URL generated successfully, redirecting to Google");
+    tracing::debug!("Google OAuth URL: {}", auth_url);
 
     Ok(Redirect::temporary(&auth_url))
 }
@@ -81,25 +93,48 @@ pub async fn oauth_callback(
     State(app_state): State<AppState>,
     Query(params): Query<OAuthCallbackQuery>,
 ) -> Result<Redirect, ApiError> {
+    tracing::info!(
+        "OAuth callback received - code length: {}, state: {}",
+        params.code.len(),
+        params.state
+    );
+
     // The provider is determined from the state stored in the database
     // Returns (session, frontend_callback_url)
     let (session, frontend_callback) = app_state
         .oauth_service
-        .handle_callback_unified(params.code, params.state)
+        .handle_callback_unified(params.code.clone(), params.state.clone())
         .await
         .map_err(|e| {
-            tracing::error!("OAuth callback failed: {}", e);
+            tracing::error!("OAuth callback failed for state {}: {}", params.state, e);
             ApiError::oauth_failed()
         })?;
 
+    tracing::info!(
+        "OAuth callback processed successfully - session_id: {}, user_id: {}",
+        session.session_id,
+        session.user_id
+    );
+
     let token = session.token.ok_or_else(|| {
-        tracing::error!("Session token not returned from service");
+        tracing::error!(
+            "Session token not returned from service for session_id: {}",
+            session.session_id
+        );
         ApiError::internal_server_error("Failed to create session")
     })?;
 
+    tracing::debug!("Session token generated, length: {}", token.len());
+
     // Use frontend_callback from OAuth state, or fall back to FRONTEND_URL env var
-    let frontend_url = frontend_callback.unwrap_or_else(|| {
-        std::env::var("FRONTEND_URL").unwrap_or_else(|_| "http://localhost:3000".to_string())
+    let frontend_url = frontend_callback.clone().unwrap_or_else(|| {
+        let fallback =
+            std::env::var("FRONTEND_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
+        tracing::debug!(
+            "No frontend_callback in OAuth state, using fallback: {}",
+            fallback
+        );
+        fallback
     });
 
     tracing::info!("Redirecting to frontend: {}", frontend_url);
@@ -110,6 +145,8 @@ pub async fn oauth_callback(
         urlencoding::encode(&token),
         urlencoding::encode(&session.expires_at.to_rfc3339())
     );
+
+    tracing::debug!("Final callback URL: {}", callback_url);
 
     Ok(Redirect::temporary(&callback_url))
 }
@@ -132,22 +169,34 @@ pub async fn github_login(
     State(app_state): State<AppState>,
     Query(params): Query<OAuthInitQuery>,
 ) -> Result<Redirect, ApiError> {
+    tracing::info!(
+        "Github OAuth login initiated - redirect_uri: {:?}, frontend_callback: {:?}",
+        params.redirect_uri,
+        params.frontend_callback
+    );
+
     let redirect_uri = params
         .redirect_uri
+        .clone()
         .unwrap_or_else(|| format!("{}/v1/auth/callback", app_state.redirect_uri));
+
+    tracing::debug!("Using OAuth redirect_uri: {}", redirect_uri);
 
     let auth_url = app_state
         .oauth_service
         .get_authorization_url(
             services::auth::ports::OAuthProvider::Github,
-            redirect_uri,
-            params.frontend_callback,
+            redirect_uri.clone(),
+            params.frontend_callback.clone(),
         )
         .await
         .map_err(|e| {
             tracing::error!("Failed to generate Github authorization URL: {}", e);
             ApiError::oauth_provider_error("Github")
         })?;
+
+    tracing::info!("Github OAuth URL generated successfully, redirecting to Github");
+    tracing::debug!("Github OAuth URL: {}", auth_url);
 
     Ok(Redirect::temporary(&auth_url))
 }
@@ -172,14 +221,18 @@ pub async fn logout(
     State(app_state): State<AppState>,
     Query(session_id): Query<SessionId>,
 ) -> Result<StatusCode, ApiError> {
+    tracing::info!("Logout requested for session_id: {}", session_id);
+
     app_state
         .oauth_service
         .revoke_session(session_id)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to revoke session: {}", e);
+            tracing::error!("Failed to revoke session {}: {}", session_id, e);
             ApiError::logout_failed()
         })?;
+
+    tracing::info!("Session {} successfully revoked", session_id);
 
     Ok(StatusCode::NO_CONTENT)
 }

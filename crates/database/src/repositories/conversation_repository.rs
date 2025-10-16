@@ -21,6 +21,13 @@ impl ConversationRepository for PostgresConversationRepository {
         user_id: UserId,
         title: Option<String>,
     ) -> Result<Conversation, ConversationError> {
+        tracing::debug!(
+            "Repository: Upserting conversation - conversation_id={}, user_id={}, title={:?}",
+            conversation_id,
+            user_id,
+            title
+        );
+
         let client = self
             .pool
             .get()
@@ -31,7 +38,7 @@ impl ConversationRepository for PostgresConversationRepository {
             .query_one(
                 "INSERT INTO conversations (id, user_id, title)
                  VALUES ($1, $2, $3)
-                 ON CONFLICT (id, user_id) 
+                 ON CONFLICT (id) 
                  DO UPDATE SET 
                     title = COALESCE($3, conversations.title),
                     updated_at = NOW()
@@ -41,19 +48,29 @@ impl ConversationRepository for PostgresConversationRepository {
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
-        Ok(Conversation {
+        let conversation = Conversation {
             id: row.get(0),
             user_id: UserId(row.get(1)),
             title: row.get(2),
             created_at: row.get(3),
             updated_at: row.get(4),
-        })
+        };
+
+        tracing::debug!(
+            "Repository: Conversation upserted - conversation_id={}, user_id={}",
+            conversation.id,
+            conversation.user_id
+        );
+
+        Ok(conversation)
     }
 
     async fn list_conversations(
         &self,
         user_id: UserId,
     ) -> Result<Vec<Conversation>, ConversationError> {
+        tracing::debug!("Repository: Listing conversations for user_id={}", user_id);
+
         let client = self
             .pool
             .get()
@@ -71,7 +88,7 @@ impl ConversationRepository for PostgresConversationRepository {
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
-        Ok(rows
+        let conversations: Vec<Conversation> = rows
             .iter()
             .map(|row| Conversation {
                 id: row.get(0),
@@ -80,7 +97,15 @@ impl ConversationRepository for PostgresConversationRepository {
                 created_at: row.get(3),
                 updated_at: row.get(4),
             })
-            .collect())
+            .collect();
+
+        tracing::debug!(
+            "Repository: Found {} conversation(s) for user_id={}",
+            conversations.len(),
+            user_id
+        );
+
+        Ok(conversations)
     }
 
     async fn get_conversation(

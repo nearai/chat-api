@@ -18,8 +18,10 @@ impl PostgresUserRepository {
 #[async_trait]
 impl UserRepository for PostgresUserRepository {
     async fn get_user(&self, user_id: UserId) -> anyhow::Result<Option<User>> {
+        tracing::debug!("Repository: Fetching user by user_id={}", user_id);
+
         let client = self.pool.get().await?;
-        
+
         let row = client
             .query_opt(
                 "SELECT id, email, name, avatar_url, created_at, updated_at 
@@ -29,19 +31,27 @@ impl UserRepository for PostgresUserRepository {
             )
             .await?;
 
-        Ok(row.map(|r| User {
+        let result = row.map(|r| User {
             id: r.get(0),
             email: r.get(1),
             name: r.get(2),
             avatar_url: r.get(3),
             created_at: r.get(4),
             updated_at: r.get(5),
-        }))
+        });
+
+        if result.is_some() {
+            tracing::debug!("Repository: User found for user_id={}", user_id);
+        } else {
+            tracing::debug!("Repository: No user found for user_id={}", user_id);
+        }
+
+        Ok(result)
     }
 
     async fn get_user_by_email(&self, email: &str) -> anyhow::Result<Option<User>> {
         let client = self.pool.get().await?;
-        
+
         let row = client
             .query_opt(
                 "SELECT id, email, name, avatar_url, created_at, updated_at 
@@ -67,8 +77,14 @@ impl UserRepository for PostgresUserRepository {
         name: Option<String>,
         avatar_url: Option<String>,
     ) -> anyhow::Result<User> {
+        tracing::info!(
+            "Repository: Creating user with email={}, name={:?}",
+            email,
+            name
+        );
+
         let client = self.pool.get().await?;
-        
+
         let row = client
             .query_one(
                 "INSERT INTO users (email, name, avatar_url) 
@@ -78,14 +94,22 @@ impl UserRepository for PostgresUserRepository {
             )
             .await?;
 
-        Ok(User {
+        let user = User {
             id: row.get(0),
             email: row.get(1),
             name: row.get(2),
             avatar_url: row.get(3),
             created_at: row.get(4),
             updated_at: row.get(5),
-        })
+        };
+
+        tracing::info!(
+            "Repository: User created successfully with user_id={}, email={}",
+            user.id,
+            user.email
+        );
+
+        Ok(user)
     }
 
     async fn update_user(
@@ -95,7 +119,7 @@ impl UserRepository for PostgresUserRepository {
         avatar_url: Option<String>,
     ) -> anyhow::Result<User> {
         let client = self.pool.get().await?;
-        
+
         let row = client
             .query_one(
                 "UPDATE users 
@@ -118,7 +142,7 @@ impl UserRepository for PostgresUserRepository {
 
     async fn delete_user(&self, user_id: UserId) -> anyhow::Result<()> {
         let client = self.pool.get().await?;
-        
+
         client
             .execute("DELETE FROM users WHERE id = $1", &[&user_id])
             .await?;
@@ -126,9 +150,12 @@ impl UserRepository for PostgresUserRepository {
         Ok(())
     }
 
-    async fn get_linked_accounts(&self, user_id: UserId) -> anyhow::Result<Vec<LinkedOAuthAccount>> {
+    async fn get_linked_accounts(
+        &self,
+        user_id: UserId,
+    ) -> anyhow::Result<Vec<LinkedOAuthAccount>> {
         let client = self.pool.get().await?;
-        
+
         let rows = client
             .query(
                 "SELECT provider, provider_user_id, linked_at 
@@ -163,14 +190,21 @@ impl UserRepository for PostgresUserRepository {
         provider: OAuthProvider,
         provider_user_id: String,
     ) -> anyhow::Result<()> {
+        tracing::info!(
+            "Repository: Linking OAuth account - user_id={}, provider={:?}, provider_user_id={}",
+            user_id,
+            provider,
+            provider_user_id
+        );
+
         let client = self.pool.get().await?;
-        
+
         let provider_str = match provider {
             OAuthProvider::Google => "google",
             OAuthProvider::Github => "github",
         };
 
-        client
+        let rows_affected = client
             .execute(
                 "INSERT INTO oauth_accounts (user_id, provider, provider_user_id) 
                  VALUES ($1, $2, $3) 
@@ -178,6 +212,20 @@ impl UserRepository for PostgresUserRepository {
                 &[&user_id, &provider_str, &provider_user_id],
             )
             .await?;
+
+        if rows_affected > 0 {
+            tracing::info!(
+                "Repository: OAuth account linked successfully - user_id={}, provider={:?}",
+                user_id,
+                provider
+            );
+        } else {
+            tracing::debug!(
+                "Repository: OAuth account already linked - user_id={}, provider={:?}",
+                user_id,
+                provider
+            );
+        }
 
         Ok(())
     }
@@ -187,8 +235,14 @@ impl UserRepository for PostgresUserRepository {
         provider: OAuthProvider,
         provider_user_id: &str,
     ) -> anyhow::Result<Option<UserId>> {
+        tracing::debug!(
+            "Repository: Finding user by OAuth - provider={:?}, provider_user_id={}",
+            provider,
+            provider_user_id
+        );
+
         let client = self.pool.get().await?;
-        
+
         let provider_str = match provider {
             OAuthProvider::Google => "google",
             OAuthProvider::Github => "github",
@@ -201,7 +255,22 @@ impl UserRepository for PostgresUserRepository {
             )
             .await?;
 
-        Ok(row.map(|r| r.get(0)))
+        let result = row.map(|r| r.get(0));
+
+        if let Some(ref user_id) = result {
+            tracing::debug!(
+                "Repository: Found user_id={} for provider={:?}",
+                user_id,
+                provider
+            );
+        } else {
+            tracing::debug!(
+                "Repository: No user found for provider={:?}, provider_user_id={}",
+                provider,
+                provider_user_id
+            );
+        }
+
+        Ok(result)
     }
 }
-

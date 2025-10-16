@@ -19,6 +19,12 @@ impl PostgresOAuthRepository {
 #[async_trait]
 impl OAuthRepository for PostgresOAuthRepository {
     async fn store_oauth_state(&self, state: &OAuthState) -> anyhow::Result<()> {
+        tracing::debug!(
+            "Repository: Storing OAuth state - state={}, provider={:?}",
+            state.state,
+            state.provider
+        );
+
         let client = self.pool.get().await?;
 
         let provider_str = match state.provider {
@@ -40,10 +46,17 @@ impl OAuthRepository for PostgresOAuthRepository {
             )
             .await?;
 
+        tracing::debug!(
+            "Repository: OAuth state stored successfully - state={}",
+            state.state
+        );
+
         Ok(())
     }
 
     async fn consume_oauth_state(&self, state: &str) -> anyhow::Result<Option<OAuthState>> {
+        tracing::debug!("Repository: Consuming OAuth state - state={}", state);
+
         let mut client = self.pool.get().await?;
 
         // Start a transaction
@@ -61,7 +74,7 @@ impl OAuthRepository for PostgresOAuthRepository {
 
         transaction.commit().await?;
 
-        Ok(row.map(|r| {
+        let result = row.map(|r| {
             let provider_str: String = r.get(1);
             let provider = match provider_str.as_str() {
                 "google" => OAuthProvider::Google,
@@ -76,7 +89,21 @@ impl OAuthRepository for PostgresOAuthRepository {
                 frontend_callback: r.get(3),
                 created_at: r.get(4),
             }
-        }))
+        });
+
+        if result.is_some() {
+            tracing::debug!(
+                "Repository: OAuth state consumed successfully - state={}",
+                state
+            );
+        } else {
+            tracing::warn!(
+                "Repository: OAuth state not found or already consumed - state={}",
+                state
+            );
+        }
+
+        Ok(result)
     }
 
     async fn store_oauth_tokens(
@@ -85,6 +112,13 @@ impl OAuthRepository for PostgresOAuthRepository {
         provider: OAuthProvider,
         tokens: &OAuthTokens,
     ) -> anyhow::Result<()> {
+        tracing::debug!(
+            "Repository: Storing OAuth tokens - user_id={}, provider={:?}, has_refresh_token={}",
+            user_id,
+            provider,
+            tokens.refresh_token.is_some()
+        );
+
         let client = self.pool.get().await?;
 
         let provider_str = match provider {
@@ -92,7 +126,7 @@ impl OAuthRepository for PostgresOAuthRepository {
             OAuthProvider::Github => "github",
         };
 
-        client
+        let rows_affected = client
             .execute(
                 "INSERT INTO oauth_tokens (user_id, provider, access_token, refresh_token, expires_at) 
                  VALUES ($1, $2, $3, $4, $5) 
@@ -111,6 +145,13 @@ impl OAuthRepository for PostgresOAuthRepository {
                 ],
             )
             .await?;
+
+        tracing::debug!(
+            "Repository: OAuth tokens stored successfully - user_id={}, provider={:?}, rows_affected={}",
+            user_id,
+            provider,
+            rows_affected
+        );
 
         Ok(())
     }

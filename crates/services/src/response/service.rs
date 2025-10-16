@@ -39,16 +39,22 @@ impl OpenAIProxyService for OpenAIProxy {
         let clean_path = path.trim_start_matches('/');
         let url = format!("{}/{}", self.base_url, clean_path);
 
+        tracing::info!("OpenAI Proxy: Forwarding request {} to {}", method, url);
+
+        let body_size = body.as_ref().map(|b| b.len()).unwrap_or(0);
+        tracing::debug!("Request body size: {} bytes", body_size);
+
         // Build the request
         let mut request_builder = self
             .http_client
-            .request(method, &url)
+            .request(method.clone(), &url)
             .header("Authorization", format!("Bearer {}", self.api_key));
 
         // Forward all headers from the client (except Authorization which we set above)
         headers.remove("authorization");
         headers.remove("host"); // Don't forward host header
 
+        tracing::debug!("Forwarding {} header(s) to OpenAI", headers.len());
         for (key, value) in headers.iter() {
             request_builder = request_builder.header(key, value);
         }
@@ -59,14 +65,24 @@ impl OpenAIProxyService for OpenAIProxy {
         }
 
         // Send the request
-        let response = request_builder
-            .send()
-            .await
-            .map_err(|e| ProxyError::ApiError(e.to_string()))?;
+        tracing::debug!("Sending request to OpenAI: {} {}", method, url);
+        let response = request_builder.send().await.map_err(|e| {
+            tracing::error!("OpenAI API request failed for {} {}: {}", method, url, e);
+            ProxyError::ApiError(e.to_string())
+        })?;
 
         // Extract status and headers
         let status = response.status().as_u16();
         let response_headers = response.headers().clone();
+
+        tracing::info!(
+            "OpenAI Proxy: Received response from {} {} - status: {}",
+            method,
+            url,
+            status
+        );
+
+        tracing::debug!("Response has {} header(s)", response_headers.len());
 
         // Get the body as a stream (don't buffer it)
         let body_stream = response.bytes_stream();

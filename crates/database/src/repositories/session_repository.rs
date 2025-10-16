@@ -33,15 +33,21 @@ impl PostgresSessionRepository {
 #[async_trait]
 impl SessionRepository for PostgresSessionRepository {
     async fn create_session(&self, user_id: UserId) -> anyhow::Result<UserSession> {
+        tracing::info!("Creating session for user_id={}", user_id);
+
         let client = self.pool.get().await?;
 
         let created_at = Utc::now();
         // Sessions expire after 30 days
         let expires_at = created_at + Duration::days(30);
 
+        tracing::debug!("Session expiry set to: {} (30 days from now)", expires_at);
+
         // Generate token and hash it
         let token = Self::generate_session_token();
         let token_hash = Self::hash_session_token(&token);
+
+        tracing::debug!("Generated session token and hash for user_id={}", user_id);
 
         let row = client
             .query_one(
@@ -52,19 +58,33 @@ impl SessionRepository for PostgresSessionRepository {
             )
             .await?;
 
-        Ok(UserSession {
+        let session = UserSession {
             session_id: row.get(0),
             user_id: row.get(1),
             created_at: row.get(2),
             expires_at: row.get(3),
             token: Some(token), // Return the unhashed token only on creation
-        })
+        };
+
+        tracing::info!(
+            "Session created successfully: session_id={}, user_id={}, expires_at={}",
+            session.session_id,
+            session.user_id,
+            session.expires_at
+        );
+
+        Ok(session)
     }
 
     async fn get_session_by_token_hash(
         &self,
         token_hash: String,
     ) -> anyhow::Result<Option<UserSession>> {
+        tracing::debug!(
+            "Looking up session by token_hash: {}...",
+            &token_hash.chars().take(16).collect::<String>()
+        );
+
         let client = self.pool.get().await?;
 
         let row = client
@@ -76,21 +96,41 @@ impl SessionRepository for PostgresSessionRepository {
             )
             .await?;
 
-        Ok(row.map(|r| UserSession {
+        let result = row.map(|r| UserSession {
             session_id: r.get(0),
             user_id: r.get(1),
             created_at: r.get(2),
             expires_at: r.get(3),
             token: None, // Never return the token on retrieval
-        }))
+        });
+
+        if let Some(ref session) = result {
+            tracing::debug!(
+                "Session found: session_id={}, user_id={}",
+                session.session_id,
+                session.user_id
+            );
+        } else {
+            tracing::debug!("No session found for provided token_hash");
+        }
+
+        Ok(result)
     }
 
     async fn delete_session(&self, session_id: SessionId) -> anyhow::Result<()> {
+        tracing::info!("Deleting session: session_id={}", session_id);
+
         let client = self.pool.get().await?;
 
-        client
+        let rows_affected = client
             .execute("DELETE FROM sessions WHERE id = $1", &[&session_id])
             .await?;
+
+        if rows_affected > 0 {
+            tracing::info!("Session deleted successfully: session_id={}", session_id);
+        } else {
+            tracing::warn!("No session found to delete: session_id={}", session_id);
+        }
 
         Ok(())
     }

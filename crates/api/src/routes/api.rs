@@ -45,10 +45,21 @@ async fn create_conversation(
     headers: HeaderMap,
     request: Request,
 ) -> Result<Response, Response> {
+    tracing::info!(
+        "create_conversation called for user_id={}, session_id={}",
+        user.user_id,
+        user.session_id
+    );
+    
     // Extract body
     let body_bytes = axum::body::to_bytes(request.into_body(), usize::MAX)
         .await
         .map_err(|e| {
+            tracing::error!(
+                "Failed to read request body for user_id={}: {}",
+                user.user_id,
+                e
+            );
             (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
@@ -58,12 +69,29 @@ async fn create_conversation(
                 .into_response()
         })?;
 
+    tracing::debug!(
+        "create_conversation request body size: {} bytes for user_id={}",
+        body_bytes.len(),
+        user.user_id
+    );
+    
+    if let Ok(body_str) = std::str::from_utf8(&body_bytes) {
+        tracing::debug!("Request body: {}", body_str);
+    }
+
+    tracing::debug!("Forwarding conversation creation request to OpenAI for user_id={}", user.user_id);
+    
     // Forward to OpenAI
     let proxy_response = state
         .proxy_service
-        .forward_request(Method::POST, "conversations", headers, Some(body_bytes))
+        .forward_request(Method::POST, "conversations", headers.clone(), Some(body_bytes))
         .await
         .map_err(|e| {
+            tracing::error!(
+                "OpenAI API error during conversation creation for user_id={}: {}",
+                user.user_id,
+                e
+            );
             (
                 StatusCode::BAD_GATEWAY,
                 Json(ErrorResponse {
@@ -75,6 +103,13 @@ async fn create_conversation(
 
     let status = proxy_response.status;
     let response_headers = proxy_response.headers;
+
+    tracing::info!(
+        "Received response from OpenAI for conversation creation - status: {}, user_id={}",
+        status,
+        user.user_id
+    );
+    tracing::debug!("Response headers: {:?}", response_headers);
 
     // For conversation creation, we need to buffer the response to extract the conversation ID
     // Collect the stream into bytes
@@ -97,19 +132,49 @@ async fn create_conversation(
 
     // If successful, parse response and track conversation
     if status >= 200 && status < 300 {
+        tracing::debug!("Parsing successful conversation creation response");
         if let Ok(response_json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
+            tracing::debug!("Response JSON parsed successfully");
             if let Some(conversation_id) = response_json.get("id").and_then(|v| v.as_str()) {
+                tracing::info!(
+                    "Conversation created with id={} for user_id={}",
+                    conversation_id,
+                    user.user_id
+                );
+                
                 // Track conversation in database
+                tracing::debug!("Tracking conversation {} in database", conversation_id);
                 if let Err(e) = state
                     .conversation_service
                     .track_conversation(conversation_id, user.user_id, None)
                     .await
                 {
-                    tracing::warn!("Failed to track conversation {}: {}", conversation_id, e);
+                    tracing::error!(
+                        "Failed to track conversation {} for user {}: {}",
+                        conversation_id,
+                        user.user_id,
+                        e
+                    );
                     // Don't fail the request if tracking fails
+                } else {
+                    tracing::info!(
+                        "Successfully tracked conversation {} in database for user_id={}",
+                        conversation_id,
+                        user.user_id
+                    );
                 }
+            } else {
+                tracing::warn!("No conversation ID found in OpenAI response for user_id={}", user.user_id);
             }
+        } else {
+            tracing::warn!("Failed to parse OpenAI response as JSON for user_id={}", user.user_id);
         }
+    } else {
+        tracing::warn!(
+            "Conversation creation returned non-success status {} for user_id={}",
+            status,
+            user.user_id
+        );
     }
 
     // Build response
@@ -140,11 +205,21 @@ async fn list_conversations(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
 ) -> Result<Json<Vec<ConversationResponse>>, Response> {
+    tracing::info!(
+        "list_conversations called for user_id={}",
+        user.user_id
+    );
+    
     let conversations = state
         .conversation_service
         .list_conversations(user.user_id)
         .await
         .map_err(|e| {
+            tracing::error!(
+                "Failed to list conversations for user_id={}: {}",
+                user.user_id,
+                e
+            );
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
@@ -153,6 +228,22 @@ async fn list_conversations(
             )
                 .into_response()
         })?;
+
+    tracing::info!(
+        "Retrieved {} conversations for user_id={}",
+        conversations.len(),
+        user.user_id
+    );
+    
+    for conv in &conversations {
+        tracing::debug!(
+            "Conversation: id={}, title={:?}, created={}, updated={}",
+            conv.id,
+            conv.title,
+            conv.created_at,
+            conv.updated_at
+        );
+    }
 
     Ok(Json(
         conversations
@@ -176,23 +267,63 @@ async fn proxy_handler(
     headers: HeaderMap,
     request: Request,
 ) -> Result<Response, Response> {
+    tracing::info!(
+        "proxy_handler: {} /v1/{} for user_id={}, session_id={}",
+        method,
+        path,
+        user.user_id,
+        user.session_id
+    );
+    
     // Extract body bytes
     let body_bytes = extract_body_bytes(request).await?;
+    
+    tracing::debug!(
+        "Extracted request body: {} bytes for {} /v1/{}",
+        body_bytes.len(),
+        method,
+        path
+    );
+    
+    if body_bytes.len() > 0 {
+        if let Ok(body_str) = std::str::from_utf8(&body_bytes) {
+            tracing::debug!("Request body content: {}", body_str);
+        }
+    }
 
     // Track conversation if this is a POST to /responses
     if method == Method::POST && path == "responses" {
+        tracing::debug!("POST to /responses detected, attempting to track conversation");
         if let Err(e) = track_conversation_from_request(&state, user.user_id, &body_bytes).await {
-            tracing::warn!("Failed to track conversation: {}", e);
+            tracing::error!(
+                "Failed to track conversation for user {} from /responses: {}",
+                user.user_id,
+                e
+            );
             // Don't fail the request if conversation tracking fails
         }
     }
 
+    tracing::debug!(
+        "Forwarding {} /v1/{} to OpenAI for user_id={}",
+        method,
+        path,
+        user.user_id
+    );
+    
     // Forward the request to OpenAI
     let proxy_response = state
         .proxy_service
-        .forward_request(method, &path, headers, Some(body_bytes))
+        .forward_request(method.clone(), &path, headers.clone(), Some(body_bytes))
         .await
         .map_err(|e| {
+            tracing::error!(
+                "OpenAI API error for {} /v1/{} (user_id={}): {}",
+                method,
+                path,
+                user.user_id,
+                e
+            );
             (
                 StatusCode::BAD_GATEWAY,
                 Json(ErrorResponse {
@@ -201,6 +332,14 @@ async fn proxy_handler(
             )
                 .into_response()
         })?;
+    
+    tracing::info!(
+        "Received response from OpenAI: status={} for {} /v1/{} (user_id={})",
+        proxy_response.status,
+        method,
+        path,
+        user.user_id
+    );
 
     // Build the response
     let mut response = Response::builder()
@@ -235,9 +374,11 @@ async fn proxy_handler(
 
 /// Extract body bytes from a request
 async fn extract_body_bytes(request: Request) -> Result<Bytes, Response> {
-    axum::body::to_bytes(request.into_body(), usize::MAX)
+    tracing::debug!("Extracting body bytes from request");
+    let result = axum::body::to_bytes(request.into_body(), usize::MAX)
         .await
         .map_err(|e| {
+            tracing::error!("Failed to read request body: {}", e);
             (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
@@ -245,7 +386,10 @@ async fn extract_body_bytes(request: Request) -> Result<Bytes, Response> {
                 }),
             )
                 .into_response()
-        })
+        })?;
+    
+    tracing::debug!("Successfully extracted {} bytes from request body", result.len());
+    Ok(result)
 }
 
 /// Track a conversation from a response creation request
@@ -254,6 +398,8 @@ async fn track_conversation_from_request(
     user_id: UserId,
     body: &Bytes,
 ) -> anyhow::Result<()> {
+    tracing::debug!("Attempting to track conversation from /responses request for user_id={}", user_id);
+    
     // Parse the request body to extract conversation_id if present
     #[derive(Deserialize)]
     struct ResponseRequest {
@@ -262,11 +408,27 @@ async fn track_conversation_from_request(
 
     if let Ok(req) = serde_json::from_slice::<ResponseRequest>(body) {
         if let Some(conversation_id) = req.conversation {
+            tracing::info!(
+                "Found conversation_id={} in /responses request for user_id={}, tracking...",
+                conversation_id,
+                user_id
+            );
+            
             state
                 .conversation_service
                 .track_conversation(&conversation_id, user_id, None)
                 .await?;
+            
+            tracing::info!(
+                "Successfully tracked conversation {} from /responses for user_id={}",
+                conversation_id,
+                user_id
+            );
+        } else {
+            tracing::debug!("No conversation_id found in /responses request body for user_id={}", user_id);
         }
+    } else {
+        tracing::debug!("Failed to parse /responses request body for user_id={}", user_id);
     }
 
     Ok(())

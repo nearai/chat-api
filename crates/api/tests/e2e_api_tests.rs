@@ -1,7 +1,7 @@
 use axum_test::TestServer;
 use serde_json::json;
 
-const SESSION_TOKEN: &str = "sess_2b15a8365325436099e7e7101e8712b9";
+const SESSION_TOKEN: &str = "sess_e7ce7abb623a46f68db69a12e995af21";
 
 async fn create_test_server() -> TestServer {
     use api::{create_router, AppState};
