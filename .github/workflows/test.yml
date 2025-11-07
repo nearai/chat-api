@@ -14,8 +14,7 @@ jobs:
   test:
     name: Test Suite
     runs-on: ubuntu-latest
-    environment: Chat API test env
-    
+
     services:
       postgres:
         image: postgres:15
