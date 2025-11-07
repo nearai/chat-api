@@ -139,13 +139,15 @@ pub async fn oauth_callback(
 
     tracing::info!("Redirecting to frontend: {}", frontend_url);
 
-    let callback_url = format!(
-        "{}/auth/callback?token={}&expires_at={}&is_new_user={}",
+    let mut callback_url = format!(
+        "{}/auth/callback?token={}&expires_at={}",
         frontend_url,
         urlencoding::encode(&token),
-        urlencoding::encode(&session.expires_at.to_rfc3339()),
-        is_new_user
+        urlencoding::encode(&session.expires_at.to_rfc3339())
     );
+    if is_new_user {
+        callback_url.push_str("&is_new_user=true");
+    }
 
     tracing::debug!("Final callback URL: {}", callback_url);
 
