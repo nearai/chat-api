@@ -88,13 +88,13 @@ async fn test_conversation_workflow() {
         .post("/v1/conversations")
         .add_header(
             http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {}", SESSION_TOKEN)).unwrap(),
+            http::HeaderValue::from_str(&format!("Bearer {SESSION_TOKEN}")).unwrap(),
         )
         .json(&create_conv_body)
         .await;
 
     let status = response.status_code();
-    println!("   Status: {}", status);
+    println!("   Status: {status}");
 
     let conversation_id = if status.is_success() {
         let body: serde_json::Value = response.json();
@@ -104,11 +104,11 @@ async fn test_conversation_workflow() {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .expect("Conversation should have an ID");
-        println!("   Conversation ID: {}", conv_id);
+        println!("   Conversation ID: {conv_id}");
         conv_id
     } else {
         let error_text = response.text();
-        println!("   ✗ Failed: {}", error_text);
+        println!("   ✗ Failed: {error_text}");
         panic!("Failed to create conversation");
     };
 
@@ -130,13 +130,13 @@ async fn test_conversation_workflow() {
         .post("/v1/responses")
         .add_header(
             http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {}", SESSION_TOKEN)).unwrap(),
+            http::HeaderValue::from_str(&format!("Bearer {SESSION_TOKEN}")).unwrap(),
         )
         .json(&request_body)
         .await;
 
     let status = response.status_code();
-    println!("   Status: {}", status);
+    println!("   Status: {status}");
 
     if status.is_success() {
         let body: serde_json::Value = response.json();
@@ -147,7 +147,7 @@ async fn test_conversation_workflow() {
         );
     } else {
         let error_text = response.text();
-        println!("   ✗ Failed: {}", error_text);
+        println!("   ✗ Failed: {error_text}");
         panic!("Failed to create first response");
     };
 
@@ -169,13 +169,13 @@ async fn test_conversation_workflow() {
         .post("/v1/responses")
         .add_header(
             http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {}", SESSION_TOKEN)).unwrap(),
+            http::HeaderValue::from_str(&format!("Bearer {SESSION_TOKEN}")).unwrap(),
         )
         .json(&request_body)
         .await;
 
     let status = response.status_code();
-    println!("   Status: {}", status);
+    println!("   Status: {status}");
 
     if status.is_success() {
         let body: serde_json::Value = response.json();
@@ -186,7 +186,7 @@ async fn test_conversation_workflow() {
         );
     } else {
         let error_text = response.text();
-        println!("   ✗ Failed: {}", error_text);
+        println!("   ✗ Failed: {error_text}");
         panic!("Failed to create second response");
     };
 
@@ -196,14 +196,14 @@ async fn test_conversation_workflow() {
         .get("/v1/conversations")
         .add_header(
             http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {}", SESSION_TOKEN)).unwrap(),
+            http::HeaderValue::from_str(&format!("Bearer {SESSION_TOKEN}")).unwrap(),
         )
         .await;
 
     assert_eq!(response.status_code(), 200, "Should list conversations");
 
     let conversations: Vec<serde_json::Value> = response.json();
-    println!("{:?}", conversations);
+    println!("{conversations:?}");
     println!("   Found {} total conversations", conversations.len());
 
     // Find our conversation

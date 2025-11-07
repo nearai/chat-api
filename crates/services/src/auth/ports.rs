@@ -103,7 +103,7 @@ pub trait OAuthService: Send + Sync {
         &self,
         code: String,
         state: String,
-    ) -> anyhow::Result<(UserSession, Option<String>)>;
+    ) -> anyhow::Result<(UserSession, Option<String>, bool)>;
 
     /// Refresh an access token
     async fn refresh_token(

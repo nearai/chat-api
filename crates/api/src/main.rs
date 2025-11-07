@@ -12,7 +12,7 @@ use utoipa_swagger_ui::SwaggerUi;
 async fn main() -> anyhow::Result<()> {
     // Load .env file if it exists
     if let Err(e) = dotenvy::dotenv() {
-        eprintln!("Warning: Could not load .env file: {}", e);
+        eprintln!("Warning: Could not load .env file: {e}");
         eprintln!("Continuing with environment variables...");
     }
 
