@@ -100,8 +100,8 @@ pub async fn oauth_callback(
     );
 
     // The provider is determined from the state stored in the database
-    // Returns (session, frontend_callback_url)
-    let (session, frontend_callback) = app_state
+    // Returns (session, frontend_callback_url, is_new_user)
+    let (session, frontend_callback, is_new_user) = app_state
         .oauth_service
         .handle_callback_unified(params.code.clone(), params.state.clone())
         .await
@@ -139,12 +139,15 @@ pub async fn oauth_callback(
 
     tracing::info!("Redirecting to frontend: {}", frontend_url);
 
-    let callback_url = format!(
+    let mut callback_url = format!(
         "{}/auth/callback?token={}&expires_at={}",
         frontend_url,
         urlencoding::encode(&token),
         urlencoding::encode(&session.expires_at.to_rfc3339())
     );
+    if is_new_user {
+        callback_url.push_str("&is_new_user=true");
+    }
 
     tracing::debug!("Final callback URL: {}", callback_url);
 

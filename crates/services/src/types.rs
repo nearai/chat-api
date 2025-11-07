@@ -133,7 +133,7 @@ mod tests {
     fn test_id_display() {
         let uuid = Uuid::new_v4();
         let user_id = UserId(uuid);
-        assert_eq!(format!("{}", user_id), format!("{}", uuid));
+        assert_eq!(format!("{user_id}"), format!("{}", uuid));
     }
 
     #[test]

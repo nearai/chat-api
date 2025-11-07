@@ -145,8 +145,7 @@ impl ApiError {
     /// OAuth provider error
     pub fn oauth_provider_error(provider: &str) -> Self {
         Self::bad_gateway(format!(
-            "Failed to communicate with {} OAuth provider",
-            provider
+            "Failed to communicate with {provider} OAuth provider"
         ))
     }
 

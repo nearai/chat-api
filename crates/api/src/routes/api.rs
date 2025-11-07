@@ -65,7 +65,7 @@ async fn create_conversation(
             (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
-                    error: format!("Failed to read request body: {}", e),
+                    error: format!("Failed to read request body: {e}"),
                 }),
             )
                 .into_response()
@@ -105,7 +105,7 @@ async fn create_conversation(
             (
                 StatusCode::BAD_GATEWAY,
                 Json(ErrorResponse {
-                    error: format!("OpenAI API error: {}", e),
+                    error: format!("OpenAI API error: {e}"),
                 }),
             )
                 .into_response()
@@ -131,7 +131,7 @@ async fn create_conversation(
             (
                 StatusCode::BAD_GATEWAY,
                 Json(ErrorResponse {
-                    error: format!("Failed to read response: {}", e),
+                    error: format!("Failed to read response: {e}"),
                 }),
             )
                 .into_response()
@@ -141,7 +141,7 @@ async fn create_conversation(
         .collect();
 
     // If successful, parse response and track conversation
-    if status >= 200 && status < 300 {
+    if (200..300).contains(&status) {
         tracing::debug!("Parsing successful conversation creation response");
 
         // Decompress if gzipped
@@ -227,7 +227,7 @@ async fn create_conversation(
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: format!("Failed to build response: {}", e),
+                error: format!("Failed to build response: {e}"),
             }),
         )
             .into_response()
@@ -254,7 +254,7 @@ async fn list_conversations(
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: format!("Failed to list conversations: {}", e),
+                    error: format!("Failed to list conversations: {e}"),
                 }),
             )
                 .into_response()
@@ -316,7 +316,7 @@ async fn proxy_handler(
         path
     );
 
-    if body_bytes.len() > 0 {
+    if !body_bytes.is_empty() {
         if let Ok(body_str) = std::str::from_utf8(&body_bytes) {
             tracing::debug!("Request body content: {}", body_str);
         }
@@ -358,7 +358,7 @@ async fn proxy_handler(
             (
                 StatusCode::BAD_GATEWAY,
                 Json(ErrorResponse {
-                    error: format!("OpenAI API error: {}", e),
+                    error: format!("OpenAI API error: {e}"),
                 }),
             )
                 .into_response()
@@ -387,16 +387,14 @@ async fn proxy_handler(
     }
 
     // Convert the stream to an axum Body for streaming support
-    let stream = proxy_response
-        .body
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+    let stream = proxy_response.body.map_err(std::io::Error::other);
     let body = Body::from_stream(stream);
 
     response.body(body).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: format!("Failed to build response: {}", e),
+                error: format!("Failed to build response: {e}"),
             }),
         )
             .into_response()
@@ -413,7 +411,7 @@ async fn extract_body_bytes(request: Request) -> Result<Bytes, Response> {
             (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
-                    error: format!("Failed to read request body: {}", e),
+                    error: format!("Failed to read request body: {e}"),
                 }),
             )
                 .into_response()
