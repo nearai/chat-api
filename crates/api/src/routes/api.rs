@@ -391,9 +391,7 @@ async fn create_conversation_items(
     }
 
     // Convert the stream to an axum Body for streaming support
-    let stream = proxy_response
-        .body
-        .map_err(std::io::Error::other);
+    let stream = proxy_response.body.map_err(std::io::Error::other);
     let body = Body::from_stream(stream);
 
     response.body(body).map_err(|e| {
@@ -505,9 +503,7 @@ async fn proxy_handler(
     }
 
     // Convert the stream to an axum Body for streaming support
-    let stream = proxy_response
-        .body
-        .map_err(std::io::Error::other);
+    let stream = proxy_response.body.map_err(std::io::Error::other);
     let body = Body::from_stream(stream);
 
     response.body(body).map_err(|e| {

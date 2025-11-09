@@ -190,8 +190,50 @@ async fn test_conversation_workflow() {
         panic!("Failed to create second response");
     };
 
-    // Step 4: List conversations (from our database)
-    println!("\n4. Listing conversations from database...");
+    // Step 4: Add response with custom items to the same conversation
+    println!("\n4. Adding response with custom items to the conversation...");
+    let request_body = json!({
+        "items": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "Tell me another joke",
+                    }
+                ]
+            }, // TODO: should add output item here?
+        ]
+    });
+
+    let response = server
+        .post(&format!("/v1/conversations/{conversation_id}/items"))
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", SESSION_TOKEN)).unwrap(),
+        )
+        .json(&request_body)
+        .await;
+
+    let status = response.status_code();
+    println!("   Status: {}", status);
+
+    if status.is_success() {
+        let body: serde_json::Value = response.json();
+        println!("   ✓ Third response with custom items created successfully");
+        println!(
+            "   Response ID: {}",
+            body.get("id").unwrap_or(&json!("N/A"))
+        );
+    } else {
+        let error_text = response.text();
+        println!("   ✗ Failed: {}", error_text);
+        panic!("Failed to create third response");
+    };
+
+    // Step 5: List conversations (from our database)
+    println!("\n5. Listing conversations from database...");
     let response = server
         .get("/v1/conversations")
         .add_header(
