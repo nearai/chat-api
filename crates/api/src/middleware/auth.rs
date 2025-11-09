@@ -39,12 +39,8 @@ pub async fn auth_middleware(
 ) -> Result<Response, Response> {
     let path = request.uri().path();
     let method = request.method().clone();
-    
-    tracing::info!(
-        "Auth middleware invoked for {} {}",
-        method,
-        path
-    );
+
+    tracing::info!("Auth middleware invoked for {} {}", method, path);
 
     // Try to extract authentication from Authorization header
     let auth_header = request
@@ -52,36 +48,55 @@ pub async fn auth_middleware(
         .get("authorization")
         .and_then(|h| h.to_str().ok());
 
-    tracing::debug!("Auth middleware: processing request with auth_header present: {}", auth_header.is_some());
-    
+    tracing::debug!(
+        "Auth middleware: processing request with auth_header present: {}",
+        auth_header.is_some()
+    );
+
     if let Some(auth_value) = auth_header {
-        tracing::debug!("Authorization header value prefix: {}...", &auth_value.chars().take(10).collect::<String>());
+        tracing::debug!(
+            "Authorization header value prefix: {}...",
+            &auth_value.chars().take(10).collect::<String>()
+        );
     }
 
     let auth_result = if let Some(auth_value) = auth_header {
         if let Some(token) = auth_value.strip_prefix("Bearer ") {
-            tracing::debug!("Extracted Bearer token, length: {}, prefix: {}...", token.len(), &token.chars().take(8).collect::<String>());
+            tracing::debug!(
+                "Extracted Bearer token, length: {}, prefix: {}...",
+                token.len(),
+                &token.chars().take(8).collect::<String>()
+            );
 
             // Validate token format (should start with sess_ and be the right length)
             if !token.starts_with("sess_") {
                 tracing::warn!("Invalid session token format: token does not start with 'sess_'");
                 return Err(ApiError::invalid_token().into_response());
             }
-            
+
             if token.len() != 37 {
-                tracing::warn!("Invalid session token format: expected length 37, got {}", token.len());
+                tracing::warn!(
+                    "Invalid session token format: expected length 37, got {}",
+                    token.len()
+                );
                 return Err(ApiError::invalid_token().into_response());
             }
 
             tracing::debug!("Token format validation passed, proceeding to authenticate");
-            
+
             // Hash the token and look it up
             let token_hash = hash_session_token(token);
-            tracing::debug!("Token hashed, hash prefix: {}...", &token_hash.chars().take(16).collect::<String>());
-            
+            tracing::debug!(
+                "Token hashed, hash prefix: {}...",
+                &token_hash.chars().take(16).collect::<String>()
+            );
+
             authenticate_session_by_token(&state, token_hash).await
         } else {
-            tracing::warn!("Authorization header does not start with 'Bearer ', header: {}", auth_value);
+            tracing::warn!(
+                "Authorization header does not start with 'Bearer ', header: {}",
+                auth_value
+            );
             Err(ApiError::invalid_auth_header())
         }
     } else {
@@ -116,19 +131,29 @@ async fn authenticate_session_by_token(
     state: &AuthState,
     token_hash: String,
 ) -> Result<AuthenticatedUser, ApiError> {
-    tracing::debug!("Authenticating session by token hash: {}...", &token_hash.chars().take(16).collect::<String>());
-    
+    tracing::debug!(
+        "Authenticating session by token hash: {}...",
+        &token_hash.chars().take(16).collect::<String>()
+    );
+
     // Look up the session by token hash
     let session = state
         .session_repository
         .get_session_by_token_hash(token_hash.clone())
         .await
         .map_err(|e| {
-            tracing::error!("Failed to get session from repository for token_hash {}...: {}", &token_hash.chars().take(16).collect::<String>(), e);
+            tracing::error!(
+                "Failed to get session from repository for token_hash {}...: {}",
+                &token_hash.chars().take(16).collect::<String>(),
+                e
+            );
             ApiError::internal_server_error("Failed to authenticate session")
         })?
         .ok_or_else(|| {
-            tracing::warn!("Session not found for token_hash: {}...", &token_hash.chars().take(16).collect::<String>());
+            tracing::warn!(
+                "Session not found for token_hash: {}...",
+                &token_hash.chars().take(16).collect::<String>()
+            );
             ApiError::session_not_found()
         })?;
 
@@ -151,7 +176,7 @@ async fn authenticate_session_by_token(
         );
         return Err(ApiError::session_expired());
     }
-    
+
     let time_until_expiry = session.expires_at.signed_duration_since(now);
     tracing::debug!(
         "Session valid for {} more seconds",

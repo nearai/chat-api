@@ -63,6 +63,7 @@ pub struct OAuthServiceImpl {
 }
 
 impl OAuthServiceImpl {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         oauth_repository: Arc<dyn OAuthRepository>,
         session_repository: Arc<dyn SessionRepository>,
@@ -121,7 +122,7 @@ impl OAuthServiceImpl {
             name: user_data["name"].as_str().map(|s| s.to_string()),
             avatar_url: user_data["picture"].as_str().map(|s| s.to_string()),
         };
-        
+
         tracing::info!(
             "Successfully fetched Google user info: email={}, provider_user_id={}",
             user_info.email,
@@ -169,7 +170,7 @@ impl OAuthServiceImpl {
 
         let emails: Vec<serde_json::Value> = emails_response.json().await?;
         tracing::debug!("Github emails received: {} email(s)", emails.len());
-        
+
         let primary_email = emails
             .iter()
             .find(|e| e["primary"].as_bool().unwrap_or(false))
@@ -187,7 +188,7 @@ impl OAuthServiceImpl {
             name: user_data["name"].as_str().map(|s| s.to_string()),
             avatar_url: user_data["avatar_url"].as_str().map(|s| s.to_string()),
         };
-        
+
         tracing::info!(
             "Successfully fetched Github user info: email={}, provider_user_id={}",
             user_info.email,
@@ -206,14 +207,14 @@ impl OAuthServiceImpl {
             user_info.provider,
             user_info.email
         );
-        
+
         // First check if user exists by OAuth provider
         tracing::debug!(
             "Checking for existing user by OAuth: provider={:?}, provider_user_id={}",
             user_info.provider,
             user_info.provider_user_id
         );
-        
+
         if let Some(user_id) = self
             .user_repository
             .find_user_by_oauth(user_info.provider, &user_info.provider_user_id)
@@ -227,8 +228,11 @@ impl OAuthServiceImpl {
             return Ok(user_id);
         }
 
-        tracing::debug!("No user found by OAuth, checking by email: {}", user_info.email);
-        
+        tracing::debug!(
+            "No user found by OAuth, checking by email: {}",
+            user_info.email
+        );
+
         // Check if user exists by email
         if let Some(existing_user) = self
             .user_repository
@@ -247,7 +251,7 @@ impl OAuthServiceImpl {
                 existing_user.id,
                 user_info.provider
             );
-            
+
             self.user_repository
                 .link_oauth_account(
                     existing_user.id,
@@ -270,7 +274,7 @@ impl OAuthServiceImpl {
             "No existing user found, creating new user for email: {}",
             user_info.email
         );
-        
+
         let user = self
             .user_repository
             .create_user(
@@ -292,7 +296,7 @@ impl OAuthServiceImpl {
             user.id,
             user_info.provider
         );
-        
+
         self.user_repository
             .link_oauth_account(
                 user.id,
@@ -323,7 +327,7 @@ impl OAuthServiceImpl {
             provider,
             oauth_state.redirect_uri
         );
-        
+
         // Build client for token exchange
         let (client_id, client_secret, auth_url, token_url) = match provider {
             OAuthProvider::Google => (
@@ -340,8 +344,11 @@ impl OAuthServiceImpl {
             ),
         };
 
-        tracing::debug!("Building OAuth client for token exchange with provider: {:?}", provider);
-        
+        tracing::debug!(
+            "Building OAuth client for token exchange with provider: {:?}",
+            provider
+        );
+
         let client = BasicClient::new(ClientId::new(client_id.clone()))
             .set_client_secret(ClientSecret::new(client_secret.clone()))
             .set_auth_uri(AuthUrl::new(auth_url.to_string())?)
@@ -349,7 +356,7 @@ impl OAuthServiceImpl {
             .set_redirect_uri(RedirectUrl::new(oauth_state.redirect_uri.clone())?);
 
         tracing::debug!("Exchanging authorization code for access token");
-        
+
         let token_result = client
             .exchange_code(AuthorizationCode::new(code))
             .request_async(&async_http_client)
@@ -360,11 +367,11 @@ impl OAuthServiceImpl {
             })?;
 
         tracing::info!("Successfully exchanged authorization code for access token");
-        
+
         let access_token = token_result.access_token().secret();
         let has_refresh_token = token_result.refresh_token().is_some();
         let expires_in = token_result.expires_in();
-        
+
         tracing::debug!(
             "Token details: has_refresh_token={}, expires_in={:?}",
             has_refresh_token,
@@ -395,7 +402,7 @@ impl OAuthServiceImpl {
             user_id,
             provider
         );
-        
+
         self.oauth_repository
             .store_oauth_tokens(user_id, provider, &oauth_tokens)
             .await?;
@@ -431,7 +438,7 @@ impl OAuthService for OAuthServiceImpl {
             redirect_uri,
             frontend_callback
         );
-        
+
         let (client_id, client_secret, auth_url, token_url, scopes) = match provider {
             OAuthProvider::Google => (
                 &self.google_client_id,
@@ -463,7 +470,7 @@ impl OAuthService for OAuthServiceImpl {
         }
 
         let (auth_url, csrf_token) = auth_request.url();
-        
+
         tracing::debug!("Generated CSRF token: {}", csrf_token.secret());
 
         // Store the state for verification
@@ -476,7 +483,7 @@ impl OAuthService for OAuthServiceImpl {
         };
 
         tracing::debug!("Storing OAuth state in database");
-        
+
         self.oauth_repository
             .store_oauth_state(&oauth_state)
             .await?;
@@ -559,7 +566,7 @@ impl OAuthService for OAuthServiceImpl {
         state: String,
     ) -> anyhow::Result<(UserSession, Option<String>)> {
         tracing::info!("Handling unified OAuth callback with state: {}", state);
-        
+
         // First, look up the state to determine the provider
         tracing::debug!("Looking up OAuth state in database");
         let oauth_state = self
@@ -584,9 +591,9 @@ impl OAuthService for OAuthServiceImpl {
 
     async fn revoke_session(&self, session_id: SessionId) -> anyhow::Result<()> {
         tracing::info!("Revoking session: session_id={}", session_id);
-        
+
         self.session_repository.delete_session(session_id).await?;
-        
+
         tracing::info!("Session revoked successfully: session_id={}", session_id);
         Ok(())
     }
