@@ -369,7 +369,7 @@ async fn create_conversation_items(
             (
                 StatusCode::BAD_GATEWAY,
                 Json(ErrorResponse {
-                    error: format!("OpenAI API error: {}", e),
+                    error: format!("OpenAI API error: {e}"),
                 }),
             )
                 .into_response()
@@ -398,7 +398,7 @@ async fn create_conversation_items(
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: format!("Failed to build response: {}", e),
+                error: format!("Failed to build response: {e}"),
             }),
         )
             .into_response()
