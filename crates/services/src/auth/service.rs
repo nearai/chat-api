@@ -198,10 +198,12 @@ impl OAuthServiceImpl {
         Ok(user_info)
     }
 
+    /// Find or create user from OAuth
+    /// Returns (user_id, is_new_user)
     async fn find_or_create_user_from_oauth(
         &self,
         user_info: &OAuthUserInfo,
-    ) -> anyhow::Result<UserId> {
+    ) -> anyhow::Result<(UserId, bool)> {
         tracing::info!(
             "Finding or creating user for OAuth login: provider={:?}, email={}",
             user_info.provider,
@@ -225,7 +227,7 @@ impl OAuthServiceImpl {
                 user_id,
                 user_info.provider
             );
-            return Ok(user_id);
+            return Ok((user_id, false));
         }
 
         tracing::debug!(
@@ -266,7 +268,7 @@ impl OAuthServiceImpl {
                 existing_user.id
             );
 
-            return Ok(existing_user.id);
+            return Ok((existing_user.id, false));
         }
 
         // Create new user
@@ -311,7 +313,7 @@ impl OAuthServiceImpl {
             user.id
         );
 
-        Ok(user.id)
+        Ok((user.id, true))
     }
 
     /// Internal implementation that handles the callback with a pre-validated state
@@ -321,7 +323,7 @@ impl OAuthServiceImpl {
         provider: OAuthProvider,
         code: String,
         oauth_state: OAuthState,
-    ) -> anyhow::Result<(UserSession, Option<String>)> {
+    ) -> anyhow::Result<(UserSession, Option<String>, bool)> {
         tracing::info!(
             "Processing OAuth callback: provider={:?}, redirect_uri={}",
             provider,
@@ -386,7 +388,7 @@ impl OAuthServiceImpl {
         };
 
         // Find or create user
-        let user_id = self.find_or_create_user_from_oauth(&user_info).await?;
+        let (user_id, is_new_user) = self.find_or_create_user_from_oauth(&user_info).await?;
 
         // Store OAuth tokens
         let oauth_tokens = OAuthTokens {
@@ -420,7 +422,7 @@ impl OAuthServiceImpl {
             session.session_id
         );
 
-        Ok((session, oauth_state.frontend_callback))
+        Ok((session, oauth_state.frontend_callback, is_new_user))
     }
 }
 
@@ -564,7 +566,7 @@ impl OAuthService for OAuthServiceImpl {
         &self,
         code: String,
         state: String,
-    ) -> anyhow::Result<(UserSession, Option<String>)> {
+    ) -> anyhow::Result<(UserSession, Option<String>, bool)> {
         tracing::info!("Handling unified OAuth callback with state: {}", state);
 
         // First, look up the state to determine the provider

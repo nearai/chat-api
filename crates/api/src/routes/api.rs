@@ -69,7 +69,7 @@ async fn create_conversation(
             (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
-                    error: format!("Failed to read request body: {}", e),
+                    error: format!("Failed to read request body: {e}"),
                 }),
             )
                 .into_response()
@@ -109,7 +109,7 @@ async fn create_conversation(
             (
                 StatusCode::BAD_GATEWAY,
                 Json(ErrorResponse {
-                    error: format!("OpenAI API error: {}", e),
+                    error: format!("OpenAI API error: {e}"),
                 }),
             )
                 .into_response()
@@ -135,7 +135,7 @@ async fn create_conversation(
             (
                 StatusCode::BAD_GATEWAY,
                 Json(ErrorResponse {
-                    error: format!("Failed to read response: {}", e),
+                    error: format!("Failed to read response: {e}"),
                 }),
             )
                 .into_response()
@@ -231,7 +231,7 @@ async fn create_conversation(
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: format!("Failed to build response: {}", e),
+                error: format!("Failed to build response: {e}"),
             }),
         )
             .into_response()
@@ -258,7 +258,7 @@ async fn list_conversations(
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: format!("Failed to list conversations: {}", e),
+                    error: format!("Failed to list conversations: {e}"),
                 }),
             )
                 .into_response()
@@ -474,7 +474,7 @@ async fn proxy_handler(
             (
                 StatusCode::BAD_GATEWAY,
                 Json(ErrorResponse {
-                    error: format!("OpenAI API error: {}", e),
+                    error: format!("OpenAI API error: {e}"),
                 }),
             )
                 .into_response()
@@ -510,7 +510,7 @@ async fn proxy_handler(
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: format!("Failed to build response: {}", e),
+                error: format!("Failed to build response: {e}"),
             }),
         )
             .into_response()
@@ -527,7 +527,7 @@ async fn extract_body_bytes(request: Request) -> Result<Bytes, Response> {
             (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
-                    error: format!("Failed to read request body: {}", e),
+                    error: format!("Failed to read request body: {e}"),
                 }),
             )
                 .into_response()
