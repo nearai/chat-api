@@ -125,7 +125,7 @@ async fn test_conversation_workflow() {
                         "text": "Tell me a joke",
                     }
                 ]
-            }, // TODO: should add output item here?
+            }, // TODO: should add assistant item here?
         ]
     });
 
