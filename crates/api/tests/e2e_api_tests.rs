@@ -112,25 +112,28 @@ async fn test_conversation_workflow() {
         panic!("Failed to create conversation");
     };
 
-    // Step 2: Add first response to the conversation
-    println!("\n2. Adding first response to the conversation...");
+    // Step 2: Add first response with custom items to the conversation
+    println!("\n2. Adding response with custom items to the conversation...");
     let request_body = json!({
-        "conversation": conversation_id,
-        "model": "gpt-4o",
-        "input": [
+        "items": [
             {
                 "type": "message",
                 "role": "user",
-                "content": "Say hello!"
-            }
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "Tell me a joke",
+                    }
+                ]
+            }, // TODO: should add output item here?
         ]
     });
 
     let response = server
-        .post("/v1/responses")
+        .post(&format!("/v1/conversations/{conversation_id}/items"))
         .add_header(
             http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {SESSION_TOKEN}")).unwrap(),
+            http::HeaderValue::from_str(&format!("Bearer {}", SESSION_TOKEN)).unwrap(),
         )
         .json(&request_body)
         .await;
@@ -140,10 +143,10 @@ async fn test_conversation_workflow() {
 
     if status.is_success() {
         let body: serde_json::Value = response.json();
-        println!("   ✓ First response created successfully");
+        println!("   ✓ First response with custom items created successfully");
         println!(
-            "   Response ID: {}",
-            body.get("id").unwrap_or(&json!("N/A"))
+            "   Response items: {}",
+            body.get("items").unwrap_or(&json!("N/A"))
         );
     } else {
         let error_text = response.text();
@@ -160,7 +163,7 @@ async fn test_conversation_workflow() {
             {
                 "type": "message",
                 "role": "user",
-                "content": "Tell me a joke!"
+                "content": "Explain what makes the joke funny"
             }
         ]
     });
@@ -190,28 +193,25 @@ async fn test_conversation_workflow() {
         panic!("Failed to create second response");
     };
 
-    // Step 4: Add response with custom items to the same conversation
-    println!("\n4. Adding response with custom items to the conversation...");
+    // Step 4: Add third response to the conversation
+    println!("\n4. Adding third response to the conversation...");
     let request_body = json!({
-        "items": [
+        "conversation": conversation_id,
+        "model": "gpt-4o",
+        "input": [
             {
                 "type": "message",
                 "role": "user",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": "Tell me another joke",
-                    }
-                ]
-            }, // TODO: should add output item here?
+                "content": "Tell me another joke with the same topic"
+            }
         ]
     });
 
     let response = server
-        .post(&format!("/v1/conversations/{conversation_id}/items"))
+        .post("/v1/responses")
         .add_header(
             http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {}", SESSION_TOKEN)).unwrap(),
+            http::HeaderValue::from_str(&format!("Bearer {SESSION_TOKEN}")).unwrap(),
         )
         .json(&request_body)
         .await;
@@ -221,7 +221,7 @@ async fn test_conversation_workflow() {
 
     if status.is_success() {
         let body: serde_json::Value = response.json();
-        println!("   ✓ Third response with custom items created successfully");
+        println!("   ✓ Third response created successfully");
         println!(
             "   Response ID: {}",
             body.get("id").unwrap_or(&json!("N/A"))
