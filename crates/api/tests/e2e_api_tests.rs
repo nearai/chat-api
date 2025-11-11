@@ -146,7 +146,7 @@ async fn test_conversation_workflow() {
         println!("   ✓ First response with custom items created successfully");
         println!(
             "   Response items: {}",
-            body.get("items").unwrap_or(&json!("N/A"))
+            body.get("data").unwrap_or(&json!("N/A"))
         );
     } else {
         let error_text = response.text();
