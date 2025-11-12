@@ -1,6 +1,6 @@
 use crate::pool::DbPool;
 use async_trait::async_trait;
-use services::conversation::ports::{Conversation, ConversationError, ConversationRepository};
+use services::conversation::ports::{ConversationError, ConversationRepository};
 use services::UserId;
 
 pub struct PostgresConversationRepository {
@@ -19,13 +19,11 @@ impl ConversationRepository for PostgresConversationRepository {
         &self,
         conversation_id: &str,
         user_id: UserId,
-        title: Option<String>,
-    ) -> Result<Conversation, ConversationError> {
+    ) -> Result<(), ConversationError> {
         tracing::debug!(
-            "Repository: Upserting conversation - conversation_id={}, user_id={}, title={:?}",
+            "Repository: Upserting conversation - conversation_id={}, user_id={}",
             conversation_id,
-            user_id,
-            title
+            user_id
         );
 
         let client = self
@@ -34,41 +32,27 @@ impl ConversationRepository for PostgresConversationRepository {
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
-        let row = client
-            .query_one(
-                "INSERT INTO conversations (id, user_id, title)
-                 VALUES ($1, $2, $3)
+        client
+            .execute(
+                "INSERT INTO conversations (id, user_id)
+                 VALUES ($1, $2)
                  ON CONFLICT (id) 
-                 DO UPDATE SET 
-                    title = COALESCE($3, conversations.title),
-                    updated_at = NOW()
-                 RETURNING id, user_id, title, created_at, updated_at",
-                &[&conversation_id, &user_id.0, &title],
+                 DO UPDATE SET updated_at = NOW()",
+                &[&conversation_id, &user_id.0],
             )
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
-        let conversation = Conversation {
-            id: row.get(0),
-            user_id: UserId(row.get(1)),
-            title: row.get(2),
-            created_at: row.get(3),
-            updated_at: row.get(4),
-        };
-
         tracing::debug!(
             "Repository: Conversation upserted - conversation_id={}, user_id={}",
-            conversation.id,
-            conversation.user_id
+            conversation_id,
+            user_id
         );
 
-        Ok(conversation)
+        Ok(())
     }
 
-    async fn list_conversations(
-        &self,
-        user_id: UserId,
-    ) -> Result<Vec<Conversation>, ConversationError> {
+    async fn list_conversations(&self, user_id: UserId) -> Result<Vec<String>, ConversationError> {
         tracing::debug!("Repository: Listing conversations for user_id={}", user_id);
 
         let client = self
@@ -79,8 +63,7 @@ impl ConversationRepository for PostgresConversationRepository {
 
         let rows = client
             .query(
-                "SELECT id, user_id, title, created_at, updated_at 
-                 FROM conversations 
+                "SELECT id FROM conversations 
                  WHERE user_id = $1 
                  ORDER BY updated_at DESC",
                 &[&user_id.0],
@@ -88,31 +71,22 @@ impl ConversationRepository for PostgresConversationRepository {
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
-        let conversations: Vec<Conversation> = rows
-            .iter()
-            .map(|row| Conversation {
-                id: row.get(0),
-                user_id: UserId(row.get(1)),
-                title: row.get(2),
-                created_at: row.get(3),
-                updated_at: row.get(4),
-            })
-            .collect();
+        let conversation_ids: Vec<String> = rows.iter().map(|row| row.get(0)).collect();
 
         tracing::debug!(
             "Repository: Found {} conversation(s) for user_id={}",
-            conversations.len(),
+            conversation_ids.len(),
             user_id
         );
 
-        Ok(conversations)
+        Ok(conversation_ids)
     }
 
     async fn get_conversation(
         &self,
         conversation_id: &str,
         user_id: UserId,
-    ) -> Result<Conversation, ConversationError> {
+    ) -> Result<(), ConversationError> {
         let client = self
             .pool
             .get()
@@ -121,8 +95,7 @@ impl ConversationRepository for PostgresConversationRepository {
 
         let row = client
             .query_opt(
-                "SELECT id, user_id, title, created_at, updated_at 
-                 FROM conversations 
+                "SELECT id FROM conversations 
                  WHERE id = $1 AND user_id = $2",
                 &[&conversation_id, &user_id.0],
             )
@@ -130,13 +103,7 @@ impl ConversationRepository for PostgresConversationRepository {
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
         match row {
-            Some(row) => Ok(Conversation {
-                id: row.get(0),
-                user_id: UserId(row.get(1)),
-                title: row.get(2),
-                created_at: row.get(3),
-                updated_at: row.get(4),
-            }),
+            Some(_) => Ok(()),
             None => Err(ConversationError::NotFound),
         }
     }

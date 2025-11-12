@@ -16,22 +16,16 @@ use std::io::Read;
 use crate::middleware::auth::AuthenticatedUser;
 
 #[derive(Serialize, Deserialize)]
-pub struct ConversationResponse {
-    pub id: String,
-    pub title: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-#[derive(Serialize, Deserialize)]
 pub struct ErrorResponse {
     pub error: String,
 }
 
 /// Create the OpenAI API proxy router
 pub fn create_api_router() -> Router<crate::state::AppState> {
+    // IMPORTANT: Specific routes MUST be in the same Router and registered BEFORE catch-all routes
+    // Axum matches routes in order within a router
     Router::new()
-        // Specific handlers for conversation endpoints (track in DB)
+        // Specific conversation endpoints (handle these before catch-all)
         .route("/v1/conversations", post(create_conversation))
         .route("/v1/conversations", get(list_conversations))
         // Catch-all proxy for all other OpenAI endpoints
@@ -171,7 +165,7 @@ async fn create_conversation(
                 tracing::debug!("Tracking conversation {} in database", conversation_id);
                 if let Err(e) = state
                     .conversation_service
-                    .track_conversation(conversation_id, user.user_id, None)
+                    .track_conversation(conversation_id, user.user_id)
                     .await
                 {
                     tracing::error!(
@@ -234,11 +228,11 @@ async fn create_conversation(
     })
 }
 
-/// List all conversations for the authenticated user (from local DB)
+/// List all conversations for the authenticated user (fetches details from OpenAI client)
 async fn list_conversations(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-) -> Result<Json<Vec<ConversationResponse>>, Response> {
+) -> Result<Json<Vec<serde_json::Value>>, Response> {
     tracing::info!("list_conversations called for user_id={}", user.user_id);
 
     let conversations = state
@@ -266,27 +260,7 @@ async fn list_conversations(
         user.user_id
     );
 
-    for conv in &conversations {
-        tracing::debug!(
-            "Conversation: id={}, title={:?}, created={}, updated={}",
-            conv.id,
-            conv.title,
-            conv.created_at,
-            conv.updated_at
-        );
-    }
-
-    Ok(Json(
-        conversations
-            .into_iter()
-            .map(|c| ConversationResponse {
-                id: c.id,
-                title: c.title,
-                created_at: c.created_at.to_rfc3339(),
-                updated_at: c.updated_at.to_rfc3339(),
-            })
-            .collect(),
-    ))
+    Ok(Json(conversations))
 }
 
 /// Generic proxy handler that forwards all requests to OpenAI
@@ -475,7 +449,7 @@ async fn track_conversation_from_request(
 
             state
                 .conversation_service
-                .track_conversation(&conversation_id, user_id, None)
+                .track_conversation(&conversation_id, user_id)
                 .await?;
 
             tracing::info!(
