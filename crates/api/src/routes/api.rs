@@ -414,7 +414,6 @@ async fn list_conversation_items(
     Extension(user): Extension<AuthenticatedUser>,
     Path(conversation_id): Path<String>,
     headers: HeaderMap,
-    request: Request,
 ) -> Result<Response, Response> {
     tracing::info!(
         "list_conversation_items called for user_id={}, session_id={}",
@@ -448,21 +447,8 @@ async fn list_conversation_items(
         }
     };
 
-    // Extract body
-    let body_bytes = extract_body_bytes(request).await?;
-
     tracing::debug!(
-        "create_conversation_items request body size: {} bytes for user_id={}",
-        body_bytes.len(),
-        user.user_id
-    );
-
-    if let Ok(body_str) = std::str::from_utf8(&body_bytes) {
-        tracing::debug!("Request body: {}", body_str);
-    }
-
-    tracing::debug!(
-        "Forwarding conversation items creation request to OpenAI for user_id={}",
+        "Forwarding conversation items list request to OpenAI for user_id={}",
         user.user_id
     );
 
@@ -473,7 +459,7 @@ async fn list_conversation_items(
             Method::GET,
             &format!("conversations/{conversation_id}/items"),
             headers.clone(),
-            Some(body_bytes),
+            None,
         )
         .await
         .map_err(|e| {
