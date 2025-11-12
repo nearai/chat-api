@@ -74,7 +74,10 @@ async fn main() -> anyhow::Result<()> {
     let proxy_service = Arc::new(proxy_service);
 
     // Initialize conversation service
-    let conversation_service = Arc::new(ConversationServiceImpl::new(conversation_repo));
+    let conversation_service = Arc::new(ConversationServiceImpl::new(
+        conversation_repo,
+        proxy_service.clone(),
+    ));
 
     // Create application state
     let app_state = AppState {

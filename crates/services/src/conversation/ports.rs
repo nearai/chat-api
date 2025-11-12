@@ -1,5 +1,4 @@
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 
 use crate::UserId;
 
@@ -9,42 +8,32 @@ pub enum ConversationError {
     DatabaseError(String),
     #[error("Conversation not found")]
     NotFound,
-}
-
-/// A conversation tracked for a user
-#[derive(Debug, Clone)]
-pub struct Conversation {
-    pub id: String, // OpenAI conversation ID
-    pub user_id: UserId,
-    pub title: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    #[error("OpenAI API error: {0}")]
+    ApiError(String),
+    #[error("Access denied")]
+    AccessDenied,
 }
 
 #[async_trait]
 pub trait ConversationRepository: Send + Sync {
-    /// Create or update a conversation for a user
+    /// Track a conversation ID for a user
     async fn upsert_conversation(
         &self,
         conversation_id: &str,
         user_id: UserId,
-        title: Option<String>,
-    ) -> Result<Conversation, ConversationError>;
+    ) -> Result<(), ConversationError>;
 
-    /// List all conversations for a user
-    async fn list_conversations(
-        &self,
-        user_id: UserId,
-    ) -> Result<Vec<Conversation>, ConversationError>;
+    /// List all conversation IDs for a user
+    async fn list_conversations(&self, user_id: UserId) -> Result<Vec<String>, ConversationError>;
 
-    /// Get a specific conversation
+    /// Check if a conversation exists for a user
     async fn get_conversation(
         &self,
         conversation_id: &str,
         user_id: UserId,
-    ) -> Result<Conversation, ConversationError>;
+    ) -> Result<(), ConversationError>;
 
-    /// Delete a conversation
+    /// Delete a conversation for a user
     async fn delete_conversation(
         &self,
         conversation_id: &str,
@@ -54,28 +43,27 @@ pub trait ConversationRepository: Send + Sync {
 
 #[async_trait]
 pub trait ConversationService: Send + Sync {
-    /// Track a conversation for a user (create or update)
+    /// Track a conversation ID for a user
     async fn track_conversation(
         &self,
         conversation_id: &str,
         user_id: UserId,
-        title: Option<String>,
-    ) -> Result<Conversation, ConversationError>;
+    ) -> Result<(), ConversationError>;
 
-    /// List all conversations for a user
+    /// List all conversations for a user with details from OpenAI
     async fn list_conversations(
         &self,
         user_id: UserId,
-    ) -> Result<Vec<Conversation>, ConversationError>;
+    ) -> Result<Vec<serde_json::Value>, ConversationError>;
 
-    /// Get a specific conversation
+    /// Get a conversation with details from OpenAI (checks user access first)
     async fn get_conversation(
         &self,
         conversation_id: &str,
         user_id: UserId,
-    ) -> Result<Conversation, ConversationError>;
+    ) -> Result<serde_json::Value, ConversationError>;
 
-    /// Delete a conversation
+    /// Delete a conversation for a user
     async fn delete_conversation(
         &self,
         conversation_id: &str,
