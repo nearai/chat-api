@@ -26,6 +26,7 @@ async fn create_test_server() -> TestServer {
     let session_repo = db.session_repository();
     let oauth_repo = db.oauth_repository();
     let conversation_repo = db.conversation_repository();
+    let user_settings_repo = db.user_settings_repository();
 
     // Create services
     let oauth_service = Arc::new(services::auth::OAuthServiceImpl::new(
@@ -40,6 +41,10 @@ async fn create_test_server() -> TestServer {
     ));
 
     let user_service = Arc::new(services::user::UserServiceImpl::new(user_repo));
+
+    let user_settings_service = Arc::new(services::user::UserSettingsServiceImpl::new(
+        user_settings_repo as Arc<dyn services::user::ports::UserSettingsRepository>,
+    ));
 
     // Initialize OpenAI proxy service
     let mut proxy_service =
@@ -61,6 +66,8 @@ async fn create_test_server() -> TestServer {
     let app_state = AppState {
         oauth_service: oauth_service as Arc<dyn services::auth::ports::OAuthService>,
         user_service: user_service as Arc<dyn services::user::ports::UserService>,
+        user_settings_service: user_settings_service
+            as Arc<dyn services::user::ports::UserSettingsService>,
         session_repository: session_repo,
         proxy_service: proxy_service as Arc<dyn services::response::ports::OpenAIProxyService>,
         conversation_service: conversation_service

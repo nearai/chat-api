@@ -126,3 +126,50 @@ pub struct CombinedAttestationReport {
     /// Model provider attestations (can be multiple when routing to different models)
     pub model_attestations: Vec<ModelAttestation>,
 }
+
+/// User settings request body
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UserSettingsRequest {
+    /// Notification preference
+    pub notification: bool,
+    /// System prompt
+    pub system_prompt: String,
+}
+
+/// User settings response
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UserSettingsResponse {
+    /// Settings ID
+    pub id: String,
+    /// User ID
+    pub user_id: String,
+    /// Settings content (JSON)
+    pub content: serde_json::Value,
+    /// Created at timestamp
+    pub created_at: String,
+    /// Updated at timestamp
+    pub updated_at: String,
+}
+
+/// User settings update request (partial update)
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UserSettingsUpdateRequest {
+    /// Notification preference (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notification: Option<bool>,
+    /// System prompt (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
+}
+
+impl From<services::user::ports::UserSettings> for UserSettingsResponse {
+    fn from(settings: services::user::ports::UserSettings) -> Self {
+        Self {
+            id: settings.id.to_string(),
+            user_id: settings.user_id.to_string(),
+            content: settings.content,
+            created_at: settings.created_at.to_rfc3339(),
+            updated_at: settings.updated_at.to_rfc3339(),
+        }
+    }
+}
