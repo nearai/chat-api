@@ -12,6 +12,7 @@ use flate2::read::GzDecoder;
 use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use services::conversation::ports::ConversationError;
+use services::response::ports::ProxyResponse;
 use services::UserId;
 use std::io::Read;
 
@@ -284,31 +285,7 @@ async fn create_conversation_items(
         user.session_id
     );
 
-    match state
-        .conversation_service
-        .get_conversation(&conversation_id, user.user_id)
-        .await
-    {
-        Ok(_) => (),
-        Err(ConversationError::NotFound) => {
-            return Err((
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    error: "Conversation not found".to_string(),
-                }),
-            )
-                .into_response());
-        }
-        Err(_) => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Failed to get conversation".to_string(),
-                }),
-            )
-                .into_response());
-        }
-    };
+    validate_user_conversation(&state, &user, &conversation_id).await?;
 
     // Extract body
     let body_bytes = extract_body_bytes(request).await?;
@@ -353,34 +330,7 @@ async fn create_conversation_items(
                 .into_response()
         })?;
 
-    // Build the response
-    let mut response = Response::builder().status(
-        StatusCode::from_u16(proxy_response.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-    );
-
-    // Copy headers from OpenAI response
-    if let Some(response_headers) = response.headers_mut() {
-        for (key, value) in proxy_response.headers.iter() {
-            // Skip certain headers that shouldn't be forwarded
-            if key != "transfer-encoding" && key != "connection" {
-                response_headers.insert(key, value.clone());
-            }
-        }
-    }
-
-    // Convert the stream to an axum Body for streaming support
-    let stream = proxy_response.body.map_err(std::io::Error::other);
-    let body = Body::from_stream(stream);
-
-    response.body(body).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Failed to build response: {e}"),
-            }),
-        )
-            .into_response()
-    })
+    build_response(proxy_response).await
 }
 
 async fn list_conversation_items(
@@ -395,31 +345,7 @@ async fn list_conversation_items(
         user.session_id
     );
 
-    match state
-        .conversation_service
-        .get_conversation(&conversation_id, user.user_id)
-        .await
-    {
-        Ok(_) => (),
-        Err(ConversationError::NotFound) => {
-            return Err((
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    error: "Conversation not found".to_string(),
-                }),
-            )
-                .into_response());
-        }
-        Err(_) => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Failed to get conversation".to_string(),
-                }),
-            )
-                .into_response());
-        }
-    };
+    validate_user_conversation(&state, &user, &conversation_id).await?;
 
     tracing::debug!(
         "Forwarding conversation items list request to OpenAI for user_id={}",
@@ -451,34 +377,7 @@ async fn list_conversation_items(
                 .into_response()
         })?;
 
-    // Build the response
-    let mut response = Response::builder().status(
-        StatusCode::from_u16(proxy_response.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-    );
-
-    // Copy headers from OpenAI response
-    if let Some(response_headers) = response.headers_mut() {
-        for (key, value) in proxy_response.headers.iter() {
-            // Skip certain headers that shouldn't be forwarded
-            if key != "transfer-encoding" && key != "connection" {
-                response_headers.insert(key, value.clone());
-            }
-        }
-    }
-
-    // Convert the stream to an axum Body for streaming support
-    let stream = proxy_response.body.map_err(std::io::Error::other);
-    let body = Body::from_stream(stream);
-
-    response.body(body).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Failed to build response: {e}"),
-            }),
-        )
-            .into_response()
-    })
+    build_response(proxy_response).await
 }
 
 /// Generic proxy handler that forwards all requests to OpenAI
@@ -564,9 +463,14 @@ async fn proxy_handler(
         user.user_id
     );
 
+    build_response(proxy_response).await
+}
+
+async fn build_response(proxy_response: ProxyResponse) -> Result<Response, Response> {
     // Build the response
-    let mut response = Response::builder()
-        .status(StatusCode::from_u16(proxy_response.status).unwrap_or(StatusCode::OK));
+    let mut response = Response::builder().status(
+        StatusCode::from_u16(proxy_response.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+    );
 
     // Copy headers from OpenAI response
     if let Some(response_headers) = response.headers_mut() {
@@ -591,6 +495,34 @@ async fn proxy_handler(
         )
             .into_response()
     })
+}
+
+async fn validate_user_conversation(
+    state: &crate::state::AppState,
+    user: &AuthenticatedUser,
+    conversation_id: &str,
+) -> Result<(), Response> {
+    match state
+        .conversation_service
+        .get_conversation(conversation_id, user.user_id)
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(ConversationError::NotFound) => Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Conversation not found".to_string(),
+            }),
+        )
+            .into_response()),
+        Err(_) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Failed to get conversation".to_string(),
+            }),
+        )
+            .into_response()),
+    }
 }
 
 /// Extract body bytes from a request
