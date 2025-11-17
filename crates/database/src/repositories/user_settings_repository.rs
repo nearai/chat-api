@@ -31,21 +31,19 @@ impl UserSettingsRepository for PostgresUserSettingsRepository {
             )
             .await?;
 
-        let result = if let Some(row) = row {
+        if let Some(row) = row {
             let content_json: serde_json::Value = row.get(2);
             let content: UserSettingsContent = serde_json::from_value(content_json)?;
-            UserSettings {
+            Ok(Some(UserSettings {
                 id: row.get(0),
                 user_id: row.get(1),
                 content,
                 created_at: row.get(3),
                 updated_at: row.get(4),
-            }
+            }))
         } else {
-            return Ok(None);
-        };
-
-        Ok(Some(result))
+            Ok(None)
+        }
     }
 
     async fn upsert_settings(

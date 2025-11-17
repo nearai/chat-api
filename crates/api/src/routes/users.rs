@@ -51,7 +51,6 @@ pub async fn get_current_user(
     responses(
         (status = 200, description = "User settings retrieved", body = UserSettingsResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
-        (status = 404, description = "User settings not found", body = crate::error::ApiErrorResponse),
         (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
     ),
     security(
@@ -90,7 +89,6 @@ pub async fn get_user_settings(
     responses(
         (status = 200, description = "User settings updated", body = UserSettingsResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
-        (status = 404, description = "User settings not found", body = crate::error::ApiErrorResponse),
         (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
     ),
     security(
