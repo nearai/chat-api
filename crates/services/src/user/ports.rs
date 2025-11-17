@@ -106,7 +106,32 @@ pub trait UserService: Send + Sync {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct UserSettingsContent {
     pub notification: bool,
-    pub system_prompt: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PartialUserSettingsContent {
+    pub notification: Option<bool>,
+    pub system_prompt: Option<String>,
+}
+
+impl Default for UserSettingsContent {
+    fn default() -> Self {
+        Self {
+            notification: true,
+            system_prompt: None,
+        }
+    }
+}
+
+impl UserSettingsContent {
+    pub fn into_updated(self, content: PartialUserSettingsContent) -> Self {
+        Self {
+            notification: content.notification.unwrap_or(self.notification),
+            system_prompt: content.system_prompt.or(self.system_prompt),
+        }
+    }
 }
 
 /// User settings stored as JSONB in the database
@@ -131,32 +156,18 @@ pub trait UserSettingsRepository: Send + Sync {
         user_id: UserId,
         content: UserSettingsContent,
     ) -> anyhow::Result<UserSettings>;
-
-    /// Update user settings (partial update)
-    async fn update_settings(
-        &self,
-        user_id: UserId,
-        content: UserSettingsContent,
-    ) -> anyhow::Result<UserSettings>;
 }
 
 /// Service trait for user settings operations
 #[async_trait]
 pub trait UserSettingsService: Send + Sync {
     /// Get user settings by user ID
-    async fn get_settings(&self, user_id: UserId) -> anyhow::Result<UserSettings>;
+    async fn get_settings(&self, user_id: UserId) -> anyhow::Result<UserSettingsContent>;
 
     /// Create or update user settings
-    async fn upsert_settings(
-        &self,
-        user_id: UserId,
-        content: UserSettingsContent,
-    ) -> anyhow::Result<UserSettings>;
-
-    /// Update user settings (partial update)
     async fn update_settings(
         &self,
         user_id: UserId,
-        content: UserSettingsContent,
-    ) -> anyhow::Result<UserSettings>;
+        content: PartialUserSettingsContent,
+    ) -> anyhow::Result<UserSettingsContent>;
 }

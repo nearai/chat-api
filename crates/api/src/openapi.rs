@@ -19,7 +19,6 @@ use utoipa::OpenApi;
         crate::routes::oauth::logout,
         // User endpoints
         crate::routes::users::get_current_user,
-        crate::routes::users::create_user_settings,
         crate::routes::users::get_user_settings,
         crate::routes::users::update_user_settings,
         // Attestation endpoints
@@ -34,7 +33,6 @@ use utoipa::OpenApi;
         crate::models::ErrorResponse,
         crate::error::ApiErrorResponse,
         // User settings models
-        crate::models::UserSettingsRequest,
         crate::models::UserSettingsResponse,
         crate::models::UserSettingsUpdateRequest,
         // Attestation models

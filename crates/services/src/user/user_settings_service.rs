@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 
 use super::ports::{
-    UserSettings, UserSettingsContent, UserSettingsRepository, UserSettingsService,
+    PartialUserSettingsContent, UserSettingsContent, UserSettingsRepository, UserSettingsService,
 };
 use crate::types::UserId;
 
@@ -20,40 +20,15 @@ impl UserSettingsServiceImpl {
 
 #[async_trait]
 impl UserSettingsService for UserSettingsServiceImpl {
-    async fn get_settings(&self, user_id: UserId) -> anyhow::Result<UserSettings> {
+    async fn get_settings(&self, user_id: UserId) -> anyhow::Result<UserSettingsContent> {
         tracing::info!("Getting user settings for user_id={}", user_id);
 
         let settings = self
             .user_settings_repository
             .get_settings(user_id)
             .await?
-            .ok_or_else(|| {
-                tracing::error!("User settings not found: user_id={}", user_id);
-                anyhow::anyhow!("User settings not found")
-            })?;
-
-        tracing::info!("User settings retrieved successfully: user_id={}", user_id);
-
-        Ok(settings)
-    }
-
-    async fn upsert_settings(
-        &self,
-        user_id: UserId,
-        content: UserSettingsContent,
-    ) -> anyhow::Result<UserSettings> {
-        tracing::info!(
-            "Upserting user settings: user_id={}, content={:?}",
-            user_id,
-            content
-        );
-
-        let settings = self
-            .user_settings_repository
-            .upsert_settings(user_id, content)
-            .await?;
-
-        tracing::info!("User settings upserted successfully: user_id={}", user_id);
+            .map(|settings| settings.content)
+            .unwrap_or_else(UserSettingsContent::default);
 
         Ok(settings)
     }
@@ -61,21 +36,23 @@ impl UserSettingsService for UserSettingsServiceImpl {
     async fn update_settings(
         &self,
         user_id: UserId,
-        content: UserSettingsContent,
-    ) -> anyhow::Result<UserSettings> {
+        content: PartialUserSettingsContent,
+    ) -> anyhow::Result<UserSettingsContent> {
         tracing::info!(
-            "Updating user settings: user_id={}, content={:?}",
+            "Upserting user settings: user_id={}, content={:?}",
             user_id,
             content
         );
 
+        let old_content = self.get_settings(user_id).await?;
+
         let settings = self
             .user_settings_repository
-            .update_settings(user_id, content)
+            .upsert_settings(user_id, old_content.into_updated(content))
             .await?;
 
-        tracing::info!("User settings updated successfully: user_id={}", user_id);
+        tracing::info!("User settings upserted successfully: user_id={}", user_id);
 
-        Ok(settings)
+        Ok(settings.content)
     }
 }

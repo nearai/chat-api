@@ -127,29 +127,21 @@ pub struct CombinedAttestationReport {
     pub model_attestations: Vec<ModelAttestation>,
 }
 
-/// User settings request body
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct UserSettingsRequest {
-    /// Notification preference
-    pub notification: bool,
-    /// System prompt
-    pub system_prompt: String,
-}
-
 /// User settings content for API responses
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UserSettingsContent {
     /// Notification preference
     pub notification: bool,
     /// System prompt
-    pub system_prompt: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
 }
 
 /// User settings response
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UserSettingsResponse {
     /// User ID
-    pub user_id: String,
+    pub user_id: UserId,
     /// Settings content (serialized as "settings")
     #[serde(rename = "settings")]
     pub content: UserSettingsContent,
@@ -159,10 +151,8 @@ pub struct UserSettingsResponse {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UserSettingsUpdateRequest {
     /// Notification preference (optional)
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub notification: Option<bool>,
     /// System prompt (optional)
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
 }
 
@@ -171,15 +161,6 @@ impl From<services::user::ports::UserSettingsContent> for UserSettingsContent {
         Self {
             notification: content.notification,
             system_prompt: content.system_prompt,
-        }
-    }
-}
-
-impl From<services::user::ports::UserSettings> for UserSettingsResponse {
-    fn from(settings: services::user::ports::UserSettings) -> Self {
-        Self {
-            user_id: settings.user_id.to_string(),
-            content: settings.content.into(),
         }
     }
 }
