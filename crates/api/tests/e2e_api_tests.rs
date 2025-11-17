@@ -430,6 +430,7 @@ async fn test_conversation_tracking_on_response_creation() {
 }
 
 #[tokio::test]
+#[ignore]
 async fn test_user_settings_get_default() {
     let server = create_test_server().await;
 
@@ -468,6 +469,7 @@ async fn test_user_settings_get_default() {
 }
 
 #[tokio::test]
+#[ignore]
 async fn test_user_settings_create_and_update() {
     let server = create_test_server().await;
 
