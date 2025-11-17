@@ -83,9 +83,10 @@ impl From<services::user::ports::UserProfile> for UserProfileResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ApiGatewayAttestation {
     /// Intel TDX quote in hex format
-    pub quote: String,
-    /// Event log in hex format
-    pub event_log: String,
+    pub intel_quote: String,
+    /// Event log
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_log: Option<serde_json::Value>,
 }
 
 /// Model attestation from VLLM inference providers
@@ -125,4 +126,12 @@ pub struct CombinedAttestationReport {
 
     /// Model provider attestations (can be multiple when routing to different models)
     pub model_attestations: Vec<ModelAttestation>,
+}
+
+/// Attestation report structure from proxy_service
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttestationReport {
+    pub gateway_attestation: ApiGatewayAttestation,
+    pub model_attestations: Vec<ModelAttestation>,
+    pub event_log: serde_json::Value,
 }
