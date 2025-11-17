@@ -1,3 +1,5 @@
+use crate::consts::SYSTEM_PROMPT_MAX_LEN;
+use crate::ApiError;
 use serde::{Deserialize, Serialize};
 use services::UserId;
 use utoipa::ToSchema;
@@ -137,6 +139,15 @@ pub struct UserSettingsContent {
     pub system_prompt: Option<String>,
 }
 
+impl From<services::user::ports::UserSettingsContent> for UserSettingsContent {
+    fn from(content: services::user::ports::UserSettingsContent) -> Self {
+        Self {
+            notification: content.notification,
+            system_prompt: content.system_prompt,
+        }
+    }
+}
+
 /// User settings response
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UserSettingsResponse {
@@ -156,11 +167,14 @@ pub struct UserSettingsUpdateRequest {
     pub system_prompt: Option<String>,
 }
 
-impl From<services::user::ports::UserSettingsContent> for UserSettingsContent {
-    fn from(content: services::user::ports::UserSettingsContent) -> Self {
-        Self {
-            notification: content.notification,
-            system_prompt: content.system_prompt,
+impl UserSettingsUpdateRequest {
+    pub fn validate(&self) -> Result<(), ApiError> {
+        if let Some(ref system_prompt) = self.system_prompt {
+            if system_prompt.len() > SYSTEM_PROMPT_MAX_LEN {
+                return Err(ApiError::bad_request("system_prompt exceeds max length"));
+            }
         }
+
+        Ok(())
     }
 }

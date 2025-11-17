@@ -116,10 +116,11 @@ pub struct PartialUserSettingsContent {
     pub system_prompt: Option<String>,
 }
 
+#[allow(clippy::derivable_impls)]
 impl Default for UserSettingsContent {
     fn default() -> Self {
         Self {
-            notification: true,
+            notification: false,
             system_prompt: None,
         }
     }

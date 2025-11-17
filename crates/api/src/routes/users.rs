@@ -102,6 +102,8 @@ pub async fn update_user_settings(
 ) -> Result<Json<UserSettingsResponse>, ApiError> {
     tracing::info!("Updating user settings for user: {}", user.user_id);
 
+    request.validate()?;
+
     let content = services::user::ports::PartialUserSettingsContent {
         notification: request.notification,
         system_prompt: request.system_prompt,
