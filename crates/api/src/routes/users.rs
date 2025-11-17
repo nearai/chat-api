@@ -65,10 +65,10 @@ pub async fn create_user_settings(
 ) -> Result<Json<UserSettingsResponse>, ApiError> {
     tracing::info!("Creating user settings for user: {}", user.user_id);
 
-    let content = serde_json::json!({
-        "notification": request.notification,
-        "system_prompt": request.system_prompt,
-    });
+    let content = services::user::ports::UserSettingsContent {
+        notification: request.notification,
+        system_prompt: request.system_prompt,
+    };
 
     let settings = app_state
         .user_settings_service
@@ -145,23 +145,33 @@ pub async fn update_user_settings(
 ) -> Result<Json<UserSettingsResponse>, ApiError> {
     tracing::info!("Updating user settings for user: {}", user.user_id);
 
-    let mut content = serde_json::Map::new();
-    if let Some(notification) = request.notification {
-        content.insert(
-            "notification".to_string(),
-            serde_json::Value::Bool(notification),
-        );
-    }
-    if let Some(system_prompt) = request.system_prompt {
-        content.insert(
-            "system_prompt".to_string(),
-            serde_json::Value::String(system_prompt),
-        );
-    }
+    // Get existing settings to merge with partial update
+    let existing = app_state
+        .user_settings_service
+        .get_settings(user.user_id)
+        .await
+        .ok();
+
+    let content = if let Some(existing_settings) = existing {
+        services::user::ports::UserSettingsContent {
+            notification: request
+                .notification
+                .unwrap_or(existing_settings.content.notification),
+            system_prompt: request
+                .system_prompt
+                .unwrap_or_else(|| existing_settings.content.system_prompt.clone()),
+        }
+    } else {
+        // If no existing settings, use defaults for missing fields
+        services::user::ports::UserSettingsContent {
+            notification: request.notification.unwrap_or(false),
+            system_prompt: request.system_prompt.unwrap_or_default(),
+        }
+    };
 
     let settings = app_state
         .user_settings_service
-        .update_settings(user.user_id, serde_json::Value::Object(content))
+        .update_settings(user.user_id, content)
         .await
         .map_err(|e| {
             tracing::error!("Failed to update user settings: {}", e);

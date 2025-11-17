@@ -1,7 +1,7 @@
 use crate::pool::DbPool;
 use async_trait::async_trait;
 use services::{
-    user::ports::{UserSettings, UserSettingsRepository},
+    user::ports::{UserSettings, UserSettingsContent, UserSettingsRepository},
     UserId,
 };
 
@@ -31,12 +31,20 @@ impl UserSettingsRepository for PostgresUserSettingsRepository {
             )
             .await?;
 
-        let result = row.map(|r| UserSettings {
-            id: r.get(0),
-            user_id: r.get(1),
-            content: r.get(2),
-            created_at: r.get(3),
-            updated_at: r.get(4),
+        let result = row.map(|r| {
+            let content_json: serde_json::Value = r.get(2);
+            let content: UserSettingsContent =
+                serde_json::from_value(content_json).unwrap_or_else(|_| UserSettingsContent {
+                    notification: false,
+                    system_prompt: String::new(),
+                });
+            UserSettings {
+                id: r.get(0),
+                user_id: r.get(1),
+                content,
+                created_at: r.get(3),
+                updated_at: r.get(4),
+            }
         });
 
         if result.is_some() {
@@ -51,7 +59,7 @@ impl UserSettingsRepository for PostgresUserSettingsRepository {
     async fn upsert_settings(
         &self,
         user_id: UserId,
-        content: serde_json::Value,
+        content: UserSettingsContent,
     ) -> anyhow::Result<UserSettings> {
         tracing::info!(
             "Repository: Upserting user settings for user_id={}",
@@ -60,6 +68,9 @@ impl UserSettingsRepository for PostgresUserSettingsRepository {
 
         let client = self.pool.get().await?;
 
+        // Serialize content to JSONB
+        let content_json = serde_json::to_value(&content)?;
+
         let row = client
             .query_one(
                 "INSERT INTO user_settings (user_id, content) 
@@ -67,14 +78,17 @@ impl UserSettingsRepository for PostgresUserSettingsRepository {
                  ON CONFLICT (user_id) 
                  DO UPDATE SET content = $2, updated_at = NOW()
                  RETURNING id, user_id, content, created_at, updated_at",
-                &[&user_id, &content],
+                &[&user_id, &content_json],
             )
             .await?;
+
+        let content_json: serde_json::Value = row.get(2);
+        let content: UserSettingsContent = serde_json::from_value(content_json)?;
 
         let settings = UserSettings {
             id: row.get(0),
             user_id: row.get(1),
-            content: row.get(2),
+            content,
             created_at: row.get(3),
             updated_at: row.get(4),
         };
@@ -90,30 +104,14 @@ impl UserSettingsRepository for PostgresUserSettingsRepository {
     async fn update_settings(
         &self,
         user_id: UserId,
-        content: serde_json::Value,
+        content: UserSettingsContent,
     ) -> anyhow::Result<UserSettings> {
         tracing::info!("Repository: Updating user settings for user_id={}", user_id);
 
         let client = self.pool.get().await?;
 
-        // First get existing settings to merge
-        let existing = self.get_settings(user_id).await?;
-        let merged_content = if let Some(existing_settings) = existing {
-            // Merge existing content with new content
-            let mut existing_obj = existing_settings
-                .content
-                .as_object()
-                .cloned()
-                .unwrap_or_default();
-            if let Some(new_obj) = content.as_object() {
-                for (key, value) in new_obj {
-                    existing_obj.insert(key.clone(), value.clone());
-                }
-            }
-            serde_json::Value::Object(existing_obj)
-        } else {
-            content
-        };
+        // Serialize content to JSONB
+        let content_json = serde_json::to_value(&content)?;
 
         let row = client
             .query_one(
@@ -122,14 +120,17 @@ impl UserSettingsRepository for PostgresUserSettingsRepository {
                  ON CONFLICT (user_id) 
                  DO UPDATE SET content = $2, updated_at = NOW()
                  RETURNING id, user_id, content, created_at, updated_at",
-                &[&user_id, &merged_content],
+                &[&user_id, &content_json],
             )
             .await?;
+
+        let content_json: serde_json::Value = row.get(2);
+        let content: UserSettingsContent = serde_json::from_value(content_json)?;
 
         let settings = UserSettings {
             id: row.get(0),
             user_id: row.get(1),
-            content: row.get(2),
+            content,
             created_at: row.get(3),
             updated_at: row.get(4),
         };

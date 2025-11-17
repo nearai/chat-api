@@ -102,12 +102,19 @@ pub trait UserService: Send + Sync {
     async fn delete_account(&self, user_id: UserId) -> anyhow::Result<()>;
 }
 
+/// User settings content structure
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct UserSettingsContent {
+    pub notification: bool,
+    pub system_prompt: String,
+}
+
 /// User settings stored as JSONB in the database
 #[derive(Debug, Clone)]
 pub struct UserSettings {
     pub id: uuid::Uuid,
     pub user_id: UserId,
-    pub content: serde_json::Value,
+    pub content: UserSettingsContent,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -122,14 +129,14 @@ pub trait UserSettingsRepository: Send + Sync {
     async fn upsert_settings(
         &self,
         user_id: UserId,
-        content: serde_json::Value,
+        content: UserSettingsContent,
     ) -> anyhow::Result<UserSettings>;
 
     /// Update user settings (partial update)
     async fn update_settings(
         &self,
         user_id: UserId,
-        content: serde_json::Value,
+        content: UserSettingsContent,
     ) -> anyhow::Result<UserSettings>;
 }
 
@@ -143,13 +150,13 @@ pub trait UserSettingsService: Send + Sync {
     async fn upsert_settings(
         &self,
         user_id: UserId,
-        content: serde_json::Value,
+        content: UserSettingsContent,
     ) -> anyhow::Result<UserSettings>;
 
     /// Update user settings (partial update)
     async fn update_settings(
         &self,
         user_id: UserId,
-        content: serde_json::Value,
+        content: UserSettingsContent,
     ) -> anyhow::Result<UserSettings>;
 }

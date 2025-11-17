@@ -1,7 +1,9 @@
 use async_trait::async_trait;
 use std::sync::Arc;
 
-use super::ports::{UserSettings, UserSettingsRepository, UserSettingsService};
+use super::ports::{
+    UserSettings, UserSettingsContent, UserSettingsRepository, UserSettingsService,
+};
 use crate::types::UserId;
 
 pub struct UserSettingsServiceImpl {
@@ -38,7 +40,7 @@ impl UserSettingsService for UserSettingsServiceImpl {
     async fn upsert_settings(
         &self,
         user_id: UserId,
-        content: serde_json::Value,
+        content: UserSettingsContent,
     ) -> anyhow::Result<UserSettings> {
         tracing::info!(
             "Upserting user settings: user_id={}, content={:?}",
@@ -59,7 +61,7 @@ impl UserSettingsService for UserSettingsServiceImpl {
     async fn update_settings(
         &self,
         user_id: UserId,
-        content: serde_json::Value,
+        content: UserSettingsContent,
     ) -> anyhow::Result<UserSettings> {
         tracing::info!(
             "Updating user settings: user_id={}, content={:?}",
