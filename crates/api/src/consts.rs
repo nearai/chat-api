@@ -1,1 +1,1 @@
-pub const SYSTEM_PROMPT_MAX_LEN: usize = 1024;
+pub const SYSTEM_PROMPT_MAX_LEN: usize = 64 * 1024;

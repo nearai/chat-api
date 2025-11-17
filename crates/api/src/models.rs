@@ -171,7 +171,7 @@ impl UserSettingsUpdateRequest {
     pub fn validate(&self) -> Result<(), ApiError> {
         if let Some(ref system_prompt) = self.system_prompt {
             if system_prompt.len() > SYSTEM_PROMPT_MAX_LEN {
-                return Err(ApiError::bad_request("system_prompt exceeds max length"));
+                return Err(ApiError::bad_request("System prompt exceeds max length"));
             }
         }
 
