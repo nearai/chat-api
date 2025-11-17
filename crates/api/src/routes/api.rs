@@ -12,7 +12,6 @@ use flate2::read::GzDecoder;
 use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use services::conversation::ports::ConversationError;
-use services::response::ports::ProxyResponse;
 use services::UserId;
 use std::io::Read;
 
@@ -214,27 +213,7 @@ async fn create_conversation(
         );
     }
 
-    // Build response
-    let mut response_builder = Response::builder()
-        .status(StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR));
-
-    if let Some(headers_map) = response_builder.headers_mut() {
-        for (key, value) in response_headers.iter() {
-            if key != "transfer-encoding" && key != "connection" {
-                headers_map.insert(key, value.clone());
-            }
-        }
-    }
-
-    response_builder.body(Body::from(body_bytes)).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Failed to build response: {e}"),
-            }),
-        )
-            .into_response()
-    })
+    build_response(status, response_headers, Body::from(body_bytes)).await
 }
 
 /// List all conversations for the authenticated user (fetches details from OpenAI client)
@@ -330,7 +309,7 @@ async fn create_conversation_items(
                 .into_response()
         })?;
 
-    build_response(proxy_response).await
+    build_response(proxy_response.status, proxy_response.headers, Body::from_stream(proxy_response.body)).await
 }
 
 async fn list_conversation_items(
@@ -377,7 +356,7 @@ async fn list_conversation_items(
                 .into_response()
         })?;
 
-    build_response(proxy_response).await
+    build_response(proxy_response.status, proxy_response.headers, Body::from_stream(proxy_response.body)).await
 }
 
 /// Generic proxy handler that forwards all requests to OpenAI
@@ -463,28 +442,24 @@ async fn proxy_handler(
         user.user_id
     );
 
-    build_response(proxy_response).await
+    build_response(proxy_response.status, proxy_response.headers, Body::from_stream(proxy_response.body)).await
 }
 
-async fn build_response(proxy_response: ProxyResponse) -> Result<Response, Response> {
+async fn build_response(status: u16, headers: HeaderMap, body: Body) -> Result<Response, Response> {
     // Build the response
     let mut response = Response::builder().status(
-        StatusCode::from_u16(proxy_response.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+        StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
     );
 
     // Copy headers from OpenAI response
     if let Some(response_headers) = response.headers_mut() {
-        for (key, value) in proxy_response.headers.iter() {
+        for (key, value) in headers.iter() {
             // Skip certain headers that shouldn't be forwarded
             if key != "transfer-encoding" && key != "connection" {
                 response_headers.insert(key, value.clone());
             }
         }
     }
-
-    // Convert the stream to an axum Body for streaming support
-    let stream = proxy_response.body.map_err(std::io::Error::other);
-    let body = Body::from_stream(stream);
 
     response.body(body).map_err(|e| {
         (
