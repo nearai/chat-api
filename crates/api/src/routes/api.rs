@@ -309,7 +309,12 @@ async fn create_conversation_items(
                 .into_response()
         })?;
 
-    build_response(proxy_response.status, proxy_response.headers, Body::from_stream(proxy_response.body)).await
+    build_response(
+        proxy_response.status,
+        proxy_response.headers,
+        Body::from_stream(proxy_response.body),
+    )
+    .await
 }
 
 async fn list_conversation_items(
@@ -356,7 +361,12 @@ async fn list_conversation_items(
                 .into_response()
         })?;
 
-    build_response(proxy_response.status, proxy_response.headers, Body::from_stream(proxy_response.body)).await
+    build_response(
+        proxy_response.status,
+        proxy_response.headers,
+        Body::from_stream(proxy_response.body),
+    )
+    .await
 }
 
 /// Generic proxy handler that forwards all requests to OpenAI
@@ -442,14 +452,18 @@ async fn proxy_handler(
         user.user_id
     );
 
-    build_response(proxy_response.status, proxy_response.headers, Body::from_stream(proxy_response.body)).await
+    build_response(
+        proxy_response.status,
+        proxy_response.headers,
+        Body::from_stream(proxy_response.body),
+    )
+    .await
 }
 
 async fn build_response(status: u16, headers: HeaderMap, body: Body) -> Result<Response, Response> {
     // Build the response
-    let mut response = Response::builder().status(
-        StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-    );
+    let mut response = Response::builder()
+        .status(StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR));
 
     // Copy headers from OpenAI response
     if let Some(response_headers) = response.headers_mut() {
