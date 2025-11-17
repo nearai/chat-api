@@ -451,7 +451,10 @@ async fn test_user_settings_get_default() {
     if status.is_success() {
         let body: serde_json::Value = response.json();
         println!("   ✓ Settings retrieved (default values)");
-        println!("   Response: {}", serde_json::to_string_pretty(&body).unwrap());
+        println!(
+            "   Response: {}",
+            serde_json::to_string_pretty(&body).unwrap()
+        );
         assert!(body.get("user_id").is_some());
         assert!(body.get("settings").is_some());
     } else {
@@ -492,7 +495,10 @@ async fn test_user_settings_create_and_update() {
     assert!(status.is_success(), "Should create settings successfully");
     let body: serde_json::Value = response.json();
     println!("   ✓ Settings created successfully");
-    println!("   Response: {}", serde_json::to_string_pretty(&body).unwrap());
+    println!(
+        "   Response: {}",
+        serde_json::to_string_pretty(&body).unwrap()
+    );
 
     let settings = body.get("settings").expect("Should have settings field");
     assert_eq!(
