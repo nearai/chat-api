@@ -158,12 +158,33 @@ pub struct UserSettingsResponse {
     pub content: UserSettingsContent,
 }
 
+/// User settings update request
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UpdateUserSettingsRequest {
+    /// Notification preference
+    pub notification: bool,
+    /// System prompt
+    pub system_prompt: Option<String>,
+}
+
+impl UpdateUserSettingsRequest {
+    pub fn validate(&self) -> Result<(), ApiError> {
+        if let Some(ref system_prompt) = self.system_prompt {
+            if system_prompt.len() > SYSTEM_PROMPT_MAX_LEN {
+                return Err(ApiError::bad_request("System prompt exceeds max length"));
+            }
+        }
+
+        Ok(())
+    }
+}
+
 /// User settings update request (partial update)
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UpdateUserSettingsPartiallyRequest {
-    /// Notification preference (optional)
+    /// Notification preference
     pub notification: Option<bool>,
-    /// System prompt (optional)
+    /// System prompt
     pub system_prompt: Option<String>,
 }
 
