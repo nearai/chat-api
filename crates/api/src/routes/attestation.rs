@@ -1,7 +1,5 @@
 use crate::{
-    models::{
-        ApiGatewayAttestation, AttestationReport, CombinedAttestationReport, ErrorResponse,
-    },
+    models::{ApiGatewayAttestation, AttestationReport, CombinedAttestationReport, ErrorResponse},
     state::AppState,
 };
 use axum::{
@@ -9,15 +7,17 @@ use axum::{
 };
 use futures::TryStreamExt;
 use http::Method;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct AttestationQuery {
     /// Optional model name to get specific attestations
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 
     /// Signing algorithm: "ecdsa" or "ed25519"
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub signing_algo: Option<String>,
 }
 
@@ -48,17 +48,10 @@ pub async fn get_attestation_report(
     State(app_state): State<AppState>,
     Query(params): Query<AttestationQuery>,
 ) -> Result<Json<CombinedAttestationReport>, (StatusCode, Json<ErrorResponse>)> {
-    let _model_name = params.model.unwrap_or_else(|| "llama-3".to_string());
-    let signing_algo = params.signing_algo.unwrap_or_else(|| "ecdsa".to_string());
+    let query = serde_urlencoded::to_string(&params).unwrap();
 
     // Build the path for proxy_service attestation endpoint
-    let path = format!("attestation/report?signing_algo={}", signing_algo);
-
-    tracing::info!(
-        "Fetching attestation report from proxy_service: {} (signing_algo={})",
-        path,
-        signing_algo
-    );
+    let path = format!("attestation/report?{}", query);
 
     // Use proxy_service to forward the request
     let proxy_response = app_state

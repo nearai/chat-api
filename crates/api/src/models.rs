@@ -125,13 +125,12 @@ pub struct CombinedAttestationReport {
     pub cloud_api_gateway_attestation: ApiGatewayAttestation,
 
     /// Model provider attestations (can be multiple when routing to different models)
-    pub model_attestations: Vec<ModelAttestation>,
+    pub model_attestations: Option<Vec<ModelAttestation>>,
 }
 
 /// Attestation report structure from proxy_service
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttestationReport {
     pub gateway_attestation: ApiGatewayAttestation,
-    pub model_attestations: Vec<ModelAttestation>,
-    pub event_log: serde_json::Value,
+    pub model_attestations: Option<Vec<ModelAttestation>>,
 }
