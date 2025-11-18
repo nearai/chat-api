@@ -36,7 +36,7 @@ impl UserSettingsService for UserSettingsServiceImpl {
     async fn update_settings(
         &self,
         user_id: UserId,
-        content: PartialUserSettingsContent,
+        content: UserSettingsContent,
     ) -> anyhow::Result<UserSettingsContent> {
         tracing::info!(
             "Upserting user settings: user_id={}, content={:?}",
@@ -44,15 +44,23 @@ impl UserSettingsService for UserSettingsServiceImpl {
             content
         );
 
-        let old_content = self.get_settings(user_id).await?;
-
         let settings = self
             .user_settings_repository
-            .upsert_settings(user_id, old_content.into_updated(content))
+            .upsert_settings(user_id, content)
             .await?;
 
         tracing::info!("User settings upserted successfully: user_id={}", user_id);
 
         Ok(settings.content)
+    }
+
+    async fn update_settings_partially(
+        &self,
+        user_id: UserId,
+        content: PartialUserSettingsContent,
+    ) -> anyhow::Result<UserSettingsContent> {
+        let old_content = self.get_settings(user_id).await?;
+        self.update_settings(user_id, old_content.into_updated(content))
+            .await
     }
 }

@@ -160,14 +160,14 @@ pub struct UserSettingsResponse {
 
 /// User settings update request (partial update)
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct UserSettingsUpdateRequest {
+pub struct UpdateUserSettingsPartiallyRequest {
     /// Notification preference (optional)
     pub notification: Option<bool>,
     /// System prompt (optional)
     pub system_prompt: Option<String>,
 }
 
-impl UserSettingsUpdateRequest {
+impl UpdateUserSettingsPartiallyRequest {
     pub fn validate(&self) -> Result<(), ApiError> {
         if let Some(ref system_prompt) = self.system_prompt {
             if system_prompt.len() > SYSTEM_PROMPT_MAX_LEN {

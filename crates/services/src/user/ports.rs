@@ -165,8 +165,15 @@ pub trait UserSettingsService: Send + Sync {
     /// Get user settings by user ID
     async fn get_settings(&self, user_id: UserId) -> anyhow::Result<UserSettingsContent>;
 
-    /// Create or update user settings
+    /// Update user settings
     async fn update_settings(
+        &self,
+        user_id: UserId,
+        content: UserSettingsContent,
+    ) -> anyhow::Result<UserSettingsContent>;
+
+    /// Update user settings partially
+    async fn update_settings_partially(
         &self,
         user_id: UserId,
         content: PartialUserSettingsContent,

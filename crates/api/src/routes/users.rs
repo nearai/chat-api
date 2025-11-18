@@ -85,7 +85,7 @@ pub async fn get_user_settings(
     patch,
     path = "/v1/users/me/settings",
     tag = "Users",
-    request_body = UserSettingsUpdateRequest,
+    request_body = UpdateUserSettingsPartiallyRequest,
     responses(
         (status = 200, description = "User settings updated", body = UserSettingsResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
@@ -95,10 +95,10 @@ pub async fn get_user_settings(
         ("session_token" = [])
     )
 )]
-pub async fn update_user_settings(
+pub async fn update_user_settings_partially(
     State(app_state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    Json(request): Json<UserSettingsUpdateRequest>,
+    Json(request): Json<UpdateUserSettingsPartiallyRequest>,
 ) -> Result<Json<UserSettingsResponse>, ApiError> {
     tracing::info!("Updating user settings for user: {}", user.user_id);
 
@@ -111,7 +111,7 @@ pub async fn update_user_settings(
 
     let content = app_state
         .user_settings_service
-        .update_settings(user.user_id, content)
+        .update_settings_partially(user.user_id, content)
         .await
         .map_err(|e| {
             tracing::error!("Failed to update user settings: {}", e);
@@ -129,5 +129,5 @@ pub fn create_user_router() -> Router<AppState> {
     Router::new()
         .route("/me", get(get_current_user))
         .route("/me/settings", get(get_user_settings))
-        .route("/me/settings", patch(update_user_settings))
+        .route("/me/settings", patch(update_user_settings_partially))
 }
