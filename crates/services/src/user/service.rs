@@ -97,4 +97,20 @@ impl UserService for UserServiceImpl {
 
         Ok(())
     }
+
+    async fn list_users(&self, page: u32, limit: u32) -> anyhow::Result<(Vec<User>, u64)> {
+        tracing::info!("Listing users with page={}, limit={}", page, limit);
+
+        let (users, total_count) = self.user_repository.list_users(page, limit).await?;
+
+        tracing::info!(
+            "Retrieved {} user(s) (total: {}) for page={}, limit={}",
+            users.len(),
+            total_count,
+            page,
+            limit
+        );
+
+        Ok((users, total_count))
+    }
 }

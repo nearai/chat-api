@@ -18,6 +18,7 @@ use utoipa::OpenApi;
         crate::routes::oauth::oauth_callback,
         crate::routes::oauth::logout,
         // User endpoints
+        crate::routes::users::list_users,
         crate::routes::users::get_current_user,
         crate::routes::users::get_user_settings,
         crate::routes::users::update_user_settings_partially,
@@ -28,6 +29,7 @@ use utoipa::OpenApi;
     components(schemas(
         // Request/Response models
         crate::models::UserResponse,
+        crate::models::UserListResponse,
         crate::models::LinkedAccountResponse,
         crate::models::UserProfileResponse,
         crate::models::AuthResponse,

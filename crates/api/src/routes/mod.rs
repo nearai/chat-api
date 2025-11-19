@@ -18,6 +18,8 @@ pub fn create_router_with_cors(app_state: AppState, allowed_origins: Vec<String>
     // Create auth state for middleware
     let auth_state = AuthState {
         session_repository: app_state.session_repository.clone(),
+        user_service: app_state.user_service.clone(),
+        admin_domains: app_state.admin_domains.clone(),
     };
 
     // OAuth routes (public, no auth required)
@@ -26,9 +28,15 @@ pub fn create_router_with_cors(app_state: AppState, allowed_origins: Vec<String>
     // Attestation routes (public, no auth required)
     let attestation_routes = attestation::create_attestation_router();
 
+    // Admin user routes (requires admin authentication)
+    let admin_user_routes = users::create_admin_user_router().layer(from_fn_with_state(
+        app_state.clone(),
+        crate::middleware::admin_auth_middleware,
+    ));
+
     // User routes (requires authentication)
     let user_routes = users::create_user_router().layer(from_fn_with_state(
-        auth_state.clone(),
+        app_state.clone(),
         crate::middleware::auth_middleware,
     ));
 
@@ -39,9 +47,11 @@ pub fn create_router_with_cors(app_state: AppState, allowed_origins: Vec<String>
     ));
 
     // Build the base router
+    // Note: admin_user_routes must be registered before user_routes to ensure /v1/users matches first
     let router = Router::new()
         .nest("/v1/auth", auth_routes)
-        .nest("/v1/users", user_routes)
+        .nest("/v1/users", admin_user_routes) // Admin routes (requires admin auth) - matches /v1/users
+        .nest("/v1/users", user_routes) // Protected routes (requires auth) - matches /v1/users/me, etc.
         .merge(api_routes) // Merge instead of nest since api routes already have /v1 prefix
         .merge(attestation_routes) // Merge attestation routes (already have /v1 prefix)
         .with_state(app_state);

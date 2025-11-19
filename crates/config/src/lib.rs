@@ -109,6 +109,24 @@ impl Default for CorsConfig {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct AdminConfig {
+    pub admin_domains: Vec<String>,
+}
+
+impl Default for AdminConfig {
+    fn default() -> Self {
+        Self {
+            admin_domains: std::env::var("AUTH_ADMIN_DOMAINS")
+                .unwrap_or_default()
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct Config {
     pub database: DatabaseConfig,
@@ -116,6 +134,7 @@ pub struct Config {
     pub server: ServerConfig,
     pub openai: OpenAIConfig,
     pub cors: CorsConfig,
+    pub admin: AdminConfig,
 }
 
 impl Config {
@@ -126,6 +145,7 @@ impl Config {
             server: ServerConfig::default(),
             openai: OpenAIConfig::default(),
             cors: CorsConfig::default(),
+            admin: AdminConfig::default(),
         }
     }
 }

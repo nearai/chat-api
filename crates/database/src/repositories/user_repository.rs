@@ -273,4 +273,42 @@ impl UserRepository for PostgresUserRepository {
 
         Ok(result)
     }
+
+    async fn list_users(&self, page: u32, limit: u32) -> anyhow::Result<(Vec<User>, u64)> {
+        let client = self.pool.get().await?;
+
+        // Calculate offset
+        let offset = (page.saturating_sub(1)) * limit;
+
+        // Get total count
+        let total_count: i64 = client
+            .query_one("SELECT COUNT(*) FROM users", &[])
+            .await?
+            .get(0);
+
+        // Get paginated users
+        let rows = client
+            .query(
+                "SELECT id, email, name, avatar_url, created_at, updated_at 
+                 FROM users 
+                 ORDER BY created_at DESC 
+                 LIMIT $1 OFFSET $2",
+                &[&(limit as i64), &(offset as i64)],
+            )
+            .await?;
+
+        let users = rows
+            .into_iter()
+            .map(|r| User {
+                id: r.get(0),
+                email: r.get(1),
+                name: r.get(2),
+                avatar_url: r.get(3),
+                created_at: r.get(4),
+                updated_at: r.get(5),
+            })
+            .collect();
+
+        Ok((users, total_count as u64))
+    }
 }

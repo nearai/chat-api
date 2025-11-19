@@ -73,6 +73,7 @@ async fn create_test_server() -> TestServer {
         conversation_service: conversation_service
             as Arc<dyn services::conversation::ports::ConversationService>,
         redirect_uri: config.oauth.redirect_uri.clone(),
+        admin_domains: config.admin.admin_domains.clone(),
     };
 
     // Create router
