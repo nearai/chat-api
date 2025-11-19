@@ -44,7 +44,6 @@ services = { path = "../services", features = ["utoipa"] }
 database = { path = "../database" }
 config = { path = "../config" }
 hex = "0.4.3"
-log = "0.4.28"
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json"] }
