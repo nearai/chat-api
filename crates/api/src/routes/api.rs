@@ -1,3 +1,4 @@
+use crate::middleware::auth::AuthenticatedUser;
 use axum::{
     body::Body,
     extract::{Extension, Path, Request, State},
@@ -10,10 +11,9 @@ use bytes::Bytes;
 use flate2::read::GzDecoder;
 use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
+use services::conversation::ports::ConversationError;
 use services::UserId;
 use std::io::Read;
-
-use crate::middleware::auth::AuthenticatedUser;
 
 #[derive(Serialize, Deserialize)]
 pub struct ErrorResponse {
@@ -28,6 +28,14 @@ pub fn create_api_router() -> Router<crate::state::AppState> {
         // Specific conversation endpoints (handle these before catch-all)
         .route("/v1/conversations", post(create_conversation))
         .route("/v1/conversations", get(list_conversations))
+        .route(
+            "/v1/conversations/{conversation_id}/items",
+            post(create_conversation_items),
+        )
+        .route(
+            "/v1/conversations/{conversation_id}/items",
+            get(list_conversation_items),
+        )
         // Catch-all proxy for all other OpenAI endpoints
         .route("/v1/{*path}", post(proxy_handler))
         .route("/v1/{*path}", get(proxy_handler))
@@ -205,27 +213,7 @@ async fn create_conversation(
         );
     }
 
-    // Build response
-    let mut response_builder = Response::builder()
-        .status(StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR));
-
-    if let Some(headers_map) = response_builder.headers_mut() {
-        for (key, value) in response_headers.iter() {
-            if key != "transfer-encoding" && key != "connection" {
-                headers_map.insert(key, value.clone());
-            }
-        }
-    }
-
-    response_builder.body(Body::from(body_bytes)).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Failed to build response: {e}"),
-            }),
-        )
-            .into_response()
-    })
+    build_response(status, response_headers, Body::from(body_bytes)).await
 }
 
 /// List all conversations for the authenticated user (fetches details from OpenAI client)
@@ -261,6 +249,124 @@ async fn list_conversations(
     );
 
     Ok(Json(conversations))
+}
+
+async fn create_conversation_items(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(conversation_id): Path<String>,
+    headers: HeaderMap,
+    request: Request,
+) -> Result<Response, Response> {
+    tracing::info!(
+        "create_conversation_items called for user_id={}, session_id={}",
+        user.user_id,
+        user.session_id
+    );
+
+    validate_user_conversation(&state, &user, &conversation_id).await?;
+
+    // Extract body
+    let body_bytes = extract_body_bytes(request).await?;
+
+    tracing::debug!(
+        "create_conversation_items request body size: {} bytes for user_id={}",
+        body_bytes.len(),
+        user.user_id
+    );
+
+    if let Ok(body_str) = std::str::from_utf8(&body_bytes) {
+        tracing::debug!("Request body: {}", body_str);
+    }
+
+    tracing::debug!(
+        "Forwarding conversation items creation request to OpenAI for user_id={}",
+        user.user_id
+    );
+
+    // Forward to OpenAI
+    let proxy_response = state
+        .proxy_service
+        .forward_request(
+            Method::POST,
+            &format!("conversations/{conversation_id}/items"),
+            headers.clone(),
+            Some(body_bytes),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "OpenAI API error during conversation items creation for user_id={}: {}",
+                user.user_id,
+                e
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("OpenAI API error: {e}"),
+                }),
+            )
+                .into_response()
+        })?;
+
+    build_response(
+        proxy_response.status,
+        proxy_response.headers,
+        Body::from_stream(proxy_response.body),
+    )
+    .await
+}
+
+async fn list_conversation_items(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(conversation_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, Response> {
+    tracing::info!(
+        "list_conversation_items called for user_id={}, session_id={}",
+        user.user_id,
+        user.session_id
+    );
+
+    validate_user_conversation(&state, &user, &conversation_id).await?;
+
+    tracing::debug!(
+        "Forwarding conversation items list request to OpenAI for user_id={}",
+        user.user_id
+    );
+
+    // Forward to OpenAI
+    let proxy_response = state
+        .proxy_service
+        .forward_request(
+            Method::GET,
+            &format!("conversations/{conversation_id}/items"),
+            headers.clone(),
+            None,
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "OpenAI API error during conversation items list for user_id={}: {}",
+                user.user_id,
+                e
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("OpenAI API error: {e}"),
+                }),
+            )
+                .into_response()
+        })?;
+
+    build_response(
+        proxy_response.status,
+        proxy_response.headers,
+        Body::from_stream(proxy_response.body),
+    )
+    .await
 }
 
 /// Generic proxy handler that forwards all requests to OpenAI
@@ -346,23 +452,28 @@ async fn proxy_handler(
         user.user_id
     );
 
+    build_response(
+        proxy_response.status,
+        proxy_response.headers,
+        Body::from_stream(proxy_response.body),
+    )
+    .await
+}
+
+async fn build_response(status: u16, headers: HeaderMap, body: Body) -> Result<Response, Response> {
     // Build the response
     let mut response = Response::builder()
-        .status(StatusCode::from_u16(proxy_response.status).unwrap_or(StatusCode::OK));
+        .status(StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR));
 
     // Copy headers from OpenAI response
     if let Some(response_headers) = response.headers_mut() {
-        for (key, value) in proxy_response.headers.iter() {
+        for (key, value) in headers.iter() {
             // Skip certain headers that shouldn't be forwarded
             if key != "transfer-encoding" && key != "connection" {
                 response_headers.insert(key, value.clone());
             }
         }
     }
-
-    // Convert the stream to an axum Body for streaming support
-    let stream = proxy_response.body.map_err(std::io::Error::other);
-    let body = Body::from_stream(stream);
 
     response.body(body).map_err(|e| {
         (
@@ -373,6 +484,34 @@ async fn proxy_handler(
         )
             .into_response()
     })
+}
+
+async fn validate_user_conversation(
+    state: &crate::state::AppState,
+    user: &AuthenticatedUser,
+    conversation_id: &str,
+) -> Result<(), Response> {
+    match state
+        .conversation_service
+        .get_conversation(conversation_id, user.user_id)
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(ConversationError::NotFound) => Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Conversation not found".to_string(),
+            }),
+        )
+            .into_response()),
+        Err(_) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Failed to get conversation".to_string(),
+            }),
+        )
+            .into_response()),
+    }
 }
 
 /// Extract body bytes from a request

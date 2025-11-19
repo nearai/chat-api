@@ -1,3 +1,5 @@
+use crate::consts::SYSTEM_PROMPT_MAX_LEN;
+use crate::ApiError;
 use serde::{Deserialize, Serialize};
 use services::UserId;
 use utoipa::ToSchema;
@@ -133,4 +135,75 @@ pub struct CombinedAttestationReport {
 pub struct AttestationReport {
     pub gateway_attestation: ApiGatewayAttestation,
     pub model_attestations: Option<Vec<ModelAttestation>>,
+}
+
+/// User settings content for API responses
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UserSettingsContent {
+    /// Notification preference
+    pub notification: bool,
+    /// System prompt
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
+}
+
+impl From<services::user::ports::UserSettingsContent> for UserSettingsContent {
+    fn from(content: services::user::ports::UserSettingsContent) -> Self {
+        Self {
+            notification: content.notification,
+            system_prompt: content.system_prompt,
+        }
+    }
+}
+
+/// User settings response
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UserSettingsResponse {
+    /// User ID
+    pub user_id: UserId,
+    /// Settings content (serialized as "settings")
+    #[serde(rename = "settings")]
+    pub content: UserSettingsContent,
+}
+
+/// User settings update request
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UpdateUserSettingsRequest {
+    /// Notification preference
+    pub notification: bool,
+    /// System prompt
+    pub system_prompt: Option<String>,
+}
+
+impl UpdateUserSettingsRequest {
+    pub fn validate(&self) -> Result<(), ApiError> {
+        if let Some(ref system_prompt) = self.system_prompt {
+            if system_prompt.len() > SYSTEM_PROMPT_MAX_LEN {
+                return Err(ApiError::bad_request("System prompt exceeds max length"));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// User settings update request (partial update)
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UpdateUserSettingsPartiallyRequest {
+    /// Notification preference
+    pub notification: Option<bool>,
+    /// System prompt
+    pub system_prompt: Option<String>,
+}
+
+impl UpdateUserSettingsPartiallyRequest {
+    pub fn validate(&self) -> Result<(), ApiError> {
+        if let Some(ref system_prompt) = self.system_prompt {
+            if system_prompt.len() > SYSTEM_PROMPT_MAX_LEN {
+                return Err(ApiError::bad_request("System prompt exceeds max length"));
+            }
+        }
+
+        Ok(())
+    }
 }
