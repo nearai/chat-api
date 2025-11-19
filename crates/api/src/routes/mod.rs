@@ -30,13 +30,13 @@ pub fn create_router_with_cors(app_state: AppState, allowed_origins: Vec<String>
 
     // Admin user routes (requires admin authentication)
     let admin_user_routes = users::create_admin_user_router().layer(from_fn_with_state(
-        app_state.clone(),
+        auth_state.clone(),
         crate::middleware::admin_auth_middleware,
     ));
 
     // User routes (requires authentication)
     let user_routes = users::create_user_router().layer(from_fn_with_state(
-        app_state.clone(),
+        auth_state.clone(),
         crate::middleware::auth_middleware,
     ));
 
