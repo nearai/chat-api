@@ -101,3 +101,81 @@ pub trait UserService: Send + Sync {
     /// Delete user account
     async fn delete_account(&self, user_id: UserId) -> anyhow::Result<()>;
 }
+
+/// User settings content structure
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct UserSettingsContent {
+    pub notification: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PartialUserSettingsContent {
+    pub notification: Option<bool>,
+    pub system_prompt: Option<String>,
+}
+
+#[allow(clippy::derivable_impls)]
+impl Default for UserSettingsContent {
+    fn default() -> Self {
+        Self {
+            notification: false,
+            system_prompt: None,
+        }
+    }
+}
+
+impl UserSettingsContent {
+    pub fn into_updated(self, content: PartialUserSettingsContent) -> Self {
+        Self {
+            notification: content.notification.unwrap_or(self.notification),
+            system_prompt: content.system_prompt.or(self.system_prompt),
+        }
+    }
+}
+
+/// User settings stored as JSONB in the database
+#[derive(Debug, Clone)]
+pub struct UserSettings {
+    pub id: uuid::Uuid,
+    pub user_id: UserId,
+    pub content: UserSettingsContent,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Repository trait for user settings operations
+#[async_trait]
+pub trait UserSettingsRepository: Send + Sync {
+    /// Get user settings by user ID
+    async fn get_settings(&self, user_id: UserId) -> anyhow::Result<Option<UserSettings>>;
+
+    /// Create or update user settings
+    async fn upsert_settings(
+        &self,
+        user_id: UserId,
+        content: UserSettingsContent,
+    ) -> anyhow::Result<UserSettings>;
+}
+
+/// Service trait for user settings operations
+#[async_trait]
+pub trait UserSettingsService: Send + Sync {
+    /// Get user settings by user ID
+    async fn get_settings(&self, user_id: UserId) -> anyhow::Result<UserSettingsContent>;
+
+    /// Update user settings
+    async fn update_settings(
+        &self,
+        user_id: UserId,
+        content: UserSettingsContent,
+    ) -> anyhow::Result<UserSettingsContent>;
+
+    /// Update user settings partially
+    async fn update_settings_partially(
+        &self,
+        user_id: UserId,
+        content: PartialUserSettingsContent,
+    ) -> anyhow::Result<UserSettingsContent>;
+}

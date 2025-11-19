@@ -1,7 +1,7 @@
 use api::{create_router_with_cors, ApiDoc, AppState};
 use services::{
     auth::OAuthServiceImpl, conversation::service::ConversationServiceImpl,
-    response::service::OpenAIProxy, user::UserServiceImpl,
+    response::service::OpenAIProxy, user::UserServiceImpl, user::UserSettingsServiceImpl,
 };
 use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -50,6 +50,7 @@ async fn main() -> anyhow::Result<()> {
     let session_repo = db.session_repository();
     let oauth_repo = db.oauth_repository();
     let conversation_repo = db.conversation_repository();
+    let user_settings_repo = db.user_settings_repository();
 
     // Create services
     tracing::info!("Initializing services...");
@@ -65,6 +66,10 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     let user_service = Arc::new(UserServiceImpl::new(user_repo));
+
+    let user_settings_service = Arc::new(UserSettingsServiceImpl::new(
+        user_settings_repo as Arc<dyn services::user::ports::UserSettingsRepository>,
+    ));
 
     // Initialize OpenAI proxy service
     let mut proxy_service = OpenAIProxy::new(config.openai.api_key.clone());
@@ -83,6 +88,8 @@ async fn main() -> anyhow::Result<()> {
     let app_state = AppState {
         oauth_service: oauth_service as Arc<dyn services::auth::ports::OAuthService>,
         user_service: user_service as Arc<dyn services::user::ports::UserService>,
+        user_settings_service: user_settings_service
+            as Arc<dyn services::user::ports::UserSettingsService>,
         session_repository: session_repo,
         proxy_service: proxy_service as Arc<dyn services::response::ports::OpenAIProxyService>,
         conversation_service: conversation_service
