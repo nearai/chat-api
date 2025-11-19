@@ -20,6 +20,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tokio = { version = "1", features = ["full"] }
 anyhow = "1.0"
 dotenvy = "0.15"
+dstack-sdk = "0.1.2"
 
 # Authentication dependencies
 tower = { version = "0.5", features = ["util"] }
@@ -42,6 +43,8 @@ utoipa-swagger-ui = { version = "9", features = ["axum"] }
 services = { path = "../services", features = ["utoipa"] }
 database = { path = "../database" }
 config = { path = "../config" }
+hex = "0.4.3"
+log = "0.4.28"
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json"] }

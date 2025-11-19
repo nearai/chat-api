@@ -460,10 +460,13 @@ dependencies = [
  "config",
  "database",
  "dotenvy",
+ "dstack-sdk",
  "flate2",
  "futures",
  "headers",
+ "hex",
  "http",
+ "log",
  "reqwest",
  "serde",
  "serde_json",
@@ -1592,9 +1595,9 @@ checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 
 [[package]]
 name = "dstack-sdk"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d1054906db933d763116630878db9657175a376021e364da3c32eefee1f4bfc"
+checksum = "6f21263be8034d895a3bef0deb4e786a8a401acdcfc49c742b385c1f17508ad4"
 dependencies = [
  "alloy",
  "anyhow",

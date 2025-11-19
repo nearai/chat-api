@@ -36,12 +36,6 @@ pub struct AuthResponse {
     pub expires_at: String,
 }
 
-/// Error response
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct ErrorResponse {
-    pub error: String,
-}
-
 impl From<services::user::ports::User> for UserResponse {
     fn from(user: services::user::ports::User) -> Self {
         Self {
@@ -89,6 +83,11 @@ pub struct ApiGatewayAttestation {
     /// Event log
     #[serde(skip_serializing_if = "Option::is_none")]
     pub event_log: Option<serde_json::Value>,
+    /// Request nonce
+    pub request_nonce: String,
+    /// Attestation info
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub info: Option<serde_json::Value>,
 }
 
 /// Model attestation from VLLM inference providers

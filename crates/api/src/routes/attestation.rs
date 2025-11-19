@@ -1,14 +1,13 @@
+use crate::common::is_dev;
 use crate::{
-    models::{ApiGatewayAttestation, AttestationReport, CombinedAttestationReport, ErrorResponse},
+    models::{ApiGatewayAttestation, AttestationReport, CombinedAttestationReport},
     state::AppState,
+    ApiError,
 };
-use axum::{
-    extract::Query, extract::State, http::StatusCode, response::Json, routing::get, Router,
-};
+use axum::{extract::Query, extract::State, response::Json, routing::get, Router};
 use futures::TryStreamExt;
 use http::Method;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct AttestationQuery {
@@ -19,6 +18,10 @@ pub struct AttestationQuery {
     /// Signing algorithm: "ecdsa" or "ed25519"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signing_algo: Option<String>,
+
+    /// random hex string WITHOUT 0x prefix (32 bytes)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nonce: Option<String>,
 }
 
 /// GET /v1/attestation/report
@@ -26,7 +29,7 @@ pub struct AttestationQuery {
 /// Returns a combined attestation report combining attestations from multiple layers.
 ///
 /// This endpoint (chat-api) acts as an AI Gateway Service and combines attestations from multiple layers:
-/// 1. **This API's own CPU attestation** (chat_api_gateway_attestation) - Proves this chat-api runs in a trusted TEE (currently mock data)
+/// 1. **This API's own CPU attestation** (chat_api_gateway_attestation) - Proves this chat-api runs in a trusted TEE
 /// 2. **Cloud-API gateway attestation** (cloud_api_gateway_attestation) - Fetched from proxy_service `/v1/attestation/report` endpoint
 /// 3. **Model provider attestations** (model_attestations) - Fetched from proxy_service `/v1/attestation/report` endpoint
 ///
@@ -35,19 +38,20 @@ pub struct AttestationQuery {
     get,
     path = "/v1/attestation/report",
     params(
-        ("model" = Option<String>, Query, description = "Optional model name to filter attestations"),
-        ("signing_algo" = Option<String>, Query, description = "Signing algorithm: 'ecdsa' or 'ed25519'")
+        ("model" = Option<String>, Query, description = "Optional model name to filter model attestations"),
+        ("signing_algo" = Option<String>, Query, description = "Signing algorithm: 'ecdsa' or 'ed25519'"),
+        ("nonce" = Option<String>, Query, description = "64 length (32 bytes) hex string")
     ),
     responses(
         (status = 200, description = "Combined attestation report", body = CombinedAttestationReport),
-        (status = 503, description = "Attestation service unavailable", body = ErrorResponse)
+        (status = 503, description = "Attestation service unavailable", body = crate::error::ApiErrorResponse)
     ),
     tag = "attestation"
 )]
 pub async fn get_attestation_report(
     State(app_state): State<AppState>,
     Query(params): Query<AttestationQuery>,
-) -> Result<Json<CombinedAttestationReport>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<CombinedAttestationReport>, ApiError> {
     let query = serde_urlencoded::to_string(&params).unwrap();
 
     // Build the path for proxy_service attestation endpoint
@@ -63,12 +67,7 @@ pub async fn get_attestation_report(
                 "Failed to fetch attestation report from proxy_service: {}",
                 e
             );
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(ErrorResponse {
-                    error: format!("Failed to fetch attestation report: {}", e),
-                }),
-            )
+            ApiError::bad_gateway(format!("Failed to fetch attestation report: {}", e))
         })?;
 
     // Check response status
@@ -77,15 +76,10 @@ pub async fn get_attestation_report(
             "proxy_service returned error status {}",
             proxy_response.status
         );
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(ErrorResponse {
-                error: format!(
-                    "Attestation service returned error: {}",
-                    proxy_response.status
-                ),
-            }),
-        ));
+        return Err(ApiError::service_unavailable(format!(
+            "Attestation service returned error: {}",
+            proxy_response.status
+        )));
     }
 
     // Collect the response body from the stream
@@ -95,12 +89,7 @@ pub async fn get_attestation_report(
         .await
         .map_err(|e| {
             tracing::error!("Failed to read response body from proxy_service: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Failed to read response body: {}", e),
-                }),
-            )
+            ApiError::internal_server_error(format!("Failed to read response body: {}", e))
         })?
         .into_iter()
         .flatten()
@@ -112,19 +101,48 @@ pub async fn get_attestation_report(
             "Failed to parse attestation report from proxy_service: {}",
             e
         );
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Failed to parse attestation report: {}", e),
-            }),
-        )
+        ApiError::internal_server_error(format!("Failed to parse attestation report: {}", e))
     })?;
 
-    // Mock THIS chat-api's own CPU attestation (proves this service runs in a trusted TEE)
-    // TODO: Implement real chat-api gateway attestation
-    let chat_api_gateway_attestation = ApiGatewayAttestation {
-        intel_quote: "0x04000000b40015000000000003000000000000004d4a04040000000000000000010000000000000089be4e9fcc80eaca7c4fba9c387e85bf8bf0e88170e0a5de8eafb8a1c99ad4a0000000000000000000000000000000000000000000000000000000000000000".to_string(),
-        event_log: Some(json!("0x0800000001000000746573745f6576656e745f6c6f670000000000000000")),
+    let mut report_data = vec![0u8; 64];
+
+    let request_nonce = proxy_report.gateway_attestation.request_nonce.clone();
+
+    // Parse nonce from cloud API gateway attestation to keep consistent
+    let nonce_bytes = hex::decode(&request_nonce).map_err(|e| {
+        tracing::error!("Failed to decode nonce hex string: {}", e);
+        ApiError::internal_server_error(format!("Invalid nonce format: {e}"))
+    })?;
+
+    report_data[32..64].copy_from_slice(&nonce_bytes);
+
+    let chat_api_gateway_attestation = if is_dev() {
+        ApiGatewayAttestation {
+            intel_quote: "0x1234567890abcdef".to_string(),
+            event_log: None,
+            request_nonce,
+            info: None,
+        }
+    } else {
+        let client = dstack_sdk::dstack_client::DstackClient::new(None);
+
+        let info = client.info().await.map_err(|_| {
+            tracing::error!("Failed to get chat API attestation info, are you running in a CVM?");
+            ApiError::internal_server_error("failed to get chat API attestation info")
+        })?;
+
+        let cpu_quote = client.get_quote(report_data).await.map_err(|_| {
+            tracing::error!("Failed to get cloud API attestation, are you running in a CVM?");
+            ApiError::internal_server_error("failed to get cloud API attestation")
+        })?;
+
+        ApiGatewayAttestation {
+            intel_quote: cpu_quote.quote,
+            event_log: serde_json::from_str(&cpu_quote.event_log)
+                .map_err(|_| ApiError::internal_server_error("Failed to deserialize event_log"))?,
+            info: Some(serde_json::to_value(info).unwrap_or_default()),
+            request_nonce,
+        }
     };
 
     let cloud_api_gateway_attestation = proxy_report.gateway_attestation;

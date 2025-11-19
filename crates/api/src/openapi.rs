@@ -31,7 +31,6 @@ use utoipa::OpenApi;
         crate::models::LinkedAccountResponse,
         crate::models::UserProfileResponse,
         crate::models::AuthResponse,
-        crate::models::ErrorResponse,
         crate::error::ApiErrorResponse,
         // User settings models
         crate::models::UserSettingsResponse,
