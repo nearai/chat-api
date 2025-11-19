@@ -50,8 +50,7 @@ pub fn create_router_with_cors(app_state: AppState, allowed_origins: Vec<String>
     // Note: admin_user_routes must be registered before user_routes to ensure /v1/users matches first
     let router = Router::new()
         .nest("/v1/auth", auth_routes)
-        .nest("/v1/users", admin_user_routes) // Admin routes (requires admin auth) - matches /v1/users
-        .nest("/v1/users", user_routes) // Protected routes (requires auth) - matches /v1/users/me, etc.
+        .nest("/v1/users", user_routes.merge(admin_user_routes))
         .merge(api_routes) // Merge instead of nest since api routes already have /v1 prefix
         .merge(attestation_routes) // Merge attestation routes (already have /v1 prefix)
         .with_state(app_state);
