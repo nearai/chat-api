@@ -3,22 +3,45 @@ mod common;
 use common::create_test_server;
 use serde_json::json;
 
-const SESSION_TOKEN: &str = "sess_dac8f13b2dac4d9fbbef019098456472";
+/// Helper function to create a user and get a session token via mock login
+async fn create_user_and_get_token(server: &axum_test::TestServer, email: &str) -> String {
+    let login_request = json!({
+        "email": email,
+        "name": format!("Test User {}", email),
+    });
+
+    let response = server
+        .post("/v1/auth/mock-login")
+        .json(&login_request)
+        .await;
+
+    assert_eq!(response.status_code(), 200, "Mock login should succeed");
+
+    let body: serde_json::Value = response.json();
+    body.get("token")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .expect("Response should contain token")
+}
 
 #[tokio::test]
-#[ignore]
 async fn test_user_settings_get_default() {
     let server = create_test_server().await;
 
-    println!("\n=== Test: Get User Settings (Not Found) ===");
+    println!("\n=== Test: Get Default User Settings ===");
+
+    // Create a user and get token via mock login
+    println!("\n0. Creating user via mock login...");
+    let token = create_user_and_get_token(&server, "test_user_settings@example.com").await;
+    println!("   ✓ User created and token obtained");
 
     // Try to get settings for a user that doesn't have any
-    println!("1. Getting user settings (should return default)...");
+    println!("\n1. Getting user settings (should return default)...");
     let response = server
         .get("/v1/users/me/settings")
         .add_header(
             http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {SESSION_TOKEN}")).unwrap(),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
         )
         .await;
 
@@ -45,14 +68,18 @@ async fn test_user_settings_get_default() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_user_settings_create_and_update() {
     let server = create_test_server().await;
 
     println!("\n=== Test: Create and Update User Settings ===");
 
+    // Create a user and get token via mock login
+    println!("0. Creating user via mock login...");
+    let token = create_user_and_get_token(&server, "test_user_settings_update@example.com").await;
+    println!("   ✓ User created and token obtained");
+
     // Step 1: Create settings via PATCH (first update creates the settings)
-    println!("1. Creating user settings via PATCH...");
+    println!("\n1. Creating user settings via PATCH...");
     let create_body = json!({
         "notification": true,
         "system_prompt": "You are a helpful assistant."
@@ -62,7 +89,7 @@ async fn test_user_settings_create_and_update() {
         .patch("/v1/users/me/settings")
         .add_header(
             http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {SESSION_TOKEN}")).unwrap(),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
         )
         .json(&create_body)
         .await;
@@ -100,7 +127,7 @@ async fn test_user_settings_create_and_update() {
         .patch("/v1/users/me/settings")
         .add_header(
             http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {SESSION_TOKEN}")).unwrap(),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
         )
         .json(&update_body)
         .await;
@@ -134,7 +161,7 @@ async fn test_user_settings_create_and_update() {
         .patch("/v1/users/me/settings")
         .add_header(
             http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {SESSION_TOKEN}")).unwrap(),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
         )
         .json(&update_body)
         .await;
@@ -164,7 +191,7 @@ async fn test_user_settings_create_and_update() {
         .get("/v1/users/me/settings")
         .add_header(
             http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {SESSION_TOKEN}")).unwrap(),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
         )
         .await;
 

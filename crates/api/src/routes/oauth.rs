@@ -1,3 +1,4 @@
+use crate::{error::ApiError, state::AppState};
 use axum::{
     extract::{Query, State},
     http::StatusCode,
@@ -5,14 +6,8 @@ use axum::{
     routing::get,
     Router,
 };
-#[cfg(test)]
-use axum::{routing::post, Json};
 use serde::Deserialize;
 use services::SessionId;
-
-#[cfg(test)]
-use crate::models::AuthResponse;
-use crate::{error::ApiError, state::AppState};
 
 /// Query parameters for OAuth callback
 #[derive(Debug, Deserialize)]
@@ -260,8 +255,8 @@ pub async fn logout(
 #[cfg(test)]
 pub async fn mock_login(
     State(app_state): State<AppState>,
-    Json(request): Json<MockLoginRequest>,
-) -> Result<Json<AuthResponse>, ApiError> {
+    axum::Json(request): axum::Json<MockLoginRequest>,
+) -> Result<axum::Json<crate::models::AuthResponse>, ApiError> {
     tracing::info!("Mock login requested for email: {}", request.email);
 
     // Check if user already exists
@@ -316,7 +311,7 @@ pub async fn mock_login(
         session.session_id
     );
 
-    Ok(Json(AuthResponse {
+    Ok(axum::Json(crate::models::AuthResponse {
         token,
         expires_at: session.expires_at.to_rfc3339(),
     }))
@@ -335,7 +330,7 @@ pub fn create_oauth_router() -> Router<AppState> {
 
     // Add mock login route only in test builds
     #[cfg(test)]
-    let router = router.route("/mock-login", post(mock_login));
+    let router = router.route("/mock-login", axum::routing::post(mock_login));
 
     router
 }
