@@ -44,7 +44,8 @@ pub struct AttestationQuery {
     params(
         ("model" = Option<String>, Query, description = "Optional model name to filter model attestations"),
         ("signing_algo" = Option<String>, Query, description = "Signing algorithm: 'ecdsa' or 'ed25519'"),
-        ("nonce" = Option<String>, Query, description = "64 length (32 bytes) hex string")
+        ("nonce" = Option<String>, Query, description = "64 length (32 bytes) hex string"),
+        ("signing_address" = Option<String>, Query, description = "Query the attestation of the specific model that owns this signing address")
     ),
     responses(
         (status = 200, description = "Combined attestation report", body = CombinedAttestationReport),
