@@ -24,7 +24,7 @@ pub struct OAuthInitQuery {
 }
 
 /// Request body for mock login (test only)
-#[cfg(test)]
+#[cfg(feature = "test")]
 #[derive(Debug, Deserialize)]
 pub struct MockLoginRequest {
     pub email: String,
@@ -252,7 +252,7 @@ pub async fn logout(
 ///
 /// This endpoint allows creating a user and getting a session token directly,
 /// bypassing the OAuth flow. Only available in test builds.
-#[cfg(test)]
+#[cfg(feature = "test")]
 pub async fn mock_login(
     State(app_state): State<AppState>,
     axum::Json(request): axum::Json<MockLoginRequest>,
@@ -329,7 +329,7 @@ pub fn create_oauth_router() -> Router<AppState> {
         .route("/logout", get(logout));
 
     // Add mock login route only in test builds
-    #[cfg(test)]
+    #[cfg(feature = "test")]
     let router = router.route("/mock-login", axum::routing::post(mock_login));
 
     router

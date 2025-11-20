@@ -49,3 +49,7 @@ chrono = "0.4"
 tokio = { version = "1", features = ["full"] }
 axum-test = "18"
 dotenvy = "0.15"
+
+[features]
+default = []
+test = []
