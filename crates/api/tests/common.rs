@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use api::{create_router, AppState};
 use axum_test::TestServer;
 use serde_json::json;
@@ -83,7 +85,9 @@ pub async fn create_test_server() -> TestServer {
     TestServer::new(app).expect("Failed to create test server")
 }
 
-/// Helper function to get/create a user and get a session token via mock login
+/// Helper function to get/create a user and get a session token via mock login.
+///
+/// To use this function, you need to enable test feature: `cargo test --features test`
 pub async fn mock_login(server: &TestServer, email: &str) -> String {
     let login_request = json!({
         "email": email,

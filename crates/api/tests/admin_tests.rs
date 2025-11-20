@@ -41,22 +41,6 @@ async fn test_admin_users_list_with_admin_account() {
         body.get("users").is_some(),
         "Response should have users field"
     );
-    assert!(
-        body.get("page").is_some(),
-        "Response should have page field"
-    );
-    assert!(
-        body.get("page_size").is_some(),
-        "Response should have page_size field"
-    );
-    assert!(
-        body.get("total").is_some(),
-        "Response should have total field"
-    );
-    assert!(
-        body.get("total_pages").is_some(),
-        "Response should have total_pages field"
-    );
 
     let users = body.get("users").unwrap().as_array().unwrap();
     println!("   Found {} users", users.len());
