@@ -22,6 +22,10 @@ pub struct AttestationQuery {
     /// random hex string WITHOUT 0x prefix (32 bytes)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nonce: Option<String>,
+
+    /// Signing address
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signing_address: Option<String>,
 }
 
 /// GET /v1/attestation/report
