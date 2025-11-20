@@ -18,8 +18,9 @@ use utoipa::OpenApi;
         crate::routes::oauth::oauth_callback,
         crate::routes::oauth::logout,
         // User endpoints
-        crate::routes::users::list_users,
         crate::routes::users::get_current_user,
+        // Admin endpoints
+        crate::routes::admin::list_users,
         crate::routes::users::get_user_settings,
         crate::routes::users::update_user_settings_partially,
         crate::routes::users::update_user_settings,
@@ -48,6 +49,7 @@ use utoipa::OpenApi;
     tags(
         (name = "Auth", description = "OAuth authentication endpoints"),
         (name = "Users", description = "User profile management endpoints"),
+        (name = "Admin", description = "Admin management endpoints"),
         (name = "attestation", description = "Attestation reporting endpoints for TEE verification")
     )
 )]
