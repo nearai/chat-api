@@ -140,7 +140,9 @@ pub async fn get_attestation_report(
             intel_quote: cpu_quote.quote,
             event_log: serde_json::from_str(&cpu_quote.event_log)
                 .map_err(|_| ApiError::internal_server_error("Failed to deserialize event_log"))?,
-            info: Some(serde_json::to_value(info).map_err(|_| ApiError::internal_server_error("Failed to serialize attestation info"))?),
+            info: Some(serde_json::to_value(info).map_err(|_| {
+                ApiError::internal_server_error("Failed to serialize attestation info")
+            })?),
             request_nonce,
         }
     };
