@@ -1,5 +1,6 @@
 use api::{create_router, AppState};
 use axum_test::TestServer;
+use serde_json::json;
 use std::sync::Arc;
 
 /// Create a test server with all services initialized
@@ -80,4 +81,25 @@ pub async fn create_test_server() -> TestServer {
 
     // Create test server
     TestServer::new(app).expect("Failed to create test server")
+}
+
+/// Helper function to get/create a user and get a session token via mock login
+pub async fn mock_login(server: &TestServer, email: &str) -> String {
+    let login_request = json!({
+        "email": email,
+        "name": format!("Test User {}", email),
+    });
+
+    let response = server
+        .post("/v1/auth/mock-login")
+        .json(&login_request)
+        .await;
+
+    assert_eq!(response.status_code(), 200, "Mock login should succeed");
+
+    let body: serde_json::Value = response.json();
+    body.get("token")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .expect("Response should contain token")
 }

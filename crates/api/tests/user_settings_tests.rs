@@ -1,28 +1,7 @@
 mod common;
 
-use common::create_test_server;
+use common::{create_test_server, mock_login};
 use serde_json::json;
-
-/// Helper function to create a user and get a session token via mock login
-async fn create_user_and_get_token(server: &axum_test::TestServer, email: &str) -> String {
-    let login_request = json!({
-        "email": email,
-        "name": format!("Test User {}", email),
-    });
-
-    let response = server
-        .post("/v1/auth/mock-login")
-        .json(&login_request)
-        .await;
-
-    assert_eq!(response.status_code(), 200, "Mock login should succeed");
-
-    let body: serde_json::Value = response.json();
-    body.get("token")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .expect("Response should contain token")
-}
 
 #[tokio::test]
 async fn test_user_settings_get_default() {
@@ -32,7 +11,7 @@ async fn test_user_settings_get_default() {
 
     // Create a user and get token via mock login
     println!("\n0. Creating user via mock login...");
-    let token = create_user_and_get_token(&server, "test_user_settings@example.com").await;
+    let token = mock_login(&server, "test_user_settings@example.com").await;
     println!("   ✓ User created and token obtained");
 
     // Try to get settings for a user that doesn't have any
@@ -75,7 +54,7 @@ async fn test_user_settings_create_and_update() {
 
     // Create a user and get token via mock login
     println!("0. Creating user via mock login...");
-    let token = create_user_and_get_token(&server, "test_user_settings_update@example.com").await;
+    let token = mock_login(&server, "test_user_settings_update@example.com").await;
     println!("   ✓ User created and token obtained");
 
     // Step 1: Create settings via PATCH (first update creates the settings)
