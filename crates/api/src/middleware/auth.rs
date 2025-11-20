@@ -183,9 +183,7 @@ fn is_admin_domain(email: &str, admin_domains: &[String]) -> bool {
     }
 
     if let Some(domain) = extract_email_domain(email) {
-        admin_domains
-            .iter()
-            .any(|admin_domain| domain == *admin_domain)
+        admin_domains.contains(&domain)
     } else {
         tracing::warn!("Failed to extract domain from email: {}", email);
         false
