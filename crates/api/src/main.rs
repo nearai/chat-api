@@ -65,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
         config.oauth.redirect_uri.clone(),
     ));
 
-    let user_service = Arc::new(UserServiceImpl::new(user_repo));
+    let user_service = Arc::new(UserServiceImpl::new(user_repo.clone()));
 
     let user_settings_service = Arc::new(UserSettingsServiceImpl::new(
         user_settings_repo as Arc<dyn services::user::ports::UserSettingsRepository>,
@@ -94,6 +94,7 @@ async fn main() -> anyhow::Result<()> {
         conversation_service,
         redirect_uri: config.oauth.redirect_uri,
         admin_domains: Arc::new(config.admin.admin_domains),
+        user_repository: user_repo.clone(),
     };
 
     // Create router with CORS support

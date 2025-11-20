@@ -11,7 +11,7 @@ async fn create_test_server() -> TestServer {
     dotenvy::dotenv().ok();
 
     // Load configuration
-    let config = config::Config::from_env();
+    let mut config = config::Config::from_env();
 
     // Create database connection
     let db = database::Database::from_config(&config.database)
@@ -40,7 +40,7 @@ async fn create_test_server() -> TestServer {
         config.oauth.redirect_uri.clone(),
     ));
 
-    let user_service = Arc::new(services::user::UserServiceImpl::new(user_repo));
+    let user_service = Arc::new(services::user::UserServiceImpl::new(user_repo.clone()));
 
     let user_settings_service = Arc::new(services::user::UserSettingsServiceImpl::new(
         user_settings_repo as Arc<dyn services::user::ports::UserSettingsRepository>,
@@ -62,18 +62,19 @@ async fn create_test_server() -> TestServer {
         ),
     );
 
+    config.admin.admin_domains.push("admin.org".to_string());
+
     // Create application state
     let app_state = AppState {
-        oauth_service: oauth_service as Arc<dyn services::auth::ports::OAuthService>,
-        user_service: user_service as Arc<dyn services::user::ports::UserService>,
-        user_settings_service: user_settings_service
-            as Arc<dyn services::user::ports::UserSettingsService>,
+        oauth_service,
+        user_service,
+        user_settings_service,
         session_repository: session_repo,
-        proxy_service: proxy_service as Arc<dyn services::response::ports::OpenAIProxyService>,
-        conversation_service: conversation_service
-            as Arc<dyn services::conversation::ports::ConversationService>,
+        proxy_service,
+        conversation_service,
         redirect_uri: config.oauth.redirect_uri,
         admin_domains: Arc::new(config.admin.admin_domains),
+        user_repository: user_repo,
     };
 
     // Create router
