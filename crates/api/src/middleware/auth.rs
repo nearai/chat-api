@@ -166,7 +166,17 @@ async fn authenticate_session_by_token(
     })
 }
 
-/// Extract email domain from email address
+/// Extracts the domain portion from an email address.
+///
+/// # Arguments
+/// * `email` - The email address to parse
+///
+/// # Returns
+/// The lowercase domain if the email contains an '@' symbol, None otherwise
+///
+/// # Examples
+/// * `user@example.com` -> `Some("example.com")`
+/// * `invalid-email` -> `None`
 fn extract_email_domain(email: &str) -> Option<String> {
     email.split('@').nth(1).map(|s| s.to_lowercase())
 }
@@ -179,10 +189,9 @@ fn is_admin_domain(email: &str, admin_domains: &[String]) -> bool {
     }
 
     if let Some(domain) = extract_email_domain(email) {
-        admin_domains.iter().any(|admin_domain| {
-            let admin_domain_lower = admin_domain.to_lowercase();
-            domain == admin_domain_lower
-        })
+        admin_domains
+            .iter()
+            .any(|admin_domain| domain == *admin_domain)
     } else {
         tracing::warn!("Failed to extract domain from email: {}", email);
         false

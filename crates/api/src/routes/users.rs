@@ -228,7 +228,12 @@ pub async fn list_users(
         params.page_size
     );
 
-    // Validate page_size
+    if params.page == 0 {
+        return Err(ApiError::bad_request(
+            "page is less than minimum value of 1",
+        ));
+    }
+
     if params.page_size > PAGE_SIZE_MAX {
         return Err(ApiError::bad_request(format!(
             "page_size exceeds maximum value of {}",
@@ -236,24 +241,21 @@ pub async fn list_users(
         )));
     }
 
-    let page_size = params.page_size.max(1);
-    let page = params.page.max(1);
-
     let (users, total) = app_state
         .user_service
-        .list_users(page, page_size)
+        .list_users(params.page, params.page_size)
         .await
         .map_err(|e| {
             tracing::error!("Failed to list users: {}", e);
             ApiError::internal_server_error("Failed to list users")
         })?;
 
-    let total_pages = ((total as f64) / (page_size as f64)).ceil() as u32;
+    let total_pages = ((total as f64) / (params.page_size as f64)).ceil() as u32;
 
     Ok(Json(UserListResponse {
         users: users.into_iter().map(Into::into).collect(),
-        page,
-        page_size,
+        page: params.page,
+        page_size: params.page_size,
         total,
         total_pages,
     }))

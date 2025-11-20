@@ -72,8 +72,8 @@ async fn create_test_server() -> TestServer {
         proxy_service: proxy_service as Arc<dyn services::response::ports::OpenAIProxyService>,
         conversation_service: conversation_service
             as Arc<dyn services::conversation::ports::ConversationService>,
-        redirect_uri: config.oauth.redirect_uri.clone(),
-        admin_domains: config.admin.admin_domains.clone(),
+        redirect_uri: config.oauth.redirect_uri,
+        admin_domains: Arc::new(config.admin.admin_domains),
     };
 
     // Create router

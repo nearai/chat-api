@@ -274,28 +274,31 @@ impl UserRepository for PostgresUserRepository {
         Ok(result)
     }
 
-    async fn list_users(&self, page: u32, limit: u32) -> anyhow::Result<(Vec<User>, u64)> {
+    async fn list_users(&self, page: u32, page_size: u32) -> anyhow::Result<(Vec<User>, u64)> {
         let client = self.pool.get().await?;
 
         // Calculate offset
-        let offset = (page.saturating_sub(1)) * limit;
+        let offset = (page.saturating_sub(1)) * page_size;
 
-        // Get total count
-        let total_count: i64 = client
-            .query_one("SELECT COUNT(*) FROM users", &[])
-            .await?
-            .get(0);
-
-        // Get paginated users
+        // Get paginated users and total count in a single query using window function
+        // This ensures consistency by avoiding race conditions between COUNT and SELECT queries
         let rows = client
             .query(
-                "SELECT id, email, name, avatar_url, created_at, updated_at 
+                "SELECT id, email, name, avatar_url, created_at, updated_at,
+                        COUNT(*) OVER() as total_count
                  FROM users 
                  ORDER BY created_at DESC 
                  LIMIT $1 OFFSET $2",
-                &[&(limit as i64), &(offset as i64)],
+                &[&page_size, &offset],
             )
             .await?;
+
+        // Extract total count from the first row (all rows have the same total_count)
+        let total_count = if rows.is_empty() {
+            0i64
+        } else {
+            rows[0].get::<_, i64>(6)
+        };
 
         let users = rows
             .into_iter()

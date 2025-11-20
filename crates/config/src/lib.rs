@@ -120,7 +120,7 @@ impl Default for AdminConfig {
             admin_domains: std::env::var("AUTH_ADMIN_DOMAINS")
                 .unwrap_or_default()
                 .split(',')
-                .map(|s| s.trim().to_string())
+                .map(|s| s.trim().to_lowercase())
                 .filter(|s| !s.is_empty())
                 .collect(),
         }
