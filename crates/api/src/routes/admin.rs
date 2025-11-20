@@ -57,9 +57,15 @@ pub async fn list_users(
         params.page_size
     );
 
-    if params.page == 0 {
+    if params.page < 1 {
         return Err(ApiError::bad_request(
             "page is less than minimum value of 1",
+        ));
+    }
+
+    if params.page_size < 1 {
+        return Err(ApiError::bad_request(
+            "page_size is less than minimum value of 1",
         ));
     }
 
