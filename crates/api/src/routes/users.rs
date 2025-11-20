@@ -1,8 +1,7 @@
 use crate::{error::ApiError, middleware::AuthenticatedUser, models::*, state::AppState};
-use axum::routing::post;
 use axum::{
     extract::{Extension, State},
-    routing::{get, patch},
+    routing::{get, patch, post},
     Json, Router,
 };
 
