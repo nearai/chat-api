@@ -70,22 +70,16 @@ fn extract_token_from_request(request: &Request) -> Result<String, ApiError> {
     Ok(token.to_string())
 }
 
-/// Authenticate a request and return the authenticated user
-async fn authenticate_request(
-    request: &Request,
+/// Authenticate a token string (without needing Request object)
+async fn authenticate_token_string(
+    token: String,
     auth_state: &AuthState,
 ) -> Result<AuthenticatedUser, ApiError> {
-    tracing::debug!("Extracting token from request");
-
-    let token = extract_token_from_request(request)?;
-
     tracing::debug!(
-        "Extracted Bearer token, length: {}, prefix: {}...",
+        "Authenticating token, length: {}, prefix: {}...",
         token.len(),
         &token.chars().take(8).collect::<String>()
     );
-
-    tracing::debug!("Token format validation passed, proceeding to authenticate");
 
     // Hash the token and look it up
     let token_hash = hash_session_token(&token);
@@ -204,49 +198,45 @@ pub async fn auth_middleware(
     mut request: Request,
     next: Next,
 ) -> Result<Response, Response> {
-    let path = request.uri().path();
+    let path = request.uri().path().to_string();
     let method = request.method().clone();
 
     tracing::info!("Auth middleware invoked for {} {}", method, path);
 
-    let auth_result = authenticate_request(&request, &state).await;
+    let token = extract_token_from_request(&request).map_err(|e| e.into_response())?;
+    let user = authenticate_token_string(token, &state)
+        .await
+        .map_err(|e| e.into_response())?;
 
-    match auth_result {
-        Ok(user) => {
-            tracing::info!(
-                "Authentication successful for user_id={}, session_id={} on {} {}",
-                user.user_id,
-                user.session_id,
-                method,
-                path
-            );
-            // Add authenticated user to request extensions
-            request.extensions_mut().insert(user);
-            let response = next.run(request).await;
-            tracing::debug!("Request completed with status: {}", response.status());
-            Ok(response)
-        }
-        Err(err) => {
-            tracing::error!("Authentication failed for {} {}: {:?}", method, path, err);
-            Err(err.into_response())
-        }
-    }
+    tracing::info!(
+        "Authentication successful for user_id={}, session_id={} on {} {}",
+        user.user_id,
+        user.session_id,
+        method,
+        path
+    );
+    // Add authenticated user to request extensions
+    request.extensions_mut().insert(user);
+    let response = next.run(request).await;
+    tracing::debug!("Request completed with status: {}", response.status());
+    Ok(response)
 }
 
 /// Admin authentication middleware that validates session tokens and checks admin domain
-/// This middleware first authenticates the user, then checks if their email domain
+/// This middleware first authenticates the user, then check if their email domain
 /// is in the allowed admin domains list.
 pub async fn admin_auth_middleware(
     State(state): State<AuthState>,
     mut request: Request,
     next: Next,
 ) -> Result<Response, Response> {
-    let path = request.uri().path();
+    let path = request.uri().path().to_string();
     let method = request.method().clone();
 
     tracing::info!("Admin auth middleware invoked for {} {}", method, path);
 
-    let authenticated_user = authenticate_request(&request, &state)
+    let token = extract_token_from_request(&request).map_err(|e| e.into_response())?;
+    let authenticated_user = authenticate_token_string(token, &state)
         .await
         .map_err(|err| {
             tracing::error!("Authentication failed in admin middleware: {:?}", err);
