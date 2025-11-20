@@ -6,3 +6,7 @@ config/examples/production.yaml
 *.crt
 .env
 .idea
+
+# Frontend build artifacts (for local development)
+frontend/
+crates/api/frontend/
