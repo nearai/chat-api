@@ -172,7 +172,9 @@ async fn authenticate_session_by_token(
 /// * `user@example.com` -> `Some("example.com")`
 /// * `invalid-email` -> `None`
 fn extract_email_domain(email: &str) -> Option<String> {
-    email.split('@').nth(1).map(|s| s.to_lowercase())
+    email
+        .split_once('@')
+        .map(|(_, domain)| domain.to_lowercase())
 }
 
 /// Check if email domain is in the allowed admin domains list
@@ -221,7 +223,7 @@ pub async fn auth_middleware(
 }
 
 /// Admin authentication middleware that validates session tokens and checks admin domain
-/// This middleware first authenticates the user, then check if their email domain
+/// This middleware first authenticates the user, then checks if their email domain
 /// is in the allowed admin domains list.
 pub async fn admin_auth_middleware(
     State(state): State<AuthState>,

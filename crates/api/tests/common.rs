@@ -63,6 +63,8 @@ pub async fn create_test_server() -> TestServer {
     );
 
     let mut admin_domains = config.admin.admin_domains;
+
+    // Add `admin.org` as test admin domain
     admin_domains.push("admin.org".to_string());
 
     // Create application state

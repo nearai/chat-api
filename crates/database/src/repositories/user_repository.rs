@@ -294,21 +294,21 @@ impl UserRepository for PostgresUserRepository {
             .await?;
 
         // Extract total count from the first row (all rows have the same total_count)
-        let total_count = if rows.is_empty() {
-            0i64
+        let total_count: i64 = if rows.is_empty() {
+            0
         } else {
-            rows[0].get::<_, i64>(6)
+            rows[0].get("total_count")
         };
 
         let users = rows
             .into_iter()
             .map(|r| User {
-                id: r.get(0),
-                email: r.get(1),
-                name: r.get(2),
-                avatar_url: r.get(3),
-                created_at: r.get(4),
-                updated_at: r.get(5),
+                id: r.get("id"),
+                email: r.get("email"),
+                name: r.get("name"),
+                avatar_url: r.get("avatar_url"),
+                created_at: r.get("created_at"),
+                updated_at: r.get("updated_at"),
             })
             .collect();
 
