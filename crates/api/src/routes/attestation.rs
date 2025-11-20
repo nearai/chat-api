@@ -52,7 +52,7 @@ pub async fn get_attestation_report(
     State(app_state): State<AppState>,
     Query(params): Query<AttestationQuery>,
 ) -> Result<Json<CombinedAttestationReport>, ApiError> {
-    let query = serde_urlencoded::to_string(&params).unwrap();
+    let query = serde_urlencoded::to_string(&params).expect("Failed to serialize query string");
 
     // Build the path for proxy_service attestation endpoint
     let path = format!("attestation/report?{}", query);
@@ -114,7 +114,7 @@ pub async fn get_attestation_report(
         ApiError::internal_server_error(format!("Invalid nonce format: {e}"))
     })?;
 
-    report_data[32..64].copy_from_slice(&nonce_bytes);
+    report_data[32..].copy_from_slice(&nonce_bytes);
 
     let chat_api_gateway_attestation = if is_dev() {
         ApiGatewayAttestation {
@@ -128,19 +128,19 @@ pub async fn get_attestation_report(
 
         let info = client.info().await.map_err(|_| {
             tracing::error!("Failed to get chat API attestation info, are you running in a CVM?");
-            ApiError::internal_server_error("failed to get chat API attestation info")
+            ApiError::internal_server_error("Failed to get chat API attestation info")
         })?;
 
         let cpu_quote = client.get_quote(report_data).await.map_err(|_| {
-            tracing::error!("Failed to get cloud API attestation, are you running in a CVM?");
-            ApiError::internal_server_error("failed to get cloud API attestation")
+            tracing::error!("Failed to get chat API attestation, are you running in a CVM?");
+            ApiError::internal_server_error("Failed to get chat API attestation")
         })?;
 
         ApiGatewayAttestation {
             intel_quote: cpu_quote.quote,
             event_log: serde_json::from_str(&cpu_quote.event_log)
                 .map_err(|_| ApiError::internal_server_error("Failed to deserialize event_log"))?,
-            info: Some(serde_json::to_value(info).unwrap_or_default()),
+            info: Some(serde_json::to_value(info).map_err(|_| ApiError::internal_server_error("Failed to serialize attestation info"))?),
             request_nonce,
         }
     };
