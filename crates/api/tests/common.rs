@@ -8,7 +8,7 @@ pub async fn create_test_server() -> TestServer {
     dotenvy::dotenv().ok();
 
     // Load configuration
-    let mut config = config::Config::from_env();
+    let config = config::Config::from_env();
 
     // Create database connection
     let db = database::Database::from_config(&config.database)
@@ -59,7 +59,8 @@ pub async fn create_test_server() -> TestServer {
         ),
     );
 
-    config.admin.admin_domains.push("admin.org".to_string());
+    let mut admin_domains = config.admin.admin_domains;
+    admin_domains.push("admin.org".to_string());
 
     // Create application state
     let app_state = AppState {
@@ -67,11 +68,11 @@ pub async fn create_test_server() -> TestServer {
         user_service,
         user_settings_service,
         session_repository: session_repo,
+        user_repository: user_repo,
         proxy_service,
         conversation_service,
         redirect_uri: config.oauth.redirect_uri,
-        admin_domains: Arc::new(config.admin.admin_domains),
-        user_repository: user_repo,
+        admin_domains: Arc::new(admin_domains),
     };
 
     // Create router
