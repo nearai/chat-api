@@ -76,7 +76,7 @@ echo ""
 # Extract package information from the built image
 echo "Extracting package information from built image: $TEMP_TAG"
 # Extract frontend builder stage package information
-docker run --rm "$TEMP_TAG" cat /frontend/pinned-packages-frontend-builder.txt > pinned-packages-frontend-builder.txt
+docker run --rm "$TEMP_TAG" cat /app/pinned-packages-frontend-builder.txt > pinned-packages-frontend-builder.txt
 echo "Package information extracted to pinned-packages-frontend-builder.txt ($(wc -l < pinned-packages-frontend-builder.txt) packages)"
 # Extract backend builder stage package information
 docker run --rm "$TEMP_TAG" cat /app/pinned-packages-backend-builder.txt > pinned-packages-backend-builder.txt
