@@ -32,6 +32,10 @@ impl PaginationQuery {
             )));
         }
 
+        if self.offset < 0 {
+            return Err(ApiError::bad_request("offset cannot be negative"));
+        }
+
         Ok(())
     }
 }
@@ -52,8 +56,8 @@ fn default_offset() -> i64 {
     path = "/v1/admin/users",
     tag = "Admin",
     params(
-        ("limit" = Option<u32>, Query, description = "Maximum number of items to return (default: 20, max: 100)"),
-        ("offset" = Option<u32>, Query, description = "Number of items to skip (default: 0)")
+        ("limit" = Option<i64>, Query, description = "Maximum number of items to return (default: 20, max: 100)"),
+        ("offset" = Option<i64>, Query, description = "Number of items to skip (default: 0)")
     ),
     responses(
         (status = 200, description = "User list retrieved", body = UserListResponse),
