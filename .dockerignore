@@ -43,3 +43,6 @@ node_modules/
 # Temporary files
 tmp/
 temp/
+
+# Cargo config (we need this for reproducible builds)
+!.cargo/
