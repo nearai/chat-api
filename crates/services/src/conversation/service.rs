@@ -66,21 +66,13 @@ impl ConversationService for ConversationServiceImpl {
             user_id
         );
 
-        // Fetch details from OpenAI for each conversation
-        let mut conversations = Vec::new();
-        for conversation_id in conversation_ids {
-            match self.fetch_conversation_from_openai(&conversation_id).await {
-                Ok(conversation) => conversations.push(conversation),
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to fetch conversation {} from OpenAI: {}",
-                        conversation_id,
-                        e
-                    );
-                    // Continue with other conversations even if one fails
-                }
-            }
+        // Early return if no conversations
+        if conversation_ids.is_empty() {
+            return Ok(Vec::new());
         }
+
+        // Fetch all conversations using batch API
+        let conversations = self.batch_fetch_conversations(&conversation_ids).await?;
 
         tracing::info!(
             "Successfully fetched {} conversation(s) from OpenAI for user_id={}",
@@ -151,6 +143,92 @@ impl ConversationService for ConversationServiceImpl {
 }
 
 impl ConversationServiceImpl {
+    /// Batch fetch multiple conversations from OpenAI API
+    async fn batch_fetch_conversations(
+        &self,
+        conversation_ids: &[String],
+    ) -> Result<Vec<serde_json::Value>, ConversationError> {
+        let path = "conversations/batch";
+
+        tracing::debug!(
+            "Batch fetching {} conversations from OpenAI",
+            conversation_ids.len()
+        );
+
+        // Build request body
+        #[derive(serde::Serialize)]
+        struct BatchRequest {
+            ids: Vec<String>,
+        }
+
+        let request_body = BatchRequest {
+            ids: conversation_ids.to_vec(),
+        };
+
+        let body_bytes = serde_json::to_vec(&request_body).map_err(|e| {
+            ConversationError::ApiError(format!("Failed to serialize request: {}", e))
+        })?;
+
+        // Make batch request
+        let response = self
+            .openai_proxy
+            .forward_request(
+                Method::POST,
+                path,
+                http::HeaderMap::new(),
+                Some(Bytes::from(body_bytes)),
+            )
+            .await
+            .map_err(|e| ConversationError::ApiError(e.to_string()))?;
+
+        if response.status != 200 {
+            tracing::error!(
+                "OpenAI batch API returned status {} for conversations batch",
+                response.status
+            );
+            return Err(ConversationError::ApiError(format!(
+                "OpenAI batch API returned status {}",
+                response.status
+            )));
+        }
+
+        // Collect the response body
+        let body_bytes: Bytes = response
+            .body
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(|e| ConversationError::ApiError(format!("Failed to read response: {}", e)))?
+            .into_iter()
+            .flatten()
+            .collect();
+
+        // Parse batch response
+        #[derive(serde::Deserialize)]
+        struct BatchResponse {
+            data: Vec<serde_json::Value>,
+            missing_ids: Vec<String>,
+        }
+
+        let batch_response: BatchResponse = serde_json::from_slice(&body_bytes)
+            .map_err(|e| ConversationError::ApiError(format!("Failed to parse JSON: {}", e)))?;
+
+        // Log any missing conversations (maintaining current behavior of continuing on failures)
+        if !batch_response.missing_ids.is_empty() {
+            tracing::warn!(
+                "Failed to fetch {} conversation(s) from OpenAI: {:?}",
+                batch_response.missing_ids.len(),
+                batch_response.missing_ids
+            );
+        }
+
+        tracing::debug!(
+            "Successfully batch fetched {} conversations from OpenAI",
+            batch_response.data.len()
+        );
+
+        Ok(batch_response.data)
+    }
+
     /// Fetch conversation details from OpenAI API
     async fn fetch_conversation_from_openai(
         &self,
