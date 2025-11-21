@@ -36,6 +36,22 @@ pub fn create_api_router() -> Router<crate::state::AppState> {
             "/v1/conversations/{conversation_id}/items",
             get(list_conversation_items),
         )
+        .route(
+            "/v1/conversations/{conversation_id}/pin",
+            post(pin_conversation),
+        )
+        .route(
+            "/v1/conversations/{conversation_id}/pin",
+            delete(unpin_conversation),
+        )
+        .route(
+            "/v1/conversations/{conversation_id}/archive",
+            post(archive_conversation),
+        )
+        .route(
+            "/v1/conversations/{conversation_id}/archive",
+            delete(unarchive_conversation),
+        )
         // Catch-all proxy for all other OpenAI endpoints
         .route("/v1/{*path}", post(proxy_handler))
         .route("/v1/{*path}", get(proxy_handler))
@@ -349,6 +365,213 @@ async fn list_conversation_items(
         .map_err(|e| {
             tracing::error!(
                 "OpenAI API error during conversation items list for user_id={}: {}",
+                user.user_id,
+                e
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("OpenAI API error: {e}"),
+                }),
+            )
+                .into_response()
+        })?;
+
+    build_response(
+        proxy_response.status,
+        proxy_response.headers,
+        Body::from_stream(proxy_response.body),
+    )
+    .await
+}
+
+async fn pin_conversation(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(conversation_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, Response> {
+    tracing::info!(
+        "pin_conversation called for user_id={}, session_id={}, conversation_id={}",
+        user.user_id,
+        user.session_id,
+        conversation_id
+    );
+
+    validate_user_conversation(&state, &user, &conversation_id).await?;
+
+    tracing::debug!(
+        "Forwarding conversation pin request to OpenAI for user_id={}",
+        user.user_id
+    );
+
+    // Forward to OpenAI
+    let proxy_response = state
+        .proxy_service
+        .forward_request(
+            Method::POST,
+            &format!("conversations/{conversation_id}/pin"),
+            headers.clone(),
+            None,
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "OpenAI API error during conversation pin for user_id={}: {}",
+                user.user_id,
+                e
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("OpenAI API error: {e}"),
+                }),
+            )
+                .into_response()
+        })?;
+
+    build_response(
+        proxy_response.status,
+        proxy_response.headers,
+        Body::from_stream(proxy_response.body),
+    )
+    .await
+}
+
+async fn unpin_conversation(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(conversation_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, Response> {
+    tracing::info!(
+        "unpin_conversation called for user_id={}, session_id={}, conversation_id={}",
+        user.user_id,
+        user.session_id,
+        conversation_id
+    );
+
+    validate_user_conversation(&state, &user, &conversation_id).await?;
+
+    tracing::debug!(
+        "Forwarding conversation unpin request to OpenAI for user_id={}",
+        user.user_id
+    );
+
+    // Forward to OpenAI
+    let proxy_response = state
+        .proxy_service
+        .forward_request(
+            Method::DELETE,
+            &format!("conversations/{conversation_id}/pin"),
+            headers.clone(),
+            None,
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "OpenAI API error during conversation unpin for user_id={}: {}",
+                user.user_id,
+                e
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("OpenAI API error: {e}"),
+                }),
+            )
+                .into_response()
+        })?;
+
+    build_response(
+        proxy_response.status,
+        proxy_response.headers,
+        Body::from_stream(proxy_response.body),
+    )
+    .await
+}
+
+async fn archive_conversation(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(conversation_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, Response> {
+    tracing::info!(
+        "archive_conversation called for user_id={}, session_id={}, conversation_id={}",
+        user.user_id,
+        user.session_id,
+        conversation_id
+    );
+
+    validate_user_conversation(&state, &user, &conversation_id).await?;
+
+    // Forward to OpenAI
+    let proxy_response = state
+        .proxy_service
+        .forward_request(
+            Method::POST,
+            &format!("conversations/{conversation_id}/archive"),
+            headers.clone(),
+            None,
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "OpenAI API error during conversation archive for user_id={}: {}",
+                user.user_id,
+                e
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("OpenAI API error: {e}"),
+                }),
+            )
+                .into_response()
+        })?;
+
+    build_response(
+        proxy_response.status,
+        proxy_response.headers,
+        Body::from_stream(proxy_response.body),
+    )
+    .await
+}
+
+async fn unarchive_conversation(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(conversation_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, Response> {
+    tracing::info!(
+        "unarchive_conversation called for user_id={}, session_id={}, conversation_id={}",
+        user.user_id,
+        user.session_id,
+        conversation_id
+    );
+
+    validate_user_conversation(&state, &user, &conversation_id).await?;
+
+    tracing::debug!(
+        "Forwarding conversation unarchive request to OpenAI for user_id={}",
+        user.user_id
+    );
+
+    // Forward to OpenAI
+    let proxy_response = state
+        .proxy_service
+        .forward_request(
+            Method::DELETE,
+            &format!("conversations/{conversation_id}/archive"),
+            headers.clone(),
+            None,
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "OpenAI API error during conversation unarchive for user_id={}: {}",
                 user.user_id,
                 e
             );
