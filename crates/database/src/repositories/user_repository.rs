@@ -274,7 +274,7 @@ impl UserRepository for PostgresUserRepository {
         Ok(result)
     }
 
-    async fn list_users(&self, page: u32, page_size: u32) -> anyhow::Result<(Vec<User>, u64)> {
+    async fn list_users(&self, page: i64, page_size: i64) -> anyhow::Result<(Vec<User>, u64)> {
         let client = self.pool.get().await?;
 
         // Calculate offset
@@ -289,7 +289,7 @@ impl UserRepository for PostgresUserRepository {
                  FROM users 
                  ORDER BY created_at DESC 
                  LIMIT $1 OFFSET $2",
-                &[&(page_size as i64), &(offset as i64)],
+                &[&page_size, &offset],
             )
             .await?;
 

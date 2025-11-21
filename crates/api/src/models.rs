@@ -213,11 +213,11 @@ pub struct UserListResponse {
     /// List of users
     pub users: Vec<UserResponse>,
     /// Current page number (1-based)
-    pub page: u32,
+    pub page: i64,
     /// Number of items per page
-    pub page_size: u32,
+    pub page_size: i64,
     /// Total number of users
     pub total: u64,
     /// Total number of pages
-    pub total_pages: u32,
+    pub total_pages: u64,
 }

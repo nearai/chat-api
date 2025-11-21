@@ -11,17 +11,17 @@ use serde::Deserialize;
 pub struct PaginationQuery {
     /// Page number (1-based, default: 1)
     #[serde(default = "default_page")]
-    pub page: u32,
+    pub page: i64,
     /// Number of items per page (default: 20, max: PAGE_SIZE_MAX)
     #[serde(default = "default_page_size")]
-    pub page_size: u32,
+    pub page_size: i64,
 }
 
-fn default_page() -> u32 {
+fn default_page() -> i64 {
     1
 }
 
-fn default_page_size() -> u32 {
+fn default_page_size() -> i64 {
     20
 }
 
@@ -85,7 +85,7 @@ pub async fn list_users(
             ApiError::internal_server_error("Failed to list users")
         })?;
 
-    let total_pages = ((total as f64) / (params.page_size as f64)).ceil() as u32;
+    let total_pages = ((total as f64) / (params.page_size as f64)).ceil() as u64;
 
     Ok(Json(UserListResponse {
         users: users.into_iter().map(Into::into).collect(),
