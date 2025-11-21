@@ -39,7 +39,7 @@ if [ -z "$PRIVATE_CHAT_FRONTEND_VERSION" ]; then
 fi
 echo "Using private-chat frontend version: ${PRIVATE_CHAT_FRONTEND_VERSION}"
 
-TEMP_TAG="cloud-api-temp:$(date +%s)"
+TEMP_TAG="private-chat-temp:$(date +%s)"
 docker buildx build --builder buildkit_20 --no-cache --platform linux/amd64 \
     --build-arg SOURCE_DATE_EPOCH="0" \
     --build-arg PRIVATE_CHAT_FRONTEND_VERSION="${PRIVATE_CHAT_FRONTEND_VERSION}" \

@@ -4,7 +4,6 @@ FROM node:22-slim@sha256:b21fe589dfbe5cc39365d0544b9be3f1f33f55f3c86c87a76ff65a0
 # Set working directory for frontend build
 WORKDIR /frontend
 
-
 # Bootstrap by installing ca-certificates which will be overridden by the pinned packages.
 # Otherwise the source list cannot be fetched from the debian snapshot.
 RUN apt-get update && \
@@ -145,7 +144,7 @@ COPY --from=backend-builder --chmod=0664 /app/crates/database/src/migrations/sql
 COPY --from=frontend-builder --chmod=0775 /frontend/dist ./crates/api/frontend/dist
 
 # Copy the pinned package list from builder stage
-COPY --from=frontend-builder --chmod=0664 /app/pinned-packages-frontend-builder.txt /app/pinned-packages-frontend-builder.txt
+COPY --from=frontend-builder --chmod=0664 /frontend/pinned-packages-frontend-builder.txt /app/pinned-packages-frontend-builder.txt
 COPY --from=backend-builder --chmod=0664 /app/pinned-packages-backend-builder.txt /app/pinned-packages-backend-builder.txt
 
 # Change ownership to app user
