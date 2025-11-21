@@ -20,8 +20,8 @@ pub struct ProxyResponse {
 }
 
 #[async_trait]
-pub trait OpenAIProxyService: Send + Sync {
-    /// Forward an HTTP request to OpenAI's API and return the raw response.
+pub trait CloudAPIProxyService: Send + Sync {
+    /// Forward an HTTP request to Cloud API and return the raw response.
     /// This is a generic proxy that works with any endpoint.
     ///
     /// # Arguments

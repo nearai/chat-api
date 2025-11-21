@@ -1,7 +1,7 @@
 use api::{create_router_with_cors, ApiDoc, AppState};
 use services::{
     auth::OAuthServiceImpl, conversation::service::ConversationServiceImpl,
-    response::service::OpenAIProxy, user::UserServiceImpl, user::UserSettingsServiceImpl,
+    response::service::CloudAPIProxy, user::UserServiceImpl, user::UserSettingsServiceImpl,
 };
 use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -71,9 +71,9 @@ async fn main() -> anyhow::Result<()> {
         user_settings_repo as Arc<dyn services::user::ports::UserSettingsRepository>,
     ));
 
-    // Initialize OpenAI proxy service
-    let mut proxy_service = OpenAIProxy::new(config.openai.api_key.clone());
-    if let Some(base_url) = config.openai.base_url.clone() {
+    // Initialize Cloud API proxy service
+    let mut proxy_service = CloudAPIProxy::new(config.cloud_api.api_key.clone());
+    if let Some(base_url) = config.cloud_api.base_url.clone() {
         proxy_service = proxy_service.with_base_url(base_url);
     }
     let proxy_service = Arc::new(proxy_service);
@@ -91,7 +91,7 @@ async fn main() -> anyhow::Result<()> {
         user_settings_service: user_settings_service
             as Arc<dyn services::user::ports::UserSettingsService>,
         session_repository: session_repo,
-        proxy_service: proxy_service as Arc<dyn services::response::ports::OpenAIProxyService>,
+        proxy_service: proxy_service as Arc<dyn services::response::ports::CloudAPIProxyService>,
         conversation_service: conversation_service
             as Arc<dyn services::conversation::ports::ConversationService>,
         redirect_uri: config.oauth.redirect_uri.clone(),

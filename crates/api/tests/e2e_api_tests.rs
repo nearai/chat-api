@@ -46,10 +46,10 @@ async fn create_test_server() -> TestServer {
         user_settings_repo as Arc<dyn services::user::ports::UserSettingsRepository>,
     ));
 
-    // Initialize OpenAI proxy service
+    // Initialize Cloud API proxy service
     let mut proxy_service =
-        services::response::service::OpenAIProxy::new(config.openai.api_key.clone());
-    if let Some(base_url) = config.openai.base_url.clone() {
+        services::response::service::CloudAPIProxy::new(config.cloud_api.api_key.clone());
+    if let Some(base_url) = config.cloud_api.base_url.clone() {
         proxy_service = proxy_service.with_base_url(base_url);
     }
     let proxy_service = Arc::new(proxy_service);
@@ -69,7 +69,7 @@ async fn create_test_server() -> TestServer {
         user_settings_service: user_settings_service
             as Arc<dyn services::user::ports::UserSettingsService>,
         session_repository: session_repo,
-        proxy_service: proxy_service as Arc<dyn services::response::ports::OpenAIProxyService>,
+        proxy_service: proxy_service as Arc<dyn services::response::ports::CloudAPIProxyService>,
         conversation_service: conversation_service
             as Arc<dyn services::conversation::ports::ConversationService>,
         redirect_uri: config.oauth.redirect_uri.clone(),
@@ -83,14 +83,14 @@ async fn create_test_server() -> TestServer {
 }
 
 #[tokio::test]
-#[ignore] // This makes real OpenAI API calls - run with: cargo test -- --ignored --nocapture
+#[ignore] // This makes real Cloud API calls - run with: cargo test -- --ignored --nocapture
 async fn test_conversation_workflow() {
     let server = create_test_server().await;
 
     println!("\n=== Test: Conversation Workflow ===");
 
-    // Step 1: Create a conversation using OpenAI's API
-    println!("1. Creating a conversation via OpenAI...");
+    // Step 1: Create a conversation using Cloud API
+    println!("1. Creating a conversation via Cloud API...");
     let create_conv_body = json!({
         "metadata": {"test": "e2e"}
     });
@@ -201,8 +201,8 @@ async fn test_conversation_workflow() {
         panic!("Failed to create second response");
     };
 
-    // Step 4: List conversations (fetches from OpenAI with details)
-    println!("\n4. Listing conversations (should fetch details from OpenAI)...");
+    // Step 4: List conversations (fetches from Cloud API with details)
+    println!("\n4. Listing conversations (should fetch details from Cloud API)...");
     let response = server
         .get("/v1/conversations")
         .add_header(
@@ -228,7 +228,7 @@ async fn test_conversation_workflow() {
         println!("   ✓ Found our conversation in the list!");
         println!("      ID: {}", conv.get("id").unwrap_or(&json!("N/A")));
 
-        // Verify that we got OpenAI conversation details (not just ID)
+        // Verify that we got Cloud API conversation details (not just ID)
         if conv.get("created_at").is_some() {
             println!("      Created: {}", conv.get("created_at").unwrap());
         }
@@ -239,18 +239,18 @@ async fn test_conversation_workflow() {
             println!("      Metadata: {:?}", conv.get("metadata").unwrap());
         }
 
-        println!("   ✓ Conversation details fetched from OpenAI");
+        println!("   ✓ Conversation details fetched from Cloud API");
     } else {
         println!("   ✗ Our conversation not found in list");
         panic!("Conversation tracking is not working properly");
     }
 
     println!("\n=== Test Complete ===");
-    println!("✅ Test passed: Created conversation, added responses, and listed conversations with OpenAI details\n");
+    println!("✅ Test passed: Created conversation, added responses, and listed conversations with Cloud API details\n");
 }
 
 #[tokio::test]
-#[ignore] // This makes real OpenAI API calls - run with: cargo test -- --ignored --nocapture
+#[ignore] // This makes real Cloud API calls - run with: cargo test -- --ignored --nocapture
 async fn test_conversation_access_control() {
     let server = create_test_server().await;
 
@@ -308,7 +308,7 @@ async fn test_conversation_access_control() {
 }
 
 #[tokio::test]
-#[ignore] // This makes real OpenAI API calls - run with: cargo test -- --ignored --nocapture
+#[ignore] // This makes real Cloud API calls - run with: cargo test -- --ignored --nocapture
 async fn test_empty_conversation_list() {
     let server = create_test_server().await;
 
@@ -335,7 +335,7 @@ async fn test_empty_conversation_list() {
 }
 
 #[tokio::test]
-#[ignore] // This makes real OpenAI API calls - run with: cargo test -- --ignored --nocapture
+#[ignore] // This makes real Cloud API calls - run with: cargo test -- --ignored --nocapture
 async fn test_conversation_tracking_on_response_creation() {
     let server = create_test_server().await;
 
@@ -423,7 +423,7 @@ async fn test_conversation_tracking_on_response_creation() {
         "Conversation should be tracked after response creation"
     );
     println!("   ✓ Conversation is tracked in database");
-    println!("   ✓ Details fetched from OpenAI successfully");
+    println!("   ✓ Details fetched from Cloud API successfully");
 
     println!("\n=== Test Complete ===");
     println!("✅ Test passed: Conversation tracking on response creation works correctly\n");

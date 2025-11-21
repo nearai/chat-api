@@ -5,22 +5,22 @@ use http::Method;
 use std::sync::Arc;
 
 use super::ports::{ConversationError, ConversationRepository, ConversationService};
-use crate::response::ports::OpenAIProxyService;
+use crate::response::ports::CloudAPIProxyService;
 use crate::UserId;
 
 pub struct ConversationServiceImpl {
     repository: Arc<dyn ConversationRepository>,
-    openai_proxy: Arc<dyn OpenAIProxyService>,
+    cloud_api_proxy: Arc<dyn CloudAPIProxyService>,
 }
 
 impl ConversationServiceImpl {
     pub fn new(
         repository: Arc<dyn ConversationRepository>,
-        openai_proxy: Arc<dyn OpenAIProxyService>,
+        cloud_api_proxy: Arc<dyn CloudAPIProxyService>,
     ) -> Self {
         Self {
             repository,
-            openai_proxy,
+            cloud_api_proxy,
         }
     }
 }
@@ -66,14 +66,17 @@ impl ConversationService for ConversationServiceImpl {
             user_id
         );
 
-        // Fetch details from OpenAI for each conversation
+        // Fetch details from Cloud API for each conversation
         let mut conversations = Vec::new();
         for conversation_id in conversation_ids {
-            match self.fetch_conversation_from_openai(&conversation_id).await {
+            match self
+                .fetch_conversation_from_cloud_api(&conversation_id)
+                .await
+            {
                 Ok(conversation) => conversations.push(conversation),
                 Err(e) => {
                     tracing::warn!(
-                        "Failed to fetch conversation {} from OpenAI: {}",
+                        "Failed to fetch conversation {} from Cloud API: {}",
                         conversation_id,
                         e
                     );
@@ -83,7 +86,7 @@ impl ConversationService for ConversationServiceImpl {
         }
 
         tracing::info!(
-            "Successfully fetched {} conversation(s) from OpenAI for user_id={}",
+            "Successfully fetched {} conversation(s) from Cloud API for user_id={}",
             conversations.len(),
             user_id
         );
@@ -108,16 +111,18 @@ impl ConversationService for ConversationServiceImpl {
             .await?;
 
         tracing::debug!(
-            "User {} has access to conversation {}, fetching from OpenAI",
+            "User {} has access to conversation {}, fetching from Cloud API",
             user_id,
             conversation_id
         );
 
-        // Fetch details from OpenAI
-        let conversation = self.fetch_conversation_from_openai(conversation_id).await?;
+        // Fetch details from Cloud API
+        let conversation = self
+            .fetch_conversation_from_cloud_api(conversation_id)
+            .await?;
 
         tracing::info!(
-            "Successfully fetched conversation {} from OpenAI for user_id={}",
+            "Successfully fetched conversation {} from Cloud API for user_id={}",
             conversation_id,
             user_id
         );
@@ -151,29 +156,29 @@ impl ConversationService for ConversationServiceImpl {
 }
 
 impl ConversationServiceImpl {
-    /// Fetch conversation details from OpenAI API
-    async fn fetch_conversation_from_openai(
+    /// Fetch conversation details from Cloud API
+    async fn fetch_conversation_from_cloud_api(
         &self,
         conversation_id: &str,
     ) -> Result<serde_json::Value, ConversationError> {
         let path = format!("conversations/{}", conversation_id);
 
-        tracing::debug!("Fetching conversation from OpenAI: {}", path);
+        tracing::debug!("Fetching conversation from Cloud API: {}", path);
 
         let response = self
-            .openai_proxy
+            .cloud_api_proxy
             .forward_request(Method::GET, &path, http::HeaderMap::new(), None)
             .await
             .map_err(|e| ConversationError::ApiError(e.to_string()))?;
 
         if response.status != 200 {
             tracing::error!(
-                "OpenAI API returned status {} for conversation {}",
+                "Cloud API returned status {} for conversation {}",
                 response.status,
                 conversation_id
             );
             return Err(ConversationError::ApiError(format!(
-                "OpenAI API returned status {}",
+                "Cloud API returned status {}",
                 response.status
             )));
         }
@@ -193,7 +198,7 @@ impl ConversationServiceImpl {
             .map_err(|e| ConversationError::ApiError(format!("Failed to parse JSON: {}", e)))?;
 
         tracing::debug!(
-            "Successfully fetched conversation {} from OpenAI",
+            "Successfully fetched conversation {} from Cloud API",
             conversation_id
         );
 

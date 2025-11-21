@@ -77,12 +77,12 @@ impl Default for ServerConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct OpenAIConfig {
+pub struct CloudAPIConfig {
     pub api_key: String,
     pub base_url: Option<String>,
 }
 
-impl Default for OpenAIConfig {
+impl Default for CloudAPIConfig {
     fn default() -> Self {
         Self {
             api_key: std::env::var("OPENAI_API_KEY").unwrap_or_default(),
@@ -114,7 +114,7 @@ pub struct Config {
     pub database: DatabaseConfig,
     pub oauth: OAuthConfig,
     pub server: ServerConfig,
-    pub openai: OpenAIConfig,
+    pub cloud_api: CloudAPIConfig,
     pub cors: CorsConfig,
 }
 
@@ -124,7 +124,7 @@ impl Config {
             database: DatabaseConfig::default(),
             oauth: OAuthConfig::default(),
             server: ServerConfig::default(),
-            openai: OpenAIConfig::default(),
+            cloud_api: CloudAPIConfig::default(),
             cors: CorsConfig::default(),
         }
     }

@@ -20,7 +20,7 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
-/// Create the OpenAI API proxy router
+/// Create the Cloud API proxy router
 pub fn create_api_router() -> Router<crate::state::AppState> {
     // IMPORTANT: Specific routes MUST be in the same Router and registered BEFORE catch-all routes
     // Axum matches routes in order within a router
@@ -36,13 +36,13 @@ pub fn create_api_router() -> Router<crate::state::AppState> {
             "/v1/conversations/{conversation_id}/items",
             get(list_conversation_items),
         )
-        // Catch-all proxy for all other OpenAI endpoints
+        // Catch-all proxy for all other Cloud API endpoints
         .route("/v1/{*path}", post(proxy_handler))
         .route("/v1/{*path}", get(proxy_handler))
         .route("/v1/{*path}", delete(proxy_handler))
 }
 
-/// Create a conversation - forwards to OpenAI and tracks in DB
+/// Create a conversation - forwards to Cloud API and tracks in DB
 async fn create_conversation(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -84,11 +84,11 @@ async fn create_conversation(
     }
 
     tracing::debug!(
-        "Forwarding conversation creation request to OpenAI for user_id={}",
+        "Forwarding conversation creation request to Cloud API for user_id={}",
         user.user_id
     );
 
-    // Forward to OpenAI
+    // Forward to Cloud API
     let proxy_response = state
         .proxy_service
         .forward_request(
@@ -100,14 +100,14 @@ async fn create_conversation(
         .await
         .map_err(|e| {
             tracing::error!(
-                "OpenAI API error during conversation creation for user_id={}: {}",
+                "Cloud API error during conversation creation for user_id={}: {}",
                 user.user_id,
                 e
             );
             (
                 StatusCode::BAD_GATEWAY,
                 Json(ErrorResponse {
-                    error: format!("OpenAI API error: {e}"),
+                    error: format!("Cloud API error: {e}"),
                 }),
             )
                 .into_response()
@@ -117,7 +117,7 @@ async fn create_conversation(
     let response_headers = proxy_response.headers;
 
     tracing::info!(
-        "Received response from OpenAI for conversation creation - status: {}, user_id={}",
+        "Received response from Cloud API for conversation creation - status: {}, user_id={}",
         status,
         user.user_id
     );
@@ -192,13 +192,13 @@ async fn create_conversation(
                 }
             } else {
                 tracing::warn!(
-                    "No conversation ID found in OpenAI response for user_id={}",
+                    "No conversation ID found in Cloud API response for user_id={}",
                     user.user_id
                 );
             }
         } else {
             tracing::warn!(
-                "Failed to parse OpenAI response as JSON for user_id={}",
+                "Failed to parse Cloud API response as JSON for user_id={}",
                 user.user_id
             );
             if let Ok(text) = String::from_utf8(decompressed_bytes.clone()) {
@@ -216,7 +216,7 @@ async fn create_conversation(
     build_response(status, response_headers, Body::from(body_bytes)).await
 }
 
-/// List all conversations for the authenticated user (fetches details from OpenAI client)
+/// List all conversations for the authenticated user (fetches details from Cloud API client)
 async fn list_conversations(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -280,11 +280,11 @@ async fn create_conversation_items(
     }
 
     tracing::debug!(
-        "Forwarding conversation items creation request to OpenAI for user_id={}",
+        "Forwarding conversation items creation request to Cloud API for user_id={}",
         user.user_id
     );
 
-    // Forward to OpenAI
+    // Forward to Cloud API
     let proxy_response = state
         .proxy_service
         .forward_request(
@@ -296,14 +296,14 @@ async fn create_conversation_items(
         .await
         .map_err(|e| {
             tracing::error!(
-                "OpenAI API error during conversation items creation for user_id={}: {}",
+                "Cloud API error during conversation items creation for user_id={}: {}",
                 user.user_id,
                 e
             );
             (
                 StatusCode::BAD_GATEWAY,
                 Json(ErrorResponse {
-                    error: format!("OpenAI API error: {e}"),
+                    error: format!("Cloud API error: {e}"),
                 }),
             )
                 .into_response()
@@ -332,11 +332,11 @@ async fn list_conversation_items(
     validate_user_conversation(&state, &user, &conversation_id).await?;
 
     tracing::debug!(
-        "Forwarding conversation items list request to OpenAI for user_id={}",
+        "Forwarding conversation items list request to Cloud API for user_id={}",
         user.user_id
     );
 
-    // Forward to OpenAI
+    // Forward to Cloud API
     let proxy_response = state
         .proxy_service
         .forward_request(
@@ -348,14 +348,14 @@ async fn list_conversation_items(
         .await
         .map_err(|e| {
             tracing::error!(
-                "OpenAI API error during conversation items list for user_id={}: {}",
+                "Cloud API error during conversation items list for user_id={}: {}",
                 user.user_id,
                 e
             );
             (
                 StatusCode::BAD_GATEWAY,
                 Json(ErrorResponse {
-                    error: format!("OpenAI API error: {e}"),
+                    error: format!("Cloud API error: {e}"),
                 }),
             )
                 .into_response()
@@ -369,7 +369,7 @@ async fn list_conversation_items(
     .await
 }
 
-/// Generic proxy handler that forwards all requests to OpenAI
+/// Generic proxy handler that forwards all requests to Cloud API
 async fn proxy_handler(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -416,20 +416,20 @@ async fn proxy_handler(
     }
 
     tracing::debug!(
-        "Forwarding {} /v1/{} to OpenAI for user_id={}",
+        "Forwarding {} /v1/{} to Cloud API for user_id={}",
         method,
         path,
         user.user_id
     );
 
-    // Forward the request to OpenAI
+    // Forward the request to Cloud API
     let proxy_response = state
         .proxy_service
         .forward_request(method.clone(), &path, headers.clone(), Some(body_bytes))
         .await
         .map_err(|e| {
             tracing::error!(
-                "OpenAI API error for {} /v1/{} (user_id={}): {}",
+                "Cloud API error for {} /v1/{} (user_id={}): {}",
                 method,
                 path,
                 user.user_id,
@@ -438,14 +438,14 @@ async fn proxy_handler(
             (
                 StatusCode::BAD_GATEWAY,
                 Json(ErrorResponse {
-                    error: format!("OpenAI API error: {e}"),
+                    error: format!("Cloud API error: {e}"),
                 }),
             )
                 .into_response()
         })?;
 
     tracing::info!(
-        "Received response from OpenAI: status={} for {} /v1/{} (user_id={})",
+        "Received response from Cloud API: status={} for {} /v1/{} (user_id={})",
         proxy_response.status,
         method,
         path,
@@ -465,7 +465,7 @@ async fn build_response(status: u16, headers: HeaderMap, body: Body) -> Result<R
     let mut response = Response::builder()
         .status(StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR));
 
-    // Copy headers from OpenAI response
+    // Copy headers from Cloud API response
     if let Some(response_headers) = response.headers_mut() {
         for (key, value) in headers.iter() {
             // Skip certain headers that shouldn't be forwarded

@@ -8,7 +8,7 @@ pub enum ConversationError {
     DatabaseError(String),
     #[error("Conversation not found")]
     NotFound,
-    #[error("OpenAI API error: {0}")]
+    #[error("Cloud API error: {0}")]
     ApiError(String),
     #[error("Access denied")]
     AccessDenied,
@@ -50,13 +50,13 @@ pub trait ConversationService: Send + Sync {
         user_id: UserId,
     ) -> Result<(), ConversationError>;
 
-    /// List all conversations for a user with details from OpenAI
+    /// List all conversations for a user with details from Cloud API
     async fn list_conversations(
         &self,
         user_id: UserId,
     ) -> Result<Vec<serde_json::Value>, ConversationError>;
 
-    /// Get a conversation with details from OpenAI (checks user access first)
+    /// Get a conversation with details from Cloud API (checks user access first)
     async fn get_conversation(
         &self,
         conversation_id: &str,
