@@ -30,16 +30,17 @@ RUN --mount=type=bind,source=pinned-packages-frontend-builder.txt,target=/tmp/pi
     apt-get update && \
     apt-get install -y --no-install-recommends \
         ca-certificates \
-        git \
+        curl \
         && rm -rf /var/lib/apt/lists/* /var/log/* /var/cache/ldconfig/aux-cache
 
 # Fetch the latest pinned package list
 RUN dpkg -l | grep '^ii' | awk '{print $2"="$3}' | sort > ./pinned-packages-frontend-builder.txt
 
-# Clone the private-chat frontend repository and checkout specific version
+# Download the private-chat frontend repository archive for the specific version
 ARG PRIVATE_CHAT_FRONTEND_VERSION
-RUN git clone https://github.com/nearai/private-chat.git . && \
-    git checkout ${PRIVATE_CHAT_FRONTEND_VERSION}
+RUN curl -L -o /tmp/private-chat.tar.gz "https://github.com/nearai/private-chat/archive/${PRIVATE_CHAT_FRONTEND_VERSION}.tar.gz" && \
+    tar -xzf /tmp/private-chat.tar.gz --strip-components=1 && \
+    rm /tmp/private-chat.tar.gz
 
 # Install pnpm with specific version
 RUN npm install -g pnpm@10.10.0
