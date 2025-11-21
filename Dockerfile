@@ -85,7 +85,8 @@ WORKDIR /app
 RUN dpkg -l | grep '^ii' | awk '{print $2"="$3}' | sort > ./pinned-packages-backend-builder.txt
 
 # Set the source date epoch to 0 to avoid timestamp changes
-ENV SOURCE_DATE_EPOCH=0
+ARG SOURCE_DATE_EPOCH=0
+ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
 
 # Copy workspace files
 COPY Cargo.toml Cargo.lock ./
