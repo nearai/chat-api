@@ -169,15 +169,16 @@ impl ConversationServiceImpl {
             ConversationError::ApiError(format!("Failed to serialize request: {}", e))
         })?;
 
-        // Make batch request
+        // Make batch request with Content-Type header
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_TYPE,
+            "application/json".parse().unwrap(),
+        );
+
         let response = self
             .openai_proxy
-            .forward_request(
-                Method::POST,
-                path,
-                http::HeaderMap::new(),
-                Some(Bytes::from(body_bytes)),
-            )
+            .forward_request(Method::POST, path, headers, Some(Bytes::from(body_bytes)))
             .await
             .map_err(|e| ConversationError::ApiError(e.to_string()))?;
 
