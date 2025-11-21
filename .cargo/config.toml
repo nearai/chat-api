@@ -14,6 +14,10 @@ rustflags = [
     # Additional reproducibility flags
     "-C", "link-arg=-Wl,--no-undefined",
     "-C", "link-arg=-Wl,--hash-style=gnu",
+    "-C", "link-arg=-Wl,-z,max-page-size=4096",
+    "-C", "link-arg=-Wl,-z,combreloc",
+    # Disable PIE to avoid ASLR affecting data addresses
+    "-C", "link-arg=-no-pie",
 ]
 
 [profile.release]
