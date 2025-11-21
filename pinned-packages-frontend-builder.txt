@@ -1,2 +1,4 @@
 ca-certificates=20230311+deb12u1
 git=1:2.39.5-0+deb12u2
+perl=5.36.0-7+deb12u1
+perl-base=5.36.0-7+deb12u1
