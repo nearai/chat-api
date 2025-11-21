@@ -12,3 +12,7 @@ crates/api/frontend/*
 !crates/api/frontend/dist/
 crates/api/frontend/dist/*
 !crates/api/frontend/dist/.gitkeep
+
+# Reproducible build artifacts
+.GIT_REV
+oci.tar
