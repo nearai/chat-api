@@ -28,9 +28,21 @@ if ! docker buildx inspect buildkit_20 &>/dev/null; then
 fi
 touch pinned-packages-backend-builder.txt pinned-packages-frontend-builder.txt pinned-packages-runtime.txt
 git rev-parse HEAD > .GIT_REV
+
+# Read private-chat frontend version from build-config.toml
+if [ -f "build-config.toml" ]; then
+    PRIVATE_CHAT_FRONTEND_VERSION=$(grep -E '^\s*private_chat_frontend_version\s*=' build-config.toml | awk -F'"' '{print $2}' | head -n1)
+fi
+if [ -z "$PRIVATE_CHAT_FRONTEND_VERSION" ]; then
+    echo "Error: private-chat frontend version not found in build-config.toml"
+    exit 1
+fi
+echo "Using private-chat frontend version: ${PRIVATE_CHAT_FRONTEND_VERSION}"
+
 TEMP_TAG="cloud-api-temp:$(date +%s)"
 docker buildx build --builder buildkit_20 --no-cache --platform linux/amd64 \
     --build-arg SOURCE_DATE_EPOCH="0" \
+    --build-arg PRIVATE_CHAT_FRONTEND_VERSION="${PRIVATE_CHAT_FRONTEND_VERSION}" \
     --output type=oci,dest=./oci.tar,rewrite-timestamp=true \
     --output type=docker,name="$TEMP_TAG",rewrite-timestamp=true .
 

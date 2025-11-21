@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - serve-private-chat
     tags:
       - 'v*'
 

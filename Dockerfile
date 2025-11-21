@@ -4,6 +4,13 @@ FROM node:22-slim@sha256:b21fe589dfbe5cc39365d0544b9be3f1f33f55f3c86c87a76ff65a0
 # Set working directory for frontend build
 WORKDIR /frontend
 
+
+# Bootstrap by installing ca-certificates which will be overridden by the pinned packages.
+# Otherwise the source list cannot be fetched from the debian snapshot.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* /var/log/* /var/cache/ldconfig/aux-cache
+
 # Install pinned apt dependencies
 RUN --mount=type=bind,source=pinned-packages-frontend-builder.txt,target=/tmp/pinned-packages-frontend-builder.txt,ro \
     set -e; \
@@ -23,14 +30,17 @@ RUN --mount=type=bind,source=pinned-packages-frontend-builder.txt,target=/tmp/pi
     done && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
+        ca-certificates \
         git \
         && rm -rf /var/lib/apt/lists/* /var/log/* /var/cache/ldconfig/aux-cache
 
 # Fetch the latest pinned package list
 RUN dpkg -l | grep '^ii' | awk '{print $2"="$3}' | sort > ./pinned-packages-frontend-builder.txt
 
-# Clone the private-chat frontend repository
-RUN git clone https://github.com/nearai/private-chat.git .
+# Clone the private-chat frontend repository and checkout specific version
+ARG PRIVATE_CHAT_FRONTEND_VERSION
+RUN git clone https://github.com/nearai/private-chat.git . && \
+    git checkout ${PRIVATE_CHAT_FRONTEND_VERSION}
 
 # Install pnpm with specific version
 RUN npm install -g pnpm@10.10.0
@@ -43,7 +53,7 @@ RUN pnpm run build
 
 
 # Stage 2: Rust build stage  
-FROM rust:1.90.0-bookworm@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f as backend-builder
+FROM rust:1.90.0-bookworm@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f AS backend-builder
 
 # Install pinned apt dependencies
 RUN --mount=type=bind,source=pinned-packages-backend-builder.txt,target=/tmp/pinned-packages-backend-builder.txt,ro \
