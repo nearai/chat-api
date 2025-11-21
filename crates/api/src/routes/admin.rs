@@ -17,6 +17,25 @@ pub struct PaginationQuery {
     pub offset: i64,
 }
 
+impl PaginationQuery {
+    pub fn validate(&self) -> Result<(), ApiError> {
+        if self.limit < 1 {
+            return Err(ApiError::bad_request(
+                "limit is less than minimum value of 1",
+            ));
+        }
+
+        if self.limit > LIMIT_MAX {
+            return Err(ApiError::bad_request(format!(
+                "limit exceeds maximum value of {}",
+                LIMIT_MAX
+            )));
+        }
+
+        Ok(())
+    }
+}
+
 fn default_limit() -> i64 {
     20
 }
@@ -57,18 +76,7 @@ pub async fn list_users(
         params.offset
     );
 
-    if params.limit < 1 {
-        return Err(ApiError::bad_request(
-            "limit is less than minimum value of 1",
-        ));
-    }
-
-    if params.limit > LIMIT_MAX {
-        return Err(ApiError::bad_request(format!(
-            "limit exceeds maximum value of {}",
-            LIMIT_MAX
-        )));
-    }
+    params.validate()?;
 
     let (users, total) = app_state
         .user_service
