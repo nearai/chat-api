@@ -84,6 +84,9 @@ WORKDIR /app
 # Fetch the latest pinned package list
 RUN dpkg -l | grep '^ii' | awk '{print $2"="$3}' | sort > ./pinned-packages-backend-builder.txt
 
+# Set the source date epoch to 0 to avoid timestamp changes
+ENV SOURCE_DATE_EPOCH=0
+
 # Copy workspace files
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ ./crates/
