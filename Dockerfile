@@ -11,7 +11,7 @@ RUN apt-get update && \
     && rm -rf /var/lib/apt/lists/* /var/log/* /var/cache/ldconfig/aux-cache
 
 # Install pinned apt dependencies
-RUN --mount=type=bind,source=pinned-packages-frontend-builder.txt,target=/tmp/pinned-packages-frontend-builder.txt,ro \
+RUN --mount=type=bind,source=scripts/pinned-packages-frontend-builder.txt,target=/tmp/pinned-packages-frontend-builder.txt,ro \
     set -e; \
     # Create a sources.list file pointing to a specific snapshot
     echo 'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20250411T024939Z bookworm main' > /etc/apt/sources.list && \
@@ -56,7 +56,7 @@ RUN pnpm run build
 FROM rust:1.90.0-bookworm@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f AS backend-builder
 
 # Install pinned apt dependencies
-RUN --mount=type=bind,source=pinned-packages-backend-builder.txt,target=/tmp/pinned-packages-backend-builder.txt,ro \
+RUN --mount=type=bind,source=scripts/pinned-packages-backend-builder.txt,target=/tmp/pinned-packages-backend-builder.txt,ro \
     set -e; \
     # Create a sources.list file pointing to a specific snapshot
     echo 'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20250411T024939Z bookworm main' > /etc/apt/sources.list && \
@@ -103,7 +103,7 @@ RUN apt-get update && \
     && rm -rf /var/lib/apt/lists/* /var/log/* /var/cache/ldconfig/aux-cache
 
 # Install pinned apt dependencies
-RUN --mount=type=bind,source=pinned-packages-runtime.txt,target=/tmp/pinned-packages-runtime.txt,ro \
+RUN --mount=type=bind,source=scripts/pinned-packages-runtime.txt,target=/tmp/pinned-packages-runtime.txt,ro \
     set -e; \
     # Create a sources.list file pointing to a specific snapshot
     echo 'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20250411T024939Z bookworm main' > /etc/apt/sources.list && \

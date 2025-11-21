@@ -26,7 +26,8 @@ done
 if ! docker buildx inspect buildkit_20 &>/dev/null; then
     docker buildx create --use --driver-opt image=moby/buildkit:v0.20.2 --name buildkit_20
 fi
-touch pinned-packages-frontend-builder.txt pinned-packages-backend-builder.txt pinned-packages-runtime.txt
+
+touch scripts/pinned-packages-frontend-builder.txt scripts/pinned-packages-backend-builder.txt scripts/pinned-packages-runtime.txt
 git rev-parse HEAD > .GIT_REV
 
 # Read private-chat frontend version from build-config.toml
@@ -76,14 +77,14 @@ echo ""
 # Extract package information from the built image
 echo "Extracting package information from built image: $TEMP_TAG"
 # Extract frontend builder stage package information
-docker run --rm "$TEMP_TAG" cat /app/pinned-packages-frontend-builder.txt > pinned-packages-frontend-builder.txt
-echo "Package information extracted to pinned-packages-frontend-builder.txt ($(wc -l < pinned-packages-frontend-builder.txt) packages)"
+docker run --rm "$TEMP_TAG" cat /app/pinned-packages-frontend-builder.txt > scripts/pinned-packages-frontend-builder.txt
+echo "Package information extracted to scripts/pinned-packages-frontend-builder.txt ($(wc -l < scripts/pinned-packages-frontend-builder.txt) packages)"
 # Extract backend builder stage package information
-docker run --rm "$TEMP_TAG" cat /app/pinned-packages-backend-builder.txt > pinned-packages-backend-builder.txt
-echo "Package information extracted to pinned-packages-backend-builder.txt ($(wc -l < pinned-packages-backend-builder.txt) packages)"
+docker run --rm "$TEMP_TAG" cat /app/pinned-packages-backend-builder.txt > scripts/pinned-packages-backend-builder.txt
+echo "Package information extracted to scripts/pinned-packages-backend-builder.txt ($(wc -l < scripts/pinned-packages-backend-builder.txt) packages)"
 # Extract runtime stage package information
-docker run --rm --entrypoint bash "$TEMP_TAG" -c "dpkg -l | grep '^ii' | awk '{print \$2\"=\"\$3}' | sort" > pinned-packages-runtime.txt
-echo "Package information extracted to pinned-packages-runtime.txt ($(wc -l < pinned-packages-runtime.txt) packages)"
+docker run --rm --entrypoint bash "$TEMP_TAG" -c "dpkg -l | grep '^ii' | awk '{print \$2\"=\"\$3}' | sort" > scripts/pinned-packages-runtime.txt
+echo "Package information extracted to scripts/pinned-packages-runtime.txt ($(wc -l < scripts/pinned-packages-runtime.txt) packages)"
 
 # Clean up the temporary image from Docker daemon
 docker rmi "$TEMP_TAG" 2>/dev/null || true
