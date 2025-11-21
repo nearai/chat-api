@@ -510,6 +510,7 @@ async fn archive_conversation(
         "Forwarding conversation archive request to OpenAI for user_id={}",
         user.user_id
     );
+
     // Forward to OpenAI
     let proxy_response = state
         .proxy_service
