@@ -274,11 +274,8 @@ impl UserRepository for PostgresUserRepository {
         Ok(result)
     }
 
-    async fn list_users(&self, page: i64, page_size: i64) -> anyhow::Result<(Vec<User>, u64)> {
+    async fn list_users(&self, limit: i64, offset: i64) -> anyhow::Result<(Vec<User>, u64)> {
         let client = self.pool.get().await?;
-
-        // Calculate offset
-        let offset = (page.saturating_sub(1)) * page_size;
 
         // Get paginated users and total count in a single query using window function
         // This ensures consistency by avoiding race conditions between COUNT and SELECT queries
@@ -289,7 +286,7 @@ impl UserRepository for PostgresUserRepository {
                  FROM users 
                  ORDER BY created_at DESC 
                  LIMIT $1 OFFSET $2",
-                &[&page_size, &offset],
+                &[&limit, &offset],
             )
             .await?;
 

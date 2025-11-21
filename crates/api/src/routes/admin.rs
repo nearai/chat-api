@@ -1,4 +1,4 @@
-use crate::{consts::PAGE_SIZE_MAX, error::ApiError, models::*, state::AppState};
+use crate::{consts::LIMIT_MAX, error::ApiError, models::*, state::AppState};
 use axum::{
     extract::{Query, State},
     routing::get,
@@ -9,20 +9,20 @@ use serde::Deserialize;
 /// Pagination query parameters
 #[derive(Debug, Deserialize)]
 pub struct PaginationQuery {
-    /// Page number (1-based, default: 1)
-    #[serde(default = "default_page")]
-    pub page: i64,
-    /// Number of items per page (default: 20, max: PAGE_SIZE_MAX)
-    #[serde(default = "default_page_size")]
-    pub page_size: i64,
+    /// Maximum number of items to return (default: 20, max: LIMIT_MAX)
+    #[serde(default = "default_limit")]
+    pub limit: i64,
+    /// Number of items to skip (default: 0)
+    #[serde(default = "default_offset")]
+    pub offset: i64,
 }
 
-fn default_page() -> i64 {
-    1
-}
-
-fn default_page_size() -> i64 {
+fn default_limit() -> i64 {
     20
+}
+
+fn default_offset() -> i64 {
+    0
 }
 
 /// List users
@@ -33,8 +33,8 @@ fn default_page_size() -> i64 {
     path = "/v1/admin/users",
     tag = "Admin",
     params(
-        ("page" = Option<u32>, Query, description = "Page number (1-based, default: 1)"),
-        ("page_size" = Option<u32>, Query, description = "Number of items per page (default: 20, max: 100)")
+        ("limit" = Option<u32>, Query, description = "Maximum number of items to return (default: 20, max: 100)"),
+        ("offset" = Option<u32>, Query, description = "Number of items to skip (default: 0)")
     ),
     responses(
         (status = 200, description = "User list retrieved", body = UserListResponse),
@@ -52,47 +52,38 @@ pub async fn list_users(
     Query(params): Query<PaginationQuery>,
 ) -> Result<Json<UserListResponse>, ApiError> {
     tracing::info!(
-        "Listing users with page={}, page_size={}",
-        params.page,
-        params.page_size
+        "Listing users with limit={}, offset={}",
+        params.limit,
+        params.offset
     );
 
-    if params.page < 1 {
+    if params.limit < 1 {
         return Err(ApiError::bad_request(
-            "page is less than minimum value of 1",
+            "limit is less than minimum value of 1",
         ));
     }
 
-    if params.page_size < 1 {
-        return Err(ApiError::bad_request(
-            "page_size is less than minimum value of 1",
-        ));
-    }
-
-    if params.page_size > PAGE_SIZE_MAX {
+    if params.limit > LIMIT_MAX {
         return Err(ApiError::bad_request(format!(
-            "page_size exceeds maximum value of {}",
-            PAGE_SIZE_MAX
+            "limit exceeds maximum value of {}",
+            LIMIT_MAX
         )));
     }
 
     let (users, total) = app_state
         .user_service
-        .list_users(params.page, params.page_size)
+        .list_users(params.limit, params.offset)
         .await
         .map_err(|e| {
             tracing::error!("Failed to list users: {}", e);
             ApiError::internal_server_error("Failed to list users")
         })?;
 
-    let total_pages = ((total as f64) / (params.page_size as f64)).ceil() as u64;
-
     Ok(Json(UserListResponse {
         users: users.into_iter().map(Into::into).collect(),
-        page: params.page,
-        page_size: params.page_size,
+        limit: params.limit,
+        offset: params.offset,
         total,
-        total_pages,
     }))
 }
 

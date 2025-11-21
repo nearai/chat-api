@@ -212,12 +212,10 @@ impl UpdateUserSettingsPartiallyRequest {
 pub struct UserListResponse {
     /// List of users
     pub users: Vec<UserResponse>,
-    /// Current page number (1-based)
-    pub page: i64,
-    /// Number of items per page
-    pub page_size: i64,
+    /// Maximum number of items returned
+    pub limit: i64,
+    /// Number of items skipped
+    pub offset: i64,
     /// Total number of users
     pub total: u64,
-    /// Total number of pages
-    pub total_pages: u64,
 }

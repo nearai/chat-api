@@ -98,17 +98,17 @@ impl UserService for UserServiceImpl {
         Ok(())
     }
 
-    async fn list_users(&self, page: i64, page_size: i64) -> anyhow::Result<(Vec<User>, u64)> {
-        tracing::info!("Listing users with page={}, page_size={}", page, page_size);
+    async fn list_users(&self, limit: i64, offset: i64) -> anyhow::Result<(Vec<User>, u64)> {
+        tracing::info!("Listing users with limit={}, offset={}", limit, offset);
 
-        let (users, total_count) = self.user_repository.list_users(page, page_size).await?;
+        let (users, total_count) = self.user_repository.list_users(limit, offset).await?;
 
         tracing::info!(
-            "Retrieved {} user(s) (total: {}) for page={}, page_size={}",
+            "Retrieved {} user(s) (total: {}) for limit={}, offset={}",
             users.len(),
             total_count,
-            page,
-            page_size
+            limit,
+            offset
         );
 
         Ok((users, total_count))
