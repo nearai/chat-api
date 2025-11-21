@@ -122,9 +122,9 @@ RUN --mount=type=bind,source=scripts/pinned-packages-runtime.txt,target=/tmp/pin
     apt-get update && \
     apt-get install -y --no-install-recommends \
         ca-certificates \
+        libssl3 \
+        curl \
         && rm -rf /var/lib/apt/lists/* /var/log/* /var/cache/ldconfig/aux-cache
-        # libssl3 \
-        # curl \
 
 # Create app user
 # Normalize /etc/shadow file last password change date to 0 for app user
@@ -142,7 +142,7 @@ RUN mkdir -p /app/crates/database/src/migrations/sql
 COPY --from=backend-builder --chmod=0664 /app/crates/database/src/migrations/sql/*.sql /app/crates/database/src/migrations/sql/
 
 # Copy the built frontend from the frontend-builder stage
-COPY --from=frontend-builder --chmod=0775 /frontend/dist ./crates/api/frontend/dist
+COPY --from=frontend-builder /frontend/dist ./crates/api/frontend/dist
 
 # Copy the pinned package list from builder stage
 COPY --from=frontend-builder --chmod=0664 /frontend/pinned-packages-frontend-builder.txt /app/pinned-packages-frontend-builder.txt
