@@ -12,6 +12,7 @@ use flate2::read::GzDecoder;
 use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use services::conversation::ports::ConversationError;
+use services::response::ports::ProxyResponse;
 use services::UserId;
 use std::io::Read;
 
@@ -51,6 +52,10 @@ pub fn create_api_router() -> Router<crate::state::AppState> {
         .route(
             "/v1/conversations/{conversation_id}/archive",
             delete(unarchive_conversation),
+        )
+        .route(
+            "/v1/conversations/{conversation_id}/clone",
+            post(clone_conversation),
         )
         // Catch-all proxy for all other OpenAI endpoints
         .route("/v1/{*path}", post(proxy_handler))
@@ -129,17 +134,21 @@ async fn create_conversation(
                 .into_response()
         })?;
 
+    handle_conversation_response(&state, &user, proxy_response).await
+}
+
+/// Helper function to handle conversation response: buffer, parse, and track conversation
+async fn handle_conversation_response(
+    state: &crate::state::AppState,
+    user: &AuthenticatedUser,
+    proxy_response: ProxyResponse,
+) -> Result<Response, Response> {
     let status = proxy_response.status;
     let response_headers = proxy_response.headers;
 
-    tracing::info!(
-        "Received response from OpenAI for conversation creation - status: {}, user_id={}",
-        status,
-        user.user_id
-    );
     tracing::debug!("Response headers: {:?}", response_headers);
 
-    // For conversation creation, we need to buffer the response to extract the conversation ID
+    // Buffer the response to extract the conversation ID
     // Collect the stream into bytes
     let body_bytes: Bytes = proxy_response
         .body
@@ -160,9 +169,6 @@ async fn create_conversation(
 
     // If successful, parse response and track conversation
     if (200..300).contains(&status) {
-        tracing::debug!("Parsing successful conversation creation response");
-
-        // Decompress if gzipped
         let decompressed_bytes = match decompress_if_gzipped(&body_bytes, &response_headers) {
             Ok(bytes) => bytes,
             Err(e) => {
@@ -179,12 +185,6 @@ async fn create_conversation(
         {
             tracing::debug!("Response JSON parsed successfully");
             if let Some(conversation_id) = response_json.get("id").and_then(|v| v.as_str()) {
-                tracing::info!(
-                    "Conversation created with id={} for user_id={}",
-                    conversation_id,
-                    user.user_id
-                );
-
                 // Track conversation in database
                 tracing::debug!("Tracking conversation {} in database", conversation_id);
                 if let Err(e) = state
@@ -223,7 +223,7 @@ async fn create_conversation(
         }
     } else {
         tracing::warn!(
-            "Conversation creation returned non-success status {} for user_id={}",
+            "Returned non-success status {} for user_id={}",
             status,
             user.user_id
         );
@@ -590,6 +590,55 @@ async fn unarchive_conversation(
         Body::from_stream(proxy_response.body),
     )
     .await
+}
+
+async fn clone_conversation(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(conversation_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, Response> {
+    tracing::info!(
+        "clone_conversation called for user_id={}, session_id={}, conversation_id={}",
+        user.user_id,
+        user.session_id,
+        conversation_id
+    );
+
+    // Validate user has access to the source conversation
+    validate_user_conversation(&state, &user, &conversation_id).await?;
+
+    tracing::debug!(
+        "Forwarding conversation clone request to OpenAI for user_id={}",
+        user.user_id
+    );
+
+    // Forward to OpenAI
+    let proxy_response = state
+        .proxy_service
+        .forward_request(
+            Method::POST,
+            &format!("conversations/{conversation_id}/clone"),
+            headers.clone(),
+            None,
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "OpenAI API error during conversation clone for user_id={}: {}",
+                user.user_id,
+                e
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("OpenAI API error: {e}"),
+                }),
+            )
+                .into_response()
+        })?;
+
+    handle_conversation_response(&state, &user, proxy_response).await
 }
 
 /// Generic proxy handler that forwards all requests to OpenAI
