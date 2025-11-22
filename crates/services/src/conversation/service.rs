@@ -201,11 +201,7 @@ impl ConversationServiceImpl {
                     all_missing_ids.extend(missing_ids);
                 }
                 Err(e) => {
-                    tracing::error!(
-                        "Batch request {} failed: {}",
-                        idx + 1,
-                        e
-                    );
+                    tracing::error!("Batch request {} failed: {}", idx + 1, e);
                     return Err(e);
                 }
             }
