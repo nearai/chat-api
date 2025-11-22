@@ -206,3 +206,16 @@ impl UpdateUserSettingsPartiallyRequest {
         Ok(())
     }
 }
+
+/// Paginated user list response
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UserListResponse {
+    /// List of users
+    pub users: Vec<UserResponse>,
+    /// Maximum number of items returned
+    pub limit: i64,
+    /// Number of items skipped
+    pub offset: i64,
+    /// Total number of users
+    pub total: u64,
+}

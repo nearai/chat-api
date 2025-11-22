@@ -172,7 +172,7 @@ pub async fn update_user_settings_partially(
     }))
 }
 
-/// Create user router with all routes
+/// Create user router with all routes (requires authentication)
 pub fn create_user_router() -> Router<AppState> {
     Router::new()
         .route("/me", get(get_current_user))

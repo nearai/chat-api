@@ -1,3 +1,4 @@
+use crate::{error::ApiError, state::AppState};
 use axum::{
     extract::{Query, State},
     http::StatusCode,
@@ -7,8 +8,6 @@ use axum::{
 };
 use serde::Deserialize;
 use services::SessionId;
-
-use crate::{error::ApiError, state::AppState};
 
 /// Query parameters for OAuth callback
 #[derive(Debug, Deserialize)]
@@ -22,6 +21,15 @@ pub struct OAuthCallbackQuery {
 pub struct OAuthInitQuery {
     pub redirect_uri: Option<String>,
     pub frontend_callback: Option<String>,
+}
+
+/// Request body for mock login (test only)
+#[cfg(feature = "test")]
+#[derive(Debug, Deserialize)]
+pub struct MockLoginRequest {
+    pub email: String,
+    pub name: Option<String>,
+    pub avatar_url: Option<String>,
 }
 
 /// Handler for initiating Google OAuth flow
@@ -240,14 +248,89 @@ pub async fn logout(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Mock login handler for testing (test only)
+///
+/// This endpoint allows creating a user and getting a session token directly,
+/// bypassing the OAuth flow. Only available in test builds.
+#[cfg(feature = "test")]
+pub async fn mock_login(
+    State(app_state): State<AppState>,
+    axum::Json(request): axum::Json<MockLoginRequest>,
+) -> Result<axum::Json<crate::models::AuthResponse>, ApiError> {
+    tracing::info!("Mock login requested for email: {}", request.email);
+
+    // Check if user already exists
+    let user = match app_state
+        .user_repository
+        .get_user_by_email(&request.email)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to check existing user: {}", e);
+            ApiError::internal_server_error("Failed to check user")
+        })? {
+        Some(existing_user) => {
+            tracing::info!("User already exists: user_id={}", existing_user.id);
+            existing_user
+        }
+        None => {
+            // Create new user
+            tracing::info!("Creating new user with email: {}", request.email);
+            app_state
+                .user_repository
+                .create_user(
+                    request.email.clone(),
+                    request.name.clone(),
+                    request.avatar_url.clone(),
+                )
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to create user: {}", e);
+                    ApiError::internal_server_error("Failed to create user")
+                })?
+        }
+    };
+
+    // Create session
+    let session = app_state
+        .session_repository
+        .create_session(user.id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to create session: {}", e);
+            ApiError::internal_server_error("Failed to create session")
+        })?;
+
+    let token = session.token.ok_or_else(|| {
+        tracing::error!("Session token not returned for user_id: {}", user.id);
+        ApiError::internal_server_error("Failed to create session")
+    })?;
+
+    tracing::info!(
+        "Mock login successful - user_id={}, session_id={}",
+        user.id,
+        session.session_id
+    );
+
+    Ok(axum::Json(crate::models::AuthResponse {
+        token,
+        expires_at: session.expires_at.to_rfc3339(),
+    }))
+}
+
 /// Create OAuth router with all routes
 pub fn create_oauth_router() -> Router<AppState> {
-    Router::new()
+    let router = Router::new()
         // OAuth initiation routes
         .route("/google", get(google_login))
         .route("/github", get(github_login))
         // Unified callback route for all providers
         .route("/callback", get(oauth_callback))
         // Logout route
-        .route("/logout", get(logout))
+        .route("/logout", get(logout));
+
+    // Add mock login route only in test builds
+    #[cfg(feature = "test")]
+    let router = router.route("/mock-login", axum::routing::post(mock_login));
+
+    router
 }
