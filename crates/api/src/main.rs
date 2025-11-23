@@ -32,13 +32,15 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!(
         "Database: {}:{}/{}",
-        config.database.host.as_deref().unwrap_or(
-            if !config.database.primary_app_id.is_empty() {
+        config
+            .database
+            .host
+            .as_deref()
+            .unwrap_or(if !config.database.primary_app_id.is_empty() {
                 &config.database.primary_app_id
             } else {
                 "localhost"
-            }
-        ),
+            }),
         config.database.port,
         config.database.database
     );

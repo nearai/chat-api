@@ -372,13 +372,21 @@ mod tests {
 
     #[test]
     fn test_read_preference_from_str() {
-        assert_eq!(ReadPreference::from("round_robin"), ReadPreference::RoundRobin);
-        assert_eq!(ReadPreference::from("Round_Robin"), ReadPreference::RoundRobin);
+        assert_eq!(
+            ReadPreference::from("round_robin"),
+            ReadPreference::RoundRobin
+        );
+        assert_eq!(
+            ReadPreference::from("Round_Robin"),
+            ReadPreference::RoundRobin
+        );
         assert_eq!(ReadPreference::from("least_lag"), ReadPreference::LeastLag);
         assert_eq!(ReadPreference::from("LEAST_LAG"), ReadPreference::LeastLag);
-        assert_eq!(ReadPreference::from("leader_only"), ReadPreference::LeaderOnly);
+        assert_eq!(
+            ReadPreference::from("leader_only"),
+            ReadPreference::LeaderOnly
+        );
         assert_eq!(ReadPreference::from("unknown"), ReadPreference::LeastLag); // Default
         assert_eq!(ReadPreference::from(""), ReadPreference::LeastLag); // Default
     }
 }
-

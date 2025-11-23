@@ -283,15 +283,17 @@ mod tests {
     #[tokio::test]
     async fn test_get_least_lag_replica() {
         let discovery = PatroniDiscovery::new("test-app".to_string(), 30);
-        
+
         let replica1 = create_test_member("replica1", "replica", Some(100));
         let replica2 = create_test_member("replica2", "replica", Some(10));
         let replica3 = create_test_member("replica3", "replica", Some(1000));
-        
-        discovery.set_cluster_state_for_testing(
-            None,
-            vec![replica1.clone(), replica2.clone(), replica3.clone()]
-        ).await;
+
+        discovery
+            .set_cluster_state_for_testing(
+                None,
+                vec![replica1.clone(), replica2.clone(), replica3.clone()],
+            )
+            .await;
 
         // Should pick replica2 (least lag)
         let chosen = discovery.get_least_lag_replica(None).await.unwrap();
@@ -301,7 +303,7 @@ mod tests {
         let chosen = discovery.get_least_lag_replica(Some(50)).await.unwrap();
         assert_eq!(chosen.name, "replica2");
 
-        // With max lag constraint that excludes best replica but allows others? 
+        // With max lag constraint that excludes best replica but allows others?
         // Logic sorts by lag, so it checks strictly in order.
         // If best replica has lag 10, and max is 5, it should return None (assuming others have more lag)
         let chosen = discovery.get_least_lag_replica(Some(5)).await;
@@ -311,15 +313,14 @@ mod tests {
     #[tokio::test]
     async fn test_get_replicas_by_lag() {
         let discovery = PatroniDiscovery::new("test-app".to_string(), 30);
-        
+
         let replica1 = create_test_member("replica1", "replica", Some(100));
         let replica2 = create_test_member("replica2", "replica", Some(10));
         let replica3 = create_test_member("replica3", "replica", None); // Unknown lag -> last
-        
-        discovery.set_cluster_state_for_testing(
-            None,
-            vec![replica1, replica2, replica3]
-        ).await;
+
+        discovery
+            .set_cluster_state_for_testing(None, vec![replica1, replica2, replica3])
+            .await;
 
         let replicas = discovery.get_replicas_by_lag().await;
         assert_eq!(replicas.len(), 3);
@@ -331,14 +332,13 @@ mod tests {
     #[tokio::test]
     async fn test_round_robin_selection() {
         let discovery = PatroniDiscovery::new("test-app".to_string(), 30);
-        
+
         let replica1 = create_test_member("replica1", "replica", None);
         let replica2 = create_test_member("replica2", "replica", None);
-        
-        discovery.set_cluster_state_for_testing(
-            None,
-            vec![replica1, replica2]
-        ).await;
+
+        discovery
+            .set_cluster_state_for_testing(None, vec![replica1, replica2])
+            .await;
 
         let r1 = discovery.get_read_replica_round_robin(0).await.unwrap();
         let r2 = discovery.get_read_replica_round_robin(1).await.unwrap();
@@ -394,4 +394,3 @@ mod tests {
         assert_eq!(info.scope.as_deref(), Some("pg-cluster"));
     }
 }
-

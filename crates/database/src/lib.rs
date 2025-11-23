@@ -1,8 +1,8 @@
 pub mod cluster_manager;
 pub mod migrations;
+pub mod patroni_discovery;
 pub mod pool;
 pub mod repositories;
-pub mod patroni_discovery;
 
 pub use pool::DbPool;
 pub use repositories::{
@@ -10,8 +10,8 @@ pub use repositories::{
     PostgresUserRepository, PostgresUserSettingsRepository,
 };
 
-use anyhow::Result;
 use crate::pool::create_pool_with_native_tls;
+use anyhow::Result;
 use cluster_manager::{ClusterManager, DatabaseConfig as ClusterDbConfig, ReadPreference};
 use deadpool_postgres::Runtime;
 use patroni_discovery::PatroniDiscovery;
@@ -54,7 +54,7 @@ impl Database {
         // If mock flag is set, use mock database
         if config.mock {
             info!("Using mock database for testing (not implemented yet, falling back to simple postgres)");
-             // return create_mock_database().await;
+            // return create_mock_database().await;
         }
 
         // For tests or simple setup, use simple postgres connection without Patroni
@@ -97,8 +97,8 @@ impl Database {
             database: config.database.clone(),
             username: config.username.clone(),
             password: config.password.clone(),
-            max_write_connections: config.max_connections as u32,
-            max_read_connections: config.max_connections as u32,
+            max_write_connections: config.max_connections,
+            max_read_connections: config.max_connections,
             tls_enabled: config.tls_enabled,
             tls_ca_cert_path: config.tls_ca_cert_path.clone(),
         };
