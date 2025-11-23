@@ -74,17 +74,25 @@ Tests automatic conversation tracking:
    DATABASE_PASSWORD=your_password
    ```
 
-3. **Valid Session Token**: The tests use `SESSION_TOKEN` constant - ensure you have a valid session in the database
+3. **Test Feature Flag**: Most tests require the `test` feature flag to enable the mock-login endpoint
 
 ### Run All Tests
 
 ```bash
+# Run all tests (including admin tests)
+cargo test --features test
+
 # Run all E2E tests (they make real OpenAI API calls)
-cargo test --test e2e_api_tests -- --ignored --nocapture
+cargo test --test e2e_api_tests --features test -- --ignored --nocapture
+
+# Run admin tests
+cargo test --test admin_tests --features test
 
 # Run a specific test
-cargo test --test e2e_api_tests test_conversation_workflow -- --ignored --nocapture
+cargo test --test e2e_api_tests test_conversation_workflow --features test -- --ignored --nocapture
 ```
+
+**Important**: The `--features test` flag is required for most tests because it enables the `/v1/auth/mock-login` endpoint used for test authentication without requiring real OAuth providers.
 
 ### Test Output
 
