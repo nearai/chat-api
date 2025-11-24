@@ -82,6 +82,9 @@ pub trait UserRepository: Send + Sync {
         provider: OAuthProvider,
         provider_user_id: &str,
     ) -> anyhow::Result<Option<UserId>>;
+
+    /// List users with pagination
+    async fn list_users(&self, limit: i64, offset: i64) -> anyhow::Result<(Vec<User>, u64)>;
 }
 
 /// Service trait for user-related operations
@@ -100,6 +103,9 @@ pub trait UserService: Send + Sync {
 
     /// Delete user account
     async fn delete_account(&self, user_id: UserId) -> anyhow::Result<()>;
+
+    /// List users with pagination
+    async fn list_users(&self, limit: i64, offset: i64) -> anyhow::Result<(Vec<User>, u64)>;
 }
 
 /// User settings content structure

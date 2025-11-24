@@ -22,6 +22,8 @@ pub struct AuthenticatedUser {
 #[derive(Clone)]
 pub struct AuthState {
     pub session_repository: Arc<dyn services::auth::ports::SessionRepository>,
+    pub user_service: Arc<dyn services::user::ports::UserService>,
+    pub admin_domains: Arc<Vec<String>>,
 }
 
 /// Hash a session token for lookup
@@ -31,99 +33,62 @@ fn hash_session_token(token: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-/// Authentication middleware that validates session tokens
-pub async fn auth_middleware(
-    State(state): State<AuthState>,
-    mut request: Request,
-    next: Next,
-) -> Result<Response, Response> {
-    let path = request.uri().path();
-    let method = request.method().clone();
-
-    tracing::info!("Auth middleware invoked for {} {}", method, path);
-
-    // Try to extract authentication from Authorization header
+/// Extract and validate token from Authorization header
+fn extract_token_from_request(request: &Request) -> Result<String, ApiError> {
     let auth_header = request
         .headers()
         .get("authorization")
         .and_then(|h| h.to_str().ok());
 
+    let auth_value = auth_header.ok_or_else(|| {
+        tracing::warn!("No authorization header found");
+        ApiError::missing_auth_header()
+    })?;
+
+    let token = auth_value.strip_prefix("Bearer ").ok_or_else(|| {
+        tracing::warn!(
+            "Authorization header does not start with 'Bearer ', header: {}",
+            auth_value
+        );
+        ApiError::invalid_auth_header()
+    })?;
+
+    // Validate token format (should start with sess_ and be the right length)
+    if !token.starts_with("sess_") {
+        tracing::warn!("Invalid session token format: token does not start with 'sess_'");
+        return Err(ApiError::invalid_token());
+    }
+
+    if token.len() != 37 {
+        tracing::warn!(
+            "Invalid session token format: expected length 37, got {}",
+            token.len()
+        );
+        return Err(ApiError::invalid_token());
+    }
+
+    Ok(token.to_string())
+}
+
+/// Authenticate a token string (without needing Request object)
+async fn authenticate_token_string(
+    token: String,
+    auth_state: &AuthState,
+) -> Result<AuthenticatedUser, ApiError> {
     tracing::debug!(
-        "Auth middleware: processing request with auth_header present: {}",
-        auth_header.is_some()
+        "Authenticating token, length: {}, prefix: {}...",
+        token.len(),
+        &token.chars().take(8).collect::<String>()
     );
 
-    if let Some(auth_value) = auth_header {
-        tracing::debug!(
-            "Authorization header value prefix: {}...",
-            &auth_value.chars().take(10).collect::<String>()
-        );
-    }
+    // Hash the token and look it up
+    let token_hash = hash_session_token(&token);
+    tracing::debug!(
+        "Token hashed, hash prefix: {}...",
+        &token_hash.chars().take(16).collect::<String>()
+    );
 
-    let auth_result = if let Some(auth_value) = auth_header {
-        if let Some(token) = auth_value.strip_prefix("Bearer ") {
-            tracing::debug!(
-                "Extracted Bearer token, length: {}, prefix: {}...",
-                token.len(),
-                &token.chars().take(8).collect::<String>()
-            );
-
-            // Validate token format (should start with sess_ and be the right length)
-            if !token.starts_with("sess_") {
-                tracing::warn!("Invalid session token format: token does not start with 'sess_'");
-                return Err(ApiError::invalid_token().into_response());
-            }
-
-            if token.len() != 37 {
-                tracing::warn!(
-                    "Invalid session token format: expected length 37, got {}",
-                    token.len()
-                );
-                return Err(ApiError::invalid_token().into_response());
-            }
-
-            tracing::debug!("Token format validation passed, proceeding to authenticate");
-
-            // Hash the token and look it up
-            let token_hash = hash_session_token(token);
-            tracing::debug!(
-                "Token hashed, hash prefix: {}...",
-                &token_hash.chars().take(16).collect::<String>()
-            );
-
-            authenticate_session_by_token(&state, token_hash).await
-        } else {
-            tracing::warn!(
-                "Authorization header does not start with 'Bearer ', header: {}",
-                auth_value
-            );
-            Err(ApiError::invalid_auth_header())
-        }
-    } else {
-        tracing::warn!("No authorization header found for {} {}", method, path);
-        Err(ApiError::missing_auth_header())
-    };
-
-    match auth_result {
-        Ok(user) => {
-            tracing::info!(
-                "Authentication successful for user_id={}, session_id={} on {} {}",
-                user.user_id,
-                user.session_id,
-                method,
-                path
-            );
-            // Add authenticated user to request extensions
-            request.extensions_mut().insert(user);
-            let response = next.run(request).await;
-            tracing::debug!("Request completed with status: {}", response.status());
-            Ok(response)
-        }
-        Err(err) => {
-            tracing::error!("Authentication failed for {} {}: {:?}", method, path, err);
-            Err(err.into_response())
-        }
-    }
+    authenticate_session_by_token(auth_state, token_hash).await
 }
 
 /// Authenticate a session by token hash
@@ -193,4 +158,127 @@ async fn authenticate_session_by_token(
         user_id: session.user_id,
         session_id: session.session_id,
     })
+}
+
+/// Extracts the domain portion from an email address.
+///
+/// # Arguments
+/// * `email` - The email address to parse
+///
+/// # Returns
+/// The lowercase domain if the email contains an '@' symbol, None otherwise
+///
+/// # Examples
+/// * `user@example.com` -> `Some("example.com")`
+/// * `invalid-email` -> `None`
+fn extract_email_domain(email: &str) -> Option<String> {
+    email
+        .split_once('@')
+        .map(|(_, domain)| domain.to_lowercase())
+}
+
+/// Check if email domain is in the allowed admin domains list
+fn is_admin_domain(email: &str, admin_domains: &[String]) -> bool {
+    if admin_domains.is_empty() {
+        tracing::warn!("Admin domains list is empty, denying access");
+        return false;
+    }
+
+    if let Some(domain) = extract_email_domain(email) {
+        admin_domains.contains(&domain)
+    } else {
+        tracing::warn!("Failed to extract domain from email: {}", email);
+        false
+    }
+}
+
+/// Authentication middleware that validates session tokens
+pub async fn auth_middleware(
+    State(state): State<AuthState>,
+    mut request: Request,
+    next: Next,
+) -> Result<Response, Response> {
+    let path = request.uri().path().to_string();
+    let method = request.method().clone();
+
+    tracing::info!("Auth middleware invoked for {} {}", method, path);
+
+    let token = extract_token_from_request(&request).map_err(|e| e.into_response())?;
+    let user = authenticate_token_string(token, &state)
+        .await
+        .map_err(|e| e.into_response())?;
+
+    tracing::info!(
+        "Authentication successful for user_id={}, session_id={} on {} {}",
+        user.user_id,
+        user.session_id,
+        method,
+        path
+    );
+    // Add authenticated user to request extensions
+    request.extensions_mut().insert(user);
+    let response = next.run(request).await;
+    tracing::debug!("Request completed with status: {}", response.status());
+    Ok(response)
+}
+
+/// Admin authentication middleware that validates session tokens and checks admin domain
+/// This middleware first authenticates the user, then checks if their email domain
+/// is in the allowed admin domains list.
+pub async fn admin_auth_middleware(
+    State(state): State<AuthState>,
+    mut request: Request,
+    next: Next,
+) -> Result<Response, Response> {
+    let path = request.uri().path().to_string();
+    let method = request.method().clone();
+
+    tracing::info!("Admin auth middleware invoked for {} {}", method, path);
+
+    let token = extract_token_from_request(&request).map_err(|e| e.into_response())?;
+    let authenticated_user = authenticate_token_string(token, &state)
+        .await
+        .map_err(|err| {
+            tracing::error!("Authentication failed in admin middleware: {:?}", err);
+            err.into_response()
+        })?;
+
+    tracing::info!(
+        "User authenticated, checking admin access for user_id={}",
+        authenticated_user.user_id
+    );
+
+    // Get user profile to check email domain
+    let user_profile = state
+        .user_service
+        .get_user_profile(authenticated_user.user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get user profile for admin check: {}", e);
+            ApiError::internal_server_error("Failed to verify admin access").into_response()
+        })?;
+
+    let user_email = &user_profile.user.email;
+    tracing::debug!("Checking admin access for email: {}", user_email);
+
+    if !is_admin_domain(user_email, &state.admin_domains) {
+        tracing::warn!(
+            "Admin access denied for user_id={}, email={}, domain not in allowed list: {:?}",
+            authenticated_user.user_id,
+            user_email,
+            &state.admin_domains
+        );
+        return Err(ApiError::forbidden("Admin access required").into_response());
+    }
+
+    tracing::info!(
+        "Admin access granted for user_id={}, email={}",
+        authenticated_user.user_id,
+        user_email
+    );
+
+    // Add authenticated user to request extensions
+    request.extensions_mut().insert(authenticated_user);
+    let response = next.run(request).await;
+    Ok(response)
 }

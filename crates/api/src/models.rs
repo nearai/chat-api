@@ -36,12 +36,6 @@ pub struct AuthResponse {
     pub expires_at: String,
 }
 
-/// Error response
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct ErrorResponse {
-    pub error: String,
-}
-
 impl From<services::user::ports::User> for UserResponse {
     fn from(user: services::user::ports::User) -> Self {
         Self {
@@ -85,9 +79,15 @@ impl From<services::user::ports::UserProfile> for UserProfileResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ApiGatewayAttestation {
     /// Intel TDX quote in hex format
-    pub quote: String,
-    /// Event log in hex format
-    pub event_log: String,
+    pub intel_quote: String,
+    /// Event log
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_log: Option<serde_json::Value>,
+    /// Request nonce
+    pub request_nonce: String,
+    /// Attestation info
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub info: Option<serde_json::Value>,
 }
 
 /// Model attestation from VLLM inference providers
@@ -126,7 +126,14 @@ pub struct CombinedAttestationReport {
     pub cloud_api_gateway_attestation: ApiGatewayAttestation,
 
     /// Model provider attestations (can be multiple when routing to different models)
-    pub model_attestations: Vec<ModelAttestation>,
+    pub model_attestations: Option<Vec<ModelAttestation>>,
+}
+
+/// Attestation report structure from proxy_service
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttestationReport {
+    pub gateway_attestation: ApiGatewayAttestation,
+    pub model_attestations: Option<Vec<ModelAttestation>>,
 }
 
 /// User settings content for API responses
@@ -198,4 +205,17 @@ impl UpdateUserSettingsPartiallyRequest {
 
         Ok(())
     }
+}
+
+/// Paginated user list response
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UserListResponse {
+    /// List of users
+    pub users: Vec<UserResponse>,
+    /// Maximum number of items returned
+    pub limit: i64,
+    /// Number of items skipped
+    pub offset: i64,
+    /// Total number of users
+    pub total: u64,
 }

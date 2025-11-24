@@ -1,8 +1,7 @@
 use crate::{error::ApiError, middleware::AuthenticatedUser, models::*, state::AppState};
-use axum::routing::post;
 use axum::{
     extract::{Extension, State},
-    routing::{get, patch},
+    routing::{get, patch, post},
     Json, Router,
 };
 
@@ -173,7 +172,7 @@ pub async fn update_user_settings_partially(
     }))
 }
 
-/// Create user router with all routes
+/// Create user router with all routes (requires authentication)
 pub fn create_user_router() -> Router<AppState> {
     Router::new()
         .route("/me", get(get_current_user))
