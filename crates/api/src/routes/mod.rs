@@ -4,10 +4,39 @@ pub mod attestation;
 pub mod oauth;
 pub mod users;
 
-use axum::{middleware::from_fn_with_state, routing::get, Router};
+use axum::{middleware::from_fn_with_state, routing::get, Json, Router};
+use serde::Serialize;
 use tower_http::cors::{Any, CorsLayer};
+use utoipa::ToSchema;
 
 use crate::{middleware::AuthState, state::AppState, static_files};
+
+#[derive(Serialize, ToSchema)]
+pub struct HealthResponse {
+    /// Service status
+    pub status: &'static str,
+    /// API version
+    pub version: &'static str,
+}
+
+/// Health check endpoint
+///
+/// Returns the health status of the API service. This endpoint is typically used by
+/// load balancers, monitoring systems, and orchestration tools to verify service availability.
+#[utoipa::path(
+    get,
+    path = "/health",
+    tag = "Health",
+    responses(
+        (status = 200, description = "Service is healthy", body = HealthResponse)
+    )
+)]
+async fn health_check() -> Json<HealthResponse> {
+    Json(HealthResponse {
+        status: "ok",
+        version: env!("CARGO_PKG_VERSION"),
+    })
+}
 
 /// Create the main API router with all routes
 pub fn create_router(app_state: AppState) -> Router {
@@ -49,6 +78,7 @@ pub fn create_router_with_cors(app_state: AppState, allowed_origins: Vec<String>
 
     // Build the base router
     let router = Router::new()
+        .route("/health", get(health_check))
         .nest("/v1/auth", auth_routes)
         .nest("/v1/users", user_routes)
         .nest("/v1/admin", admin_routes)

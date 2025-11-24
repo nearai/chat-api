@@ -12,6 +12,8 @@ use utoipa::OpenApi;
         license(name = "MIT",)
     ),
     paths(
+        // Health endpoint
+        crate::routes::health_check,
         // Auth endpoints
         crate::routes::oauth::google_login,
         crate::routes::oauth::github_login,
@@ -29,6 +31,7 @@ use utoipa::OpenApi;
     ),
     components(schemas(
         // Request/Response models
+        crate::routes::HealthResponse,
         crate::models::UserResponse,
         crate::models::UserListResponse,
         crate::models::LinkedAccountResponse,
@@ -46,6 +49,7 @@ use utoipa::OpenApi;
     )),
     modifiers(&SecurityAddon),
     tags(
+        (name = "Health", description = "Health check and service status endpoints"),
         (name = "Auth", description = "OAuth authentication endpoints"),
         (name = "Users", description = "User profile management endpoints"),
         (name = "Admin", description = "Admin management endpoints"),
