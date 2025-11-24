@@ -466,7 +466,9 @@ dependencies = [
  "headers",
  "hex",
  "http",
+ "mime_guess",
  "reqwest",
+ "rust-embed",
  "serde",
  "serde_json",
  "serde_urlencoded",
@@ -3833,6 +3835,7 @@ version = "8.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "025908b8682a26ba8d12f6f2d66b987584a4a87bc024abc5bbc12553a8cd178a"
 dependencies = [
+ "axum",
  "rust-embed-impl",
  "rust-embed-utils",
  "walkdir",

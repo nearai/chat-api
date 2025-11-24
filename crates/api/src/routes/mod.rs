@@ -4,10 +4,10 @@ pub mod attestation;
 pub mod oauth;
 pub mod users;
 
-use axum::{middleware::from_fn_with_state, Router};
+use axum::{middleware::from_fn_with_state, routing::get, Router};
 use tower_http::cors::{Any, CorsLayer};
 
-use crate::{middleware::AuthState, state::AppState};
+use crate::{middleware::AuthState, state::AppState, static_files};
 
 /// Create the main API router with all routes
 pub fn create_router(app_state: AppState) -> Router {
@@ -54,7 +54,9 @@ pub fn create_router_with_cors(app_state: AppState, allowed_origins: Vec<String>
         .nest("/v1/admin", admin_routes)
         .merge(api_routes) // Merge instead of nest since api routes already have /v1 prefix
         .merge(attestation_routes) // Merge attestation routes (already have /v1 prefix)
-        .with_state(app_state);
+        .with_state(app_state)
+        // Add static file serving as fallback (must be last)
+        .fallback(get(static_files::static_handler));
 
     tracing::info!("CORS enabled for origins: {:?}", allowed_origins);
 

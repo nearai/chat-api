@@ -39,6 +39,10 @@ headers = "0.4"
 utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid"] }
 utoipa-swagger-ui = { version = "9", features = ["axum"] }
 
+# Static file serving
+rust-embed = { version = "8", features = ["axum"] }
+mime_guess = "2"
+
 # Internal dependencies
 services = { path = "../services", features = ["utoipa"] }
 database = { path = "../database" }

@@ -1,0 +1,10 @@
+# Build configuration for chat-api Docker image
+# This file contains version information for dependencies used during the build process
+
+[frontend]
+# Git commit hash, tag, or branch name for the private-chat frontend repository
+# Examples:
+#   - "main" (branch)
+#   - "v1.2.3" (tag)
+#   - "abc123def456" (commit hash)
+private_chat_frontend_version = "65ded113e185333ef5eaf8c4d9d45cf611ca0c1c" # v0.1.0-alpha.2

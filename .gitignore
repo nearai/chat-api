@@ -6,3 +6,14 @@ config/examples/production.yaml
 *.crt
 .env
 .idea
+
+# Frontend build artifacts (for local development)
+frontend/
+crates/api/frontend/*
+!crates/api/frontend/dist/
+crates/api/frontend/dist/*
+!crates/api/frontend/dist/.gitkeep
+
+# Reproducible build artifacts
+.GIT_REV
+oci.tar
