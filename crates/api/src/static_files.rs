@@ -55,13 +55,15 @@ fn serve_asset(path: &str, content: rust_embed::EmbeddedFile) -> Response {
 
     // Add cache headers for assets (except HTML files for SPA)
     if !path.ends_with(".html") {
-        response = response.header(header::CACHE_CONTROL, "public, max-age=31536000, immutable");
+        response = response.header(header::CACHE_CONTROL, "public, max-age=604800, immutable");
     } else {
         // Don't cache HTML files to allow for SPA updates
         response = response.header(header::CACHE_CONTROL, "no-cache");
     }
 
-    response.body(Body::from(content.data)).unwrap()
+    response
+        .body(Body::from(content.data))
+        .expect("Failed to build response for static asset")
 }
 
 /// Return a 404 Not Found response
@@ -69,5 +71,5 @@ fn not_found() -> Response {
     Response::builder()
         .status(StatusCode::NOT_FOUND)
         .body(Body::from("Not Found"))
-        .unwrap()
+        .expect("Failed to build 404 Not Found response")
 }

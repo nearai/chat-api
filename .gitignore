@@ -8,6 +8,7 @@ config/examples/production.yaml
 .idea
 
 # Frontend build artifacts (for local development)
+frontend/
 crates/api/frontend/*
 !crates/api/frontend/dist/
 crates/api/frontend/dist/*
