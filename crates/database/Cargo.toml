@@ -51,3 +51,7 @@ refinery = { version = "0.8", features = ["tokio-postgres"] }
 # For hashing API keys and session tokens
 sha2 = "0.10"
 rand = "0.9.2"
+reqwest = { version = "0.12.24", features = ["json", "rustls-tls"] }
+deadpool = "0.12.3"
+native-tls = "0.2.14"
+postgres-native-tls = "0.5.2"

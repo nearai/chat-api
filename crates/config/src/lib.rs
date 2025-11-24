@@ -2,7 +2,7 @@ use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DatabaseConfig {
-    pub host: String,
+    pub host: Option<String>,
     pub port: u16,
     pub database: String,
     pub username: String,
@@ -10,12 +10,15 @@ pub struct DatabaseConfig {
     pub max_connections: u32,
     pub tls_enabled: bool,
     pub tls_ca_cert_path: Option<String>,
+    pub primary_app_id: String,
+    pub refresh_interval: u64,
+    pub mock: bool,
 }
 
 impl Default for DatabaseConfig {
     fn default() -> Self {
         Self {
-            host: std::env::var("DATABASE_HOST").unwrap_or_else(|_| "localhost".to_string()),
+            host: std::env::var("DATABASE_HOST").ok(),
             port: std::env::var("DATABASE_PORT")
                 .ok()
                 .and_then(|p| p.parse().ok())
@@ -32,6 +35,15 @@ impl Default for DatabaseConfig {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(false),
             tls_ca_cert_path: std::env::var("DATABASE_TLS_CA_CERT_PATH").ok(),
+            primary_app_id: std::env::var("DATABASE_PRIMARY_APP_ID").unwrap_or_default(),
+            refresh_interval: std::env::var("DATABASE_REFRESH_INTERVAL")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(30),
+            mock: std::env::var("DATABASE_MOCK")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(false),
         }
     }
 }
