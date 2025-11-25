@@ -44,7 +44,7 @@ echo "Copying build artifacts to $FRONTEND_DIST_TARGET..."
 mkdir -p "$(dirname "$FRONTEND_DIST_TARGET")"
 rm -rf "$FRONTEND_DIST_TARGET"
 cp -r "$FRONTEND_DIR/dist" "$FRONTEND_DIST_TARGET"
+touch "$FRONTEND_DIST_TARGET/.gitkeep"
 
 echo "✅ Frontend build complete!"
 echo "You can now build the Rust API with: cargo build --release --bin api"
-
