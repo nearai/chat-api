@@ -4,12 +4,22 @@ pub mod attestation;
 pub mod oauth;
 pub mod users;
 
-use axum::{middleware::from_fn_with_state, routing::get, Json, Router};
+use axum::{
+    middleware::from_fn_with_state,
+    routing::{get, get_service},
+    Json, Router,
+};
 use serde::Serialize;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::{
+    cors::{Any, CorsLayer},
+    services::{ServeDir, ServeFile},
+};
 use utoipa::ToSchema;
 
-use crate::{middleware::AuthState, state::AppState, static_files};
+use crate::{middleware::AuthState, state::AppState};
+
+/// Path to the frontend static files directory.
+pub const FRONTEND_DIR: &str = "crates/api/frontend/dist";
 
 #[derive(Serialize, ToSchema)]
 pub struct HealthResponse {
@@ -86,9 +96,10 @@ pub fn create_router_with_cors(app_state: AppState, allowed_origins: Vec<String>
         .merge(api_routes) // Merge instead of nest since api routes already have /v1 prefix
         .merge(attestation_routes) // Merge attestation routes (already have /v1 prefix)
         .with_state(app_state)
-        // Serve static files with SPA fallback (must be last)
-        // This handler serves files from the filesystem and falls back to index.html for SPA routes
-        .fallback(get(static_files::static_file_handler));
+        // Serve static files with SPA fallback using tower-http services
+        .fallback_service(get_service(ServeDir::new(FRONTEND_DIR).not_found_service(
+            ServeFile::new(format!("{}/index.html", FRONTEND_DIR)),
+        )));
 
     tracing::info!("CORS enabled for origins: {:?}", allowed_origins);
 
