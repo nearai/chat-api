@@ -77,6 +77,7 @@ pub fn create_router_with_cors(app_state: AppState, allowed_origins: Vec<String>
     ));
 
     // Build the base router
+    // Note: Routes are matched in order, so API routes must come before static file serving
     let router = Router::new()
         .route("/health", get(health_check))
         .nest("/v1/auth", auth_routes)
@@ -85,8 +86,9 @@ pub fn create_router_with_cors(app_state: AppState, allowed_origins: Vec<String>
         .merge(api_routes) // Merge instead of nest since api routes already have /v1 prefix
         .merge(attestation_routes) // Merge attestation routes (already have /v1 prefix)
         .with_state(app_state)
-        // Add static file serving as fallback (must be last)
-        .fallback(get(static_files::static_handler));
+        // Serve static files with SPA fallback (must be last)
+        // This handler serves files from the filesystem and falls back to index.html for SPA routes
+        .fallback(get(static_files::static_file_handler));
 
     tracing::info!("CORS enabled for origins: {:?}", allowed_origins);
 

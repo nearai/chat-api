@@ -3,50 +3,53 @@ use axum::{
     http::{header, StatusCode, Uri},
     response::{IntoResponse, Response},
 };
-use rust_embed::RustEmbed;
+use std::path::PathBuf;
 
-/// Embedded static assets from the React frontend build
-#[derive(RustEmbed)]
-#[folder = "frontend/dist"]
-pub struct Assets;
+/// Path to the frontend static files directory
+pub const FRONTEND_DIR: &str = "crates/api/frontend/dist";
 
-/// Serve static files with SPA fallback
+/// Static file handler with SPA fallback
 ///
-/// This handler serves embedded static files and falls back to index.html
-/// for any route that doesn't match a static asset (SPA routing).
-pub async fn static_handler(uri: Uri) -> impl IntoResponse {
-    let path = uri.path().trim_start_matches('/');
+/// This handler:
+/// 1. First tries to serve the requested file from the filesystem
+/// 2. If the file doesn't exist, serves index.html for SPA routing
+/// 3. Returns 404 only if index.html is also missing
+pub async fn static_file_handler(uri: Uri) -> impl IntoResponse {
+    let requested_path = uri.path().trim_start_matches('/');
+    let base_dir = PathBuf::from(FRONTEND_DIR);
 
     // Try to serve the requested file
-    if let Some(content) = Assets::get(path) {
-        return serve_asset(path, content);
-    }
+    if !requested_path.is_empty() {
+        let file_path = base_dir.join(requested_path);
 
-    // If path is empty or doesn't exist, try adding index.html
-    let index_path = if path.is_empty() || path == "/" {
-        "index.html"
-    } else {
-        // For SPA routing, check if we should fall back to index.html
-        // We do this for paths that don't have an extension (likely routes)
-        if !path.contains('.') {
-            "index.html"
-        } else {
-            // If it has an extension but wasn't found, return 404
+        // Security: prevent directory traversal
+        if !file_path.starts_with(&base_dir) {
             return not_found();
         }
-    };
 
-    // Try to serve index.html
-    if let Some(content) = Assets::get(index_path) {
-        return serve_asset(index_path, content);
+        // Check if it's a file (not a directory) and exists
+        if file_path.is_file() {
+            if let Ok(content) = tokio::fs::read(&file_path).await {
+                return serve_file(requested_path, content);
+            }
+        }
     }
 
-    // If even index.html is not found, return 404
-    not_found()
+    // SPA fallback: serve index.html for routes that don't match files
+    let index_path = base_dir.join("index.html");
+    match tokio::fs::read(&index_path).await {
+        Ok(content) => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+            .header(header::CACHE_CONTROL, "no-cache")
+            .body(Body::from(content))
+            .expect("Failed to build response for index.html"),
+        Err(_) => not_found(),
+    }
 }
 
-/// Serve an embedded asset with appropriate headers
-fn serve_asset(path: &str, content: rust_embed::EmbeddedFile) -> Response {
+/// Serve a file with appropriate headers
+fn serve_file(path: &str, content: Vec<u8>) -> Response {
     let mime_type = mime_guess::from_path(path).first_or_octet_stream();
 
     let mut response = Response::builder()
@@ -62,8 +65,8 @@ fn serve_asset(path: &str, content: rust_embed::EmbeddedFile) -> Response {
     }
 
     response
-        .body(Body::from(content.data))
-        .expect("Failed to build response for static asset")
+        .body(Body::from(content))
+        .expect("Failed to build response for static file")
 }
 
 /// Return a 404 Not Found response

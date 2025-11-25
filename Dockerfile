@@ -146,7 +146,7 @@ RUN mkdir -p /app/crates/database/src/migrations/sql
 COPY --from=backend-builder --chmod=0664 /app/crates/database/src/migrations/sql/*.sql /app/crates/database/src/migrations/sql/
 
 # Copy the built frontend from the frontend-builder stage
-COPY --from=frontend-builder /frontend/dist ./crates/api/frontend/dist
+COPY --from=frontend-builder /frontend/dist /app/crates/api/frontend/dist
 
 # Copy the pinned package list from builder stage
 COPY --from=frontend-builder --chmod=0664 /frontend/pinned-packages-frontend-builder.txt /app/pinned-packages-frontend-builder.txt
