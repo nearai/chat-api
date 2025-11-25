@@ -25,7 +25,15 @@ impl Default for DatabaseConfig {
                 .unwrap_or(5432),
             database: std::env::var("DATABASE_NAME").unwrap_or_else(|_| "chat_api".to_string()),
             username: std::env::var("DATABASE_USER").unwrap_or_else(|_| "postgres".to_string()),
-            password: std::env::var("DATABASE_PASSWORD").unwrap_or_else(|_| "postgres".to_string()),
+            password: if let Ok(path) = std::env::var("DATABASE_PASSWORD_FILE") {
+                std::fs::read_to_string(&path)
+                    .map(|p| p.trim().to_string())
+                    .unwrap_or_else(|e| {
+                        panic!("Failed to read DATABASE_PASSWORD_FILE at {}: {}", path, e)
+                    })
+            } else {
+                std::env::var("DATABASE_PASSWORD").unwrap_or_else(|_| "postgres".to_string())
+            },
             max_connections: std::env::var("DATABASE_MAX_CONNECTIONS")
                 .ok()
                 .and_then(|p| p.parse().ok())
