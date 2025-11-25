@@ -3,14 +3,23 @@ use axum::{
     http::{header, Request, StatusCode},
     response::{IntoResponse, Response},
 };
+use std::{env, path::PathBuf};
 use tower::ServiceExt;
 use tower_http::services::{ServeDir, ServeFile};
 
 /// Path to the frontend static files directory.
-pub const FRONTEND_DIR: &str = "crates/api/frontend/dist";
+pub const DEFAULT_FRONTEND_DIR: &str = "crates/api/frontend/dist";
+
+fn frontend_dir() -> PathBuf {
+    env::var("FRONTEND_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(DEFAULT_FRONTEND_DIR))
+}
 
 /// Serve static files with SPA fallback and proper cache headers.
 pub async fn static_handler(req: Request<Body>) -> Response {
+    let frontend_dir = frontend_dir();
+
     let has_extension = req
         .uri()
         .path()
@@ -21,12 +30,10 @@ pub async fn static_handler(req: Request<Body>) -> Response {
 
     // Serve static files if they have an extension, otherwise fallback to the index.html file
     let result = if has_extension {
-        ServeDir::new(FRONTEND_DIR).oneshot(req).await
+        ServeDir::new(frontend_dir.clone()).oneshot(req).await
     } else {
-        ServeDir::new(FRONTEND_DIR)
-            .not_found_service(ServeFile::new(
-                std::path::Path::new(FRONTEND_DIR).join("index.html"),
-            ))
+        ServeDir::new(frontend_dir.clone())
+            .not_found_service(ServeFile::new(frontend_dir.join("index.html")))
             .oneshot(req)
             .await
     };
