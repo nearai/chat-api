@@ -98,7 +98,7 @@ pub fn create_router_with_cors(app_state: AppState, allowed_origins: Vec<String>
         .with_state(app_state)
         // Serve static files with SPA fallback using tower-http services
         .fallback_service(get_service(ServeDir::new(FRONTEND_DIR).not_found_service(
-            ServeFile::new(format!("{}/index.html", FRONTEND_DIR)),
+            ServeFile::new(std::path::Path::new(FRONTEND_DIR).join("index.html")),
         )));
 
     tracing::info!("CORS enabled for origins: {:?}", allowed_origins);
