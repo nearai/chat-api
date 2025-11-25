@@ -9,10 +9,7 @@ config/examples/production.yaml
 
 # Frontend build artifacts (for local development)
 frontend/
-crates/api/frontend/*
-!crates/api/frontend/dist/
-crates/api/frontend/dist/*
-!crates/api/frontend/dist/.gitkeep
+crates/api/frontend/
 
 # Reproducible build artifacts
 .GIT_REV

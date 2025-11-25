@@ -47,4 +47,3 @@ cp -r "$FRONTEND_DIR/dist" "$FRONTEND_DIST_TARGET"
 
 echo "✅ Frontend build complete!"
 echo "You can now build the Rust API with: cargo build --release --bin api"
-

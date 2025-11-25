@@ -86,7 +86,7 @@ pub fn create_router_with_cors(app_state: AppState, allowed_origins: Vec<String>
         .merge(attestation_routes) // Merge attestation routes (already have /v1 prefix)
         .with_state(app_state)
         // Add static file serving as fallback (must be last)
-        .fallback(get(static_files::static_handler));
+        .fallback(static_files::static_handler);
 
     tracing::info!("CORS enabled for origins: {:?}", allowed_origins);
 

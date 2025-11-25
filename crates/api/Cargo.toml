@@ -24,7 +24,7 @@ dstack-sdk = "0.1.2"
 
 # Authentication dependencies
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.6", features = ["cors"] }
+tower-http = { version = "0.6", features = ["cors", "fs"] }
 uuid = { version = "1.5", features = ["v4"] }
 url = "2.5"
 urlencoding = "2.1"
@@ -38,10 +38,6 @@ headers = "0.4"
 # OpenAPI documentation generation
 utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid"] }
 utoipa-swagger-ui = { version = "9", features = ["axum"] }
-
-# Static file serving
-rust-embed = { version = "8", features = ["axum"] }
-mime_guess = "2"
 
 # Internal dependencies
 services = { path = "../services", features = ["utoipa"] }
