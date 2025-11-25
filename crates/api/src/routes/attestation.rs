@@ -131,13 +131,19 @@ pub async fn get_attestation_report(
     } else {
         let client = dstack_sdk::dstack_client::DstackClient::new(None);
 
-        let info = client.info().await.map_err(|_| {
-            tracing::error!("Failed to get chat API attestation info, are you running in a CVM?");
+        let info = client.info().await.map_err(|e| {
+            tracing::error!(
+                "Failed to get chat API attestation info, are you running in a CVM?: {:?}",
+                e
+            );
             ApiError::internal_server_error("Failed to get chat API attestation info")
         })?;
 
-        let cpu_quote = client.get_quote(report_data).await.map_err(|_| {
-            tracing::error!("Failed to get chat API attestation, are you running in a CVM?");
+        let cpu_quote = client.get_quote(report_data).await.map_err(|e| {
+            tracing::error!(
+                "Failed to get chat API attestation, are you running in a CVM?: {:?}",
+                e
+            );
             ApiError::internal_server_error("Failed to get chat API attestation")
         })?;
 
