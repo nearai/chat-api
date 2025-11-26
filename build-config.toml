@@ -7,4 +7,4 @@
 #   - "main" (branch)
 #   - "v1.2.3" (tag)
 #   - "abc123def456" (commit hash)
-private_chat_frontend_version = "1fe98758e47a97ba7b92d1b8e85ee9950e1afb69"
+private_chat_frontend_version = "c0705f0995439d8b3342ebb7ae1e15fe470ade02"
