@@ -57,6 +57,10 @@ pub trait SessionRepository: Send + Sync {
         token_hash: String,
     ) -> anyhow::Result<Option<UserSession>>;
 
+    /// Retrieve a session by session ID
+    async fn get_session_by_id(&self, session_id: SessionId)
+        -> anyhow::Result<Option<UserSession>>;
+
     /// Delete a session
     async fn delete_session(&self, session_id: SessionId) -> anyhow::Result<()>;
 }

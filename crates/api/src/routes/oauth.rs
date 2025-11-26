@@ -1,13 +1,15 @@
-use crate::{error::ApiError, state::AppState};
+use crate::{error::ApiError, middleware::AuthenticatedUser, state::AppState};
+use axum::extract::Query;
 use axum::{
-    extract::{Query, State},
+    extract::{Extension, State},
     http::StatusCode,
     response::Redirect,
     routing::get,
-    Router,
+    Json, Router,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use services::SessionId;
+use utoipa::ToSchema;
 
 /// Query parameters for OAuth callback
 #[derive(Debug, Deserialize)]
@@ -21,6 +23,13 @@ pub struct OAuthCallbackQuery {
 pub struct OAuthInitQuery {
     pub redirect_uri: Option<String>,
     pub frontend_callback: Option<String>,
+}
+
+/// Request body for logout
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+pub struct LogoutRequest {
+    /// Session ID to revoke
+    pub session_id: SessionId,
 }
 
 /// Request body for mock login (test only)
@@ -148,9 +157,10 @@ pub async fn oauth_callback(
     tracing::info!("Redirecting to frontend: {}", frontend_url);
 
     let mut callback_url = format!(
-        "{}/auth/callback?token={}&expires_at={}",
+        "{}/auth/callback?token={}&session_id={}&expires_at={}",
         frontend_url,
         urlencoding::encode(&token),
+        urlencoding::encode(&session.session_id.to_string()),
         urlencoding::encode(&session.expires_at.to_rfc3339())
     );
     if is_new_user {
@@ -214,14 +224,15 @@ pub async fn github_login(
 
 /// Handler for logout
 #[utoipa::path(
-    get,
+    post,
     path = "/v1/auth/logout",
     tag = "Auth",
-    params(
-        ("session_id" = uuid::Uuid, Query, description = "Session ID to revoke")
-    ),
+    request_body = LogoutRequest,
     responses(
         (status = 204, description = "Successfully logged out"),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - session does not belong to authenticated user", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "Session not found", body = crate::error::ApiErrorResponse),
         (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
     ),
     security(
@@ -230,9 +241,41 @@ pub async fn github_login(
 )]
 pub async fn logout(
     State(app_state): State<AppState>,
-    Query(session_id): Query<SessionId>,
+    Extension(authenticated_user): Extension<AuthenticatedUser>,
+    Json(request): Json<LogoutRequest>,
 ) -> Result<StatusCode, ApiError> {
-    tracing::info!("Logout requested for session_id: {}", session_id);
+    let session_id = request.session_id;
+    tracing::info!(
+        "Logout requested for session_id: {} by user_id: {}",
+        session_id,
+        authenticated_user.user_id
+    );
+
+    // Verify that the session belongs to the authenticated user
+    let session = app_state
+        .session_repository
+        .get_session_by_id(session_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get session {}: {}", session_id, e);
+            ApiError::logout_failed()
+        })?;
+
+    let session = session.ok_or_else(|| {
+        tracing::warn!("Session {} not found", session_id);
+        ApiError::session_id_not_found()
+    })?;
+
+    // Verify that the session belongs to the authenticated user
+    if session.user_id != authenticated_user.user_id {
+        tracing::warn!(
+            "User {} attempted to logout session {} which belongs to user {}",
+            authenticated_user.user_id,
+            session_id,
+            session.user_id
+        );
+        return Err(ApiError::forbidden("You can only logout your own sessions"));
+    }
 
     app_state
         .oauth_service
@@ -243,7 +286,11 @@ pub async fn logout(
             ApiError::logout_failed()
         })?;
 
-    tracing::info!("Session {} successfully revoked", session_id);
+    tracing::info!(
+        "Session {} successfully revoked by user_id: {}",
+        session_id,
+        authenticated_user.user_id
+    );
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -317,16 +364,14 @@ pub async fn mock_login(
     }))
 }
 
-/// Create OAuth router with all routes
+/// Create OAuth router with all routes (excluding logout, which requires auth)
 pub fn create_oauth_router() -> Router<AppState> {
     let router = Router::new()
         // OAuth initiation routes
         .route("/google", get(google_login))
         .route("/github", get(github_login))
         // Unified callback route for all providers
-        .route("/callback", get(oauth_callback))
-        // Logout route
-        .route("/logout", get(logout));
+        .route("/callback", get(oauth_callback));
 
     // Add mock login route only in test builds
     #[cfg(feature = "test")]
