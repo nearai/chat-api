@@ -59,7 +59,7 @@ pub async fn static_handler(req: Request<Body>) -> Response {
                     .unwrap_or(false);
                 // Don't cache HTML files to allow for SPA updates
                 let cache_value = if is_html {
-                    "no-cache, no-store, must-revalidate"
+                    "no-cache"
                 } else {
                     "public, max-age=31536000, immutable"
                 };
