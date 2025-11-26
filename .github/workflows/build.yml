@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - fix/index-html-cache
     tags:
       - 'v*'
 

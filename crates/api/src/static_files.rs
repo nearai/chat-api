@@ -21,6 +21,7 @@ pub async fn static_handler(req: Request<Body>) -> Response {
     let frontend_dir = frontend_dir();
     let uri = req.uri().clone();
 
+    // Redirect root to /?v=1 to workaround the cache issue
     let needs_version_redirect = uri.path() == "/"
         && uri
             .query()
