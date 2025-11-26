@@ -4,7 +4,7 @@ pub mod attestation;
 pub mod oauth;
 pub mod users;
 
-use axum::{middleware::from_fn_with_state, routing::get, Json, Router};
+use axum::{middleware::from_fn_with_state, response::Redirect, routing::get, Json, Router};
 use serde::Serialize;
 use tower_http::cors::{Any, CorsLayer};
 use utoipa::ToSchema;
@@ -78,6 +78,8 @@ pub fn create_router_with_cors(app_state: AppState, allowed_origins: Vec<String>
 
     // Build the base router
     let router = Router::new()
+        // Redirect root to /?v=1 to workaround the cache issue
+        .route("/", get(|| async { Redirect::temporary("/?v=1") }))
         .route("/health", get(health_check))
         .nest("/v1/auth", auth_routes)
         .nest("/v1/users", user_routes)

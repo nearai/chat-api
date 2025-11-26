@@ -19,21 +19,17 @@ fn frontend_dir() -> PathBuf {
 /// Serve static files with SPA fallback and proper cache headers.
 pub async fn static_handler(req: Request<Body>) -> Response {
     let frontend_dir = frontend_dir();
-    let path = req.uri().path().to_owned();
-    let is_root = path == "/";
 
-    let has_extension = path
+    let has_extension = req
+        .uri()
+        .path()
         .rsplit('/')
         .next()
         .map(|segment| segment.contains('.'))
         .unwrap_or(false);
 
     // Serve static files if they have an extension, otherwise fallback to the index.html file
-    let result = if is_root {
-        ServeFile::new(frontend_dir.join("index.html"))
-            .oneshot(req)
-            .await
-    } else if has_extension {
+    let result = if has_extension {
         ServeDir::new(frontend_dir.clone()).oneshot(req).await
     } else {
         ServeDir::new(frontend_dir.clone())
@@ -50,7 +46,7 @@ pub async fn static_handler(req: Request<Body>) -> Response {
                     .map(|ct| ct.contains("text/html"))
                     .unwrap_or(false);
                 // Don't cache HTML files to allow for SPA updates
-                let cache_value = if is_html || is_root {
+                let cache_value = if is_html {
                     "no-cache, no-store, must-revalidate"
                 } else {
                     "public, max-age=31536000, immutable"
