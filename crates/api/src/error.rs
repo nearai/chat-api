@@ -111,6 +111,12 @@ impl ApiError {
             .with_details("Session token must start with 'sess_' and be 37 characters long")
     }
 
+    /// Session id not found
+    pub fn session_id_not_found() -> Self {
+        Self::not_found("Session id not found")
+            .with_details("The provided session id does not match any active session.")
+    }
+
     /// Session token not found
     pub fn session_not_found() -> Self {
         Self::unauthorized("Session not found").with_details(

@@ -55,6 +55,14 @@ pub fn create_router_with_cors(app_state: AppState, allowed_origins: Vec<String>
     // OAuth routes (public, no auth required)
     let auth_routes = oauth::create_oauth_router();
 
+    // Logout route (requires authentication)
+    let logout_route = Router::new()
+        .route("/logout", axum::routing::post(oauth::logout))
+        .layer(from_fn_with_state(
+            auth_state.clone(),
+            crate::middleware::auth_middleware,
+        ));
+
     // Attestation routes (public, no auth required)
     let attestation_routes = attestation::create_attestation_router();
 
@@ -80,6 +88,7 @@ pub fn create_router_with_cors(app_state: AppState, allowed_origins: Vec<String>
     let router = Router::new()
         .route("/health", get(health_check))
         .nest("/v1/auth", auth_routes)
+        .nest("/v1/auth", logout_route) // Logout route with auth middleware
         .nest("/v1/users", user_routes)
         .nest("/v1/admin", admin_routes)
         .merge(api_routes) // Merge instead of nest since api routes already have /v1 prefix

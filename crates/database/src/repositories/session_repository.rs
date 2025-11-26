@@ -117,6 +117,44 @@ impl SessionRepository for PostgresSessionRepository {
         Ok(result)
     }
 
+    async fn get_session_by_id(
+        &self,
+        session_id: SessionId,
+    ) -> anyhow::Result<Option<UserSession>> {
+        tracing::debug!("Looking up session by session_id: {}", session_id);
+
+        let client = self.pool.get().await?;
+
+        let row = client
+            .query_opt(
+                "SELECT id, user_id, created_at, expires_at 
+                 FROM sessions 
+                 WHERE id = $1",
+                &[&session_id],
+            )
+            .await?;
+
+        let result = row.map(|r| UserSession {
+            session_id: r.get(0),
+            user_id: r.get(1),
+            created_at: r.get(2),
+            expires_at: r.get(3),
+            token: None, // Never return the token on retrieval
+        });
+
+        if let Some(ref session) = result {
+            tracing::debug!(
+                "Session found: session_id={}, user_id={}",
+                session.session_id,
+                session.user_id
+            );
+        } else {
+            tracing::debug!("No session found for session_id: {}", session_id);
+        }
+
+        Ok(result)
+    }
+
     async fn delete_session(&self, session_id: SessionId) -> anyhow::Result<()> {
         tracing::info!("Deleting session: session_id={}", session_id);
 
