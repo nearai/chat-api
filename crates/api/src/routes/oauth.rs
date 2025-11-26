@@ -232,6 +232,7 @@ pub async fn github_login(
         (status = 204, description = "Successfully logged out"),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 403, description = "Forbidden - session does not belong to authenticated user", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "Session not found", body = crate::error::ApiErrorResponse),
         (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
     ),
     security(

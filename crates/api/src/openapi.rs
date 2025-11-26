@@ -38,6 +38,8 @@ use utoipa::OpenApi;
         crate::models::UserProfileResponse,
         crate::models::AuthResponse,
         crate::error::ApiErrorResponse,
+        // Auth request models
+        crate::routes::oauth::LogoutRequest,
         // User settings models
         crate::models::UserSettingsResponse,
         crate::models::UpdateUserSettingsPartiallyRequest,
