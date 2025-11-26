@@ -54,6 +54,14 @@ impl OpenAIProxyService for OpenAIProxy {
         headers.remove("authorization");
         headers.remove("host"); // Don't forward host header
 
+        // If no body is provided, remove content-related headers to avoid
+        // the server waiting for body data that will never arrive
+        if body.is_none() {
+            headers.remove("content-length");
+            headers.remove("content-type");
+            headers.remove("transfer-encoding");
+        }
+
         tracing::debug!("Forwarding {} header(s) to OpenAI", headers.len());
         for (key, value) in headers.iter() {
             request_builder = request_builder.header(key, value);
