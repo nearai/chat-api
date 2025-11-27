@@ -1,3 +1,4 @@
+use crate::consts::ALLOWED_PROXY_PATHS;
 use crate::middleware::auth::AuthenticatedUser;
 use axum::{
     body::Body,
@@ -15,9 +16,6 @@ use services::conversation::ports::ConversationError;
 use services::response::ports::ProxyResponse;
 use services::UserId;
 use std::io::Read;
-
-/// Allowed proxy paths that can be forwarded to OpenAI
-const ALLOWED_PROXY_PATHS: &[&str] = &["responses", "chat/completions"];
 
 #[derive(Serialize, Deserialize)]
 pub struct ErrorResponse {
