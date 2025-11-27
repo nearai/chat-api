@@ -127,7 +127,7 @@ pub struct PartialUserSettingsContent {
 #[allow(clippy::derivable_impls)]
 impl Default for UserSettingsContent {
     // When retrieving settings, default values are used to fill in any unset values.
-    // If the value type is `Option<T>`, we cannot distinguish between "not set" and the user explicitly setting it to `None`.
+    // If the value type is `Option<T>`, we cannot distinguish between "unset" and "set null".
     // Therefore, using `Some(T)` as the default value is NOT recommended, may cause unexpected behavior.
     fn default() -> Self {
         Self {
