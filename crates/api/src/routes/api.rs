@@ -16,6 +16,9 @@ use services::response::ports::ProxyResponse;
 use services::UserId;
 use std::io::Read;
 
+/// Allowed proxy paths that can be forwarded to OpenAI
+const ALLOWED_PROXY_PATHS: &[&str] = &["responses", "chat/completions"];
+
 #[derive(Serialize, Deserialize)]
 pub struct ErrorResponse {
     pub error: String,
@@ -662,6 +665,28 @@ async fn proxy_handler(
         user.user_id,
         user.session_id
     );
+
+    // Validate path against allowed list
+    let is_path_allowed = ALLOWED_PROXY_PATHS.iter().any(|allowed| {
+        // Check if the path starts with an allowed path
+        // This allows both exact matches and sub-paths (e.g., "responses" matches "responses" and "responses/123")
+        path == *allowed || path.starts_with(&format!("{}/", allowed))
+    });
+
+    if !is_path_allowed {
+        tracing::warn!(
+            "Proxy path '{}' is not in allowed list for user_id={}",
+            path,
+            user.user_id
+        );
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: format!("Path '{}' is not allowed for proxy forwarding", path),
+            }),
+        )
+            .into_response());
+    }
 
     // Extract body bytes
     let body_bytes = extract_body_bytes(request).await?;
