@@ -114,12 +114,14 @@ pub struct UserSettingsContent {
     pub notification: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
+    pub web_search: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PartialUserSettingsContent {
     pub notification: Option<bool>,
     pub system_prompt: Option<String>,
+    pub web_search: Option<bool>,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -128,6 +130,7 @@ impl Default for UserSettingsContent {
         Self {
             notification: false,
             system_prompt: None,
+            web_search: false,
         }
     }
 }
@@ -137,6 +140,7 @@ impl UserSettingsContent {
         Self {
             notification: content.notification.unwrap_or(self.notification),
             system_prompt: content.system_prompt.or(self.system_prompt),
+            web_search: content.web_search.unwrap_or(self.web_search),
         }
     }
 }

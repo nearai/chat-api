@@ -144,6 +144,8 @@ pub struct UserSettingsContent {
     /// System prompt
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
+    /// Web search preference
+    pub web_search: bool,
 }
 
 impl From<services::user::ports::UserSettingsContent> for UserSettingsContent {
@@ -151,6 +153,7 @@ impl From<services::user::ports::UserSettingsContent> for UserSettingsContent {
         Self {
             notification: content.notification,
             system_prompt: content.system_prompt,
+            web_search: content.web_search,
         }
     }
 }
@@ -172,6 +175,8 @@ pub struct UpdateUserSettingsRequest {
     pub notification: bool,
     /// System prompt
     pub system_prompt: Option<String>,
+    /// Web search preference
+    pub web_search: bool,
 }
 
 impl UpdateUserSettingsRequest {
@@ -193,6 +198,8 @@ pub struct UpdateUserSettingsPartiallyRequest {
     pub notification: Option<bool>,
     /// System prompt
     pub system_prompt: Option<String>,
+    /// Web search preference
+    pub web_search: Option<bool>,
 }
 
 impl UpdateUserSettingsPartiallyRequest {

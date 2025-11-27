@@ -32,7 +32,7 @@ impl UserSettingsRepository for PostgresUserSettingsRepository {
             .await?;
 
         if let Some(row) = row {
-            let content_json: serde_json::Value = row.get(2);
+            let content_json: serde_json::Value = row.get("content");
             let content: UserSettingsContent = serde_json::from_value(content_json)?;
             Ok(Some(UserSettings {
                 id: row.get(0),
