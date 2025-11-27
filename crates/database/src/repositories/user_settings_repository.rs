@@ -1,7 +1,9 @@
 use crate::pool::DbPool;
 use async_trait::async_trait;
 use services::{
-    user::ports::{UserSettings, UserSettingsContent, UserSettingsRepository},
+    user::ports::{
+        PartialUserSettingsContent, UserSettings, UserSettingsContent, UserSettingsRepository,
+    },
     UserId,
 };
 
@@ -33,7 +35,13 @@ impl UserSettingsRepository for PostgresUserSettingsRepository {
 
         if let Some(row) = row {
             let content_json: serde_json::Value = row.get("content");
-            let content: UserSettingsContent = serde_json::from_value(content_json)?;
+
+            let default_content = UserSettingsContent::default();
+            // Missing fields will be filled from default settings content
+            let partial_content =
+                serde_json::from_value::<PartialUserSettingsContent>(content_json)?;
+            let content = default_content.into_updated(partial_content);
+
             Ok(Some(UserSettings {
                 id: row.get(0),
                 user_id: row.get(1),

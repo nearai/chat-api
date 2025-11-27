@@ -126,6 +126,9 @@ pub struct PartialUserSettingsContent {
 
 #[allow(clippy::derivable_impls)]
 impl Default for UserSettingsContent {
+    // When retrieving settings, default values are used to fill in any unset values.
+    // If the value type is `Option<T>`, we cannot distinguish between "not set" and the user explicitly setting it to `None`.
+    // Therefore, using `Some(T)` as the default value is NOT recommended, may cause unexpected behavior.
     fn default() -> Self {
         Self {
             notification: false,
@@ -159,6 +162,7 @@ pub struct UserSettings {
 #[async_trait]
 pub trait UserSettingsRepository: Send + Sync {
     /// Get user settings by user ID
+    /// Returns default settings if not found, and fills missing fields with default values
     async fn get_settings(&self, user_id: UserId) -> anyhow::Result<Option<UserSettings>>;
 
     /// Create or update user settings
