@@ -74,20 +74,17 @@ impl UserSettingsRepository for PostgresUserSettingsRepository {
                  VALUES ($1, $2) 
                  ON CONFLICT (user_id) 
                  DO UPDATE SET content = $2, updated_at = NOW()
-                 RETURNING id, user_id, content, created_at, updated_at",
+                 RETURNING id, user_id, created_at, updated_at",
                 &[&user_id, &content_json],
             )
             .await?;
 
-        let content_json: serde_json::Value = row.get(2);
-        let content: UserSettingsContent = serde_json::from_value(content_json)?;
-
         let settings = UserSettings {
-            id: row.get(0),
-            user_id: row.get(1),
+            id: row.get("id"),
+            user_id: row.get("user_id"),
             content,
-            created_at: row.get(3),
-            updated_at: row.get(4),
+            created_at: row.get("created_at"),
+            updated_at: row.get("updated_at"),
         };
 
         tracing::info!(

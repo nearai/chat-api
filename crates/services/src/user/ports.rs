@@ -108,6 +108,14 @@ pub trait UserService: Send + Sync {
     async fn list_users(&self, limit: i64, offset: i64) -> anyhow::Result<(Vec<User>, u64)>;
 }
 
+/// Appearance preference
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Appearance {
+    Light,
+    Dark,
+    System,
+}
+
 /// User settings content structure
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct UserSettingsContent {
@@ -115,6 +123,7 @@ pub struct UserSettingsContent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
     pub web_search: bool,
+    pub appearance: Appearance,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -122,6 +131,7 @@ pub struct PartialUserSettingsContent {
     pub notification: Option<bool>,
     pub system_prompt: Option<String>,
     pub web_search: Option<bool>,
+    pub appearance: Option<Appearance>,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -134,6 +144,7 @@ impl Default for UserSettingsContent {
             notification: false,
             system_prompt: None,
             web_search: false,
+            appearance: Appearance::System,
         }
     }
 }
@@ -144,6 +155,7 @@ impl UserSettingsContent {
             notification: content.notification.unwrap_or(self.notification),
             system_prompt: content.system_prompt.or(self.system_prompt),
             web_search: content.web_search.unwrap_or(self.web_search),
+            appearance: content.appearance.unwrap_or(self.appearance),
         }
     }
 }

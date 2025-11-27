@@ -136,6 +136,34 @@ pub struct AttestationReport {
     pub model_attestations: Option<Vec<ModelAttestation>>,
 }
 
+/// Appearance preference
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub enum Appearance {
+    Light,
+    Dark,
+    System,
+}
+
+impl From<services::user::ports::Appearance> for Appearance {
+    fn from(appearance: services::user::ports::Appearance) -> Self {
+        match appearance {
+            services::user::ports::Appearance::Light => Appearance::Light,
+            services::user::ports::Appearance::Dark => Appearance::Dark,
+            services::user::ports::Appearance::System => Appearance::System,
+        }
+    }
+}
+
+impl From<Appearance> for services::user::ports::Appearance {
+    fn from(appearance: Appearance) -> Self {
+        match appearance {
+            Appearance::Light => services::user::ports::Appearance::Light,
+            Appearance::Dark => services::user::ports::Appearance::Dark,
+            Appearance::System => services::user::ports::Appearance::System,
+        }
+    }
+}
+
 /// User settings content for API responses
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UserSettingsContent {
@@ -146,6 +174,8 @@ pub struct UserSettingsContent {
     pub system_prompt: Option<String>,
     /// Web search preference
     pub web_search: bool,
+    /// Appearance preference
+    pub appearance: Appearance,
 }
 
 impl From<services::user::ports::UserSettingsContent> for UserSettingsContent {
@@ -154,6 +184,7 @@ impl From<services::user::ports::UserSettingsContent> for UserSettingsContent {
             notification: content.notification,
             system_prompt: content.system_prompt,
             web_search: content.web_search,
+            appearance: content.appearance.into(),
         }
     }
 }
@@ -177,6 +208,8 @@ pub struct UpdateUserSettingsRequest {
     pub system_prompt: Option<String>,
     /// Web search preference
     pub web_search: bool,
+    /// Appearance preference
+    pub appearance: Appearance,
 }
 
 impl UpdateUserSettingsRequest {
@@ -200,6 +233,8 @@ pub struct UpdateUserSettingsPartiallyRequest {
     pub system_prompt: Option<String>,
     /// Web search preference
     pub web_search: Option<bool>,
+    /// Appearance preference
+    pub appearance: Option<Appearance>,
 }
 
 impl UpdateUserSettingsPartiallyRequest {
