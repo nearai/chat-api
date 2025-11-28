@@ -45,5 +45,9 @@ pub trait FileService: Send + Sync {
     ) -> Result<serde_json::Value, FileError>;
 
     /// Delete a file for a user
-    async fn delete_file(&self, file_id: &str, user_id: UserId) -> Result<(), FileError>;
+    async fn delete_file(
+        &self,
+        file_id: &str,
+        user_id: UserId,
+    ) -> Result<serde_json::Value, FileError>;
 }

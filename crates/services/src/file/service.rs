@@ -1,12 +1,11 @@
+use super::ports::{FileError, FileRepository, FileService};
+use crate::response::ports::OpenAIProxyService;
+use crate::UserId;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::TryStreamExt;
 use http::Method;
 use std::sync::Arc;
-
-use super::ports::{FileError, FileRepository, FileService};
-use crate::response::ports::OpenAIProxyService;
-use crate::UserId;
 
 pub struct FileServiceImpl {
     repository: Arc<dyn FileRepository>,
@@ -98,11 +97,12 @@ impl FileService for FileServiceImpl {
         Ok(file)
     }
 
-    async fn delete_file(&self, file_id: &str, user_id: UserId) -> Result<(), FileError> {
+    async fn delete_file(
+        &self,
+        file_id: &str,
+        user_id: UserId,
+    ) -> Result<serde_json::Value, FileError> {
         tracing::info!("Deleting file: file_id={}, user_id={}", file_id, user_id);
-
-        // Delete from OpenAI first
-        self.delete_file_from_openai(file_id).await?;
 
         // Then delete from database
         self.repository.delete_file(file_id, user_id).await?;
@@ -113,7 +113,8 @@ impl FileService for FileServiceImpl {
             user_id
         );
 
-        Ok(())
+        // Delete from OpenAI first
+        self.delete_file_from_openai(file_id).await
     }
 }
 
@@ -198,7 +199,7 @@ impl FileServiceImpl {
     }
 
     /// Delete file from OpenAI API
-    async fn delete_file_from_openai(&self, file_id: &str) -> Result<(), FileError> {
+    async fn delete_file_from_openai(&self, file_id: &str) -> Result<serde_json::Value, FileError> {
         let path = format!("files/{}", file_id);
 
         tracing::debug!("Deleting file from OpenAI: {}", path);
@@ -223,6 +224,20 @@ impl FileServiceImpl {
 
         tracing::debug!("Successfully deleted file {} from OpenAI", file_id);
 
-        Ok(())
+        // Collect the response body
+        let body_bytes: Bytes = response
+            .body
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(|e| FileError::ApiError(format!("Failed to read response: {}", e)))?
+            .into_iter()
+            .flatten()
+            .collect();
+
+        // Parse as JSON
+        let file: serde_json::Value = serde_json::from_slice(&body_bytes)
+            .map_err(|e| FileError::ApiError(format!("Failed to parse JSON: {}", e)))?;
+
+        Ok(file)
     }
 }

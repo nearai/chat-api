@@ -722,7 +722,6 @@ async fn delete_file(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path(file_id): Path<String>,
-    headers: HeaderMap,
 ) -> Result<Response, Response> {
     tracing::info!(
         "delete_file called for user_id={}, file_id={}",
@@ -735,6 +734,7 @@ async fn delete_file(
         .file_service
         .delete_file(&file_id, user.user_id)
         .await
+        .map(|value| (StatusCode::OK, Json(value)).into_response())
         .map_err(|e| {
             tracing::error!(
                 "Failed to delete file {} for user_id={}: {}",
@@ -753,45 +753,7 @@ async fn delete_file(
                 ),
             };
             (status, Json(ErrorResponse { error: error_msg })).into_response()
-        })?;
-
-    tracing::info!(
-        "File {} deleted successfully for user_id={}",
-        file_id,
-        user.user_id
-    );
-
-    // Forward delete request to OpenAI to get proper response format
-    let proxy_response = state
-        .proxy_service
-        .forward_request(
-            Method::DELETE,
-            &format!("files/{file_id}"),
-            headers.clone(),
-            None,
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                "OpenAI API error during file delete for user_id={}: {}",
-                user.user_id,
-                e
-            );
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(ErrorResponse {
-                    error: format!("OpenAI API error: {e}"),
-                }),
-            )
-                .into_response()
-        })?;
-
-    build_response(
-        proxy_response.status,
-        proxy_response.headers,
-        Body::from_stream(proxy_response.body),
-    )
-    .await
+        })
 }
 
 /// Get file content - validates user access and fetches content from OpenAI
