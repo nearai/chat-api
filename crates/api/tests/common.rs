@@ -5,6 +5,10 @@ use axum_test::TestServer;
 use serde_json::json;
 use services::file::service::FileServiceImpl;
 use std::sync::Arc;
+use tokio::sync::OnceCell;
+
+// Global once cell to ensure migrations only run once across all tests
+static MIGRATIONS_INITIALIZED: OnceCell<()> = OnceCell::const_new();
 
 /// Create a test server with all services initialized
 pub async fn create_test_server() -> TestServer {
@@ -19,8 +23,14 @@ pub async fn create_test_server() -> TestServer {
         .await
         .expect("Failed to connect to database");
 
-    // Run migrations
-    db.run_migrations().await.expect("Failed to run migrations");
+    // Run migrations only once, even when tests run in parallel
+    MIGRATIONS_INITIALIZED
+        .get_or_init(|| async {
+            db.run_migrations()
+                .await
+                .expect("Failed to run database migrations");
+        })
+        .await;
 
     // Get repositories
     let user_repo = db.user_repository();

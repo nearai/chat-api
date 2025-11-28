@@ -1,7 +1,9 @@
 use crate::pool::DbPool;
 use async_trait::async_trait;
 use services::{
-    user::ports::{UserSettings, UserSettingsContent, UserSettingsRepository},
+    user::ports::{
+        PartialUserSettingsContent, UserSettings, UserSettingsContent, UserSettingsRepository,
+    },
     UserId,
 };
 
@@ -32,8 +34,14 @@ impl UserSettingsRepository for PostgresUserSettingsRepository {
             .await?;
 
         if let Some(row) = row {
-            let content_json: serde_json::Value = row.get(2);
-            let content: UserSettingsContent = serde_json::from_value(content_json)?;
+            let content_json: serde_json::Value = row.get("content");
+
+            let default_content = UserSettingsContent::default();
+            // Missing fields will be filled from default settings content
+            let partial_content =
+                serde_json::from_value::<PartialUserSettingsContent>(content_json)?;
+            let content = default_content.into_updated(partial_content);
+
             Ok(Some(UserSettings {
                 id: row.get(0),
                 user_id: row.get(1),
@@ -66,20 +74,17 @@ impl UserSettingsRepository for PostgresUserSettingsRepository {
                  VALUES ($1, $2) 
                  ON CONFLICT (user_id) 
                  DO UPDATE SET content = $2, updated_at = NOW()
-                 RETURNING id, user_id, content, created_at, updated_at",
+                 RETURNING id, user_id, created_at, updated_at",
                 &[&user_id, &content_json],
             )
             .await?;
 
-        let content_json: serde_json::Value = row.get(2);
-        let content: UserSettingsContent = serde_json::from_value(content_json)?;
-
         let settings = UserSettings {
-            id: row.get(0),
-            user_id: row.get(1),
+            id: row.get("id"),
+            user_id: row.get("user_id"),
             content,
-            created_at: row.get(3),
-            updated_at: row.get(4),
+            created_at: row.get("created_at"),
+            updated_at: row.get("updated_at"),
         };
 
         tracing::info!(
