@@ -48,6 +48,12 @@ RUN npm install -g pnpm@10.10.0
 # Install dependencies and build
 RUN pnpm install --frozen-lockfile
 
+# Set the PostHog key and host
+ARG POSTHOG_KEY
+ARG POSTHOG_HOST
+ENV VITE_PUBLIC_POSTHOG_KEY=${POSTHOG_KEY}
+ENV VITE_PUBLIC_POSTHOG_HOST=${POSTHOG_HOST}
+
 # Build the frontend
 RUN pnpm run build
 
