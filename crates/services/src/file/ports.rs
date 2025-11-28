@@ -33,4 +33,17 @@ pub trait FileRepository: Send + Sync {
 pub trait FileService: Send + Sync {
     /// Track a file ID for a user
     async fn track_file(&self, file_id: &str, user_id: UserId) -> Result<(), FileError>;
+
+    /// List all files for a user with details from OpenAI
+    async fn list_files(&self, user_id: UserId) -> Result<Vec<serde_json::Value>, FileError>;
+
+    /// Get a file with details from OpenAI (checks user access first)
+    async fn get_file(
+        &self,
+        file_id: &str,
+        user_id: UserId,
+    ) -> Result<serde_json::Value, FileError>;
+
+    /// Delete a file for a user
+    async fn delete_file(&self, file_id: &str, user_id: UserId) -> Result<(), FileError>;
 }

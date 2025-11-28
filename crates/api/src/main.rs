@@ -95,7 +95,7 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     // Initialize file service
-    let file_service = Arc::new(FileServiceImpl::new(file_repo));
+    let file_service = Arc::new(FileServiceImpl::new(file_repo, proxy_service.clone()));
 
     // Create application state
     let app_state = AppState {

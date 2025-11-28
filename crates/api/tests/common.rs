@@ -69,7 +69,7 @@ pub async fn create_test_server() -> TestServer {
     // Add `admin.org` as test admin domain
     admin_domains.push("admin.org".to_string());
 
-    let file_service = Arc::new(FileServiceImpl::new(file_repo));
+    let file_service = Arc::new(FileServiceImpl::new(file_repo, proxy_service.clone()));
 
     // Create application state
     let app_state = AppState {

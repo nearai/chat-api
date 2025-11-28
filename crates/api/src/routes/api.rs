@@ -12,6 +12,7 @@ use flate2::read::GzDecoder;
 use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use services::conversation::ports::ConversationError;
+use services::file::ports::FileError;
 use services::response::ports::ProxyResponse;
 use services::UserId;
 use std::io::Read;
@@ -63,7 +64,12 @@ pub fn create_api_router() -> Router<crate::state::AppState> {
             post(clone_conversation),
         );
 
-    let files_router = Router::new().route("/v1/files", post(upload_file));
+    let files_router = Router::new()
+        .route("/v1/files", post(upload_file))
+        .route("/v1/files", get(list_files))
+        .route("/v1/files/{file_id}", get(get_file))
+        .route("/v1/files/{file_id}", delete(delete_file))
+        .route("/v1/files/{file_id}/content", get(get_file_content));
 
     let catch_all_router = Router::new()
         .route("/v1/{*path}", post(proxy_handler))
@@ -626,6 +632,222 @@ async fn upload_file(
     handle_trackable_response(&state, &user, proxy_response, TrackableResource::File).await
 }
 
+/// List all files for the authenticated user (fetches details from OpenAI)
+async fn list_files(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+) -> Result<Json<Vec<serde_json::Value>>, Response> {
+    tracing::info!("list_files called for user_id={}", user.user_id);
+
+    let files = state
+        .file_service
+        .list_files(user.user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to list files for user_id={}: {}", user.user_id, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to list files: {e}"),
+                }),
+            )
+                .into_response()
+        })?;
+
+    tracing::info!(
+        "Retrieved {} files for user_id={}",
+        files.len(),
+        user.user_id
+    );
+
+    Ok(Json(files))
+}
+
+/// Get a file - validates user access and fetches from OpenAI
+async fn get_file(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(file_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, Response> {
+    tracing::info!(
+        "get_file called for user_id={}, file_id={}",
+        user.user_id,
+        file_id
+    );
+
+    validate_user_file(&state, &user, &file_id).await?;
+
+    tracing::debug!(
+        "Forwarding file get request to OpenAI for user_id={}",
+        user.user_id
+    );
+
+    // Forward to OpenAI
+    let proxy_response = state
+        .proxy_service
+        .forward_request(
+            Method::GET,
+            &format!("files/{file_id}"),
+            headers.clone(),
+            None,
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "OpenAI API error during file get for user_id={}: {}",
+                user.user_id,
+                e
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("OpenAI API error: {e}"),
+                }),
+            )
+                .into_response()
+        })?;
+
+    build_response(
+        proxy_response.status,
+        proxy_response.headers,
+        Body::from_stream(proxy_response.body),
+    )
+    .await
+}
+
+/// Delete a file - validates user access, deletes from OpenAI and DB
+async fn delete_file(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(file_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, Response> {
+    tracing::info!(
+        "delete_file called for user_id={}, file_id={}",
+        user.user_id,
+        file_id
+    );
+
+    validate_user_file(&state, &user, &file_id).await?;
+
+    // Delete from OpenAI and DB
+    state
+        .file_service
+        .delete_file(&file_id, user.user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to delete file {} for user_id={}: {}",
+                file_id,
+                user.user_id,
+                e
+            );
+            let (status, error_msg) = match e {
+                FileError::NotFound => (StatusCode::NOT_FOUND, "File not found".to_string()),
+                FileError::ApiError(msg) => {
+                    (StatusCode::BAD_GATEWAY, format!("OpenAI API error: {msg}"))
+                }
+                _ => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to delete file: {e}"),
+                ),
+            };
+            (status, Json(ErrorResponse { error: error_msg })).into_response()
+        })?;
+
+    tracing::info!(
+        "File {} deleted successfully for user_id={}",
+        file_id,
+        user.user_id
+    );
+
+    // Forward delete request to OpenAI to get proper response format
+    let proxy_response = state
+        .proxy_service
+        .forward_request(
+            Method::DELETE,
+            &format!("files/{file_id}"),
+            headers.clone(),
+            None,
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "OpenAI API error during file delete for user_id={}: {}",
+                user.user_id,
+                e
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("OpenAI API error: {e}"),
+                }),
+            )
+                .into_response()
+        })?;
+
+    build_response(
+        proxy_response.status,
+        proxy_response.headers,
+        Body::from_stream(proxy_response.body),
+    )
+    .await
+}
+
+/// Get file content - validates user access and fetches content from OpenAI
+async fn get_file_content(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(file_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, Response> {
+    tracing::info!(
+        "get_file_content called for user_id={}, file_id={}",
+        user.user_id,
+        file_id
+    );
+
+    validate_user_file(&state, &user, &file_id).await?;
+
+    tracing::debug!(
+        "Forwarding file content request to OpenAI for user_id={}",
+        user.user_id
+    );
+
+    // Forward to OpenAI
+    let proxy_response = state
+        .proxy_service
+        .forward_request(
+            Method::GET,
+            &format!("files/{file_id}/content"),
+            headers.clone(),
+            None,
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "OpenAI API error during file content get for user_id={}: {}",
+                user.user_id,
+                e
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("OpenAI API error: {e}"),
+                }),
+            )
+                .into_response()
+        })?;
+
+    build_response(
+        proxy_response.status,
+        proxy_response.headers,
+        Body::from_stream(proxy_response.body),
+    )
+    .await
+}
+
 /// Generic proxy handler that forwards all requests to OpenAI
 async fn proxy_handler(
     State(state): State<crate::state::AppState>,
@@ -832,6 +1054,57 @@ async fn build_response(status: u16, headers: HeaderMap, body: Body) -> Result<R
     })
 }
 
+/// Track a conversation from a response creation request
+async fn track_conversation_from_request(
+    state: &crate::state::AppState,
+    user_id: UserId,
+    body: &Bytes,
+) -> anyhow::Result<()> {
+    tracing::debug!(
+        "Attempting to track conversation from /responses request for user_id={}",
+        user_id
+    );
+
+    // Parse the request body to extract conversation_id if present
+    #[derive(Deserialize)]
+    struct ResponseRequest {
+        conversation: Option<String>,
+    }
+
+    if let Ok(req) = serde_json::from_slice::<ResponseRequest>(body) {
+        if let Some(conversation_id) = req.conversation {
+            tracing::info!(
+                "Found conversation_id={} in /responses request for user_id={}, tracking...",
+                conversation_id,
+                user_id
+            );
+
+            state
+                .conversation_service
+                .track_conversation(&conversation_id, user_id)
+                .await?;
+
+            tracing::info!(
+                "Successfully tracked conversation {} from /responses for user_id={}",
+                conversation_id,
+                user_id
+            );
+        } else {
+            tracing::debug!(
+                "No conversation_id found in /responses request body for user_id={}",
+                user_id
+            );
+        }
+    } else {
+        tracing::debug!(
+            "Failed to parse /responses request body for user_id={}",
+            user_id
+        );
+    }
+
+    Ok(())
+}
+
 async fn validate_user_conversation(
     state: &crate::state::AppState,
     user: &AuthenticatedUser,
@@ -854,6 +1127,30 @@ async fn validate_user_conversation(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
                 error: "Failed to get conversation".to_string(),
+            }),
+        )
+            .into_response()),
+    }
+}
+
+async fn validate_user_file(
+    state: &crate::state::AppState,
+    user: &AuthenticatedUser,
+    file_id: &str,
+) -> Result<(), Response> {
+    match state.file_service.get_file(file_id, user.user_id).await {
+        Ok(_) => Ok(()),
+        Err(FileError::NotFound) => Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "File not found".to_string(),
+            }),
+        )
+            .into_response()),
+        Err(_) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Failed to get file".to_string(),
             }),
         )
             .into_response()),
@@ -905,55 +1202,4 @@ fn decompress_if_gzipped(bytes: &[u8], headers: &HeaderMap) -> Result<Vec<u8>, s
 
     // Not gzipped, return as-is
     Ok(bytes.to_vec())
-}
-
-/// Track a conversation from a response creation request
-async fn track_conversation_from_request(
-    state: &crate::state::AppState,
-    user_id: UserId,
-    body: &Bytes,
-) -> anyhow::Result<()> {
-    tracing::debug!(
-        "Attempting to track conversation from /responses request for user_id={}",
-        user_id
-    );
-
-    // Parse the request body to extract conversation_id if present
-    #[derive(Deserialize)]
-    struct ResponseRequest {
-        conversation: Option<String>,
-    }
-
-    if let Ok(req) = serde_json::from_slice::<ResponseRequest>(body) {
-        if let Some(conversation_id) = req.conversation {
-            tracing::info!(
-                "Found conversation_id={} in /responses request for user_id={}, tracking...",
-                conversation_id,
-                user_id
-            );
-
-            state
-                .conversation_service
-                .track_conversation(&conversation_id, user_id)
-                .await?;
-
-            tracing::info!(
-                "Successfully tracked conversation {} from /responses for user_id={}",
-                conversation_id,
-                user_id
-            );
-        } else {
-            tracing::debug!(
-                "No conversation_id found in /responses request body for user_id={}",
-                user_id
-            );
-        }
-    } else {
-        tracing::debug!(
-            "Failed to parse /responses request body for user_id={}",
-            user_id
-        );
-    }
-
-    Ok(())
 }
