@@ -59,7 +59,7 @@ jobs:
       run: cargo test --lib --bins
 
     - name: Run integration tests
-      run: cargo test --features test --test e2e_api_tests --test admin_tests --test user_settings_tests
+      run: cargo test --features test
       env:
         DATABASE_HOST: localhost
         DATABASE_PORT: 5432
