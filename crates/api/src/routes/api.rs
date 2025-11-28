@@ -729,12 +729,90 @@ async fn proxy_handler(
         user.user_id
     );
 
-    build_response(
-        proxy_response.status,
-        proxy_response.headers,
-        Body::from_stream(proxy_response.body),
-    )
-    .await
+    // Track file if this is a POST to /files and response is successful
+    if method == Method::POST && path == "files" && (200..300).contains(&proxy_response.status) {
+        // Buffer the response to extract the file ID
+        let status = proxy_response.status;
+        let response_headers = proxy_response.headers.clone();
+        let body_bytes: Bytes = proxy_response
+            .body
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to read response body for file tracking: {}", e);
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(ErrorResponse {
+                        error: format!("Failed to read response: {e}"),
+                    }),
+                )
+                    .into_response()
+            })?
+            .into_iter()
+            .flatten()
+            .collect();
+
+        // Parse response and track file
+        let decompressed_bytes = match decompress_if_gzipped(&body_bytes, &response_headers) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::error!(
+                    "Failed to decompress response for file tracking (user_id={}): {}",
+                    user.user_id,
+                    e
+                );
+                body_bytes.to_vec()
+            }
+        };
+
+        if let Ok(response_json) = serde_json::from_slice::<serde_json::Value>(&decompressed_bytes)
+        {
+            if let Some(file_id_with_prefix) = response_json.get("id").and_then(|v| v.as_str()) {
+                // Remove "file-" prefix if present
+                let file_id = file_id_with_prefix
+                    .strip_prefix("file-")
+                    .unwrap_or(file_id_with_prefix);
+
+                tracing::debug!("Tracking file {} in database", file_id);
+                if let Err(e) = state.file_service.track_file(file_id, user.user_id).await {
+                    tracing::error!(
+                        "Failed to track file {} for user {}: {}",
+                        file_id,
+                        user.user_id,
+                        e
+                    );
+                    // Don't fail the request if tracking fails
+                } else {
+                    tracing::info!(
+                        "Successfully tracked file {} in database for user_id={}",
+                        file_id,
+                        user.user_id
+                    );
+                }
+            } else {
+                tracing::warn!(
+                    "No file ID found in OpenAI response for user_id={}",
+                    user.user_id
+                );
+            }
+        } else {
+            tracing::warn!(
+                "Failed to parse OpenAI response as JSON for file tracking (user_id={})",
+                user.user_id
+            );
+        }
+
+        // Build response with buffered body
+        build_response(status, response_headers, Body::from(body_bytes)).await
+    } else {
+        // For non-file POST or other methods, stream the response directly
+        build_response(
+            proxy_response.status,
+            proxy_response.headers,
+            Body::from_stream(proxy_response.body),
+        )
+        .await
+    }
 }
 
 async fn build_response(status: u16, headers: HeaderMap, body: Body) -> Result<Response, Response> {
