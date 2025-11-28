@@ -730,8 +730,6 @@ async fn delete_file(
         file_id
     );
 
-    validate_user_file(&state, &user, &file_id).await?;
-
     // Delete from OpenAI and DB
     state
         .file_service

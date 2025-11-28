@@ -101,9 +101,6 @@ impl FileService for FileServiceImpl {
     async fn delete_file(&self, file_id: &str, user_id: UserId) -> Result<(), FileError> {
         tracing::info!("Deleting file: file_id={}, user_id={}", file_id, user_id);
 
-        // Check if user has access to this file
-        self.repository.get_file(file_id, user_id).await?;
-
         // Delete from OpenAI first
         self.delete_file_from_openai(file_id).await?;
 
