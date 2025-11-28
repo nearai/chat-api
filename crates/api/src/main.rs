@@ -1,12 +1,78 @@
 use api::{create_router_with_cors, ApiDoc, AppState};
+use hmac::{Hmac, Mac};
 use services::{
     auth::OAuthServiceImpl, conversation::service::ConversationServiceImpl,
     response::service::OpenAIProxy, user::UserServiceImpl, user::UserSettingsServiceImpl,
 };
+use sha2::Sha256;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
+
+type HmacSha256 = Hmac<Sha256>;
+
+/// Response from VPC login endpoint
+#[derive(serde::Deserialize)]
+struct VpcLoginResponse {
+    api_key: String,
+}
+
+/// Performs VPC authentication to obtain an API key
+async fn vpc_authenticate(
+    config: &config::VpcAuthConfig,
+    base_url: &str,
+) -> anyhow::Result<String> {
+    let shared_secret = config
+        .read_shared_secret()
+        .ok_or_else(|| anyhow::anyhow!("Failed to read VPC shared secret"))?;
+
+    // Generate timestamp
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("Time went backwards")
+        .as_secs();
+
+    // Generate HMAC-SHA256 signature
+    let mut mac = HmacSha256::new_from_slice(shared_secret.as_bytes())
+        .expect("HMAC can take key of any size");
+    mac.update(timestamp.to_string().as_bytes());
+    let signature = hex::encode(mac.finalize().into_bytes());
+
+    tracing::info!(
+        "Performing VPC authentication with client_id: {}",
+        config.client_id
+    );
+    tracing::debug!("VPC auth timestamp: {}", timestamp);
+
+    // Build the auth URL
+    let auth_url = format!("{}/v1/auth/vpc/login", base_url.trim_end_matches('/'));
+
+    // Make authentication request
+    let client = reqwest::Client::new();
+    let response = client
+        .post(&auth_url)
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "timestamp": timestamp,
+            "signature": signature,
+            "client_id": config.client_id
+        }))
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!("VPC authentication failed with status {}: {}", status, body);
+    }
+
+    let login_response: VpcLoginResponse = response.json().await?;
+    tracing::info!("VPC authentication successful");
+
+    Ok(login_response.api_key)
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -59,6 +125,7 @@ async fn main() -> anyhow::Result<()> {
     let oauth_repo = db.oauth_repository();
     let conversation_repo = db.conversation_repository();
     let user_settings_repo = db.user_settings_repository();
+    let app_config_repo = db.app_config_repository();
 
     // Create services
     tracing::info!("Initializing services...");
@@ -79,8 +146,48 @@ async fn main() -> anyhow::Result<()> {
         user_settings_repo as Arc<dyn services::user::ports::UserSettingsRepository>,
     ));
 
+    // Get OpenAI API key - check database first, then VPC auth, then config
+    const VPC_API_KEY_CONFIG_KEY: &str = "vpc_api_key";
+
+    let api_key = if config.vpc_auth.is_configured() {
+        let base_url = config.openai.base_url.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("OPENAI_BASE_URL is required when using VPC authentication")
+        })?;
+
+        // Check if we have a cached API key in the database
+        match app_config_repo.get(VPC_API_KEY_CONFIG_KEY).await {
+            Ok(Some(cached_key)) => {
+                tracing::info!("Using cached VPC API key from database");
+                cached_key
+            }
+            Ok(None) => {
+                tracing::info!("No cached API key found, performing VPC authentication...");
+                let new_key = vpc_authenticate(&config.vpc_auth, base_url).await?;
+
+                // Store the new key in the database
+                if let Err(e) = app_config_repo.set(VPC_API_KEY_CONFIG_KEY, &new_key).await {
+                    tracing::warn!("Failed to cache VPC API key in database: {}", e);
+                } else {
+                    tracing::info!("VPC API key cached in database");
+                }
+
+                new_key
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to check for cached API key: {}, performing VPC auth...",
+                    e
+                );
+                vpc_authenticate(&config.vpc_auth, base_url).await?
+            }
+        }
+    } else {
+        tracing::info!("Using API key from environment");
+        config.openai.api_key.clone()
+    };
+
     // Initialize OpenAI proxy service
-    let mut proxy_service = OpenAIProxy::new(config.openai.api_key.clone());
+    let mut proxy_service = OpenAIProxy::new(api_key);
     if let Some(base_url) = config.openai.base_url.clone() {
         proxy_service = proxy_service.with_base_url(base_url);
     }

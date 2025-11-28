@@ -465,6 +465,7 @@ dependencies = [
  "futures",
  "headers",
  "hex",
+ "hmac",
  "http",
  "reqwest",
  "serde",

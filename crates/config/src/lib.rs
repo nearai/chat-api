@@ -105,6 +105,7 @@ pub struct OpenAIConfig {
 impl Default for OpenAIConfig {
     fn default() -> Self {
         Self {
+            // API key can be set directly, from file, or via VPC auth (handled at startup)
             api_key: if let Ok(path) = std::env::var("OPENAI_API_KEY_FILE") {
                 std::fs::read_to_string(&path)
                     .map(|p| p.trim().to_string())
@@ -116,6 +117,41 @@ impl Default for OpenAIConfig {
             },
             base_url: std::env::var("OPENAI_BASE_URL").ok(),
         }
+    }
+}
+
+/// Configuration for VPC authentication to obtain API keys dynamically
+#[derive(Debug, Clone, Deserialize)]
+pub struct VpcAuthConfig {
+    /// Path to the file containing the VPC shared secret
+    pub shared_secret_file: Option<String>,
+    /// Client ID for VPC authentication
+    pub client_id: String,
+}
+
+impl Default for VpcAuthConfig {
+    fn default() -> Self {
+        Self {
+            shared_secret_file: std::env::var("VPC_SHARED_SECRET_FILE").ok(),
+            client_id: std::env::var("VPC_CLIENT_ID")
+                .unwrap_or_else(|_| "chat-api-client".to_string()),
+        }
+    }
+}
+
+impl VpcAuthConfig {
+    /// Returns true if VPC authentication is configured
+    pub fn is_configured(&self) -> bool {
+        self.shared_secret_file.is_some()
+    }
+
+    /// Reads the shared secret from the configured file
+    pub fn read_shared_secret(&self) -> Option<String> {
+        self.shared_secret_file.as_ref().and_then(|path| {
+            std::fs::read_to_string(path)
+                .map(|s| s.trim().to_string())
+                .ok()
+        })
     }
 }
 
@@ -163,6 +199,7 @@ pub struct Config {
     pub openai: OpenAIConfig,
     pub cors: CorsConfig,
     pub admin: AdminConfig,
+    pub vpc_auth: VpcAuthConfig,
 }
 
 impl Config {
@@ -174,6 +211,7 @@ impl Config {
             openai: OpenAIConfig::default(),
             cors: CorsConfig::default(),
             admin: AdminConfig::default(),
+            vpc_auth: VpcAuthConfig::default(),
         }
     }
 }
