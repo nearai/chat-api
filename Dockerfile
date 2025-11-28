@@ -42,6 +42,12 @@ RUN curl -L -o /tmp/private-chat.tar.gz "https://github.com/nearai/private-chat/
     tar -xzf /tmp/private-chat.tar.gz --strip-components=1 && \
     rm /tmp/private-chat.tar.gz
 
+# Set the PostHog key and host
+ARG POSTHOG_KEY
+ARG POSTHOG_HOST
+ENV VITE_PUBLIC_POSTHOG_KEY=${POSTHOG_KEY}
+ENV VITE_PUBLIC_POSTHOG_HOST=${POSTHOG_HOST}
+
 # Install pnpm with specific version
 RUN npm install -g pnpm@10.10.0
 
