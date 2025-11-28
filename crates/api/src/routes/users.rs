@@ -106,6 +106,8 @@ pub async fn update_user_settings(
     let content = services::user::ports::UserSettingsContent {
         notification: request.notification,
         system_prompt: request.system_prompt,
+        web_search: request.web_search,
+        appearance: request.appearance.into(),
     };
 
     let content = app_state
@@ -155,6 +157,8 @@ pub async fn update_user_settings_partially(
     let content = services::user::ports::PartialUserSettingsContent {
         notification: request.notification,
         system_prompt: request.system_prompt,
+        web_search: request.web_search,
+        appearance: request.appearance.map(Into::into),
     };
 
     let content = app_state
