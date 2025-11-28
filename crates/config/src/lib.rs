@@ -105,7 +105,15 @@ pub struct OpenAIConfig {
 impl Default for OpenAIConfig {
     fn default() -> Self {
         Self {
-            api_key: std::env::var("OPENAI_API_KEY").unwrap_or_default(),
+            api_key: if let Ok(path) = std::env::var("OPENAI_API_KEY_FILE") {
+                std::fs::read_to_string(&path)
+                    .map(|p| p.trim().to_string())
+                    .unwrap_or_else(|e| {
+                        panic!("Failed to read OPENAI_API_KEY_FILE at {}: {}", path, e)
+                    })
+            } else {
+                std::env::var("OPENAI_API_KEY").unwrap_or_default()
+            },
             base_url: std::env::var("OPENAI_BASE_URL").ok(),
         }
     }
