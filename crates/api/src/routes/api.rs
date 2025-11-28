@@ -16,6 +16,12 @@ use services::response::ports::ProxyResponse;
 use services::UserId;
 use std::io::Read;
 
+/// Type of resource to track in the response
+enum TrackableResource {
+    Conversation,
+    File,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct ErrorResponse {
     pub error: String,
@@ -25,8 +31,7 @@ pub struct ErrorResponse {
 pub fn create_api_router() -> Router<crate::state::AppState> {
     // IMPORTANT: Specific routes MUST be in the same Router and registered BEFORE catch-all routes
     // Axum matches routes in order within a router
-    Router::new()
-        // Specific conversation endpoints (handle these before catch-all)
+    let conversations_router = Router::new()
         .route("/v1/conversations", post(create_conversation))
         .route("/v1/conversations", get(list_conversations))
         .route(
@@ -56,11 +61,19 @@ pub fn create_api_router() -> Router<crate::state::AppState> {
         .route(
             "/v1/conversations/{conversation_id}/clone",
             post(clone_conversation),
-        )
-        // Catch-all proxy for all other OpenAI endpoints
+        );
+
+    let files_router = Router::new().route("/v1/files", post(upload_file));
+
+    let catch_all_router = Router::new()
         .route("/v1/{*path}", post(proxy_handler))
         .route("/v1/{*path}", get(proxy_handler))
-        .route("/v1/{*path}", delete(proxy_handler))
+        .route("/v1/{*path}", delete(proxy_handler));
+
+    Router::new()
+        .merge(conversations_router)
+        .merge(files_router)
+        .merge(catch_all_router)
 }
 
 /// Create a conversation - forwards to OpenAI and tracks in DB
@@ -134,102 +147,13 @@ async fn create_conversation(
                 .into_response()
         })?;
 
-    handle_conversation_response(&state, &user, proxy_response).await
-}
-
-/// Helper function to handle conversation response: buffer, parse, and track conversation
-async fn handle_conversation_response(
-    state: &crate::state::AppState,
-    user: &AuthenticatedUser,
-    proxy_response: ProxyResponse,
-) -> Result<Response, Response> {
-    let status = proxy_response.status;
-    let response_headers = proxy_response.headers;
-
-    tracing::debug!("Response headers: {:?}", response_headers);
-
-    // Buffer the response to extract the conversation ID
-    // Collect the stream into bytes
-    let body_bytes: Bytes = proxy_response
-        .body
-        .try_collect::<Vec<_>>()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(ErrorResponse {
-                    error: format!("Failed to read response: {e}"),
-                }),
-            )
-                .into_response()
-        })?
-        .into_iter()
-        .flatten()
-        .collect();
-
-    // If successful, parse response and track conversation
-    if (200..300).contains(&status) {
-        let decompressed_bytes = match decompress_if_gzipped(&body_bytes, &response_headers) {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                tracing::error!(
-                    "Failed to decompress response for user_id={}: {}",
-                    user.user_id,
-                    e
-                );
-                body_bytes.to_vec()
-            }
-        };
-
-        if let Ok(response_json) = serde_json::from_slice::<serde_json::Value>(&decompressed_bytes)
-        {
-            tracing::debug!("Response JSON parsed successfully");
-            if let Some(conversation_id) = response_json.get("id").and_then(|v| v.as_str()) {
-                // Track conversation in database
-                tracing::debug!("Tracking conversation {} in database", conversation_id);
-                if let Err(e) = state
-                    .conversation_service
-                    .track_conversation(conversation_id, user.user_id)
-                    .await
-                {
-                    tracing::error!(
-                        "Failed to track conversation {} for user {}: {}",
-                        conversation_id,
-                        user.user_id,
-                        e
-                    );
-                    // Don't fail the request if tracking fails
-                } else {
-                    tracing::info!(
-                        "Successfully tracked conversation {} in database for user_id={}",
-                        conversation_id,
-                        user.user_id
-                    );
-                }
-            } else {
-                tracing::warn!(
-                    "No conversation ID found in OpenAI response for user_id={}",
-                    user.user_id
-                );
-            }
-        } else {
-            tracing::warn!(
-                "Failed to parse OpenAI response as JSON for user_id={}",
-                user.user_id
-            );
-            if let Ok(text) = String::from_utf8(decompressed_bytes.clone()) {
-                tracing::debug!("Response body: {}", text);
-            }
-        }
-    } else {
-        tracing::warn!(
-            "Returned non-success status {} for user_id={}",
-            status,
-            user.user_id
-        );
-    }
-
-    build_response(status, response_headers, Body::from(body_bytes)).await
+    handle_trackable_response(
+        &state,
+        &user,
+        proxy_response,
+        TrackableResource::Conversation,
+    )
+    .await
 }
 
 /// List all conversations for the authenticated user (fetches details from OpenAI client)
@@ -643,7 +567,63 @@ async fn clone_conversation(
                 .into_response()
         })?;
 
-    handle_conversation_response(&state, &user, proxy_response).await
+    handle_trackable_response(
+        &state,
+        &user,
+        proxy_response,
+        TrackableResource::Conversation,
+    )
+    .await
+}
+
+/// Upload a file - forwards to OpenAI and tracks in DB
+async fn upload_file(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    request: Request,
+) -> Result<Response, Response> {
+    tracing::info!(
+        "upload_file called for user_id={}, session_id={}",
+        user.user_id,
+        user.session_id
+    );
+
+    // Extract body
+    let body_bytes = extract_body_bytes(request).await?;
+
+    tracing::debug!(
+        "upload_file request body size: {} bytes for user_id={}",
+        body_bytes.len(),
+        user.user_id
+    );
+
+    tracing::debug!(
+        "Forwarding file upload request to OpenAI for user_id={}",
+        user.user_id
+    );
+
+    // Forward to OpenAI
+    let proxy_response = state
+        .proxy_service
+        .forward_request(Method::POST, "files", headers.clone(), Some(body_bytes))
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "OpenAI API error during file upload for user_id={}: {}",
+                user.user_id,
+                e
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("OpenAI API error: {e}"),
+                }),
+            )
+                .into_response()
+        })?;
+
+    handle_trackable_response(&state, &user, proxy_response, TrackableResource::File).await
 }
 
 /// Generic proxy handler that forwards all requests to OpenAI
@@ -729,90 +709,101 @@ async fn proxy_handler(
         user.user_id
     );
 
-    // Track file if this is a POST to /files and response is successful
-    if method == Method::POST && path == "files" && (200..300).contains(&proxy_response.status) {
-        // Buffer the response to extract the file ID
-        let status = proxy_response.status;
-        let response_headers = proxy_response.headers.clone();
-        let body_bytes: Bytes = proxy_response
-            .body
-            .try_collect::<Vec<_>>()
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to read response body for file tracking: {}", e);
-                (
-                    StatusCode::BAD_GATEWAY,
-                    Json(ErrorResponse {
-                        error: format!("Failed to read response: {e}"),
-                    }),
-                )
-                    .into_response()
-            })?
-            .into_iter()
-            .flatten()
-            .collect();
+    build_response(
+        proxy_response.status,
+        proxy_response.headers,
+        Body::from_stream(proxy_response.body),
+    )
+    .await
+}
 
-        // Parse response and track file
-        let decompressed_bytes = match decompress_if_gzipped(&body_bytes, &response_headers) {
-            Ok(bytes) => bytes,
-            Err(e) => {
+/// Helper function to handle response: buffer, parse, and track resource
+async fn handle_trackable_response(
+    state: &crate::state::AppState,
+    user: &AuthenticatedUser,
+    proxy_response: ProxyResponse,
+    resource_type: TrackableResource,
+) -> Result<Response, Response> {
+    let status = proxy_response.status;
+    let response_headers = proxy_response.headers;
+
+    tracing::debug!("Response headers: {:?}", response_headers);
+
+    // Buffer the response to extract the resource ID
+    // Collect the stream into bytes
+    let body_bytes: Bytes = proxy_response
+        .body
+        .try_collect::<Vec<_>>()
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("Failed to read response: {e}"),
+                }),
+            )
+                .into_response()
+        })?
+        .into_iter()
+        .flatten()
+        .collect();
+
+    if !(200..300).contains(&status) {
+        return build_response(status, response_headers, Body::from(body_bytes)).await;
+    }
+
+    // If successful, parse response and track resource (don't fail request if tracking fails)
+
+    let decompressed_bytes =
+        decompress_if_gzipped(&body_bytes, &response_headers).unwrap_or_else(|e| {
+            tracing::error!(
+                "Failed to decompress response for user_id={}: {}",
+                user.user_id,
+                e
+            );
+            body_bytes.to_vec()
+        });
+
+    let Ok(response_json) = serde_json::from_slice::<serde_json::Value>(&decompressed_bytes) else {
+        return build_response(status, response_headers, Body::from(body_bytes)).await;
+    };
+
+    let Some(resource_id) = response_json.get("id").and_then(|v| v.as_str()) else {
+        return build_response(status, response_headers, Body::from(body_bytes)).await;
+    };
+
+    match resource_type {
+        TrackableResource::Conversation => {
+            if let Err(e) = state
+                .conversation_service
+                .track_conversation(resource_id, user.user_id)
+                .await
+            {
                 tracing::error!(
-                    "Failed to decompress response for file tracking (user_id={}): {}",
+                    "Failed to track conversation {} for user {}: {}",
+                    resource_id,
                     user.user_id,
                     e
                 );
-                body_bytes.to_vec()
             }
-        };
-
-        if let Ok(response_json) = serde_json::from_slice::<serde_json::Value>(&decompressed_bytes)
-        {
-            if let Some(file_id_with_prefix) = response_json.get("id").and_then(|v| v.as_str()) {
-                // Remove "file-" prefix if present
-                let file_id = file_id_with_prefix
-                    .strip_prefix("file-")
-                    .unwrap_or(file_id_with_prefix);
-
-                tracing::debug!("Tracking file {} in database", file_id);
-                if let Err(e) = state.file_service.track_file(file_id, user.user_id).await {
-                    tracing::error!(
-                        "Failed to track file {} for user {}: {}",
-                        file_id,
-                        user.user_id,
-                        e
-                    );
-                    // Don't fail the request if tracking fails
-                } else {
-                    tracing::info!(
-                        "Successfully tracked file {} in database for user_id={}",
-                        file_id,
-                        user.user_id
-                    );
-                }
-            } else {
-                tracing::warn!(
-                    "No file ID found in OpenAI response for user_id={}",
-                    user.user_id
+        }
+        TrackableResource::File => {
+            if let Err(e) = state
+                .file_service
+                .track_file(resource_id, user.user_id)
+                .await
+            {
+                tracing::error!(
+                    "Failed to track file {} for user {}: {}",
+                    resource_id,
+                    user.user_id,
+                    e
                 );
             }
-        } else {
-            tracing::warn!(
-                "Failed to parse OpenAI response as JSON for file tracking (user_id={})",
-                user.user_id
-            );
         }
-
-        // Build response with buffered body
-        build_response(status, response_headers, Body::from(body_bytes)).await
-    } else {
-        // For non-file POST or other methods, stream the response directly
-        build_response(
-            proxy_response.status,
-            proxy_response.headers,
-            Body::from_stream(proxy_response.body),
-        )
-        .await
     }
+
+    build_response(status, response_headers, Body::from(body_bytes)).await
 }
 
 async fn build_response(status: u16, headers: HeaderMap, body: Body) -> Result<Response, Response> {
