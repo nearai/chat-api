@@ -36,6 +36,11 @@ pub fn create_api_router() -> Router<crate::state::AppState> {
     let conversations_router = Router::new()
         .route("/v1/conversations", post(create_conversation))
         .route("/v1/conversations", get(list_conversations))
+        .route("/v1/conversations/{conversation_id}", get(get_conversation))
+        .route(
+            "/v1/conversations/{conversation_id}",
+            delete(delete_conversation),
+        )
         .route(
             "/v1/conversations/{conversation_id}/items",
             post(create_conversation_items),
@@ -167,7 +172,7 @@ async fn create_conversation(
 async fn list_conversations(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-) -> Result<Json<Vec<serde_json::Value>>, Response> {
+) -> Result<Response, Response> {
     tracing::info!("list_conversations called for user_id={}", user.user_id);
 
     let conversations = state
@@ -195,7 +200,87 @@ async fn list_conversations(
         user.user_id
     );
 
-    Ok(Json(conversations))
+    Ok(Json(conversations).into_response())
+}
+
+/// Get a conversation - validates user access and fetches details via service/OpenAI
+async fn get_conversation(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(conversation_id): Path<String>,
+) -> Result<Json<serde_json::Value>, Response> {
+    tracing::info!(
+        "get_conversation called for user_id={}, conversation_id={}",
+        user.user_id,
+        conversation_id
+    );
+
+    let conversation = state
+        .conversation_service
+        .get_conversation(&conversation_id, user.user_id)
+        .await
+        .map_err(|e| {
+            let (status, error) = match e {
+                ConversationError::NotFound => {
+                    (StatusCode::NOT_FOUND, "Conversation not found".to_string())
+                }
+                ConversationError::ApiError(msg) => {
+                    (StatusCode::BAD_GATEWAY, format!("OpenAI API error: {msg}"))
+                }
+                _ => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to get conversation".to_string(),
+                ),
+            };
+
+            (status, Json(ErrorResponse { error })).into_response()
+        })?;
+
+    Ok(Json(conversation))
+}
+
+/// Delete a conversation for the authenticated user
+async fn delete_conversation(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(conversation_id): Path<String>,
+) -> Result<Response, Response> {
+    tracing::info!(
+        "delete_conversation called for user_id={}, conversation_id={}",
+        user.user_id,
+        conversation_id
+    );
+
+    // Delete from DB and OpenAI
+    let deleted = state
+        .conversation_service
+        .delete_conversation(&conversation_id, user.user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to delete conversation {} for user_id={}: {}",
+                conversation_id,
+                user.user_id,
+                e
+            );
+
+            let (status, msg) = match e {
+                ConversationError::NotFound => {
+                    (StatusCode::NOT_FOUND, "Conversation not found".to_string())
+                }
+                ConversationError::ApiError(msg) => {
+                    (StatusCode::BAD_GATEWAY, format!("OpenAI API error: {msg}"))
+                }
+                _ => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to delete conversation".to_string(),
+                ),
+            };
+
+            (status, Json(ErrorResponse { error: msg })).into_response()
+        })?;
+
+    Ok(Json(deleted).into_response())
 }
 
 async fn create_conversation_items(
@@ -646,13 +731,19 @@ async fn list_files(
         .await
         .map_err(|e| {
             tracing::error!("Failed to list files for user_id={}: {}", user.user_id, e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Failed to list files: {e}"),
-                }),
-            )
-                .into_response()
+
+            let (status, error) = match e {
+                FileError::NotFound => (StatusCode::NOT_FOUND, "File not found".to_string()),
+                FileError::ApiError(msg) => {
+                    (StatusCode::BAD_GATEWAY, format!("OpenAI API error: {msg}"))
+                }
+                _ => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to list files: {e}"),
+                ),
+            };
+
+            (status, Json(ErrorResponse { error })).into_response()
         })?;
 
     tracing::info!(
@@ -669,7 +760,6 @@ async fn get_file(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path(file_id): Path<String>,
-    headers: HeaderMap,
 ) -> Result<Response, Response> {
     tracing::info!(
         "get_file called for user_id={}, file_id={}",
@@ -677,44 +767,26 @@ async fn get_file(
         file_id
     );
 
-    validate_user_file(&state, &user, &file_id).await?;
-
-    tracing::debug!(
-        "Forwarding file get request to OpenAI for user_id={}",
-        user.user_id
-    );
-
-    // Forward to OpenAI
-    let proxy_response = state
-        .proxy_service
-        .forward_request(
-            Method::GET,
-            &format!("files/{file_id}"),
-            headers.clone(),
-            None,
-        )
+    let file = state
+        .file_service
+        .get_file(&file_id, user.user_id)
         .await
         .map_err(|e| {
-            tracing::error!(
-                "OpenAI API error during file get for user_id={}: {}",
-                user.user_id,
-                e
-            );
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(ErrorResponse {
-                    error: format!("OpenAI API error: {e}"),
-                }),
-            )
-                .into_response()
+            let (status, error) = match e {
+                FileError::NotFound => (StatusCode::NOT_FOUND, "File not found".to_string()),
+                FileError::ApiError(msg) => {
+                    (StatusCode::BAD_GATEWAY, format!("OpenAI API error: {msg}"))
+                }
+                _ => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to get file: {e}"),
+                ),
+            };
+
+            (status, Json(ErrorResponse { error })).into_response()
         })?;
 
-    build_response(
-        proxy_response.status,
-        proxy_response.headers,
-        Body::from_stream(proxy_response.body),
-    )
-    .await
+    Ok(Json(file).into_response())
 }
 
 /// Delete a file - validates user access, deletes from OpenAI and DB
@@ -729,12 +801,11 @@ async fn delete_file(
         file_id
     );
 
-    // Delete from OpenAI and DB
-    state
+    // Delete from DB and OpenAI
+    let deleted = state
         .file_service
         .delete_file(&file_id, user.user_id)
         .await
-        .map(|value| (StatusCode::OK, Json(value)).into_response())
         .map_err(|e| {
             tracing::error!(
                 "Failed to delete file {} for user_id={}: {}",
@@ -753,7 +824,9 @@ async fn delete_file(
                 ),
             };
             (status, Json(ErrorResponse { error: error_msg })).into_response()
-        })
+        })?;
+
+    Ok(Json(deleted).into_response())
 }
 
 /// Get file content - validates user access and fetches content from OpenAI

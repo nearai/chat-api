@@ -121,7 +121,7 @@ impl ConversationService for ConversationServiceImpl {
         &self,
         conversation_id: &str,
         user_id: UserId,
-    ) -> Result<(), ConversationError> {
+    ) -> Result<serde_json::Value, ConversationError> {
         tracing::info!(
             "Deleting conversation: conversation_id={}, user_id={}",
             conversation_id,
@@ -132,13 +132,8 @@ impl ConversationService for ConversationServiceImpl {
             .delete_conversation(conversation_id, user_id)
             .await?;
 
-        tracing::info!(
-            "Conversation deleted successfully: conversation_id={}, user_id={}",
-            conversation_id,
-            user_id
-        );
-
-        Ok(())
+        // Also delete conversation from OpenAI
+        self.delete_conversation_from_openai(conversation_id).await
     }
 }
 
@@ -338,5 +333,54 @@ impl ConversationServiceImpl {
         );
 
         Ok(conversation)
+    }
+
+    /// Delete conversation from OpenAI API and return the delete response
+    async fn delete_conversation_from_openai(
+        &self,
+        conversation_id: &str,
+    ) -> Result<serde_json::Value, ConversationError> {
+        let path = format!("conversations/{}", conversation_id);
+
+        tracing::debug!("Deleting conversation from OpenAI: {}", path);
+
+        let response = self
+            .openai_proxy
+            .forward_request(Method::DELETE, &path, http::HeaderMap::new(), None)
+            .await
+            .map_err(|e| ConversationError::ApiError(e.to_string()))?;
+
+        if response.status != 200 {
+            tracing::error!(
+                "OpenAI API returned status {} for conversation delete {}",
+                response.status,
+                conversation_id
+            );
+            return Err(ConversationError::ApiError(format!(
+                "OpenAI API returned status {}",
+                response.status
+            )));
+        }
+
+        // Collect the response body
+        let body_bytes: Bytes = response
+            .body
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(|e| ConversationError::ApiError(format!("Failed to read response: {}", e)))?
+            .into_iter()
+            .flatten()
+            .collect();
+
+        // Parse as JSON
+        let value: serde_json::Value = serde_json::from_slice(&body_bytes)
+            .map_err(|e| ConversationError::ApiError(format!("Failed to parse JSON: {}", e)))?;
+
+        tracing::debug!(
+            "Successfully deleted conversation {} from OpenAI",
+            conversation_id
+        );
+
+        Ok(value)
     }
 }

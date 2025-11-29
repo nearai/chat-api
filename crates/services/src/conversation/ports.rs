@@ -68,5 +68,5 @@ pub trait ConversationService: Send + Sync {
         &self,
         conversation_id: &str,
         user_id: UserId,
-    ) -> Result<(), ConversationError>;
+    ) -> Result<serde_json::Value, ConversationError>;
 }
