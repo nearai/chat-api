@@ -96,7 +96,7 @@ impl ConversationService for ConversationServiceImpl {
 
         // Check if user has access to this conversation
         self.repository
-            .get_conversation(conversation_id, user_id)
+            .access_conversation(conversation_id, user_id)
             .await?;
 
         tracing::debug!(
@@ -108,13 +108,17 @@ impl ConversationService for ConversationServiceImpl {
         // Fetch details from OpenAI
         let conversation = self.fetch_conversation_from_openai(conversation_id).await?;
 
-        tracing::info!(
-            "Successfully fetched conversation {} from OpenAI for user_id={}",
-            conversation_id,
-            user_id
-        );
-
         Ok(conversation)
+    }
+
+    async fn access_conversation(
+        &self,
+        conversation_id: &str,
+        user_id: UserId,
+    ) -> Result<(), ConversationError> {
+        self.repository
+            .access_conversation(conversation_id, user_id)
+            .await
     }
 
     async fn delete_conversation(

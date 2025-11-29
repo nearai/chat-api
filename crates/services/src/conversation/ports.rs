@@ -27,7 +27,7 @@ pub trait ConversationRepository: Send + Sync {
     async fn list_conversations(&self, user_id: UserId) -> Result<Vec<String>, ConversationError>;
 
     /// Check if a conversation exists for a user
-    async fn get_conversation(
+    async fn access_conversation(
         &self,
         conversation_id: &str,
         user_id: UserId,
@@ -62,6 +62,13 @@ pub trait ConversationService: Send + Sync {
         conversation_id: &str,
         user_id: UserId,
     ) -> Result<serde_json::Value, ConversationError>;
+
+    /// Ensure the user has access to a conversation using only the local database
+    async fn access_conversation(
+        &self,
+        conversation_id: &str,
+        user_id: UserId,
+    ) -> Result<(), ConversationError>;
 
     /// Delete a conversation for a user
     async fn delete_conversation(

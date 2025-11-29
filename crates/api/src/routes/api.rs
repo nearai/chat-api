@@ -1166,27 +1166,23 @@ async fn validate_user_conversation(
     user: &AuthenticatedUser,
     conversation_id: &str,
 ) -> Result<(), Response> {
-    match state
+    state
         .conversation_service
-        .get_conversation(conversation_id, user.user_id)
+        .access_conversation(conversation_id, user.user_id)
         .await
-    {
-        Ok(_) => Ok(()),
-        Err(ConversationError::NotFound) => Err((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: "Conversation not found".to_string(),
-            }),
-        )
-            .into_response()),
-        Err(_) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Failed to get conversation".to_string(),
-            }),
-        )
-            .into_response()),
-    }
+        .map_err(|e| {
+            let (status, error) = match e {
+                ConversationError::NotFound => {
+                    (StatusCode::NOT_FOUND, "Conversation not found".to_string())
+                }
+                _ => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to get conversation: {}", e),
+                ),
+            };
+
+            (status, Json(ErrorResponse { error })).into_response()
+        })
 }
 
 async fn validate_user_file(
@@ -1194,23 +1190,21 @@ async fn validate_user_file(
     user: &AuthenticatedUser,
     file_id: &str,
 ) -> Result<(), Response> {
-    match state.file_service.get_file(file_id, user.user_id).await {
-        Ok(_) => Ok(()),
-        Err(FileError::NotFound) => Err((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: "File not found".to_string(),
-            }),
-        )
-            .into_response()),
-        Err(_) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Failed to get file".to_string(),
-            }),
-        )
-            .into_response()),
-    }
+    state
+        .file_service
+        .access_file(file_id, user.user_id)
+        .await
+        .map_err(|e| {
+            let (status, error) = match e {
+                FileError::NotFound => (StatusCode::NOT_FOUND, "File not found".to_string()),
+                _ => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to get file: {}", e),
+                ),
+            };
+
+            (status, Json(ErrorResponse { error })).into_response()
+        })
 }
 
 /// Extract body bytes from a request

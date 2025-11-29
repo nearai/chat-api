@@ -78,7 +78,7 @@ impl FileRepository for PostgresFileRepository {
         Ok(file_ids)
     }
 
-    async fn get_file(&self, file_id: &str, user_id: UserId) -> Result<(), FileError> {
+    async fn access_file(&self, file_id: &str, user_id: UserId) -> Result<(), FileError> {
         let client = self
             .pool
             .get()

@@ -77,7 +77,7 @@ impl FileService for FileServiceImpl {
         tracing::info!("Getting file: file_id={}, user_id={}", file_id, user_id);
 
         // Check if user has access to this file
-        self.repository.get_file(file_id, user_id).await?;
+        self.repository.access_file(file_id, user_id).await?;
 
         tracing::debug!(
             "User {} has access to file {}, fetching from OpenAI",
@@ -88,13 +88,11 @@ impl FileService for FileServiceImpl {
         // Fetch details from OpenAI
         let file = self.fetch_file_from_openai(file_id).await?;
 
-        tracing::info!(
-            "Successfully fetched file {} from OpenAI for user_id={}",
-            file_id,
-            user_id
-        );
-
         Ok(file)
+    }
+
+    async fn access_file(&self, file_id: &str, user_id: UserId) -> Result<(), FileError> {
+        self.repository.access_file(file_id, user_id).await
     }
 
     async fn delete_file(
