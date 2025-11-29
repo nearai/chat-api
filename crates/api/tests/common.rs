@@ -3,6 +3,7 @@
 use api::{create_router, AppState};
 use axum_test::TestServer;
 use serde_json::json;
+use services::file::service::FileServiceImpl;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
@@ -36,6 +37,7 @@ pub async fn create_test_server() -> TestServer {
     let session_repo = db.session_repository();
     let oauth_repo = db.oauth_repository();
     let conversation_repo = db.conversation_repository();
+    let file_repo = db.file_repository();
     let user_settings_repo = db.user_settings_repository();
 
     // Create services
@@ -77,6 +79,8 @@ pub async fn create_test_server() -> TestServer {
     // Add `admin.org` as test admin domain
     admin_domains.push("admin.org".to_string());
 
+    let file_service = Arc::new(FileServiceImpl::new(file_repo, proxy_service.clone()));
+
     // Create application state
     let app_state = AppState {
         oauth_service,
@@ -86,6 +90,7 @@ pub async fn create_test_server() -> TestServer {
         user_repository: user_repo,
         proxy_service,
         conversation_service,
+        file_service,
         redirect_uri: config.oauth.redirect_uri,
         admin_domains: Arc::new(admin_domains),
     };

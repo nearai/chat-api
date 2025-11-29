@@ -82,7 +82,7 @@ impl ConversationRepository for PostgresConversationRepository {
         Ok(conversation_ids)
     }
 
-    async fn get_conversation(
+    async fn access_conversation(
         &self,
         conversation_id: &str,
         user_id: UserId,
