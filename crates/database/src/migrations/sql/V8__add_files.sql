@@ -3,8 +3,7 @@ CREATE TABLE files (
     id VARCHAR(255) PRIMARY KEY, -- OpenAI file ID
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE(id, user_id)
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX idx_files_user_id ON files(user_id);
