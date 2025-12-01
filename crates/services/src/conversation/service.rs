@@ -132,6 +132,8 @@ impl ConversationService for ConversationServiceImpl {
             user_id
         );
 
+        self.access_conversation(conversation_id, user_id).await?;
+
         // First delete conversation from OpenAI
         let deleted = self
             .delete_conversation_from_openai(conversation_id)
