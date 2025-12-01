@@ -47,6 +47,7 @@ impl FileService for FileServiceImpl {
         after: Option<String>,
         limit: i64,
         order: &str,
+        purpose: Option<String>,
     ) -> Result<(Vec<FileData>, bool), FileError> {
         tracing::info!(
             "Listing files with pagination for user_id={}, after={:?}, limit={}, order={}",
@@ -62,7 +63,7 @@ impl FileService for FileServiceImpl {
         // Get files directly from database with pagination
         let files = self
             .repository
-            .list_files(user_id, after, fetch_limit, order)
+            .list_files(user_id, after, fetch_limit, order, purpose)
             .await?;
 
         tracing::info!(

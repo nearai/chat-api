@@ -1,4 +1,4 @@
-use crate::consts::ALLOWED_PROXY_PATHS;
+use crate::consts::{ALLOWED_PROXY_PATHS, LIST_FILES_LIMIT_MAX};
 use crate::middleware::auth::AuthenticatedUser;
 use axum::{
     body::Body,
@@ -731,8 +731,7 @@ async fn list_files(
     let limit = params
         .get("limit")
         .and_then(|s| s.parse::<i64>().ok())
-        .unwrap_or(10000)
-        .clamp(1, 10000);
+        .unwrap_or(LIST_FILES_LIMIT_MAX);
     let order = params.get("order").map(|s| s.as_str()).unwrap_or("desc");
 
     if order != "asc" && order != "desc" {
@@ -745,9 +744,24 @@ async fn list_files(
             .into_response());
     }
 
+    if !(1..=LIST_FILES_LIMIT_MAX).contains(&limit) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!(
+                    "Invalid limit parameter. Must be between 1 and {}",
+                    LIST_FILES_LIMIT_MAX
+                ),
+            }),
+        )
+            .into_response());
+    }
+
+    let purpose = params.get("purpose").map(|s| s.to_string());
+
     let (files, has_more) = state
         .file_service
-        .list_files(user.user_id, after, limit, order)
+        .list_files(user.user_id, after, limit, order, purpose)
         .await
         .map_err(|e| {
             tracing::error!("Failed to list files for user_id={}: {}", user.user_id, e);

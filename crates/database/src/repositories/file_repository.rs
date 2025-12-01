@@ -98,6 +98,7 @@ impl FileRepository for PostgresFileRepository {
         after: Option<String>,
         limit: i64,
         order: &str,
+        purpose: Option<String>,
     ) -> Result<Vec<FileData>, FileError> {
         tracing::debug!(
             "Repository: Listing files with pagination for user_id={}, after={:?}, limit={}, order={}",
@@ -124,46 +125,101 @@ impl FileRepository for PostgresFileRepository {
             }
         };
 
-        // Build query with cursor-based pagination
-        let rows = if let Some(after_id) = after {
-            match order {
-                "asc" => {
-                    client
+        // Build query with cursor-based pagination and optional purpose filter
+        let rows =
+            if let Some(after_id) = &after {
+                match (order, &purpose) {
+                    ("asc", Some(purpose)) => client
                         .query(
                             "SELECT id, bytes, file_created_at, file_expires_at, filename, purpose
                              FROM files 
-                             WHERE user_id = $1 AND file_created_at > (SELECT file_created_at FROM files WHERE id = $2 AND user_id = $1)
+                             WHERE user_id = $1
+                               AND purpose = $2
+                               AND file_created_at > (
+                                   SELECT file_created_at
+                                   FROM files
+                                   WHERE id = $3 AND user_id = $1 AND purpose = $2
+                               )
+                             ORDER BY file_created_at ASC
+                             LIMIT $4",
+                            &[&user_id.0, purpose, after_id, &limit],
+                        )
+                        .await,
+                    ("asc", None) => client
+                        .query(
+                            "SELECT id, bytes, file_created_at, file_expires_at, filename, purpose
+                             FROM files 
+                             WHERE user_id = $1
+                               AND file_created_at > (
+                                   SELECT file_created_at
+                                   FROM files
+                                   WHERE id = $2 AND user_id = $1
+                               )
                              ORDER BY file_created_at ASC
                              LIMIT $3",
-                            &[&user_id.0, &after_id, &limit],
+                            &[&user_id.0, after_id, &limit],
                         )
-                        .await
-                }
-                _ => {
-                    client
+                        .await,
+                    (_, Some(purpose)) => client
                         .query(
                             "SELECT id, bytes, file_created_at, file_expires_at, filename, purpose
                              FROM files 
-                             WHERE user_id = $1 AND file_created_at < (SELECT file_created_at FROM files WHERE id = $2 AND user_id = $1)
+                             WHERE user_id = $1
+                               AND purpose = $2
+                               AND file_created_at < (
+                                   SELECT file_created_at
+                                   FROM files
+                                   WHERE id = $3 AND user_id = $1 AND purpose = $2
+                               )
+                             ORDER BY file_created_at DESC
+                             LIMIT $4",
+                            &[&user_id.0, purpose, after_id, &limit],
+                        )
+                        .await,
+                    (_, None) => client
+                        .query(
+                            "SELECT id, bytes, file_created_at, file_expires_at, filename, purpose
+                             FROM files 
+                             WHERE user_id = $1
+                               AND file_created_at < (
+                                   SELECT file_created_at
+                                   FROM files
+                                   WHERE id = $2 AND user_id = $1
+                               )
                              ORDER BY file_created_at DESC
                              LIMIT $3",
-                            &[&user_id.0, &after_id, &limit],
+                            &[&user_id.0, after_id, &limit],
                         )
-                        .await
+                        .await,
+                }
+            } else {
+                match &purpose {
+                    Some(purpose) => {
+                        let query = format!(
+                            "SELECT id, bytes, file_created_at, file_expires_at, filename, purpose
+                         FROM files 
+                         WHERE user_id = $1
+                           AND purpose = $2
+                         ORDER BY file_created_at {}
+                         LIMIT $3",
+                            order_clause
+                        );
+                        client.query(&query, &[&user_id.0, purpose, &limit]).await
+                    }
+                    None => {
+                        let query = format!(
+                            "SELECT id, bytes, file_created_at, file_expires_at, filename, purpose
+                         FROM files 
+                         WHERE user_id = $1 
+                         ORDER BY file_created_at {}
+                         LIMIT $2",
+                            order_clause
+                        );
+                        client.query(&query, &[&user_id.0, &limit]).await
+                    }
                 }
             }
-        } else {
-            let query = format!(
-                "SELECT id, bytes, file_created_at, file_expires_at, filename, purpose
-                 FROM files 
-                 WHERE user_id = $1 
-                 ORDER BY file_created_at {}
-                 LIMIT $2",
-                order_clause
-            );
-            client.query(&query, &[&user_id.0, &limit]).await
-        }
-        .map_err(|e| FileError::DatabaseError(e.to_string()))?;
+            .map_err(|e| FileError::DatabaseError(e.to_string()))?;
 
         let files: Vec<FileData> = rows.iter().map(raw_to_file_data).collect();
 

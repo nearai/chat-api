@@ -43,6 +43,7 @@ pub trait FileRepository: Send + Sync {
         after: Option<String>,
         limit: i64,
         order: &str,
+        purpose: Option<String>,
     ) -> Result<Vec<FileData>, FileError>;
 
     /// Check if a file exists for a user
@@ -64,6 +65,7 @@ pub trait FileService: Send + Sync {
         after: Option<String>,
         limit: i64,
         order: &str,
+        purpose: Option<String>,
     ) -> Result<(Vec<FileData>, bool), FileError>;
 
     /// Get a file from local database (checks user access)

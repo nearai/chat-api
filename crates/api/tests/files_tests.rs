@@ -408,7 +408,7 @@ async fn test_file_list_pagination() {
     assert_eq!(response.status_code(), 200, "Should accept limit=10000");
     println!("   ✓ Maximum limit (10000) works correctly");
 
-    // Test limit beyond maximum (should clamp to 10000)
+    // Test limit beyond maximum (should return 400)
     let response = server
         .get("/v1/files?limit=20000")
         .add_header(
@@ -416,8 +416,12 @@ async fn test_file_list_pagination() {
             http::HeaderValue::from_str(&format!("Bearer {SESSION_TOKEN}")).unwrap(),
         )
         .await;
-    assert_eq!(response.status_code(), 200, "Should clamp limit to 10000");
-    println!("   ✓ Limit clamping works correctly");
+    assert_eq!(
+        response.status_code(),
+        400,
+        "Should reject limit beyond maximum with 400"
+    );
+    println!("   ✓ Limit upper bound validation works correctly");
 
     // Step 8: Test has_more flag
     println!("\n8. Testing has_more flag...");

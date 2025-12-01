@@ -1,4 +1,4 @@
-use crate::{consts::LIMIT_MAX, error::ApiError, models::*, state::AppState};
+use crate::{consts::LIST_USERS_LIMIT_MAX, error::ApiError, models::*, state::AppState};
 use axum::{
     extract::{Query, State},
     routing::get,
@@ -25,10 +25,10 @@ impl PaginationQuery {
             ));
         }
 
-        if self.limit > LIMIT_MAX {
+        if self.limit > LIST_USERS_LIMIT_MAX {
             return Err(ApiError::bad_request(format!(
                 "limit exceeds maximum value of {}",
-                LIMIT_MAX
+                LIST_USERS_LIMIT_MAX
             )));
         }
 
