@@ -9,4 +9,5 @@ pub const ALLOWED_PROXY_PATHS: &[&str] = &[
     "models",
     "model/list",
     "files",
+    "signature",
 ];
