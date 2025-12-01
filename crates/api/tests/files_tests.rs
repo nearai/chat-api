@@ -98,7 +98,7 @@ async fn test_file_upload_workflow() {
     };
 
     // Step 2: Get file details
-    println!("\n3. Getting file details...");
+    println!("\n2. Getting file details...");
     let response = server
         .get(&format!("/v1/files/{}", file_id))
         .add_header(
@@ -113,7 +113,7 @@ async fn test_file_upload_workflow() {
     println!("   File: {}", serde_json::to_string_pretty(&file).unwrap());
 
     // Step 3: Get file content
-    println!("\n4. Getting file content...");
+    println!("\n3. Getting file content...");
     let response = server
         .get(&format!("/v1/files/{}/content", file_id))
         .add_header(
@@ -128,7 +128,7 @@ async fn test_file_upload_workflow() {
     println!("   Content length: {} bytes", content.len());
 
     // Step 4: Delete file
-    println!("\n5. Deleting file...");
+    println!("\n4. Deleting file...");
     let response = server
         .delete(&format!("/v1/files/{}", file_id))
         .add_header(

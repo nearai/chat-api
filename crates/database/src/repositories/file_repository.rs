@@ -35,6 +35,7 @@ impl FileRepository for PostgresFileRepository {
                  VALUES ($1, $2, $3, $4, $5, $6, $7)
                  ON CONFLICT (id) 
                  DO UPDATE SET 
+                     user_id = EXCLUDED.user_id,
                      bytes = EXCLUDED.bytes,
                      file_created_at = EXCLUDED.file_created_at,
                      file_expires_at = EXCLUDED.file_expires_at,

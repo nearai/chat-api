@@ -114,7 +114,7 @@ impl FileService for FileServiceImpl {
             user_id
         );
 
-        // Delete from OpenAI first
+        // Also delete file from OpenAI
         self.delete_file_from_openai(file_id).await
     }
 }
