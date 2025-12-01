@@ -29,6 +29,60 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
+/// Raw query parameters for listing files
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ListFilesParams {
+    pub after: Option<String>,
+    pub limit: Option<i64>,
+    pub order: Option<String>,
+    pub purpose: Option<String>,
+}
+
+/// Validated and normalized list files parameters
+#[derive(Debug)]
+pub struct ValidatedListFilesParams {
+    pub after: Option<String>,
+    pub limit: i64,
+    pub order: String,
+    pub purpose: Option<String>,
+}
+
+impl ListFilesParams {
+    /// Validate query parameters and return normalized values (with defaults applied)
+    fn validate(self) -> Result<ValidatedListFilesParams, (StatusCode, Json<ErrorResponse>)> {
+        // Apply default values
+        let limit = self.limit.unwrap_or(LIST_FILES_LIMIT_MAX);
+        if !(1..=LIST_FILES_LIMIT_MAX).contains(&limit) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!(
+                        "Invalid limit parameter. Must be between 1 and {}",
+                        LIST_FILES_LIMIT_MAX
+                    ),
+                }),
+            ));
+        }
+
+        let order = self.order.unwrap_or_else(|| "desc".to_string());
+        if order != "asc" && order != "desc" {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Invalid order parameter. Must be 'asc' or 'desc'".to_string(),
+                }),
+            ));
+        }
+
+        Ok(ValidatedListFilesParams {
+            after: self.after,
+            limit,
+            order,
+            purpose: self.purpose,
+        })
+    }
+}
+
 /// Create the OpenAI API proxy router
 pub fn create_api_router() -> Router<crate::state::AppState> {
     // IMPORTANT: Specific routes MUST be in the same Router and registered BEFORE catch-all routes
@@ -722,48 +776,22 @@ async fn upload_file(
 async fn list_files(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    axum::extract::Query(params): axum::extract::Query<ListFilesParams>,
 ) -> Result<Json<crate::models::FileListResponse>, Response> {
     tracing::info!("list_files called for user_id={}", user.user_id);
 
-    // Parse query parameters
-    let after = params.get("after").map(|s| s.to_string());
-
-    let limit = params
-        .get("limit")
-        .and_then(|s| s.parse::<i64>().ok())
-        .unwrap_or(LIST_FILES_LIMIT_MAX);
-
-    if !(1..=LIST_FILES_LIMIT_MAX).contains(&limit) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: format!(
-                    "Invalid limit parameter. Must be between 1 and {}",
-                    LIST_FILES_LIMIT_MAX
-                ),
-            }),
-        )
-            .into_response());
-    }
-
-    let order = params.get("order").map(|s| s.as_str()).unwrap_or("desc");
-
-    if order != "asc" && order != "desc" {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "Invalid order parameter. Must be 'asc' or 'desc'".to_string(),
-            }),
-        )
-            .into_response());
-    }
-
-    let purpose = params.get("purpose").map(|s| s.to_string());
+    // Validate and normalize query parameters
+    let validated = params.validate().map_err(|e| e.into_response())?;
 
     let (files, has_more) = state
         .file_service
-        .list_files(user.user_id, after, limit, order, purpose)
+        .list_files(
+            user.user_id,
+            validated.after.clone(),
+            validated.limit,
+            &validated.order,
+            validated.purpose.clone(),
+        )
         .await
         .map_err(|e| {
             tracing::error!("Failed to list files for user_id={}: {}", user.user_id, e);
