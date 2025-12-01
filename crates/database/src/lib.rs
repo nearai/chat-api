@@ -6,8 +6,9 @@ pub mod repositories;
 
 pub use pool::DbPool;
 pub use repositories::{
-    PostgresConversationRepository, PostgresFileRepository, PostgresOAuthRepository,
-    PostgresSessionRepository, PostgresUserRepository, PostgresUserSettingsRepository,
+    PostgresAppConfigRepository, PostgresConversationRepository, PostgresFileRepository,
+    PostgresOAuthRepository, PostgresSessionRepository, PostgresUserRepository,
+    PostgresUserSettingsRepository,
 };
 
 use crate::pool::create_pool_with_native_tls;
@@ -27,6 +28,7 @@ pub struct Database {
     conversation_repository: Arc<PostgresConversationRepository>,
     file_repository: Arc<PostgresFileRepository>,
     user_settings_repository: Arc<PostgresUserSettingsRepository>,
+    app_config_repository: Arc<PostgresAppConfigRepository>,
     cluster_manager: Option<Arc<ClusterManager>>,
 }
 
@@ -39,6 +41,7 @@ impl Database {
         let conversation_repository = Arc::new(PostgresConversationRepository::new(pool.clone()));
         let file_repository = Arc::new(PostgresFileRepository::new(pool.clone()));
         let user_settings_repository = Arc::new(PostgresUserSettingsRepository::new(pool.clone()));
+        let app_config_repository = Arc::new(PostgresAppConfigRepository::new(pool.clone()));
 
         Self {
             pool,
@@ -48,6 +51,7 @@ impl Database {
             conversation_repository,
             file_repository,
             user_settings_repository,
+            app_config_repository,
             cluster_manager: None,
         }
     }
@@ -199,5 +203,10 @@ impl Database {
     /// Get the user settings repository
     pub fn user_settings_repository(&self) -> Arc<PostgresUserSettingsRepository> {
         self.user_settings_repository.clone()
+    }
+
+    /// Get the app config repository
+    pub fn app_config_repository(&self) -> Arc<PostgresAppConfigRepository> {
+        self.app_config_repository.clone()
     }
 }
