@@ -48,7 +48,7 @@ async fn vpc_authenticate(
     tracing::debug!("VPC auth timestamp: {}", timestamp);
 
     // Build the auth URL
-    let auth_url = format!("{}/v1/auth/vpc/login", base_url.trim_end_matches('/'));
+    let auth_url = format!("{}/auth/vpc/login", base_url.trim_end_matches('/'));
 
     // Make authentication request
     let client = reqwest::Client::new();
