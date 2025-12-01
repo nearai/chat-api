@@ -188,7 +188,7 @@ async fn test_file_not_found() {
 }
 
 #[tokio::test]
-#[ignore] // This makes real OpenAI API calls - run with: cargo test -- --ignored --nocapture
+// #[ignore] // This makes real OpenAI API calls - run with: cargo test -- --ignored --nocapture
 async fn test_file_list_pagination() {
     let server = create_test_server().await;
 
@@ -222,20 +222,21 @@ async fn test_file_list_pagination() {
             .bytes(Bytes::from(multipart_body))
             .await;
 
-        if response.status_code().is_success() {
-            let body: serde_json::Value = response.json();
-            if let Some(id) = body.get("id").and_then(|v| v.as_str()) {
-                uploaded_file_ids.push(id.to_string());
-                println!("   ✓ Uploaded file {}: {}", i, id);
-                // Small delay to ensure different created_at timestamps
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-            }
+        assert!(response.status_code().is_success());
+
+        let body: serde_json::Value = response.json();
+        if let Some(id) = body.get("id").and_then(|v| v.as_str()) {
+            uploaded_file_ids.push(id.to_string());
+            println!("   ✓ Uploaded file {}: {}", i, id);
+            // Small delay to ensure different created_at timestamps
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
     }
 
-    assert!(
-        uploaded_file_ids.len() >= 3,
-        "Should have uploaded at least 3 files for pagination test"
+    assert_eq!(
+        uploaded_file_ids.len(),
+        5,
+        "Ensure files uploaded for pagination test"
     );
     println!("   Total files uploaded: {}", uploaded_file_ids.len());
 
