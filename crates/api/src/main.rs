@@ -2,7 +2,8 @@ use api::{create_router_with_cors, ApiDoc, AppState};
 use hmac::{Hmac, Mac};
 use services::{
     auth::OAuthServiceImpl, conversation::service::ConversationServiceImpl,
-    response::service::OpenAIProxy, user::UserServiceImpl, user::UserSettingsServiceImpl,
+    file::service::FileServiceImpl, response::service::OpenAIProxy, user::UserServiceImpl,
+    user::UserSettingsServiceImpl,
 };
 use sha2::Sha256;
 use std::sync::Arc;
@@ -124,6 +125,7 @@ async fn main() -> anyhow::Result<()> {
     let session_repo = db.session_repository();
     let oauth_repo = db.oauth_repository();
     let conversation_repo = db.conversation_repository();
+    let file_repo = db.file_repository();
     let user_settings_repo = db.user_settings_repository();
     let app_config_repo = db.app_config_repository();
 
@@ -199,6 +201,9 @@ async fn main() -> anyhow::Result<()> {
         proxy_service.clone(),
     ));
 
+    // Initialize file service
+    let file_service = Arc::new(FileServiceImpl::new(file_repo, proxy_service.clone()));
+
     // Create application state
     let app_state = AppState {
         oauth_service,
@@ -207,6 +212,7 @@ async fn main() -> anyhow::Result<()> {
         session_repository: session_repo,
         proxy_service,
         conversation_service,
+        file_service,
         redirect_uri: config.oauth.redirect_uri,
         admin_domains: Arc::new(config.admin.admin_domains),
         user_repository: user_repo.clone(),

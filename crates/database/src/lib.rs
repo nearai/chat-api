@@ -6,8 +6,9 @@ pub mod repositories;
 
 pub use pool::DbPool;
 pub use repositories::{
-    PostgresAppConfigRepository, PostgresConversationRepository, PostgresOAuthRepository,
-    PostgresSessionRepository, PostgresUserRepository, PostgresUserSettingsRepository,
+    PostgresAppConfigRepository, PostgresConversationRepository, PostgresFileRepository,
+    PostgresOAuthRepository, PostgresSessionRepository, PostgresUserRepository,
+    PostgresUserSettingsRepository,
 };
 
 use crate::pool::create_pool_with_native_tls;
@@ -25,6 +26,7 @@ pub struct Database {
     session_repository: Arc<PostgresSessionRepository>,
     oauth_repository: Arc<PostgresOAuthRepository>,
     conversation_repository: Arc<PostgresConversationRepository>,
+    file_repository: Arc<PostgresFileRepository>,
     user_settings_repository: Arc<PostgresUserSettingsRepository>,
     app_config_repository: Arc<PostgresAppConfigRepository>,
     cluster_manager: Option<Arc<ClusterManager>>,
@@ -37,6 +39,7 @@ impl Database {
         let session_repository = Arc::new(PostgresSessionRepository::new(pool.clone()));
         let oauth_repository = Arc::new(PostgresOAuthRepository::new(pool.clone()));
         let conversation_repository = Arc::new(PostgresConversationRepository::new(pool.clone()));
+        let file_repository = Arc::new(PostgresFileRepository::new(pool.clone()));
         let user_settings_repository = Arc::new(PostgresUserSettingsRepository::new(pool.clone()));
         let app_config_repository = Arc::new(PostgresAppConfigRepository::new(pool.clone()));
 
@@ -46,6 +49,7 @@ impl Database {
             session_repository,
             oauth_repository,
             conversation_repository,
+            file_repository,
             user_settings_repository,
             app_config_repository,
             cluster_manager: None,
@@ -189,6 +193,11 @@ impl Database {
     /// Get the conversation repository
     pub fn conversation_repository(&self) -> Arc<PostgresConversationRepository> {
         self.conversation_repository.clone()
+    }
+
+    /// Get the file repository
+    pub fn file_repository(&self) -> Arc<PostgresFileRepository> {
+        self.file_repository.clone()
     }
 
     /// Get the user settings repository
