@@ -78,6 +78,87 @@ impl FileRepository for PostgresFileRepository {
         Ok(file_ids)
     }
 
+    async fn list_files_paginated(
+        &self,
+        user_id: UserId,
+        after: Option<String>,
+        limit: i64,
+        order: &str,
+    ) -> Result<Vec<String>, FileError> {
+        tracing::debug!(
+            "Repository: Listing files with pagination for user_id={}, after={:?}, limit={}, order={}",
+            user_id,
+            after,
+            limit,
+            order
+        );
+
+        let client = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| FileError::DatabaseError(e.to_string()))?;
+
+        // Validate order parameter
+        let order_clause = match order {
+            "asc" => "ASC",
+            "desc" => "DESC",
+            _ => {
+                return Err(FileError::DatabaseError(
+                    "Invalid order parameter".to_string(),
+                ))
+            }
+        };
+
+        // Build query with cursor-based pagination
+        let rows = if let Some(after_id) = after {
+            match order {
+                "asc" => {
+                    client
+                        .query(
+                            "SELECT id FROM files 
+                             WHERE user_id = $1 AND created_at > (SELECT created_at FROM files WHERE id = $2 AND user_id = $1)
+                             ORDER BY created_at ASC
+                             LIMIT $3",
+                            &[&user_id.0, &after_id, &limit],
+                        )
+                        .await
+                }
+                _ => {
+                    client
+                        .query(
+                            "SELECT id FROM files 
+                             WHERE user_id = $1 AND created_at < (SELECT created_at FROM files WHERE id = $2 AND user_id = $1)
+                             ORDER BY created_at DESC
+                             LIMIT $3",
+                            &[&user_id.0, &after_id, &limit],
+                        )
+                        .await
+                }
+            }
+        } else {
+            let query = format!(
+                "SELECT id FROM files 
+                 WHERE user_id = $1 
+                 ORDER BY created_at {}
+                 LIMIT $2",
+                order_clause
+            );
+            client.query(&query, &[&user_id.0, &limit]).await
+        }
+        .map_err(|e| FileError::DatabaseError(e.to_string()))?;
+
+        let file_ids: Vec<String> = rows.iter().map(|row| row.get(0)).collect();
+
+        tracing::debug!(
+            "Repository: Found {} file(s) with pagination for user_id={}",
+            file_ids.len(),
+            user_id
+        );
+
+        Ok(file_ids)
+    }
+
     async fn access_file(&self, file_id: &str, user_id: UserId) -> Result<(), FileError> {
         let client = self
             .pool

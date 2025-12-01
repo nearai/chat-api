@@ -261,3 +261,20 @@ pub struct UserListResponse {
     /// Total number of users
     pub total: u64,
 }
+
+/// File list response with pagination
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct FileListResponse {
+    /// Always "list"
+    pub object: String,
+    /// List of files
+    pub data: Vec<serde_json::Value>,
+    /// First file ID in the list
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_id: Option<String>,
+    /// Last file ID in the list
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_id: Option<String>,
+    /// Whether there are more files available
+    pub has_more: bool,
+}

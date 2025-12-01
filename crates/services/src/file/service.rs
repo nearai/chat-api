@@ -69,6 +69,57 @@ impl FileService for FileServiceImpl {
         Ok(files)
     }
 
+    async fn list_files_paginated(
+        &self,
+        user_id: UserId,
+        after: Option<String>,
+        limit: i64,
+        order: &str,
+    ) -> Result<(Vec<serde_json::Value>, bool), FileError> {
+        tracing::info!(
+            "Listing files with pagination for user_id={}, after={:?}, limit={}, order={}",
+            user_id,
+            after,
+            limit,
+            order
+        );
+
+        // Fetch limit + 1 to determine if there are more results
+        let fetch_limit = limit + 1;
+
+        // Get file IDs from database with pagination
+        let file_ids = self
+            .repository
+            .list_files_paginated(user_id, after, fetch_limit, order)
+            .await?;
+
+        tracing::info!(
+            "Retrieved {} file ID(s) from database for user_id={}",
+            file_ids.len(),
+            user_id
+        );
+
+        // Determine if there are more results
+        let has_more = file_ids.len() > limit as usize;
+        let file_ids_to_fetch: Vec<_> = file_ids.into_iter().take(limit as usize).collect();
+
+        // Early return if no files
+        if file_ids_to_fetch.is_empty() {
+            return Ok((Vec::new(), false));
+        }
+
+        // Fetch files from OpenAI
+        let files = self.batch_fetch_files(&file_ids_to_fetch).await?;
+
+        tracing::info!(
+            "Successfully fetched {} file(s) from OpenAI for user_id={}",
+            files.len(),
+            user_id
+        );
+
+        Ok((files, has_more))
+    }
+
     async fn get_file(
         &self,
         file_id: &str,

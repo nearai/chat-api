@@ -722,16 +722,35 @@ async fn upload_file(
 async fn list_files(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-) -> Result<Json<Vec<serde_json::Value>>, Response> {
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<crate::models::FileListResponse>, Response> {
     tracing::info!("list_files called for user_id={}", user.user_id);
 
-    let files = state
+    // Parse query parameters
+    let after = params.get("after").map(|s| s.to_string());
+    let limit = params
+        .get("limit")
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(10000)
+        .clamp(1, 10000);
+    let order = params.get("order").map(|s| s.as_str()).unwrap_or("desc");
+
+    if order != "asc" && order != "desc" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Invalid order parameter. Must be 'asc' or 'desc'".to_string(),
+            }),
+        )
+            .into_response());
+    }
+
+    let (files, has_more) = state
         .file_service
-        .list_files(user.user_id)
+        .list_files_paginated(user.user_id, after, limit, order)
         .await
         .map_err(|e| {
             tracing::error!("Failed to list files for user_id={}: {}", user.user_id, e);
-
             let (status, error) = match e {
                 FileError::NotFound => (StatusCode::NOT_FOUND, "File not found".to_string()),
                 FileError::ApiError(msg) => {
@@ -742,17 +761,28 @@ async fn list_files(
                     format!("Failed to list files: {e}"),
                 ),
             };
-
             (status, Json(ErrorResponse { error })).into_response()
         })?;
 
-    tracing::info!(
-        "Retrieved {} files for user_id={}",
-        files.len(),
-        user.user_id
-    );
+    // Extract first and last file IDs
+    let first_id = files
+        .first()
+        .and_then(|f| f.get("id"))
+        .and_then(|id| id.as_str().map(|s| s.to_string()));
+    let last_id = files
+        .last()
+        .and_then(|f| f.get("id"))
+        .and_then(|id| id.as_str().map(|s| s.to_string()));
 
-    Ok(Json(files))
+    let response = crate::models::FileListResponse {
+        object: "list".to_string(),
+        data: files,
+        first_id,
+        last_id,
+        has_more,
+    };
+
+    Ok(Json(response))
 }
 
 /// Get a file - validates user access and fetches from OpenAI

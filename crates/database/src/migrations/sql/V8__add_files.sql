@@ -7,6 +7,7 @@ CREATE TABLE files (
 );
 
 CREATE INDEX idx_files_user_id ON files(user_id);
+CREATE INDEX idx_files_created_at ON files(created_at DESC);
 CREATE INDEX idx_files_updated_at ON files(updated_at DESC);
 
 -- Trigger for files table

@@ -22,6 +22,15 @@ pub trait FileRepository: Send + Sync {
     /// List all file IDs for a user
     async fn list_files(&self, user_id: UserId) -> Result<Vec<String>, FileError>;
 
+    /// List file IDs for a user with pagination
+    async fn list_files_paginated(
+        &self,
+        user_id: UserId,
+        after: Option<String>,
+        limit: i64,
+        order: &str,
+    ) -> Result<Vec<String>, FileError>;
+
     /// Check if a file exists for a user
     async fn access_file(&self, file_id: &str, user_id: UserId) -> Result<(), FileError>;
 
@@ -36,6 +45,15 @@ pub trait FileService: Send + Sync {
 
     /// List all files for a user with details from OpenAI
     async fn list_files(&self, user_id: UserId) -> Result<Vec<serde_json::Value>, FileError>;
+
+    /// List files for a user with pagination and details from OpenAI
+    async fn list_files_paginated(
+        &self,
+        user_id: UserId,
+        after: Option<String>,
+        limit: i64,
+        order: &str,
+    ) -> Result<(Vec<serde_json::Value>, bool), FileError>;
 
     /// Get a file with details from OpenAI (checks user access first)
     async fn get_file(
