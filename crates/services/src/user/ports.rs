@@ -134,7 +134,6 @@ pub struct PartialUserSettingsContent {
     pub appearance: Option<Appearance>,
 }
 
-#[allow(clippy::derivable_impls)]
 impl Default for UserSettingsContent {
     // When retrieving settings, default values are used to fill in any unset values.
     // If the value type is `Option<T>`, we cannot distinguish between "unset" and "set null".
@@ -143,7 +142,7 @@ impl Default for UserSettingsContent {
         Self {
             notification: false,
             system_prompt: None,
-            web_search: false,
+            web_search: true,
             appearance: Appearance::System,
         }
     }

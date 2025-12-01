@@ -18,6 +18,69 @@ use services::response::ports::ProxyResponse;
 use services::UserId;
 use std::io::Read;
 
+/// Create the OpenAI API proxy router
+pub fn create_api_router() -> Router<crate::state::AppState> {
+    // IMPORTANT: Specific routes MUST be in the same Router and registered BEFORE catch-all routes
+    // Axum matches routes in order within a router
+    let conversations_router = Router::new()
+        .route("/v1/conversations", post(create_conversation))
+        .route("/v1/conversations", get(list_conversations))
+        .route("/v1/conversations/{conversation_id}", get(get_conversation))
+        .route(
+            "/v1/conversations/{conversation_id}",
+            post(update_conversation),
+        )
+        .route(
+            "/v1/conversations/{conversation_id}",
+            delete(delete_conversation),
+        )
+        .route(
+            "/v1/conversations/{conversation_id}/items",
+            post(create_conversation_items),
+        )
+        .route(
+            "/v1/conversations/{conversation_id}/items",
+            get(list_conversation_items),
+        )
+        .route(
+            "/v1/conversations/{conversation_id}/pin",
+            post(pin_conversation),
+        )
+        .route(
+            "/v1/conversations/{conversation_id}/pin",
+            delete(unpin_conversation),
+        )
+        .route(
+            "/v1/conversations/{conversation_id}/archive",
+            post(archive_conversation),
+        )
+        .route(
+            "/v1/conversations/{conversation_id}/archive",
+            delete(unarchive_conversation),
+        )
+        .route(
+            "/v1/conversations/{conversation_id}/clone",
+            post(clone_conversation),
+        );
+
+    let files_router = Router::new()
+        .route("/v1/files", post(upload_file))
+        .route("/v1/files", get(list_files))
+        .route("/v1/files/{file_id}", get(get_file))
+        .route("/v1/files/{file_id}", delete(delete_file))
+        .route("/v1/files/{file_id}/content", get(get_file_content));
+
+    let catch_all_router = Router::new()
+        .route("/v1/{*path}", post(proxy_handler))
+        .route("/v1/{*path}", get(proxy_handler))
+        .route("/v1/{*path}", delete(proxy_handler));
+
+    Router::new()
+        .merge(conversations_router)
+        .merge(files_router)
+        .merge(catch_all_router)
+}
+
 /// Type of resource to track in the response
 enum TrackableResource {
     Conversation,
@@ -81,65 +144,6 @@ impl ListFilesParams {
             purpose: self.purpose,
         })
     }
-}
-
-/// Create the OpenAI API proxy router
-pub fn create_api_router() -> Router<crate::state::AppState> {
-    // IMPORTANT: Specific routes MUST be in the same Router and registered BEFORE catch-all routes
-    // Axum matches routes in order within a router
-    let conversations_router = Router::new()
-        .route("/v1/conversations", post(create_conversation))
-        .route("/v1/conversations", get(list_conversations))
-        .route("/v1/conversations/{conversation_id}", get(get_conversation))
-        .route(
-            "/v1/conversations/{conversation_id}",
-            delete(delete_conversation),
-        )
-        .route(
-            "/v1/conversations/{conversation_id}/items",
-            post(create_conversation_items),
-        )
-        .route(
-            "/v1/conversations/{conversation_id}/items",
-            get(list_conversation_items),
-        )
-        .route(
-            "/v1/conversations/{conversation_id}/pin",
-            post(pin_conversation),
-        )
-        .route(
-            "/v1/conversations/{conversation_id}/pin",
-            delete(unpin_conversation),
-        )
-        .route(
-            "/v1/conversations/{conversation_id}/archive",
-            post(archive_conversation),
-        )
-        .route(
-            "/v1/conversations/{conversation_id}/archive",
-            delete(unarchive_conversation),
-        )
-        .route(
-            "/v1/conversations/{conversation_id}/clone",
-            post(clone_conversation),
-        );
-
-    let files_router = Router::new()
-        .route("/v1/files", post(upload_file))
-        .route("/v1/files", get(list_files))
-        .route("/v1/files/{file_id}", get(get_file))
-        .route("/v1/files/{file_id}", delete(delete_file))
-        .route("/v1/files/{file_id}/content", get(get_file_content));
-
-    let catch_all_router = Router::new()
-        .route("/v1/{*path}", post(proxy_handler))
-        .route("/v1/{*path}", get(proxy_handler))
-        .route("/v1/{*path}", delete(proxy_handler));
-
-    Router::new()
-        .merge(conversations_router)
-        .merge(files_router)
-        .merge(catch_all_router)
 }
 
 /// Create a conversation - forwards to OpenAI and tracks in DB
@@ -213,6 +217,77 @@ async fn create_conversation(
                 .into_response()
         })?;
 
+    handle_trackable_response(
+        &state,
+        &user,
+        proxy_response,
+        TrackableResource::Conversation,
+    )
+    .await
+}
+
+/// Update a conversation - validates user access then forwards to OpenAI and updates tracking
+async fn update_conversation(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(conversation_id): Path<String>,
+    headers: HeaderMap,
+    request: Request,
+) -> Result<Response, Response> {
+    tracing::info!(
+        "update_conversation called for user_id={}, session_id={}, conversation_id={}",
+        user.user_id,
+        user.session_id,
+        conversation_id
+    );
+
+    // Validate user has access to the conversation
+    validate_user_conversation(&state, &user, &conversation_id).await?;
+
+    // Extract body
+    let body_bytes = extract_body_bytes(request).await?;
+
+    tracing::debug!(
+        "update_conversation request body size: {} bytes for user_id={}",
+        body_bytes.len(),
+        user.user_id
+    );
+
+    if let Ok(body_str) = std::str::from_utf8(&body_bytes) {
+        tracing::debug!("Request body: {}", body_str);
+    }
+
+    tracing::debug!(
+        "Forwarding conversation update request to OpenAI for user_id={}",
+        user.user_id
+    );
+
+    // Forward to OpenAI
+    let proxy_response = state
+        .proxy_service
+        .forward_request(
+            Method::POST,
+            &format!("conversations/{conversation_id}"),
+            headers.clone(),
+            Some(body_bytes),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "OpenAI API error during conversation update for user_id={}: {}",
+                user.user_id,
+                e
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("OpenAI API error: {e}"),
+                }),
+            )
+                .into_response()
+        })?;
+
+    // Track the updated conversation (don't fail the request if tracking fails)
     handle_trackable_response(
         &state,
         &user,
