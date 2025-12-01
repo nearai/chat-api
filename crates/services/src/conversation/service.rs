@@ -132,12 +132,23 @@ impl ConversationService for ConversationServiceImpl {
             user_id
         );
 
+        // First delete conversation from OpenAI
+        let deleted = self
+            .delete_conversation_from_openai(conversation_id)
+            .await?;
+
+        // Then delete from database
         self.repository
             .delete_conversation(conversation_id, user_id)
             .await?;
 
-        // Also delete conversation from OpenAI
-        self.delete_conversation_from_openai(conversation_id).await
+        tracing::info!(
+            "Conversation deleted successfully: conversation_id={}, user_id={}",
+            conversation_id,
+            user_id
+        );
+
+        Ok(deleted)
     }
 }
 
