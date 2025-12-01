@@ -14,10 +14,7 @@ impl PostgresAppConfigRepository {
         let client = self.pool.get().await?;
 
         let row = client
-            .query_opt(
-                "SELECT value FROM app_config WHERE key = $1",
-                &[&key],
-            )
+            .query_opt("SELECT value FROM app_config WHERE key = $1", &[&key])
             .await?;
 
         Ok(row.map(|r| r.get("value")))
@@ -40,4 +37,3 @@ impl PostgresAppConfigRepository {
         Ok(())
     }
 }
-
