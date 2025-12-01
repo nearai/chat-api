@@ -1,3 +1,5 @@
+#![allow(clippy::uninlined_format_args)]
+
 pub mod common;
 pub mod consts;
 pub mod error;

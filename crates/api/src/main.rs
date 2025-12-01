@@ -1,3 +1,5 @@
+#![allow(clippy::uninlined_format_args)]
+
 use api::{create_router_with_cors, ApiDoc, AppState};
 use services::{
     auth::OAuthServiceImpl, conversation::service::ConversationServiceImpl,
