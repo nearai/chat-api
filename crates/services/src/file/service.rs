@@ -105,6 +105,11 @@ impl FileService for FileServiceImpl {
     ) -> Result<serde_json::Value, FileError> {
         tracing::info!("Deleting file: file_id={}, user_id={}", file_id, user_id);
 
+        self.access_file(file_id, user_id).await?;
+
+        // First delete file from OpenAI
+        let deleted = self.delete_file_from_openai(file_id).await?;
+
         // Then delete from database
         self.repository.delete_file(file_id, user_id).await?;
 
@@ -114,8 +119,7 @@ impl FileService for FileServiceImpl {
             user_id
         );
 
-        // Also delete file from OpenAI
-        self.delete_file_from_openai(file_id).await
+        Ok(deleted)
     }
 }
 
