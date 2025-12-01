@@ -1,5 +1,3 @@
-#![allow(clippy::uninlined_format_args)]
-
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]

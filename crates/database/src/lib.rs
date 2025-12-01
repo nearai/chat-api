@@ -1,5 +1,3 @@
-#![allow(clippy::uninlined_format_args)]
-
 pub mod cluster_manager;
 pub mod migrations;
 pub mod patroni_discovery;
