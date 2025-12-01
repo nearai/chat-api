@@ -26,11 +26,7 @@ impl FileServiceImpl {
 
 #[async_trait]
 impl FileService for FileServiceImpl {
-    async fn track_file(
-        &self,
-        file: FileData,
-        user_id: UserId,
-    ) -> Result<(), FileError> {
+    async fn track_file(&self, file: FileData, user_id: UserId) -> Result<(), FileError> {
         tracing::info!("Tracking file: file_id={}, user_id={}", file.id, user_id);
 
         // Store complete file object in database
@@ -45,22 +41,7 @@ impl FileService for FileServiceImpl {
         Ok(())
     }
 
-    async fn list_files(&self, user_id: UserId) -> Result<Vec<FileData>, FileError> {
-        tracing::info!("Listing files for user_id={}", user_id);
-
-        // Get files directly from database
-        let files = self.repository.list_files(user_id).await?;
-
-        tracing::info!(
-            "Retrieved {} file(s) from database for user_id={}",
-            files.len(),
-            user_id
-        );
-
-        Ok(files)
-    }
-
-    async fn list_files_paginated(
+    async fn list_files(
         &self,
         user_id: UserId,
         after: Option<String>,
@@ -81,7 +62,7 @@ impl FileService for FileServiceImpl {
         // Get files directly from database with pagination
         let files = self
             .repository
-            .list_files_paginated(user_id, after, fetch_limit, order)
+            .list_files(user_id, after, fetch_limit, order)
             .await?;
 
         tracing::info!(
@@ -97,11 +78,7 @@ impl FileService for FileServiceImpl {
         Ok((files_to_return, has_more))
     }
 
-    async fn get_file(
-        &self,
-        file_id: &str,
-        user_id: UserId,
-    ) -> Result<FileData, FileError> {
+    async fn get_file(&self, file_id: &str, user_id: UserId) -> Result<FileData, FileError> {
         tracing::info!("Getting file: file_id={}, user_id={}", file_id, user_id);
 
         // Get file directly from database

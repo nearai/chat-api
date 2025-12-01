@@ -747,7 +747,7 @@ async fn list_files(
 
     let (files, has_more) = state
         .file_service
-        .list_files_paginated(user.user_id, after, limit, order)
+        .list_files(user.user_id, after, limit, order)
         .await
         .map_err(|e| {
             tracing::error!("Failed to list files for user_id={}: {}", user.user_id, e);
@@ -764,25 +764,13 @@ async fn list_files(
             (status, Json(ErrorResponse { error })).into_response()
         })?;
 
-    // Convert FileData to JSON with object field
-    let data: Vec<serde_json::Value> = files
-        .iter()
-        .map(|file| {
-            let mut json = serde_json::to_value(file).unwrap_or_default();
-            if let Some(obj) = json.as_object_mut() {
-                obj.insert("object".to_string(), serde_json::Value::String("file".to_string()));
-            }
-            json
-        })
-        .collect();
-
     // Extract first and last file IDs
     let first_id = files.first().map(|f| f.id.clone());
     let last_id = files.last().map(|f| f.id.clone());
 
     let response = crate::models::FileListResponse {
         object: "list".to_string(),
-        data,
+        data: files.into_iter().map(From::from).collect(),
         first_id,
         last_id,
         has_more,
@@ -796,7 +784,7 @@ async fn get_file(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path(file_id): Path<String>,
-) -> Result<Response, Response> {
+) -> Result<Json<crate::models::FileGetResponse>, Response> {
     tracing::info!(
         "get_file called for user_id={}, file_id={}",
         user.user_id,
@@ -822,13 +810,7 @@ async fn get_file(
             (status, Json(ErrorResponse { error })).into_response()
         })?;
 
-    // Convert FileData to JSON with object field
-    let mut json = serde_json::to_value(&file).unwrap_or_default();
-    if let Some(obj) = json.as_object_mut() {
-        obj.insert("object".to_string(), serde_json::Value::String("file".to_string()));
-    }
-
-    Ok(Json(json).into_response())
+    Ok(Json(file.into()))
 }
 
 /// Delete a file - validates user access, deletes from OpenAI and DB
@@ -1088,7 +1070,11 @@ async fn handle_trackable_response(
         return build_response(status, response_headers, Body::from(body_bytes)).await;
     };
 
-    let Some(id) = response_json.get("id").and_then(|v| v.as_str()).map(ToString::to_string) else {
+    let Some(id) = response_json
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(ToString::to_string)
+    else {
         return build_response(status, response_headers, Body::from(body_bytes)).await;
     };
 
@@ -1110,11 +1096,7 @@ async fn handle_trackable_response(
         TrackableResource::File => {
             match serde_json::from_value::<services::file::ports::FileData>(response_json) {
                 Ok(file_data) => {
-                    if let Err(e) = state
-                        .file_service
-                        .track_file(file_data, user.user_id)
-                        .await
-                    {
+                    if let Err(e) = state.file_service.track_file(file_data, user.user_id).await {
                         tracing::error!(
                             "Failed to track file {} for user {}: {}",
                             id,

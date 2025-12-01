@@ -1,14 +1,16 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use crate::UserId;
 
-/// File data structure for tracking files
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// File data structure for tracking files (internal and list response)
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct FileData {
     pub id: String,
     pub bytes: i64,
     pub created_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<i64>,
     pub filename: String,
     pub purpose: String,
@@ -32,17 +34,10 @@ pub trait FileRepository: Send + Sync {
     async fn upsert_file(&self, file: &FileData, user_id: UserId) -> Result<(), FileError>;
 
     /// Get a file object by ID
-    async fn get_file(
-        &self,
-        file_id: &str,
-        user_id: UserId,
-    ) -> Result<FileData, FileError>;
-
-    /// List all file objects for a user
-    async fn list_files(&self, user_id: UserId) -> Result<Vec<FileData>, FileError>;
+    async fn get_file(&self, file_id: &str, user_id: UserId) -> Result<FileData, FileError>;
 
     /// List file objects for a user with pagination
-    async fn list_files_paginated(
+    async fn list_files(
         &self,
         user_id: UserId,
         after: Option<String>,
@@ -60,17 +55,10 @@ pub trait FileRepository: Send + Sync {
 #[async_trait]
 pub trait FileService: Send + Sync {
     /// Track a file by storing complete information
-    async fn track_file(
-        &self,
-        file: FileData,
-        user_id: UserId,
-    ) -> Result<(), FileError>;
-
-    /// List all files for a user from local database
-    async fn list_files(&self, user_id: UserId) -> Result<Vec<FileData>, FileError>;
+    async fn track_file(&self, file: FileData, user_id: UserId) -> Result<(), FileError>;
 
     /// List files for a user with pagination from local database
-    async fn list_files_paginated(
+    async fn list_files(
         &self,
         user_id: UserId,
         after: Option<String>,
@@ -79,11 +67,7 @@ pub trait FileService: Send + Sync {
     ) -> Result<(Vec<FileData>, bool), FileError>;
 
     /// Get a file from local database (checks user access)
-    async fn get_file(
-        &self,
-        file_id: &str,
-        user_id: UserId,
-    ) -> Result<FileData, FileError>;
+    async fn get_file(&self, file_id: &str, user_id: UserId) -> Result<FileData, FileError>;
 
     /// Ensure the user has access to a file using only the local database
     async fn access_file(&self, file_id: &str, user_id: UserId) -> Result<(), FileError>;

@@ -2,6 +2,7 @@ use crate::pool::DbPool;
 use async_trait::async_trait;
 use services::file::ports::{FileData, FileError, FileRepository};
 use services::UserId;
+use tokio_postgres::Row;
 
 pub struct PostgresFileRepository {
     pool: DbPool,
@@ -62,11 +63,7 @@ impl FileRepository for PostgresFileRepository {
         Ok(())
     }
 
-    async fn get_file(
-        &self,
-        file_id: &str,
-        user_id: UserId,
-    ) -> Result<FileData, FileError> {
+    async fn get_file(&self, file_id: &str, user_id: UserId) -> Result<FileData, FileError> {
         tracing::debug!(
             "Repository: Getting file - file_id={}, user_id={}",
             file_id,
@@ -90,62 +87,12 @@ impl FileRepository for PostgresFileRepository {
             .map_err(|e| FileError::DatabaseError(e.to_string()))?;
 
         match row {
-            Some(r) => {
-                Ok(FileData {
-                    id: r.get(0),
-                    bytes: r.get(1),
-                    created_at: r.get(2),
-                    expires_at: r.get(3),
-                    filename: r.get(4),
-                    purpose: r.get(5),
-                })
-            }
+            Some(r) => Ok(raw_to_file_data(&r)),
             None => Err(FileError::NotFound),
         }
     }
 
-    async fn list_files(&self, user_id: UserId) -> Result<Vec<FileData>, FileError> {
-        tracing::debug!("Repository: Listing files for user_id={}", user_id);
-
-        let client = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| FileError::DatabaseError(e.to_string()))?;
-
-        let rows = client
-            .query(
-                "SELECT id, bytes, file_created_at, file_expires_at, filename, purpose
-                 FROM files 
-                 WHERE user_id = $1 
-                 ORDER BY file_created_at DESC",
-                &[&user_id.0],
-            )
-            .await
-            .map_err(|e| FileError::DatabaseError(e.to_string()))?;
-
-        let files: Vec<FileData> = rows
-            .iter()
-            .map(|r| FileData {
-                id: r.get(0),
-                bytes: r.get(1),
-                created_at: r.get(2),
-                expires_at: r.get(3),
-                filename: r.get(4),
-                purpose: r.get(5),
-            })
-            .collect();
-
-        tracing::debug!(
-            "Repository: Found {} file(s) for user_id={}",
-            files.len(),
-            user_id
-        );
-
-        Ok(files)
-    }
-
-    async fn list_files_paginated(
+    async fn list_files(
         &self,
         user_id: UserId,
         after: Option<String>,
@@ -218,17 +165,7 @@ impl FileRepository for PostgresFileRepository {
         }
         .map_err(|e| FileError::DatabaseError(e.to_string()))?;
 
-        let files: Vec<FileData> = rows
-            .iter()
-            .map(|r| FileData {
-                id: r.get(0),
-                bytes: r.get(1),
-                created_at: r.get(2),
-                expires_at: r.get(3),
-                filename: r.get(4),
-                purpose: r.get(5),
-            })
-            .collect();
+        let files: Vec<FileData> = rows.iter().map(raw_to_file_data).collect();
 
         tracing::debug!(
             "Repository: Found {} file(s) with pagination for user_id={}",
@@ -281,5 +218,16 @@ impl FileRepository for PostgresFileRepository {
         } else {
             Ok(())
         }
+    }
+}
+
+fn raw_to_file_data(row: &Row) -> FileData {
+    FileData {
+        id: row.get("id"),
+        bytes: row.get("bytes"),
+        created_at: row.get("file_created_at"),
+        expires_at: row.get("file_expires_at"),
+        filename: row.get("filename"),
+        purpose: row.get("purpose"),
     }
 }

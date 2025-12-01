@@ -303,19 +303,9 @@ async fn test_file_list_pagination() {
         let first_page_ids: Vec<String> = list_response
             .data
             .iter()
-            .filter_map(|f| {
-                f.get("id")
-                    .and_then(|id| id.as_str().map(|s| s.to_string()))
-            })
+            .map(|f| f.file.id.clone())
             .collect();
-        let next_page_ids: Vec<String> = next_page
-            .data
-            .iter()
-            .filter_map(|f| {
-                f.get("id")
-                    .and_then(|id| id.as_str().map(|s| s.to_string()))
-            })
-            .collect();
+        let next_page_ids: Vec<String> = next_page.data.iter().map(|f| f.file.id.clone()).collect();
 
         for id in &next_page_ids {
             assert!(
