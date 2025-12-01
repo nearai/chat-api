@@ -728,21 +728,11 @@ async fn list_files(
 
     // Parse query parameters
     let after = params.get("after").map(|s| s.to_string());
+
     let limit = params
         .get("limit")
         .and_then(|s| s.parse::<i64>().ok())
         .unwrap_or(LIST_FILES_LIMIT_MAX);
-    let order = params.get("order").map(|s| s.as_str()).unwrap_or("desc");
-
-    if order != "asc" && order != "desc" {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "Invalid order parameter. Must be 'asc' or 'desc'".to_string(),
-            }),
-        )
-            .into_response());
-    }
 
     if !(1..=LIST_FILES_LIMIT_MAX).contains(&limit) {
         return Err((
@@ -752,6 +742,18 @@ async fn list_files(
                     "Invalid limit parameter. Must be between 1 and {}",
                     LIST_FILES_LIMIT_MAX
                 ),
+            }),
+        )
+            .into_response());
+    }
+
+    let order = params.get("order").map(|s| s.as_str()).unwrap_or("desc");
+
+    if order != "asc" && order != "desc" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Invalid order parameter. Must be 'asc' or 'desc'".to_string(),
             }),
         )
             .into_response());
