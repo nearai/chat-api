@@ -188,7 +188,7 @@ async fn test_file_not_found() {
 }
 
 #[tokio::test]
-// #[ignore] // This makes real OpenAI API calls - run with: cargo test -- --ignored --nocapture
+#[ignore] // This makes real OpenAI API calls - run with: cargo test -- --ignored --nocapture
 async fn test_file_list_pagination() {
     let server = create_test_server().await;
 

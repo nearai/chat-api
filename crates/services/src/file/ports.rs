@@ -1,6 +1,18 @@
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 use crate::UserId;
+
+/// File data structure for tracking files
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileData {
+    pub id: String,
+    pub bytes: i64,
+    pub created_at: i64,
+    pub expires_at: Option<i64>,
+    pub filename: String,
+    pub purpose: String,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum FileError {
@@ -16,20 +28,27 @@ pub enum FileError {
 
 #[async_trait]
 pub trait FileRepository: Send + Sync {
-    /// Track a file ID for a user
-    async fn upsert_file(&self, file_id: &str, user_id: UserId) -> Result<(), FileError>;
+    /// Store complete file object for a user
+    async fn upsert_file(&self, file: &FileData, user_id: UserId) -> Result<(), FileError>;
 
-    /// List all file IDs for a user
-    async fn list_files(&self, user_id: UserId) -> Result<Vec<String>, FileError>;
+    /// Get a file object by ID
+    async fn get_file(
+        &self,
+        file_id: &str,
+        user_id: UserId,
+    ) -> Result<FileData, FileError>;
 
-    /// List file IDs for a user with pagination
+    /// List all file objects for a user
+    async fn list_files(&self, user_id: UserId) -> Result<Vec<FileData>, FileError>;
+
+    /// List file objects for a user with pagination
     async fn list_files_paginated(
         &self,
         user_id: UserId,
         after: Option<String>,
         limit: i64,
         order: &str,
-    ) -> Result<Vec<String>, FileError>;
+    ) -> Result<Vec<FileData>, FileError>;
 
     /// Check if a file exists for a user
     async fn access_file(&self, file_id: &str, user_id: UserId) -> Result<(), FileError>;
@@ -40,27 +59,31 @@ pub trait FileRepository: Send + Sync {
 
 #[async_trait]
 pub trait FileService: Send + Sync {
-    /// Track a file ID for a user
-    async fn track_file(&self, file_id: &str, user_id: UserId) -> Result<(), FileError>;
+    /// Track a file by storing complete information
+    async fn track_file(
+        &self,
+        file: FileData,
+        user_id: UserId,
+    ) -> Result<(), FileError>;
 
-    /// List all files for a user with details from OpenAI
-    async fn list_files(&self, user_id: UserId) -> Result<Vec<serde_json::Value>, FileError>;
+    /// List all files for a user from local database
+    async fn list_files(&self, user_id: UserId) -> Result<Vec<FileData>, FileError>;
 
-    /// List files for a user with pagination and details from OpenAI
+    /// List files for a user with pagination from local database
     async fn list_files_paginated(
         &self,
         user_id: UserId,
         after: Option<String>,
         limit: i64,
         order: &str,
-    ) -> Result<(Vec<serde_json::Value>, bool), FileError>;
+    ) -> Result<(Vec<FileData>, bool), FileError>;
 
-    /// Get a file with details from OpenAI (checks user access first)
+    /// Get a file from local database (checks user access)
     async fn get_file(
         &self,
         file_id: &str,
         user_id: UserId,
-    ) -> Result<serde_json::Value, FileError>;
+    ) -> Result<FileData, FileError>;
 
     /// Ensure the user has access to a file using only the local database
     async fn access_file(&self, file_id: &str, user_id: UserId) -> Result<(), FileError>;

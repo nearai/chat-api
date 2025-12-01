@@ -1,4 +1,4 @@
-use super::ports::{FileError, FileRepository, FileService};
+use super::ports::{FileData, FileError, FileRepository, FileService};
 use crate::response::ports::OpenAIProxyService;
 use crate::UserId;
 use async_trait::async_trait;
@@ -26,42 +26,33 @@ impl FileServiceImpl {
 
 #[async_trait]
 impl FileService for FileServiceImpl {
-    async fn track_file(&self, file_id: &str, user_id: UserId) -> Result<(), FileError> {
-        tracing::info!("Tracking file: file_id={}, user_id={}", file_id, user_id);
+    async fn track_file(
+        &self,
+        file: FileData,
+        user_id: UserId,
+    ) -> Result<(), FileError> {
+        tracing::info!("Tracking file: file_id={}, user_id={}", file.id, user_id);
 
-        self.repository.upsert_file(file_id, user_id).await?;
+        // Store complete file object in database
+        self.repository.upsert_file(&file, user_id).await?;
 
         tracing::info!(
             "File tracked successfully: file_id={}, user_id={}",
-            file_id,
+            file.id,
             user_id
         );
 
         Ok(())
     }
 
-    async fn list_files(&self, user_id: UserId) -> Result<Vec<serde_json::Value>, FileError> {
+    async fn list_files(&self, user_id: UserId) -> Result<Vec<FileData>, FileError> {
         tracing::info!("Listing files for user_id={}", user_id);
 
-        // Get file IDs from database
-        let file_ids = self.repository.list_files(user_id).await?;
+        // Get files directly from database
+        let files = self.repository.list_files(user_id).await?;
 
         tracing::info!(
-            "Retrieved {} file ID(s) from database for user_id={}",
-            file_ids.len(),
-            user_id
-        );
-
-        // Early return if no files
-        if file_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // Fetch all files from OpenAI
-        let files = self.batch_fetch_files(&file_ids).await?;
-
-        tracing::info!(
-            "Successfully fetched {} file(s) from OpenAI for user_id={}",
+            "Retrieved {} file(s) from database for user_id={}",
             files.len(),
             user_id
         );
@@ -75,7 +66,7 @@ impl FileService for FileServiceImpl {
         after: Option<String>,
         limit: i64,
         order: &str,
-    ) -> Result<(Vec<serde_json::Value>, bool), FileError> {
+    ) -> Result<(Vec<FileData>, bool), FileError> {
         tracing::info!(
             "Listing files with pagination for user_id={}, after={:?}, limit={}, order={}",
             user_id,
@@ -87,57 +78,40 @@ impl FileService for FileServiceImpl {
         // Fetch limit + 1 to determine if there are more results
         let fetch_limit = limit + 1;
 
-        // Get file IDs from database with pagination
-        let file_ids = self
+        // Get files directly from database with pagination
+        let files = self
             .repository
             .list_files_paginated(user_id, after, fetch_limit, order)
             .await?;
 
         tracing::info!(
-            "Retrieved {} file ID(s) from database for user_id={}",
-            file_ids.len(),
-            user_id
-        );
-
-        // Determine if there are more results
-        let has_more = file_ids.len() > limit as usize;
-        let file_ids_to_fetch: Vec<_> = file_ids.into_iter().take(limit as usize).collect();
-
-        // Early return if no files
-        if file_ids_to_fetch.is_empty() {
-            return Ok((Vec::new(), false));
-        }
-
-        // Fetch files from OpenAI
-        let files = self.batch_fetch_files(&file_ids_to_fetch).await?;
-
-        tracing::info!(
-            "Successfully fetched {} file(s) from OpenAI for user_id={}",
+            "Retrieved {} file(s) from database for user_id={}",
             files.len(),
             user_id
         );
 
-        Ok((files, has_more))
+        // Determine if there are more results
+        let has_more = files.len() > limit as usize;
+        let files_to_return: Vec<_> = files.into_iter().take(limit as usize).collect();
+
+        Ok((files_to_return, has_more))
     }
 
     async fn get_file(
         &self,
         file_id: &str,
         user_id: UserId,
-    ) -> Result<serde_json::Value, FileError> {
+    ) -> Result<FileData, FileError> {
         tracing::info!("Getting file: file_id={}, user_id={}", file_id, user_id);
 
-        // Check if user has access to this file
-        self.repository.access_file(file_id, user_id).await?;
+        // Get file directly from database
+        let file = self.repository.get_file(file_id, user_id).await?;
 
         tracing::debug!(
-            "User {} has access to file {}, fetching from OpenAI",
-            user_id,
-            file_id
+            "Retrieved file {} from database for user {}",
+            file_id,
+            user_id
         );
-
-        // Fetch details from OpenAI
-        let file = self.fetch_file_from_openai(file_id).await?;
 
         Ok(file)
     }
@@ -168,85 +142,6 @@ impl FileService for FileServiceImpl {
 }
 
 impl FileServiceImpl {
-    /// Batch fetch multiple files from OpenAI API
-    async fn batch_fetch_files(
-        &self,
-        file_ids: &[String],
-    ) -> Result<Vec<serde_json::Value>, FileError> {
-        // Fetch files in parallel
-        let futures: Vec<_> = file_ids
-            .iter()
-            .map(|file_id| {
-                let openai_proxy = self.openai_proxy.clone();
-                let file_id = file_id.clone();
-                async move { Self::fetch_file_from_openai_internal(openai_proxy, &file_id).await }
-            })
-            .collect();
-
-        let results = futures::future::join_all(futures).await;
-
-        let mut files = Vec::new();
-        for (idx, result) in results.into_iter().enumerate() {
-            match result {
-                Ok(file) => files.push(file),
-                Err(e) => {
-                    tracing::warn!("Failed to fetch file {} from OpenAI: {}", file_ids[idx], e);
-                }
-            }
-        }
-
-        Ok(files)
-    }
-
-    /// Fetch file details from OpenAI API
-    async fn fetch_file_from_openai(&self, file_id: &str) -> Result<serde_json::Value, FileError> {
-        Self::fetch_file_from_openai_internal(self.openai_proxy.clone(), file_id).await
-    }
-
-    async fn fetch_file_from_openai_internal(
-        openai_proxy: Arc<dyn OpenAIProxyService>,
-        file_id: &str,
-    ) -> Result<serde_json::Value, FileError> {
-        let path = format!("files/{}", file_id);
-
-        tracing::debug!("Fetching file from OpenAI: {}", path);
-
-        let response = openai_proxy
-            .forward_request(Method::GET, &path, http::HeaderMap::new(), None)
-            .await
-            .map_err(|e| FileError::ApiError(e.to_string()))?;
-
-        if response.status != 200 {
-            tracing::error!(
-                "OpenAI API returned status {} for file {}",
-                response.status,
-                file_id
-            );
-            return Err(FileError::ApiError(format!(
-                "OpenAI API returned status {}",
-                response.status
-            )));
-        }
-
-        // Collect the response body
-        let body_bytes: Bytes = response
-            .body
-            .try_collect::<Vec<_>>()
-            .await
-            .map_err(|e| FileError::ApiError(format!("Failed to read response: {}", e)))?
-            .into_iter()
-            .flatten()
-            .collect();
-
-        // Parse as JSON
-        let file: serde_json::Value = serde_json::from_slice(&body_bytes)
-            .map_err(|e| FileError::ApiError(format!("Failed to parse JSON: {}", e)))?;
-
-        tracing::debug!("Successfully fetched file {} from OpenAI", file_id);
-
-        Ok(file)
-    }
-
     /// Delete file from OpenAI API
     async fn delete_file_from_openai(&self, file_id: &str) -> Result<serde_json::Value, FileError> {
         let path = format!("files/{}", file_id);
