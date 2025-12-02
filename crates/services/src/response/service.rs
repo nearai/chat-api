@@ -1,20 +1,22 @@
+use crate::vpc::VpcCredentialsService;
 use async_trait::async_trait;
 use bytes::Bytes;
 use http::{HeaderMap, Method};
+use std::sync::Arc;
 
 use super::ports::{OpenAIProxyService, ProxyError, ProxyResponse};
 
 /// Generic proxy service that forwards any request to OpenAI's API
 pub struct OpenAIProxy {
-    api_key: String,
+    vpc_service: Arc<dyn VpcCredentialsService>,
     base_url: String,
     http_client: reqwest::Client,
 }
 
 impl OpenAIProxy {
-    pub fn new(api_key: String) -> Self {
+    pub fn new(vpc_service: Arc<dyn VpcCredentialsService>) -> Self {
         Self {
-            api_key,
+            vpc_service,
             base_url: "https://api.openai.com/v1".to_string(),
             http_client: reqwest::Client::new(),
         }
@@ -35,6 +37,12 @@ impl OpenAIProxyService for OpenAIProxy {
         mut headers: HeaderMap,
         body: Option<Bytes>,
     ) -> Result<ProxyResponse, ProxyError> {
+        // Get API key
+        let api_key = self.vpc_service.get_api_key().await.map_err(|e| {
+            tracing::error!("Failed to get API key: {}", e);
+            ProxyError::ApiError("Failed to get API key".to_string())
+        })?;
+
         // Ensure path doesn't start with a slash
         let clean_path = path.trim_start_matches('/');
         let url = format!("{}/{}", self.base_url, clean_path);
@@ -48,7 +56,7 @@ impl OpenAIProxyService for OpenAIProxy {
         let mut request_builder = self
             .http_client
             .request(method.clone(), &url)
-            .header("Authorization", format!("Bearer {}", self.api_key));
+            .header("Authorization", format!("Bearer {}", api_key));
 
         // Forward all headers from the client (except Authorization which we set above)
         headers.remove("authorization");
@@ -106,17 +114,20 @@ impl OpenAIProxyService for OpenAIProxy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vpc::test_helpers::MockVpcCredentialsService;
 
     #[tokio::test]
     async fn test_service_creation() {
-        let service = OpenAIProxy::new("test-api-key".to_string());
+        let vpc_service = Arc::new(MockVpcCredentialsService::not_configured());
+        let service = OpenAIProxy::new(vpc_service);
         assert_eq!(service.base_url, "https://api.openai.com/v1");
     }
 
     #[tokio::test]
     async fn test_service_with_custom_base_url() {
-        let service = OpenAIProxy::new("test-api-key".to_string())
-            .with_base_url("https://custom.api.com/v1".to_string());
+        let vpc_service = Arc::new(MockVpcCredentialsService::not_configured());
+        let service =
+            OpenAIProxy::new(vpc_service).with_base_url("https://custom.api.com/v1".to_string());
         assert_eq!(service.base_url, "https://custom.api.com/v1");
     }
 }

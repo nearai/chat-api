@@ -5,6 +5,7 @@ use async_trait::async_trait;
 pub struct VpcCredentials {
     pub access_token: String,
     pub organization_id: String,
+    pub api_key: String,
 }
 
 /// Repository for storing VPC credentials
@@ -31,6 +32,9 @@ pub trait VpcCredentialsService: Send + Sync {
     /// Get valid VPC credentials, refreshing tokens if necessary
     /// Returns None if VPC is not configured
     async fn get_credentials(&self) -> anyhow::Result<Option<VpcCredentials>>;
+
+    /// Get the current API key (either static or from VPC auth)
+    async fn get_api_key(&self) -> anyhow::Result<String>;
 
     /// Check if VPC is configured
     fn is_configured(&self) -> bool;

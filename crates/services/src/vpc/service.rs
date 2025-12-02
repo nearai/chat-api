@@ -42,6 +42,7 @@ struct CachedCredentials {
     access_token_created_at: std::time::Instant,
     refresh_token: String,
     organization_id: String,
+    api_key: String,
 }
 
 /// How long an access token is valid (refresh proactively before expiry)
@@ -53,18 +54,21 @@ pub struct VpcCredentialsServiceImpl {
     repository: Arc<dyn VpcCredentialsRepository>,
     cached: RwLock<Option<CachedCredentials>>,
     http_client: reqwest::Client,
+    static_api_key: Option<String>,
 }
 
 impl VpcCredentialsServiceImpl {
     pub fn new(
         config: Option<VpcAuthConfig>,
         repository: Arc<dyn VpcCredentialsRepository>,
+        static_api_key: Option<String>,
     ) -> Self {
         Self {
             config,
             repository,
             cached: RwLock::new(None),
             http_client: reqwest::Client::new(),
+            static_api_key,
         }
     }
 
@@ -158,22 +162,28 @@ impl VpcCredentialsServiceImpl {
     async fn load_from_db(&self) -> anyhow::Result<Option<CachedCredentials>> {
         let refresh_token = self.repository.get(VPC_REFRESH_TOKEN_CONFIG_KEY).await?;
         let org_id = self.repository.get(VPC_ORGANIZATION_ID_CONFIG_KEY).await?;
+        let api_key = self.repository.get(VPC_API_KEY_CONFIG_KEY).await?;
 
-        match (refresh_token, org_id) {
-            (Some(refresh_token), Some(org_id)) => Ok(Some(CachedCredentials {
+        match (refresh_token, org_id, api_key) {
+            (Some(refresh_token), Some(org_id), Some(api_key)) => Ok(Some(CachedCredentials {
                 access_token: String::new(),                        // Will be refreshed
                 access_token_created_at: std::time::Instant::now(), // Will be updated on refresh
                 refresh_token,
                 organization_id: org_id,
+                api_key,
             })),
             _ => Ok(None),
         }
     }
 
     /// Save credentials to database
-    async fn save_to_db(&self, creds: &CachedCredentials, api_key: Option<&str>) {
-        if let Some(api_key) = api_key {
-            if let Err(e) = self.repository.set(VPC_API_KEY_CONFIG_KEY, api_key).await {
+    async fn save_to_db(&self, creds: &CachedCredentials) {
+        if !creds.api_key.is_empty() {
+            if let Err(e) = self
+                .repository
+                .set(VPC_API_KEY_CONFIG_KEY, &creds.api_key)
+                .await
+            {
                 tracing::warn!("Failed to cache VPC API key: {}", e);
             }
         }
@@ -217,6 +227,7 @@ impl VpcCredentialsServiceImpl {
                     return Ok(VpcCredentials {
                         access_token: creds.access_token.clone(),
                         organization_id: creds.organization_id.clone(),
+                        api_key: creds.api_key.clone(),
                     });
                 }
             }
@@ -231,6 +242,7 @@ impl VpcCredentialsServiceImpl {
                 return Ok(VpcCredentials {
                     access_token: creds.access_token.clone(),
                     organization_id: creds.organization_id.clone(),
+                    api_key: creds.api_key.clone(),
                 });
             }
         }
@@ -254,11 +266,12 @@ impl VpcCredentialsServiceImpl {
                     creds.refresh_token = token_response.refresh_token.clone();
 
                     // Update refresh token in database (it rotates)
-                    self.save_to_db(creds, None).await;
+                    self.save_to_db(creds).await;
 
                     return Ok(VpcCredentials {
                         access_token: token_response.access_token,
                         organization_id: creds.organization_id.clone(),
+                        api_key: creds.api_key.clone(),
                     });
                 }
                 Err(e) => {
@@ -281,17 +294,18 @@ impl VpcCredentialsServiceImpl {
             access_token_created_at: std::time::Instant::now(),
             refresh_token: login_response.refresh_token.clone(),
             organization_id: login_response.organization.id.clone(),
+            api_key: login_response.api_key.clone(),
         };
 
         // Save to database
-        self.save_to_db(&new_creds, Some(&login_response.api_key))
-            .await;
+        self.save_to_db(&new_creds).await;
 
         *cached = Some(new_creds);
 
         Ok(VpcCredentials {
             access_token: login_response.access_token,
             organization_id: login_response.organization.id,
+            api_key: login_response.api_key,
         })
     }
 }
@@ -305,6 +319,17 @@ impl VpcCredentialsService for VpcCredentialsServiceImpl {
         }
     }
 
+    async fn get_api_key(&self) -> anyhow::Result<String> {
+        if let Some(config) = &self.config {
+            // Ensure we have valid credentials (refresh/re-auth if needed)
+            let creds = self.get_or_refresh_credentials(config).await?;
+            Ok(creds.api_key)
+        } else {
+            // Not configured for VPC, use static key
+            Ok(self.static_api_key.clone().unwrap_or_default())
+        }
+    }
+
     fn is_configured(&self) -> bool {
         self.config.is_some()
     }
@@ -315,38 +340,22 @@ impl VpcCredentialsService for VpcCredentialsServiceImpl {
 pub async fn initialize_vpc_credentials(
     config: Option<VpcAuthConfig>,
     repository: Arc<dyn VpcCredentialsRepository>,
-) -> anyhow::Result<(String, Arc<dyn VpcCredentialsService>)> {
+    static_api_key: Option<String>,
+) -> anyhow::Result<Arc<dyn VpcCredentialsService>> {
     let service = Arc::new(VpcCredentialsServiceImpl::new(
         config.clone(),
         repository.clone(),
+        static_api_key,
     ));
 
-    // If VPC is configured, ensure we have valid credentials and get the API key
-    let api_key = if config.is_some() {
-        // Check if we have a cached API key
-        if let Some(cached_key) = repository.get(VPC_API_KEY_CONFIG_KEY).await? {
-            // Also ensure we can get valid credentials (this will refresh if needed)
-            let _ = service.get_credentials().await?;
-            tracing::info!("Using cached VPC API key");
-            cached_key
-        } else {
-            // No cached key - perform authentication
-            let creds = service.get_credentials().await?;
-            if creds.is_none() {
-                anyhow::bail!("VPC is configured but authentication failed");
-            }
-            // The API key should now be stored, fetch it
-            repository
-                .get(VPC_API_KEY_CONFIG_KEY)
-                .await?
-                .ok_or_else(|| anyhow::anyhow!("API key not found after VPC authentication"))?
-        }
-    } else {
-        // Not using VPC - this will be overridden by env config
-        String::new()
-    };
+    // If VPC is configured, ensure we have valid credentials
+    if config.is_some() {
+        // Also ensure we can get valid credentials (this will refresh if needed)
+        let _ = service.get_credentials().await?;
+        tracing::info!("VPC credentials initialized");
+    }
 
-    Ok((api_key, service))
+    Ok(service)
 }
 
 /// No-op VPC repository for non-VPC mode
@@ -390,6 +399,10 @@ pub mod test_helpers {
     impl VpcCredentialsService for MockVpcCredentialsService {
         async fn get_credentials(&self) -> anyhow::Result<Option<VpcCredentials>> {
             Ok(self.credentials.clone())
+        }
+
+        async fn get_api_key(&self) -> anyhow::Result<String> {
+            Ok("mock-api-key".to_string())
         }
 
         fn is_configured(&self) -> bool {

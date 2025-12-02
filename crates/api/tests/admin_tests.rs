@@ -176,6 +176,7 @@ async fn test_get_system_prompt_with_admin_success() {
     let vpc_credentials = VpcCredentials {
         access_token: "test-access-token".to_string(),
         organization_id: "test-org-123".to_string(),
+        api_key: "test-api-key".to_string(),
     };
 
     let server = create_test_server_with_config(TestServerConfig {
@@ -220,6 +221,7 @@ async fn test_set_system_prompt_with_admin_success() {
     let vpc_credentials = VpcCredentials {
         access_token: "test-access-token".to_string(),
         organization_id: "test-org-456".to_string(),
+        api_key: "test-api-key".to_string(),
     };
 
     let server = create_test_server_with_config(TestServerConfig {

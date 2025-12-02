@@ -6,9 +6,7 @@ use services::{
     response::service::OpenAIProxy,
     user::UserServiceImpl,
     user::UserSettingsServiceImpl,
-    vpc::{
-        initialize_vpc_credentials, NoOpVpcRepository, VpcAuthConfig, VpcCredentialsServiceImpl,
-    },
+    vpc::{initialize_vpc_credentials, VpcAuthConfig},
 };
 use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -108,21 +106,23 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    let (api_key, vpc_credentials_service) = if vpc_auth_config.is_some() {
-        tracing::info!("Initializing VPC credentials service...");
-        let (key, service) = initialize_vpc_credentials(vpc_auth_config, app_config_repo).await?;
-        (key, service)
-    } else {
+    let static_api_key = if vpc_auth_config.is_none() {
         tracing::info!("Using API key from environment");
-        // Create a no-op VPC credentials service for non-VPC mode
-        let service: Arc<dyn services::vpc::VpcCredentialsService> = Arc::new(
-            VpcCredentialsServiceImpl::new(None, Arc::new(NoOpVpcRepository)),
-        );
-        (config.openai.api_key.clone(), service)
+        Some(config.openai.api_key.clone())
+    } else {
+        None
     };
 
+    tracing::info!("Initializing VPC credentials service...");
+    let vpc_credentials_service = initialize_vpc_credentials(
+        vpc_auth_config,
+        app_config_repo.clone() as Arc<dyn services::vpc::VpcCredentialsRepository>,
+        static_api_key,
+    )
+    .await?;
+
     // Initialize OpenAI proxy service
-    let mut proxy_service = OpenAIProxy::new(api_key);
+    let mut proxy_service = OpenAIProxy::new(vpc_credentials_service.clone());
     if let Some(base_url) = config.openai.base_url.clone() {
         proxy_service = proxy_service.with_base_url(base_url);
     }

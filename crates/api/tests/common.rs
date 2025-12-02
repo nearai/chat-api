@@ -75,9 +75,16 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
         user_settings_repo as Arc<dyn services::user::ports::UserSettingsRepository>,
     ));
 
+    // Create VPC credentials service based on provided credentials
+    let vpc_credentials_service: Arc<dyn services::vpc::VpcCredentialsService> =
+        match test_config.vpc_credentials {
+            Some(creds) => Arc::new(MockVpcCredentialsService::with_credentials(creds)),
+            None => Arc::new(MockVpcCredentialsService::not_configured()),
+        };
+
     // Initialize OpenAI proxy service
     let mut proxy_service =
-        services::response::service::OpenAIProxy::new(config.openai.api_key.clone());
+        services::response::service::OpenAIProxy::new(vpc_credentials_service.clone());
     if let Some(base_url) = config.openai.base_url.clone() {
         proxy_service = proxy_service.with_base_url(base_url);
     }
@@ -97,13 +104,6 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
     admin_domains.push("admin.org".to_string());
 
     let file_service = Arc::new(FileServiceImpl::new(file_repo, proxy_service.clone()));
-
-    // Create VPC credentials service based on provided credentials
-    let vpc_credentials_service: Arc<dyn services::vpc::VpcCredentialsService> =
-        match test_config.vpc_credentials {
-            Some(creds) => Arc::new(MockVpcCredentialsService::with_credentials(creds)),
-            None => Arc::new(MockVpcCredentialsService::not_configured()),
-        };
 
     // Create application state
     let app_state = AppState {
