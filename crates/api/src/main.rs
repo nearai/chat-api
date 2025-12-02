@@ -1,79 +1,19 @@
 use api::{create_router_with_cors, ApiDoc, AppState};
-use hmac::{Hmac, Mac};
 use services::{
-    auth::OAuthServiceImpl, conversation::service::ConversationServiceImpl,
-    file::service::FileServiceImpl, response::service::OpenAIProxy, user::UserServiceImpl,
+    auth::OAuthServiceImpl,
+    conversation::service::ConversationServiceImpl,
+    file::service::FileServiceImpl,
+    response::service::OpenAIProxy,
+    user::UserServiceImpl,
     user::UserSettingsServiceImpl,
+    vpc::{
+        initialize_vpc_credentials, NoOpVpcRepository, VpcAuthConfig, VpcCredentialsServiceImpl,
+    },
 };
-use sha2::Sha256;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
-
-type HmacSha256 = Hmac<Sha256>;
-
-/// Response from VPC login endpoint
-#[derive(serde::Deserialize)]
-struct VpcLoginResponse {
-    api_key: String,
-}
-
-/// Performs VPC authentication to obtain an API key
-async fn vpc_authenticate(
-    config: &config::VpcAuthConfig,
-    base_url: &str,
-) -> anyhow::Result<String> {
-    let shared_secret = config
-        .read_shared_secret()
-        .ok_or_else(|| anyhow::anyhow!("Failed to read VPC shared secret"))?;
-
-    // Generate timestamp
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("Time went backwards")
-        .as_secs();
-
-    // Generate HMAC-SHA256 signature
-    let mut mac = HmacSha256::new_from_slice(shared_secret.as_bytes())
-        .expect("HMAC can take key of any size");
-    mac.update(timestamp.to_string().as_bytes());
-    let signature = hex::encode(mac.finalize().into_bytes());
-
-    tracing::info!(
-        "Performing VPC authentication with client_id: {}",
-        config.client_id
-    );
-    tracing::debug!("VPC auth timestamp: {}", timestamp);
-
-    // Build the auth URL
-    let auth_url = format!("{}/auth/vpc/login", base_url.trim_end_matches('/'));
-
-    // Make authentication request
-    let client = reqwest::Client::new();
-    let response = client
-        .post(&auth_url)
-        .header("Content-Type", "application/json")
-        .json(&serde_json::json!({
-            "timestamp": timestamp,
-            "signature": signature,
-            "client_id": config.client_id
-        }))
-        .send()
-        .await?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        anyhow::bail!("VPC authentication failed with status {}: {}", status, body);
-    }
-
-    let login_response: VpcLoginResponse = response.json().await?;
-    tracing::info!("VPC authentication successful");
-
-    Ok(login_response.api_key)
-}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -148,44 +88,37 @@ async fn main() -> anyhow::Result<()> {
         user_settings_repo as Arc<dyn services::user::ports::UserSettingsRepository>,
     ));
 
-    // Get OpenAI API key - check database first, then VPC auth, then config
-    const VPC_API_KEY_CONFIG_KEY: &str = "vpc_api_key";
-
-    let api_key = if config.vpc_auth.is_configured() {
+    // Initialize VPC credentials service and get API key
+    let vpc_auth_config = if config.vpc_auth.is_configured() {
         let base_url = config.openai.base_url.as_ref().ok_or_else(|| {
             anyhow::anyhow!("OPENAI_BASE_URL is required when using VPC authentication")
         })?;
 
-        // Check if we have a cached API key in the database
-        match app_config_repo.get(VPC_API_KEY_CONFIG_KEY).await {
-            Ok(Some(cached_key)) => {
-                tracing::info!("Using cached VPC API key from database");
-                cached_key
-            }
-            Ok(None) => {
-                tracing::info!("No cached API key found, performing VPC authentication...");
-                let new_key = vpc_authenticate(&config.vpc_auth, base_url).await?;
+        let shared_secret = config
+            .vpc_auth
+            .read_shared_secret()
+            .ok_or_else(|| anyhow::anyhow!("Failed to read VPC shared secret"))?;
 
-                // Store the new key in the database
-                if let Err(e) = app_config_repo.set(VPC_API_KEY_CONFIG_KEY, &new_key).await {
-                    tracing::warn!("Failed to cache VPC API key in database: {}", e);
-                } else {
-                    tracing::info!("VPC API key cached in database");
-                }
+        Some(VpcAuthConfig {
+            client_id: config.vpc_auth.client_id.clone(),
+            shared_secret,
+            base_url: base_url.clone(),
+        })
+    } else {
+        None
+    };
 
-                new_key
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to check for cached API key: {}, performing VPC auth...",
-                    e
-                );
-                vpc_authenticate(&config.vpc_auth, base_url).await?
-            }
-        }
+    let (api_key, vpc_credentials_service) = if vpc_auth_config.is_some() {
+        tracing::info!("Initializing VPC credentials service...");
+        let (key, service) = initialize_vpc_credentials(vpc_auth_config, app_config_repo).await?;
+        (key, service)
     } else {
         tracing::info!("Using API key from environment");
-        config.openai.api_key.clone()
+        // Create a no-op VPC credentials service for non-VPC mode
+        let service: Arc<dyn services::vpc::VpcCredentialsService> = Arc::new(
+            VpcCredentialsServiceImpl::new(None, Arc::new(NoOpVpcRepository)),
+        );
+        (config.openai.api_key.clone(), service)
     };
 
     // Initialize OpenAI proxy service
@@ -216,6 +149,8 @@ async fn main() -> anyhow::Result<()> {
         redirect_uri: config.oauth.redirect_uri,
         admin_domains: Arc::new(config.admin.admin_domains),
         user_repository: user_repo.clone(),
+        vpc_credentials_service,
+        cloud_api_base_url: config.openai.base_url.clone().unwrap_or_default(),
     };
 
     // Create router with CORS support

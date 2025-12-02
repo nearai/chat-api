@@ -4,14 +4,31 @@ use api::{create_router, AppState};
 use axum_test::TestServer;
 use serde_json::json;
 use services::file::service::FileServiceImpl;
+use services::vpc::test_helpers::MockVpcCredentialsService;
+use services::vpc::VpcCredentials;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
 // Global once cell to ensure migrations only run once across all tests
 static MIGRATIONS_INITIALIZED: OnceCell<()> = OnceCell::const_new();
 
-/// Create a test server with all services initialized
+/// Configuration for test server with Cloud API mocking
+pub struct TestServerConfig {
+    pub vpc_credentials: Option<VpcCredentials>,
+    pub cloud_api_base_url: String,
+}
+
+/// Create a test server with all services initialized (VPC not configured)
 pub async fn create_test_server() -> TestServer {
+    create_test_server_with_config(TestServerConfig {
+        vpc_credentials: None,
+        cloud_api_base_url: String::new(),
+    })
+    .await
+}
+
+/// Create a test server with custom configuration
+pub async fn create_test_server_with_config(test_config: TestServerConfig) -> TestServer {
     // Load .env file
     dotenvy::dotenv().ok();
 
@@ -81,8 +98,16 @@ pub async fn create_test_server() -> TestServer {
 
     let file_service = Arc::new(FileServiceImpl::new(file_repo, proxy_service.clone()));
 
+    // Create VPC credentials service based on provided credentials
+    let vpc_credentials_service: Arc<dyn services::vpc::VpcCredentialsService> =
+        match test_config.vpc_credentials {
+            Some(creds) => Arc::new(MockVpcCredentialsService::with_credentials(creds)),
+            None => Arc::new(MockVpcCredentialsService::not_configured()),
+        };
+
     // Create application state
     let app_state = AppState {
+        vpc_credentials_service,
         oauth_service,
         user_service,
         user_settings_service,
@@ -93,6 +118,7 @@ pub async fn create_test_server() -> TestServer {
         file_service,
         redirect_uri: config.oauth.redirect_uri,
         admin_domains: Arc::new(admin_domains),
+        cloud_api_base_url: test_config.cloud_api_base_url.clone(),
     };
 
     // Create router
