@@ -21,17 +21,6 @@ pub async fn static_handler(req: Request<Body>) -> Response {
     let frontend_dir = frontend_dir();
     let uri = req.uri().clone();
 
-    // Redirect root to /?v=1 to workaround the cache issue
-    let needs_version_redirect = uri.path() == "/"
-        && uri
-            .query()
-            .map(|q| !q.split('&').any(|pair| pair.starts_with("v=")))
-            .unwrap_or(true);
-
-    if needs_version_redirect {
-        return Redirect::temporary("/?v=1").into_response();
-    }
-
     let has_extension = req
         .uri()
         .path()
