@@ -1,7 +1,7 @@
 use axum::{
     body::Body,
     http::{header, Request, StatusCode},
-    response::{IntoResponse, Redirect, Response},
+    response::{IntoResponse, Response},
 };
 use std::{env, path::PathBuf};
 use tower::ServiceExt;
@@ -19,7 +19,6 @@ fn frontend_dir() -> PathBuf {
 /// Serve static files with SPA fallback and proper cache headers.
 pub async fn static_handler(req: Request<Body>) -> Response {
     let frontend_dir = frontend_dir();
-    let uri = req.uri().clone();
 
     let has_extension = req
         .uri()
