@@ -13,4 +13,7 @@ pub struct AppState {
     pub file_service: Arc<dyn services::file::ports::FileService>,
     pub redirect_uri: String,
     pub admin_domains: Arc<Vec<String>>,
+    pub vpc_credentials_service: Arc<dyn services::vpc::VpcCredentialsService>,
+    /// Base URL for Cloud API calls (same as OpenAI base URL when using VPC)
+    pub cloud_api_base_url: String,
 }

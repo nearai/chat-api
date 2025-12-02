@@ -1,4 +1,6 @@
 use crate::pool::DbPool;
+use async_trait::async_trait;
+use services::vpc::VpcCredentialsRepository;
 
 pub struct PostgresAppConfigRepository {
     pool: DbPool,
@@ -35,5 +37,16 @@ impl PostgresAppConfigRepository {
             .await?;
 
         Ok(())
+    }
+}
+
+#[async_trait]
+impl VpcCredentialsRepository for PostgresAppConfigRepository {
+    async fn get(&self, key: &str) -> anyhow::Result<Option<String>> {
+        PostgresAppConfigRepository::get(self, key).await
+    }
+
+    async fn set(&self, key: &str, value: &str) -> anyhow::Result<()> {
+        PostgresAppConfigRepository::set(self, key, value).await
     }
 }
