@@ -1,7 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use near_api::{signer::NEP413Payload, AccountId, NetworkConfig, PublicKey, types::Signature};
-use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use url::Url;
 
