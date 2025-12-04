@@ -79,6 +79,42 @@ impl Default for OAuthConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct NearConfig {
+    pub expected_recipient: String,
+    pub rpc_url: String,
+}
+
+impl Default for NearConfig {
+    fn default() -> Self {
+        let is_dev = std::env::var("DEV")
+            .ok()
+            .and_then(|v| v.parse::<bool>().ok())
+            .unwrap_or(false);
+
+        let expected_recipient = std::env::var("NEAR_EXPECTED_RECIPIENT").unwrap_or_else(|_| {
+            if is_dev {
+                "http://localhost:auth/*".to_string()
+            } else {
+                "https://private.near.ai/auth/*".to_string()
+            }
+        });
+
+        let rpc_url = std::env::var("NEAR_RPC_URL").unwrap_or_else(|_| {
+            if is_dev {
+                "https://rpc.testnet.near.org".to_string()
+            } else {
+                "https://rpc.mainnet.near.org".to_string()
+            }
+        });
+
+        Self {
+            expected_recipient,
+            rpc_url,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
@@ -200,6 +236,7 @@ pub struct Config {
     pub cors: CorsConfig,
     pub admin: AdminConfig,
     pub vpc_auth: VpcAuthConfig,
+    pub near: NearConfig,
 }
 
 impl Config {
@@ -212,6 +249,7 @@ impl Config {
             cors: CorsConfig::default(),
             admin: AdminConfig::default(),
             vpc_auth: VpcAuthConfig::default(),
+            near: NearConfig::default(),
         }
     }
 }

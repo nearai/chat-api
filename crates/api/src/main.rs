@@ -75,6 +75,7 @@ async fn main() -> anyhow::Result<()> {
         session_repo.clone(),
         user_repo.clone(),
         near_nonce_repo,
+        config.near.expected_recipient.clone(),
         config.oauth.google_client_id.clone(),
         config.oauth.google_client_secret.clone(),
         config.oauth.github_client_id.clone(),

@@ -71,6 +71,7 @@ impl OAuthServiceImpl {
         session_repository: Arc<dyn SessionRepository>,
         user_repository: Arc<dyn UserRepository>,
         near_nonce_repository: Arc<dyn NearNonceRepository>,
+        near_expected_recipient: String,
         google_client_id: String,
         google_client_secret: String,
         github_client_id: String,
@@ -81,6 +82,7 @@ impl OAuthServiceImpl {
             session_repository.clone(),
             user_repository.clone(),
             near_nonce_repository,
+            near_expected_recipient,
         );
 
         Self {

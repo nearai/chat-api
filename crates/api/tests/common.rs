@@ -16,15 +16,24 @@ static MIGRATIONS_INITIALIZED: OnceCell<()> = OnceCell::const_new();
 pub struct TestServerConfig {
     pub vpc_credentials: Option<VpcCredentials>,
     pub cloud_api_base_url: String,
+    pub near_expected_recipient: Option<String>,
+    pub near_rpc_url: Option<String>,
+}
+
+impl Default for TestServerConfig {
+    fn default() -> Self {
+        Self {
+            vpc_credentials: None,
+            cloud_api_base_url: String::new(),
+            near_expected_recipient: Some("http://localhost:auth/*".to_string()),
+            near_rpc_url: None,
+        }
+    }
 }
 
 /// Create a test server with all services initialized (VPC not configured)
 pub async fn create_test_server() -> TestServer {
-    create_test_server_with_config(TestServerConfig {
-        vpc_credentials: None,
-        cloud_api_base_url: String::new(),
-    })
-    .await
+    create_test_server_with_config(TestServerConfig::default()).await
 }
 
 /// Create a test server with custom configuration
@@ -33,7 +42,16 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
     dotenvy::dotenv().ok();
 
     // Load configuration
-    let config = config::Config::from_env();
+    let mut config = config::Config::from_env();
+
+    config.near.expected_recipient = test_config
+        .near_expected_recipient
+        .clone()
+        .unwrap_or(config.near.expected_recipient);
+
+    if let Some(rpc_url) = test_config.near_rpc_url.clone() {
+        config.near.rpc_url = rpc_url;
+    }
 
     // Create database connection
     let db = database::Database::from_config(&config.database)
@@ -64,6 +82,7 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
         session_repo.clone(),
         user_repo.clone(),
         near_nonce_repo,
+        config.near.expected_recipient.clone(),
         config.oauth.google_client_id.clone(),
         config.oauth.google_client_secret.clone(),
         config.oauth.github_client_id.clone(),

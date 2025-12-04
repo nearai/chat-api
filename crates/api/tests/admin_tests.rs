@@ -182,6 +182,7 @@ async fn test_get_system_prompt_with_admin_success() {
     let server = create_test_server_with_config(TestServerConfig {
         vpc_credentials: Some(vpc_credentials),
         cloud_api_base_url: mock_cloud_api.uri(),
+        ..Default::default()
     })
     .await;
 
@@ -227,6 +228,7 @@ async fn test_set_system_prompt_with_admin_success() {
     let server = create_test_server_with_config(TestServerConfig {
         vpc_credentials: Some(vpc_credentials),
         cloud_api_base_url: mock_cloud_api.uri(),
+        ..Default::default()
     })
     .await;
 

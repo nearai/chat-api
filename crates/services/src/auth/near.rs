@@ -29,6 +29,7 @@ pub struct NearAuthService {
     session_repository: Arc<dyn SessionRepository>,
     user_repository: Arc<dyn UserRepository>,
     nonce_repository: Arc<dyn NearNonceRepository>,
+    expected_recipient: String,
 }
 
 #[derive(BorshSerialize)]
@@ -45,11 +46,13 @@ impl NearAuthService {
         session_repository: Arc<dyn SessionRepository>,
         user_repository: Arc<dyn UserRepository>,
         nonce_repository: Arc<dyn NearNonceRepository>,
+        expected_recipient: String,
     ) -> Self {
         Self {
             session_repository,
             user_repository,
             nonce_repository,
+            expected_recipient,
         }
     }
 
@@ -84,6 +87,24 @@ impl NearAuthService {
 
         Signature::from_parts(KeyType::ED25519, &raw)
             .map_err(|_| anyhow::anyhow!("invalid signature bytes"))
+    }
+
+    fn validate_recipient(&self, recipient: &str) -> anyhow::Result<()> {
+        let matches = if let Some(prefix) = self.expected_recipient.strip_suffix('*') {
+            recipient.starts_with(prefix)
+        } else {
+            recipient == self.expected_recipient
+        };
+
+        if matches {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(
+                "Invalid recipient: expected {}, got {}",
+                self.expected_recipient,
+                recipient
+            ))
+        }
     }
 
     /// Construct the NEP-413 payload that was signed using Borsh
@@ -209,6 +230,8 @@ impl NearAuthService {
             "NEAR authentication attempt for account: {}",
             account_id
         );
+
+        self.validate_recipient(&signed_message.recipient)?;
 
         // 1. Verify nonce length
         if signed_message.nonce.len() != 32 {
