@@ -1,3 +1,4 @@
+use anyhow::anyhow;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
@@ -19,6 +20,30 @@ pub struct User {
 pub enum OAuthProvider {
     Google,
     Github,
+    Near,
+}
+
+impl OAuthProvider {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            OAuthProvider::Google => "google",
+            OAuthProvider::Github => "github",
+            OAuthProvider::Near => "near",
+        }
+    }
+}
+
+impl TryFrom<&str> for OAuthProvider {
+    type Error = anyhow::Error;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "google" => Ok(OAuthProvider::Google),
+            "github" => Ok(OAuthProvider::Github),
+            "near" => Ok(OAuthProvider::Near),
+            other => Err(anyhow!("Unsupported OAuth provider: {}", other)),
+        }
+    }
 }
 
 /// Represents a linked OAuth account

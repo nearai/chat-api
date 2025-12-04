@@ -4,11 +4,11 @@ use axum::{
     extract::{Extension, State},
     http::StatusCode,
     response::Redirect,
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use services::SessionId;
+use services::{auth::NearSignedMessage, SessionId};
 use utoipa::ToSchema;
 
 /// Query parameters for OAuth callback
@@ -39,6 +39,36 @@ pub struct MockLoginRequest {
     pub email: String,
     pub name: Option<String>,
     pub avatar_url: Option<String>,
+}
+
+/// Request body for NEAR authentication
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+pub struct NearAuthRequest {
+    /// NEAR account ID (e.g., "alice.near")
+    pub account_id: String,
+    /// Public key used to sign (e.g., "ed25519:...")
+    pub public_key: String,
+    /// Base64-encoded signature
+    pub signature: String,
+    /// The message that was signed
+    pub message: String,
+    /// The nonce used (as array of bytes)
+    pub nonce: Vec<u8>,
+    /// The recipient (your app identifier)
+    pub recipient: String,
+}
+
+/// Response for NEAR authentication
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct NearAuthResponse {
+    /// Session token
+    pub token: String,
+    /// Session ID
+    pub session_id: String,
+    /// Token expiration time (RFC3339)
+    pub expires_at: String,
+    /// Whether this is a new user
+    pub is_new_user: bool,
 }
 
 /// Handler for initiating Google OAuth flow
@@ -364,12 +394,76 @@ pub async fn mock_login(
     }))
 }
 
+/// Handler for NEAR wallet authentication
+#[utoipa::path(
+    post,
+    path = "/v1/auth/near",
+    tag = "Auth",
+    request_body = NearAuthRequest,
+    responses(
+        (status = 200, description = "Successfully authenticated", body = NearAuthResponse),
+        (status = 401, description = "Invalid signature or expired", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    )
+)]
+pub async fn near_auth(
+    State(app_state): State<AppState>,
+    Json(request): Json<NearAuthRequest>,
+) -> Result<Json<NearAuthResponse>, ApiError> {
+    tracing::info!(
+        "NEAR authentication request for account: {}",
+        request.account_id
+    );
+
+    let signed_message = NearSignedMessage {
+        account_id: request.account_id,
+        public_key: request.public_key,
+        signature: request.signature,
+        message: request.message,
+        nonce: request.nonce,
+        recipient: request.recipient,
+    };
+
+    let (session, is_new_user) = app_state
+        .oauth_service
+        .authenticate_near(signed_message, None)
+        .await
+        .map_err(|e| {
+            tracing::error!("NEAR authentication failed: {}", e);
+            ApiError::unauthorized(e.to_string())
+        })?;
+
+    let token = session.token.ok_or_else(|| {
+        tracing::error!(
+            "Session token not returned from service for session_id: {}",
+            session.session_id
+        );
+        ApiError::internal_server_error("Failed to create session")
+    })?;
+
+    tracing::info!(
+        "NEAR authentication successful - session_id: {}, user_id: {}, is_new_user: {}",
+        session.session_id,
+        session.user_id,
+        is_new_user
+    );
+
+    Ok(Json(NearAuthResponse {
+        token,
+        session_id: session.session_id.to_string(),
+        expires_at: session.expires_at.to_rfc3339(),
+        is_new_user,
+    }))
+}
+
 /// Create OAuth router with all routes (excluding logout, which requires auth)
 pub fn create_oauth_router() -> Router<AppState> {
     let router = Router::new()
         // OAuth initiation routes
         .route("/google", get(google_login))
         .route("/github", get(github_login))
+        // NEAR wallet authentication
+        .route("/near", post(near_auth))
         // Unified callback route for all providers
         .route("/callback", get(oauth_callback));
 

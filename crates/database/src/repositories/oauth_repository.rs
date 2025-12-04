@@ -30,6 +30,7 @@ impl OAuthRepository for PostgresOAuthRepository {
         let provider_str = match state.provider {
             OAuthProvider::Google => "google",
             OAuthProvider::Github => "github",
+            OAuthProvider::Near => "near",
         };
 
         client
@@ -79,6 +80,7 @@ impl OAuthRepository for PostgresOAuthRepository {
             let provider = match provider_str.as_str() {
                 "google" => OAuthProvider::Google,
                 "github" => OAuthProvider::Github,
+                "near" => OAuthProvider::Near,
                 _ => OAuthProvider::Google, // fallback
             };
 
@@ -124,6 +126,7 @@ impl OAuthRepository for PostgresOAuthRepository {
         let provider_str = match provider {
             OAuthProvider::Google => "google",
             OAuthProvider::Github => "github",
+            OAuthProvider::Near => "near",
         };
 
         let rows_affected = client
@@ -166,6 +169,7 @@ impl OAuthRepository for PostgresOAuthRepository {
         let provider_str = match provider {
             OAuthProvider::Google => "google",
             OAuthProvider::Github => "github",
+            OAuthProvider::Near => "near",
         };
 
         let row = client

@@ -7,8 +7,8 @@ pub mod repositories;
 pub use pool::DbPool;
 pub use repositories::{
     PostgresAppConfigRepository, PostgresConversationRepository, PostgresFileRepository,
-    PostgresOAuthRepository, PostgresSessionRepository, PostgresUserRepository,
-    PostgresUserSettingsRepository,
+    PostgresNearNonceRepository, PostgresOAuthRepository, PostgresSessionRepository,
+    PostgresUserRepository, PostgresUserSettingsRepository,
 };
 
 use crate::pool::create_pool_with_native_tls;
@@ -29,6 +29,7 @@ pub struct Database {
     file_repository: Arc<PostgresFileRepository>,
     user_settings_repository: Arc<PostgresUserSettingsRepository>,
     app_config_repository: Arc<PostgresAppConfigRepository>,
+    near_nonce_repository: Arc<PostgresNearNonceRepository>,
     cluster_manager: Option<Arc<ClusterManager>>,
 }
 
@@ -42,6 +43,7 @@ impl Database {
         let file_repository = Arc::new(PostgresFileRepository::new(pool.clone()));
         let user_settings_repository = Arc::new(PostgresUserSettingsRepository::new(pool.clone()));
         let app_config_repository = Arc::new(PostgresAppConfigRepository::new(pool.clone()));
+        let near_nonce_repository = Arc::new(PostgresNearNonceRepository::new(pool.clone()));
 
         Self {
             pool,
@@ -52,6 +54,7 @@ impl Database {
             file_repository,
             user_settings_repository,
             app_config_repository,
+            near_nonce_repository,
             cluster_manager: None,
         }
     }
@@ -208,5 +211,10 @@ impl Database {
     /// Get the app config repository
     pub fn app_config_repository(&self) -> Arc<PostgresAppConfigRepository> {
         self.app_config_repository.clone()
+    }
+
+    /// Get the NEAR nonce repository
+    pub fn near_nonce_repository(&self) -> Arc<PostgresNearNonceRepository> {
+        self.near_nonce_repository.clone()
     }
 }

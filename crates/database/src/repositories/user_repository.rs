@@ -173,6 +173,7 @@ impl UserRepository for PostgresUserRepository {
                 let provider = match provider_str.as_str() {
                     "google" => OAuthProvider::Google,
                     "github" => OAuthProvider::Github,
+                    "near" => OAuthProvider::Near,
                     _ => OAuthProvider::Google, // fallback
                 };
                 LinkedOAuthAccount {
@@ -202,6 +203,7 @@ impl UserRepository for PostgresUserRepository {
         let provider_str = match provider {
             OAuthProvider::Google => "google",
             OAuthProvider::Github => "github",
+            OAuthProvider::Near => "near",
         };
 
         let rows_affected = client
@@ -246,6 +248,7 @@ impl UserRepository for PostgresUserRepository {
         let provider_str = match provider {
             OAuthProvider::Google => "google",
             OAuthProvider::Github => "github",
+            OAuthProvider::Near => "near",
         };
 
         let row = client

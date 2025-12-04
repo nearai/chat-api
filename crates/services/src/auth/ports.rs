@@ -34,6 +34,17 @@ pub struct OAuthUserInfo {
     pub avatar_url: Option<String>,
 }
 
+/// NEP-413 message signing request from the frontend
+#[derive(Debug, Clone)]
+pub struct NearSignedMessage {
+    pub account_id: String,
+    pub public_key: String,
+    pub signature: String,
+    pub message: String,
+    pub nonce: Vec<u8>,
+    pub recipient: String,
+}
+
 /// OAuth session created after successful authentication
 #[derive(Debug, Clone)]
 pub struct UserSession {
@@ -118,4 +129,12 @@ pub trait OAuthService: Send + Sync {
 
     /// Revoke access (logout)
     async fn revoke_session(&self, session_id: SessionId) -> anyhow::Result<()>;
+
+    /// Authenticate with NEAR signed message
+    /// Returns (UserSession, is_new_user)
+    async fn authenticate_near(
+        &self,
+        signed_message: NearSignedMessage,
+        max_age_ms: Option<u64>,
+    ) -> anyhow::Result<(UserSession, bool)>;
 }

@@ -56,12 +56,14 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
     let conversation_repo = db.conversation_repository();
     let file_repo = db.file_repository();
     let user_settings_repo = db.user_settings_repository();
+    let near_nonce_repo = db.near_nonce_repository();
 
     // Create services
     let oauth_service = Arc::new(services::auth::OAuthServiceImpl::new(
         oauth_repo.clone(),
         session_repo.clone(),
         user_repo.clone(),
+        near_nonce_repo,
         config.oauth.google_client_id.clone(),
         config.oauth.google_client_secret.clone(),
         config.oauth.github_client_id.clone(),

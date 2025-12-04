@@ -66,6 +66,7 @@ async fn main() -> anyhow::Result<()> {
     let file_repo = db.file_repository();
     let user_settings_repo = db.user_settings_repository();
     let app_config_repo = db.app_config_repository();
+    let near_nonce_repo = db.near_nonce_repository();
 
     // Create services
     tracing::info!("Initializing services...");
@@ -73,6 +74,7 @@ async fn main() -> anyhow::Result<()> {
         oauth_repo.clone(),
         session_repo.clone(),
         user_repo.clone(),
+        near_nonce_repo,
         config.oauth.google_client_id.clone(),
         config.oauth.google_client_secret.clone(),
         config.oauth.github_client_id.clone(),
