@@ -53,7 +53,12 @@ impl NearAuthService {
     }
 
     fn parse_public_key(public_key: &str) -> anyhow::Result<PublicKey> {
-        PublicKey::from_str(public_key).map_err(|_| anyhow::anyhow!("invalid public key"))
+        PublicKey::from_str(public_key).map_err(|e| {
+            anyhow::anyhow!(
+                "Invalid NEAR public key format: expected format 'ed25519:base58' ({})",
+                e
+            )
+        })
     }
 
     fn parse_signature(signature_str: &str) -> anyhow::Result<Signature> {
