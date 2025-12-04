@@ -162,7 +162,17 @@ impl NearAuthService {
             }
         }
 
-        // 4. Check nonce hasn't been used (replay protection)
+        // 4. Verify signature AND public key ownership via near-api
+        let is_valid = verify_signed_message(&signed_message, &payload, &self.network_config)
+            .await
+            .map_err(|e| anyhow::anyhow!("Signature verification failed: {}", e))?;
+
+        if !is_valid {
+            return Err(anyhow::anyhow!("Invalid signature"));
+        }
+
+        // 5. Consume nonce AFTER signature verification (replay protection)
+        // This prevents attackers from burning legitimate nonces with invalid signatures
         let nonce_hash = hex::encode(Sha256::digest(payload.nonce));
         let nonce_consumed = self.nonce_repository.consume_nonce(&nonce_hash).await?;
         if !nonce_consumed {
@@ -173,15 +183,6 @@ impl NearAuthService {
             return Err(anyhow::anyhow!(
                 "Nonce already used (replay attack detected)"
             ));
-        }
-
-        // 5. Verify signature AND public key ownership via near-api
-        let is_valid = verify_signed_message(&signed_message, &payload, &self.network_config)
-            .await
-            .map_err(|e| anyhow::anyhow!("Signature verification failed: {}", e))?;
-
-        if !is_valid {
-            return Err(anyhow::anyhow!("Invalid signature"));
         }
 
         // 6. Find or create user
