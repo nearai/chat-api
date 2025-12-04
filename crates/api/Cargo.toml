@@ -44,7 +44,7 @@ services = { path = "../services", features = ["utoipa"] }
 database = { path = "../database" }
 config = { path = "../config" }
 hex = "0.4.3"
-near-api = { git = "https://github.com/near/near-api-rs", branch = "main" }
+near-api = { git = "https://github.com/near/near-api-rs", rev = "f07473256aa7a70e094432618bac174e60d533df" }
 
 # VPC authentication
 reqwest = { version = "0.12", features = ["json"] }
