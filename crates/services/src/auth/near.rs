@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use borsh::{to_vec, BorshSerialize};
 use chrono::{DateTime, Duration, Utc};
+use near_account_id::AccountId as NearAccountId;
 use near_crypto::{KeyType, PublicKey, Signature};
 use sha2::{Digest, Sha256};
 use std::{str::FromStr, sync::Arc};
@@ -59,6 +60,14 @@ impl NearAuthService {
                 e
             )
         })
+    }
+
+    fn validate_account_id(account_id: &str) -> anyhow::Result<String> {
+        let parsed: NearAccountId = account_id
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Invalid NEAR account ID: {}", e))?;
+
+        Ok(parsed.to_string())
     }
 
     fn parse_signature(signature_str: &str) -> anyhow::Result<Signature> {
@@ -194,9 +203,11 @@ impl NearAuthService {
     ) -> anyhow::Result<(UserSession, bool)> {
         let max_age = max_age_ms.unwrap_or(DEFAULT_MAX_NONCE_AGE_MS);
 
+        let account_id = Self::validate_account_id(&signed_message.account_id)?;
+
         tracing::info!(
             "NEAR authentication attempt for account: {}",
-            signed_message.account_id
+            account_id
         );
 
         // 1. Verify nonce length
@@ -213,7 +224,7 @@ impl NearAuthService {
             if age > Duration::milliseconds(max_age as i64) {
                 tracing::warn!(
                     "NEAR signature expired for account {}: age={:?}ms, max_age={}ms",
-                    signed_message.account_id,
+                    account_id,
                     age.num_milliseconds(),
                     max_age
                 );
@@ -222,7 +233,7 @@ impl NearAuthService {
             if age < Duration::zero() {
                 tracing::warn!(
                     "NEAR signature has future timestamp for account {}",
-                    signed_message.account_id
+                    account_id
                 );
                 return Err(anyhow::anyhow!("Invalid signature timestamp"));
             }
@@ -234,7 +245,7 @@ impl NearAuthService {
         if !nonce_consumed {
             tracing::warn!(
                 "NEAR signature replay detected for account {}",
-                signed_message.account_id
+                account_id
             );
             return Err(anyhow::anyhow!(
                 "Nonce already used (replay attack detected)"
@@ -245,7 +256,7 @@ impl NearAuthService {
         self.verify_signature(&signed_message)?;
 
         // 5. Find or create user
-        let (user_id, is_new_user) = self.find_or_create_user(&signed_message.account_id).await?;
+        let (user_id, is_new_user) = self.find_or_create_user(&account_id).await?;
 
         // 6. Create session
         let session = self.session_repository.create_session(user_id).await?;
