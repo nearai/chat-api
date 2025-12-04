@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use chrono::Utc;
-use near_api::{types::nep413::{Payload, SignedMessage}, NetworkConfig};
+use near_api::{signer::NEP413Payload, NetworkConfig};
 use oauth2::{
     basic::BasicClient, AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, RedirectUrl,
     RefreshToken, Scope, TokenResponse, TokenUrl,
@@ -642,8 +642,8 @@ impl OAuthService for OAuthServiceImpl {
 
     async fn authenticate_near(
         &self,
-        signed_message: SignedMessage,
-        payload: Payload,
+        signed_message: super::near::SignedMessage,
+        payload: NEP413Payload,
     ) -> anyhow::Result<(UserSession, bool)> {
         self.near_auth
             .verify_and_authenticate(signed_message, payload)

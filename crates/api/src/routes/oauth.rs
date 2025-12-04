@@ -7,9 +7,10 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use near_api::types::nep413::{Payload, SignedMessage};
+use near_api::signer::NEP413Payload;
 use serde::{Deserialize, Serialize};
 use services::SessionId;
+use services::auth::near::SignedMessage;
 use utoipa::ToSchema;
 
 /// Query parameters for OAuth callback
@@ -85,23 +86,33 @@ impl TryFrom<NearSignedMessageJson> for SignedMessage {
     type Error = anyhow::Error;
 
     fn try_from(msg: NearSignedMessageJson) -> Result<Self, Self::Error> {
+        use base64::prelude::*;
+        use near_api::types::Signature;
+
+        let public_key: near_api::PublicKey = msg.public_key.parse()?;
+
+        // Parse base64 signature and create Signature based on key type
+        let sig_bytes = BASE64_STANDARD.decode(&msg.signature)?;
+        let signature = Signature::from_parts(public_key.key_type(), &sig_bytes)
+            .map_err(|e| anyhow::anyhow!("Invalid signature: {}", e))?;
+
         Ok(SignedMessage {
             account_id: msg.account_id.parse()?,
-            public_key: msg.public_key.parse()?,
-            signature: msg.signature,
+            public_key,
+            signature,
             state: msg.state,
         })
     }
 }
 
-impl TryFrom<NearPayloadJson> for Payload {
+impl TryFrom<NearPayloadJson> for NEP413Payload {
     type Error = anyhow::Error;
 
     fn try_from(payload: NearPayloadJson) -> Result<Self, Self::Error> {
         let nonce: [u8; 32] = payload.nonce.try_into().map_err(|v: Vec<u8>| {
             anyhow::anyhow!("Invalid nonce length: expected 32, got {}", v.len())
         })?;
-        Ok(Payload {
+        Ok(NEP413Payload {
             message: payload.message,
             nonce,
             recipient: payload.recipient,
@@ -473,7 +484,7 @@ pub async fn near_auth(
         .try_into()
         .map_err(|e| ApiError::bad_request(format!("{}", e)))?;
 
-    let payload: Payload = request
+    let payload: NEP413Payload = request
         .payload
         .try_into()
         .map_err(|e| ApiError::bad_request(format!("{}", e)))?;

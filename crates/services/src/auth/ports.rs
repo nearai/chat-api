@@ -125,7 +125,7 @@ pub trait OAuthService: Send + Sync {
     /// Returns (UserSession, is_new_user)
     async fn authenticate_near(
         &self,
-        signed_message: near_api::types::nep413::SignedMessage,
-        payload: near_api::types::nep413::Payload,
+        signed_message: super::near::SignedMessage,
+        payload: near_api::signer::NEP413Payload,
     ) -> anyhow::Result<(UserSession, bool)>;
 }

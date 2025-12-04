@@ -1,10 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
-use near_api::{
-    types::nep413::{Payload, SignedMessage},
-    verify::verify_signed_message,
-    NetworkConfig,
-};
+use near_api::{signer::NEP413Payload, AccountId, NetworkConfig, PublicKey, types::Signature};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
@@ -13,6 +9,18 @@ use crate::types::UserId;
 use crate::user::ports::{OAuthProvider, UserRepository};
 
 const DEFAULT_MAX_NONCE_AGE_MS: u64 = 5 * 60 * 1000; // 5 minutes
+
+/// Signed message data received from the wallet (NEP-413 output)
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SignedMessage {
+    #[serde(rename = "accountId")]
+    pub account_id: AccountId,
+    #[serde(rename = "publicKey")]
+    pub public_key: PublicKey,
+    pub signature: Signature,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+}
 
 /// Repository trait for NEAR nonce management (replay protection)
 #[async_trait]
@@ -124,7 +132,7 @@ impl NearAuthService {
     pub async fn verify_and_authenticate(
         &self,
         signed_message: SignedMessage,
-        payload: Payload,
+        payload: NEP413Payload,
     ) -> anyhow::Result<(UserSession, bool)> {
         let max_age = DEFAULT_MAX_NONCE_AGE_MS;
         let account_id = signed_message.account_id.to_string();
@@ -163,7 +171,13 @@ impl NearAuthService {
         }
 
         // 4. Verify signature AND public key ownership via near-api
-        let is_valid = verify_signed_message(&signed_message, &payload, &self.network_config)
+        let is_valid = payload
+            .verify(
+                &signed_message.account_id,
+                &signed_message.public_key,
+                &signed_message.signature,
+                &self.network_config,
+            )
             .await
             .map_err(|e| anyhow::anyhow!("Signature verification failed: {}", e))?;
 

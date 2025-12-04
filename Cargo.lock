@@ -450,6 +450,7 @@ dependencies = [
  "axum",
  "axum-extra",
  "axum-test",
+ "base64",
  "bytes",
  "chrono",
  "config",
@@ -3035,7 +3036,7 @@ dependencies = [
 [[package]]
 name = "near-api"
 version = "0.7.8"
-source = "git+https://github.com/near/near-api-rs?branch=copilot%2Fadd-verify-nep-413-message-method#7c2549d3fccee9c29451946800699c0b2cbe3b10"
+source = "git+https://github.com/near/near-api-rs?branch=copilot%2Fadd-verify-nep-413-message-method#8be083f3dae1d265c062b5480417bb00aa1df3e0"
 dependencies = [
  "async-trait",
  "base64",
@@ -3060,7 +3061,7 @@ dependencies = [
 [[package]]
 name = "near-api-types"
 version = "0.7.8"
-source = "git+https://github.com/near/near-api-rs?branch=copilot%2Fadd-verify-nep-413-message-method#7c2549d3fccee9c29451946800699c0b2cbe3b10"
+source = "git+https://github.com/near/near-api-rs?branch=copilot%2Fadd-verify-nep-413-message-method#8be083f3dae1d265c062b5480417bb00aa1df3e0"
 dependencies = [
  "base64",
  "borsh",
