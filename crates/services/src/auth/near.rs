@@ -1,24 +1,18 @@
 use async_trait::async_trait;
-use borsh::{to_vec, BorshSerialize};
 use chrono::{DateTime, Duration, Utc};
-use near_account_id::AccountId as NearAccountId;
-use near_crypto::{KeyType, PublicKey, Signature};
-use sha2::{Digest, Sha256};
-use std::{
-    str::FromStr,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
+use near_api::{
+    types::nep413::{Payload, SignedMessage},
+    verify::verify_signed_message,
+    NetworkConfig,
 };
+use sha2::{Digest, Sha256};
+use std::sync::Arc;
 
-use super::ports::{NearSignedMessage, SessionRepository, UserSession};
+use super::ports::{SessionRepository, UserSession};
 use crate::types::UserId;
 use crate::user::ports::{OAuthProvider, UserRepository};
 
-const NEP413_TAG: u32 = 2_147_484_061; // 2^31 + 413 (NEP-413 specification)
 const DEFAULT_MAX_NONCE_AGE_MS: u64 = 5 * 60 * 1000; // 5 minutes
-const NONCE_CLEANUP_INTERVAL: u64 = 100;
 
 /// Repository trait for NEAR nonce management (replay protection)
 #[async_trait]
@@ -37,16 +31,7 @@ pub struct NearAuthService {
     user_repository: Arc<dyn UserRepository>,
     nonce_repository: Arc<dyn NearNonceRepository>,
     expected_recipient: String,
-    cleanup_counter: AtomicU64,
-}
-
-#[derive(BorshSerialize)]
-struct Nep413Payload {
-    tag: u32,
-    message: String,
-    nonce: [u8; 32],
-    recipient: String,
-    callback_url: Option<String>,
+    network_config: NetworkConfig,
 }
 
 impl NearAuthService {
@@ -55,75 +40,25 @@ impl NearAuthService {
         user_repository: Arc<dyn UserRepository>,
         nonce_repository: Arc<dyn NearNonceRepository>,
         expected_recipient: String,
+        network_config: NetworkConfig,
     ) -> Self {
         Self {
             session_repository,
             user_repository,
             nonce_repository,
             expected_recipient,
-            cleanup_counter: AtomicU64::new(0),
+            network_config,
         }
     }
 
-    fn parse_public_key(public_key: &str) -> anyhow::Result<PublicKey> {
-        PublicKey::from_str(public_key).map_err(|e| {
-            anyhow::anyhow!(
-                "Invalid NEAR public key format: expected format 'ed25519:base58' ({})",
-                e
-            )
-        })
-    }
-
-    async fn maybe_cleanup_nonces(&self) {
-        let attempt = self.cleanup_counter.fetch_add(1, Ordering::Relaxed) + 1;
-        if attempt % NONCE_CLEANUP_INTERVAL != 0 {
-            return;
+    async fn cleanup_nonces(&self) {
+        if let Err(err) = self.nonce_repository.cleanup_expired_nonces().await {
+            tracing::warn!("Failed to cleanup expired NEAR nonces: {}", err);
         }
-
-        match self.nonce_repository.cleanup_expired_nonces().await {
-            Ok(deleted) => {
-                if deleted > 0 {
-                    tracing::debug!("Cleaned up {} expired NEAR nonces", deleted);
-                }
-            }
-            Err(err) => {
-                tracing::warn!("Failed to cleanup expired NEAR nonces: {}", err);
-            }
-        }
-    }
-
-    fn validate_account_id(account_id: &str) -> anyhow::Result<String> {
-        let parsed: NearAccountId = account_id
-            .parse()
-            .map_err(|e| anyhow::anyhow!("Invalid NEAR account ID: {}", e))?;
-
-        Ok(parsed.to_string())
-    }
-
-    fn parse_signature(signature_str: &str) -> anyhow::Result<Signature> {
-        // Try standard NEAR format first (ed25519:base58)
-        if let Ok(sig) = Signature::from_str(signature_str) {
-            return Ok(sig);
-        }
-
-        // Fallback: wallet UIs sometimes return base64 without prefix
-        use base64::{engine::general_purpose::STANDARD, Engine};
-        let raw = STANDARD
-            .decode(signature_str)
-            .map_err(|_| anyhow::anyhow!("invalid signature encoding"))?;
-
-        Signature::from_parts(KeyType::ED25519, &raw)
-            .map_err(|_| anyhow::anyhow!("invalid signature bytes"))
     }
 
     fn validate_recipient(&self, recipient: &str) -> anyhow::Result<()> {
-        let matches = if let Some(prefix) = self.expected_recipient.strip_suffix('*') {
-            recipient.starts_with(prefix)
-        } else {
-            recipient == self.expected_recipient
-        };
-
-        if matches {
+        if recipient == self.expected_recipient {
             Ok(())
         } else {
             Err(anyhow::anyhow!(
@@ -132,65 +67,6 @@ impl NearAuthService {
                 recipient
             ))
         }
-    }
-
-    /// Construct the NEP-413 payload that was signed using Borsh
-    /// Format: SHA256(borsh_serialize(NEP413Payload))
-    fn construct_nep413_payload(
-        message: &str,
-        nonce: &[u8; 32],
-        recipient: &str,
-        callback_url: Option<&str>,
-    ) -> anyhow::Result<Vec<u8>> {
-        let payload = Nep413Payload {
-            tag: NEP413_TAG,
-            message: message.to_string(),
-            nonce: *nonce,
-            recipient: recipient.to_string(),
-            callback_url: callback_url.map(str::to_string),
-        };
-
-        let serialized = to_vec(&payload)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize NEP-413 payload: {}", e))?;
-
-        Ok(Sha256::digest(serialized).to_vec())
-    }
-
-    /// Extract timestamp from nonce (near-kit embeds timestamp in first 8 bytes)
-    fn extract_nonce_timestamp(nonce: &[u8]) -> Option<DateTime<Utc>> {
-        if nonce.len() < 8 {
-            return None;
-        }
-
-        let timestamp_bytes: [u8; 8] = nonce[0..8].try_into().ok()?;
-        let timestamp_ms = i64::from_le_bytes(timestamp_bytes);
-
-        DateTime::from_timestamp_millis(timestamp_ms)
-    }
-
-    /// Verify the cryptographic signature
-    fn verify_signature(&self, signed_message: &NearSignedMessage) -> anyhow::Result<()> {
-        let public_key = Self::parse_public_key(&signed_message.public_key)?;
-        let signature = Self::parse_signature(&signed_message.signature)?;
-
-        let nonce_bytes: [u8; 32] = signed_message
-            .nonce
-            [..]
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("invalid nonce length"))?;
-
-        let payload_hash = Self::construct_nep413_payload(
-            &signed_message.message,
-            &nonce_bytes,
-            &signed_message.recipient,
-            None,
-        )?;
-
-        if !signature.verify(payload_hash.as_ref(), &public_key) {
-            return Err(anyhow::anyhow!("invalid signature"));
-        }
-
-        Ok(())
     }
 
     /// Find or create user from NEAR account
@@ -244,54 +120,50 @@ impl NearAuthService {
 
         Ok((user.id, true))
     }
+
     pub async fn verify_and_authenticate(
         &self,
-        signed_message: NearSignedMessage,
-        max_age_ms: Option<u64>,
+        signed_message: SignedMessage,
+        payload: Payload,
     ) -> anyhow::Result<(UserSession, bool)> {
-        let max_age = max_age_ms.unwrap_or(DEFAULT_MAX_NONCE_AGE_MS);
+        let max_age = DEFAULT_MAX_NONCE_AGE_MS;
+        let account_id = signed_message.account_id.to_string();
 
-        let account_id = Self::validate_account_id(&signed_message.account_id)?;
+        tracing::info!("NEAR authentication attempt for account: {}", account_id);
 
-        tracing::info!(
-            "NEAR authentication attempt for account: {}",
-            account_id
-        );
+        // 1. Validate recipient
+        self.validate_recipient(&payload.recipient)?;
 
-        self.validate_recipient(&signed_message.recipient)?;
-        self.maybe_cleanup_nonces().await;
+        // 2. Cleanup expired nonces
+        self.cleanup_nonces().await;
 
-        // 1. Verify nonce length
-        if signed_message.nonce.len() != 32 {
-            return Err(anyhow::anyhow!(
-                "Invalid nonce length: expected 32 bytes, got {}",
-                signed_message.nonce.len()
-            ));
-        }
-
-        // 2. Check nonce timestamp (replay protection)
-        if let Some(nonce_time) = Self::extract_nonce_timestamp(&signed_message.nonce) {
-            let age = Utc::now().signed_duration_since(nonce_time);
-            if age > Duration::milliseconds(max_age as i64) {
-                tracing::warn!(
-                    "NEAR signature expired for account {}: age={:?}ms, max_age={}ms",
-                    account_id,
-                    age.num_milliseconds(),
-                    max_age
-                );
-                return Err(anyhow::anyhow!("Signature expired"));
-            }
-            if age < Duration::zero() {
-                tracing::warn!(
-                    "NEAR signature has future timestamp for account {}",
-                    account_id
-                );
-                return Err(anyhow::anyhow!("Invalid signature timestamp"));
+        // 3. Check nonce timestamp (replay protection)
+        let nonce_timestamp_ms = payload.extract_timestamp_from_nonce();
+        if nonce_timestamp_ms > 0 {
+            let nonce_time = DateTime::from_timestamp_millis(nonce_timestamp_ms as i64);
+            if let Some(nonce_time) = nonce_time {
+                let age = Utc::now().signed_duration_since(nonce_time);
+                if age > Duration::milliseconds(max_age as i64) {
+                    tracing::warn!(
+                        "NEAR signature expired for account {}: age={:?}ms, max_age={}ms",
+                        account_id,
+                        age.num_milliseconds(),
+                        max_age
+                    );
+                    return Err(anyhow::anyhow!("Signature expired"));
+                }
+                if age < Duration::zero() {
+                    tracing::warn!(
+                        "NEAR signature has future timestamp for account {}",
+                        account_id
+                    );
+                    return Err(anyhow::anyhow!("Invalid signature timestamp"));
+                }
             }
         }
 
-        // 3. Check nonce hasn't been used (replay protection)
-        let nonce_hash = hex::encode(Sha256::digest(&signed_message.nonce));
+        // 4. Check nonce hasn't been used (replay protection)
+        let nonce_hash = hex::encode(Sha256::digest(payload.nonce));
         let nonce_consumed = self.nonce_repository.consume_nonce(&nonce_hash).await?;
         if !nonce_consumed {
             tracing::warn!(
@@ -303,13 +175,19 @@ impl NearAuthService {
             ));
         }
 
-        // 4. Verify cryptographic signature
-        self.verify_signature(&signed_message)?;
+        // 5. Verify signature AND public key ownership via near-api
+        let is_valid = verify_signed_message(&signed_message, &payload, &self.network_config)
+            .await
+            .map_err(|e| anyhow::anyhow!("Signature verification failed: {}", e))?;
 
-        // 5. Find or create user
+        if !is_valid {
+            return Err(anyhow::anyhow!("Invalid signature"));
+        }
+
+        // 6. Find or create user
         let (user_id, is_new_user) = self.find_or_create_user(&account_id).await?;
 
-        // 6. Create session
+        // 7. Create session
         let session = self.session_repository.create_session(user_id).await?;
 
         tracing::info!(

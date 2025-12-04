@@ -37,12 +37,9 @@ rmcp = { version = "0.6", features = [
 hex = "0.4"
 hmac = "0.12"
 sha2 = "0.10"
-near-crypto = "0.34.1"
-base64 = "0.22.1"
-borsh = { version = "1.6.0", features = ["derive"] }
 dstack-sdk = "0.1"
 utoipa = { version = "5", optional = true }
-near-account-id = "2.1.0"
+near-api = { git = "https://github.com/near/near-api-rs", branch = "copilot/add-verify-nep-413-message-method" }
 
 [features]
 utoipa = ["dep:utoipa"]

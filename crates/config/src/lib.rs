@@ -93,9 +93,9 @@ impl Default for NearConfig {
 
         let expected_recipient = std::env::var("NEAR_EXPECTED_RECIPIENT").unwrap_or_else(|_| {
             if is_dev {
-                "http://localhost:auth/*".to_string()
+                "localhost:3000".to_string()
             } else {
-                "https://private.near.ai/auth/*".to_string()
+                "chat.near.ai".to_string()
             }
         });
 

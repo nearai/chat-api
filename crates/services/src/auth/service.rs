@@ -1,13 +1,15 @@
 use async_trait::async_trait;
 use chrono::Utc;
+use near_api::{types::nep413::{Payload, SignedMessage}, NetworkConfig};
 use oauth2::{
     basic::BasicClient, AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, RedirectUrl,
     RefreshToken, Scope, TokenResponse, TokenUrl,
 };
 use std::sync::Arc;
+use url::Url;
 
 use super::ports::{
-    NearSignedMessage, OAuthRepository, OAuthService, OAuthState, OAuthTokens, OAuthUserInfo,
+    OAuthRepository, OAuthService, OAuthState, OAuthTokens, OAuthUserInfo,
     SessionRepository, UserSession,
 };
 use super::{NearAuthService, NearNonceRepository};
@@ -72,17 +74,23 @@ impl OAuthServiceImpl {
         user_repository: Arc<dyn UserRepository>,
         near_nonce_repository: Arc<dyn NearNonceRepository>,
         near_expected_recipient: String,
+        near_rpc_url: String,
         google_client_id: String,
         google_client_secret: String,
         github_client_id: String,
         github_client_secret: String,
         redirect_uri: String,
     ) -> Self {
+        let near_network_config = NetworkConfig::from_rpc_url(
+            "near",
+            Url::parse(&near_rpc_url).expect("Invalid NEAR RPC URL"),
+        );
         let near_auth = NearAuthService::new(
             session_repository.clone(),
             user_repository.clone(),
             near_nonce_repository,
             near_expected_recipient,
+            near_network_config,
         );
 
         Self {
@@ -634,11 +642,11 @@ impl OAuthService for OAuthServiceImpl {
 
     async fn authenticate_near(
         &self,
-        signed_message: NearSignedMessage,
-        max_age_ms: Option<u64>,
+        signed_message: SignedMessage,
+        payload: Payload,
     ) -> anyhow::Result<(UserSession, bool)> {
         self.near_auth
-            .verify_and_authenticate(signed_message, max_age_ms)
+            .verify_and_authenticate(signed_message, payload)
             .await
     }
 }

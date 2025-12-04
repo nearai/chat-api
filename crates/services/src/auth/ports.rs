@@ -34,16 +34,7 @@ pub struct OAuthUserInfo {
     pub avatar_url: Option<String>,
 }
 
-/// NEP-413 message signing request from the frontend
-#[derive(Debug, Clone)]
-pub struct NearSignedMessage {
-    pub account_id: String,
-    pub public_key: String,
-    pub signature: String,
-    pub message: String,
-    pub nonce: Vec<u8>,
-    pub recipient: String,
-}
+// NEP-413 types are now imported from near_api::types::nep413::{SignedMessage, Payload, PayloadJson}
 
 /// OAuth session created after successful authentication
 #[derive(Debug, Clone)]
@@ -130,11 +121,11 @@ pub trait OAuthService: Send + Sync {
     /// Revoke access (logout)
     async fn revoke_session(&self, session_id: SessionId) -> anyhow::Result<()>;
 
-    /// Authenticate with NEAR signed message
+    /// Authenticate with NEAR signed message (NEP-413)
     /// Returns (UserSession, is_new_user)
     async fn authenticate_near(
         &self,
-        signed_message: NearSignedMessage,
-        max_age_ms: Option<u64>,
+        signed_message: near_api::types::nep413::SignedMessage,
+        payload: near_api::types::nep413::Payload,
     ) -> anyhow::Result<(UserSession, bool)>;
 }

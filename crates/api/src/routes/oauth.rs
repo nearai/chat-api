@@ -7,8 +7,9 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use near_api::types::nep413::{Payload, SignedMessage};
 use serde::{Deserialize, Serialize};
-use services::{auth::NearSignedMessage, SessionId};
+use services::SessionId;
 use utoipa::ToSchema;
 
 /// Query parameters for OAuth callback
@@ -41,21 +42,72 @@ pub struct MockLoginRequest {
     pub avatar_url: Option<String>,
 }
 
-/// Request body for NEAR authentication
+/// Request body for NEAR authentication (NEP-413)
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
 pub struct NearAuthRequest {
+    /// The signed message from the wallet
+    pub signed_message: NearSignedMessageJson,
+    /// The payload that was signed
+    pub payload: NearPayloadJson,
+}
+
+/// Signed message from wallet (NEP-413 SignedMessage)
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NearSignedMessageJson {
     /// NEAR account ID (e.g., "alice.near")
     pub account_id: String,
     /// Public key used to sign (e.g., "ed25519:...")
     pub public_key: String,
     /// Base64-encoded signature
     pub signature: String,
+    /// Optional state for browser wallets
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+}
+
+/// Payload that was signed (NEP-413 Payload)
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NearPayloadJson {
     /// The message that was signed
     pub message: String,
-    /// The nonce used (as array of bytes)
+    /// The nonce (as array of 32 bytes)
     pub nonce: Vec<u8>,
     /// The recipient (your app identifier)
     pub recipient: String,
+    /// Optional callback URL
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub callback_url: Option<String>,
+}
+
+impl TryFrom<NearSignedMessageJson> for SignedMessage {
+    type Error = anyhow::Error;
+
+    fn try_from(msg: NearSignedMessageJson) -> Result<Self, Self::Error> {
+        Ok(SignedMessage {
+            account_id: msg.account_id.parse()?,
+            public_key: msg.public_key.parse()?,
+            signature: msg.signature,
+            state: msg.state,
+        })
+    }
+}
+
+impl TryFrom<NearPayloadJson> for Payload {
+    type Error = anyhow::Error;
+
+    fn try_from(payload: NearPayloadJson) -> Result<Self, Self::Error> {
+        let nonce: [u8; 32] = payload.nonce.try_into().map_err(|v: Vec<u8>| {
+            anyhow::anyhow!("Invalid nonce length: expected 32, got {}", v.len())
+        })?;
+        Ok(Payload {
+            message: payload.message,
+            nonce,
+            recipient: payload.recipient,
+            callback_url: payload.callback_url,
+        })
+    }
 }
 
 /// Response for NEAR authentication
@@ -412,21 +464,23 @@ pub async fn near_auth(
 ) -> Result<Json<NearAuthResponse>, ApiError> {
     tracing::info!(
         "NEAR authentication request for account: {}",
-        request.account_id
+        request.signed_message.account_id
     );
 
-    let signed_message = NearSignedMessage {
-        account_id: request.account_id,
-        public_key: request.public_key,
-        signature: request.signature,
-        message: request.message,
-        nonce: request.nonce,
-        recipient: request.recipient,
-    };
+    // Convert to near-api types
+    let signed_message: SignedMessage = request
+        .signed_message
+        .try_into()
+        .map_err(|e| ApiError::bad_request(format!("{}", e)))?;
+
+    let payload: Payload = request
+        .payload
+        .try_into()
+        .map_err(|e| ApiError::bad_request(format!("{}", e)))?;
 
     let (session, is_new_user) = app_state
         .oauth_service
-        .authenticate_near(signed_message, None)
+        .authenticate_near(signed_message, payload)
         .await
         .map_err(|e| {
             tracing::error!("NEAR authentication failed: {}", e);

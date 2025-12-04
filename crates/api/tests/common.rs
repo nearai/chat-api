@@ -25,8 +25,8 @@ impl Default for TestServerConfig {
         Self {
             vpc_credentials: None,
             cloud_api_base_url: String::new(),
-            near_expected_recipient: Some("http://localhost:auth/*".to_string()),
-            near_rpc_url: None,
+            near_expected_recipient: Some("localhost".to_string()),
+            near_rpc_url: Some("https://rpc.testnet.near.org".to_string()),
         }
     }
 }
@@ -83,6 +83,7 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
         user_repo.clone(),
         near_nonce_repo,
         config.near.expected_recipient.clone(),
+        config.near.rpc_url.clone(),
         config.oauth.google_client_id.clone(),
         config.oauth.google_client_secret.clone(),
         config.oauth.github_client_id.clone(),
