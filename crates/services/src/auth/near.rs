@@ -110,7 +110,7 @@ impl NearAuthServiceImpl {
 
         let nonce_bytes: [u8; 32] = signed_message
             .nonce
-            .clone()
+            [..]
             .try_into()
             .map_err(|_| anyhow::anyhow!("invalid nonce length"))?;
 
