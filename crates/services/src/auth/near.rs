@@ -4,7 +4,13 @@ use chrono::{DateTime, Duration, Utc};
 use near_account_id::AccountId as NearAccountId;
 use near_crypto::{KeyType, PublicKey, Signature};
 use sha2::{Digest, Sha256};
-use std::{str::FromStr, sync::Arc};
+use std::{
+    str::FromStr,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+};
 
 use super::ports::{NearSignedMessage, SessionRepository, UserSession};
 use crate::types::UserId;
@@ -12,6 +18,7 @@ use crate::user::ports::{OAuthProvider, UserRepository};
 
 const NEP413_TAG: u32 = 2_147_484_061; // 2^31 + 413 (NEP-413 specification)
 const DEFAULT_MAX_NONCE_AGE_MS: u64 = 5 * 60 * 1000; // 5 minutes
+const NONCE_CLEANUP_INTERVAL: u64 = 100;
 
 /// Repository trait for NEAR nonce management (replay protection)
 #[async_trait]
@@ -30,6 +37,7 @@ pub struct NearAuthService {
     user_repository: Arc<dyn UserRepository>,
     nonce_repository: Arc<dyn NearNonceRepository>,
     expected_recipient: String,
+    cleanup_counter: AtomicU64,
 }
 
 #[derive(BorshSerialize)]
@@ -53,6 +61,7 @@ impl NearAuthService {
             user_repository,
             nonce_repository,
             expected_recipient,
+            cleanup_counter: AtomicU64::new(0),
         }
     }
 
@@ -63,6 +72,24 @@ impl NearAuthService {
                 e
             )
         })
+    }
+
+    async fn maybe_cleanup_nonces(&self) {
+        let attempt = self.cleanup_counter.fetch_add(1, Ordering::Relaxed) + 1;
+        if attempt % NONCE_CLEANUP_INTERVAL != 0 {
+            return;
+        }
+
+        match self.nonce_repository.cleanup_expired_nonces().await {
+            Ok(deleted) => {
+                if deleted > 0 {
+                    tracing::debug!("Cleaned up {} expired NEAR nonces", deleted);
+                }
+            }
+            Err(err) => {
+                tracing::warn!("Failed to cleanup expired NEAR nonces: {}", err);
+            }
+        }
     }
 
     fn validate_account_id(account_id: &str) -> anyhow::Result<String> {
@@ -232,6 +259,7 @@ impl NearAuthService {
         );
 
         self.validate_recipient(&signed_message.recipient)?;
+        self.maybe_cleanup_nonces().await;
 
         // 1. Verify nonce length
         if signed_message.nonce.len() != 32 {
