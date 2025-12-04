@@ -3,13 +3,16 @@ use chrono::{DateTime, Duration, Utc};
 use near_api::{signer::NEP413Payload, AccountId, NetworkConfig, PublicKey, types::Signature};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
+use url::Url;
 
 use super::ports::{SessionRepository, UserSession};
 use crate::types::UserId;
 use crate::user::ports::{OAuthProvider, UserRepository};
 
-const DEFAULT_MAX_NONCE_AGE_MS: u64 = 5 * 60 * 1000; // 5 minutes
+const MAX_NONCE_AGE_MS: u64 = 5 * 60 * 1000; // 5 minutes
 const EXPECTED_MESSAGE: &str = "Sign in to NEAR AI Private Chat";
+const EXPECTED_RECIPIENT: &str = "private.near.ai";
+const RPC_URL: &str = "https://free.rpc.fastnear.com";
 
 /// Signed message data received from the wallet (NEP-413 output)
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -39,7 +42,6 @@ pub struct NearAuthService {
     session_repository: Arc<dyn SessionRepository>,
     user_repository: Arc<dyn UserRepository>,
     nonce_repository: Arc<dyn NearNonceRepository>,
-    expected_recipient: String,
     network_config: NetworkConfig,
 }
 
@@ -48,14 +50,12 @@ impl NearAuthService {
         session_repository: Arc<dyn SessionRepository>,
         user_repository: Arc<dyn UserRepository>,
         nonce_repository: Arc<dyn NearNonceRepository>,
-        expected_recipient: String,
-        network_config: NetworkConfig,
     ) -> Self {
+        let network_config = NetworkConfig::from_rpc_url("near", Url::parse(RPC_URL).unwrap());
         Self {
             session_repository,
             user_repository,
             nonce_repository,
-            expected_recipient,
             network_config,
         }
     }
@@ -66,13 +66,13 @@ impl NearAuthService {
         }
     }
 
-    fn validate_recipient(&self, recipient: &str) -> anyhow::Result<()> {
-        if recipient == self.expected_recipient {
+    fn validate_recipient(recipient: &str) -> anyhow::Result<()> {
+        if recipient == EXPECTED_RECIPIENT {
             Ok(())
         } else {
             Err(anyhow::anyhow!(
                 "Invalid recipient: expected {}, got {}",
-                self.expected_recipient,
+                EXPECTED_RECIPIENT,
                 recipient
             ))
         }
@@ -143,13 +143,12 @@ impl NearAuthService {
         signed_message: SignedMessage,
         payload: NEP413Payload,
     ) -> anyhow::Result<(UserSession, bool)> {
-        let max_age = DEFAULT_MAX_NONCE_AGE_MS;
         let account_id = signed_message.account_id.to_string();
 
         tracing::info!("NEAR authentication attempt for account: {}", account_id);
 
         // 1. Validate recipient
-        self.validate_recipient(&payload.recipient)?;
+        Self::validate_recipient(&payload.recipient)?;
 
         // 2. Validate message
         Self::validate_message(&payload.message)?;
@@ -163,12 +162,12 @@ impl NearAuthService {
             let nonce_time = DateTime::from_timestamp_millis(nonce_timestamp_ms as i64);
             if let Some(nonce_time) = nonce_time {
                 let age = Utc::now().signed_duration_since(nonce_time);
-                if age > Duration::milliseconds(max_age as i64) {
+                if age > Duration::milliseconds(MAX_NONCE_AGE_MS as i64) {
                     tracing::warn!(
                         "NEAR signature expired for account {}: age={:?}ms, max_age={}ms",
                         account_id,
                         age.num_milliseconds(),
-                        max_age
+                        MAX_NONCE_AGE_MS
                     );
                     return Err(anyhow::anyhow!("Signature expired"));
                 }
@@ -199,8 +198,8 @@ impl NearAuthService {
 
         // 6. Consume nonce AFTER signature verification (replay protection)
         // This prevents attackers from burning legitimate nonces with invalid signatures
-        let nonce_hash = hex::encode(Sha256::digest(payload.nonce));
-        let nonce_consumed = self.nonce_repository.consume_nonce(&nonce_hash).await?;
+        let nonce_hex = hex::encode(&payload.nonce);
+        let nonce_consumed = self.nonce_repository.consume_nonce(&nonce_hex).await?;
         if !nonce_consumed {
             tracing::warn!(
                 "NEAR signature replay detected for account {}",

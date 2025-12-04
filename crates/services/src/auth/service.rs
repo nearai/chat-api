@@ -1,12 +1,11 @@
 use async_trait::async_trait;
 use chrono::Utc;
-use near_api::{signer::NEP413Payload, NetworkConfig};
+use near_api::signer::NEP413Payload;
 use oauth2::{
     basic::BasicClient, AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, RedirectUrl,
     RefreshToken, Scope, TokenResponse, TokenUrl,
 };
 use std::sync::Arc;
-use url::Url;
 
 use super::ports::{
     OAuthRepository, OAuthService, OAuthState, OAuthTokens, OAuthUserInfo,
@@ -67,7 +66,6 @@ pub struct OAuthServiceImpl {
 }
 
 impl OAuthServiceImpl {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         oauth_repository: Arc<dyn OAuthRepository>,
         session_repository: Arc<dyn SessionRepository>,
@@ -79,16 +77,10 @@ impl OAuthServiceImpl {
         github_client_secret: String,
         redirect_uri: String,
     ) -> Self {
-        let near_network_config = NetworkConfig::from_rpc_url(
-            "near",
-            Url::parse("https://free.rpc.fastnear.com").unwrap(),
-        );
         let near_auth = NearAuthService::new(
             session_repository.clone(),
             user_repository.clone(),
             near_nonce_repository,
-            "private.near.ai".to_string(),
-            near_network_config,
         );
 
         Self {
