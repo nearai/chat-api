@@ -95,15 +95,15 @@ impl Default for NearConfig {
             if is_dev {
                 "localhost:3000".to_string()
             } else {
-                "chat.near.ai".to_string()
+                "private.near.ai".to_string()
             }
         });
 
         let rpc_url = std::env::var("NEAR_RPC_URL").unwrap_or_else(|_| {
             if is_dev {
-                "https://rpc.testnet.near.org".to_string()
+                "https://test.rpc.fastnear.com".to_string()
             } else {
-                "https://rpc.mainnet.near.org".to_string()
+                "https://free.rpc.fastnear.com".to_string()
             }
         });
 
