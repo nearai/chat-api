@@ -21,7 +21,7 @@ pub trait NearNonceRepository: Send + Sync {
 }
 
 /// Helper to verify NEP-413 signed messages and create sessions
-pub struct NearAuthServiceImpl {
+pub struct NearAuthService {
     session_repository: Arc<dyn SessionRepository>,
     user_repository: Arc<dyn UserRepository>,
     nonce_repository: Arc<dyn NearNonceRepository>,
@@ -36,7 +36,7 @@ struct Nep413Payload {
     callback_url: Option<String>,
 }
 
-impl NearAuthServiceImpl {
+impl NearAuthService {
     pub fn new(
         session_repository: Arc<dyn SessionRepository>,
         user_repository: Arc<dyn UserRepository>,

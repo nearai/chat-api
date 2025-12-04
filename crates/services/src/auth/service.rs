@@ -10,7 +10,7 @@ use super::ports::{
     NearSignedMessage, OAuthRepository, OAuthService, OAuthState, OAuthTokens, OAuthUserInfo,
     SessionRepository, UserSession,
 };
-use super::{NearAuthServiceImpl, NearNonceRepository};
+use super::{NearAuthService, NearNonceRepository};
 use crate::types::{SessionId, UserId};
 use crate::user::ports::{OAuthProvider, UserRepository};
 
@@ -56,7 +56,7 @@ pub struct OAuthServiceImpl {
     oauth_repository: Arc<dyn OAuthRepository>,
     session_repository: Arc<dyn SessionRepository>,
     user_repository: Arc<dyn UserRepository>,
-    near_auth: NearAuthServiceImpl,
+    near_auth: NearAuthService,
     google_client_id: String,
     google_client_secret: String,
     github_client_id: String,
@@ -77,7 +77,7 @@ impl OAuthServiceImpl {
         github_client_secret: String,
         redirect_uri: String,
     ) -> Self {
-        let near_auth = NearAuthServiceImpl::new(
+        let near_auth = NearAuthService::new(
             session_repository.clone(),
             user_repository.clone(),
             near_nonce_repository,
