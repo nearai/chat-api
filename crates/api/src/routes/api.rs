@@ -1,4 +1,4 @@
-use crate::consts::{ALLOWED_PROXY_PATHS, LIST_FILES_LIMIT_MAX};
+use crate::consts::LIST_FILES_LIMIT_MAX;
 use crate::middleware::auth::AuthenticatedUser;
 use axum::{
     body::Body,
@@ -19,9 +19,9 @@ use services::UserId;
 use std::io::Read;
 
 /// Create the OpenAI API proxy router
-pub fn create_api_router() -> Router<crate::state::AppState> {
-    // IMPORTANT: Specific routes MUST be in the same Router and registered BEFORE catch-all routes
-    // Axum matches routes in order within a router
+pub fn create_api_router(
+    rate_limit_state: crate::middleware::RateLimitState,
+) -> Router<crate::state::AppState> {
     let conversations_router = Router::new()
         .route("/v1/conversations", post(create_conversation))
         .route("/v1/conversations", get(list_conversations))
@@ -70,15 +70,22 @@ pub fn create_api_router() -> Router<crate::state::AppState> {
         .route("/v1/files/{file_id}", delete(delete_file))
         .route("/v1/files/{file_id}/content", get(get_file_content));
 
-    let catch_all_router = Router::new()
-        .route("/v1/{*path}", post(proxy_handler))
-        .route("/v1/{*path}", get(proxy_handler))
-        .route("/v1/{*path}", delete(proxy_handler));
+    let responses_router = Router::new()
+        .route("/v1/responses", post(proxy_responses))
+        .layer(axum::middleware::from_fn_with_state(
+            rate_limit_state,
+            crate::middleware::rate_limit_middleware,
+        ));
+
+    let proxy_router = Router::new()
+        .route("/v1/model/list", get(proxy_model_list))
+        .route("/v1/signature/{chat_id}", get(proxy_signature));
 
     Router::new()
         .merge(conversations_router)
         .merge(files_router)
-        .merge(catch_all_router)
+        .merge(responses_router)
+        .merge(proxy_router)
 }
 
 /// Type of resource to track in the response
@@ -1025,53 +1032,24 @@ async fn get_file_content(
     .await
 }
 
-/// Generic proxy handler that forwards all requests to OpenAI
-async fn proxy_handler(
+async fn proxy_responses(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    method: Method,
-    Path(path): Path<String>,
     headers: HeaderMap,
     request: Request,
 ) -> Result<Response, Response> {
     tracing::info!(
-        "proxy_handler: {} /v1/{} for user_id={}, session_id={}",
-        method,
-        path,
+        "proxy_responses: POST /v1/responses for user_id={}, session_id={}",
         user.user_id,
         user.session_id
     );
-
-    // Validate path against allowed list
-    let is_path_allowed = ALLOWED_PROXY_PATHS.iter().any(|allowed| {
-        // Check if the path starts with an allowed path
-        // This allows both exact matches and sub-paths (e.g., "responses" matches "responses" and "responses/123")
-        path == *allowed || path.starts_with(&format!("{}/", allowed))
-    });
-
-    if !is_path_allowed {
-        tracing::warn!(
-            "Proxy path '{}' is not in allowed list for user_id={}",
-            path,
-            user.user_id
-        );
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse {
-                error: format!("Path '{}' is not allowed for proxy forwarding", path),
-            }),
-        )
-            .into_response());
-    }
 
     // Extract body bytes
     let body_bytes = extract_body_bytes(request).await?;
 
     tracing::debug!(
-        "Extracted request body: {} bytes for {} /v1/{}",
-        body_bytes.len(),
-        method,
-        path
+        "Extracted request body: {} bytes for POST /v1/responses",
+        body_bytes.len()
     );
 
     if !body_bytes.is_empty() {
@@ -1080,36 +1058,30 @@ async fn proxy_handler(
         }
     }
 
-    // Track conversation if this is a POST to /responses
-    if method == Method::POST && path == "responses" {
-        tracing::debug!("POST to /responses detected, attempting to track conversation");
-        if let Err(e) = track_conversation_from_request(&state, user.user_id, &body_bytes).await {
-            tracing::error!(
-                "Failed to track conversation for user {} from /responses: {}",
-                user.user_id,
-                e
-            );
-            // Don't fail the request if conversation tracking fails
-        }
+    // Track conversation from the request
+    tracing::debug!("POST to /responses detected, attempting to track conversation");
+    if let Err(e) = track_conversation_from_request(&state, user.user_id, &body_bytes).await {
+        tracing::error!(
+            "Failed to track conversation for user {} from /responses: {}",
+            user.user_id,
+            e
+        );
+        // Don't fail the request if conversation tracking fails
     }
 
     tracing::debug!(
-        "Forwarding {} /v1/{} to OpenAI for user_id={}",
-        method,
-        path,
+        "Forwarding POST /v1/responses to OpenAI for user_id={}",
         user.user_id
     );
 
     // Forward the request to OpenAI
     let proxy_response = state
         .proxy_service
-        .forward_request(method.clone(), &path, headers.clone(), Some(body_bytes))
+        .forward_request(Method::POST, "responses", headers.clone(), Some(body_bytes))
         .await
         .map_err(|e| {
             tracing::error!(
-                "OpenAI API error for {} /v1/{} (user_id={}): {}",
-                method,
-                path,
+                "OpenAI API error for POST /v1/responses (user_id={}): {}",
                 user.user_id,
                 e
             );
@@ -1123,10 +1095,104 @@ async fn proxy_handler(
         })?;
 
     tracing::info!(
-        "Received response from OpenAI: status={} for {} /v1/{} (user_id={})",
+        "Received response from OpenAI: status={} for POST /v1/responses (user_id={})",
         proxy_response.status,
-        method,
-        path,
+        user.user_id
+    );
+
+    build_response(
+        proxy_response.status,
+        proxy_response.headers,
+        Body::from_stream(proxy_response.body),
+    )
+    .await
+}
+
+async fn proxy_model_list(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+) -> Result<Response, Response> {
+    tracing::info!(
+        "proxy_model_list: GET /v1/model/list for user_id={}, session_id={}",
+        user.user_id,
+        user.session_id
+    );
+
+    // Forward the request to OpenAI
+    let proxy_response = state
+        .proxy_service
+        .forward_request(Method::GET, "model/list", headers.clone(), None)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "OpenAI API error for GET /v1/model/list (user_id={}): {}",
+                user.user_id,
+                e
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("OpenAI API error: {e}"),
+                }),
+            )
+                .into_response()
+        })?;
+
+    tracing::info!(
+        "Received response from OpenAI: status={} for GET /v1/model/list (user_id={})",
+        proxy_response.status,
+        user.user_id
+    );
+
+    build_response(
+        proxy_response.status,
+        proxy_response.headers,
+        Body::from_stream(proxy_response.body),
+    )
+    .await
+}
+
+async fn proxy_signature(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(chat_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, Response> {
+    tracing::info!(
+        "proxy_signature: GET /v1/signature/{} for user_id={}, session_id={}",
+        chat_id,
+        user.user_id,
+        user.session_id
+    );
+
+    let path = format!("signature/{}", chat_id);
+
+    // Forward the request to OpenAI
+    let proxy_response = state
+        .proxy_service
+        .forward_request(Method::GET, &path, headers.clone(), None)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "OpenAI API error for GET /v1/signature/{} (user_id={}): {}",
+                chat_id,
+                user.user_id,
+                e
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("OpenAI API error: {e}"),
+                }),
+            )
+                .into_response()
+        })?;
+
+    tracing::info!(
+        "Received response from OpenAI: status={} for GET /v1/signature/{} (user_id={})",
+        proxy_response.status,
+        chat_id,
         user.user_id
     );
 
