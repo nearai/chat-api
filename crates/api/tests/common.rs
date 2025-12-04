@@ -25,8 +25,8 @@ impl Default for TestServerConfig {
         Self {
             vpc_credentials: None,
             cloud_api_base_url: String::new(),
-            near_expected_recipient: Some("localhost".to_string()),
-            near_rpc_url: Some("https://rpc.testnet.near.org".to_string()),
+            near_expected_recipient: Some("localhost:3000".to_string()),
+            near_rpc_url: Some("https://test.rpc.fastnear.com".to_string()),
         }
     }
 }
