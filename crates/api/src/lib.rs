@@ -12,5 +12,5 @@ pub use error::{ApiError, ApiErrorResponse};
 pub use middleware::{auth_middleware, AuthState, AuthenticatedUser};
 pub use models::*;
 pub use openapi::ApiDoc;
-pub use routes::{create_router, create_router_with_cors};
+pub use routes::create_router_with_cors;
 pub use state::AppState;

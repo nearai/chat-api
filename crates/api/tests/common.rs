@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use api::{create_router, AppState};
+use api::{create_router_with_cors, AppState};
 use axum_test::TestServer;
 use serde_json::json;
 use services::file::service::FileServiceImpl;
@@ -121,7 +121,7 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
     };
 
     // Create router
-    let app = create_router(app_state);
+    let app = create_router_with_cors(app_state, vec![]);
 
     // Create test server
     TestServer::new(app).expect("Failed to create test server")

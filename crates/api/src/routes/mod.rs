@@ -9,7 +9,7 @@ use serde::Serialize;
 use tower_http::cors::{Any, CorsLayer};
 use utoipa::ToSchema;
 
-use crate::{middleware::AuthState, state::AppState, static_files};
+use crate::{middleware::AuthState, middleware::RateLimitState, state::AppState, static_files};
 
 #[derive(Serialize, ToSchema)]
 pub struct HealthResponse {
@@ -36,11 +36,6 @@ async fn health_check() -> Json<HealthResponse> {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
     })
-}
-
-/// Create the main API router with all routes
-pub fn create_router(app_state: AppState) -> Router {
-    create_router_with_cors(app_state, vec![])
 }
 
 /// Create the main API router with CORS configuration
@@ -78,8 +73,10 @@ pub fn create_router_with_cors(app_state: AppState, allowed_origins: Vec<String>
         crate::middleware::auth_middleware,
     ));
 
+    let rate_limit_state = RateLimitState::new();
+
     // API proxy routes (requires authentication)
-    let api_routes = api::create_api_router().layer(from_fn_with_state(
+    let api_routes = api::create_api_router(rate_limit_state).layer(from_fn_with_state(
         auth_state,
         crate::middleware::auth_middleware,
     ));
