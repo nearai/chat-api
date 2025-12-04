@@ -44,15 +44,6 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
     // Load configuration
     let mut config = config::Config::from_env();
 
-    config.near.expected_recipient = test_config
-        .near_expected_recipient
-        .clone()
-        .unwrap_or(config.near.expected_recipient);
-
-    if let Some(rpc_url) = test_config.near_rpc_url.clone() {
-        config.near.rpc_url = rpc_url;
-    }
-
     // Create database connection
     let db = database::Database::from_config(&config.database)
         .await
