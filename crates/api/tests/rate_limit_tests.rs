@@ -1,7 +1,9 @@
 mod common;
 
 use common::{create_test_server, mock_login};
+use futures::future::join_all;
 use serde_json::json;
+use std::sync::Arc;
 
 #[tokio::test]
 async fn test_rate_limit_first_request_succeeds() {
@@ -131,4 +133,51 @@ async fn test_non_rate_limited_endpoints_unaffected() {
             i + 1
         );
     }
+}
+
+#[tokio::test]
+async fn test_concurrent_requests_rate_limited() {
+    let server = Arc::new(create_test_server().await);
+    let token = Arc::new(mock_login(&server, "rate-limit-concurrent@example.com").await);
+
+    let request_body = json!({
+        "model": "test-model",
+        "input": "Hello"
+    });
+
+    // Spawn 3 concurrent requests
+    let futures: Vec<_> = (0..3)
+        .map(|_| {
+            let server = Arc::clone(&server);
+            let token = Arc::clone(&token);
+            let body = request_body.clone();
+            tokio::spawn(async move {
+                server
+                    .post("/v1/responses")
+                    .add_header(
+                        http::HeaderName::from_static("authorization"),
+                        http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
+                    )
+                    .json(&body)
+                    .await
+                    .status_code()
+            })
+        })
+        .collect();
+
+    let results: Vec<_> = join_all(futures)
+        .await
+        .into_iter()
+        .map(|r| r.unwrap())
+        .collect();
+
+    // At least one request should be rate limited (429)
+    // With config: max 1 req/sec, max 2 concurrent, at least 2 of 3 should be rejected
+    let rate_limited_count = results.iter().filter(|&&s| s == 429).count();
+    assert!(
+        rate_limited_count >= 2,
+        "Expected at least 2 rate-limited responses, got {} (results: {:?})",
+        rate_limited_count,
+        results
+    );
 }
