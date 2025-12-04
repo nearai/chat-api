@@ -9,6 +9,8 @@ use super::ports::{NearSignedMessage, SessionRepository, UserSession};
 use crate::types::UserId;
 use crate::user::ports::{OAuthProvider, UserRepository};
 
+const NEP413_TAG: u32 = 2_147_484_061; // 2^31 + 413 (NEP-413 specification)
+
 /// Repository trait for NEAR nonce management (replay protection)
 #[async_trait]
 pub trait NearNonceRepository: Send + Sync {
@@ -78,7 +80,7 @@ impl NearAuthService {
         callback_url: Option<&str>,
     ) -> anyhow::Result<Vec<u8>> {
         let payload = Nep413Payload {
-            tag: 2_147_484_061, // 2^31 + 413
+            tag: NEP413_TAG,
             message: message.to_string(),
             nonce: *nonce,
             recipient: recipient.to_string(),
