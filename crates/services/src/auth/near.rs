@@ -81,7 +81,11 @@ impl NearAuthService {
         if message == EXPECTED_MESSAGE {
             Ok(())
         } else {
-            Err(anyhow::anyhow!("Invalid message"))
+            Err(anyhow::anyhow!(
+                "Invalid message: expected '{}', got '{}'",
+                EXPECTED_MESSAGE,
+                message
+            ))
         }
     }
 

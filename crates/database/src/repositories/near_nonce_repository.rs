@@ -15,8 +15,8 @@ impl PostgresNearNonceRepository {
 
 #[async_trait]
 impl NearNonceRepository for PostgresNearNonceRepository {
-    async fn consume_nonce(&self, nonce_hash: &str) -> anyhow::Result<bool> {
-        tracing::debug!("Repository: Attempting to consume nonce: {}", nonce_hash);
+    async fn consume_nonce(&self, nonce_hex: &str) -> anyhow::Result<bool> {
+        tracing::debug!("Repository: Attempting to consume nonce: {}", nonce_hex);
 
         let client = self.pool.get().await?;
 
@@ -24,19 +24,19 @@ impl NearNonceRepository for PostgresNearNonceRepository {
         // due to the PRIMARY KEY constraint, and we return false.
         let result = client
             .execute(
-                "INSERT INTO near_used_nonces (nonce_hash) VALUES ($1) ON CONFLICT DO NOTHING",
-                &[&nonce_hash],
+                "INSERT INTO near_used_nonces (nonce_hex) VALUES ($1) ON CONFLICT DO NOTHING",
+                &[&nonce_hex],
             )
             .await?;
 
         let consumed = result > 0;
 
         if consumed {
-            tracing::debug!("Repository: Nonce consumed successfully: {}", nonce_hash);
+            tracing::debug!("Repository: Nonce consumed successfully: {}", nonce_hex);
         } else {
             tracing::warn!(
                 "Repository: Nonce already used (replay attempt): {}",
-                nonce_hash
+                nonce_hex
             );
         }
 

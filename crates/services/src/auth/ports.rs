@@ -34,8 +34,6 @@ pub struct OAuthUserInfo {
     pub avatar_url: Option<String>,
 }
 
-// NEP-413 types are now imported from near_api::types::nep413::{SignedMessage, Payload, PayloadJson}
-
 /// OAuth session created after successful authentication
 #[derive(Debug, Clone)]
 pub struct UserSession {
