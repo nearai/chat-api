@@ -10,6 +10,7 @@ use crate::types::UserId;
 use crate::user::ports::{OAuthProvider, UserRepository};
 
 const NEP413_TAG: u32 = 2_147_484_061; // 2^31 + 413 (NEP-413 specification)
+const DEFAULT_MAX_NONCE_AGE_MS: u64 = 5 * 60 * 1000; // 5 minutes
 
 /// Repository trait for NEAR nonce management (replay protection)
 #[async_trait]
@@ -186,7 +187,7 @@ impl NearAuthService {
         signed_message: NearSignedMessage,
         max_age_ms: Option<u64>,
     ) -> anyhow::Result<(UserSession, bool)> {
-        let max_age = max_age_ms.unwrap_or(5 * 60 * 1000); // Default 5 minutes
+        let max_age = max_age_ms.unwrap_or(DEFAULT_MAX_NONCE_AGE_MS);
 
         tracing::info!(
             "NEAR authentication attempt for account: {}",
