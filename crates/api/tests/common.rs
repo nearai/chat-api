@@ -13,18 +13,10 @@ use tokio::sync::OnceCell;
 static MIGRATIONS_INITIALIZED: OnceCell<()> = OnceCell::const_new();
 
 /// Configuration for test server with Cloud API mocking
+#[derive(Default)]
 pub struct TestServerConfig {
     pub vpc_credentials: Option<VpcCredentials>,
     pub cloud_api_base_url: String,
-}
-
-impl Default for TestServerConfig {
-    fn default() -> Self {
-        Self {
-            vpc_credentials: None,
-            cloud_api_base_url: String::new(),
-        }
-    }
 }
 
 /// Create a test server with all services initialized (VPC not configured)
@@ -38,7 +30,7 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
     dotenvy::dotenv().ok();
 
     // Load configuration
-    let mut config = config::Config::from_env();
+    let config = config::Config::from_env();
 
     // Create database connection
     let db = database::Database::from_config(&config.database)

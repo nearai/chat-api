@@ -58,10 +58,7 @@ impl NearNonceRepository for PostgresNearNonceRepository {
             )
             .await?;
 
-        tracing::info!(
-            "Repository: Cleaned up {} expired nonces",
-            deleted
-        );
+        tracing::info!("Repository: Cleaned up {} expired nonces", deleted);
 
         Ok(deleted)
     }

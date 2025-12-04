@@ -9,8 +9,8 @@ use axum::{
 };
 use near_api::signer::NEP413Payload;
 use serde::{Deserialize, Serialize};
-use services::SessionId;
 use services::auth::near::SignedMessage;
+use services::SessionId;
 use utoipa::ToSchema;
 
 /// Query parameters for OAuth callback

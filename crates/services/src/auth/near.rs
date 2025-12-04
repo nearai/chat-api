@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
-use near_api::{signer::NEP413Payload, AccountId, NetworkConfig, PublicKey, types::Signature};
+use near_api::{signer::NEP413Payload, types::Signature, AccountId, NetworkConfig, PublicKey};
 use std::sync::Arc;
 use url::Url;
 
@@ -200,10 +200,7 @@ impl NearAuthService {
         let nonce_hex = hex::encode(payload.nonce);
         let nonce_consumed = self.nonce_repository.consume_nonce(&nonce_hex).await?;
         if !nonce_consumed {
-            tracing::warn!(
-                "NEAR signature replay detected for account {}",
-                account_id
-            );
+            tracing::warn!("NEAR signature replay detected for account {}", account_id);
             return Err(anyhow::anyhow!(
                 "Nonce already used (replay attack detected)"
             ));

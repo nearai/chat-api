@@ -8,8 +8,8 @@ use oauth2::{
 use std::sync::Arc;
 
 use super::ports::{
-    OAuthRepository, OAuthService, OAuthState, OAuthTokens, OAuthUserInfo,
-    SessionRepository, UserSession,
+    OAuthRepository, OAuthService, OAuthState, OAuthTokens, OAuthUserInfo, SessionRepository,
+    UserSession,
 };
 use super::{NearAuthService, NearNonceRepository};
 use crate::types::{SessionId, UserId};
