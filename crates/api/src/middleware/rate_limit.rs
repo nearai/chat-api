@@ -86,7 +86,7 @@ impl RateLimitState {
         user_limits.retain(|_, state| !state.is_idle(Duration::from_secs(3600)));
 
         let user_state = user_limits
-            .entry(user_id.clone())
+            .entry(user_id)
             .or_insert_with(|| UserRateLimitState::new(self.config.max_concurrent));
 
         let now = Instant::now();
@@ -187,7 +187,7 @@ pub async fn rate_limit_middleware(
     request: axum::extract::Request,
     next: Next,
 ) -> Response {
-    let _guard = match state.try_acquire(user.user_id.clone()).await {
+    let _guard = match state.try_acquire(user.user_id).await {
         Ok(guard) => guard,
         Err(e) => return e.into_response(),
     };
@@ -217,7 +217,7 @@ mod tests {
         let user = test_user_id(1);
 
         // First request should succeed
-        let _guard1 = state.try_acquire(user.clone()).await.unwrap();
+        let _guard1 = state.try_acquire(user).await.unwrap();
 
         // Second request within the same second should fail (rate limit)
         let result = state.try_acquire(user).await;
@@ -238,8 +238,8 @@ mod tests {
         let user = test_user_id(1);
 
         // First two requests should succeed
-        let _guard1 = state.try_acquire(user.clone()).await.unwrap();
-        let _guard2 = state.try_acquire(user.clone()).await.unwrap();
+        let _guard1 = state.try_acquire(user).await.unwrap();
+        let _guard2 = state.try_acquire(user).await.unwrap();
 
         // Third request should fail (concurrency limit)
         let result = state.try_acquire(user).await;
@@ -258,10 +258,10 @@ mod tests {
         let user2 = test_user_id(2);
 
         // User 1's first request should succeed
-        let _guard1 = state.try_acquire(user1.clone()).await.unwrap();
+        let _guard1 = state.try_acquire(user1).await.unwrap();
 
         // User 2's first request should also succeed (separate limit)
-        let _guard2 = state.try_acquire(user2.clone()).await.unwrap();
+        let _guard2 = state.try_acquire(user2).await.unwrap();
 
         // User 1's second request should fail (concurrency limit reached)
         let result = state.try_acquire(user1).await;
@@ -283,10 +283,10 @@ mod tests {
         let user = test_user_id(1);
 
         // First request
-        let guard = state.try_acquire(user.clone()).await.unwrap();
+        let guard = state.try_acquire(user).await.unwrap();
 
         // Second request should fail
-        let result = state.try_acquire(user.clone()).await;
+        let result = state.try_acquire(user).await;
         assert!(matches!(result, Err(RateLimitError::TooManyConcurrent)));
 
         // Drop the guard
@@ -308,11 +308,11 @@ mod tests {
         let user = test_user_id(1);
 
         // First request succeeds and completes
-        let guard1 = state.try_acquire(user.clone()).await.unwrap();
+        let guard1 = state.try_acquire(user).await.unwrap();
         drop(guard1);
 
         // Second request should fail with RateLimitExceeded (not TooManyConcurrent)
-        let result = state.try_acquire(user.clone()).await;
+        let result = state.try_acquire(user).await;
         assert!(
             matches!(result, Err(RateLimitError::RateLimitExceeded { .. })),
             "Should be rate limited, not concurrency limited"
@@ -323,12 +323,12 @@ mod tests {
 
         // Now we should be able to make max_concurrent requests simultaneously
         // proving no permits were leaked when rate limit rejected the request
-        let guard_a = state.try_acquire(user.clone()).await.unwrap();
+        let guard_a = state.try_acquire(user).await.unwrap();
 
         // Wait for rate limit window again before second concurrent request
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        let guard_b = state.try_acquire(user.clone()).await.unwrap();
+        let guard_b = state.try_acquire(user).await.unwrap();
 
         // Both guards acquired successfully - no permit leak
         drop(guard_a);
@@ -347,8 +347,8 @@ mod tests {
         let user2 = test_user_id(2);
 
         // Make requests for both users
-        let _g1 = state.try_acquire(user1.clone()).await.unwrap();
-        let _g2 = state.try_acquire(user2.clone()).await.unwrap();
+        let _g1 = state.try_acquire(user1).await.unwrap();
+        let _g2 = state.try_acquire(user2).await.unwrap();
 
         // Check that both users are in the map
         {
