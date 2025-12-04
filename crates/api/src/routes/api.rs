@@ -1032,9 +1032,7 @@ async fn get_file_content(
     .await
 }
 
-/// Proxy handler for POST /v1/responses (rate limited)
-/// Forwards to OpenAI and tracks conversations
-pub async fn proxy_responses(
+async fn proxy_responses(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
@@ -1110,8 +1108,7 @@ pub async fn proxy_responses(
     .await
 }
 
-/// Proxy handler for GET /v1/model/list
-pub async fn proxy_model_list(
+async fn proxy_model_list(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
@@ -1156,8 +1153,7 @@ pub async fn proxy_model_list(
     .await
 }
 
-/// Proxy handler for GET /v1/signature/{chat_id}
-pub async fn proxy_signature(
+async fn proxy_signature(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path(chat_id): Path<String>,

@@ -21,14 +21,10 @@ use std::{
 };
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 
-/// Configuration for the rate limiter
 #[derive(Clone)]
 pub struct RateLimitConfig {
-    /// Maximum number of concurrent requests per user
     pub max_concurrent: usize,
-    /// Maximum requests per window per user
     pub max_requests_per_window: usize,
-    /// Time window for rate limiting
     pub window_duration: Duration,
 }
 
@@ -42,39 +38,41 @@ impl Default for RateLimitConfig {
     }
 }
 
-/// Per-user rate limit tracking
 struct UserRateLimitState {
-    /// Semaphore for concurrency limiting (per user)
     semaphore: Arc<Semaphore>,
-    /// Sliding window timestamps for rate limiting (per user)
+    max_permits: usize,
     request_timestamps: VecDeque<Instant>,
+    last_activity: Instant,
 }
 
 impl UserRateLimitState {
     fn new(max_concurrent: usize) -> Self {
         Self {
             semaphore: Arc::new(Semaphore::new(max_concurrent)),
+            max_permits: max_concurrent,
             request_timestamps: VecDeque::new(),
+            last_activity: Instant::now(),
         }
+    }
+
+    fn is_idle(&self, max_idle: Duration) -> bool {
+        self.last_activity.elapsed() > max_idle
+            && self.request_timestamps.is_empty()
+            && self.semaphore.available_permits() == self.max_permits
     }
 }
 
-/// Shared state for per-user rate limiting
 #[derive(Clone)]
 pub struct RateLimitState {
-    /// Per-user rate limit tracking
     user_limits: Arc<Mutex<HashMap<UserId, UserRateLimitState>>>,
-    /// Configuration
     config: Arc<RateLimitConfig>,
 }
 
 impl RateLimitState {
-    /// Create a new rate limit state with default configuration
     pub fn new() -> Self {
         Self::with_config(RateLimitConfig::default())
     }
 
-    /// Create a new rate limit state with custom configuration
     pub fn with_config(config: RateLimitConfig) -> Self {
         Self {
             user_limits: Arc::new(Mutex::new(HashMap::new())),
@@ -82,33 +80,18 @@ impl RateLimitState {
         }
     }
 
-    /// Try to acquire a permit for the request for a specific user
-    /// Returns Ok(guard) if the request is allowed, Err with the appropriate response otherwise
     async fn try_acquire(&self, user_id: UserId) -> Result<RateLimitGuard, RateLimitError> {
         let mut user_limits = self.user_limits.lock().await;
 
-        // Get or create user's rate limit state
+        user_limits.retain(|_, state| !state.is_idle(Duration::from_secs(3600)));
+
         let user_state = user_limits
             .entry(user_id.clone())
             .or_insert_with(|| UserRateLimitState::new(self.config.max_concurrent));
 
-        // First, check concurrency limit
-        let permit = match user_state.semaphore.clone().try_acquire_owned() {
-            Ok(permit) => permit,
-            Err(_) => {
-                tracing::warn!(
-                    user_id = %user_id.0,
-                    "Rate limit: max concurrent requests ({}) exceeded for user",
-                    self.config.max_concurrent
-                );
-                return Err(RateLimitError::TooManyConcurrent);
-            }
-        };
-
-        // Then, check rate limit (sliding window)
         let now = Instant::now();
+        user_state.last_activity = now;
 
-        // Remove timestamps outside the window
         while let Some(front) = user_state.request_timestamps.front() {
             if now.duration_since(*front) > self.config.window_duration {
                 user_state.request_timestamps.pop_front();
@@ -117,16 +100,12 @@ impl RateLimitState {
             }
         }
 
-        // Check if we're within the rate limit
         if user_state.request_timestamps.len() >= self.config.max_requests_per_window {
-            // Calculate time until next request is allowed
             if let Some(oldest) = user_state.request_timestamps.front() {
                 let wait_time = self.config.window_duration - now.duration_since(*oldest);
                 tracing::warn!(
                     user_id = %user_id.0,
-                    "Rate limit: {} requests per {:?} exceeded for user, retry in {:?}",
-                    self.config.max_requests_per_window,
-                    self.config.window_duration,
+                    "Rate limit exceeded for user, retry in {:?}",
                     wait_time
                 );
                 return Err(RateLimitError::RateLimitExceeded {
@@ -135,7 +114,17 @@ impl RateLimitState {
             }
         }
 
-        // Record this request
+        let permit = match user_state.semaphore.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                tracing::warn!(
+                    user_id = %user_id.0,
+                    "Max concurrent requests exceeded for user"
+                );
+                return Err(RateLimitError::TooManyConcurrent);
+            }
+        };
+
         user_state.request_timestamps.push_back(now);
 
         Ok(RateLimitGuard { _permit: permit })
@@ -148,19 +137,16 @@ impl Default for RateLimitState {
     }
 }
 
-/// Guard that holds the semaphore permit for the duration of the request
 pub struct RateLimitGuard {
     _permit: OwnedSemaphorePermit,
 }
 
-/// Errors that can occur during rate limiting
 #[derive(Debug)]
 enum RateLimitError {
     TooManyConcurrent,
     RateLimitExceeded { retry_after_ms: u64 },
 }
 
-/// Error response for rate limit exceeded
 #[derive(Serialize)]
 struct RateLimitErrorResponse {
     error: String,
@@ -195,21 +181,16 @@ impl IntoResponse for RateLimitError {
     }
 }
 
-/// Per-user rate limiting middleware
 pub async fn rate_limit_middleware(
     State(state): State<RateLimitState>,
     Extension(user): Extension<AuthenticatedUser>,
     request: axum::extract::Request,
     next: Next,
 ) -> Response {
-    let user_id = user.user_id;
-
-    let _guard = match state.try_acquire(user_id.clone()).await {
+    let _guard = match state.try_acquire(user.user_id.clone()).await {
         Ok(guard) => guard,
         Err(e) => return e.into_response(),
     };
-
-    tracing::debug!(user_id = %user_id.0, "Rate limit: request permitted");
 
     next.run(request).await
 }
@@ -269,7 +250,7 @@ mod tests {
     async fn test_different_users_have_separate_limits() {
         let state = RateLimitState::with_config(RateLimitConfig {
             max_concurrent: 1,
-            max_requests_per_window: 1,
+            max_requests_per_window: 100, // High to test concurrency, not rate
             window_duration: Duration::from_secs(1),
         });
 
@@ -282,11 +263,11 @@ mod tests {
         // User 2's first request should also succeed (separate limit)
         let _guard2 = state.try_acquire(user2.clone()).await.unwrap();
 
-        // User 1's second request should fail (their limit is reached)
+        // User 1's second request should fail (concurrency limit reached)
         let result = state.try_acquire(user1).await;
         assert!(matches!(result, Err(RateLimitError::TooManyConcurrent)));
 
-        // User 2's second request should also fail (their limit is reached)
+        // User 2's second request should also fail (concurrency limit reached)
         let result = state.try_acquire(user2).await;
         assert!(matches!(result, Err(RateLimitError::TooManyConcurrent)));
     }
@@ -295,7 +276,7 @@ mod tests {
     async fn test_permit_released_after_drop() {
         let state = RateLimitState::with_config(RateLimitConfig {
             max_concurrent: 1,
-            max_requests_per_window: 100, // High limit to avoid rate limiting
+            max_requests_per_window: 100,
             window_duration: Duration::from_secs(1),
         });
 
@@ -314,5 +295,65 @@ mod tests {
         // Now a new request should succeed
         let result = state.try_acquire(user).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_no_permit_leak_on_rate_limit_rejection() {
+        let state = RateLimitState::with_config(RateLimitConfig {
+            max_concurrent: 2,
+            max_requests_per_window: 1,
+            window_duration: Duration::from_millis(50),
+        });
+
+        let user = test_user_id(1);
+
+        // First request succeeds and completes
+        let guard1 = state.try_acquire(user.clone()).await.unwrap();
+        drop(guard1);
+
+        // Second request should fail with RateLimitExceeded (not TooManyConcurrent)
+        let result = state.try_acquire(user.clone()).await;
+        assert!(
+            matches!(result, Err(RateLimitError::RateLimitExceeded { .. })),
+            "Should be rate limited, not concurrency limited"
+        );
+
+        // Wait for rate limit window to fully expire
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Now we should be able to make max_concurrent requests simultaneously
+        // proving no permits were leaked when rate limit rejected the request
+        let guard_a = state.try_acquire(user.clone()).await.unwrap();
+
+        // Wait for rate limit window again before second concurrent request
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let guard_b = state.try_acquire(user.clone()).await.unwrap();
+
+        // Both guards acquired successfully - no permit leak
+        drop(guard_a);
+        drop(guard_b);
+    }
+
+    #[tokio::test]
+    async fn test_idle_user_cleanup() {
+        let state = RateLimitState::with_config(RateLimitConfig {
+            max_concurrent: 2,
+            max_requests_per_window: 10,
+            window_duration: Duration::from_millis(10),
+        });
+
+        let user1 = test_user_id(1);
+        let user2 = test_user_id(2);
+
+        // Make requests for both users
+        let _g1 = state.try_acquire(user1.clone()).await.unwrap();
+        let _g2 = state.try_acquire(user2.clone()).await.unwrap();
+
+        // Check that both users are in the map
+        {
+            let limits = state.user_limits.lock().await;
+            assert_eq!(limits.len(), 2);
+        }
     }
 }

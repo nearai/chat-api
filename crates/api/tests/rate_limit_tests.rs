@@ -3,7 +3,6 @@ mod common;
 use common::{create_test_server, mock_login};
 use serde_json::json;
 
-/// Test that the first request to a rate-limited endpoint succeeds
 #[tokio::test]
 async fn test_rate_limit_first_request_succeeds() {
     let server = create_test_server().await;
@@ -29,7 +28,6 @@ async fn test_rate_limit_first_request_succeeds() {
     );
 }
 
-/// Test that rapid sequential requests get rate limited
 #[tokio::test]
 async fn test_rate_limit_blocks_rapid_requests() {
     let server = create_test_server().await;
@@ -73,7 +71,6 @@ async fn test_rate_limit_blocks_rapid_requests() {
     );
 }
 
-/// Test that different users have separate rate limits
 #[tokio::test]
 async fn test_rate_limit_per_user_isolation() {
     let server = create_test_server().await;
@@ -112,7 +109,6 @@ async fn test_rate_limit_per_user_isolation() {
     );
 }
 
-/// Test that non-rate-limited endpoints are not affected
 #[tokio::test]
 async fn test_non_rate_limited_endpoints_unaffected() {
     let server = create_test_server().await;
@@ -136,4 +132,3 @@ async fn test_non_rate_limited_endpoints_unaffected() {
         );
     }
 }
-
