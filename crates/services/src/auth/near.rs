@@ -184,7 +184,7 @@ impl NearAuthService {
         let is_valid = payload
             .verify(
                 &signed_message.account_id,
-                signed_message.public_key.clone(),
+                signed_message.public_key,
                 &signed_message.signature,
                 &self.network_config,
             )
@@ -197,7 +197,7 @@ impl NearAuthService {
 
         // 6. Consume nonce AFTER signature verification (replay protection)
         // This prevents attackers from burning legitimate nonces with invalid signatures
-        let nonce_hex = hex::encode(&payload.nonce);
+        let nonce_hex = hex::encode(payload.nonce);
         let nonce_consumed = self.nonce_repository.consume_nonce(&nonce_hex).await?;
         if !nonce_consumed {
             tracing::warn!(

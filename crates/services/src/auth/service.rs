@@ -66,6 +66,7 @@ pub struct OAuthServiceImpl {
 }
 
 impl OAuthServiceImpl {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         oauth_repository: Arc<dyn OAuthRepository>,
         session_repository: Arc<dyn SessionRepository>,
