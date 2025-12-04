@@ -73,8 +73,6 @@ impl OAuthServiceImpl {
         session_repository: Arc<dyn SessionRepository>,
         user_repository: Arc<dyn UserRepository>,
         near_nonce_repository: Arc<dyn NearNonceRepository>,
-        near_expected_recipient: String,
-        near_rpc_url: String,
         google_client_id: String,
         google_client_secret: String,
         github_client_id: String,
@@ -83,13 +81,13 @@ impl OAuthServiceImpl {
     ) -> Self {
         let near_network_config = NetworkConfig::from_rpc_url(
             "near",
-            Url::parse(&near_rpc_url).expect("Invalid NEAR RPC URL"),
+            Url::parse("https://free.rpc.fastnear.com").unwrap(),
         );
         let near_auth = NearAuthService::new(
             session_repository.clone(),
             user_repository.clone(),
             near_nonce_repository,
-            near_expected_recipient,
+            "private.near.ai".to_string(),
             near_network_config,
         );
 

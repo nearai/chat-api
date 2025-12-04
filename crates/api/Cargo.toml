@@ -44,7 +44,7 @@ services = { path = "../services", features = ["utoipa"] }
 database = { path = "../database" }
 config = { path = "../config" }
 hex = "0.4.3"
-near-api = { git = "https://github.com/near/near-api-rs", branch = "copilot/add-verify-nep-413-message-method" }
+near-api = { git = "https://github.com/near/near-api-rs", branch = "main" }
 
 # VPC authentication
 reqwest = { version = "0.12", features = ["json"] }

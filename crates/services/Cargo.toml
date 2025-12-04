@@ -39,7 +39,7 @@ hmac = "0.12"
 sha2 = "0.10"
 dstack-sdk = "0.1"
 utoipa = { version = "5", optional = true }
-near-api = { git = "https://github.com/near/near-api-rs", branch = "copilot/add-verify-nep-413-message-method" }
+near-api = { git = "https://github.com/near/near-api-rs", branch = "main" }
 
 [features]
 utoipa = ["dep:utoipa"]

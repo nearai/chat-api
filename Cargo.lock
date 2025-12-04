@@ -3036,7 +3036,7 @@ dependencies = [
 [[package]]
 name = "near-api"
 version = "0.7.8"
-source = "git+https://github.com/near/near-api-rs?branch=copilot%2Fadd-verify-nep-413-message-method#8be083f3dae1d265c062b5480417bb00aa1df3e0"
+source = "git+https://github.com/near/near-api-rs?branch=main#f07473256aa7a70e094432618bac174e60d533df"
 dependencies = [
  "async-trait",
  "base64",
@@ -3061,7 +3061,7 @@ dependencies = [
 [[package]]
 name = "near-api-types"
 version = "0.7.8"
-source = "git+https://github.com/near/near-api-rs?branch=copilot%2Fadd-verify-nep-413-message-method#8be083f3dae1d265c062b5480417bb00aa1df3e0"
+source = "git+https://github.com/near/near-api-rs?branch=main#f07473256aa7a70e094432618bac174e60d533df"
 dependencies = [
  "base64",
  "borsh",

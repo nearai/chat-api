@@ -9,6 +9,7 @@ use crate::types::UserId;
 use crate::user::ports::{OAuthProvider, UserRepository};
 
 const DEFAULT_MAX_NONCE_AGE_MS: u64 = 5 * 60 * 1000; // 5 minutes
+const EXPECTED_MESSAGE: &str = "Sign in to NEAR AI Private Chat";
 
 /// Signed message data received from the wallet (NEP-413 output)
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -77,6 +78,14 @@ impl NearAuthService {
         }
     }
 
+    fn validate_message(message: &str) -> anyhow::Result<()> {
+        if message == EXPECTED_MESSAGE {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Invalid message"))
+        }
+    }
+
     /// Find or create user from NEAR account
     async fn find_or_create_user(&self, account_id: &str) -> anyhow::Result<(UserId, bool)> {
         tracing::info!("Finding or creating user for NEAR account: {}", account_id);
@@ -142,10 +151,13 @@ impl NearAuthService {
         // 1. Validate recipient
         self.validate_recipient(&payload.recipient)?;
 
-        // 2. Cleanup expired nonces
+        // 2. Validate message
+        Self::validate_message(&payload.message)?;
+
+        // 3. Cleanup expired nonces
         self.cleanup_nonces().await;
 
-        // 3. Check nonce timestamp (replay protection)
+        // 4. Check nonce timestamp (replay protection)
         let nonce_timestamp_ms = payload.extract_timestamp_from_nonce();
         if nonce_timestamp_ms > 0 {
             let nonce_time = DateTime::from_timestamp_millis(nonce_timestamp_ms as i64);
@@ -170,11 +182,11 @@ impl NearAuthService {
             }
         }
 
-        // 4. Verify signature AND public key ownership via near-api
+        // 5. Verify signature AND public key ownership via near-api
         let is_valid = payload
             .verify(
                 &signed_message.account_id,
-                &signed_message.public_key,
+                signed_message.public_key.clone(),
                 &signed_message.signature,
                 &self.network_config,
             )
@@ -185,7 +197,7 @@ impl NearAuthService {
             return Err(anyhow::anyhow!("Invalid signature"));
         }
 
-        // 5. Consume nonce AFTER signature verification (replay protection)
+        // 6. Consume nonce AFTER signature verification (replay protection)
         // This prevents attackers from burning legitimate nonces with invalid signatures
         let nonce_hash = hex::encode(Sha256::digest(payload.nonce));
         let nonce_consumed = self.nonce_repository.consume_nonce(&nonce_hash).await?;
@@ -199,10 +211,10 @@ impl NearAuthService {
             ));
         }
 
-        // 6. Find or create user
+        // 7. Find or create user
         let (user_id, is_new_user) = self.find_or_create_user(&account_id).await?;
 
-        // 7. Create session
+        // 8. Create session
         let session = self.session_repository.create_session(user_id).await?;
 
         tracing::info!(

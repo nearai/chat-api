@@ -16,8 +16,6 @@ static MIGRATIONS_INITIALIZED: OnceCell<()> = OnceCell::const_new();
 pub struct TestServerConfig {
     pub vpc_credentials: Option<VpcCredentials>,
     pub cloud_api_base_url: String,
-    pub near_expected_recipient: Option<String>,
-    pub near_rpc_url: Option<String>,
 }
 
 impl Default for TestServerConfig {
@@ -25,8 +23,6 @@ impl Default for TestServerConfig {
         Self {
             vpc_credentials: None,
             cloud_api_base_url: String::new(),
-            near_expected_recipient: Some("localhost:3000".to_string()),
-            near_rpc_url: Some("https://test.rpc.fastnear.com".to_string()),
         }
     }
 }
@@ -73,8 +69,6 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
         session_repo.clone(),
         user_repo.clone(),
         near_nonce_repo,
-        config.near.expected_recipient.clone(),
-        config.near.rpc_url.clone(),
         config.oauth.google_client_id.clone(),
         config.oauth.google_client_secret.clone(),
         config.oauth.github_client_id.clone(),
