@@ -10,8 +10,11 @@ use crate::user::ports::{OAuthProvider, UserRepository};
 
 const MAX_NONCE_AGE_MS: u64 = 5 * 60 * 1000; // 5 minutes
 const EXPECTED_MESSAGE: &str = "Sign in to NEAR AI Private Chat";
-const EXPECTED_RECIPIENT: &str = "private.near.ai";
 const RPC_URL: &str = "https://free.rpc.fastnear.com";
+
+fn expected_recipient() -> String {
+    std::env::var("NEAR_EXPECTED_RECIPIENT").unwrap_or_else(|_| "private.near.ai".to_string())
+}
 
 /// Signed message data received from the wallet (NEP-413 output)
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -66,12 +69,13 @@ impl NearAuthService {
     }
 
     fn validate_recipient(recipient: &str) -> anyhow::Result<()> {
-        if recipient == EXPECTED_RECIPIENT {
+        let expected = expected_recipient();
+        if recipient == expected {
             Ok(())
         } else {
             Err(anyhow::anyhow!(
                 "Invalid recipient: expected {}, got {}",
-                EXPECTED_RECIPIENT,
+                expected,
                 recipient
             ))
         }
