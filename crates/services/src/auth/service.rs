@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use chrono::Utc;
+use near_api::signer::NEP413Payload;
 use oauth2::{
     basic::BasicClient, AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, RedirectUrl,
     RefreshToken, Scope, TokenResponse, TokenUrl,
@@ -10,6 +11,7 @@ use super::ports::{
     OAuthRepository, OAuthService, OAuthState, OAuthTokens, OAuthUserInfo, SessionRepository,
     UserSession,
 };
+use super::{NearAuthService, NearNonceRepository};
 use crate::types::{SessionId, UserId};
 use crate::user::ports::{OAuthProvider, UserRepository};
 
@@ -55,6 +57,7 @@ pub struct OAuthServiceImpl {
     oauth_repository: Arc<dyn OAuthRepository>,
     session_repository: Arc<dyn SessionRepository>,
     user_repository: Arc<dyn UserRepository>,
+    near_auth: NearAuthService,
     google_client_id: String,
     google_client_secret: String,
     github_client_id: String,
@@ -68,16 +71,24 @@ impl OAuthServiceImpl {
         oauth_repository: Arc<dyn OAuthRepository>,
         session_repository: Arc<dyn SessionRepository>,
         user_repository: Arc<dyn UserRepository>,
+        near_nonce_repository: Arc<dyn NearNonceRepository>,
         google_client_id: String,
         google_client_secret: String,
         github_client_id: String,
         github_client_secret: String,
         redirect_uri: String,
     ) -> Self {
+        let near_auth = NearAuthService::new(
+            session_repository.clone(),
+            user_repository.clone(),
+            near_nonce_repository,
+        );
+
         Self {
             oauth_repository,
             session_repository,
             user_repository,
+            near_auth,
             google_client_id,
             google_client_secret,
             github_client_id,
@@ -344,6 +355,11 @@ impl OAuthServiceImpl {
                 "https://github.com/login/oauth/authorize",
                 "https://github.com/login/oauth/access_token",
             ),
+            OAuthProvider::Near => {
+                return Err(anyhow::anyhow!(
+                    "NEAR authentication does not use OAuth2 flow"
+                ));
+            }
         };
 
         tracing::debug!(
@@ -385,6 +401,11 @@ impl OAuthServiceImpl {
         let user_info = match provider {
             OAuthProvider::Google => self.fetch_google_user_info(access_token).await?,
             OAuthProvider::Github => self.fetch_github_user_info(access_token).await?,
+            OAuthProvider::Near => {
+                return Err(anyhow::anyhow!(
+                    "NEAR authentication does not use OAuth2 flow"
+                ));
+            }
         };
 
         // Find or create user
@@ -456,6 +477,11 @@ impl OAuthService for OAuthServiceImpl {
                 "https://github.com/login/oauth/access_token",
                 vec!["user:email", "read:user"],
             ),
+            OAuthProvider::Near => {
+                return Err(anyhow::anyhow!(
+                    "NEAR authentication does not use OAuth2 flow"
+                ));
+            }
         };
 
         tracing::debug!("OAuth scopes for {:?}: {:?}", provider, scopes);
@@ -529,6 +555,11 @@ impl OAuthService for OAuthServiceImpl {
                 "https://github.com/login/oauth/authorize",
                 "https://github.com/login/oauth/access_token",
             ),
+            OAuthProvider::Near => {
+                return Err(anyhow::anyhow!(
+                    "NEAR authentication does not use OAuth2 token refresh"
+                ));
+            }
         };
 
         let client = BasicClient::new(ClientId::new(client_id.clone()))
@@ -598,5 +629,15 @@ impl OAuthService for OAuthServiceImpl {
 
         tracing::info!("Session revoked successfully: session_id={}", session_id);
         Ok(())
+    }
+
+    async fn authenticate_near(
+        &self,
+        signed_message: super::near::SignedMessage,
+        payload: NEP413Payload,
+    ) -> anyhow::Result<(UserSession, bool)> {
+        self.near_auth
+            .verify_and_authenticate(signed_message, payload)
+            .await
     }
 }

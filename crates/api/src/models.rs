@@ -55,6 +55,7 @@ impl From<services::user::ports::LinkedOAuthAccount> for LinkedAccountResponse {
         let provider = match account.provider {
             services::user::ports::OAuthProvider::Google => "google",
             services::user::ports::OAuthProvider::Github => "github",
+            services::user::ports::OAuthProvider::Near => "near",
         };
         Self {
             provider: provider.to_string(),

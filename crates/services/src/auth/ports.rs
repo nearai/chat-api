@@ -118,4 +118,12 @@ pub trait OAuthService: Send + Sync {
 
     /// Revoke access (logout)
     async fn revoke_session(&self, session_id: SessionId) -> anyhow::Result<()>;
+
+    /// Authenticate with NEAR signed message (NEP-413)
+    /// Returns (UserSession, is_new_user)
+    async fn authenticate_near(
+        &self,
+        signed_message: super::near::SignedMessage,
+        payload: near_api::signer::NEP413Payload,
+    ) -> anyhow::Result<(UserSession, bool)>;
 }

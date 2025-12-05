@@ -18,6 +18,7 @@ use utoipa::OpenApi;
         crate::routes::oauth::google_login,
         crate::routes::oauth::github_login,
         crate::routes::oauth::oauth_callback,
+        crate::routes::oauth::near_auth,
         crate::routes::oauth::logout,
         // User endpoints
         crate::routes::users::get_current_user,
@@ -40,6 +41,8 @@ use utoipa::OpenApi;
         crate::error::ApiErrorResponse,
         // Auth request models
         crate::routes::oauth::LogoutRequest,
+        crate::routes::oauth::NearAuthRequest,
+        crate::routes::oauth::NearAuthResponse,
         // User settings models
         crate::models::UserSettingsResponse,
         crate::models::UpdateUserSettingsPartiallyRequest,

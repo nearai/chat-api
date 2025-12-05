@@ -19,6 +19,7 @@ pub struct User {
 pub enum OAuthProvider {
     Google,
     Github,
+    Near,
 }
 
 /// Represents a linked OAuth account
