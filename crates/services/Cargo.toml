@@ -38,6 +38,9 @@ hex = "0.4"
 hmac = "0.12"
 sha2 = "0.10"
 dstack-sdk = "0.1"
+# OpenTelemetry for metrics
+opentelemetry = { version = "0.31", features = ["metrics"] }
+opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "metrics"] }
 utoipa = { version = "5", optional = true }
 near-api = { git = "https://github.com/near/near-api-rs", rev = "f07473256aa7a70e094432618bac174e60d533df" }
 

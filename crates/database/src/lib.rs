@@ -6,9 +6,9 @@ pub mod repositories;
 
 pub use pool::DbPool;
 pub use repositories::{
-    PostgresAppConfigRepository, PostgresConversationRepository, PostgresFileRepository,
-    PostgresNearNonceRepository, PostgresOAuthRepository, PostgresSessionRepository,
-    PostgresUserRepository, PostgresUserSettingsRepository,
+    PostgresAnalyticsRepository, PostgresAppConfigRepository, PostgresConversationRepository,
+    PostgresFileRepository, PostgresNearNonceRepository, PostgresOAuthRepository,
+    PostgresSessionRepository, PostgresUserRepository, PostgresUserSettingsRepository,
 };
 
 use crate::pool::create_pool_with_native_tls;
@@ -30,6 +30,7 @@ pub struct Database {
     user_settings_repository: Arc<PostgresUserSettingsRepository>,
     app_config_repository: Arc<PostgresAppConfigRepository>,
     near_nonce_repository: Arc<PostgresNearNonceRepository>,
+    analytics_repository: Arc<PostgresAnalyticsRepository>,
     cluster_manager: Option<Arc<ClusterManager>>,
 }
 
@@ -44,6 +45,7 @@ impl Database {
         let user_settings_repository = Arc::new(PostgresUserSettingsRepository::new(pool.clone()));
         let app_config_repository = Arc::new(PostgresAppConfigRepository::new(pool.clone()));
         let near_nonce_repository = Arc::new(PostgresNearNonceRepository::new(pool.clone()));
+        let analytics_repository = Arc::new(PostgresAnalyticsRepository::new(pool.clone()));
 
         Self {
             pool,
@@ -55,6 +57,7 @@ impl Database {
             user_settings_repository,
             app_config_repository,
             near_nonce_repository,
+            analytics_repository,
             cluster_manager: None,
         }
     }
@@ -216,5 +219,10 @@ impl Database {
     /// Get the NEAR nonce repository
     pub fn near_nonce_repository(&self) -> Arc<PostgresNearNonceRepository> {
         self.near_nonce_repository.clone()
+    }
+
+    /// Get the analytics repository
+    pub fn analytics_repository(&self) -> Arc<PostgresAnalyticsRepository> {
+        self.analytics_repository.clone()
     }
 }

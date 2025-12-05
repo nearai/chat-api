@@ -191,6 +191,33 @@ impl Default for AdminConfig {
     }
 }
 
+/// Configuration for OpenTelemetry metrics export
+#[derive(Debug, Clone, Deserialize)]
+pub struct TelemetryConfig {
+    /// Service name for metrics (default: "chat-api")
+    pub service_name: String,
+    /// OTLP gRPC endpoint (e.g., "http://localhost:4317")
+    /// If not set, metrics export is disabled
+    pub otlp_endpoint: Option<String>,
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            service_name: std::env::var("TELEMETRY_SERVICE_NAME")
+                .unwrap_or_else(|_| "chat-api".to_string()),
+            otlp_endpoint: std::env::var("TELEMETRY_OTLP_ENDPOINT").ok(),
+        }
+    }
+}
+
+impl TelemetryConfig {
+    /// Returns true if OTLP export is configured
+    pub fn is_enabled(&self) -> bool {
+        self.otlp_endpoint.is_some()
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct Config {
     pub database: DatabaseConfig,
@@ -200,6 +227,7 @@ pub struct Config {
     pub cors: CorsConfig,
     pub admin: AdminConfig,
     pub vpc_auth: VpcAuthConfig,
+    pub telemetry: TelemetryConfig,
 }
 
 impl Config {
@@ -212,6 +240,7 @@ impl Config {
             cors: CorsConfig::default(),
             admin: AdminConfig::default(),
             vpc_auth: VpcAuthConfig::default(),
+            telemetry: TelemetryConfig::default(),
         }
     }
 }

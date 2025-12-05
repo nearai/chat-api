@@ -1,8 +1,16 @@
 use api::{create_router_with_cors, ApiDoc, AppState};
+use opentelemetry::global;
+use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_sdk::{
+    metrics::{PeriodicReader, SdkMeterProvider},
+    Resource,
+};
 use services::{
+    analytics::AnalyticsServiceImpl,
     auth::OAuthServiceImpl,
     conversation::service::ConversationServiceImpl,
     file::service::FileServiceImpl,
+    metrics::{MockMetricsService, OtlpMetricsService},
     response::service::OpenAIProxy,
     user::UserServiceImpl,
     user::UserSettingsServiceImpl,
@@ -67,6 +75,7 @@ async fn main() -> anyhow::Result<()> {
     let user_settings_repo = db.user_settings_repository();
     let app_config_repo = db.app_config_repository();
     let near_nonce_repo = db.near_nonce_repository();
+    let analytics_repo = db.analytics_repository();
 
     // Create services
     tracing::info!("Initializing services...");
@@ -139,6 +148,66 @@ async fn main() -> anyhow::Result<()> {
     // Initialize file service
     let file_service = Arc::new(FileServiceImpl::new(file_repo, proxy_service.clone()));
 
+    // Initialize analytics service
+    tracing::info!("Initializing analytics service...");
+    let analytics_service = Arc::new(AnalyticsServiceImpl::new(
+        analytics_repo as Arc<dyn services::analytics::AnalyticsRepository>,
+    ));
+
+    // Initialize metrics service
+    tracing::info!("Initializing metrics service...");
+    let metrics_service: Arc<dyn services::metrics::MetricsServiceTrait> =
+        if let Some(otlp_endpoint) = &config.telemetry.otlp_endpoint {
+            tracing::info!(
+                "Initializing OpenTelemetry OTLP metrics export to {}",
+                otlp_endpoint
+            );
+
+            // Build OTLP metrics exporter
+            let exporter = opentelemetry_otlp::MetricExporter::builder()
+                .with_tonic()
+                .with_endpoint(otlp_endpoint)
+                .build()
+                .expect("Failed to build OTLP metrics exporter");
+
+            // Create periodic reader to export metrics
+            let reader = PeriodicReader::builder(exporter).build();
+
+            // Get environment for resource tags
+            let environment =
+                std::env::var("ENVIRONMENT").unwrap_or_else(|_| "development".to_string());
+
+            // Build meter provider with resource attributes
+            let meter_provider = SdkMeterProvider::builder()
+                .with_reader(reader)
+                .with_resource(
+                    Resource::builder()
+                        .with_attributes([
+                            opentelemetry::KeyValue::new(
+                                "service.name",
+                                config.telemetry.service_name.clone(),
+                            ),
+                            opentelemetry::KeyValue::new("environment", environment.clone()),
+                        ])
+                        .build(),
+                )
+                .build();
+
+            tracing::info!(
+                "OpenTelemetry metrics initialized for service '{}' in environment '{}'",
+                config.telemetry.service_name,
+                environment
+            );
+
+            // Set as global meter provider
+            global::set_meter_provider(meter_provider.clone());
+
+            Arc::new(OtlpMetricsService::new(&meter_provider))
+        } else {
+            tracing::info!("OTLP endpoint not configured, using mock metrics service");
+            Arc::new(MockMetricsService)
+        };
+
     // Create application state
     let app_state = AppState {
         oauth_service,
@@ -153,6 +222,8 @@ async fn main() -> anyhow::Result<()> {
         user_repository: user_repo.clone(),
         vpc_credentials_service,
         cloud_api_base_url: config.openai.base_url.clone().unwrap_or_default(),
+        metrics_service,
+        analytics_service,
     };
 
     // Create router with CORS support

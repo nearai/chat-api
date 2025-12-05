@@ -328,13 +328,13 @@ impl OAuthServiceImpl {
     }
 
     /// Internal implementation that handles the callback with a pre-validated state
-    /// Returns (UserSession, frontend_callback_url)
+    /// Returns (UserSession, frontend_callback_url, is_new_user, provider)
     async fn handle_callback_impl(
         &self,
         provider: OAuthProvider,
         code: String,
         oauth_state: OAuthState,
-    ) -> anyhow::Result<(UserSession, Option<String>, bool)> {
+    ) -> anyhow::Result<(UserSession, Option<String>, bool, OAuthProvider)> {
         tracing::info!(
             "Processing OAuth callback: provider={:?}, redirect_uri={}",
             provider,
@@ -443,7 +443,12 @@ impl OAuthServiceImpl {
             session.session_id
         );
 
-        Ok((session, oauth_state.frontend_callback, is_new_user))
+        Ok((
+            session,
+            oauth_state.frontend_callback,
+            is_new_user,
+            provider,
+        ))
     }
 }
 
@@ -597,7 +602,7 @@ impl OAuthService for OAuthServiceImpl {
         &self,
         code: String,
         state: String,
-    ) -> anyhow::Result<(UserSession, Option<String>, bool)> {
+    ) -> anyhow::Result<(UserSession, Option<String>, bool, OAuthProvider)> {
         tracing::info!("Handling unified OAuth callback with state: {}", state);
 
         // First, look up the state to determine the provider

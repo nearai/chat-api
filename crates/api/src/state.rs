@@ -16,4 +16,8 @@ pub struct AppState {
     pub vpc_credentials_service: Arc<dyn services::vpc::VpcCredentialsService>,
     /// Base URL for Cloud API calls (same as OpenAI base URL when using VPC)
     pub cloud_api_base_url: String,
+    /// Metrics service for recording usage metrics
+    pub metrics_service: Arc<dyn services::metrics::MetricsServiceTrait>,
+    /// Analytics service for database-backed analytics
+    pub analytics_service: Arc<dyn services::analytics::AnalyticsServiceTrait>,
 }

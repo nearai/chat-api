@@ -1,10 +1,13 @@
 use crate::{consts::LIST_USERS_LIMIT_MAX, error::ApiError, models::*, state::AppState};
 use axum::{
-    extract::{Query, State},
+    extract::{Path, Query, State},
     routing::get,
     Json, Router,
 };
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use services::analytics::{ActivityLogEntry, AnalyticsSummary, TopActiveUsersResponse};
+use services::UserId;
 
 /// Pagination query parameters
 #[derive(Debug, Deserialize)]
@@ -289,10 +292,212 @@ pub async fn set_system_prompt(
     }))
 }
 
+/// Query parameters for analytics endpoint
+#[derive(Debug, Deserialize)]
+pub struct AnalyticsQuery {
+    /// Start of the time period (ISO 8601 timestamp)
+    pub start: DateTime<Utc>,
+    /// End of the time period (ISO 8601 timestamp)
+    pub end: DateTime<Utc>,
+}
+
+/// Get analytics summary
+///
+/// Returns user metrics, activity metrics, and breakdown by auth method for a time period.
+/// Requires admin authentication.
+#[utoipa::path(
+    get,
+    path = "/v1/admin/analytics",
+    tag = "Admin",
+    params(
+        ("start" = DateTime<Utc>, Query, description = "Start of time period (ISO 8601)"),
+        ("end" = DateTime<Utc>, Query, description = "End of time period (ISO 8601)")
+    ),
+    responses(
+        (status = 200, description = "Analytics retrieved", body = AnalyticsSummary),
+        (status = 400, description = "Bad request - invalid date range", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn get_analytics(
+    State(app_state): State<AppState>,
+    Query(params): Query<AnalyticsQuery>,
+) -> Result<Json<AnalyticsSummary>, ApiError> {
+    tracing::info!(
+        "Getting analytics for period {} to {}",
+        params.start,
+        params.end
+    );
+
+    // Validate date range
+    if params.start >= params.end {
+        return Err(ApiError::bad_request("start date must be before end date"));
+    }
+
+    let analytics = app_state
+        .analytics_service
+        .get_analytics_summary(params.start, params.end)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get analytics: {}", e);
+            ApiError::internal_server_error("Failed to retrieve analytics")
+        })?;
+
+    Ok(Json(analytics))
+}
+
+/// Response for user activity endpoint
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct UserActivityResponse {
+    pub user_id: UserId,
+    pub activities: Vec<ActivityLogEntry>,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+/// Query parameters for top users endpoint
+#[derive(Debug, Deserialize)]
+pub struct TopUsersQuery {
+    /// Start of the time period (ISO 8601 timestamp)
+    pub start: DateTime<Utc>,
+    /// End of the time period (ISO 8601 timestamp)
+    pub end: DateTime<Utc>,
+    /// Maximum number of users to return (default: 10)
+    #[serde(default = "default_top_users_limit")]
+    pub limit: i64,
+}
+
+fn default_top_users_limit() -> i64 {
+    10
+}
+
+/// Get activity history for a specific user
+///
+/// Returns paginated activity log for a user. Requires admin authentication.
+#[utoipa::path(
+    get,
+    path = "/v1/admin/users/{user_id}/activity",
+    tag = "Admin",
+    params(
+        ("user_id" = UserId, Path, description = "User ID"),
+        ("limit" = Option<i64>, Query, description = "Maximum number of activities to return (default: 50)"),
+        ("offset" = Option<i64>, Query, description = "Number of activities to skip (default: 0)")
+    ),
+    responses(
+        (status = 200, description = "User activity retrieved", body = UserActivityResponse),
+        (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "User not found", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn get_user_activity(
+    State(app_state): State<AppState>,
+    Path(user_id): Path<UserId>,
+    Query(params): Query<PaginationQuery>,
+) -> Result<Json<UserActivityResponse>, ApiError> {
+    tracing::info!(
+        "Getting activity for user {} with limit={}, offset={}",
+        user_id,
+        params.limit,
+        params.offset
+    );
+
+    let activities = app_state
+        .analytics_service
+        .get_user_activity(user_id, Some(params.limit), Some(params.offset))
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get user activity: {}", e);
+            ApiError::internal_server_error("Failed to retrieve user activity")
+        })?;
+
+    Ok(Json(UserActivityResponse {
+        user_id,
+        activities,
+        limit: params.limit,
+        offset: params.offset,
+    }))
+}
+
+/// Get top active users
+///
+/// Returns the most active users in a time period. Requires admin authentication.
+#[utoipa::path(
+    get,
+    path = "/v1/admin/analytics/top-users",
+    tag = "Admin",
+    params(
+        ("start" = DateTime<Utc>, Query, description = "Start of time period (ISO 8601)"),
+        ("end" = DateTime<Utc>, Query, description = "End of time period (ISO 8601)"),
+        ("limit" = Option<i64>, Query, description = "Maximum number of users to return (default: 10)")
+    ),
+    responses(
+        (status = 200, description = "Top users retrieved", body = TopActiveUsersResponse),
+        (status = 400, description = "Bad request - invalid date range", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn get_top_users(
+    State(app_state): State<AppState>,
+    Query(params): Query<TopUsersQuery>,
+) -> Result<Json<TopActiveUsersResponse>, ApiError> {
+    tracing::info!(
+        "Getting top {} users for period {} to {}",
+        params.limit,
+        params.start,
+        params.end
+    );
+
+    // Validate date range
+    if params.start >= params.end {
+        return Err(ApiError::bad_request("start date must be before end date"));
+    }
+
+    // Validate limit
+    if params.limit < 1 || params.limit > 100 {
+        return Err(ApiError::bad_request("limit must be between 1 and 100"));
+    }
+
+    let users = app_state
+        .analytics_service
+        .get_top_active_users(params.start, params.end, params.limit)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get top users: {}", e);
+            ApiError::internal_server_error("Failed to retrieve top users")
+        })?;
+
+    Ok(Json(TopActiveUsersResponse {
+        period_start: params.start,
+        period_end: params.end,
+        users,
+    }))
+}
+
 /// Create admin router with all admin routes (requires admin authentication)
 pub fn create_admin_router() -> Router<AppState> {
-    Router::new().route("/users", get(list_users)).route(
-        "/system_prompt",
-        get(get_system_prompt).post(set_system_prompt),
-    )
+    Router::new()
+        .route("/users", get(list_users))
+        .route("/users/{user_id}/activity", get(get_user_activity))
+        .route(
+            "/system_prompt",
+            get(get_system_prompt).post(set_system_prompt),
+        )
+        .route("/analytics", get(get_analytics))
+        .route("/analytics/top-users", get(get_top_users))
 }
