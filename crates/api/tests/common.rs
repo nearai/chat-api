@@ -3,7 +3,9 @@
 use api::{create_router_with_cors, AppState};
 use axum_test::TestServer;
 use serde_json::json;
+use services::analytics::AnalyticsServiceImpl;
 use services::file::service::FileServiceImpl;
+use services::metrics::MockMetricsService;
 use services::vpc::test_helpers::MockVpcCredentialsService;
 use services::vpc::VpcCredentials;
 use std::sync::Arc;
@@ -104,6 +106,16 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
 
     let file_service = Arc::new(FileServiceImpl::new(file_repo, proxy_service.clone()));
 
+    // Create metrics service (mock for tests)
+    let metrics_service: Arc<dyn services::metrics::MetricsServiceTrait> =
+        Arc::new(MockMetricsService);
+
+    // Create analytics service
+    let analytics_repo = db.analytics_repository();
+    let analytics_service = Arc::new(AnalyticsServiceImpl::new(
+        analytics_repo as Arc<dyn services::analytics::AnalyticsRepository>,
+    ));
+
     // Create application state
     let app_state = AppState {
         vpc_credentials_service,
@@ -118,6 +130,8 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
         redirect_uri: config.oauth.redirect_uri,
         admin_domains: Arc::new(admin_domains),
         cloud_api_base_url: test_config.cloud_api_base_url.clone(),
+        metrics_service,
+        analytics_service,
     };
 
     // Create router

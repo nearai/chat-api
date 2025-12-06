@@ -51,6 +51,11 @@ reqwest = { version = "0.12", features = ["json"] }
 hmac = "0.12"
 base64 = "0.22.1"
 
+# OpenTelemetry OTLP export
+opentelemetry = { version = "0.31", features = ["metrics"] }
+opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "metrics"] }
+opentelemetry-otlp = { version = "0.31", features = ["metrics", "grpc-tonic"] }
+
 [dev-dependencies]
 serde_json = "1.0"
 chrono = "0.4"

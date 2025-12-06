@@ -12,8 +12,12 @@ use bytes::Bytes;
 use flate2::read::GzDecoder;
 use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
+use services::analytics::{ActivityType, RecordActivityRequest};
 use services::conversation::ports::ConversationError;
 use services::file::ports::FileError;
+use services::metrics::consts::{
+    METRIC_CONVERSATION_CREATED, METRIC_FILE_UPLOADED, METRIC_RESPONSE_CREATED,
+};
 use services::response::ports::ProxyResponse;
 use services::UserId;
 use std::io::Read;
@@ -1100,6 +1104,27 @@ async fn proxy_responses(
         user.user_id
     );
 
+    // Record metrics for successful responses
+    if (200..300).contains(&proxy_response.status) {
+        state
+            .metrics_service
+            .record_count(METRIC_RESPONSE_CREATED, 1, &[]);
+
+        // Record analytics in database
+        if let Err(e) = state
+            .analytics_service
+            .record_activity(RecordActivityRequest {
+                user_id: user.user_id,
+                activity_type: ActivityType::Response,
+                auth_method: None,
+                metadata: None,
+            })
+            .await
+        {
+            tracing::warn!("Failed to record analytics for response creation: {}", e);
+        }
+    }
+
     build_response(
         proxy_response.status,
         proxy_response.headers,
@@ -1277,6 +1302,28 @@ async fn handle_trackable_response(
                     e
                 );
             }
+
+            // Record metrics for conversation creation
+            state
+                .metrics_service
+                .record_count(METRIC_CONVERSATION_CREATED, 1, &[]);
+
+            // Record analytics in database
+            if let Err(e) = state
+                .analytics_service
+                .record_activity(RecordActivityRequest {
+                    user_id: user.user_id,
+                    activity_type: ActivityType::Conversation,
+                    auth_method: None,
+                    metadata: Some(serde_json::json!({ "conversation_id": id })),
+                })
+                .await
+            {
+                tracing::warn!(
+                    "Failed to record analytics for conversation creation: {}",
+                    e
+                );
+            }
         }
         TrackableResource::File => {
             match serde_json::from_value::<services::file::ports::FileData>(response_json) {
@@ -1288,6 +1335,25 @@ async fn handle_trackable_response(
                             user.user_id,
                             e
                         );
+                    }
+
+                    // Record metrics for file upload
+                    state
+                        .metrics_service
+                        .record_count(METRIC_FILE_UPLOADED, 1, &[]);
+
+                    // Record analytics in database
+                    if let Err(e) = state
+                        .analytics_service
+                        .record_activity(RecordActivityRequest {
+                            user_id: user.user_id,
+                            activity_type: ActivityType::FileUpload,
+                            auth_method: None,
+                            metadata: Some(serde_json::json!({ "file_id": id })),
+                        })
+                        .await
+                    {
+                        tracing::warn!("Failed to record analytics for file upload: {}", e);
                     }
                 }
                 Err(e) => {

@@ -9,7 +9,12 @@ use axum::{
 };
 use near_api::signer::NEP413Payload;
 use serde::{Deserialize, Serialize};
+use services::analytics::{ActivityType, AuthMethod, RecordActivityRequest};
 use services::auth::near::SignedMessage;
+use services::auth::ports::OAuthProvider;
+use services::metrics::consts::{
+    METRIC_USER_LOGIN, METRIC_USER_SIGNUP, TAG_AUTH_METHOD, TAG_IS_NEW_USER,
+};
 use services::SessionId;
 use utoipa::ToSchema;
 
@@ -210,8 +215,8 @@ pub async fn oauth_callback(
     );
 
     // The provider is determined from the state stored in the database
-    // Returns (session, frontend_callback_url, is_new_user)
-    let (session, frontend_callback, is_new_user) = app_state
+    // Returns (session, frontend_callback_url, is_new_user, provider)
+    let (session, frontend_callback, is_new_user, provider) = app_state
         .oauth_service
         .handle_callback_unified(params.code.clone(), params.state.clone())
         .await
@@ -221,10 +226,53 @@ pub async fn oauth_callback(
         })?;
 
     tracing::info!(
-        "OAuth callback processed successfully - session_id: {}, user_id: {}",
+        "OAuth callback processed successfully - session_id: {}, user_id: {}, provider: {:?}",
         session.session_id,
-        session.user_id
+        session.user_id,
+        provider
     );
+
+    // Record metrics and analytics
+    let auth_method = match provider {
+        OAuthProvider::Google => AuthMethod::Google,
+        OAuthProvider::Github => AuthMethod::Github,
+        OAuthProvider::Near => AuthMethod::Near,
+    };
+    let auth_method_str = auth_method.as_str();
+
+    // Record metrics
+    let metric_name = if is_new_user {
+        METRIC_USER_SIGNUP
+    } else {
+        METRIC_USER_LOGIN
+    };
+    let tags = [
+        format!("{}:{}", TAG_AUTH_METHOD, auth_method_str),
+        format!("{}:{}", TAG_IS_NEW_USER, is_new_user),
+    ];
+    let tags_str: Vec<&str> = tags.iter().map(|s| s.as_str()).collect();
+    app_state
+        .metrics_service
+        .record_count(metric_name, 1, &tags_str);
+
+    // Record analytics in database
+    let activity_type = if is_new_user {
+        ActivityType::Signup
+    } else {
+        ActivityType::Login
+    };
+    if let Err(e) = app_state
+        .analytics_service
+        .record_activity(RecordActivityRequest {
+            user_id: session.user_id,
+            activity_type,
+            auth_method: Some(auth_method),
+            metadata: None,
+        })
+        .await
+    {
+        tracing::warn!("Failed to record analytics for OAuth callback: {}", e);
+    }
 
     let token = session.token.ok_or_else(|| {
         tracing::error!(
@@ -497,6 +545,44 @@ pub async fn near_auth(
             tracing::error!("NEAR authentication failed: {}", e);
             ApiError::unauthorized(e.to_string())
         })?;
+
+    // Record metrics and analytics
+    let auth_method = AuthMethod::Near;
+    let auth_method_str = auth_method.as_str();
+
+    // Record metrics
+    let metric_name = if is_new_user {
+        METRIC_USER_SIGNUP
+    } else {
+        METRIC_USER_LOGIN
+    };
+    let tags = [
+        format!("{}:{}", TAG_AUTH_METHOD, auth_method_str),
+        format!("{}:{}", TAG_IS_NEW_USER, is_new_user),
+    ];
+    let tags_str: Vec<&str> = tags.iter().map(|s| s.as_str()).collect();
+    app_state
+        .metrics_service
+        .record_count(metric_name, 1, &tags_str);
+
+    // Record analytics in database
+    let activity_type = if is_new_user {
+        ActivityType::Signup
+    } else {
+        ActivityType::Login
+    };
+    if let Err(e) = app_state
+        .analytics_service
+        .record_activity(RecordActivityRequest {
+            user_id: session.user_id,
+            activity_type,
+            auth_method: Some(auth_method),
+            metadata: None,
+        })
+        .await
+    {
+        tracing::warn!("Failed to record analytics for NEAR auth: {}", e);
+    }
 
     let token = session.token.ok_or_else(|| {
         tracing::error!(

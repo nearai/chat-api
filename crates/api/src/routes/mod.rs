@@ -9,7 +9,11 @@ use serde::Serialize;
 use tower_http::cors::{Any, CorsLayer};
 use utoipa::ToSchema;
 
-use crate::{middleware::AuthState, middleware::RateLimitState, state::AppState, static_files};
+use crate::{
+    middleware::{AuthState, MetricsState, RateLimitState},
+    state::AppState,
+    static_files,
+};
 
 #[derive(Serialize, ToSchema)]
 pub struct HealthResponse {
@@ -45,6 +49,11 @@ pub fn create_router_with_cors(app_state: AppState, allowed_origins: Vec<String>
         session_repository: app_state.session_repository.clone(),
         user_service: app_state.user_service.clone(),
         admin_domains: app_state.admin_domains.clone(),
+    };
+
+    // Create metrics state for middleware
+    let metrics_state = MetricsState {
+        metrics_service: app_state.metrics_service.clone(),
     };
 
     // OAuth routes (public, no auth required)
@@ -102,5 +111,9 @@ pub fn create_router_with_cors(app_state: AppState, allowed_origins: Vec<String>
         .allow_headers(Any)
         .expose_headers(Any);
 
-    router.layer(cors)
+    // Add HTTP metrics middleware to track request counts and latencies
+    router.layer(cors).layer(from_fn_with_state(
+        metrics_state,
+        crate::middleware::http_metrics_middleware,
+    ))
 }

@@ -102,12 +102,12 @@ pub trait OAuthService: Send + Sync {
     ) -> anyhow::Result<String>;
 
     /// Unified callback handler that determines provider from state
-    /// Returns (UserSession, frontend_callback_url)
+    /// Returns (UserSession, frontend_callback_url, is_new_user, provider)
     async fn handle_callback_unified(
         &self,
         code: String,
         state: String,
-    ) -> anyhow::Result<(UserSession, Option<String>, bool)>;
+    ) -> anyhow::Result<(UserSession, Option<String>, bool, OAuthProvider)>;
 
     /// Refresh an access token
     async fn refresh_token(
