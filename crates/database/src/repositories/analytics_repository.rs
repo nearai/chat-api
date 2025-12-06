@@ -310,4 +310,3 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
             .collect())
     }
 }
-

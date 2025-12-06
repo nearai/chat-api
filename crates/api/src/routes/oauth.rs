@@ -12,7 +12,9 @@ use serde::{Deserialize, Serialize};
 use services::analytics::{ActivityType, AuthMethod, RecordActivityRequest};
 use services::auth::near::SignedMessage;
 use services::auth::ports::OAuthProvider;
-use services::metrics::consts::{METRIC_USER_LOGIN, METRIC_USER_SIGNUP, TAG_AUTH_METHOD, TAG_IS_NEW_USER};
+use services::metrics::consts::{
+    METRIC_USER_LOGIN, METRIC_USER_SIGNUP, TAG_AUTH_METHOD, TAG_IS_NEW_USER,
+};
 use services::SessionId;
 use utoipa::ToSchema;
 
@@ -249,7 +251,9 @@ pub async fn oauth_callback(
         format!("{}:{}", TAG_IS_NEW_USER, is_new_user),
     ];
     let tags_str: Vec<&str> = tags.iter().map(|s| s.as_str()).collect();
-    app_state.metrics_service.record_count(metric_name, 1, &tags_str);
+    app_state
+        .metrics_service
+        .record_count(metric_name, 1, &tags_str);
 
     // Record analytics in database
     let activity_type = if is_new_user {
@@ -557,7 +561,9 @@ pub async fn near_auth(
         format!("{}:{}", TAG_IS_NEW_USER, is_new_user),
     ];
     let tags_str: Vec<&str> = tags.iter().map(|s| s.as_str()).collect();
-    app_state.metrics_service.record_count(metric_name, 1, &tags_str);
+    app_state
+        .metrics_service
+        .record_count(metric_name, 1, &tags_str);
 
     // Record analytics in database
     let activity_type = if is_new_user {

@@ -112,10 +112,8 @@ pub fn create_router_with_cors(app_state: AppState, allowed_origins: Vec<String>
         .expose_headers(Any);
 
     // Add HTTP metrics middleware to track request counts and latencies
-    router
-        .layer(cors)
-        .layer(from_fn_with_state(
-            metrics_state,
-            crate::middleware::http_metrics_middleware,
-        ))
+    router.layer(cors).layer(from_fn_with_state(
+        metrics_state,
+        crate::middleware::http_metrics_middleware,
+    ))
 }

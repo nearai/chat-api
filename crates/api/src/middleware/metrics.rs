@@ -9,8 +9,8 @@
 use axum::{body::Body, extract::State, http::Request, middleware::Next, response::Response};
 use services::metrics::{
     consts::{
-        get_environment, METRIC_HTTP_DURATION, METRIC_HTTP_REQUESTS, TAG_ENDPOINT,
-        TAG_ENVIRONMENT, TAG_METHOD, TAG_STATUS_CODE,
+        get_environment, METRIC_HTTP_DURATION, METRIC_HTTP_REQUESTS, TAG_ENDPOINT, TAG_ENVIRONMENT,
+        TAG_METHOD, TAG_STATUS_CODE,
     },
     MetricsServiceTrait,
 };
@@ -146,4 +146,3 @@ mod tests {
         assert_eq!(normalize_path("/health"), "/health");
     }
 }
-
