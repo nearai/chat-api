@@ -94,7 +94,10 @@ pub fn create_api_router(
 
 /// Type of resource to track in the response
 enum TrackableResource {
+    /// New conversation - records metrics
     Conversation,
+    /// Updated conversation - tracks in DB but does NOT record metrics
+    ConversationUpdate,
     File,
 }
 
@@ -299,11 +302,12 @@ async fn update_conversation(
         })?;
 
     // Track the updated conversation (don't fail the request if tracking fails)
+    // Use ConversationUpdate to avoid recording metrics for updates
     handle_trackable_response(
         &state,
         &user,
         proxy_response,
-        TrackableResource::Conversation,
+        TrackableResource::ConversationUpdate,
     )
     .await
 }
@@ -1321,6 +1325,21 @@ async fn handle_trackable_response(
             {
                 tracing::warn!(
                     "Failed to record analytics for conversation creation: {}",
+                    e
+                );
+            }
+        }
+        TrackableResource::ConversationUpdate => {
+            // Track conversation in DB but do NOT record metrics (this is an update, not creation)
+            if let Err(e) = state
+                .conversation_service
+                .track_conversation(&id, user.user_id)
+                .await
+            {
+                tracing::error!(
+                    "Failed to track conversation update {} for user {}: {}",
+                    id,
+                    user.user_id,
                     e
                 );
             }
