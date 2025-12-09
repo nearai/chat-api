@@ -237,15 +237,12 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Initialize tracing/logging based on configuration
 fn init_tracing(logging_config: &LoggingConfig) {
-    // Build the filter string from the logging configuration
     let mut filter = logging_config.level.clone();
     for (module, level) in &logging_config.modules {
         filter.push_str(&format!(",{module}={level}"));
     }
 
-    // Initialize tracing based on the format specified in config
     match logging_config.format.as_str() {
         "json" => {
             tracing_subscriber::fmt()
@@ -271,7 +268,6 @@ fn init_tracing(logging_config: &LoggingConfig) {
                 .init();
         }
         _ => {
-            // Default to JSON format for containerized environments (Datadog friendly)
             tracing_subscriber::fmt()
                 .json()
                 .with_env_filter(EnvFilter::new(&filter))

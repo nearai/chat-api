@@ -240,7 +240,6 @@ impl TelemetryConfig {
     }
 }
 
-/// Logging Configuration
 #[derive(Debug, Clone, Deserialize)]
 pub struct LoggingConfig {
     pub level: String,
@@ -252,7 +251,6 @@ impl Default for LoggingConfig {
     fn default() -> Self {
         let mut modules = HashMap::new();
 
-        // Load module-specific log levels
         if let Ok(level) = std::env::var("LOG_MODULE_API") {
             modules.insert("api".to_string(), level);
         }
