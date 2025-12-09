@@ -135,7 +135,7 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
     };
 
     // Create router
-    let app = create_router_with_cors(app_state, vec![]);
+    let app = create_router_with_cors(app_state, config::CorsConfig::default());
 
     // Create test server
     TestServer::new(app).expect("Failed to create test server")
