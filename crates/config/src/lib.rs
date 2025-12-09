@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DatabaseConfig {
@@ -239,6 +240,37 @@ impl TelemetryConfig {
     }
 }
 
+/// Logging Configuration
+#[derive(Debug, Clone, Deserialize)]
+pub struct LoggingConfig {
+    pub level: String,
+    pub format: String,
+    pub modules: HashMap<String, String>,
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        let mut modules = HashMap::new();
+
+        // Load module-specific log levels
+        if let Ok(level) = std::env::var("LOG_MODULE_API") {
+            modules.insert("api".to_string(), level);
+        }
+        if let Ok(level) = std::env::var("LOG_MODULE_SERVICES") {
+            modules.insert("services".to_string(), level);
+        }
+        if let Ok(level) = std::env::var("LOG_MODULE_DATABASE") {
+            modules.insert("database".to_string(), level);
+        }
+
+        Self {
+            level: std::env::var("LOG_LEVEL").unwrap_or_else(|_| "info".to_string()),
+            format: std::env::var("LOG_FORMAT").unwrap_or_else(|_| "pretty".to_string()),
+            modules,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct Config {
     pub database: DatabaseConfig,
@@ -249,6 +281,7 @@ pub struct Config {
     pub admin: AdminConfig,
     pub vpc_auth: VpcAuthConfig,
     pub telemetry: TelemetryConfig,
+    pub logging: LoggingConfig,
 }
 
 impl Config {
@@ -262,6 +295,7 @@ impl Config {
             admin: AdminConfig::default(),
             vpc_auth: VpcAuthConfig::default(),
             telemetry: TelemetryConfig::default(),
+            logging: LoggingConfig::default(),
         }
     }
 }
