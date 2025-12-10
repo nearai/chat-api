@@ -1279,7 +1279,7 @@ async fn proxy_model_list(
             "User {} is admin, returning full model list without filtering",
             user.user_id
         );
-        return Ok(Response::builder()
+        return Response::builder()
             .status(StatusCode::from_u16(proxy_response.status).unwrap_or(StatusCode::OK))
             .header("content-type", "application/json")
             .body(Body::from(body_bytes))
@@ -1291,7 +1291,7 @@ async fn proxy_model_list(
                     }),
                 )
                     .into_response()
-            })?);
+            });
     }
 
     // Expect OpenAI-style schema: { "data": [ { "id": "...", ... }, ... ] }
@@ -1300,7 +1300,7 @@ async fn proxy_model_list(
 
     let Some(models_array) = data_opt else {
         tracing::debug!("No 'data' array found in model list response, returning original body");
-        return Ok(Response::builder()
+        return Response::builder()
             .status(StatusCode::from_u16(proxy_response.status).unwrap_or(StatusCode::OK))
             .header("content-type", "application/json")
             .body(Body::from(
@@ -1314,7 +1314,7 @@ async fn proxy_model_list(
                     }),
                 )
                     .into_response()
-            })?);
+            });
     };
 
     // Filter out models marked as private in model_settings
@@ -1363,7 +1363,7 @@ async fn proxy_model_list(
         body_bytes.to_vec()
     });
 
-    Ok(Response::builder()
+    Response::builder()
         .status(StatusCode::from_u16(proxy_response.status).unwrap_or(StatusCode::OK))
         .header("content-type", "application/json")
         .body(Body::from(filtered_bytes))
@@ -1375,7 +1375,7 @@ async fn proxy_model_list(
                 }),
             )
                 .into_response()
-        })?)
+        })
 }
 
 /// Determine whether a user is an admin based on their email domain.
