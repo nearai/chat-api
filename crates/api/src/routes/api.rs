@@ -1066,6 +1066,51 @@ async fn proxy_responses(
         }
     }
 
+    // Enforce model-level visibility for non-admin users, if a model is specified
+    #[derive(Deserialize)]
+    struct ResponseRequestModelField {
+        #[serde(default)]
+        model: Option<String>,
+    }
+
+    let is_admin = is_admin_user(&state, user.user_id).await;
+    if !is_admin {
+        if let Ok(req) = serde_json::from_slice::<ResponseRequestModelField>(&body_bytes) {
+            if let Some(model_id) = req.model {
+                match state.model_settings_service.get_settings(&model_id).await {
+                    Ok(settings) => {
+                        if settings.private {
+                            tracing::warn!(
+                                "Blocking response request for private model '{}' from non-admin user {}",
+                                model_id,
+                                user.user_id
+                            );
+                            return Err((
+                                StatusCode::FORBIDDEN,
+                                Json(ErrorResponse {
+                                    error: "This model is not available".to_string(),
+                                }),
+                            )
+                                .into_response());
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to load model settings for '{}', allowing request to proceed: {}",
+                            model_id,
+                            e
+                        );
+                    }
+                }
+            }
+        } else {
+            tracing::debug!(
+                "Failed to parse model field from /responses request body for user_id={}",
+                user.user_id
+            );
+        }
+    }
+
     // Track conversation from the request
     tracing::debug!("POST to /responses detected, attempting to track conversation");
     if let Err(e) = track_conversation_from_request(&state, user.user_id, &body_bytes).await {
@@ -1148,6 +1193,9 @@ async fn proxy_model_list(
         user.session_id
     );
 
+    // Determine if the user is an admin (by email domain)
+    let is_admin = is_admin_user(&state, user.user_id).await;
+
     // Forward the request to OpenAI
     let proxy_response = state
         .proxy_service
@@ -1174,12 +1222,201 @@ async fn proxy_model_list(
         user.user_id
     );
 
-    build_response(
-        proxy_response.status,
-        proxy_response.headers,
-        Body::from_stream(proxy_response.body),
-    )
-    .await
+    // If upstream returned non-success, just proxy as-is
+    if !(200..300).contains(&proxy_response.status) {
+        return build_response(
+            proxy_response.status,
+            proxy_response.headers,
+            Body::from_stream(proxy_response.body),
+        )
+        .await;
+    }
+
+    // Buffer body into bytes
+    let body_bytes: Bytes = proxy_response
+        .body
+        .try_collect::<Vec<_>>()
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to read model list response body for user_id={}: {}",
+                user.user_id,
+                e
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("Failed to read response body: {e}"),
+                }),
+            )
+                .into_response()
+        })?
+        .into_iter()
+        .flatten()
+        .collect();
+
+    // Try to parse JSON
+    let json_value: serde_json::Value = match serde_json::from_slice(&body_bytes) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                "Failed to parse model list JSON for user_id={}: {}, returning original body",
+                user.user_id,
+                e
+            );
+            return build_response(
+                proxy_response.status,
+                proxy_response.headers,
+                Body::from(body_bytes),
+            )
+            .await;
+        }
+    };
+
+    // If user is admin, bypass filtering and return original JSON
+    if is_admin {
+        tracing::debug!(
+            "User {} is admin, returning full model list without filtering",
+            user.user_id
+        );
+        return Ok(Response::builder()
+            .status(StatusCode::from_u16(proxy_response.status).unwrap_or(StatusCode::OK))
+            .header("content-type", "application/json")
+            .body(Body::from(body_bytes))
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("Failed to build response: {e}"),
+                    }),
+                )
+                    .into_response()
+            })?);
+    }
+
+    // Expect OpenAI-style schema: { "data": [ { "id": "...", ... }, ... ] }
+    let mut root = json_value;
+    let data_opt = root.get_mut("data").and_then(|v| v.as_array_mut());
+
+    let Some(models_array) = data_opt else {
+        tracing::debug!("No 'data' array found in model list response, returning original body");
+        return Ok(Response::builder()
+            .status(StatusCode::from_u16(proxy_response.status).unwrap_or(StatusCode::OK))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&root).unwrap_or_else(|_| body_bytes.to_vec()),
+            ))
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("Failed to build response: {e}"),
+                    }),
+                )
+                    .into_response()
+            })?);
+    };
+
+    // Filter out models marked as private in model_settings
+    let mut filtered_models = Vec::new();
+    for model in std::mem::take(models_array) {
+        let model_id_opt = model
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        if let Some(model_id) = model_id_opt {
+            match state.model_settings_service.get_settings(&model_id).await {
+                Ok(settings) => {
+                    if settings.private {
+                        tracing::debug!(
+                            "Hiding private model '{}' from non-admin user {}",
+                            model_id,
+                            user.user_id
+                        );
+                        continue;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to load settings for model '{}': {}, keeping model visible",
+                        model_id,
+                        e
+                    );
+                }
+            }
+        }
+
+        filtered_models.push(model);
+    }
+
+    *root
+        .get_mut("data")
+        .expect("data key must exist after previous check") =
+        serde_json::Value::Array(filtered_models);
+
+    let filtered_bytes = serde_json::to_vec(&root).unwrap_or_else(|e| {
+        tracing::error!(
+            "Failed to serialize filtered model list JSON: {}, returning original body",
+            e
+        );
+        body_bytes.to_vec()
+    });
+
+    Ok(Response::builder()
+        .status(StatusCode::from_u16(proxy_response.status).unwrap_or(StatusCode::OK))
+        .header("content-type", "application/json")
+        .body(Body::from(filtered_bytes))
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to build response: {e}"),
+                }),
+            )
+                .into_response()
+        })?)
+}
+
+/// Determine whether a user is an admin based on their email domain.
+async fn is_admin_user(state: &crate::state::AppState, user_id: UserId) -> bool {
+    let profile = match state.user_service.get_user_profile(user_id).await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!(
+                "Failed to get user profile for admin check: user_id={}, error={}",
+                user_id,
+                e
+            );
+            return false;
+        }
+    };
+
+    let email = &profile.user.email;
+    if state.admin_domains.is_empty() {
+        tracing::warn!("Admin domains list is empty, denying admin status");
+        return false;
+    }
+
+    let domain_opt = email
+        .split_once('@')
+        .map(|(_, domain)| domain.to_lowercase());
+
+    if let Some(domain) = domain_opt {
+        let is_admin = state.admin_domains.contains(&domain);
+        if !is_admin {
+            tracing::debug!(
+                "User {} with email {} is not in admin domains: {:?}",
+                user_id,
+                email,
+                state.admin_domains
+            );
+        }
+        is_admin
+    } else {
+        tracing::warn!("Failed to extract domain from email: {}", email);
+        false
+    }
 }
 
 async fn proxy_signature(
