@@ -7,8 +7,9 @@ pub mod repositories;
 pub use pool::DbPool;
 pub use repositories::{
     PostgresAnalyticsRepository, PostgresAppConfigRepository, PostgresConversationRepository,
-    PostgresFileRepository, PostgresNearNonceRepository, PostgresOAuthRepository,
-    PostgresSessionRepository, PostgresUserRepository, PostgresUserSettingsRepository,
+    PostgresFileRepository, PostgresModelSettingsRepository, PostgresNearNonceRepository,
+    PostgresOAuthRepository, PostgresSessionRepository, PostgresUserRepository,
+    PostgresUserSettingsRepository,
 };
 
 use crate::pool::create_pool_with_native_tls;
@@ -31,6 +32,7 @@ pub struct Database {
     app_config_repository: Arc<PostgresAppConfigRepository>,
     near_nonce_repository: Arc<PostgresNearNonceRepository>,
     analytics_repository: Arc<PostgresAnalyticsRepository>,
+    model_settings_repository: Arc<PostgresModelSettingsRepository>,
     cluster_manager: Option<Arc<ClusterManager>>,
 }
 
@@ -46,6 +48,8 @@ impl Database {
         let app_config_repository = Arc::new(PostgresAppConfigRepository::new(pool.clone()));
         let near_nonce_repository = Arc::new(PostgresNearNonceRepository::new(pool.clone()));
         let analytics_repository = Arc::new(PostgresAnalyticsRepository::new(pool.clone()));
+        let model_settings_repository =
+            Arc::new(PostgresModelSettingsRepository::new(pool.clone()));
 
         Self {
             pool,
@@ -58,6 +62,7 @@ impl Database {
             app_config_repository,
             near_nonce_repository,
             analytics_repository,
+            model_settings_repository,
             cluster_manager: None,
         }
     }
@@ -224,5 +229,10 @@ impl Database {
     /// Get the analytics repository
     pub fn analytics_repository(&self) -> Arc<PostgresAnalyticsRepository> {
         self.analytics_repository.clone()
+    }
+
+    /// Get the model settings repository
+    pub fn model_settings_repository(&self) -> Arc<PostgresModelSettingsRepository> {
+        self.model_settings_repository.clone()
     }
 }

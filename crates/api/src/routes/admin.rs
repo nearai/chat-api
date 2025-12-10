@@ -489,6 +489,128 @@ pub async fn get_top_users(
     }))
 }
 
+/// Get global model settings
+///
+/// Returns the current global model settings. Requires admin authentication.
+#[utoipa::path(
+    get,
+    path = "/v1/admin/model_settings",
+    tag = "Admin",
+    responses(
+        (status = 200, description = "Model settings retrieved", body = ModelSettingsResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn get_model_settings(
+    State(app_state): State<AppState>,
+) -> Result<Json<ModelSettingsResponse>, ApiError> {
+    tracing::info!("Getting global model settings");
+
+    let content = app_state
+        .model_settings_service
+        .get_settings()
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get model settings: {}", e);
+            ApiError::internal_server_error("Failed to get model settings")
+        })?;
+
+    Ok(Json(ModelSettingsResponse {
+        content: content.into(),
+    }))
+}
+
+/// Fully update global model settings
+///
+/// Overwrites the global model settings. Requires admin authentication.
+#[utoipa::path(
+    post,
+    path = "/v1/admin/model_settings",
+    tag = "Admin",
+    request_body = UpdateModelSettingsRequest,
+    responses(
+        (status = 200, description = "Model settings updated", body = ModelSettingsResponse),
+        (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn update_model_settings(
+    State(app_state): State<AppState>,
+    Json(request): Json<UpdateModelSettingsRequest>,
+) -> Result<Json<ModelSettingsResponse>, ApiError> {
+    tracing::info!("Fully updating global model settings: {:?}", request);
+
+    let content = services::settings::ports::ModelSettingsContent {
+        private: request.private,
+    };
+
+    let content = app_state
+        .model_settings_service
+        .update_settings(content)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to update model settings: {}", e);
+            ApiError::internal_server_error("Failed to update model settings")
+        })?;
+
+    Ok(Json(ModelSettingsResponse {
+        content: content.into(),
+    }))
+}
+
+/// Partially update global model settings
+///
+/// Partially updates the global model settings. Requires admin authentication.
+#[utoipa::path(
+    patch,
+    path = "/v1/admin/model_settings",
+    tag = "Admin",
+    request_body = UpdateModelSettingsPartiallyRequest,
+    responses(
+        (status = 200, description = "Model settings updated", body = ModelSettingsResponse),
+        (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn update_model_settings_partially(
+    State(app_state): State<AppState>,
+    Json(request): Json<UpdateModelSettingsPartiallyRequest>,
+) -> Result<Json<ModelSettingsResponse>, ApiError> {
+    tracing::info!("Partially updating global model settings: {:?}", request);
+
+    let content = services::settings::ports::PartialModelSettingsContent {
+        private: request.private,
+    };
+
+    let content = app_state
+        .model_settings_service
+        .update_settings_partially(content)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to update model settings: {}", e);
+            ApiError::internal_server_error("Failed to update model settings")
+        })?;
+
+    Ok(Json(ModelSettingsResponse {
+        content: content.into(),
+    }))
+}
+
 /// Create admin router with all admin routes (requires admin authentication)
 pub fn create_admin_router() -> Router<AppState> {
     Router::new()
@@ -497,6 +619,12 @@ pub fn create_admin_router() -> Router<AppState> {
         .route(
             "/system_prompt",
             get(get_system_prompt).post(set_system_prompt),
+        )
+        .route(
+            "/model_settings",
+            get(get_model_settings)
+                .post(update_model_settings)
+                .patch(update_model_settings_partially),
         )
         .route("/analytics", get(get_analytics))
         .route("/analytics/top-users", get(get_top_users))

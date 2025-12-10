@@ -201,6 +201,43 @@ pub struct UserSettingsResponse {
     pub content: UserSettingsContent,
 }
 
+/// Model settings content for API responses
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ModelSettingsContent {
+    /// Whether models are private (not publicly visible)
+    pub private: bool,
+}
+
+impl From<services::settings::ports::ModelSettingsContent> for ModelSettingsContent {
+    fn from(content: services::settings::ports::ModelSettingsContent) -> Self {
+        Self {
+            private: content.private,
+        }
+    }
+}
+
+/// Model settings response
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ModelSettingsResponse {
+    /// Settings content (serialized as "settings")
+    #[serde(rename = "settings")]
+    pub content: ModelSettingsContent,
+}
+
+/// Model settings update request
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UpdateModelSettingsRequest {
+    /// Whether models are private (not publicly visible)
+    pub private: bool,
+}
+
+/// Model settings update request (partial update)
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UpdateModelSettingsPartiallyRequest {
+    /// Whether models are private (not publicly visible)
+    pub private: Option<bool>,
+}
+
 /// User settings update request
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UpdateUserSettingsRequest {
