@@ -1,7 +1,8 @@
 -- Create model_settings table
--- This table stores admin-level model settings as JSONB to allow flexible schema evolution
+-- This table stores admin-level model settings per model as JSONB to allow flexible schema evolution
 CREATE TABLE model_settings (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    model_id TEXT NOT NULL UNIQUE,
     content JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()

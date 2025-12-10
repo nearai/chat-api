@@ -12,7 +12,7 @@ async fn test_model_settings_get_default() {
     let admin_token = mock_login(&server, admin_email).await;
 
     let response = server
-        .get("/v1/admin/model_settings")
+        .get("/v1/admin/model_settings/test-model-1")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -47,7 +47,7 @@ async fn test_model_settings_update_and_get() {
     });
 
     let response = server
-        .post("/v1/admin/model_settings")
+        .post("/v1/admin/model_settings/test-model-2")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -72,7 +72,7 @@ async fn test_model_settings_update_and_get() {
 
     // Get settings to verify
     let response = server
-        .get("/v1/admin/model_settings")
+        .get("/v1/admin/model_settings/test-model-2")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -99,7 +99,7 @@ async fn test_model_settings_requires_admin() {
     let non_admin_token = mock_login(&server, non_admin_email).await;
 
     let response = server
-        .get("/v1/admin/model_settings")
+        .get("/v1/admin/model_settings/test-model-3")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {non_admin_token}")).unwrap(),

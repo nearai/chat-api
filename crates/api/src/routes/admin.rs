@@ -489,13 +489,16 @@ pub async fn get_top_users(
     }))
 }
 
-/// Get global model settings
+/// Get model settings for a specific model
 ///
-/// Returns the current global model settings. Requires admin authentication.
+/// Returns the current model settings. Requires admin authentication.
 #[utoipa::path(
     get,
-    path = "/v1/admin/model_settings",
+    path = "/v1/admin/model_settings/{model_id}",
     tag = "Admin",
+    params(
+        ("model_id" = String, Path, description = "Model identifier (e.g. gpt-4.1)")
+    ),
     responses(
         (status = 200, description = "Model settings retrieved", body = ModelSettingsResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
@@ -508,12 +511,13 @@ pub async fn get_top_users(
 )]
 pub async fn get_model_settings(
     State(app_state): State<AppState>,
+    Path(model_id): Path<String>,
 ) -> Result<Json<ModelSettingsResponse>, ApiError> {
-    tracing::info!("Getting global model settings");
+    tracing::info!("Getting model settings for model_id={}", model_id);
 
     let content = app_state
         .model_settings_service
-        .get_settings()
+        .get_settings(&model_id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to get model settings: {}", e);
@@ -527,11 +531,14 @@ pub async fn get_model_settings(
 
 /// Fully update global model settings
 ///
-/// Overwrites the global model settings. Requires admin authentication.
+/// Overwrites the settings for a specific model. Requires admin authentication.
 #[utoipa::path(
     post,
-    path = "/v1/admin/model_settings",
+    path = "/v1/admin/model_settings/{model_id}",
     tag = "Admin",
+    params(
+        ("model_id" = String, Path, description = "Model identifier (e.g. gpt-4.1)")
+    ),
     request_body = UpdateModelSettingsRequest,
     responses(
         (status = 200, description = "Model settings updated", body = ModelSettingsResponse),
@@ -546,9 +553,14 @@ pub async fn get_model_settings(
 )]
 pub async fn update_model_settings(
     State(app_state): State<AppState>,
+    Path(model_id): Path<String>,
     Json(request): Json<UpdateModelSettingsRequest>,
 ) -> Result<Json<ModelSettingsResponse>, ApiError> {
-    tracing::info!("Fully updating global model settings: {:?}", request);
+    tracing::info!(
+        "Fully updating model settings for model_id={}: {:?}",
+        model_id,
+        request
+    );
 
     let content = services::settings::ports::ModelSettingsContent {
         private: request.private,
@@ -556,7 +568,7 @@ pub async fn update_model_settings(
 
     let content = app_state
         .model_settings_service
-        .update_settings(content)
+        .update_settings(&model_id, content)
         .await
         .map_err(|e| {
             tracing::error!("Failed to update model settings: {}", e);
@@ -570,11 +582,14 @@ pub async fn update_model_settings(
 
 /// Partially update global model settings
 ///
-/// Partially updates the global model settings. Requires admin authentication.
+/// Partially updates the settings for a specific model. Requires admin authentication.
 #[utoipa::path(
     patch,
-    path = "/v1/admin/model_settings",
+    path = "/v1/admin/model_settings/{model_id}",
     tag = "Admin",
+    params(
+        ("model_id" = String, Path, description = "Model identifier (e.g. gpt-4.1)")
+    ),
     request_body = UpdateModelSettingsPartiallyRequest,
     responses(
         (status = 200, description = "Model settings updated", body = ModelSettingsResponse),
@@ -589,9 +604,14 @@ pub async fn update_model_settings(
 )]
 pub async fn update_model_settings_partially(
     State(app_state): State<AppState>,
+    Path(model_id): Path<String>,
     Json(request): Json<UpdateModelSettingsPartiallyRequest>,
 ) -> Result<Json<ModelSettingsResponse>, ApiError> {
-    tracing::info!("Partially updating global model settings: {:?}", request);
+    tracing::info!(
+        "Partially updating model settings for model_id={}: {:?}",
+        model_id,
+        request
+    );
 
     let content = services::settings::ports::PartialModelSettingsContent {
         private: request.private,
@@ -599,7 +619,7 @@ pub async fn update_model_settings_partially(
 
     let content = app_state
         .model_settings_service
-        .update_settings_partially(content)
+        .update_settings_partially(&model_id, content)
         .await
         .map_err(|e| {
             tracing::error!("Failed to update model settings: {}", e);
@@ -621,7 +641,7 @@ pub fn create_admin_router() -> Router<AppState> {
             get(get_system_prompt).post(set_system_prompt),
         )
         .route(
-            "/model_settings",
+            "/model_settings/{model_id}",
             get(get_model_settings)
                 .post(update_model_settings)
                 .patch(update_model_settings_partially),

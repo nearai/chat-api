@@ -34,6 +34,7 @@ impl ModelSettingsContent {
 #[derive(Debug, Clone)]
 pub struct ModelSettings {
     pub id: uuid::Uuid,
+    pub model_id: String,
     pub content: ModelSettingsContent,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -42,30 +43,35 @@ pub struct ModelSettings {
 /// Repository trait for model settings operations
 #[async_trait]
 pub trait ModelSettingsRepository: Send + Sync {
-    /// Get global model settings.
-    /// Returns `Ok(None)` if no settings exist yet.
-    async fn get_settings(&self) -> anyhow::Result<Option<ModelSettings>>;
+    /// Get settings for a specific model.
+    /// Returns `Ok(None)` if no settings exist yet for that model.
+    async fn get_settings(&self, model_id: &str) -> anyhow::Result<Option<ModelSettings>>;
 
-    /// Create or update global model settings.
-    async fn upsert_settings(&self, content: ModelSettingsContent)
-        -> anyhow::Result<ModelSettings>;
+    /// Create or update settings for a specific model.
+    async fn upsert_settings(
+        &self,
+        model_id: &str,
+        content: ModelSettingsContent,
+    ) -> anyhow::Result<ModelSettings>;
 }
 
 /// Service trait for model settings operations
 #[async_trait]
 pub trait ModelSettingsService: Send + Sync {
-    /// Get model settings (returns default when none exist).
-    async fn get_settings(&self) -> anyhow::Result<ModelSettingsContent>;
+    /// Get model settings for a specific model (returns default when none exist).
+    async fn get_settings(&self, model_id: &str) -> anyhow::Result<ModelSettingsContent>;
 
-    /// Fully update model settings.
+    /// Fully update model settings for a specific model.
     async fn update_settings(
         &self,
+        model_id: &str,
         content: ModelSettingsContent,
     ) -> anyhow::Result<ModelSettingsContent>;
 
-    /// Partially update model settings.
+    /// Partially update model settings for a specific model.
     async fn update_settings_partially(
         &self,
+        model_id: &str,
         content: PartialModelSettingsContent,
     ) -> anyhow::Result<ModelSettingsContent>;
 }

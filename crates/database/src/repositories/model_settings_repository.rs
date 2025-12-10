@@ -16,19 +16,20 @@ impl PostgresModelSettingsRepository {
 
 #[async_trait]
 impl ModelSettingsRepository for PostgresModelSettingsRepository {
-    async fn get_settings(&self) -> anyhow::Result<Option<ModelSettings>> {
-        tracing::debug!("Repository: Fetching global model settings");
+    async fn get_settings(&self, model_id: &str) -> anyhow::Result<Option<ModelSettings>> {
+        tracing::debug!(
+            "Repository: Fetching model settings for model_id={}",
+            model_id
+        );
 
         let client = self.pool.get().await?;
 
-        // We keep at most one logical row; if multiple exist, take the latest one.
         let row = client
             .query_opt(
-                "SELECT id, content, created_at, updated_at 
+                "SELECT id, model_id, content, created_at, updated_at 
                  FROM model_settings 
-                 ORDER BY created_at DESC 
-                 LIMIT 1",
-                &[],
+                 WHERE model_id = $1",
+                &[&model_id],
             )
             .await?;
 
@@ -43,6 +44,7 @@ impl ModelSettingsRepository for PostgresModelSettingsRepository {
 
             Ok(Some(ModelSettings {
                 id: row.get("id"),
+                model_id: row.get("model_id"),
                 content,
                 created_at: row.get("created_at"),
                 updated_at: row.get("updated_at"),
@@ -54,52 +56,42 @@ impl ModelSettingsRepository for PostgresModelSettingsRepository {
 
     async fn upsert_settings(
         &self,
+        model_id: &str,
         content: ModelSettingsContent,
     ) -> anyhow::Result<ModelSettings> {
-        tracing::info!("Repository: Upserting global model settings");
+        tracing::info!(
+            "Repository: Upserting model settings for model_id={}",
+            model_id
+        );
 
         let client = self.pool.get().await?;
 
         let content_json = serde_json::to_value(&content)?;
 
-        // Try to update the latest row; if none exists, insert a new one.
+        // Insert or update by model_id
         let row = client
-            .query_opt(
-                "WITH latest AS (
-                     SELECT id 
-                     FROM model_settings 
-                     ORDER BY created_at DESC 
-                     LIMIT 1
-                 )
-                 UPDATE model_settings
-                 SET content = $1, updated_at = NOW()
-                 WHERE id IN (SELECT id FROM latest)
-                 RETURNING id, created_at, updated_at",
-                &[&content_json],
+            .query_one(
+                "INSERT INTO model_settings (model_id, content)
+                 VALUES ($1, $2)
+                 ON CONFLICT (model_id)
+                 DO UPDATE SET content = EXCLUDED.content, updated_at = NOW()
+                 RETURNING id, model_id, created_at, updated_at",
+                &[&model_id, &content_json],
             )
             .await?;
 
-        let row = if let Some(row) = row {
-            row
-        } else {
-            client
-                .query_one(
-                    "INSERT INTO model_settings (content)
-                     VALUES ($1)
-                     RETURNING id, created_at, updated_at",
-                    &[&content_json],
-                )
-                .await?
-        };
-
         let settings = ModelSettings {
             id: row.get("id"),
+            model_id: row.get("model_id"),
             content,
             created_at: row.get("created_at"),
             updated_at: row.get("updated_at"),
         };
 
-        tracing::info!("Repository: Global model settings upserted successfully");
+        tracing::info!(
+            "Repository: Model settings upserted successfully for model_id={}",
+            model_id
+        );
 
         Ok(settings)
     }
