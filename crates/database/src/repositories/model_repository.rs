@@ -187,6 +187,22 @@ impl ModelsRepository for PostgresModelRepository {
             updated_at: row.get("updated_at"),
         })
     }
+
+    async fn delete_model(&self, model_id: &str) -> anyhow::Result<bool> {
+        tracing::info!("Repository: Deleting model for model_id={}", model_id);
+
+        let client = self.pool.get().await?;
+
+        let rows_affected = client
+            .execute(
+                "DELETE FROM models
+                 WHERE model_id = $1",
+                &[&model_id],
+            )
+            .await?;
+
+        Ok(rows_affected > 0)
+    }
 }
 
 fn load_settings_from_raw(raw: &Row) -> anyhow::Result<ModelSettings> {

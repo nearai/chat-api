@@ -27,6 +27,7 @@ use utoipa::OpenApi;
         crate::routes::admin::get_model,
         crate::routes::admin::upsert_model,
         crate::routes::admin::update_model,
+        crate::routes::admin::delete_model,
         crate::routes::users::get_user_settings,
         crate::routes::users::update_user_settings_partially,
         crate::routes::users::update_user_settings,

@@ -71,6 +71,12 @@ pub trait ModelsRepository: Send + Sync {
 
     /// Partially update an existing model (model_id + optional partial settings).
     async fn update_model(&self, params: UpdateModelParams) -> anyhow::Result<Model>;
+
+    /// Delete a specific model by its identifier.
+    ///
+    /// Returns `Ok(true)` if a model was deleted, or `Ok(false)` if no model
+    /// with the given `model_id` existed.
+    async fn delete_model(&self, model_id: &str) -> anyhow::Result<bool>;
 }
 
 /// Service trait for model settings operations
@@ -91,4 +97,10 @@ pub trait ModelService: Send + Sync {
 
     /// Partially update model settings for a specific model.
     async fn update_model(&self, params: UpdateModelParams) -> anyhow::Result<Model>;
+
+    /// Delete a specific model by its identifier.
+    ///
+    /// Returns `Ok(true)` if a model was deleted, or `Ok(false)` if no model
+    /// with the given `model_id` existed.
+    async fn delete_model(&self, model_id: &str) -> anyhow::Result<bool>;
 }

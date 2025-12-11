@@ -125,6 +125,124 @@ async fn test_model_requires_admin() {
     assert_eq!(error, Some("Admin access required"));
 }
 
+#[tokio::test]
+async fn test_delete_model_success() {
+    let server = create_test_server().await;
+
+    let admin_email = "test_admin_model_delete_success@admin.org";
+    let admin_token = mock_login(&server, admin_email).await;
+
+    // First, create a model
+    let update_body = json!({
+        "settings": {
+            "public": true
+        }
+    });
+
+    let response = server
+        .post("/v1/admin/model/test-model-delete-1")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&update_body)
+        .await;
+
+    assert!(
+        response.status_code().is_success(),
+        "Admin should be able to upsert model before deleting"
+    );
+
+    // Then, delete the model
+    let response = server
+        .delete("/v1/admin/model/test-model-delete-1")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        204,
+        "Deleting existing model should return 204 No Content"
+    );
+
+    // Verify the model is gone
+    let response = server
+        .get("/v1/admin/model/test-model-delete-1")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        404,
+        "Getting a deleted model should return 404"
+    );
+}
+
+#[tokio::test]
+async fn test_delete_model_not_found() {
+    let server = create_test_server().await;
+
+    let admin_email = "test_admin_model_delete_not_found@admin.org";
+    let admin_token = mock_login(&server, admin_email).await;
+
+    let response = server
+        .delete("/v1/admin/model/non-existent-model")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        404,
+        "Deleting a non-existent model should return 404"
+    );
+
+    let body: serde_json::Value = response.json();
+    assert_eq!(
+        body.get("message"),
+        Some(&json!("Model not found")),
+        "Error message should indicate model not found"
+    );
+}
+
+#[tokio::test]
+async fn test_delete_model_requires_admin() {
+    let server = create_test_server().await;
+
+    let non_admin_email = "test_user_model_delete@no-admin.org";
+    let non_admin_token = mock_login(&server, non_admin_email).await;
+
+    let response = server
+        .delete("/v1/admin/model/test-model-delete-requires-admin")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {non_admin_token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        403,
+        "Non-admin should receive 403 Forbidden when deleting a model"
+    );
+
+    let body: serde_json::Value = response.json();
+    let error = body.get("message").and_then(|v| v.as_str());
+    assert_eq!(error, Some("Admin access required"));
+}
+
 /// Requests with a model whose settings are non-public should be blocked with 403.
 #[tokio::test]
 async fn test_responses_block_non_public_model() {

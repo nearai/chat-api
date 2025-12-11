@@ -1,6 +1,7 @@
 use crate::{consts::LIST_USERS_LIMIT_MAX, error::ApiError, models::*, state::AppState};
 use axum::{
     extract::{Path, Query, State},
+    http::StatusCode,
     routing::get,
     Json, Router,
 };
@@ -635,6 +636,49 @@ pub async fn update_model(
     Ok(Json(model.into()))
 }
 
+/// Delete a model
+///
+/// Deletes a specific model and its settings. Requires admin authentication.
+#[utoipa::path(
+    delete,
+    path = "/v1/admin/model/{model_id}",
+    tag = "Admin",
+    params(
+        ("model_id" = String, Path, description = "Model identifier (e.g. gpt-4.1)")
+    ),
+    responses(
+        (status = 204, description = "Model deleted"),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "Model not found", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn delete_model(
+    State(app_state): State<AppState>,
+    Path(model_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    tracing::info!("Deleting model for model_id={}", model_id);
+
+    let deleted = app_state
+        .model_service
+        .delete_model(&model_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to delete model: {}", e);
+            ApiError::internal_server_error("Failed to delete model")
+        })?;
+
+    if !deleted {
+        return Err(ApiError::not_found("Model not found"));
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Create admin router with all admin routes (requires admin authentication)
 pub fn create_admin_router() -> Router<AppState> {
     Router::new()
@@ -646,7 +690,10 @@ pub fn create_admin_router() -> Router<AppState> {
         )
         .route(
             "/model/{model_id}",
-            get(get_model).post(upsert_model).patch(update_model),
+            get(get_model)
+                .post(upsert_model)
+                .patch(update_model)
+                .delete(delete_model),
         )
         .route("/analytics", get(get_analytics))
         .route("/analytics/top-users", get(get_top_users))

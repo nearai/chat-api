@@ -47,4 +47,10 @@ impl ModelService for ModelServiceImpl {
 
         self.repository.update_model(params).await
     }
+
+    async fn delete_model(&self, model_id: &str) -> anyhow::Result<bool> {
+        tracing::info!("Deleting model for model_id={}", model_id);
+
+        self.repository.delete_model(model_id).await
+    }
 }
