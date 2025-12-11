@@ -1075,7 +1075,7 @@ async fn proxy_responses(
 
     if let Ok(req) = serde_json::from_slice::<ResponseRequestModelField>(&body_bytes) {
         if let Some(model_id) = req.model {
-            match state.model_settings_service.get_model(&model_id).await {
+            match state.model_service.get_model(&model_id).await {
                 Ok(Some(model)) => {
                     if !model.settings.public {
                         tracing::warn!(
@@ -1305,9 +1305,9 @@ async fn proxy_model_list(
         }
     }
 
-    // Batch fetch settings for all models
+    // Batch fetch settings for all models from the admin models table
     let settings_map = state
-        .model_settings_service
+        .model_service
         .get_models_by_ids(&model_ids.iter().map(|s| s.as_str()).collect::<Vec<&str>>())
         .await.unwrap_or_else(|e| {
         tracing::warn!(
@@ -1317,7 +1317,7 @@ async fn proxy_model_list(
         std::collections::HashMap::new()
     });
 
-    // Attach `public` flag to each model based on model_settings
+    // Attach `public` flag to each model based on its stored settings
     let mut decorated_models = Vec::new();
     for mut model in std::mem::take(models_array) {
         let public_flag = model

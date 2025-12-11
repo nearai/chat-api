@@ -55,7 +55,7 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
     let conversation_repo = db.conversation_repository();
     let file_repo = db.file_repository();
     let user_settings_repo = db.user_settings_repository();
-    let model_settings_repo = db.model_settings_repository();
+    let model_repo = db.model_repository();
     let near_nonce_repo = db.near_nonce_repository();
 
     // Create services
@@ -77,9 +77,7 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
         user_settings_repo,
     ));
 
-    let model_settings_service = Arc::new(services::model::service::ModelServiceImpl::new(
-        model_settings_repo,
-    ));
+    let model_service = Arc::new(services::model::service::ModelServiceImpl::new(model_repo));
 
     // Create VPC credentials service based on provided credentials
     let vpc_credentials_service: Arc<dyn services::vpc::VpcCredentialsService> =
@@ -127,7 +125,7 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
         oauth_service,
         user_service,
         user_settings_service,
-        model_settings_service,
+        model_service,
         session_repository: session_repo,
         user_repository: user_repo,
         proxy_service,

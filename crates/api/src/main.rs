@@ -77,7 +77,7 @@ async fn main() -> anyhow::Result<()> {
     let app_config_repo = db.app_config_repository();
     let near_nonce_repo = db.near_nonce_repository();
     let analytics_repo = db.analytics_repository();
-    let model_settings_repo = db.model_settings_repository();
+    let model_repo = db.model_repository();
 
     // Create services
     tracing::info!("Initializing services...");
@@ -97,7 +97,7 @@ async fn main() -> anyhow::Result<()> {
 
     let user_settings_service = Arc::new(UserSettingsServiceImpl::new(user_settings_repo));
 
-    let model_settings_service = Arc::new(ModelServiceImpl::new(model_settings_repo));
+    let model_service = Arc::new(ModelServiceImpl::new(model_repo));
 
     // Initialize VPC credentials service and get API key
     let vpc_auth_config = if config.vpc_auth.is_configured() {
@@ -215,7 +215,7 @@ async fn main() -> anyhow::Result<()> {
         oauth_service,
         user_service,
         user_settings_service,
-        model_settings_service,
+        model_service,
         session_repository: session_repo,
         proxy_service,
         conversation_service,

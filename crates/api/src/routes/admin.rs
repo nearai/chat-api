@@ -517,7 +517,7 @@ pub async fn get_model(
     tracing::info!("Getting model for model_id={}", model_id);
 
     let model = app_state
-        .model_settings_service
+        .model_service
         .get_model(&model_id)
         .await
         .map_err(|e| {
@@ -569,7 +569,7 @@ pub async fn upsert_model(
     };
 
     let model = app_state
-        .model_settings_service
+        .model_service
         .upsert_model(params)
         .await
         .map_err(|e| {
@@ -621,7 +621,7 @@ pub async fn update_model(
     };
 
     let model = app_state
-        .model_settings_service
+        .model_service
         .update_model(params)
         .await
         .map_err(|e| {
