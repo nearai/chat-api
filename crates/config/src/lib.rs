@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DatabaseConfig {
@@ -239,6 +240,45 @@ impl TelemetryConfig {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+/// Configuration for global and per-module logging settings.
+pub struct LoggingConfig {
+    /// Global log level for the application.
+    ///
+    /// Valid values: "error", "warn", "info", "debug", "trace".
+    /// Default: "info" (from LOG_LEVEL env var or fallback).
+    pub level: String,
+    /// Log output format.
+    ///
+    /// Valid values: "pretty", "json".
+    /// Default: "pretty" (from LOG_FORMAT env var or fallback).
+    pub format: String,
+    /// Per-module log levels.
+    pub modules: HashMap<String, String>,
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        let mut modules = HashMap::new();
+
+        if let Ok(level) = std::env::var("LOG_MODULE_API") {
+            modules.insert("api".to_string(), level);
+        }
+        if let Ok(level) = std::env::var("LOG_MODULE_SERVICES") {
+            modules.insert("services".to_string(), level);
+        }
+        if let Ok(level) = std::env::var("LOG_MODULE_DATABASE") {
+            modules.insert("database".to_string(), level);
+        }
+
+        Self {
+            level: std::env::var("LOG_LEVEL").unwrap_or_else(|_| "info".to_string()),
+            format: std::env::var("LOG_FORMAT").unwrap_or_else(|_| "pretty".to_string()),
+            modules,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct Config {
     pub database: DatabaseConfig,
@@ -249,6 +289,7 @@ pub struct Config {
     pub admin: AdminConfig,
     pub vpc_auth: VpcAuthConfig,
     pub telemetry: TelemetryConfig,
+    pub logging: LoggingConfig,
 }
 
 impl Config {
@@ -262,6 +303,7 @@ impl Config {
             admin: AdminConfig::default(),
             vpc_auth: VpcAuthConfig::default(),
             telemetry: TelemetryConfig::default(),
+            logging: LoggingConfig::default(),
         }
     }
 }

@@ -1,4 +1,5 @@
 use api::{create_router_with_cors, ApiDoc, AppState};
+use config::LoggingConfig;
 use opentelemetry::global;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{
@@ -17,7 +18,7 @@ use services::{
     vpc::{initialize_vpc_credentials, VpcAuthConfig},
 };
 use std::sync::Arc;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::EnvFilter;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
@@ -29,19 +30,13 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("Continuing with environment variables...");
     }
 
-    // Initialize tracing
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,api=debug,services=debug,database=debug".into()),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
-
-    tracing::info!("Starting API server...");
-
     // Load configuration from environment
     let config = config::Config::from_env();
+
+    // Initialize tracing based on configuration
+    init_tracing(&config.logging);
+
+    tracing::info!("Starting API server...");
 
     tracing::info!(
         "Database: {}:{}/{}",
@@ -240,4 +235,53 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+fn init_tracing(logging_config: &LoggingConfig) {
+    let mut filter = logging_config.level.clone();
+    for (module, level) in &logging_config.modules {
+        filter.push_str(&format!(",{module}={level}"));
+    }
+
+    let env_filter = EnvFilter::try_new(&filter).unwrap_or_else(|err| {
+        eprintln!(
+            "Invalid log filter '{}': {}. Falling back to 'info'.",
+            filter, err
+        );
+        EnvFilter::new("info")
+    });
+
+    match logging_config.format.as_str() {
+        "json" => {
+            tracing_subscriber::fmt()
+                .json()
+                .with_env_filter(env_filter)
+                .with_current_span(false)
+                .with_span_list(false)
+                .init();
+        }
+        "compact" => {
+            tracing_subscriber::fmt()
+                .compact()
+                .with_env_filter(env_filter)
+                .with_target(false)
+                .with_thread_ids(false)
+                .with_thread_names(false)
+                .init();
+        }
+        "pretty" => {
+            tracing_subscriber::fmt()
+                .pretty()
+                .with_env_filter(env_filter)
+                .init();
+        }
+        _ => {
+            tracing_subscriber::fmt()
+                .json()
+                .with_env_filter(env_filter)
+                .with_current_span(false)
+                .with_span_list(false)
+                .init();
+        }
+    }
 }
