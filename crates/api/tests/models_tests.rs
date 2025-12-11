@@ -4,15 +4,15 @@ use common::{create_test_server, mock_login};
 use serde_json::json;
 
 #[tokio::test]
-async fn test_model_settings_get_default() {
+async fn test_get_model_not_found() {
     let server = create_test_server().await;
 
     // Use an admin account to access admin endpoints
-    let admin_email = "test_admin_model_settings_default@admin.org";
+    let admin_email = "test_admin_model_default@admin.org";
     let admin_token = mock_login(&server, admin_email).await;
 
     let response = server
-        .get("/v1/admin/model_settings/test-model-1")
+        .get("/v1/admin/model/test-model-1")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -20,34 +20,32 @@ async fn test_model_settings_get_default() {
         .await;
 
     let status = response.status_code();
-    assert_eq!(
-        status, 200,
-        "Should return default model settings when none exist"
-    );
+    assert_eq!(status, 404, "Should return 404 when model does not exist");
 
     let body: serde_json::Value = response.json();
-    let settings = body.get("settings").expect("Should have settings field");
     assert_eq!(
-        settings.get("public"),
-        Some(&json!(false)),
-        "Default public should be false"
+        body.get("message"),
+        Some(&json!("Model not found")),
+        "Error message should indicate model not found"
     );
 }
 
 #[tokio::test]
-async fn test_model_settings_update_and_get() {
+async fn test_model_update_and_get() {
     let server = create_test_server().await;
 
-    let admin_email = "test_admin_model_settings_update@admin.org";
+    let admin_email = "test_admin_model_update@admin.org";
     let admin_token = mock_login(&server, admin_email).await;
 
-    // Update settings to public = true
+    // Upsert model with settings.public = true
     let update_body = json!({
-        "public": true
+        "settings": {
+            "public": true
+        }
     });
 
     let response = server
-        .post("/v1/admin/model_settings/test-model-2")
+        .post("/v1/admin/model/test-model-2")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -60,9 +58,14 @@ async fn test_model_settings_update_and_get() {
         .await;
 
     let status = response.status_code();
-    assert_eq!(status, 200, "Admin should be able to update model settings");
+    assert_eq!(status, 200, "Admin should be able to upsert model");
 
     let body: serde_json::Value = response.json();
+    assert_eq!(
+        body.get("model_id"),
+        Some(&json!("test-model-2")),
+        "Response should include correct model_id"
+    );
     let settings = body.get("settings").expect("Should have settings field");
     assert_eq!(
         settings.get("public"),
@@ -70,9 +73,9 @@ async fn test_model_settings_update_and_get() {
         "Public should be true after update"
     );
 
-    // Get settings to verify
+    // Get model to verify persisted settings
     let response = server
-        .get("/v1/admin/model_settings/test-model-2")
+        .get("/v1/admin/model/test-model-2")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -80,9 +83,14 @@ async fn test_model_settings_update_and_get() {
         .await;
 
     let status = response.status_code();
-    assert_eq!(status, 200, "Admin should be able to get model settings");
+    assert_eq!(status, 200, "Admin should be able to get model");
 
     let body: serde_json::Value = response.json();
+    assert_eq!(
+        body.get("model_id"),
+        Some(&json!("test-model-2")),
+        "Fetched model should have correct model_id"
+    );
     let settings = body.get("settings").expect("Should have settings field");
     assert_eq!(
         settings.get("public"),
@@ -92,14 +100,14 @@ async fn test_model_settings_update_and_get() {
 }
 
 #[tokio::test]
-async fn test_model_settings_requires_admin() {
+async fn test_model_requires_admin() {
     let server = create_test_server().await;
 
-    let non_admin_email = "test_user_model_settings@no-admin.org";
+    let non_admin_email = "test_user_model@no-admin.org";
     let non_admin_token = mock_login(&server, non_admin_email).await;
 
     let response = server
-        .get("/v1/admin/model_settings/test-model-3")
+        .get("/v1/admin/model/test-model-3")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {non_admin_token}")).unwrap(),
@@ -109,7 +117,7 @@ async fn test_model_settings_requires_admin() {
     let status = response.status_code();
     assert_eq!(
         status, 403,
-        "Non-admin should receive 403 Forbidden when accessing model settings"
+        "Non-admin should receive 403 Forbidden when accessing model admin API"
     );
 
     let body: serde_json::Value = response.json();
@@ -122,9 +130,36 @@ async fn test_model_settings_requires_admin() {
 async fn test_responses_block_non_public_model() {
     let server = create_test_server().await;
 
-    let token = mock_login(&server, "visibility-non-public@example.com").await;
+    // Use an admin account to configure model settings
+    let admin_email = "visibility-non-public-admin@admin.org";
+    let admin_token = mock_login(&server, admin_email).await;
 
-    // By default, models are non-public (public = false), so this model should be blocked.
+    // Explicitly create a non-public model via admin API
+    let update_body = json!({
+        "settings": {
+            "public": false
+        }
+    });
+
+    let response = server
+        .post("/v1/admin/model/test-non-public-model")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&update_body)
+        .await;
+
+    assert!(
+        response.status_code().is_success(),
+        "Admin should be able to set model as non-public"
+    );
+
+    // Now send a response request using the non-public model
     let body = json!({
         "model": "test-non-public-model",
         "input": "Hello"
@@ -134,7 +169,7 @@ async fn test_responses_block_non_public_model() {
         .post("/v1/responses")
         .add_header(
             http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
         )
         .add_header(
             http::HeaderName::from_static("content-type"),
@@ -168,11 +203,13 @@ async fn test_responses_allow_public_model() {
 
     // Mark the model as public via admin API
     let update_body = json!({
-        "public": true
+        "settings": {
+            "public": true
+        }
     });
 
     let response = server
-        .post("/v1/admin/model_settings/test-public-model")
+        .post("/v1/admin/model/test-public-model")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
