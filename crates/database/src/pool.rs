@@ -134,7 +134,7 @@ mod tests {
             mock: false,
         };
 
-        assert!(!config.tls_enabled);
+        assert!(config.tls_enabled);
     }
 
     #[test]
