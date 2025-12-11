@@ -243,11 +243,19 @@ fn init_tracing(logging_config: &LoggingConfig) {
         filter.push_str(&format!(",{module}={level}"));
     }
 
+    let env_filter = EnvFilter::try_new(&filter).unwrap_or_else(|err| {
+        eprintln!(
+            "Invalid log filter '{}': {}. Falling back to 'info'.",
+            filter, err
+        );
+        EnvFilter::new("info")
+    });
+
     match logging_config.format.as_str() {
         "json" => {
             tracing_subscriber::fmt()
                 .json()
-                .with_env_filter(EnvFilter::new(&filter))
+                .with_env_filter(env_filter)
                 .with_current_span(false)
                 .with_span_list(false)
                 .init();
@@ -255,7 +263,7 @@ fn init_tracing(logging_config: &LoggingConfig) {
         "compact" => {
             tracing_subscriber::fmt()
                 .compact()
-                .with_env_filter(EnvFilter::new(&filter))
+                .with_env_filter(env_filter)
                 .with_target(false)
                 .with_thread_ids(false)
                 .with_thread_names(false)
@@ -264,13 +272,13 @@ fn init_tracing(logging_config: &LoggingConfig) {
         "pretty" => {
             tracing_subscriber::fmt()
                 .pretty()
-                .with_env_filter(EnvFilter::new(&filter))
+                .with_env_filter(env_filter)
                 .init();
         }
         _ => {
             tracing_subscriber::fmt()
                 .json()
-                .with_env_filter(EnvFilter::new(&filter))
+                .with_env_filter(env_filter)
                 .with_current_span(false)
                 .with_span_list(false)
                 .init();

@@ -241,9 +241,19 @@ impl TelemetryConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+/// Configuration for global and per-module logging settings.
 pub struct LoggingConfig {
+    /// Global log level for the application.
+    ///
+    /// Valid values: "error", "warn", "info", "debug", "trace".
+    /// Default: "info" (from LOG_LEVEL env var or fallback).
     pub level: String,
+    /// Log output format.
+    ///
+    /// Valid values: "pretty", "json".
+    /// Default: "pretty" (from LOG_FORMAT env var or fallback).
     pub format: String,
+    /// Per-module log levels.
     pub modules: HashMap<String, String>,
 }
 
