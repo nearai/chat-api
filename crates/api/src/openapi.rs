@@ -24,9 +24,9 @@ use utoipa::OpenApi;
         crate::routes::users::get_current_user,
         // Admin endpoints
         crate::routes::admin::list_users,
-        crate::routes::admin::get_model_settings,
-        crate::routes::admin::update_model_settings,
-        crate::routes::admin::update_model_settings_partially,
+        crate::routes::admin::get_model,
+        crate::routes::admin::upsert_model,
+        crate::routes::admin::update_model,
         crate::routes::users::get_user_settings,
         crate::routes::users::update_user_settings_partially,
         crate::routes::users::update_user_settings,
@@ -50,10 +50,10 @@ use utoipa::OpenApi;
         crate::models::UserSettingsResponse,
         crate::models::UpdateUserSettingsPartiallyRequest,
         crate::models::UpdateUserSettingsRequest,
-        // Model settings models
-        crate::models::ModelSettingsResponse,
-        crate::models::UpdateModelSettingsPartiallyRequest,
-        crate::models::UpdateModelSettingsRequest,
+        // Model settings / model admin models
+        crate::models::ModelResponse,
+        crate::models::UpsertModelsRequest,
+        crate::models::UpdateModelRequest,
         // Attestation models
         crate::models::ApiGatewayAttestation,
         crate::models::ModelAttestation,

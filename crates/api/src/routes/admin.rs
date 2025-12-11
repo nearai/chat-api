@@ -617,7 +617,7 @@ pub async fn update_model(
 
     let params = UpdateModelParams {
         model_id: model_id.clone(),
-        settings: settings.into(),
+        settings,
     };
 
     let model = app_state
