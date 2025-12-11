@@ -1,4 +1,4 @@
-use crate::consts::LIST_FILES_LIMIT_MAX;
+use crate::consts::{LIST_FILES_LIMIT_MAX, MODEL_PUBLIC_DEFAULT};
 use crate::middleware::auth::AuthenticatedUser;
 use axum::{
     body::Body,
@@ -1066,6 +1066,57 @@ async fn proxy_responses(
         }
     }
 
+    // Enforce model-level visibility based on settings if a model is specified
+    #[derive(Deserialize)]
+    struct ResponseRequestModelField {
+        #[serde(default)]
+        model: Option<String>,
+    }
+
+    if let Ok(req) = serde_json::from_slice::<ResponseRequestModelField>(&body_bytes) {
+        if let Some(model_id) = req.model {
+            match state.model_service.get_model(&model_id).await {
+                Ok(Some(model)) => {
+                    if !model.settings.public {
+                        tracing::warn!(
+                            "Blocking response request for non-public model '{}' from user {}",
+                            model_id,
+                            user.user_id
+                        );
+                        return Err((
+                            StatusCode::FORBIDDEN,
+                            Json(ErrorResponse {
+                                error: "This model is not available".to_string(),
+                            }),
+                        )
+                            .into_response());
+                    }
+                }
+                Ok(None) => {
+                    return Err((
+                        StatusCode::NOT_FOUND,
+                        Json(ErrorResponse {
+                            error: "Model not found".to_string(),
+                        }),
+                    )
+                        .into_response())
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to load model settings for '{}', allowing request to proceed: {}",
+                        model_id,
+                        e
+                    );
+                }
+            }
+        }
+    } else {
+        tracing::debug!(
+            "Failed to parse model field from /responses request body for user_id={}",
+            user.user_id
+        );
+    }
+
     // Track conversation from the request
     tracing::debug!("POST to /responses detected, attempting to track conversation");
     if let Err(e) = track_conversation_from_request(&state, user.user_id, &body_bytes).await {
@@ -1174,12 +1225,140 @@ async fn proxy_model_list(
         user.user_id
     );
 
-    build_response(
-        proxy_response.status,
-        proxy_response.headers,
-        Body::from_stream(proxy_response.body),
-    )
-    .await
+    // If upstream returned non-success, just proxy as-is
+    if !(200..300).contains(&proxy_response.status) {
+        return build_response(
+            proxy_response.status,
+            proxy_response.headers,
+            Body::from_stream(proxy_response.body),
+        )
+        .await;
+    }
+
+    // Buffer body into bytes
+    let body_bytes: Bytes = proxy_response
+        .body
+        .try_collect::<Vec<_>>()
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to read model list response body for user_id={}: {}",
+                user.user_id,
+                e
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("Failed to read response body: {e}"),
+                }),
+            )
+                .into_response()
+        })?
+        .into_iter()
+        .flatten()
+        .collect();
+
+    // Try to parse JSON
+    let mut body_json: serde_json::Value = match serde_json::from_slice(&body_bytes) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                "Failed to parse model list JSON for user_id={}: {}, returning original body",
+                user.user_id,
+                e
+            );
+            return build_response(
+                proxy_response.status,
+                proxy_response.headers,
+                Body::from(body_bytes),
+            )
+            .await;
+        }
+    };
+
+    let models_opt = body_json.get_mut("models").and_then(|v| v.as_array_mut());
+
+    let Some(models_array) = models_opt else {
+        tracing::debug!("No 'models' array found in model list response, returning original body");
+        return Response::builder()
+            .status(StatusCode::from_u16(proxy_response.status).unwrap_or(StatusCode::OK))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&body_json).unwrap_or_else(|_| body_bytes.to_vec()),
+            ))
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("Failed to build response: {e}"),
+                    }),
+                )
+                    .into_response()
+            });
+    };
+
+    // Collect all model IDs for batch settings lookup
+    let mut model_ids: Vec<String> = Vec::new();
+    for model in models_array.iter() {
+        if let Some(model_id) = model.get("modelId").and_then(|v| v.as_str()) {
+            model_ids.push(model_id.to_string());
+        }
+    }
+
+    // Batch fetch settings for all models from the admin models table
+    let settings_map = state
+        .model_service
+        .get_models_by_ids(&model_ids.iter().map(|s| s.as_str()).collect::<Vec<&str>>())
+        .await.unwrap_or_else(|e| {
+        tracing::warn!(
+                "Failed to batch load model settings for model list: {}, defaulting all public=false",
+                e
+            );
+        std::collections::HashMap::new()
+    });
+
+    // Attach `public` flag to each model based on its stored settings
+    let mut decorated_models = Vec::new();
+    for mut model in std::mem::take(models_array) {
+        let public_flag = model
+            .get("modelId")
+            .and_then(|v| v.as_str())
+            .and_then(|id| settings_map.get(id).map(|m| m.settings.public))
+            .unwrap_or(MODEL_PUBLIC_DEFAULT);
+
+        if let Some(obj) = model.as_object_mut() {
+            obj.insert("public".to_string(), serde_json::Value::Bool(public_flag));
+        }
+
+        decorated_models.push(model);
+    }
+
+    *body_json
+        .get_mut("models")
+        .expect("models key must exist after previous check") =
+        serde_json::Value::Array(decorated_models);
+
+    let filtered_bytes = serde_json::to_vec(&body_json).unwrap_or_else(|e| {
+        tracing::error!(
+            "Failed to serialize filtered model list JSON: {}, returning original body",
+            e
+        );
+        body_bytes.to_vec()
+    });
+
+    Response::builder()
+        .status(StatusCode::from_u16(proxy_response.status).unwrap_or(StatusCode::OK))
+        .header("content-type", "application/json")
+        .body(Body::from(filtered_bytes))
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to build response: {e}"),
+                }),
+            )
+                .into_response()
+        })
 }
 
 async fn proxy_signature(

@@ -3,6 +3,7 @@ pub mod auth;
 pub mod conversation;
 pub mod file;
 pub mod metrics;
+pub mod model;
 pub mod response;
 pub mod types;
 pub mod user;

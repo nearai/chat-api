@@ -1,12 +1,14 @@
 use crate::{consts::LIST_USERS_LIMIT_MAX, error::ApiError, models::*, state::AppState};
 use axum::{
     extract::{Path, Query, State},
+    http::StatusCode,
     routing::get,
     Json, Router,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use services::analytics::{ActivityLogEntry, AnalyticsSummary, TopActiveUsersResponse};
+use services::model::ports::{UpdateModelParams, UpsertModelParams};
 use services::UserId;
 
 /// Pagination query parameters
@@ -489,6 +491,194 @@ pub async fn get_top_users(
     }))
 }
 
+/// Get model settings for a specific model
+///
+/// Returns the current model (including settings). Requires admin authentication.
+#[utoipa::path(
+    get,
+    path = "/v1/admin/model/{model_id}",
+    tag = "Admin",
+    params(
+        ("model_id" = String, Path, description = "Model identifier (e.g. gpt-4.1)")
+    ),
+    responses(
+        (status = 200, description = "Model settings retrieved", body = ModelResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn get_model(
+    State(app_state): State<AppState>,
+    Path(model_id): Path<String>,
+) -> Result<Json<ModelResponse>, ApiError> {
+    tracing::info!("Getting model for model_id={}", model_id);
+
+    let model = app_state
+        .model_service
+        .get_model(&model_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get model: {}", e);
+            ApiError::internal_server_error("Failed to get model")
+        })?;
+
+    let model = model.ok_or_else(|| ApiError::not_found("Model not found"))?;
+
+    Ok(Json(model.into()))
+}
+
+/// Fully create or update a model
+///
+/// Overwrites the settings for a specific model. Requires admin authentication.
+#[utoipa::path(
+    post,
+    path = "/v1/admin/model/{model_id}",
+    tag = "Admin",
+    params(
+        ("model_id" = String, Path, description = "Model identifier (e.g. gpt-4.1)")
+    ),
+    request_body = UpsertModelsRequest,
+    responses(
+        (status = 200, description = "Model updated", body = ModelResponse),
+        (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn upsert_model(
+    State(app_state): State<AppState>,
+    Path(model_id): Path<String>,
+    Json(request): Json<UpsertModelsRequest>,
+) -> Result<Json<ModelResponse>, ApiError> {
+    tracing::info!(
+        "Fully upserting model for model_id={}: {:?}",
+        model_id,
+        request
+    );
+
+    let params = UpsertModelParams {
+        model_id,
+        settings: request.settings.into(),
+    };
+
+    let model = app_state
+        .model_service
+        .upsert_model(params)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to upsert model: {}", e);
+            ApiError::internal_server_error("Failed to upsert model")
+        })?;
+
+    Ok(Json(model.into()))
+}
+
+/// Partially update a model
+///
+/// Partially updates the settings for a specific model. Requires admin authentication.
+#[utoipa::path(
+    patch,
+    path = "/v1/admin/model/{model_id}",
+    tag = "Admin",
+    params(
+        ("model_id" = String, Path, description = "Model identifier (e.g. gpt-4.1)")
+    ),
+    request_body = UpdateModelRequest,
+    responses(
+        (status = 200, description = "Model settings updated", body = ModelResponse),
+        (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn update_model(
+    State(app_state): State<AppState>,
+    Path(model_id): Path<String>,
+    Json(request): Json<UpdateModelRequest>,
+) -> Result<Json<ModelResponse>, ApiError> {
+    tracing::info!(
+        "Partially updating model for model_id={}: {:?}",
+        model_id,
+        request
+    );
+
+    let settings = request.settings.map(Into::into);
+
+    let params = UpdateModelParams {
+        model_id: model_id.clone(),
+        settings,
+    };
+
+    let model = app_state
+        .model_service
+        .update_model(params)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to update model: {}", e);
+            if e.to_string().contains("Model not found") {
+                return ApiError::not_found("Model not found");
+            }
+            ApiError::internal_server_error("Failed to update model")
+        })?;
+
+    Ok(Json(model.into()))
+}
+
+/// Delete a model
+///
+/// Deletes a specific model and its settings. Requires admin authentication.
+#[utoipa::path(
+    delete,
+    path = "/v1/admin/model/{model_id}",
+    tag = "Admin",
+    params(
+        ("model_id" = String, Path, description = "Model identifier (e.g. gpt-4.1)")
+    ),
+    responses(
+        (status = 204, description = "Model deleted"),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "Model not found", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn delete_model(
+    State(app_state): State<AppState>,
+    Path(model_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    tracing::info!("Deleting model for model_id={}", model_id);
+
+    let deleted = app_state
+        .model_service
+        .delete_model(&model_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to delete model: {}", e);
+            ApiError::internal_server_error("Failed to delete model")
+        })?;
+
+    if !deleted {
+        return Err(ApiError::not_found("Model not found"));
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Create admin router with all admin routes (requires admin authentication)
 pub fn create_admin_router() -> Router<AppState> {
     Router::new()
@@ -497,6 +687,13 @@ pub fn create_admin_router() -> Router<AppState> {
         .route(
             "/system_prompt",
             get(get_system_prompt).post(set_system_prompt),
+        )
+        .route(
+            "/model/{model_id}",
+            get(get_model)
+                .post(upsert_model)
+                .patch(update_model)
+                .delete(delete_model),
         )
         .route("/analytics", get(get_analytics))
         .route("/analytics/top-users", get(get_top_users))
