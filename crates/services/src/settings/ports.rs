@@ -53,6 +53,13 @@ pub trait ModelSettingsRepository: Send + Sync {
         model_id: &str,
         content: ModelSettingsContent,
     ) -> anyhow::Result<ModelSettings>;
+
+    /// Batch get settings for multiple models.
+    /// Returns a map from model_id to resolved `ModelSettingsContent`.
+    async fn get_settings_for_models(
+        &self,
+        model_ids: &[&str],
+    ) -> anyhow::Result<std::collections::HashMap<String, ModelSettingsContent>>;
 }
 
 /// Service trait for model settings operations
@@ -74,4 +81,11 @@ pub trait ModelSettingsService: Send + Sync {
         model_id: &str,
         content: PartialModelSettingsContent,
     ) -> anyhow::Result<ModelSettingsContent>;
+
+    /// Batch get settings content for multiple models.
+    /// Missing models will not appear in the map; callers should fall back to defaults.
+    async fn get_settings_for_models(
+        &self,
+        model_ids: &[&str],
+    ) -> anyhow::Result<std::collections::HashMap<String, ModelSettingsContent>>;
 }

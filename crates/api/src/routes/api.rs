@@ -1288,32 +1288,38 @@ async fn proxy_model_list(
             });
     };
 
+    // Collect all model IDs for batch settings lookup
+    let mut model_ids: Vec<String> = Vec::new();
+    for model in models_array.iter() {
+        if let Some(model_id) = model.get("modelId").and_then(|v| v.as_str()) {
+            model_ids.push(model_id.to_string());
+        }
+    }
+
+    // Batch fetch settings for all models (avoids N+1 queries)
+    let settings_map = match state
+        .model_settings_service
+        .get_settings_for_models(&model_ids.iter().map(|s| s.as_str()).collect::<Vec<&str>>())
+        .await
+    {
+        Ok(map) => map,
+        Err(e) => {
+            tracing::warn!(
+                "Failed to batch load model settings for model list: {}, defaulting all public=false",
+                e
+            );
+            std::collections::HashMap::new()
+        }
+    };
+
     // Attach `public` flag to each model based on model_settings
     let mut decorated_models = Vec::new();
     for mut model in std::mem::take(models_array) {
-        let model_id_opt = model
+        let public_flag = model
             .get("modelId")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        let mut public_flag = false;
-
-        if let Some(model_id) = model_id_opt {
-            match state.model_settings_service.get_settings(&model_id).await {
-                Ok(settings) => {
-                    public_flag = settings.public;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to load settings for model '{}': {}, defaulting public=false",
-                        model_id,
-                        e
-                    );
-                }
-            }
-        } else {
-            tracing::debug!("No 'modelId' found in model response");
-        }
+            .and_then(|id| settings_map.get(id).map(|s| s.public))
+            .unwrap_or(false);
 
         if let Some(obj) = model.as_object_mut() {
             obj.insert("public".to_string(), serde_json::Value::Bool(public_flag));

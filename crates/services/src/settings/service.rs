@@ -61,4 +61,11 @@ impl ModelSettingsService for ModelSettingsServiceImpl {
         self.update_settings(model_id, old_content.into_updated(content))
             .await
     }
+
+    async fn get_settings_for_models(
+        &self,
+        model_ids: &[&str],
+    ) -> anyhow::Result<std::collections::HashMap<String, ModelSettingsContent>> {
+        self.repository.get_settings_for_models(model_ids).await
+    }
 }

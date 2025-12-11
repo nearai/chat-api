@@ -95,4 +95,47 @@ impl ModelSettingsRepository for PostgresModelSettingsRepository {
 
         Ok(settings)
     }
+
+    async fn get_settings_for_models(
+        &self,
+        model_ids: &[&str],
+    ) -> anyhow::Result<std::collections::HashMap<String, ModelSettingsContent>> {
+        tracing::debug!(
+            "Repository: Fetching model settings for {} model_ids",
+            model_ids.len()
+        );
+
+        if model_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+
+        let client = self.pool.get().await?;
+
+        let rows = client
+            .query(
+                "SELECT model_id, content
+                 FROM model_settings
+                 WHERE model_id = ANY($1)",
+                &[&model_ids],
+            )
+            .await?;
+
+        let mut map = std::collections::HashMap::new();
+
+        for row in rows {
+            let model_id: String = row.get("model_id");
+            let content_json: serde_json::Value = row.get("content");
+
+            let default_content = ModelSettingsContent::default();
+            let partial = serde_json::from_value::<PartialModelSettingsContent>(content_json)
+                .unwrap_or(PartialModelSettingsContent {
+                    public: Some(default_content.public),
+                });
+            let content = default_content.into_updated(partial);
+
+            map.insert(model_id, content);
+        }
+
+        Ok(map)
+    }
 }
