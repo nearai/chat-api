@@ -1,4 +1,4 @@
-use crate::consts::LIST_FILES_LIMIT_MAX;
+use crate::consts::{LIST_FILES_LIMIT_MAX, MODEL_PUBLIC_DEFAULT};
 use crate::middleware::auth::AuthenticatedUser;
 use axum::{
     body::Body,
@@ -1324,7 +1324,7 @@ async fn proxy_model_list(
             .get("modelId")
             .and_then(|v| v.as_str())
             .and_then(|id| settings_map.get(id).map(|m| m.settings.public))
-            .unwrap_or(false);
+            .unwrap_or(MODEL_PUBLIC_DEFAULT);
 
         if let Some(obj) = model.as_object_mut() {
             obj.insert("public".to_string(), serde_json::Value::Bool(public_flag));
