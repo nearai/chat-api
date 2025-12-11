@@ -626,6 +626,9 @@ pub async fn update_model(
         .await
         .map_err(|e| {
             tracing::error!("Failed to update model: {}", e);
+            if e.to_string().contains("Model not found") {
+                return ApiError::not_found("Model not found");
+            }
             ApiError::internal_server_error("Failed to update model")
         })?;
 
