@@ -7,9 +7,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use services::analytics::{ActivityLogEntry, AnalyticsSummary, TopActiveUsersResponse};
-use services::model::ports::{
-    ModelSettings, PartialModelSettings, UpdateModelRequest, UpsertModelRequest,
-};
+use services::model::ports::{UpdateModelParams, UpsertModelParams};
 use services::UserId;
 
 /// Pagination query parameters
@@ -565,11 +563,14 @@ pub async fn upsert_model(
         request
     );
 
-    let upsert_request = UpsertModelRequest { model_id, settings };
+    let params = UpsertModelParams {
+        model_id,
+        settings: request.settings.into(),
+    };
 
     let model = app_state
         .model_settings_service
-        .upsert_model(upsert_request)
+        .upsert_model(params)
         .await
         .map_err(|e| {
             tracing::error!("Failed to upsert model: {}", e);
@@ -612,18 +613,16 @@ pub async fn update_model(
         request
     );
 
-    let settings = request.settings.map(|settings| PartialModelSettings {
-        public: settings.public,
-    });
+    let settings = request.settings.map(Into::into);
 
-    let update_request = UpdateModelRequest {
+    let params = UpdateModelParams {
         model_id: model_id.clone(),
-        settings,
+        settings: settings.into(),
     };
 
     let model = app_state
         .model_settings_service
-        .update_model(update_request)
+        .update_model(params)
         .await
         .map_err(|e| {
             tracing::error!("Failed to update model: {}", e);

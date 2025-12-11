@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use std::sync::Arc;
 
-use super::ports::{Model, ModelService, ModelsRepository, UpdateModelRequest, UpsertModelRequest};
+use super::ports::{Model, ModelService, ModelsRepository, UpdateModelParams, UpsertModelParams};
 
 pub struct ModelServiceImpl {
     repository: Arc<dyn ModelsRepository>,
@@ -21,30 +21,30 @@ impl ModelService for ModelServiceImpl {
         self.repository.get_model(model_id).await
     }
 
-    async fn upsert_model(&self, model: UpsertModelRequest) -> anyhow::Result<Model> {
-        tracing::info!(
-            "Upserting model for model_id={}: {:?}",
-            model.model_id,
-            model
-        );
-
-        self.repository.upsert_model(model).await
-    }
-
-    async fn update_model(&self, model: UpdateModelRequest) -> anyhow::Result<Model> {
-        tracing::info!(
-            "Updating model for model_id={}: {:?}",
-            model.model_id,
-            model
-        );
-
-        self.repository.update_model(model).await
-    }
-
     async fn get_models_by_ids(
         &self,
         model_ids: &[&str],
     ) -> anyhow::Result<std::collections::HashMap<String, Model>> {
         self.repository.get_models_by_ids(model_ids).await
+    }
+
+    async fn upsert_model(&self, params: UpsertModelParams) -> anyhow::Result<Model> {
+        tracing::info!(
+            "Upserting model for model_id={}: {:?}",
+            params.model_id,
+            params
+        );
+
+        self.repository.upsert_model(params).await
+    }
+
+    async fn update_model(&self, params: UpdateModelParams) -> anyhow::Result<Model> {
+        tracing::info!(
+            "Updating model for model_id={}: {:?}",
+            params.model_id,
+            params
+        );
+
+        self.repository.update_model(params).await
     }
 }

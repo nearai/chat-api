@@ -2,8 +2,8 @@ use crate::pool::DbPool;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use services::model::ports::{
-    Model, ModelSettings, ModelsRepository, PartialModelSettings, UpdateModelRequest,
-    UpsertModelRequest,
+    Model, ModelSettings, ModelsRepository, PartialModelSettings, UpdateModelParams,
+    UpsertModelParams,
 };
 use tokio_postgres::Row;
 use uuid::Uuid;
@@ -105,13 +105,15 @@ impl ModelsRepository for PostgresModelRepository {
         Ok(map)
     }
 
-    async fn upsert_model(&self, model: UpsertModelRequest) -> anyhow::Result<Model> {
+    async fn upsert_model(&self, params: UpsertModelParams) -> anyhow::Result<Model> {
         tracing::info!(
             "Repository: Upserting model for model_id={}",
-            model.model_id
+            params.model_id
         );
 
         let client = self.pool.get().await?;
+
+        let settings = serde_json::to_value(params.settings.clone())?;
 
         // Insert or update by model_id
         let row = client
@@ -121,16 +123,16 @@ impl ModelsRepository for PostgresModelRepository {
                  ON CONFLICT (model_id)
                  DO UPDATE SET settings = EXCLUDED.settings
                  RETURNING *",
-                &[&model.model_id, &model.settings],
+                &[&params.model_id, &settings],
             )
             .await?;
 
-        let model_id = model.model_id;
+        let model_id = params.model_id;
 
         let settings = Model {
             id: row.get("id"),
             model_id: model_id.clone(),
-            settings: model.settings,
+            settings: params.settings,
             created_at: row.get("created_at"),
             updated_at: row.get("updated_at"),
         };
@@ -143,23 +145,28 @@ impl ModelsRepository for PostgresModelRepository {
         Ok(settings)
     }
 
-    async fn update_model(&self, model: UpdateModelRequest) -> anyhow::Result<Model> {
-        tracing::info!("Repository: Updating model for model_id={}", model.model_id);
+    async fn update_model(&self, params: UpdateModelParams) -> anyhow::Result<Model> {
+        tracing::info!(
+            "Repository: Updating model for model_id={}",
+            params.model_id
+        );
 
-        let existing_model = self.get_model(&model.model_id).await?;
+        let existing_model = self.get_model(&params.model_id).await?;
 
         let Some(existing_model) = existing_model else {
-            anyhow::bail!("Model not found for model id: {}", model.model_id);
+            anyhow::bail!("Model not found for model id: {}", params.model_id);
         };
 
         let client = self.pool.get().await?;
 
         // Merge with incoming partial settings (if provided)
-        let new_settings = if let Some(delta) = model.settings {
+        let new_settings = if let Some(delta) = params.settings {
             existing_model.settings.into_updated(delta)
         } else {
             existing_model.settings
         };
+
+        let new_settings_json = serde_json::to_value(new_settings.clone())?;
 
         // Persist updated settings
         let row = client
@@ -168,7 +175,7 @@ impl ModelsRepository for PostgresModelRepository {
                  SET settings = $1
                  WHERE model_id = $2
                  RETURNING id, model_id, created_at, updated_at",
-                &[&new_settings, &model.model_id],
+                &[&new_settings_json, &params.model_id],
             )
             .await?;
 

@@ -266,6 +266,37 @@ impl From<services::model::ports::ModelSettings> for ModelSettings {
     }
 }
 
+impl From<ModelSettings> for services::model::ports::ModelSettings {
+    fn from(content: ModelSettings) -> Self {
+        Self {
+            public: content.public,
+        }
+    }
+}
+
+/// Model settings content for API responses
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct PartialModelSettings {
+    /// Whether models are public (visible/usable in responses)
+    pub public: Option<bool>,
+}
+
+impl From<services::model::ports::PartialModelSettings> for PartialModelSettings {
+    fn from(content: services::model::ports::PartialModelSettings) -> Self {
+        Self {
+            public: content.public,
+        }
+    }
+}
+
+impl From<PartialModelSettings> for services::model::ports::PartialModelSettings {
+    fn from(content: PartialModelSettings) -> Self {
+        Self {
+            public: content.public,
+        }
+    }
+}
+
 /// Complete model response
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ModelResponse {
@@ -293,8 +324,7 @@ pub struct UpsertModelsRequest {
 /// Model settings update request (partial update)
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UpdateModelRequest {
-    /// Whether models are public (visible/usable in responses)
-    pub public: Option<bool>,
+    pub settings: Option<PartialModelSettings>,
 }
 
 /// Paginated user list response
