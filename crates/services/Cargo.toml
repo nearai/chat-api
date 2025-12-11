@@ -42,7 +42,7 @@ dstack-sdk = "0.1"
 opentelemetry = { version = "0.31", features = ["metrics"] }
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "metrics"] }
 utoipa = { version = "5", optional = true }
-near-api = { git = "https://github.com/near/near-api-rs", rev = "f07473256aa7a70e094432618bac174e60d533df" }
+near-api = "0.8.0"
 
 [features]
 utoipa = ["dep:utoipa"]
