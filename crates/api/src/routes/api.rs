@@ -1075,7 +1075,7 @@ async fn proxy_responses(
 
     if let Ok(req) = serde_json::from_slice::<ResponseRequestModelField>(&body_bytes) {
         if let Some(model_id) = req.model {
-            match state.model_settings_service.get_settings(&model_id).await {
+            match state.model_settings_service.get_model(&model_id).await {
                 Ok(settings) => {
                     if !settings.public {
                         tracing::warn!(
@@ -1299,7 +1299,7 @@ async fn proxy_model_list(
     // Batch fetch settings for all models
     let settings_map = state
         .model_settings_service
-        .get_settings_by_ids(&model_ids.iter().map(|s| s.as_str()).collect::<Vec<&str>>())
+        .get_models_by_ids(&model_ids.iter().map(|s| s.as_str()).collect::<Vec<&str>>())
         .await.unwrap_or_else(|e| {
         tracing::warn!(
                 "Failed to batch load model settings for model list: {}, defaulting all public=false",

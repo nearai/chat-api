@@ -1,6 +1,8 @@
 use crate::pool::DbPool;
 use async_trait::async_trait;
-use services::model::ports::{Model, ModelSettings, ModelsRepository, PartialModelSettings};
+use chrono::{DateTime, Utc};
+use uuid::Uuid;
+use services::model::ports::{Model, ModelSettings, ModelsRepository, PartialModelSettings, UpsertModelRequest};
 
 pub struct PostgresModelRepository {
     pool: DbPool,
@@ -51,19 +53,13 @@ impl ModelsRepository for PostgresModelRepository {
         }
     }
 
-    async fn upsert_settings(
-        &self,
-        model_id: &str,
-        settings: ModelSettings,
-    ) -> anyhow::Result<Model> {
+    async fn upsert_model(&self, model: UpsertModelRequest) -> anyhow::Result<Model> {
         tracing::info!(
-            "Repository: Upserting model settings for model_id={}",
-            model_id
+            "Repository: Upserting model for model_id={}",
+            model.model_id
         );
 
         let client = self.pool.get().await?;
-
-        let settings_json = serde_json::to_value(&settings)?;
 
         // Insert or update by model_id
         let row = client
@@ -71,16 +67,18 @@ impl ModelsRepository for PostgresModelRepository {
                 "INSERT INTO models (model_id, settings)
                  VALUES ($1, $2)
                  ON CONFLICT (model_id)
-                 DO UPDATE SET settings = EXCLUDED.settings, updated_at = NOW()
-                 RETURNING id, model_id, created_at, updated_at",
-                &[&model_id, &settings_json],
+                 DO UPDATE SET settings = EXCLUDED.settings
+                 RETURNING *",
+                &[&model.model_id, &model.settings],
             )
             .await?;
+        
+        let model_id = model.model_id;
 
         let settings = Model {
             id: row.get("id"),
-            model_id: row.get("model_id"),
-            settings,
+            model_id: model_id.clone(),
+            settings: model.settings,
             created_at: row.get("created_at"),
             updated_at: row.get("updated_at"),
         };
@@ -93,12 +91,12 @@ impl ModelsRepository for PostgresModelRepository {
         Ok(settings)
     }
 
-    async fn get_settings_by_ids(
+    async fn get_models_by_ids(
         &self,
         model_ids: &[&str],
-    ) -> anyhow::Result<std::collections::HashMap<String, ModelSettings>> {
+    ) -> anyhow::Result<std::collections::HashMap<String, Model>> {
         tracing::debug!(
-            "Repository: Fetching model settings for {} model_ids",
+            "Repository: Fetching models for {} model_ids",
             model_ids.len()
         );
 
@@ -110,7 +108,7 @@ impl ModelsRepository for PostgresModelRepository {
 
         let rows = client
             .query(
-                "SELECT model_id, settings
+                "SELECT id, model_id, settings, created_at, updated_at
                  FROM models
                  WHERE model_id = ANY($1)",
                 &[&model_ids],
@@ -120,17 +118,25 @@ impl ModelsRepository for PostgresModelRepository {
         let mut map = std::collections::HashMap::new();
 
         for row in rows {
+            let id: Uuid = row.get("id");
             let model_id: String = row.get("model_id");
             let settings_json: serde_json::Value = row.get("settings");
+            let created_at: DateTime<Utc> = row.get("created_at");
+            let updated_at: DateTime<Utc> = row.get("updated_at");
 
             let default_settings = ModelSettings::default();
-            let settings_delta = serde_json::from_value::<PartialModelSettings>(settings_json)
-                .unwrap_or(PartialModelSettings {
-                    public: Some(default_settings.public),
-                });
-            let settings = default_settings.into_updated(settings_delta);
+            let partial_settings = serde_json::from_value::<PartialModelSettings>(settings_json)?;
+            let settings = default_settings.into_updated(partial_settings);
+            
+            let model = Model {
+                id,
+                model_id: model_id.clone(),
+                settings,
+                created_at,
+                updated_at
+            };
 
-            map.insert(model_id, settings);
+            map.insert(model_id, model);
         }
 
         Ok(map)

@@ -31,13 +31,25 @@ impl ModelSettings {
 }
 
 /// Model settings stored as JSONB in the database
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Model {
     pub id: uuid::Uuid,
     pub model_id: String,
     pub settings: ModelSettings,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct UpsertModelRequest {
+    pub model_id: String,
+    pub settings: ModelSettings,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct UpdateModelRequest {
+    pub model_id: String,
+    pub settings: Option<PartialModelSettings>,
 }
 
 /// Repository trait for model settings operations
@@ -47,45 +59,39 @@ pub trait ModelsRepository: Send + Sync {
     /// Returns `Ok(None)` if no settings exist yet for that model.
     async fn get_model(&self, model_id: &str) -> anyhow::Result<Option<Model>>;
 
-    /// Create or update settings for a specific model.
-    async fn upsert_settings(
-        &self,
-        model_id: &str,
-        settings: ModelSettings,
-    ) -> anyhow::Result<Model>;
+    /// Create or update a specific model with settings.
+    async fn upsert_model(&self, model: UpsertModelRequest) -> anyhow::Result<Model>;
 
-    /// Batch get settings for multiple models.
+    /// Batch get full model records for multiple model IDs.
     /// Returns a map from model_id to resolved `ModelSettings`.
-    async fn get_settings_by_ids(
+    async fn get_models_by_ids(
         &self,
         model_ids: &[&str],
-    ) -> anyhow::Result<std::collections::HashMap<String, ModelSettings>>;
+    ) -> anyhow::Result<std::collections::HashMap<String, Model>>;
 }
 
 /// Service trait for model settings operations
 #[async_trait]
 pub trait ModelService: Send + Sync {
-    /// Get model settings for a specific model (returns default when none exist).
-    async fn get_settings(&self, model_id: &str) -> anyhow::Result<ModelSettings>;
+    /// Get model
+    async fn get_model(&self, model_id: &str) -> anyhow::Result<Model>;
 
-    /// Fully update model settings for a specific model.
-    async fn update_settings(
+    /// Fully update model
+    async fn upsert_model(
         &self,
-        model_id: &str,
-        settings: ModelSettings,
-    ) -> anyhow::Result<ModelSettings>;
+        model: UpsertModelRequest,
+    ) -> anyhow::Result<Model>;
 
     /// Partially update model settings for a specific model.
-    async fn update_settings_partially(
+    async fn update_model(
         &self,
-        model_id: &str,
-        settings: PartialModelSettings,
-    ) -> anyhow::Result<ModelSettings>;
+        model: UpdateModelRequest,
+    ) -> anyhow::Result<Model>;
 
     /// Batch get settings content for multiple models.
     /// Missing models will not appear in the map; callers should fall back to defaults.
-    async fn get_settings_by_ids(
+    async fn get_models_by_ids(
         &self,
         model_ids: &[&str],
-    ) -> anyhow::Result<std::collections::HashMap<String, ModelSettings>>;
+    ) -> anyhow::Result<std::collections::HashMap<String, Model>>;
 }

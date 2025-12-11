@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use std::sync::Arc;
 
-use super::ports::{ModelService, ModelSettings, ModelsRepository, PartialModelSettings};
+use super::ports::{Model, ModelService, ModelSettings, ModelsRepository, PartialModelSettings, UpdateModelRequest, UpsertModelRequest};
 
 pub struct ModelServiceImpl {
     repository: Arc<dyn ModelsRepository>,
@@ -15,54 +15,46 @@ impl ModelServiceImpl {
 
 #[async_trait]
 impl ModelService for ModelServiceImpl {
-    async fn get_settings(&self, model_id: &str) -> anyhow::Result<ModelSettings> {
+    async fn get_model(&self, model_id: &str) -> anyhow::Result<Option<Model>> {
         tracing::info!("Getting model settings for model_id={}", model_id);
 
-        let settings = self
+        self
             .repository
             .get_model(model_id)
-            .await?
-            .map(|model| model.settings)
-            .unwrap_or_else(ModelSettings::default);
-
-        Ok(settings)
-    }
-
-    async fn update_settings(
-        &self,
-        model_id: &str,
-        settings: ModelSettings,
-    ) -> anyhow::Result<ModelSettings> {
-        tracing::info!(
-            "Updating model settings for model_id={}: {:?}",
-            model_id,
-            settings
-        );
-
-        let model = self.repository.upsert_settings(model_id, settings).await?;
-
-        tracing::info!(
-            "Model settings updated successfully for model_id={}",
-            model_id
-        );
-
-        Ok(model.settings)
-    }
-
-    async fn update_settings_partially(
-        &self,
-        model_id: &str,
-        settings: PartialModelSettings,
-    ) -> anyhow::Result<ModelSettings> {
-        let old_settings = self.get_settings(model_id).await?;
-        self.update_settings(model_id, old_settings.into_updated(settings))
             .await
     }
 
-    async fn get_settings_by_ids(
+    async fn upsert_model(
+        &self,
+        model: UpsertModelRequest
+    ) -> anyhow::Result<Model> {
+        tracing::info!(
+            "Upserting model for model_id={}: {:?}",
+            model.model_id,
+            model
+        );
+
+        self.repository.upsert_model(model).await
+    }
+
+    async fn update_model(
+        &self,
+        model: UpdateModelRequest
+    ) -> anyhow::Result<Model> {
+        tracing::info!(
+            "Updating model for model_id={}: {:?}",
+            model.model_id,
+            model
+        );
+        
+        self.repository.update_model(model)
+            .await
+    }
+
+    async fn get_models_by_ids(
         &self,
         model_ids: &[&str],
-    ) -> anyhow::Result<std::collections::HashMap<String, ModelSettings>> {
-        self.repository.get_settings_by_ids(model_ids).await
+    ) -> anyhow::Result<std::collections::HashMap<String, Model>> {
+        self.repository.get_models_by_ids(model_ids).await
     }
 }

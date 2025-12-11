@@ -517,7 +517,7 @@ pub async fn get_model_settings(
 
     let content = app_state
         .model_settings_service
-        .get_settings(&model_id)
+        .get_model(&model_id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to get model settings: {}", e);
@@ -568,7 +568,7 @@ pub async fn update_model_settings(
 
     let settings = app_state
         .model_settings_service
-        .update_settings(&model_id, settings)
+        .update_model(&model_id, settings)
         .await
         .map_err(|e| {
             tracing::error!("Failed to update model settings: {}", e);
@@ -619,7 +619,7 @@ pub async fn update_model_settings_partially(
 
     let settings = app_state
         .model_settings_service
-        .update_settings_partially(&model_id, settings)
+        .update_model(&model_id, settings)
         .await
         .map_err(|e| {
             tracing::error!("Failed to update model settings: {}", e);
