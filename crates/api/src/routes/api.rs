@@ -1296,21 +1296,17 @@ async fn proxy_model_list(
         }
     }
 
-    // Batch fetch settings for all models (avoids N+1 queries)
-    let settings_map = match state
+    // Batch fetch settings for all models
+    let settings_map = state
         .model_settings_service
         .get_settings_for_models(&model_ids.iter().map(|s| s.as_str()).collect::<Vec<&str>>())
-        .await
-    {
-        Ok(map) => map,
-        Err(e) => {
-            tracing::warn!(
+        .await.unwrap_or_else(|e| {
+        tracing::warn!(
                 "Failed to batch load model settings for model list: {}, defaulting all public=false",
                 e
             );
-            std::collections::HashMap::new()
-        }
-    };
+        std::collections::HashMap::new()
+    });
 
     // Attach `public` flag to each model based on model_settings
     let mut decorated_models = Vec::new();
@@ -1330,7 +1326,7 @@ async fn proxy_model_list(
 
     *body_json
         .get_mut("models")
-        .expect("data key must exist after previous check") =
+        .expect("models key must exist after previous check") =
         serde_json::Value::Array(decorated_models);
 
     let filtered_bytes = serde_json::to_vec(&body_json).unwrap_or_else(|e| {
