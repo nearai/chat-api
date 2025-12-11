@@ -1,8 +1,12 @@
 use crate::pool::DbPool;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use services::model::ports::{
+    Model, ModelSettings, ModelsRepository, PartialModelSettings, UpdateModelRequest,
+    UpsertModelRequest,
+};
+use tokio_postgres::Row;
 use uuid::Uuid;
-use services::model::ports::{Model, ModelSettings, ModelsRepository, PartialModelSettings, UpsertModelRequest};
 
 pub struct PostgresModelRepository {
     pool: DbPool,
@@ -53,44 +57,6 @@ impl ModelsRepository for PostgresModelRepository {
         }
     }
 
-    async fn upsert_model(&self, model: UpsertModelRequest) -> anyhow::Result<Model> {
-        tracing::info!(
-            "Repository: Upserting model for model_id={}",
-            model.model_id
-        );
-
-        let client = self.pool.get().await?;
-
-        // Insert or update by model_id
-        let row = client
-            .query_one(
-                "INSERT INTO models (model_id, settings)
-                 VALUES ($1, $2)
-                 ON CONFLICT (model_id)
-                 DO UPDATE SET settings = EXCLUDED.settings
-                 RETURNING *",
-                &[&model.model_id, &model.settings],
-            )
-            .await?;
-        
-        let model_id = model.model_id;
-
-        let settings = Model {
-            id: row.get("id"),
-            model_id: model_id.clone(),
-            settings: model.settings,
-            created_at: row.get("created_at"),
-            updated_at: row.get("updated_at"),
-        };
-
-        tracing::info!(
-            "Repository: Model settings upserted successfully for model_id={}",
-            model_id
-        );
-
-        Ok(settings)
-    }
-
     async fn get_models_by_ids(
         &self,
         model_ids: &[&str],
@@ -120,20 +86,17 @@ impl ModelsRepository for PostgresModelRepository {
         for row in rows {
             let id: Uuid = row.get("id");
             let model_id: String = row.get("model_id");
-            let settings_json: serde_json::Value = row.get("settings");
             let created_at: DateTime<Utc> = row.get("created_at");
             let updated_at: DateTime<Utc> = row.get("updated_at");
 
-            let default_settings = ModelSettings::default();
-            let partial_settings = serde_json::from_value::<PartialModelSettings>(settings_json)?;
-            let settings = default_settings.into_updated(partial_settings);
-            
+            let settings = load_settings_from_raw(&row)?;
+
             let model = Model {
                 id,
                 model_id: model_id.clone(),
                 settings,
                 created_at,
-                updated_at
+                updated_at,
             };
 
             map.insert(model_id, model);
@@ -141,4 +104,88 @@ impl ModelsRepository for PostgresModelRepository {
 
         Ok(map)
     }
+
+    async fn upsert_model(&self, model: UpsertModelRequest) -> anyhow::Result<Model> {
+        tracing::info!(
+            "Repository: Upserting model for model_id={}",
+            model.model_id
+        );
+
+        let client = self.pool.get().await?;
+
+        // Insert or update by model_id
+        let row = client
+            .query_one(
+                "INSERT INTO models (model_id, settings)
+                 VALUES ($1, $2)
+                 ON CONFLICT (model_id)
+                 DO UPDATE SET settings = EXCLUDED.settings
+                 RETURNING *",
+                &[&model.model_id, &model.settings],
+            )
+            .await?;
+
+        let model_id = model.model_id;
+
+        let settings = Model {
+            id: row.get("id"),
+            model_id: model_id.clone(),
+            settings: model.settings,
+            created_at: row.get("created_at"),
+            updated_at: row.get("updated_at"),
+        };
+
+        tracing::info!(
+            "Repository: Model settings upserted successfully for model_id={}",
+            model_id
+        );
+
+        Ok(settings)
+    }
+
+    async fn update_model(&self, model: UpdateModelRequest) -> anyhow::Result<Model> {
+        tracing::info!("Repository: Updating model for model_id={}", model.model_id);
+
+        let existing_model = self.get_model(&model.model_id).await?;
+
+        let Some(existing_model) = existing_model else {
+            anyhow::bail!("Model not found for model id: {}", model.model_id);
+        };
+
+        let client = self.pool.get().await?;
+
+        // Merge with incoming partial settings (if provided)
+        let new_settings = if let Some(delta) = model.settings {
+            existing_model.settings.into_updated(delta)
+        } else {
+            existing_model.settings
+        };
+
+        // Persist updated settings
+        let row = client
+            .query_one(
+                "UPDATE models
+                 SET settings = $1
+                 WHERE model_id = $2
+                 RETURNING id, model_id, created_at, updated_at",
+                &[&new_settings, &model.model_id],
+            )
+            .await?;
+
+        Ok(Model {
+            id: row.get("id"),
+            model_id: row.get("model_id"),
+            settings: new_settings,
+            created_at: row.get("created_at"),
+            updated_at: row.get("updated_at"),
+        })
+    }
+}
+
+fn load_settings_from_raw(raw: &Row) -> anyhow::Result<ModelSettings> {
+    let settings_json: serde_json::Value = raw.get("settings");
+    let default_settings = ModelSettings::default();
+    let partial_settings = serde_json::from_value::<PartialModelSettings>(settings_json)?;
+    let settings = default_settings.into_updated(partial_settings);
+    Ok(settings)
 }

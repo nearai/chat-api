@@ -59,34 +59,31 @@ pub trait ModelsRepository: Send + Sync {
     /// Returns `Ok(None)` if no settings exist yet for that model.
     async fn get_model(&self, model_id: &str) -> anyhow::Result<Option<Model>>;
 
-    /// Create or update a specific model with settings.
-    async fn upsert_model(&self, model: UpsertModelRequest) -> anyhow::Result<Model>;
-
     /// Batch get full model records for multiple model IDs.
     /// Returns a map from model_id to resolved `ModelSettings`.
     async fn get_models_by_ids(
         &self,
         model_ids: &[&str],
     ) -> anyhow::Result<std::collections::HashMap<String, Model>>;
+
+    /// Create or update a specific model with settings.
+    async fn upsert_model(&self, model: UpsertModelRequest) -> anyhow::Result<Model>;
+
+    /// Partially update an existing model (model_id + optional partial settings).
+    async fn update_model(&self, model: UpdateModelRequest) -> anyhow::Result<Model>;
 }
 
 /// Service trait for model settings operations
 #[async_trait]
 pub trait ModelService: Send + Sync {
     /// Get model
-    async fn get_model(&self, model_id: &str) -> anyhow::Result<Model>;
+    async fn get_model(&self, model_id: &str) -> anyhow::Result<Option<Model>>;
 
     /// Fully update model
-    async fn upsert_model(
-        &self,
-        model: UpsertModelRequest,
-    ) -> anyhow::Result<Model>;
+    async fn upsert_model(&self, model: UpsertModelRequest) -> anyhow::Result<Model>;
 
     /// Partially update model settings for a specific model.
-    async fn update_model(
-        &self,
-        model: UpdateModelRequest,
-    ) -> anyhow::Result<Model>;
+    async fn update_model(&self, model: UpdateModelRequest) -> anyhow::Result<Model>;
 
     /// Batch get settings content for multiple models.
     /// Missing models will not appear in the map; callers should fall back to defaults.

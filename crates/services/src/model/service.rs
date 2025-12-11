@@ -1,7 +1,10 @@
 use async_trait::async_trait;
 use std::sync::Arc;
 
-use super::ports::{Model, ModelService, ModelSettings, ModelsRepository, PartialModelSettings, UpdateModelRequest, UpsertModelRequest};
+use super::ports::{
+    Model, ModelService, ModelSettings, ModelsRepository, PartialModelSettings, UpdateModelRequest,
+    UpsertModelRequest,
+};
 
 pub struct ModelServiceImpl {
     repository: Arc<dyn ModelsRepository>,
@@ -18,16 +21,10 @@ impl ModelService for ModelServiceImpl {
     async fn get_model(&self, model_id: &str) -> anyhow::Result<Option<Model>> {
         tracing::info!("Getting model settings for model_id={}", model_id);
 
-        self
-            .repository
-            .get_model(model_id)
-            .await
+        self.repository.get_model(model_id).await
     }
 
-    async fn upsert_model(
-        &self,
-        model: UpsertModelRequest
-    ) -> anyhow::Result<Model> {
+    async fn upsert_model(&self, model: UpsertModelRequest) -> anyhow::Result<Model> {
         tracing::info!(
             "Upserting model for model_id={}: {:?}",
             model.model_id,
@@ -37,18 +34,14 @@ impl ModelService for ModelServiceImpl {
         self.repository.upsert_model(model).await
     }
 
-    async fn update_model(
-        &self,
-        model: UpdateModelRequest
-    ) -> anyhow::Result<Model> {
+    async fn update_model(&self, model: UpdateModelRequest) -> anyhow::Result<Model> {
         tracing::info!(
             "Updating model for model_id={}: {:?}",
             model.model_id,
             model
         );
-        
-        self.repository.update_model(model)
-            .await
+
+        self.repository.update_model(model).await
     }
 
     async fn get_models_by_ids(
