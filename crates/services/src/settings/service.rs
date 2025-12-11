@@ -52,10 +52,10 @@ impl ModelService for ModelSettingsServiceImpl {
     async fn update_settings_partially(
         &self,
         model_id: &str,
-        partial: PartialModelSettings,
+        settings: PartialModelSettings,
     ) -> anyhow::Result<ModelSettings> {
-        let old_content = self.get_settings(model_id).await?;
-        self.update_settings(model_id, old_content.into_updated(partial))
+        let old_settings = self.get_settings(model_id).await?;
+        self.update_settings(model_id, old_settings.into_updated(settings))
             .await
     }
 

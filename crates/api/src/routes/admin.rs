@@ -525,7 +525,7 @@ pub async fn get_model_settings(
         })?;
 
     Ok(Json(ModelSettingsResponse {
-        content: content.into(),
+        settings: content.into(),
     }))
 }
 
@@ -576,7 +576,7 @@ pub async fn update_model_settings(
         })?;
 
     Ok(Json(ModelSettingsResponse {
-        content: settings.into(),
+        settings: settings.into(),
     }))
 }
 
@@ -613,13 +613,13 @@ pub async fn update_model_settings_partially(
         request
     );
 
-    let partial = services::settings::ports::PartialModelSettings {
+    let settings = services::settings::ports::PartialModelSettings {
         public: request.public,
     };
 
     let settings = app_state
         .model_settings_service
-        .update_settings_partially(&model_id, partial)
+        .update_settings_partially(&model_id, settings)
         .await
         .map_err(|e| {
             tracing::error!("Failed to update model settings: {}", e);
@@ -627,7 +627,7 @@ pub async fn update_model_settings_partially(
         })?;
 
     Ok(Json(ModelSettingsResponse {
-        content: settings.into(),
+        settings: settings.into(),
     }))
 }
 

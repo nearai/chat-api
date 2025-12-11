@@ -36,8 +36,8 @@ impl ModelsRepository for PostgresModelRepository {
 
             let default_settings = ModelSettings::default();
             // Missing fields will be filled from default settings values
-            let partial = serde_json::from_value::<PartialModelSettings>(settings_json)?;
-            let settings = default_settings.into_updated(partial);
+            let settings_delta = serde_json::from_value::<PartialModelSettings>(settings_json)?;
+            let settings = default_settings.into_updated(settings_delta);
 
             Ok(Some(Model {
                 id: row.get("id"),
@@ -124,12 +124,11 @@ impl ModelsRepository for PostgresModelRepository {
             let settings_json: serde_json::Value = row.get("settings");
 
             let default_settings = ModelSettings::default();
-            let partial = serde_json::from_value::<PartialModelSettings>(settings_json).unwrap_or(
-                PartialModelSettings {
+            let settings_delta = serde_json::from_value::<PartialModelSettings>(settings_json)
+                .unwrap_or(PartialModelSettings {
                     public: Some(default_settings.public),
-                },
-            );
-            let settings = default_settings.into_updated(partial);
+                });
+            let settings = default_settings.into_updated(settings_delta);
 
             map.insert(model_id, settings);
         }

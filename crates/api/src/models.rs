@@ -203,12 +203,12 @@ pub struct UserSettingsResponse {
 
 /// Model settings content for API responses
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct ModelSettingsContent {
+pub struct ModelSettings {
     /// Whether models are public (visible/usable in responses)
     pub public: bool,
 }
 
-impl From<services::settings::ports::ModelSettings> for ModelSettingsContent {
+impl From<services::settings::ports::ModelSettings> for ModelSettings {
     fn from(content: services::settings::ports::ModelSettings) -> Self {
         Self {
             public: content.public,
@@ -219,9 +219,7 @@ impl From<services::settings::ports::ModelSettings> for ModelSettingsContent {
 /// Model settings response
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ModelSettingsResponse {
-    /// Settings content (serialized as "settings")
-    #[serde(rename = "settings")]
-    pub content: ModelSettingsContent,
+    pub settings: ModelSettings,
 }
 
 /// Model settings update request

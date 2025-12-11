@@ -23,9 +23,9 @@ impl Default for ModelSettings {
 }
 
 impl ModelSettings {
-    pub fn into_updated(self, partial: PartialModelSettings) -> Self {
+    pub fn into_updated(self, settings: PartialModelSettings) -> Self {
         Self {
-            public: partial.public.unwrap_or(self.public),
+            public: settings.public.unwrap_or(self.public),
         }
     }
 }
@@ -79,7 +79,7 @@ pub trait ModelService: Send + Sync {
     async fn update_settings_partially(
         &self,
         model_id: &str,
-        partial: PartialModelSettings,
+        settings: PartialModelSettings,
     ) -> anyhow::Result<ModelSettings>;
 
     /// Batch get settings content for multiple models.
