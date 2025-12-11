@@ -16,9 +16,9 @@ pub struct PartialModelSettingsContent {
 impl Default for ModelSettingsContent {
     /// Default model settings.
     ///
-    /// By default, models are **not** public (private = false as per requirement).
+    /// By default, models are **not** public.
     fn default() -> Self {
-        Self { private: false }
+        Self { private: true }
     }
 }
 

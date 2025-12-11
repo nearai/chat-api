@@ -1256,7 +1256,7 @@ async fn proxy_model_list(
         .collect();
 
     // Try to parse JSON
-    let json_value: serde_json::Value = match serde_json::from_slice(&body_bytes) {
+    let mut body_json: serde_json::Value = match serde_json::from_slice(&body_bytes) {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(
@@ -1294,17 +1294,15 @@ async fn proxy_model_list(
             });
     }
 
-    // Expect OpenAI-style schema: { "data": [ { "id": "...", ... }, ... ] }
-    let mut root = json_value;
-    let data_opt = root.get_mut("data").and_then(|v| v.as_array_mut());
+    let models_opt = body_json.get_mut("models").and_then(|v| v.as_array_mut());
 
-    let Some(models_array) = data_opt else {
-        tracing::debug!("No 'data' array found in model list response, returning original body");
+    let Some(models_array) = models_opt else {
+        tracing::debug!("No 'models' array found in model list response, returning original body");
         return Response::builder()
             .status(StatusCode::from_u16(proxy_response.status).unwrap_or(StatusCode::OK))
             .header("content-type", "application/json")
             .body(Body::from(
-                serde_json::to_vec(&root).unwrap_or_else(|_| body_bytes.to_vec()),
+                serde_json::to_vec(&body_json).unwrap_or_else(|_| body_bytes.to_vec()),
             ))
             .map_err(|e| {
                 (
@@ -1321,7 +1319,7 @@ async fn proxy_model_list(
     let mut filtered_models = Vec::new();
     for model in std::mem::take(models_array) {
         let model_id_opt = model
-            .get("id")
+            .get("modelId")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
@@ -1345,17 +1343,19 @@ async fn proxy_model_list(
                     );
                 }
             }
+        } else {
+            tracing::debug!("No 'modelId' found in model response");
         }
 
         filtered_models.push(model);
     }
 
-    *root
-        .get_mut("data")
+    *body_json
+        .get_mut("models")
         .expect("data key must exist after previous check") =
         serde_json::Value::Array(filtered_models);
 
-    let filtered_bytes = serde_json::to_vec(&root).unwrap_or_else(|e| {
+    let filtered_bytes = serde_json::to_vec(&body_json).unwrap_or_else(|e| {
         tracing::error!(
             "Failed to serialize filtered model list JSON: {}, returning original body",
             e
