@@ -563,7 +563,7 @@ pub async fn update_model_settings(
     );
 
     let content = services::settings::ports::ModelSettingsContent {
-        private: request.private,
+        public: request.public,
     };
 
     let content = app_state
@@ -614,7 +614,7 @@ pub async fn update_model_settings_partially(
     );
 
     let content = services::settings::ports::PartialModelSettingsContent {
-        private: request.private,
+        public: request.public,
     };
 
     let content = app_state

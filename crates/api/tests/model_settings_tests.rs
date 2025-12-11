@@ -28,9 +28,9 @@ async fn test_model_settings_get_default() {
     let body: serde_json::Value = response.json();
     let settings = body.get("settings").expect("Should have settings field");
     assert_eq!(
-        settings.get("private"),
+        settings.get("public"),
         Some(&json!(false)),
-        "Default private should be false"
+        "Default public should be false"
     );
 }
 
@@ -41,9 +41,9 @@ async fn test_model_settings_update_and_get() {
     let admin_email = "test_admin_model_settings_update@admin.org";
     let admin_token = mock_login(&server, admin_email).await;
 
-    // Update settings to private = true
+    // Update settings to public = true
     let update_body = json!({
-        "private": true
+        "public": true
     });
 
     let response = server
@@ -65,9 +65,9 @@ async fn test_model_settings_update_and_get() {
     let body: serde_json::Value = response.json();
     let settings = body.get("settings").expect("Should have settings field");
     assert_eq!(
-        settings.get("private"),
+        settings.get("public"),
         Some(&json!(true)),
-        "Private should be true after update"
+        "Public should be true after update"
     );
 
     // Get settings to verify
@@ -85,9 +85,9 @@ async fn test_model_settings_update_and_get() {
     let body: serde_json::Value = response.json();
     let settings = body.get("settings").expect("Should have settings field");
     assert_eq!(
-        settings.get("private"),
+        settings.get("public"),
         Some(&json!(true)),
-        "Private should remain true when fetched"
+        "Public should remain true when fetched"
     );
 }
 

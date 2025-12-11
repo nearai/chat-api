@@ -4,28 +4,28 @@ use chrono::{DateTime, Utc};
 /// Model settings content structure
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ModelSettingsContent {
-    /// Whether models are private (not publicly visible)
-    pub private: bool,
+    /// Whether models are public (visible/usable in responses)
+    pub public: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PartialModelSettingsContent {
-    pub private: Option<bool>,
+    pub public: Option<bool>,
 }
 
 impl Default for ModelSettingsContent {
     /// Default model settings.
     ///
-    /// By default, models are **not** public.
+    /// By default, models are **not** public (public = false).
     fn default() -> Self {
-        Self { private: true }
+        Self { public: false }
     }
 }
 
 impl ModelSettingsContent {
     pub fn into_updated(self, content: PartialModelSettingsContent) -> Self {
         Self {
-            private: content.private.unwrap_or(self.private),
+            public: content.public.unwrap_or(self.public),
         }
     }
 }

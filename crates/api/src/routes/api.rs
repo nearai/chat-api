@@ -1077,9 +1077,9 @@ async fn proxy_responses(
         if let Some(model_id) = req.model {
             match state.model_settings_service.get_settings(&model_id).await {
                 Ok(settings) => {
-                    if settings.private {
+                    if !settings.public {
                         tracing::warn!(
-                            "Blocking response request for private model '{}' from user {}",
+                            "Blocking response request for non-public model '{}' from user {}",
                             model_id,
                             user.user_id
                         );
@@ -1288,7 +1288,7 @@ async fn proxy_model_list(
             });
     };
 
-    // Attach `private` flag to each model based on model_settings
+    // Attach `public` flag to each model based on model_settings
     let mut decorated_models = Vec::new();
     for mut model in std::mem::take(models_array) {
         let model_id_opt = model
@@ -1296,16 +1296,16 @@ async fn proxy_model_list(
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        let mut private_flag = false;
+        let mut public_flag = false;
 
         if let Some(model_id) = model_id_opt {
             match state.model_settings_service.get_settings(&model_id).await {
                 Ok(settings) => {
-                    private_flag = settings.private;
+                    public_flag = settings.public;
                 }
                 Err(e) => {
                     tracing::warn!(
-                        "Failed to load settings for model '{}': {}, defaulting private=false",
+                        "Failed to load settings for model '{}': {}, defaulting public=false",
                         model_id,
                         e
                     );
@@ -1316,7 +1316,7 @@ async fn proxy_model_list(
         }
 
         if let Some(obj) = model.as_object_mut() {
-            obj.insert("private".to_string(), serde_json::Value::Bool(private_flag));
+            obj.insert("public".to_string(), serde_json::Value::Bool(public_flag));
         }
 
         decorated_models.push(model);
