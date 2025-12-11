@@ -7,7 +7,7 @@ pub mod repositories;
 pub use pool::DbPool;
 pub use repositories::{
     PostgresAnalyticsRepository, PostgresAppConfigRepository, PostgresConversationRepository,
-    PostgresFileRepository, PostgresModelSettingsRepository, PostgresNearNonceRepository,
+    PostgresFileRepository, PostgresModelRepository, PostgresNearNonceRepository,
     PostgresOAuthRepository, PostgresSessionRepository, PostgresUserRepository,
     PostgresUserSettingsRepository,
 };
@@ -32,7 +32,7 @@ pub struct Database {
     app_config_repository: Arc<PostgresAppConfigRepository>,
     near_nonce_repository: Arc<PostgresNearNonceRepository>,
     analytics_repository: Arc<PostgresAnalyticsRepository>,
-    model_settings_repository: Arc<PostgresModelSettingsRepository>,
+    model_settings_repository: Arc<PostgresModelRepository>,
     cluster_manager: Option<Arc<ClusterManager>>,
 }
 
@@ -48,8 +48,7 @@ impl Database {
         let app_config_repository = Arc::new(PostgresAppConfigRepository::new(pool.clone()));
         let near_nonce_repository = Arc::new(PostgresNearNonceRepository::new(pool.clone()));
         let analytics_repository = Arc::new(PostgresAnalyticsRepository::new(pool.clone()));
-        let model_settings_repository =
-            Arc::new(PostgresModelSettingsRepository::new(pool.clone()));
+        let model_settings_repository = Arc::new(PostgresModelRepository::new(pool.clone()));
 
         Self {
             pool,
@@ -232,7 +231,7 @@ impl Database {
     }
 
     /// Get the model settings repository
-    pub fn model_settings_repository(&self) -> Arc<PostgresModelSettingsRepository> {
+    pub fn model_settings_repository(&self) -> Arc<PostgresModelRepository> {
         self.model_settings_repository.clone()
     }
 }

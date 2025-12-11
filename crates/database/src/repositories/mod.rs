@@ -13,7 +13,7 @@ pub use analytics_repository::PostgresAnalyticsRepository;
 pub use app_config_repository::PostgresAppConfigRepository;
 pub use conversation_repository::PostgresConversationRepository;
 pub use file_repository::PostgresFileRepository;
-pub use model_settings_repository::PostgresModelSettingsRepository;
+pub use model_settings_repository::PostgresModelRepository;
 pub use near_nonce_repository::PostgresNearNonceRepository;
 pub use oauth_repository::PostgresOAuthRepository;
 pub use session_repository::PostgresSessionRepository;

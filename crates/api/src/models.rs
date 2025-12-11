@@ -208,8 +208,8 @@ pub struct ModelSettingsContent {
     pub public: bool,
 }
 
-impl From<services::settings::ports::ModelSettingsContent> for ModelSettingsContent {
-    fn from(content: services::settings::ports::ModelSettingsContent) -> Self {
+impl From<services::settings::ports::ModelSettings> for ModelSettingsContent {
+    fn from(content: services::settings::ports::ModelSettings) -> Self {
         Self {
             public: content.public,
         }

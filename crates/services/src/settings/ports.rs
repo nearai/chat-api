@@ -3,17 +3,17 @@ use chrono::{DateTime, Utc};
 
 /// Model settings content structure
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ModelSettingsContent {
+pub struct ModelSettings {
     /// Whether models are public (visible/usable in responses)
     pub public: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct PartialModelSettingsContent {
+pub struct PartialModelSettings {
     pub public: Option<bool>,
 }
 
-impl Default for ModelSettingsContent {
+impl Default for ModelSettings {
     /// Default model settings.
     ///
     /// By default, models are **not** public (public = false).
@@ -22,10 +22,10 @@ impl Default for ModelSettingsContent {
     }
 }
 
-impl ModelSettingsContent {
-    pub fn into_updated(self, content: PartialModelSettingsContent) -> Self {
+impl ModelSettings {
+    pub fn into_updated(self, partial: PartialModelSettings) -> Self {
         Self {
-            public: content.public.unwrap_or(self.public),
+            public: partial.public.unwrap_or(self.public),
         }
     }
 }
@@ -35,7 +35,7 @@ impl ModelSettingsContent {
 pub struct Model {
     pub id: uuid::Uuid,
     pub model_id: String,
-    pub settings: ModelSettingsContent,
+    pub settings: ModelSettings,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -51,41 +51,41 @@ pub trait ModelsRepository: Send + Sync {
     async fn upsert_settings(
         &self,
         model_id: &str,
-        content: ModelSettingsContent,
+        settings: ModelSettings,
     ) -> anyhow::Result<Model>;
 
     /// Batch get settings for multiple models.
-    /// Returns a map from model_id to resolved `ModelSettingsContent`.
+    /// Returns a map from model_id to resolved `ModelSettings`.
     async fn get_settings_by_ids(
         &self,
         model_ids: &[&str],
-    ) -> anyhow::Result<std::collections::HashMap<String, ModelSettingsContent>>;
+    ) -> anyhow::Result<std::collections::HashMap<String, ModelSettings>>;
 }
 
 /// Service trait for model settings operations
 #[async_trait]
 pub trait ModelService: Send + Sync {
     /// Get model settings for a specific model (returns default when none exist).
-    async fn get_settings(&self, model_id: &str) -> anyhow::Result<ModelSettingsContent>;
+    async fn get_settings(&self, model_id: &str) -> anyhow::Result<ModelSettings>;
 
     /// Fully update model settings for a specific model.
     async fn update_settings(
         &self,
         model_id: &str,
-        content: ModelSettingsContent,
-    ) -> anyhow::Result<ModelSettingsContent>;
+        settings: ModelSettings,
+    ) -> anyhow::Result<ModelSettings>;
 
     /// Partially update model settings for a specific model.
     async fn update_settings_partially(
         &self,
         model_id: &str,
-        content: PartialModelSettingsContent,
-    ) -> anyhow::Result<ModelSettingsContent>;
+        partial: PartialModelSettings,
+    ) -> anyhow::Result<ModelSettings>;
 
     /// Batch get settings content for multiple models.
     /// Missing models will not appear in the map; callers should fall back to defaults.
     async fn get_settings_by_ids(
         &self,
         model_ids: &[&str],
-    ) -> anyhow::Result<std::collections::HashMap<String, ModelSettingsContent>>;
+    ) -> anyhow::Result<std::collections::HashMap<String, ModelSettings>>;
 }
