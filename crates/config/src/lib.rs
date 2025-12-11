@@ -270,6 +270,7 @@ impl Config {
 mod tests {
     use super::*;
 
+    #[serial_test::serial]
     #[test]
     fn test_cors_config_parsing_exact_matches() {
         std::env::set_var(
@@ -287,6 +288,7 @@ mod tests {
         std::env::remove_var("CORS_ALLOWED_ORIGINS");
     }
 
+    #[serial_test::serial]
     #[test]
     fn test_cors_config_parsing_wildcard_with_dot() {
         std::env::set_var("CORS_ALLOWED_ORIGINS", "*.near.ai");
@@ -296,6 +298,7 @@ mod tests {
         std::env::remove_var("CORS_ALLOWED_ORIGINS");
     }
 
+    #[serial_test::serial]
     #[test]
     fn test_cors_config_parsing_wildcard_without_dot() {
         std::env::set_var("CORS_ALLOWED_ORIGINS", "*near.ai");
@@ -304,6 +307,7 @@ mod tests {
         std::env::remove_var("CORS_ALLOWED_ORIGINS");
     }
 
+    #[serial_test::serial]
     #[test]
     fn test_cors_config_parsing_wildcard_with_hyphen() {
         std::env::set_var("CORS_ALLOWED_ORIGINS", "*-example.com");
@@ -312,6 +316,7 @@ mod tests {
         std::env::remove_var("CORS_ALLOWED_ORIGINS");
     }
 
+    #[serial_test::serial]
     #[test]
     fn test_cors_config_parsing_mixed() {
         std::env::set_var(
@@ -330,6 +335,7 @@ mod tests {
         std::env::remove_var("CORS_ALLOWED_ORIGINS");
     }
 
+    #[serial_test::serial]
     #[test]
     fn test_cors_config_parsing_whitespace() {
         std::env::set_var("CORS_ALLOWED_ORIGINS", " https://example.com , *.near.ai ");
@@ -341,6 +347,7 @@ mod tests {
         std::env::remove_var("CORS_ALLOWED_ORIGINS");
     }
 
+    #[serial_test::serial]
     #[test]
     fn test_cors_config_parsing_empty_entries() {
         std::env::set_var("CORS_ALLOWED_ORIGINS", "https://example.com,,*.near.ai,");
