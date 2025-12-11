@@ -1299,7 +1299,7 @@ async fn proxy_model_list(
     // Batch fetch settings for all models
     let settings_map = state
         .model_settings_service
-        .get_settings_for_models(&model_ids.iter().map(|s| s.as_str()).collect::<Vec<&str>>())
+        .get_settings_by_ids(&model_ids.iter().map(|s| s.as_str()).collect::<Vec<&str>>())
         .await.unwrap_or_else(|e| {
         tracing::warn!(
                 "Failed to batch load model settings for model list: {}, defaulting all public=false",

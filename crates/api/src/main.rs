@@ -95,13 +95,9 @@ async fn main() -> anyhow::Result<()> {
 
     let user_service = Arc::new(UserServiceImpl::new(user_repo.clone()));
 
-    let user_settings_service = Arc::new(UserSettingsServiceImpl::new(
-        user_settings_repo as Arc<dyn services::user::ports::UserSettingsRepository>,
-    ));
+    let user_settings_service = Arc::new(UserSettingsServiceImpl::new(user_settings_repo));
 
-    let model_settings_service = Arc::new(ModelSettingsServiceImpl::new(
-        model_settings_repo as Arc<dyn services::settings::ports::ModelSettingsRepository>,
-    ));
+    let model_settings_service = Arc::new(ModelSettingsServiceImpl::new(model_settings_repo));
 
     // Initialize VPC credentials service and get API key
     let vpc_auth_config = if config.vpc_auth.is_configured() {

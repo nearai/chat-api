@@ -32,31 +32,31 @@ impl ModelSettingsContent {
 
 /// Model settings stored as JSONB in the database
 #[derive(Debug, Clone)]
-pub struct ModelSettings {
+pub struct Model {
     pub id: uuid::Uuid,
     pub model_id: String,
-    pub content: ModelSettingsContent,
+    pub settings: ModelSettingsContent,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
 /// Repository trait for model settings operations
 #[async_trait]
-pub trait ModelSettingsRepository: Send + Sync {
+pub trait ModelsRepository: Send + Sync {
     /// Get settings for a specific model.
     /// Returns `Ok(None)` if no settings exist yet for that model.
-    async fn get_settings(&self, model_id: &str) -> anyhow::Result<Option<ModelSettings>>;
+    async fn get_model(&self, model_id: &str) -> anyhow::Result<Option<Model>>;
 
     /// Create or update settings for a specific model.
     async fn upsert_settings(
         &self,
         model_id: &str,
         content: ModelSettingsContent,
-    ) -> anyhow::Result<ModelSettings>;
+    ) -> anyhow::Result<Model>;
 
     /// Batch get settings for multiple models.
     /// Returns a map from model_id to resolved `ModelSettingsContent`.
-    async fn get_settings_for_models(
+    async fn get_settings_by_ids(
         &self,
         model_ids: &[&str],
     ) -> anyhow::Result<std::collections::HashMap<String, ModelSettingsContent>>;
@@ -64,7 +64,7 @@ pub trait ModelSettingsRepository: Send + Sync {
 
 /// Service trait for model settings operations
 #[async_trait]
-pub trait ModelSettingsService: Send + Sync {
+pub trait ModelService: Send + Sync {
     /// Get model settings for a specific model (returns default when none exist).
     async fn get_settings(&self, model_id: &str) -> anyhow::Result<ModelSettingsContent>;
 
@@ -84,7 +84,7 @@ pub trait ModelSettingsService: Send + Sync {
 
     /// Batch get settings content for multiple models.
     /// Missing models will not appear in the map; callers should fall back to defaults.
-    async fn get_settings_for_models(
+    async fn get_settings_by_ids(
         &self,
         model_ids: &[&str],
     ) -> anyhow::Result<std::collections::HashMap<String, ModelSettingsContent>>;
