@@ -3,18 +3,18 @@ use std::sync::Arc;
 
 use super::ports::{ModelService, ModelSettings, ModelsRepository, PartialModelSettings};
 
-pub struct ModelSettingsServiceImpl {
+pub struct ModelServiceImpl {
     repository: Arc<dyn ModelsRepository>,
 }
 
-impl ModelSettingsServiceImpl {
+impl ModelServiceImpl {
     pub fn new(repository: Arc<dyn ModelsRepository>) -> Self {
         Self { repository }
     }
 }
 
 #[async_trait]
-impl ModelService for ModelSettingsServiceImpl {
+impl ModelService for ModelServiceImpl {
     async fn get_settings(&self, model_id: &str) -> anyhow::Result<ModelSettings> {
         tracing::info!("Getting model settings for model_id={}", model_id);
 

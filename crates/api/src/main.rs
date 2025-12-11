@@ -11,8 +11,8 @@ use services::{
     conversation::service::ConversationServiceImpl,
     file::service::FileServiceImpl,
     metrics::{MockMetricsService, OtlpMetricsService},
+    model::service::ModelServiceImpl,
     response::service::OpenAIProxy,
-    settings::service::ModelSettingsServiceImpl,
     user::UserServiceImpl,
     user::UserSettingsServiceImpl,
     vpc::{initialize_vpc_credentials, VpcAuthConfig},
@@ -97,7 +97,7 @@ async fn main() -> anyhow::Result<()> {
 
     let user_settings_service = Arc::new(UserSettingsServiceImpl::new(user_settings_repo));
 
-    let model_settings_service = Arc::new(ModelSettingsServiceImpl::new(model_settings_repo));
+    let model_settings_service = Arc::new(ModelServiceImpl::new(model_settings_repo));
 
     // Initialize VPC credentials service and get API key
     let vpc_auth_config = if config.vpc_auth.is_configured() {

@@ -77,9 +77,9 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
         user_settings_repo,
     ));
 
-    let model_settings_service = Arc::new(
-        services::settings::service::ModelSettingsServiceImpl::new(model_settings_repo),
-    );
+    let model_settings_service = Arc::new(services::model::service::ModelServiceImpl::new(
+        model_settings_repo,
+    ));
 
     // Create VPC credentials service based on provided credentials
     let vpc_credentials_service: Arc<dyn services::vpc::VpcCredentialsService> =

@@ -562,7 +562,7 @@ pub async fn update_model_settings(
         request
     );
 
-    let settings = services::settings::ports::ModelSettings {
+    let settings = services::model::ports::ModelSettings {
         public: request.public,
     };
 
@@ -613,7 +613,7 @@ pub async fn update_model_settings_partially(
         request
     );
 
-    let settings = services::settings::ports::PartialModelSettings {
+    let settings = services::model::ports::PartialModelSettings {
         public: request.public,
     };
 

@@ -1,6 +1,6 @@
 use crate::pool::DbPool;
 use async_trait::async_trait;
-use services::settings::ports::{Model, ModelSettings, ModelsRepository, PartialModelSettings};
+use services::model::ports::{Model, ModelSettings, ModelsRepository, PartialModelSettings};
 
 pub struct PostgresModelRepository {
     pool: DbPool,
