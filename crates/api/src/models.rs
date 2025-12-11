@@ -191,51 +191,6 @@ impl From<services::user::ports::UserSettingsContent> for UserSettingsContent {
     }
 }
 
-/// User settings response
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct UserSettingsResponse {
-    /// User ID
-    pub user_id: UserId,
-    /// Settings content (serialized as "settings")
-    #[serde(rename = "settings")]
-    pub content: UserSettingsContent,
-}
-
-/// Model settings content for API responses
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct ModelSettings {
-    /// Whether models are public (visible/usable in responses)
-    pub public: bool,
-}
-
-impl From<services::model::ports::ModelSettings> for ModelSettings {
-    fn from(content: services::model::ports::ModelSettings) -> Self {
-        Self {
-            public: content.public,
-        }
-    }
-}
-
-/// Model settings response
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct ModelSettingsResponse {
-    pub settings: ModelSettings,
-}
-
-/// Model settings update request
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct UpdateModelSettingsRequest {
-    /// Whether models are public (visible/usable in responses)
-    pub public: bool,
-}
-
-/// Model settings update request (partial update)
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct UpdateModelSettingsPartiallyRequest {
-    /// Whether models are public (visible/usable in responses)
-    pub public: Option<bool>,
-}
-
 /// User settings update request
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UpdateUserSettingsRequest {
@@ -284,6 +239,62 @@ impl UpdateUserSettingsPartiallyRequest {
 
         Ok(())
     }
+}
+
+/// User settings response
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UserSettingsResponse {
+    /// User ID
+    pub user_id: UserId,
+    /// Settings content (serialized as "settings")
+    #[serde(rename = "settings")]
+    pub content: UserSettingsContent,
+}
+
+/// Model settings content for API responses
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ModelSettings {
+    /// Whether models are public (visible/usable in responses)
+    pub public: bool,
+}
+
+impl From<services::model::ports::ModelSettings> for ModelSettings {
+    fn from(content: services::model::ports::ModelSettings) -> Self {
+        Self {
+            public: content.public,
+        }
+    }
+}
+
+/// Complete model response
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ModelResponse {
+    /// External model identifier (e.g. "gpt-4.1")
+    pub model_id: String,
+    /// Settings stored for this model
+    pub settings: ModelSettings,
+}
+
+impl From<services::model::ports::Model> for ModelResponse {
+    fn from(model: services::model::ports::Model) -> Self {
+        Self {
+            model_id: model.model_id,
+            settings: model.settings.into(),
+        }
+    }
+}
+
+/// Model upsert request
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UpsertModelsRequest {
+    pub settings: ModelSettings,
+}
+
+/// Model settings update request (partial update)
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UpdateModelRequest {
+    /// Whether models are public (visible/usable in responses)
+    pub public: Option<bool>,
 }
 
 /// Paginated user list response

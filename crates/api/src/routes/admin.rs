@@ -7,6 +7,9 @@ use axum::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use services::analytics::{ActivityLogEntry, AnalyticsSummary, TopActiveUsersResponse};
+use services::model::ports::{
+    ModelSettings, PartialModelSettings, UpdateModelRequest, UpsertModelRequest,
+};
 use services::UserId;
 
 /// Pagination query parameters
@@ -491,16 +494,16 @@ pub async fn get_top_users(
 
 /// Get model settings for a specific model
 ///
-/// Returns the current model settings. Requires admin authentication.
+/// Returns the current model (including settings). Requires admin authentication.
 #[utoipa::path(
     get,
-    path = "/v1/admin/model_settings/{model_id}",
+    path = "/v1/admin/model/{model_id}",
     tag = "Admin",
     params(
         ("model_id" = String, Path, description = "Model identifier (e.g. gpt-4.1)")
     ),
     responses(
-        (status = 200, description = "Model settings retrieved", body = ModelSettingsResponse),
+        (status = 200, description = "Model settings retrieved", body = ModelResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
         (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
@@ -509,39 +512,39 @@ pub async fn get_top_users(
         ("session_token" = [])
     )
 )]
-pub async fn get_model_settings(
+pub async fn get_model(
     State(app_state): State<AppState>,
     Path(model_id): Path<String>,
-) -> Result<Json<ModelSettingsResponse>, ApiError> {
-    tracing::info!("Getting model settings for model_id={}", model_id);
+) -> Result<Json<ModelResponse>, ApiError> {
+    tracing::info!("Getting model for model_id={}", model_id);
 
-    let content = app_state
+    let model = app_state
         .model_settings_service
         .get_model(&model_id)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to get model settings: {}", e);
-            ApiError::internal_server_error("Failed to get model settings")
+            tracing::error!("Failed to get model: {}", e);
+            ApiError::internal_server_error("Failed to get model")
         })?;
 
-    Ok(Json(ModelSettingsResponse {
-        settings: content.into(),
-    }))
+    let model = model.ok_or_else(|| ApiError::not_found("Model not found"))?;
+
+    Ok(Json(model.into()))
 }
 
-/// Fully update global model settings
+/// Fully create or update a model
 ///
 /// Overwrites the settings for a specific model. Requires admin authentication.
 #[utoipa::path(
     post,
-    path = "/v1/admin/model_settings/{model_id}",
+    path = "/v1/admin/model/{model_id}",
     tag = "Admin",
     params(
         ("model_id" = String, Path, description = "Model identifier (e.g. gpt-4.1)")
     ),
-    request_body = UpdateModelSettingsRequest,
+    request_body = UpsertModelsRequest,
     responses(
-        (status = 200, description = "Model settings updated", body = ModelSettingsResponse),
+        (status = 200, description = "Model updated", body = ModelResponse),
         (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
@@ -551,48 +554,44 @@ pub async fn get_model_settings(
         ("session_token" = [])
     )
 )]
-pub async fn update_model_settings(
+pub async fn upsert_model(
     State(app_state): State<AppState>,
     Path(model_id): Path<String>,
-    Json(request): Json<UpdateModelSettingsRequest>,
-) -> Result<Json<ModelSettingsResponse>, ApiError> {
+    Json(request): Json<UpsertModelsRequest>,
+) -> Result<Json<ModelResponse>, ApiError> {
     tracing::info!(
-        "Fully updating model settings for model_id={}: {:?}",
+        "Fully upserting model for model_id={}: {:?}",
         model_id,
         request
     );
 
-    let settings = services::model::ports::ModelSettings {
-        public: request.public,
-    };
+    let upsert_request = UpsertModelRequest { model_id, settings };
 
-    let settings = app_state
+    let model = app_state
         .model_settings_service
-        .update_model(&model_id, settings)
+        .upsert_model(upsert_request)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to update model settings: {}", e);
-            ApiError::internal_server_error("Failed to update model settings")
+            tracing::error!("Failed to upsert model: {}", e);
+            ApiError::internal_server_error("Failed to upsert model")
         })?;
 
-    Ok(Json(ModelSettingsResponse {
-        settings: settings.into(),
-    }))
+    Ok(Json(model.into()))
 }
 
-/// Partially update global model settings
+/// Partially update a model
 ///
 /// Partially updates the settings for a specific model. Requires admin authentication.
 #[utoipa::path(
     patch,
-    path = "/v1/admin/model_settings/{model_id}",
+    path = "/v1/admin/model/{model_id}",
     tag = "Admin",
     params(
         ("model_id" = String, Path, description = "Model identifier (e.g. gpt-4.1)")
     ),
-    request_body = UpdateModelSettingsPartiallyRequest,
+    request_body = UpdateModelRequest,
     responses(
-        (status = 200, description = "Model settings updated", body = ModelSettingsResponse),
+        (status = 200, description = "Model settings updated", body = ModelResponse),
         (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
@@ -602,33 +601,36 @@ pub async fn update_model_settings(
         ("session_token" = [])
     )
 )]
-pub async fn update_model_settings_partially(
+pub async fn update_model(
     State(app_state): State<AppState>,
     Path(model_id): Path<String>,
-    Json(request): Json<UpdateModelSettingsPartiallyRequest>,
-) -> Result<Json<ModelSettingsResponse>, ApiError> {
+    Json(request): Json<UpdateModelRequest>,
+) -> Result<Json<ModelResponse>, ApiError> {
     tracing::info!(
-        "Partially updating model settings for model_id={}: {:?}",
+        "Partially updating model for model_id={}: {:?}",
         model_id,
         request
     );
 
-    let settings = services::model::ports::PartialModelSettings {
-        public: request.public,
+    let settings = request.settings.map(|settings| PartialModelSettings {
+        public: settings.public,
+    });
+
+    let update_request = UpdateModelRequest {
+        model_id: model_id.clone(),
+        settings,
     };
 
-    let settings = app_state
+    let model = app_state
         .model_settings_service
-        .update_model(&model_id, settings)
+        .update_model(update_request)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to update model settings: {}", e);
-            ApiError::internal_server_error("Failed to update model settings")
+            tracing::error!("Failed to update model: {}", e);
+            ApiError::internal_server_error("Failed to update model")
         })?;
 
-    Ok(Json(ModelSettingsResponse {
-        settings: settings.into(),
-    }))
+    Ok(Json(model.into()))
 }
 
 /// Create admin router with all admin routes (requires admin authentication)
@@ -641,10 +643,8 @@ pub fn create_admin_router() -> Router<AppState> {
             get(get_system_prompt).post(set_system_prompt),
         )
         .route(
-            "/model_settings/{model_id}",
-            get(get_model_settings)
-                .post(update_model_settings)
-                .patch(update_model_settings_partially),
+            "/model/{model_id}",
+            get(get_model).post(upsert_model).patch(update_model),
         )
         .route("/analytics", get(get_analytics))
         .route("/analytics/top-users", get(get_top_users))

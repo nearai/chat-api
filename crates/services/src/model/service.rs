@@ -1,10 +1,7 @@
 use async_trait::async_trait;
 use std::sync::Arc;
 
-use super::ports::{
-    Model, ModelService, ModelSettings, ModelsRepository, PartialModelSettings, UpdateModelRequest,
-    UpsertModelRequest,
-};
+use super::ports::{Model, ModelService, ModelsRepository, UpdateModelRequest, UpsertModelRequest};
 
 pub struct ModelServiceImpl {
     repository: Arc<dyn ModelsRepository>,

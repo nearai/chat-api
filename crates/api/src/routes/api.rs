@@ -1076,8 +1076,8 @@ async fn proxy_responses(
     if let Ok(req) = serde_json::from_slice::<ResponseRequestModelField>(&body_bytes) {
         if let Some(model_id) = req.model {
             match state.model_settings_service.get_model(&model_id).await {
-                Ok(settings) => {
-                    if !settings.public {
+                Ok(Some(model)) => {
+                    if !model.settings.public {
                         tracing::warn!(
                             "Blocking response request for non-public model '{}' from user {}",
                             model_id,
@@ -1091,6 +1091,15 @@ async fn proxy_responses(
                         )
                             .into_response());
                     }
+                }
+                Ok(None) => {
+                    return Err((
+                        StatusCode::NOT_FOUND,
+                        Json(ErrorResponse {
+                            error: "Model not found".to_string(),
+                        }),
+                    )
+                        .into_response())
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -1314,7 +1323,7 @@ async fn proxy_model_list(
         let public_flag = model
             .get("modelId")
             .and_then(|v| v.as_str())
-            .and_then(|id| settings_map.get(id).map(|s| s.public))
+            .and_then(|id| settings_map.get(id).map(|m| m.settings.public))
             .unwrap_or(false);
 
         if let Some(obj) = model.as_object_mut() {
