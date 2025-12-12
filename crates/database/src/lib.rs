@@ -83,6 +83,7 @@ impl Database {
         // Create Patroni discovery
         let discovery = Arc::new(PatroniDiscovery::new(
             config.primary_app_id.clone(),
+            config.gateway_subdomain.clone(),
             config.refresh_interval,
         ));
 
