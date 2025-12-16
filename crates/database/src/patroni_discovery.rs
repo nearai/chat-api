@@ -37,18 +37,24 @@ pub struct ClusterState {
 pub struct PatroniDiscovery {
     client: Client,
     postgres_app_id: String,
+    gateway_subdomain: String,
     cluster_state: Arc<RwLock<Option<ClusterState>>>,
     refresh_interval: Duration,
 }
 
 impl PatroniDiscovery {
-    pub fn new(postgres_app_id: String, refresh_interval_secs: u64) -> Self {
+    pub fn new(
+        postgres_app_id: String,
+        gateway_subdomain: String,
+        refresh_interval_secs: u64,
+    ) -> Self {
         Self {
             client: Client::builder()
                 .timeout(Duration::from_secs(10))
                 .build()
                 .expect("Failed to create HTTP client"),
             postgres_app_id,
+            gateway_subdomain,
             cluster_state: Arc::new(RwLock::new(None)),
             refresh_interval: Duration::from_secs(refresh_interval_secs),
         }
@@ -61,14 +67,14 @@ impl PatroniDiscovery {
             self.postgres_app_id
         );
 
-        let url = "http://dstack-service/cluster";
+        let url = format!(
+            "https://{}-8008.{}/cluster",
+            self.postgres_app_id, self.gateway_subdomain
+        );
+
         let response = self
             .client
             .get(url)
-            .header("x-dstack-target-app", &self.postgres_app_id)
-            .header("x-dstack-target-port", "8008")
-            .header("x-dstack-target-use-tls", "false")
-            .header("Host", "vpc-server")
             .send()
             .await
             .map_err(|e| anyhow!("Failed to connect to Patroni API: {e}"))?;
@@ -282,7 +288,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_least_lag_replica() {
-        let discovery = PatroniDiscovery::new("test-app".to_string(), 30);
+        let discovery =
+            PatroniDiscovery::new("test-app".to_string(), "dstack.internal".to_string(), 30);
 
         let replica1 = create_test_member("replica1", "replica", Some(100));
         let replica2 = create_test_member("replica2", "replica", Some(10));
@@ -312,7 +319,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_replicas_by_lag() {
-        let discovery = PatroniDiscovery::new("test-app".to_string(), 30);
+        let discovery =
+            PatroniDiscovery::new("test-app".to_string(), "dstack.internal".to_string(), 30);
 
         let replica1 = create_test_member("replica1", "replica", Some(100));
         let replica2 = create_test_member("replica2", "replica", Some(10));
@@ -331,7 +339,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_round_robin_selection() {
-        let discovery = PatroniDiscovery::new("test-app".to_string(), 30);
+        let discovery =
+            PatroniDiscovery::new("test-app".to_string(), "dstack.internal".to_string(), 30);
 
         let replica1 = create_test_member("replica1", "replica", None);
         let replica2 = create_test_member("replica2", "replica", None);

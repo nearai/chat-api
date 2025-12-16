@@ -12,6 +12,7 @@ pub struct DatabaseConfig {
     pub tls_enabled: bool,
     pub tls_ca_cert_path: Option<String>,
     pub primary_app_id: String,
+    pub gateway_subdomain: String,
     pub refresh_interval: u64,
     pub mock: bool,
 }
@@ -45,6 +46,7 @@ impl Default for DatabaseConfig {
                 .unwrap_or(false),
             tls_ca_cert_path: std::env::var("DATABASE_TLS_CA_CERT_PATH").ok(),
             primary_app_id: std::env::var("DATABASE_PRIMARY_APP_ID").unwrap_or_default(),
+            gateway_subdomain: std::env::var("GATEWAY_SUBDOMAIN").unwrap_or_default(),
             refresh_interval: std::env::var("DATABASE_REFRESH_INTERVAL")
                 .ok()
                 .and_then(|v| v.parse().ok())

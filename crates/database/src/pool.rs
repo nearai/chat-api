@@ -102,6 +102,7 @@ mod tests {
         let config = config::DatabaseConfig {
             host: Some("localhost".to_string()),
             port: 5432,
+            gateway_subdomain: "dstack.internal".to_string(),
             database: "test_db".to_string(),
             username: "postgres".to_string(),
             password: "postgres".to_string(),
@@ -121,6 +122,7 @@ mod tests {
         let config = config::DatabaseConfig {
             host: Some("remote.example.com".to_string()),
             port: 5432,
+            gateway_subdomain: "dstack.internal".to_string(),
             database: "prod_db".to_string(),
             username: "user".to_string(),
             password: "pass".to_string(),
@@ -142,6 +144,7 @@ mod tests {
             host: Some("localhost".to_string()),
             port: 5432,
             database: "cloud_api".to_string(),
+            gateway_subdomain: "dstack.internal".to_string(),
             username: "postgres".to_string(),
             password: "postgres".to_string(),
             max_connections: 5,
@@ -160,6 +163,7 @@ mod tests {
         let remote_config = config::DatabaseConfig {
             host: Some("prod-db.example.com".to_string()),
             port: 5432,
+            gateway_subdomain: "dstack.internal".to_string(),
             database: "cloud_api_prod".to_string(),
             username: "app_user".to_string(),
             password: "secure_password".to_string(),
