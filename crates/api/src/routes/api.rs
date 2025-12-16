@@ -1043,7 +1043,7 @@ async fn get_file_content(
 async fn proxy_responses(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    headers: HeaderMap,
+    mut headers: HeaderMap,
     request: Request,
 ) -> Result<Response, Response> {
     tracing::info!(
@@ -1116,45 +1116,59 @@ async fn proxy_responses(
                     )
                         .into_response())
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to load model settings for '{}', allowing request to proceed: {}",
-                        model_id,
-                        e
-                    );
+                Err(_) => {
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error: "Failed to get model".to_string(),
+                        }),
+                    )
+                        .into_response())
                 }
             }
         }
     }
 
-    // If we have a model-level system prompt, inject it into the request as `instructions`
-    // when the client has not already provided explicit instructions.
+    // If we have a model-level system prompt, inject or prepend it into the request as `instructions`.
     let mut modified_body_bytes: Option<Bytes> = None;
     if let (Some(mut body), Some(system_prompt)) = (body_json, model_system_prompt.clone()) {
-        if !system_prompt.is_empty() && body.get("instructions").is_none() {
-            body["instructions"] = serde_json::Value::String(system_prompt);
+        if !system_prompt.is_empty() {
+            // If client already provided instructions, prepend model system prompt with two newlines.
+            let new_instructions = match body.get("instructions").and_then(|v| v.as_str()) {
+                Some(existing) if !existing.is_empty() => {
+                    format!("{system_prompt}\n\n{existing}")
+                }
+                _ => system_prompt,
+            };
+
+            body["instructions"] = serde_json::Value::String(new_instructions);
 
             match serde_json::to_vec(&body) {
                 Ok(serialized) => {
                     modified_body_bytes = Some(Bytes::from(serialized));
                 }
-                Err(e) => {
-                    tracing::error!(
-                        "Failed to serialize modified /responses body for user_id={}: {}. \
-                         Falling back to original body.",
-                        user.user_id,
-                        e
-                    );
+                Err(_) => {
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error: "Failed to modify instructions".to_string(),
+                        }),
+                    )
+                        .into_response())
                 }
             }
         }
     }
 
-    let body_bytes_to_use: &Bytes = modified_body_bytes.as_ref().unwrap_or(&body_bytes);
+    let body_bytes_to_use: &Bytes = modified_body_bytes.as_ref().unwrap();
+    headers.append(
+        "content-length",
+        body_bytes_to_use.len().to_string().parse().unwrap(),
+    );
 
     // Track conversation from the request
     tracing::debug!("POST to /responses detected, attempting to track conversation");
-    if let Err(e) = track_conversation_from_request(&state, user.user_id, &body_bytes).await {
+    if let Err(e) = track_conversation_from_request(&state, user.user_id, body_bytes_to_use).await {
         tracing::error!(
             "Failed to track conversation for user {} from /responses: {}",
             user.user_id,

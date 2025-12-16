@@ -279,7 +279,7 @@ impl From<ModelSettings> for services::model::ports::ModelSettings {
     }
 }
 
-/// Model settings content for API responses
+/// Partial model settings for API requests
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct PartialModelSettings {
     /// Whether models are public (visible/usable in responses)

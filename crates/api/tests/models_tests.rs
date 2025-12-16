@@ -372,6 +372,145 @@ async fn test_responses_allow_public_model() {
     );
 }
 
+/// When a public model has a system_prompt and the client does NOT send instructions,
+/// the proxy should inject `instructions = system_prompt` into the forwarded request.
+#[tokio::test]
+async fn test_responses_injects_system_prompt_when_instructions_missing() {
+    let server = create_test_server().await;
+
+    // Use an admin account to configure model settings (public + system_prompt)
+    let admin_email = "system-prompt-no-instructions-admin@admin.org";
+    let admin_token = mock_login(&server, admin_email).await;
+
+    let system_prompt = "You are a helpful assistant (model-level).";
+
+    let update_body = json!({
+        "settings": {
+            "public": true,
+            "system_prompt": system_prompt
+        }
+    });
+
+    let response = server
+        .post("/v1/admin/model/test-system-prompt-model-1")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&update_body)
+        .await;
+
+    assert!(
+        response.status_code().is_success(),
+        "Admin should be able to set model with system_prompt"
+    );
+
+    // Now send a responses request WITHOUT instructions
+    let user_email = "system-prompt-no-instructions-user@example.com";
+    let user_token = mock_login(&server, user_email).await;
+
+    let body = json!({
+        "model": "test-system-prompt-model-1",
+        "input": "Hello"
+    });
+
+    let response = server
+        .post("/v1/responses")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&body)
+        .await;
+
+    // We cannot directly inspect the upstream OpenAI request in this test,
+    // but at minimum the proxy should not block, since the model is public.
+    assert_ne!(
+        response.status_code(),
+        403,
+        "Requests with public model and system_prompt should not be blocked (status was {})",
+        response.status_code()
+    );
+}
+
+/// When a public model has a system_prompt and the client already sends instructions,
+/// the proxy should prepend the model system_prompt with two newlines.
+#[tokio::test]
+async fn test_responses_prepends_system_prompt_when_instructions_present() {
+    let server = create_test_server().await;
+
+    // Use an admin account to configure model settings (public + system_prompt)
+    let admin_email = "system-prompt-with-instructions-admin@admin.org";
+    let admin_token = mock_login(&server, admin_email).await;
+
+    let system_prompt = "You are a helpful assistant (model-level, prepend).";
+
+    let update_body = json!({
+        "settings": {
+            "public": true,
+            "system_prompt": system_prompt
+        }
+    });
+
+    let response = server
+        .post("/v1/admin/model/test-system-prompt-model-2")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&update_body)
+        .await;
+
+    assert!(
+        response.status_code().is_success(),
+        "Admin should be able to set model with system_prompt"
+    );
+
+    // Now send a responses request WITH client instructions
+    let user_email = "system-prompt-with-instructions-user@example.com";
+    let user_token = mock_login(&server, user_email).await;
+
+    let body = json!({
+        "model": "test-system-prompt-model-2",
+        "instructions": "User provided instructions.",
+        "input": "Hello"
+    });
+
+    let response = server
+        .post("/v1/responses")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&body)
+        .await;
+
+    // Similarly, we cannot directly assert the final contents of `instructions` here,
+    // but we can at least ensure that the request is not blocked by the visibility logic.
+    assert_ne!(
+        response.status_code(),
+        403,
+        "Requests with public model and custom instructions should not be blocked (status was {})",
+        response.status_code()
+    );
+}
+
 /// Requests without a `model` field should be allowed (no 403 from visibility logic).
 #[tokio::test]
 async fn test_responses_allow_without_model_field() {

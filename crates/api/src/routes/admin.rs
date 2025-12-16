@@ -315,6 +315,7 @@ pub async fn get_top_users(
         (status = 200, description = "Model settings retrieved", body = ModelResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "Model not found", body = crate::error::ApiErrorResponse),
         (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
     ),
     security(
@@ -407,6 +408,7 @@ pub async fn upsert_model(
         (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "Model not found", body = crate::error::ApiErrorResponse),
         (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
     ),
     security(
