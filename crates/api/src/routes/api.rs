@@ -1055,6 +1055,11 @@ async fn proxy_responses(
     // Extract body bytes
     let body_bytes = extract_body_bytes(request).await?;
 
+    // Parsed JSON body (if applicable)
+    let mut body_json: Option<serde_json::Value> = None;
+    // Optional system prompt resolved from model settings
+    let mut model_system_prompt: Option<String> = None;
+
     tracing::debug!(
         "Extracted request body: {} bytes for POST /v1/responses",
         body_bytes.len()
@@ -1064,18 +1069,26 @@ async fn proxy_responses(
         if let Ok(body_str) = std::str::from_utf8(&body_bytes) {
             tracing::debug!("Request body content: {}", body_str);
         }
+
+        // Try to parse JSON body once for further processing (model visibility + system prompt)
+        match serde_json::from_slice::<serde_json::Value>(&body_bytes) {
+            Ok(v) => {
+                body_json = Some(v);
+            }
+            Err(e) => {
+                tracing::debug!(
+                    "Failed to parse /responses request body as JSON for user_id={}: {}",
+                    user.user_id,
+                    e
+                );
+            }
+        }
     }
 
     // Enforce model-level visibility based on settings if a model is specified
-    #[derive(Deserialize)]
-    struct ResponseRequestModelField {
-        #[serde(default)]
-        model: Option<String>,
-    }
-
-    if let Ok(req) = serde_json::from_slice::<ResponseRequestModelField>(&body_bytes) {
-        if let Some(model_id) = req.model {
-            match state.model_service.get_model(&model_id).await {
+    if let Some(ref body) = body_json {
+        if let Some(model_id) = body.get("model").and_then(|v| v.as_str()) {
+            match state.model_service.get_model(model_id).await {
                 Ok(Some(model)) => {
                     if !model.settings.public {
                         tracing::warn!(
@@ -1091,6 +1104,8 @@ async fn proxy_responses(
                         )
                             .into_response());
                     }
+
+                    model_system_prompt = model.settings.system_prompt.clone();
                 }
                 Ok(None) => {
                     return Err((
@@ -1110,12 +1125,32 @@ async fn proxy_responses(
                 }
             }
         }
-    } else {
-        tracing::debug!(
-            "Failed to parse model field from /responses request body for user_id={}",
-            user.user_id
-        );
     }
+
+    // If we have a model-level system prompt, inject it into the request as `instructions`
+    // when the client has not already provided explicit instructions.
+    let mut modified_body_bytes: Option<Bytes> = None;
+    if let (Some(mut body), Some(system_prompt)) = (body_json, model_system_prompt.clone()) {
+        if !system_prompt.is_empty() && body.get("instructions").is_none() {
+            body["instructions"] = serde_json::Value::String(system_prompt);
+
+            match serde_json::to_vec(&body) {
+                Ok(serialized) => {
+                    modified_body_bytes = Some(Bytes::from(serialized));
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to serialize modified /responses body for user_id={}: {}. \
+                         Falling back to original body.",
+                        user.user_id,
+                        e
+                    );
+                }
+            }
+        }
+    }
+
+    let body_bytes_to_use: &Bytes = modified_body_bytes.as_ref().unwrap_or(&body_bytes);
 
     // Track conversation from the request
     tracing::debug!("POST to /responses detected, attempting to track conversation");
@@ -1136,7 +1171,12 @@ async fn proxy_responses(
     // Forward the request to OpenAI
     let proxy_response = state
         .proxy_service
-        .forward_request(Method::POST, "responses", headers.clone(), Some(body_bytes))
+        .forward_request(
+            Method::POST,
+            "responses",
+            headers.clone(),
+            Some(body_bytes_to_use.clone()),
+        )
         .await
         .map_err(|e| {
             tracing::error!(

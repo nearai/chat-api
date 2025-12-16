@@ -256,12 +256,16 @@ pub struct UserSettingsResponse {
 pub struct ModelSettings {
     /// Whether models are public (visible/usable in responses)
     pub public: bool,
+    /// Optional system-level system prompt for this model
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
 }
 
 impl From<services::model::ports::ModelSettings> for ModelSettings {
     fn from(content: services::model::ports::ModelSettings) -> Self {
         Self {
             public: content.public,
+            system_prompt: content.system_prompt,
         }
     }
 }
@@ -270,6 +274,7 @@ impl From<ModelSettings> for services::model::ports::ModelSettings {
     fn from(content: ModelSettings) -> Self {
         Self {
             public: content.public,
+            system_prompt: content.system_prompt,
         }
     }
 }
@@ -279,12 +284,15 @@ impl From<ModelSettings> for services::model::ports::ModelSettings {
 pub struct PartialModelSettings {
     /// Whether models are public (visible/usable in responses)
     pub public: Option<bool>,
+    /// Optional system-level system prompt for this model
+    pub system_prompt: Option<String>,
 }
 
 impl From<services::model::ports::PartialModelSettings> for PartialModelSettings {
     fn from(content: services::model::ports::PartialModelSettings) -> Self {
         Self {
             public: content.public,
+            system_prompt: content.system_prompt,
         }
     }
 }
@@ -293,6 +301,7 @@ impl From<PartialModelSettings> for services::model::ports::PartialModelSettings
     fn from(content: PartialModelSettings) -> Self {
         Self {
             public: content.public,
+            system_prompt: content.system_prompt,
         }
     }
 }

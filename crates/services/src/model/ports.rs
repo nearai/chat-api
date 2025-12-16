@@ -6,11 +6,15 @@ use chrono::{DateTime, Utc};
 pub struct ModelSettings {
     /// Whether models are public (visible/usable in responses)
     pub public: bool,
+    /// Optional system-level system prompt for this model
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PartialModelSettings {
     pub public: Option<bool>,
+    pub system_prompt: Option<String>,
 }
 
 impl Default for ModelSettings {
@@ -18,7 +22,10 @@ impl Default for ModelSettings {
     ///
     /// By default, models are **not** public (public = false).
     fn default() -> Self {
-        Self { public: false }
+        Self {
+            public: false,
+            system_prompt: None,
+        }
     }
 }
 
@@ -26,6 +33,7 @@ impl ModelSettings {
     pub fn into_updated(self, settings: PartialModelSettings) -> Self {
         Self {
             public: settings.public.unwrap_or(self.public),
+            system_prompt: settings.system_prompt.or(self.system_prompt),
         }
     }
 }
