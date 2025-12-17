@@ -20,13 +20,15 @@ async fn test_get_model_not_found() {
         .await;
 
     let status = response.status_code();
-    assert_eq!(status, 404, "Should return 404 when model does not exist");
+    assert_eq!(
+        status, 200,
+        "Should return 200 with null body when model does not exist"
+    );
 
     let body: serde_json::Value = response.json();
-    assert_eq!(
-        body.get("message"),
-        Some(&json!("Model not found")),
-        "Error message should indicate model not found"
+    assert!(
+        body.is_null(),
+        "Response body should be null when model does not exist, got: {body:?}"
     );
 }
 
@@ -183,8 +185,14 @@ async fn test_delete_model_success() {
 
     assert_eq!(
         response.status_code(),
-        404,
-        "Getting a deleted model should return 404"
+        200,
+        "Getting a deleted model should return 200 with null body"
+    );
+
+    let body: serde_json::Value = response.json();
+    assert!(
+        body.is_null(),
+        "Response body should be null after model is deleted, got: {body:?}"
     );
 }
 

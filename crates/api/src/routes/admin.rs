@@ -312,10 +312,9 @@ pub async fn get_top_users(
         ("model_id" = String, Path, description = "Model identifier (e.g. gpt-4.1)")
     ),
     responses(
-        (status = 200, description = "Model settings retrieved", body = ModelResponse),
+        (status = 200, description = "Model settings retrieved", body = Option<ModelResponse>),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
-        (status = 404, description = "Model not found", body = crate::error::ApiErrorResponse),
         (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
     ),
     security(
@@ -325,7 +324,7 @@ pub async fn get_top_users(
 pub async fn get_model(
     State(app_state): State<AppState>,
     Path(model_id): Path<String>,
-) -> Result<Json<ModelResponse>, ApiError> {
+) -> Result<Json<Option<ModelResponse>>, ApiError> {
     tracing::info!("Getting model for model_id={}", model_id);
 
     let model = app_state
@@ -337,9 +336,7 @@ pub async fn get_model(
             ApiError::internal_server_error("Failed to get model")
         })?;
 
-    let model = model.ok_or_else(|| ApiError::not_found("Model not found"))?;
-
-    Ok(Json(model.into()))
+    Ok(Json(model.map(Into::into)))
 }
 
 /// Fully create or update a model
