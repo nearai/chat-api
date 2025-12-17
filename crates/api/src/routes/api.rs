@@ -1130,9 +1130,8 @@ async fn proxy_responses(
     }
 
     // If we have a model-level system prompt, inject or prepend it into the request as `instructions`.
-    let mut modified_body_bytes: Option<Bytes> = None;
-    if let (Some(mut body), Some(system_prompt)) = (body_json, model_system_prompt.clone()) {
-        if !system_prompt.is_empty() {
+    let modified_body_bytes =
+        if let (Some(mut body), Some(system_prompt)) = (body_json, model_system_prompt.clone()) {
             // If client already provided instructions, prepend model system prompt with two newlines.
             let new_instructions = match body.get("instructions").and_then(|v| v.as_str()) {
                 Some(existing) if !existing.is_empty() => {
@@ -1144,9 +1143,7 @@ async fn proxy_responses(
             body["instructions"] = serde_json::Value::String(new_instructions);
 
             match serde_json::to_vec(&body) {
-                Ok(serialized) => {
-                    modified_body_bytes = Some(Bytes::from(serialized));
-                }
+                Ok(serialized) => Bytes::from(serialized),
                 Err(_) => {
                     return Err((
                         StatusCode::INTERNAL_SERVER_ERROR,
@@ -1157,18 +1154,20 @@ async fn proxy_responses(
                         .into_response())
                 }
             }
-        }
-    }
+        } else {
+            body_bytes
+        };
 
-    let body_bytes_to_use: &Bytes = modified_body_bytes.as_ref().unwrap();
     headers.append(
         "content-length",
-        body_bytes_to_use.len().to_string().parse().unwrap(),
+        modified_body_bytes.len().to_string().parse().unwrap(),
     );
 
     // Track conversation from the request
     tracing::debug!("POST to /responses detected, attempting to track conversation");
-    if let Err(e) = track_conversation_from_request(&state, user.user_id, body_bytes_to_use).await {
+    if let Err(e) =
+        track_conversation_from_request(&state, user.user_id, &modified_body_bytes).await
+    {
         tracing::error!(
             "Failed to track conversation for user {} from /responses: {}",
             user.user_id,
@@ -1189,7 +1188,7 @@ async fn proxy_responses(
             Method::POST,
             "responses",
             headers.clone(),
-            Some(body_bytes_to_use.clone()),
+            Some(modified_body_bytes),
         )
         .await
         .map_err(|e| {
