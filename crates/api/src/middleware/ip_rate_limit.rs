@@ -249,10 +249,7 @@ mod tests {
 
         // Third request should fail
         let result = state.try_acquire(ip.clone()).await;
-        assert!(matches!(
-            result,
-            Err(IpRateLimitError::RateLimitExceeded { .. })
-        ));
+        assert!(matches!(result, Err(IpRateLimitError::RateLimitExceeded)));
     }
 
     #[tokio::test]
@@ -272,17 +269,11 @@ mod tests {
 
         // Second request from same IP should fail
         let result = state.try_acquire(ip1.clone()).await;
-        assert!(matches!(
-            result,
-            Err(IpRateLimitError::RateLimitExceeded { .. })
-        ));
+        assert!(matches!(result, Err(IpRateLimitError::RateLimitExceeded)));
 
         // But second request from different IP should also fail (limit is 1)
         let result = state.try_acquire(ip2.clone()).await;
-        assert!(matches!(
-            result,
-            Err(IpRateLimitError::RateLimitExceeded { .. })
-        ));
+        assert!(matches!(result, Err(IpRateLimitError::RateLimitExceeded)));
     }
 
     #[tokio::test]
@@ -300,10 +291,7 @@ mod tests {
 
         // Second request immediately fails
         let result = state.try_acquire(ip.clone()).await;
-        assert!(matches!(
-            result,
-            Err(IpRateLimitError::RateLimitExceeded { .. })
-        ));
+        assert!(matches!(result, Err(IpRateLimitError::RateLimitExceeded)));
 
         // Wait for window to expire
         tokio::time::sleep(Duration::from_millis(150)).await;
