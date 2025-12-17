@@ -24,7 +24,8 @@ use std::io::Read;
 
 /// Create the OpenAI API proxy router
 pub fn create_api_router(
-    rate_limit_state: crate::middleware::RateLimitState,
+    user_rate_limit_state: crate::middleware::UserRateLimitState,
+    ip_rate_limit_state: crate::middleware::IpRateLimitMiddlewareState,
 ) -> Router<crate::state::AppState> {
     let conversations_router = Router::new()
         .route("/v1/conversations", post(create_conversation))
@@ -77,8 +78,12 @@ pub fn create_api_router(
     let responses_router = Router::new()
         .route("/v1/responses", post(proxy_responses))
         .layer(axum::middleware::from_fn_with_state(
-            rate_limit_state,
-            crate::middleware::rate_limit_middleware,
+            ip_rate_limit_state.clone(),
+            crate::middleware::ip_rate_limit_middleware,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            user_rate_limit_state,
+            crate::middleware::user_rate_limit_middleware,
         ));
 
     let proxy_router = Router::new()

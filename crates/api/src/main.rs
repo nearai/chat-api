@@ -222,7 +222,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Create router with CORS support
-    let app = create_router_with_cors(app_state, config.cors.clone())
+    let app = create_router_with_cors(app_state, config.cors.clone(), config.ip_rate_limit.clone())
         .merge(SwaggerUi::new("/docs").url("/api-docs/openapi.json", ApiDoc::openapi()));
 
     // Start server

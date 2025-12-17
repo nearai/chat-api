@@ -22,13 +22,13 @@ use std::{
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 
 #[derive(Clone)]
-pub struct RateLimitConfig {
+pub struct UserRateLimitConfig {
     pub max_concurrent: usize,
     pub max_requests_per_window: usize,
     pub window_duration: Duration,
 }
 
-impl Default for RateLimitConfig {
+impl Default for UserRateLimitConfig {
     fn default() -> Self {
         Self {
             max_concurrent: 2,
@@ -38,14 +38,14 @@ impl Default for RateLimitConfig {
     }
 }
 
-struct UserRateLimitState {
+struct UserRateLimitInnerState {
     semaphore: Arc<Semaphore>,
     max_permits: usize,
     request_timestamps: VecDeque<Instant>,
     last_activity: Instant,
 }
 
-impl UserRateLimitState {
+impl UserRateLimitInnerState {
     fn new(max_concurrent: usize) -> Self {
         Self {
             semaphore: Arc::new(Semaphore::new(max_concurrent)),
@@ -63,17 +63,17 @@ impl UserRateLimitState {
 }
 
 #[derive(Clone)]
-pub struct RateLimitState {
-    user_limits: Arc<Mutex<HashMap<UserId, UserRateLimitState>>>,
-    config: Arc<RateLimitConfig>,
+pub struct UserRateLimitState {
+    user_limits: Arc<Mutex<HashMap<UserId, UserRateLimitInnerState>>>,
+    config: Arc<UserRateLimitConfig>,
 }
 
-impl RateLimitState {
+impl UserRateLimitState {
     pub fn new() -> Self {
-        Self::with_config(RateLimitConfig::default())
+        Self::with_config(UserRateLimitConfig::default())
     }
 
-    pub fn with_config(config: RateLimitConfig) -> Self {
+    pub fn with_config(config: UserRateLimitConfig) -> Self {
         Self {
             user_limits: Arc::new(Mutex::new(HashMap::new())),
             config: Arc::new(config),
@@ -87,7 +87,7 @@ impl RateLimitState {
 
         let user_state = user_limits
             .entry(user_id)
-            .or_insert_with(|| UserRateLimitState::new(self.config.max_concurrent));
+            .or_insert_with(|| UserRateLimitInnerState::new(self.config.max_concurrent));
 
         let now = Instant::now();
         user_state.last_activity = now;
@@ -131,7 +131,7 @@ impl RateLimitState {
     }
 }
 
-impl Default for RateLimitState {
+impl Default for UserRateLimitState {
     fn default() -> Self {
         Self::new()
     }
@@ -181,8 +181,8 @@ impl IntoResponse for RateLimitError {
     }
 }
 
-pub async fn rate_limit_middleware(
-    State(state): State<RateLimitState>,
+pub async fn user_rate_limit_middleware(
+    State(state): State<UserRateLimitState>,
     Extension(user): Extension<AuthenticatedUser>,
     request: axum::extract::Request,
     next: Next,
@@ -206,14 +206,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_rate_limit_allows_first_request() {
-        let state = RateLimitState::new();
+        let state = UserRateLimitState::new();
         let result = state.try_acquire(test_user_id(1)).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_rate_limit_blocks_second_request_within_window() {
-        let state = RateLimitState::new();
+        let state = UserRateLimitState::new();
         let user = test_user_id(1);
 
         // First request should succeed
@@ -229,7 +229,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrency_limit_per_user() {
-        let state = RateLimitState::with_config(RateLimitConfig {
+        let state = UserRateLimitState::with_config(UserRateLimitConfig {
             max_concurrent: 2,
             max_requests_per_window: 100, // High limit to avoid rate limiting
             window_duration: Duration::from_secs(1),
@@ -248,7 +248,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_different_users_have_separate_limits() {
-        let state = RateLimitState::with_config(RateLimitConfig {
+        let state = UserRateLimitState::with_config(UserRateLimitConfig {
             max_concurrent: 1,
             max_requests_per_window: 100, // High to test concurrency, not rate
             window_duration: Duration::from_secs(1),
@@ -274,7 +274,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_permit_released_after_drop() {
-        let state = RateLimitState::with_config(RateLimitConfig {
+        let state = UserRateLimitState::with_config(UserRateLimitConfig {
             max_concurrent: 1,
             max_requests_per_window: 100,
             window_duration: Duration::from_secs(1),
@@ -299,7 +299,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_no_permit_leak_on_rate_limit_rejection() {
-        let state = RateLimitState::with_config(RateLimitConfig {
+        let state = UserRateLimitState::with_config(UserRateLimitConfig {
             max_concurrent: 2,
             max_requests_per_window: 1,
             window_duration: Duration::from_millis(50),
@@ -337,7 +337,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_idle_user_cleanup() {
-        let state = RateLimitState::with_config(RateLimitConfig {
+        let state = UserRateLimitState::with_config(UserRateLimitConfig {
             max_concurrent: 2,
             max_requests_per_window: 10,
             window_duration: Duration::from_millis(10),

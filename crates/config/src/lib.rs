@@ -281,6 +281,35 @@ impl Default for LoggingConfig {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct IpRateLimitConfig {
+    /// Maximum number of requests per IP per time window
+    pub max_requests_per_window: usize,
+    /// Time window duration in seconds
+    pub window_duration_secs: u64,
+    /// Maximum idle time before cleaning up IP entries (in seconds)
+    pub max_idle_time_secs: u64,
+}
+
+impl Default for IpRateLimitConfig {
+    fn default() -> Self {
+        Self {
+            max_requests_per_window: std::env::var("IP_RATE_LIMIT_MAX_REQUESTS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(100),
+            window_duration_secs: std::env::var("IP_RATE_LIMIT_WINDOW_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(60),
+            max_idle_time_secs: std::env::var("IP_RATE_LIMIT_MAX_IDLE_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(3600),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct Config {
     pub database: DatabaseConfig,
@@ -292,6 +321,7 @@ pub struct Config {
     pub vpc_auth: VpcAuthConfig,
     pub telemetry: TelemetryConfig,
     pub logging: LoggingConfig,
+    pub ip_rate_limit: IpRateLimitConfig,
 }
 
 impl Config {
@@ -306,6 +336,7 @@ impl Config {
             vpc_auth: VpcAuthConfig::default(),
             telemetry: TelemetryConfig::default(),
             logging: LoggingConfig::default(),
+            ip_rate_limit: IpRateLimitConfig::default(),
         }
     }
 }

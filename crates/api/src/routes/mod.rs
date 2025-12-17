@@ -11,7 +11,7 @@ use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use utoipa::ToSchema;
 
 use crate::{
-    middleware::{AuthState, MetricsState, RateLimitState},
+    middleware::{AuthState, IpRateLimitMiddlewareState, MetricsState, UserRateLimitState},
     state::AppState,
     static_files,
 };
@@ -73,7 +73,11 @@ fn is_origin_allowed(origin_str: &str, cors_config: &config::CorsConfig) -> bool
 }
 
 /// Create the main API router with CORS configuration
-pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsConfig) -> Router {
+pub fn create_router_with_cors(
+    app_state: AppState,
+    cors_config: config::CorsConfig,
+    ip_rate_limit_config: config::IpRateLimitConfig,
+) -> Router {
     // Create auth state for middleware
     let auth_state = AuthState {
         session_repository: app_state.session_repository.clone(),
@@ -85,6 +89,11 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
     let metrics_state = MetricsState {
         metrics_service: app_state.metrics_service.clone(),
     };
+
+    // Create IP rate limit state for middleware (only applied to Responses API)
+    let ip_rate_limit_state = IpRateLimitMiddlewareState::with_config(
+        crate::middleware::IpRateLimitConfig::from(ip_rate_limit_config),
+    );
 
     // OAuth routes (public, no auth required)
     let auth_routes = oauth::create_oauth_router();
@@ -112,13 +121,13 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         crate::middleware::auth_middleware,
     ));
 
-    let rate_limit_state = RateLimitState::new();
+    let user_rate_limit_state = UserRateLimitState::new();
 
     // API proxy routes (requires authentication)
-    let api_routes = api::create_api_router(rate_limit_state).layer(from_fn_with_state(
-        auth_state,
-        crate::middleware::auth_middleware,
-    ));
+    // IP rate limiting is applied only to the Responses API endpoint within create_api_router
+    let api_routes = api::create_api_router(user_rate_limit_state, ip_rate_limit_state).layer(
+        from_fn_with_state(auth_state, crate::middleware::auth_middleware),
+    );
 
     // Build the base router
     let router = Router::new()
@@ -128,7 +137,7 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         .nest("/v1/users", user_routes)
         .nest("/v1/admin", admin_routes)
         .merge(api_routes) // Merge instead of nest since api routes already have /v1 prefix
-        .merge(attestation_routes) // Merge attestation routes (already have /v1 prefix)
+        .merge(attestation_routes)
         .with_state(app_state)
         // Add static file serving as fallback (must be last)
         .fallback(static_files::static_handler);
