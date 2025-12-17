@@ -491,6 +491,108 @@ pub async fn delete_model(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Get global configuration
+#[utoipa::path(
+    get,
+    path = "/v1/admin/globals/config",
+    tag = "Admin",
+    responses(
+        (status = 200, description = "Global config retrieved", body = Option<GlobalConfigResponse>),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn get_global_config(
+    State(app_state): State<AppState>,
+) -> Result<Json<Option<GlobalConfigResponse>>, ApiError> {
+    tracing::info!("Getting global config");
+
+    let config = app_state.globals_service.get_config().await.map_err(|e| {
+        tracing::error!("Failed to get global config: {}", e);
+        ApiError::internal_server_error("Failed to get global config")
+    })?;
+
+    Ok(Json(config.map(Into::into)))
+}
+
+/// Fully create or replace global configuration
+#[utoipa::path(
+    post,
+    path = "/v1/admin/globals/config",
+    tag = "Admin",
+    request_body = UpsertGlobalConfigRequest,
+    responses(
+        (status = 200, description = "Global config upserted", body = GlobalConfigResponse),
+        (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn upsert_global_config(
+    State(app_state): State<AppState>,
+    Json(request): Json<UpsertGlobalConfigRequest>,
+) -> Result<Json<GlobalConfigResponse>, ApiError> {
+    tracing::info!("Upserting global config: {:?}", request);
+
+    let config: services::globals::ports::GlobalConfig = request.into();
+
+    let updated = app_state
+        .globals_service
+        .upsert_config(config)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to upsert global config: {}", e);
+            ApiError::internal_server_error("Failed to upsert global config")
+        })?;
+
+    Ok(Json(updated.into()))
+}
+
+/// Partially update global configuration
+#[utoipa::path(
+    patch,
+    path = "/v1/admin/globals/config",
+    tag = "Admin",
+    request_body = UpdateGlobalConfigRequest,
+    responses(
+        (status = 200, description = "Global config updated", body = GlobalConfigResponse),
+        (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn update_global_config(
+    State(app_state): State<AppState>,
+    Json(request): Json<UpdateGlobalConfigRequest>,
+) -> Result<Json<GlobalConfigResponse>, ApiError> {
+    tracing::info!("Partially updating global config: {:?}", request);
+
+    let partial: services::globals::ports::PartialGlobalConfig = request.into();
+
+    let updated = app_state
+        .globals_service
+        .update_config(partial)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to update global config: {}", e);
+            ApiError::internal_server_error("Failed to update global config")
+        })?;
+
+    Ok(Json(updated.into()))
+}
+
 /// Create admin router with all admin routes (requires admin authentication)
 pub fn create_admin_router() -> Router<AppState> {
     Router::new()
@@ -502,6 +604,12 @@ pub fn create_admin_router() -> Router<AppState> {
                 .post(upsert_model)
                 .patch(update_model)
                 .delete(delete_model),
+        )
+        .route(
+            "/globals/config",
+            get(get_global_config)
+                .post(upsert_global_config)
+                .patch(update_global_config),
         )
         .route("/analytics", get(get_analytics))
         .route("/analytics/top-users", get(get_top_users))

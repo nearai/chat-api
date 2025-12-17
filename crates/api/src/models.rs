@@ -349,6 +349,54 @@ pub struct UserListResponse {
     pub total: u64,
 }
 
+/// Global configuration response
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct GlobalConfigResponse {
+    /// Default model identifier to use when not specified
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
+}
+
+impl From<services::globals::ports::GlobalConfig> for GlobalConfigResponse {
+    fn from(config: services::globals::ports::GlobalConfig) -> Self {
+        Self {
+            default_model: config.default_model,
+        }
+    }
+}
+
+/// Global configuration upsert request (full replace)
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UpsertGlobalConfigRequest {
+    /// Default model identifier to use when not specified
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
+}
+
+impl From<UpsertGlobalConfigRequest> for services::globals::ports::GlobalConfig {
+    fn from(req: UpsertGlobalConfigRequest) -> Self {
+        services::globals::ports::GlobalConfig {
+            default_model: req.default_model,
+        }
+    }
+}
+
+/// Global configuration update request (partial)
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UpdateGlobalConfigRequest {
+    /// Default model identifier to use when not specified
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
+}
+
+impl From<UpdateGlobalConfigRequest> for services::globals::ports::PartialGlobalConfig {
+    fn from(req: UpdateGlobalConfigRequest) -> Self {
+        services::globals::ports::PartialGlobalConfig {
+            default_model: req.default_model,
+        }
+    }
+}
+
 /// File list response with pagination
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct FileListResponse {

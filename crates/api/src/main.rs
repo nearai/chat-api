@@ -72,6 +72,7 @@ async fn main() -> anyhow::Result<()> {
     let app_config_repo = db.app_config_repository();
     let near_nonce_repo = db.near_nonce_repository();
     let analytics_repo = db.analytics_repository();
+    let globals_repo = db.globals_repository();
     let model_repo = db.model_repository();
 
     // Create services
@@ -151,6 +152,12 @@ async fn main() -> anyhow::Result<()> {
         analytics_repo as Arc<dyn services::analytics::AnalyticsRepository>,
     ));
 
+    // Initialize globals service
+    tracing::info!("Initializing globals service...");
+    let globals_service = Arc::new(services::globals::service::GlobalsServiceImpl::new(
+        globals_repo as Arc<dyn services::globals::ports::GlobalsRepository>,
+    ));
+
     // Initialize metrics service
     tracing::info!("Initializing metrics service...");
     let metrics_service: Arc<dyn services::metrics::MetricsServiceTrait> =
@@ -211,6 +218,7 @@ async fn main() -> anyhow::Result<()> {
         user_service,
         user_settings_service,
         model_service,
+        globals_service,
         session_repository: session_repo,
         proxy_service,
         conversation_service,

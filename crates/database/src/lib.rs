@@ -7,9 +7,9 @@ pub mod repositories;
 pub use pool::DbPool;
 pub use repositories::{
     PostgresAnalyticsRepository, PostgresAppConfigRepository, PostgresConversationRepository,
-    PostgresFileRepository, PostgresModelRepository, PostgresNearNonceRepository,
-    PostgresOAuthRepository, PostgresSessionRepository, PostgresUserRepository,
-    PostgresUserSettingsRepository,
+    PostgresFileRepository, PostgresGlobalsRepository, PostgresModelRepository,
+    PostgresNearNonceRepository, PostgresOAuthRepository, PostgresSessionRepository,
+    PostgresUserRepository, PostgresUserSettingsRepository,
 };
 
 use crate::pool::create_pool_with_native_tls;
@@ -29,6 +29,7 @@ pub struct Database {
     conversation_repository: Arc<PostgresConversationRepository>,
     file_repository: Arc<PostgresFileRepository>,
     user_settings_repository: Arc<PostgresUserSettingsRepository>,
+    globals_repository: Arc<PostgresGlobalsRepository>,
     app_config_repository: Arc<PostgresAppConfigRepository>,
     near_nonce_repository: Arc<PostgresNearNonceRepository>,
     analytics_repository: Arc<PostgresAnalyticsRepository>,
@@ -45,6 +46,7 @@ impl Database {
         let conversation_repository = Arc::new(PostgresConversationRepository::new(pool.clone()));
         let file_repository = Arc::new(PostgresFileRepository::new(pool.clone()));
         let user_settings_repository = Arc::new(PostgresUserSettingsRepository::new(pool.clone()));
+        let globals_repository = Arc::new(PostgresGlobalsRepository::new(pool.clone()));
         let app_config_repository = Arc::new(PostgresAppConfigRepository::new(pool.clone()));
         let near_nonce_repository = Arc::new(PostgresNearNonceRepository::new(pool.clone()));
         let analytics_repository = Arc::new(PostgresAnalyticsRepository::new(pool.clone()));
@@ -58,6 +60,7 @@ impl Database {
             conversation_repository,
             file_repository,
             user_settings_repository,
+            globals_repository,
             app_config_repository,
             near_nonce_repository,
             analytics_repository,
@@ -234,5 +237,10 @@ impl Database {
     /// Get the model settings repository
     pub fn model_repository(&self) -> Arc<PostgresModelRepository> {
         self.model_repository.clone()
+    }
+
+    /// Get the globals repository
+    pub fn globals_repository(&self) -> Arc<PostgresGlobalsRepository> {
+        self.globals_repository.clone()
     }
 }
