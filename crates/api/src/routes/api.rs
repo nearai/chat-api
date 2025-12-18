@@ -1214,7 +1214,12 @@ async fn ensure_near_balance_for_near_user(
         .view()
         .fetch_from(&network_config)
         .await
-        .map_err(|_| {
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to fetch NEAR account info for account_id='{}': {}",
+                account_id_str,
+                e
+            );
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
