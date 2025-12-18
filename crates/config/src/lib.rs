@@ -252,7 +252,7 @@ pub struct NearConfig {
 
 impl Default for NearConfig {
     fn default() -> Self {
-        let raw = std::env::var("NEAR_RPC_URL").unwrap_or("https://near.lava.build".to_string());
+        let raw = std::env::var("NEAR_RPC_URL").unwrap_or("https://neart.lava.build".to_string());
         Self {
             rpc_url: Url::parse(&raw).expect("NEAR_RPC_URL must be a valid URL"),
         }

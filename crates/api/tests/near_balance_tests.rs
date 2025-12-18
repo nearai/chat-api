@@ -24,7 +24,6 @@ async fn test_near_balance_skipped_when_no_near_linked_account() {
         }))
         .await;
 
-    // Request may fail for other reasons (e.g. upstream), but should NOT be blocked by NEAR balance
     assert_ne!(
         response.status_code(),
         403,
@@ -33,19 +32,13 @@ async fn test_near_balance_skipped_when_no_near_linked_account() {
 }
 
 /// Integration test that verifies NEAR balance gating for a real NEAR account.
-///
-/// Requirements:
-/// - NEAR_RPC_URL must be set and reachable.
-/// - NEAR_TEST_RICH_ACCOUNT must be set to an account with >= 1 NEAR.
 #[tokio::test]
-#[ignore]
 async fn test_near_balance_allows_rich_account() {
     let server = create_test_server().await;
 
-    let rich_account = std::env::var("NEAR_TEST_RICH_ACCOUNT")
-        .expect("NEAR_TEST_RICH_ACCOUNT must be set for this test");
+    // Real account in testnet
+    let rich_account = "private-chat-rich-user.testnet";
 
-    // Use alice.near@near-style email so provider_user_id becomes the NEAR account ID
     let login_request = json!({
         "email": format!("{}@near", rich_account),
         "name": "Rich NEAR User",
@@ -85,5 +78,62 @@ async fn test_near_balance_allows_rich_account() {
         response.status_code(),
         403,
         "Rich NEAR account should not be blocked by NEAR balance check"
+    );
+}
+
+/// Integration test that verifies NEAR balance gating blocks a "poor" NEAR account.
+#[tokio::test]
+async fn test_near_balance_blocks_poor_account() {
+    let server = create_test_server().await;
+
+    // Real account in testnet
+    let poor_account = "private-chat-poor-user.testnet";
+
+    let login_request = json!({
+        "email": format!("{}@near", poor_account),
+        "name": "Poor NEAR User",
+        "oauth_provider": "near"
+    });
+
+    let response = server
+        .post("/v1/auth/mock-login")
+        .json(&login_request)
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        200,
+        "Mock login with NEAR provider should succeed for poor account"
+    );
+
+    let body: serde_json::Value = response.json();
+    let token = body
+        .get("token")
+        .and_then(|v| v.as_str())
+        .expect("Auth response should contain token");
+
+    let response = server
+        .post("/v1/responses")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
+        )
+        .json(&json!({
+            "model": "test-model",
+            "input": "Hello"
+        }))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        403,
+        "Poor NEAR account should be blocked by NEAR balance check"
+    );
+
+    let body: serde_json::Value = response.json();
+    let error = body.get("error").and_then(|v| v.as_str());
+    assert_eq!(
+        error,
+        Some("NEAR balance is below 1 NEAR; please top up before using this feature")
     );
 }
