@@ -255,8 +255,7 @@ impl Default for NearConfig {
         let raw = std::env::var("NEAR_RPC_URL")
             .expect("NEAR_RPC_URL environment variable is required but not set");
         Self {
-            rpc_url: Url::parse(&raw)
-                .expect("NEAR_RPC_URL must be a valid URL (e.g. https://near.lava.build)"),
+            rpc_url: Url::parse(&raw).expect("NEAR_RPC_URL must be a valid URL"),
         }
     }
 }
