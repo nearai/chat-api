@@ -1,5 +1,6 @@
 use serde::Deserialize;
 use std::collections::HashMap;
+use url::Url;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DatabaseConfig {
@@ -246,14 +247,16 @@ impl TelemetryConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct NearConfig {
     /// NEAR JSON-RPC endpoint used for on-chain queries (e.g. balance checks)
-    pub rpc_url: String,
+    pub rpc_url: Url,
 }
 
 impl Default for NearConfig {
     fn default() -> Self {
+        let raw = std::env::var("NEAR_RPC_URL")
+            .expect("NEAR_RPC_URL environment variable is required but not set");
         Self {
-            rpc_url: std::env::var("NEAR_RPC_URL")
-                .expect("NEAR_RPC_URL environment variable is required but not set"),
+            rpc_url: Url::parse(&raw)
+                .expect("NEAR_RPC_URL must be a valid URL (e.g. https://near.lava.build)"),
         }
     }
 }

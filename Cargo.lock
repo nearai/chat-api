@@ -1224,6 +1224,7 @@ dependencies = [
  "serial_test",
  "tempfile",
  "thiserror 2.0.17",
+ "url",
 ]
 
 [[package]]

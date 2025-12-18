@@ -23,7 +23,6 @@ use services::response::ports::ProxyResponse;
 use services::user::ports::OAuthProvider;
 use services::UserId;
 use std::io::Read;
-use url::Url;
 
 /// Minimum required NEAR balance (1 NEAR in yoctoNEAR: 10^24)
 const MIN_NEAR_BALANCE: u128 = 1_000_000_000_000_000_000_000_000;
@@ -1209,7 +1208,7 @@ async fn ensure_near_balance_for_near_user(
 
     let account = Account(account_id);
 
-    let network_config = NetworkConfig::from_rpc_url("", Url::parse(&state.near_rpc_url).unwrap());
+    let network_config = NetworkConfig::from_rpc_url("", state.near_rpc_url.clone());
 
     let info = account
         .view()

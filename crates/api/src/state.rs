@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use url::Url;
 
 /// Application state shared across all handlers
 #[derive(Clone)]
@@ -21,5 +22,5 @@ pub struct AppState {
     /// Analytics service for database-backed analytics
     pub analytics_service: Arc<dyn services::analytics::AnalyticsServiceTrait>,
     /// NEAR RPC URL used for on-chain balance checks (if configured)
-    pub near_rpc_url: String,
+    pub near_rpc_url: Url,
 }
