@@ -84,6 +84,7 @@ async fn main() -> anyhow::Result<()> {
         config.oauth.github_client_id.clone(),
         config.oauth.github_client_secret.clone(),
         config.oauth.redirect_uri.clone(),
+        config.near.rpc_url.clone(),
     ));
 
     let user_service = Arc::new(UserServiceImpl::new(user_repo.clone()));

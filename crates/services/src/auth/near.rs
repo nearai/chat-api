@@ -10,7 +10,6 @@ use crate::user::ports::{OAuthProvider, UserRepository};
 
 const MAX_NONCE_AGE_MS: u64 = 5 * 60 * 1000; // 5 minutes
 const EXPECTED_MESSAGE: &str = "Sign in to NEAR AI Private Chat";
-const RPC_URL: &str = "https://free.rpc.fastnear.com";
 
 fn expected_recipient() -> String {
     std::env::var("NEAR_EXPECTED_RECIPIENT").unwrap_or_else(|_| "private.near.ai".to_string())
@@ -52,8 +51,9 @@ impl NearAuthService {
         session_repository: Arc<dyn SessionRepository>,
         user_repository: Arc<dyn UserRepository>,
         nonce_repository: Arc<dyn NearNonceRepository>,
+        near_rpc_url: Url,
     ) -> Self {
-        let network_config = NetworkConfig::from_rpc_url("near", Url::parse(RPC_URL).unwrap());
+        let network_config = NetworkConfig::from_rpc_url("near", near_rpc_url);
         Self {
             session_repository,
             user_repository,

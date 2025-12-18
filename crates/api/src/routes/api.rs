@@ -1208,7 +1208,7 @@ async fn ensure_near_balance_for_near_user(
 
     let account = Account(account_id);
 
-    let network_config = NetworkConfig::from_rpc_url("", state.near_rpc_url.clone());
+    let network_config = NetworkConfig::from_rpc_url("near", state.near_rpc_url.clone());
 
     let info = account
         .view()
