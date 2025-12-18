@@ -2,6 +2,7 @@ mod common;
 
 use common::create_test_server;
 use serde_json::json;
+use tokio::time::sleep;
 
 /// When user has no NEAR-linked account, NEAR balance check should be skipped
 /// and /v1/responses should not return 403 due to balance.
@@ -138,6 +139,9 @@ async fn test_near_balance_blocks_poor_account() {
         Some("NEAR balance is below 1 NEAR; please top up before using this feature"),
         "First failure should be due to NEAR balance check"
     );
+
+    // Wait long enough to avoid being affected by per-user rate limit (1 req/sec)
+    sleep(std::time::Duration::from_millis(1100)).await;
 
     // Second call should be blocked by blacklist (user ban), without hitting NEAR again
     let response = server
