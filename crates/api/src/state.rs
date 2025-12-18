@@ -20,4 +20,6 @@ pub struct AppState {
     pub metrics_service: Arc<dyn services::metrics::MetricsServiceTrait>,
     /// Analytics service for database-backed analytics
     pub analytics_service: Arc<dyn services::analytics::AnalyticsServiceTrait>,
+    /// NEAR RPC URL used for on-chain balance checks (if configured)
+    pub near_rpc_url: String,
 }

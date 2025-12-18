@@ -132,6 +132,7 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
         cloud_api_base_url: test_config.cloud_api_base_url.clone(),
         metrics_service,
         analytics_service,
+        near_rpc_url: config.near.rpc_url.clone(),
     };
 
     // Create router

@@ -242,6 +242,22 @@ impl TelemetryConfig {
     }
 }
 
+/// NEAR-related configuration (shared between services)
+#[derive(Debug, Clone, Deserialize)]
+pub struct NearConfig {
+    /// NEAR JSON-RPC endpoint used for on-chain queries (e.g. balance checks)
+    pub rpc_url: String,
+}
+
+impl Default for NearConfig {
+    fn default() -> Self {
+        Self {
+            rpc_url: std::env::var("NEAR_RPC_URL")
+                .expect("NEAR_RPC_URL environment variable is required but not set"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 /// Configuration for global and per-module logging settings.
 pub struct LoggingConfig {
@@ -287,6 +303,8 @@ pub struct Config {
     pub oauth: OAuthConfig,
     pub server: ServerConfig,
     pub openai: OpenAIConfig,
+    /// NEAR-related configuration
+    pub near: NearConfig,
     pub cors: CorsConfig,
     pub admin: AdminConfig,
     pub vpc_auth: VpcAuthConfig,
@@ -301,6 +319,7 @@ impl Config {
             oauth: OAuthConfig::default(),
             server: ServerConfig::default(),
             openai: OpenAIConfig::default(),
+            near: NearConfig::default(),
             cors: CorsConfig::default(),
             admin: AdminConfig::default(),
             vpc_auth: VpcAuthConfig::default(),

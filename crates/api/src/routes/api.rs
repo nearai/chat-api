@@ -19,8 +19,15 @@ use services::metrics::consts::{
     METRIC_CONVERSATION_CREATED, METRIC_FILE_UPLOADED, METRIC_RESPONSE_CREATED,
 };
 use services::response::ports::ProxyResponse;
+use services::user::ports::OAuthProvider;
 use services::UserId;
 use std::io::Read;
+
+// NEAR balance check imports: use near-api for AccountId type only
+use near_api::AccountId;
+
+/// Minimum required NEAR balance (1 NEAR in yoctoNEAR: 10^24)
+const MIN_NEAR_BALANCE: u128 = 1_000_000_000_000_000_000_000_000;
 
 /// Create the OpenAI API proxy router
 pub fn create_api_router(
@@ -1052,6 +1059,9 @@ async fn proxy_responses(
         user.session_id
     );
 
+    // If user has a NEAR-linked account, enforce minimum balance before proxying
+    ensure_near_balance_for_near_user(&state, &user).await?;
+
     // Extract body bytes
     let body_bytes = extract_body_bytes(request).await?;
 
@@ -1135,6 +1145,206 @@ async fn proxy_responses(
         Body::from_stream(proxy_response.body),
     )
     .await
+}
+
+/// Ensure that if the authenticated user logged in with NEAR (has a NEAR-linked account),
+/// their on-chain balance is at least 1 NEAR before allowing expensive /v1/responses calls.
+async fn ensure_near_balance_for_near_user(
+    state: &crate::state::AppState,
+    user: &AuthenticatedUser,
+) -> Result<(), Response> {
+    // Fetch user profile to inspect linked OAuth accounts
+    let profile = state
+        .user_service
+        .get_user_profile(user.user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to get user profile for NEAR balance check (user_id={}): {}",
+                user.user_id,
+                e
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Failed to verify NEAR balance".to_string(),
+                }),
+            )
+                .into_response()
+        })?;
+
+    // Find a linked NEAR account (provider_user_id stores the NEAR account ID)
+    let near_account_id = profile
+        .linked_accounts
+        .iter()
+        .find(|acc| acc.provider == OAuthProvider::Near)
+        .map(|acc| acc.provider_user_id.clone());
+
+    // If the user does not have a NEAR-linked account, skip the balance check
+    let Some(account_id_str) = near_account_id else {
+        return Ok(());
+    };
+
+    tracing::info!(
+        "Checking NEAR balance for user_id={} account_id={}",
+        user.user_id,
+        account_id_str
+    );
+
+    // Parse NEAR account ID
+    let account_id: AccountId = account_id_str.parse().map_err(|e| {
+        tracing::error!(
+            "Invalid NEAR account id '{}' for user_id={}: {}",
+            account_id_str,
+            user.user_id,
+            e
+        );
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Invalid NEAR account id for user".to_string(),
+            }),
+        )
+            .into_response()
+    })?;
+
+    // Call NEAR JSON-RPC `query` method to get account balance.
+    // We still rely on near-api's `AccountId` type for validation, but use raw JSON-RPC for the call.
+    #[derive(Deserialize)]
+    struct NearAccountView {
+        amount: String,
+    }
+
+    #[derive(Deserialize)]
+    struct NearRpcQueryResponse {
+        result: Option<NearAccountView>,
+        error: Option<serde_json::Value>,
+    }
+
+    let client = reqwest::Client::new();
+
+    let rpc_body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "near-balance-check",
+        "method": "query",
+        "params": {
+            "request_type": "view_account",
+            "finality": "final",
+            "account_id": account_id.to_string(),
+        }
+    });
+
+    let resp = client
+        .post(&state.near_rpc_url)
+        .json(&rpc_body)
+        .send()
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to send NEAR RPC request for account '{}' (user_id={}): {}",
+                account_id_str,
+                user.user_id,
+                e
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: "Failed to verify NEAR balance from chain".to_string(),
+                }),
+            )
+                .into_response()
+        })?;
+
+    if !resp.status().is_success() {
+        tracing::error!(
+            "NEAR RPC returned non-success status {} for account '{}' (user_id={})",
+            resp.status(),
+            account_id_str,
+            user.user_id
+        );
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            Json(ErrorResponse {
+                error: "Failed to verify NEAR balance from chain".to_string(),
+            }),
+        )
+            .into_response());
+    }
+
+    let rpc: NearRpcQueryResponse = resp.json().await.map_err(|e| {
+        tracing::error!(
+            "Failed to parse NEAR RPC response for account '{}' (user_id={}): {}",
+            account_id_str,
+            user.user_id,
+            e
+        );
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(ErrorResponse {
+                error: "Failed to parse NEAR balance response".to_string(),
+            }),
+        )
+            .into_response()
+    })?;
+
+    let view = rpc.result.ok_or_else(|| {
+        tracing::error!(
+            "NEAR RPC response missing result for account '{}' (user_id={}), error={:?}",
+            account_id_str,
+            user.user_id,
+            rpc.error
+        );
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(ErrorResponse {
+                error: "NEAR RPC did not return account data".to_string(),
+            }),
+        )
+            .into_response()
+    })?;
+
+    let balance: u128 = view.amount.parse().map_err(|e| {
+        tracing::error!(
+            "Failed to parse NEAR balance '{}' for account '{}' (user_id={}): {}",
+            view.amount,
+            account_id_str,
+            user.user_id,
+            e
+        );
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(ErrorResponse {
+                error: "Failed to parse NEAR balance".to_string(),
+            }),
+        )
+            .into_response()
+    })?;
+    tracing::info!(
+        "NEAR balance for account '{}' (user_id={}): {} yoctoNEAR",
+        account_id_str,
+        user.user_id,
+        balance
+    );
+
+    if balance < MIN_NEAR_BALANCE {
+        tracing::warn!(
+            "NEAR balance too low for user_id={} account_id={} balance={} (required >= {})",
+            user.user_id,
+            account_id_str,
+            balance,
+            MIN_NEAR_BALANCE
+        );
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "NEAR balance is below 1 NEAR; please top up before using this feature"
+                    .to_string(),
+            }),
+        )
+            .into_response());
+    }
+
+    Ok(())
 }
 
 async fn proxy_model_list(

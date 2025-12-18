@@ -219,6 +219,7 @@ async fn main() -> anyhow::Result<()> {
         cloud_api_base_url: config.openai.base_url.clone().unwrap_or_default(),
         metrics_service,
         analytics_service,
+        near_rpc_url: config.near.rpc_url.clone(),
     };
 
     // Create router with CORS support
