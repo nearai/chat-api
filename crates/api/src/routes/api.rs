@@ -11,6 +11,7 @@ use axum::{
 use bytes::Bytes;
 use flate2::read::GzDecoder;
 use futures::TryStreamExt;
+use near_api::{Account, AccountId, NetworkConfig};
 use serde::{Deserialize, Serialize};
 use services::analytics::{ActivityType, RecordActivityRequest};
 use services::conversation::ports::ConversationError;
@@ -22,9 +23,7 @@ use services::response::ports::ProxyResponse;
 use services::user::ports::OAuthProvider;
 use services::UserId;
 use std::io::Read;
-
-// NEAR balance check imports: use near-api for AccountId type only
-use near_api::AccountId;
+use url::Url;
 
 /// Minimum required NEAR balance (1 NEAR in yoctoNEAR: 10^24)
 const MIN_NEAR_BALANCE: u128 = 1_000_000_000_000_000_000_000_000;
@@ -1208,117 +1207,26 @@ async fn ensure_near_balance_for_near_user(
             .into_response()
     })?;
 
-    // Call NEAR JSON-RPC `query` method to get account balance.
-    // We still rely on near-api's `AccountId` type for validation, but use raw JSON-RPC for the call.
-    #[derive(Deserialize)]
-    struct NearAccountView {
-        amount: String,
-    }
+    let account = Account(account_id);
 
-    #[derive(Deserialize)]
-    struct NearRpcQueryResponse {
-        result: Option<NearAccountView>,
-        error: Option<serde_json::Value>,
-    }
+    let network_config = NetworkConfig::from_rpc_url("", Url::parse(&state.near_rpc_url).unwrap());
 
-    let client = reqwest::Client::new();
-
-    let rpc_body = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": "near-balance-check",
-        "method": "query",
-        "params": {
-            "request_type": "view_account",
-            "finality": "final",
-            "account_id": account_id.to_string(),
-        }
-    });
-
-    let resp = client
-        .post(&state.near_rpc_url)
-        .json(&rpc_body)
-        .send()
+    let info = account
+        .view()
+        .fetch_from(&network_config)
         .await
-        .map_err(|e| {
-            tracing::error!(
-                "Failed to send NEAR RPC request for account '{}' (user_id={}): {}",
-                account_id_str,
-                user.user_id,
-                e
-            );
+        .map_err(|_| {
             (
-                StatusCode::BAD_GATEWAY,
+                StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: "Failed to verify NEAR balance from chain".to_string(),
+                    error: "Failed to fetch NEAR account info".to_string(),
                 }),
             )
                 .into_response()
         })?;
 
-    if !resp.status().is_success() {
-        tracing::error!(
-            "NEAR RPC returned non-success status {} for account '{}' (user_id={})",
-            resp.status(),
-            account_id_str,
-            user.user_id
-        );
-        return Err((
-            StatusCode::BAD_GATEWAY,
-            Json(ErrorResponse {
-                error: "Failed to verify NEAR balance from chain".to_string(),
-            }),
-        )
-            .into_response());
-    }
+    let balance = info.data.amount.as_yoctonear();
 
-    let rpc: NearRpcQueryResponse = resp.json().await.map_err(|e| {
-        tracing::error!(
-            "Failed to parse NEAR RPC response for account '{}' (user_id={}): {}",
-            account_id_str,
-            user.user_id,
-            e
-        );
-        (
-            StatusCode::BAD_GATEWAY,
-            Json(ErrorResponse {
-                error: "Failed to parse NEAR balance response".to_string(),
-            }),
-        )
-            .into_response()
-    })?;
-
-    let view = rpc.result.ok_or_else(|| {
-        tracing::error!(
-            "NEAR RPC response missing result for account '{}' (user_id={}), error={:?}",
-            account_id_str,
-            user.user_id,
-            rpc.error
-        );
-        (
-            StatusCode::BAD_GATEWAY,
-            Json(ErrorResponse {
-                error: "NEAR RPC did not return account data".to_string(),
-            }),
-        )
-            .into_response()
-    })?;
-
-    let balance: u128 = view.amount.parse().map_err(|e| {
-        tracing::error!(
-            "Failed to parse NEAR balance '{}' for account '{}' (user_id={}): {}",
-            view.amount,
-            account_id_str,
-            user.user_id,
-            e
-        );
-        (
-            StatusCode::BAD_GATEWAY,
-            Json(ErrorResponse {
-                error: "Failed to parse NEAR balance".to_string(),
-            }),
-        )
-            .into_response()
-    })?;
     tracing::info!(
         "NEAR balance for account '{}' (user_id={}): {} yoctoNEAR",
         account_id_str,
