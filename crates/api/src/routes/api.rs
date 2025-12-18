@@ -9,6 +9,7 @@ use axum::{
     Json, Router,
 };
 use bytes::Bytes;
+use chrono::Duration;
 use flate2::read::GzDecoder;
 use futures::TryStreamExt;
 use near_api::{Account, AccountId, NetworkConfig};
@@ -20,12 +21,15 @@ use services::metrics::consts::{
     METRIC_CONVERSATION_CREATED, METRIC_FILE_UPLOADED, METRIC_RESPONSE_CREATED,
 };
 use services::response::ports::ProxyResponse;
-use services::user::ports::OAuthProvider;
+use services::user::ports::{BanType, OAuthProvider};
 use services::UserId;
 use std::io::Read;
 
 /// Minimum required NEAR balance (1 NEAR in yoctoNEAR: 10^24)
 const MIN_NEAR_BALANCE: u128 = 1_000_000_000_000_000_000_000_000;
+
+/// Duration of user ban after NEAR balance check fails (in seconds)
+const NEAR_BALANCE_BAN_DURATION_SECS: i64 = 60 * 60;
 
 /// Create the OpenAI API proxy router
 pub fn create_api_router(
@@ -1057,6 +1061,9 @@ async fn proxy_responses(
         user.session_id
     );
 
+    // Check if user is currently banned before proceeding
+    ensure_user_not_banned(&state, &user).await?;
+
     // If user has a NEAR-linked account, enforce minimum balance before proxying
     ensure_near_balance_for_near_user(&state, &user).await?;
 
@@ -1246,11 +1253,71 @@ async fn ensure_near_balance_for_near_user(
             balance,
             MIN_NEAR_BALANCE
         );
+
+        // Ban user for a fixed duration when NEAR balance check fails
+        if let Err(e) = state
+            .user_service
+            .ban_user_for_duration(
+                user.user_id,
+                BanType::NearBalanceLow,
+                Some(format!(
+                    "NEAR balance {} is below required minimum {}",
+                    balance, MIN_NEAR_BALANCE
+                )),
+                Duration::seconds(NEAR_BALANCE_BAN_DURATION_SECS),
+            )
+            .await
+        {
+            tracing::error!(
+                "Failed to create NEAR balance ban for user_id={}: {}",
+                user.user_id,
+                e
+            );
+        }
+
         return Err((
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {
                 error: "NEAR balance is below 1 NEAR; please top up before using this feature"
                     .to_string(),
+            }),
+        )
+            .into_response());
+    }
+
+    Ok(())
+}
+
+/// Ensure the authenticated user is not currently banned
+async fn ensure_user_not_banned(
+    state: &crate::state::AppState,
+    user: &AuthenticatedUser,
+) -> Result<(), Response> {
+    let is_banned = state
+        .user_service
+        .has_active_ban(user.user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to check user ban status for user_id={}: {}",
+                user.user_id,
+                e
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Failed to verify user ban status".to_string(),
+                }),
+            )
+                .into_response()
+        })?;
+
+    if is_banned {
+        tracing::warn!("Blocked request for banned user_id={}", user.user_id);
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "User is temporarily banned; please try again later".to_string(),
             }),
         )
             .into_response());
