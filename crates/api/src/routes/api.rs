@@ -9,7 +9,7 @@ use axum::{
     Json, Router,
 };
 use bytes::Bytes;
-use chrono::Duration;
+use chrono::{Duration, Utc};
 use flate2::read::GzDecoder;
 use futures::TryStreamExt;
 use near_api::{Account, AccountId, NetworkConfig};
@@ -30,6 +30,9 @@ const MIN_NEAR_BALANCE: u128 = 1_000_000_000_000_000_000_000_000;
 
 /// Duration of user ban after NEAR balance check fails (in seconds)
 const NEAR_BALANCE_BAN_DURATION_SECS: i64 = 60 * 60;
+
+/// Duration to cache NEAR balance checks in memory (in seconds)
+const NEAR_BALANCE_CACHE_TTL_SECS: i64 = 5 * 60;
 
 /// Create the OpenAI API proxy router
 pub fn create_api_router(
@@ -1191,10 +1194,69 @@ async fn ensure_near_balance_for_near_user(
     };
 
     tracing::info!(
-        "Checking NEAR balance for user_id={} account_id={}",
+        "Checking NEAR balance for user_id={} account_id={} (with cache)",
         user.user_id,
         account_id_str
     );
+
+    // First, check in-memory cache to avoid frequent RPC calls
+    {
+        let cache = state.near_balance_cache.read().await;
+        if let Some(entry) = cache.get(&account_id_str) {
+            let age = Utc::now().signed_duration_since(entry.last_checked_at);
+            if age.num_seconds() >= 0 && age.num_seconds() < NEAR_BALANCE_CACHE_TTL_SECS {
+                tracing::debug!(
+                    "Using cached NEAR balance for account '{}' (age={}s, balance={} yoctoNEAR)",
+                    account_id_str,
+                    age.num_seconds(),
+                    entry.balance
+                );
+
+                if entry.balance < MIN_NEAR_BALANCE {
+                    tracing::warn!(
+                        "Cached NEAR balance too low for user_id={} account_id={} balance={} (required >= {})",
+                        user.user_id,
+                        account_id_str,
+                        entry.balance,
+                        MIN_NEAR_BALANCE
+                    );
+
+                    // Even though balance is from cache, we still enforce ban + error
+                    if let Err(e) = state
+                        .user_service
+                        .ban_user_for_duration(
+                            user.user_id,
+                            BanType::NearBalanceLow,
+                            Some(format!(
+                                "NEAR balance {} is below required minimum {} (cached)",
+                                entry.balance, MIN_NEAR_BALANCE
+                            )),
+                            Duration::seconds(NEAR_BALANCE_BAN_DURATION_SECS),
+                        )
+                        .await
+                    {
+                        tracing::error!(
+                            "Failed to create NEAR balance ban (cached) for user_id={}: {}",
+                            user.user_id,
+                            e
+                        );
+                    }
+
+                    return Err((
+                        StatusCode::FORBIDDEN,
+                        Json(ErrorResponse {
+                            error: "NEAR balance is below 1 NEAR; please top up before using this feature"
+                                .to_string(),
+                        }),
+                    )
+                        .into_response());
+                }
+
+                // Cached balance is sufficient
+                return Ok(());
+            }
+        }
+    }
 
     // Parse NEAR account ID
     let account_id: AccountId = account_id_str.parse().map_err(|e| {
@@ -1237,6 +1299,18 @@ async fn ensure_near_balance_for_near_user(
         })?;
 
     let balance = info.data.amount.as_yoctonear();
+
+    // Update in-memory cache with fresh balance
+    {
+        let mut cache = state.near_balance_cache.write().await;
+        cache.insert(
+            account_id_str.clone(),
+            crate::state::NearBalanceCacheEntry {
+                last_checked_at: Utc::now(),
+                balance,
+            },
+        );
+    }
 
     tracing::info!(
         "NEAR balance for account '{}' (user_id={}): {} yoctoNEAR",
