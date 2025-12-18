@@ -37,7 +37,7 @@ async fn test_near_balance_allows_rich_account() {
     let server = create_test_server().await;
 
     // Real account in testnet
-    let rich_account = "private-chat-rich-user.testnet";
+    let rich_account = "near";
 
     let login_request = json!({
         "email": format!("{}@near", rich_account),
@@ -87,7 +87,7 @@ async fn test_near_balance_blocks_poor_account() {
     let server = create_test_server().await;
 
     // Real account in testnet
-    let poor_account = "private-chat-poor-user.testnet";
+    let poor_account = "zero-balance.near";
 
     let login_request = json!({
         "email": format!("{}@near", poor_account),
