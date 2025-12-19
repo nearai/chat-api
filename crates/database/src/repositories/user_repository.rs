@@ -342,6 +342,23 @@ impl UserRepository for PostgresUserRepository {
     ) -> anyhow::Result<()> {
         let client = self.pool.get().await?;
 
+        // First, revoke any expired bans for this user and ban_type to avoid unique index conflicts.
+        // The unique index only checks revoked_at IS NULL, so expired bans that haven't been
+        // explicitly revoked would still cause conflicts when inserting a new ban.
+        client
+            .execute(
+                "UPDATE user_bans
+                 SET revoked_at = NOW()
+                 WHERE user_id = $1
+                   AND ban_type = $2
+                   AND revoked_at IS NULL
+                   AND expires_at IS NOT NULL
+                   AND expires_at <= NOW()",
+                &[&user_id, &ban_type.as_str()],
+            )
+            .await?;
+
+        // Now insert the new ban
         client
             .execute(
                 "INSERT INTO user_bans (user_id, reason, ban_type, expires_at)
