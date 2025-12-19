@@ -1212,48 +1212,11 @@ async fn ensure_near_balance_for_near_user(
                     entry.balance
                 );
 
-                if entry.balance < MIN_NEAR_BALANCE {
-                    tracing::warn!(
-                        "Cached NEAR balance too low for user_id={} account_id={} balance={} (required >= {})",
-                        user.user_id,
-                        account_id_str,
-                        entry.balance,
-                        MIN_NEAR_BALANCE
-                    );
-
-                    // Even though balance is from cache, we still enforce ban + error
-                    if let Err(e) = state
-                        .user_service
-                        .ban_user_for_duration(
-                            user.user_id,
-                            BanType::NearBalanceLow,
-                            Some(format!(
-                                "NEAR balance {} is below required minimum {} (cached)",
-                                entry.balance, MIN_NEAR_BALANCE
-                            )),
-                            Duration::seconds(NEAR_BALANCE_BAN_DURATION_SECS),
-                        )
-                        .await
-                    {
-                        tracing::error!(
-                            "Failed to create NEAR balance ban (cached) for user_id={}: {}",
-                            user.user_id,
-                            e
-                        );
-                    }
-
-                    return Err((
-                        StatusCode::FORBIDDEN,
-                        Json(ErrorResponse {
-                            error: "NEAR balance is below 1 NEAR; please top up before using this feature"
-                                .to_string(),
-                        }),
-                    )
-                        .into_response());
+                // We only treat cached values as authoritative if they meet the minimum balance.
+                // Low cached balances are ignored here so we can re-check on-chain after bans expire.
+                if entry.balance >= MIN_NEAR_BALANCE {
+                    return Ok(());
                 }
-
-                // Cached balance is sufficient
-                return Ok(());
             }
         }
     }
@@ -1300,18 +1263,6 @@ async fn ensure_near_balance_for_near_user(
 
     let balance = info.data.amount.as_yoctonear();
 
-    // Update in-memory cache with fresh balance
-    {
-        let mut cache = state.near_balance_cache.write().await;
-        cache.insert(
-            account_id_str.clone(),
-            crate::state::NearBalanceCacheEntry {
-                last_checked_at: Utc::now(),
-                balance,
-            },
-        );
-    }
-
     tracing::info!(
         "NEAR balance for account '{}' (user_id={}): {} yoctoNEAR",
         account_id_str,
@@ -1357,6 +1308,19 @@ async fn ensure_near_balance_for_near_user(
             }),
         )
             .into_response());
+    }
+
+    // Cache only positive results (sufficient balance). For low balances, we rely on bans
+    // and always re-check on-chain once bans expire.
+    {
+        let mut cache = state.near_balance_cache.write().await;
+        cache.insert(
+            account_id_str.clone(),
+            crate::state::NearBalanceCacheEntry {
+                last_checked_at: Utc::now(),
+                balance,
+            },
+        );
     }
 
     Ok(())
