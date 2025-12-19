@@ -46,6 +46,8 @@ pub struct MockLoginRequest {
     pub email: String,
     pub name: Option<String>,
     pub avatar_url: Option<String>,
+    /// Optional OAuth provider to link as a mocked linked account (google/github/near)
+    pub oauth_provider: Option<String>,
 }
 
 /// Request body for NEAR authentication (NEP-413)
@@ -477,6 +479,63 @@ pub async fn mock_login(
                 })?
         }
     };
+
+    // Optionally link a mocked OAuth account for this user (for tests)
+    if let Some(provider_str) = request.oauth_provider.as_deref() {
+        use services::user::ports::OAuthProvider;
+
+        let provider = match provider_str.to_lowercase().as_str() {
+            "google" => Some(OAuthProvider::Google),
+            "github" => Some(OAuthProvider::Github),
+            "near" => Some(OAuthProvider::Near),
+            other => {
+                tracing::warn!(
+                    "Unknown oauth_provider '{}' in mock login for user_id={}; skipping link",
+                    other,
+                    user.id
+                );
+                None
+            }
+        };
+
+        if let Some(provider) = provider {
+            // Derive provider_user_id from email.
+            // For NEAR we expect email like `alice.near@near` and use `alice.near` as provider_user_id.
+            let provider_user_id = match provider {
+                OAuthProvider::Near => {
+                    if let Some((account_id, domain)) = request.email.split_once('@') {
+                        if domain == "near" {
+                            account_id.to_string()
+                        } else {
+                            request.email.clone()
+                        }
+                    } else {
+                        request.email.clone()
+                    }
+                }
+                _ => request.email.clone(),
+            };
+
+            if let Err(e) = app_state
+                .user_repository
+                .link_oauth_account(user.id, provider, provider_user_id)
+                .await
+            {
+                tracing::warn!(
+                    "Failed to link mock OAuth account for user_id={} provider={:?}: {}",
+                    user.id,
+                    provider,
+                    e
+                );
+            } else {
+                tracing::info!(
+                    "Linked mock OAuth account for user_id={} provider={:?}",
+                    user.id,
+                    provider
+                );
+            }
+        }
+    }
 
     // Create session
     let session = app_state

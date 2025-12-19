@@ -1,7 +1,8 @@
 use async_trait::async_trait;
+use chrono::{Duration, Utc};
 use std::sync::Arc;
 
-use super::ports::{User, UserProfile, UserRepository, UserService};
+use super::ports::{BanType, User, UserProfile, UserRepository, UserService};
 use crate::types::UserId;
 
 pub struct UserServiceImpl {
@@ -112,5 +113,43 @@ impl UserService for UserServiceImpl {
         );
 
         Ok((users, total_count))
+    }
+
+    async fn has_active_ban(&self, user_id: UserId) -> anyhow::Result<bool> {
+        tracing::debug!("Checking active ban status for user_id={}", user_id);
+        self.user_repository.has_active_ban(user_id).await
+    }
+
+    async fn ban_user_for_duration(
+        &self,
+        user_id: UserId,
+        ban_type: BanType,
+        reason: Option<String>,
+        duration: Duration,
+    ) -> anyhow::Result<()> {
+        // Avoid creating duplicate active bans for the same user.
+        // This keeps the user_bans table from accumulating redundant rows
+        // when multiple failing checks happen close together.
+        if self.user_repository.has_active_ban(user_id).await? {
+            tracing::debug!(
+                "User already has active ban, skipping new ban: user_id={}, ban_type={}",
+                user_id,
+                ban_type
+            );
+            return Ok(());
+        }
+
+        let expires_at = Some(Utc::now() + duration);
+
+        tracing::warn!(
+            "Banning user: user_id={}, ban_type={}, duration_secs={}",
+            user_id,
+            ban_type,
+            duration.num_seconds()
+        );
+
+        self.user_repository
+            .create_user_ban(user_id, ban_type, reason, expires_at)
+            .await
     }
 }

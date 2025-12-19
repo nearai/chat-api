@@ -70,6 +70,7 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
         config.oauth.github_client_id.clone(),
         config.oauth.github_client_secret.clone(),
         config.oauth.redirect_uri.clone(),
+        config.near.rpc_url.clone(),
     ));
 
     let user_service = Arc::new(services::user::UserServiceImpl::new(user_repo.clone()));
@@ -142,6 +143,8 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
         cloud_api_base_url: test_config.cloud_api_base_url.clone(),
         metrics_service,
         analytics_service,
+        near_rpc_url: config.near.rpc_url.clone(),
+        near_balance_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     };
 
     // Create router

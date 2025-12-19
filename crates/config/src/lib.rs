@@ -1,5 +1,6 @@
 use serde::Deserialize;
 use std::collections::HashMap;
+use url::Url;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DatabaseConfig {
@@ -242,6 +243,23 @@ impl TelemetryConfig {
     }
 }
 
+/// NEAR-related configuration (shared between services)
+#[derive(Debug, Clone, Deserialize)]
+pub struct NearConfig {
+    /// NEAR JSON-RPC endpoint used for on-chain queries (e.g. balance checks)
+    pub rpc_url: Url,
+}
+
+impl Default for NearConfig {
+    fn default() -> Self {
+        let raw =
+            std::env::var("NEAR_RPC_URL").unwrap_or("https://free.rpc.fastnear.com".to_string());
+        Self {
+            rpc_url: Url::parse(&raw).expect("NEAR_RPC_URL must be a valid URL"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 /// Configuration for global and per-module logging settings.
 pub struct LoggingConfig {
@@ -287,6 +305,8 @@ pub struct Config {
     pub oauth: OAuthConfig,
     pub server: ServerConfig,
     pub openai: OpenAIConfig,
+    /// NEAR-related configuration
+    pub near: NearConfig,
     pub cors: CorsConfig,
     pub admin: AdminConfig,
     pub vpc_auth: VpcAuthConfig,
@@ -301,6 +321,7 @@ impl Config {
             oauth: OAuthConfig::default(),
             server: ServerConfig::default(),
             openai: OpenAIConfig::default(),
+            near: NearConfig::default(),
             cors: CorsConfig::default(),
             admin: AdminConfig::default(),
             vpc_auth: VpcAuthConfig::default(),
