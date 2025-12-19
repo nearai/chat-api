@@ -1300,19 +1300,15 @@ async fn ensure_near_balance_for_near_user(
             );
         }
 
-        return Err((
+        Err((
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {
                 error: "NEAR balance is below 1 NEAR; please top up before using this feature"
                     .to_string(),
             }),
         )
-            .into_response());
-    }
-
-    // Cache only positive results (sufficient balance). For low balances, we rely on bans
-    // and always re-check on-chain once bans expire.
-    {
+            .into_response())
+    } else {
         let mut cache = state.near_balance_cache.write().await;
         cache.insert(
             account_id_str.clone(),
@@ -1321,9 +1317,8 @@ async fn ensure_near_balance_for_near_user(
                 balance,
             },
         );
+        Ok(())
     }
-
-    Ok(())
 }
 
 /// Ensure the authenticated user is not currently banned
