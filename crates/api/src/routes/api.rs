@@ -25,6 +25,9 @@ use services::user::ports::{BanType, OAuthProvider};
 use services::UserId;
 use std::io::Read;
 
+const NEAR_BAN_ERROR_MESSAGE: &str =
+    "User is temporarily banned from using this feature; please try again later";
+
 /// Minimum required NEAR balance (1 NEAR in yoctoNEAR: 10^24)
 const MIN_NEAR_BALANCE: u128 = 1_000_000_000_000_000_000_000_000;
 
