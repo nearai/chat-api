@@ -127,6 +127,18 @@ impl UserService for UserServiceImpl {
         reason: Option<String>,
         duration: Duration,
     ) -> anyhow::Result<()> {
+        // Avoid creating duplicate active bans for the same user.
+        // This keeps the user_bans table from accumulating redundant rows
+        // when multiple failing checks happen close together.
+        if self.user_repository.has_active_ban(user_id).await? {
+            tracing::debug!(
+                "User already has active ban, skipping new ban: user_id={}, ban_type={}",
+                user_id,
+                ban_type
+            );
+            return Ok(());
+        }
+
         let expires_at = Some(Utc::now() + duration);
 
         tracing::warn!(
