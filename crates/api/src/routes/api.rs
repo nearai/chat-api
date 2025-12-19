@@ -1,6 +1,3 @@
-/// Error message when a user is banned from using /v1/responses
-const NEAR_BAN_ERROR_MESSAGE: &str =
-    "User is temporarily banned from using this feature; please try again later";
 use crate::consts::LIST_FILES_LIMIT_MAX;
 use crate::middleware::auth::AuthenticatedUser;
 use axum::{
@@ -36,6 +33,10 @@ const NEAR_BALANCE_BAN_DURATION_SECS: i64 = 60 * 60;
 
 /// Duration to cache NEAR balance checks in memory (in seconds)
 const NEAR_BALANCE_CACHE_TTL_SECS: i64 = 5 * 60;
+
+/// Error message when a user is banned
+pub const USER_BANNED_ERROR_MESSAGE: &str =
+    "Access temporarily restricted. Please try again later.";
 
 /// Create the OpenAI API proxy router
 pub fn create_api_router(
@@ -1307,7 +1308,7 @@ async fn ensure_near_balance_for_near_user(
         Err((
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {
-                error: NEAR_BAN_ERROR_MESSAGE.to_string(),
+                error: USER_BANNED_ERROR_MESSAGE.to_string(),
             }),
         )
             .into_response())
@@ -1353,7 +1354,7 @@ async fn ensure_user_not_banned(
         return Err((
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {
-                error: NEAR_BAN_ERROR_MESSAGE.to_string(),
+                error: USER_BANNED_ERROR_MESSAGE.to_string(),
             }),
         )
             .into_response());

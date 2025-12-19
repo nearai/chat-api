@@ -1,5 +1,6 @@
 mod common;
 
+use api::routes::api::USER_BANNED_ERROR_MESSAGE;
 use common::create_test_server;
 use serde_json::json;
 use tokio::time::sleep;
@@ -158,7 +159,7 @@ async fn test_near_balance_blocks_poor_account() {
     let error = body.get("error").and_then(|v| v.as_str());
     assert_eq!(
         error,
-        Some("User is temporarily banned from using this feature; please try again later"),
+        Some(USER_BANNED_ERROR_MESSAGE),
         "Ban error message should indicate a temporary ban without exposing NEAR balance details"
     );
 }
