@@ -340,12 +340,15 @@ impl UserRepository for PostgresUserRepository {
         reason: Option<String>,
         expires_at: Option<DateTime<Utc>>,
     ) -> anyhow::Result<()> {
-        let client = self.pool.get().await?;
+        let mut client = self.pool.get().await?;
+
+        // Start a transaction to ensure atomicity
+        let transaction = client.transaction().await?;
 
         // First, revoke any expired bans for this user and ban_type to avoid unique index conflicts.
         // The unique index only checks revoked_at IS NULL, so expired bans that haven't been
         // explicitly revoked would still cause conflicts when inserting a new ban.
-        client
+        transaction
             .execute(
                 "UPDATE user_bans
                  SET revoked_at = NOW()
@@ -359,13 +362,16 @@ impl UserRepository for PostgresUserRepository {
             .await?;
 
         // Now insert the new ban
-        client
+        transaction
             .execute(
                 "INSERT INTO user_bans (user_id, reason, ban_type, expires_at)
                  VALUES ($1, $2, $3, $4)",
                 &[&user_id, &reason, &ban_type.as_str(), &expires_at],
             )
             .await?;
+
+        // Commit the transaction
+        transaction.commit().await?;
 
         Ok(())
     }
