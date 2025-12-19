@@ -136,7 +136,7 @@ async fn test_near_balance_blocks_poor_account() {
     let error = body.get("error").and_then(|v| v.as_str());
     assert_eq!(
         error,
-        Some("NEAR balance is below 1 NEAR; please top up before using this feature"),
+        Some("NEAR balance is below, please top up before using this feature"),
         "First failure should be due to NEAR balance check"
     );
 
@@ -167,6 +167,6 @@ async fn test_near_balance_blocks_poor_account() {
     assert_eq!(
         error,
         Some("User is temporarily banned; please try again later"),
-        "Second failure should be due to user ban (blacklist)"
+        "Second failure should be due to user ban"
     );
 }

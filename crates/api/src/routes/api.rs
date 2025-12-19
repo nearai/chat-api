@@ -1303,7 +1303,7 @@ async fn ensure_near_balance_for_near_user(
         Err((
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {
-                error: "NEAR balance is below 1 NEAR; please top up before using this feature"
+                error: "NEAR balance is below, please top up before using this feature"
                     .to_string(),
             }),
         )
