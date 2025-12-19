@@ -22,6 +22,30 @@ pub enum OAuthProvider {
     Near,
 }
 
+/// Types of user bans / blacklist reasons
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BanType {
+    /// User is banned due to NEAR balance being below the required minimum
+    NearBalanceLow,
+    /// Manually created ban (e.g. by admin) or other generic reasons
+    Manual,
+}
+
+impl BanType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BanType::NearBalanceLow => "near_balance_low",
+            BanType::Manual => "manual",
+        }
+    }
+}
+
+impl std::fmt::Display for BanType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 /// Represents a linked OAuth account
 #[derive(Debug, Clone)]
 pub struct LinkedOAuthAccount {
@@ -86,6 +110,18 @@ pub trait UserRepository: Send + Sync {
 
     /// List users with pagination
     async fn list_users(&self, limit: i64, offset: i64) -> anyhow::Result<(Vec<User>, u64)>;
+
+    /// Check if the user currently has an active ban
+    async fn has_active_ban(&self, user_id: UserId) -> anyhow::Result<bool>;
+
+    /// Create a new ban record for the user
+    async fn create_user_ban(
+        &self,
+        user_id: UserId,
+        ban_type: BanType,
+        reason: Option<String>,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> anyhow::Result<()>;
 }
 
 /// Service trait for user-related operations
@@ -107,6 +143,18 @@ pub trait UserService: Send + Sync {
 
     /// List users with pagination
     async fn list_users(&self, limit: i64, offset: i64) -> anyhow::Result<(Vec<User>, u64)>;
+
+    /// Check if the user currently has an active ban
+    async fn has_active_ban(&self, user_id: UserId) -> anyhow::Result<bool>;
+
+    /// Ban a user for a specific duration
+    async fn ban_user_for_duration(
+        &self,
+        user_id: UserId,
+        ban_type: BanType,
+        reason: Option<String>,
+        duration: chrono::Duration,
+    ) -> anyhow::Result<()>;
 }
 
 /// Appearance preference

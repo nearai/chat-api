@@ -1,4 +1,18 @@
+use chrono::{DateTime, Utc};
+use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::RwLock;
+use url::Url;
+
+/// Cached NEAR balance entry for a given account
+#[derive(Debug, Clone)]
+pub struct NearBalanceCacheEntry {
+    pub last_checked_at: DateTime<Utc>,
+    pub balance: u128,
+}
+
+/// Type alias for NEAR balance cache (per-account)
+pub type NearBalanceCache = Arc<RwLock<HashMap<String, NearBalanceCacheEntry>>>;
 
 /// Application state shared across all handlers
 #[derive(Clone)]
@@ -20,4 +34,8 @@ pub struct AppState {
     pub metrics_service: Arc<dyn services::metrics::MetricsServiceTrait>,
     /// Analytics service for database-backed analytics
     pub analytics_service: Arc<dyn services::analytics::AnalyticsServiceTrait>,
+    /// NEAR RPC URL used for on-chain balance checks (if configured)
+    pub near_rpc_url: Url,
+    /// In-memory cache for NEAR account balances to avoid frequent RPC calls
+    pub near_balance_cache: NearBalanceCache,
 }

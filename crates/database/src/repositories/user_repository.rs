@@ -1,7 +1,8 @@
 use crate::pool::DbPool;
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use services::{
-    user::ports::{LinkedOAuthAccount, OAuthProvider, User, UserRepository},
+    user::ports::{BanType, LinkedOAuthAccount, OAuthProvider, User, UserRepository},
     UserId,
 };
 
@@ -313,5 +314,42 @@ impl UserRepository for PostgresUserRepository {
             .collect();
 
         Ok((users, total_count as u64))
+    }
+
+    async fn has_active_ban(&self, user_id: UserId) -> anyhow::Result<bool> {
+        let client = self.pool.get().await?;
+
+        let row = client
+            .query_opt(
+                "SELECT 1 FROM user_bans
+                 WHERE user_id = $1
+                   AND revoked_at IS NULL
+                   AND (expires_at IS NULL OR expires_at > NOW())
+                 LIMIT 1",
+                &[&user_id],
+            )
+            .await?;
+
+        Ok(row.is_some())
+    }
+
+    async fn create_user_ban(
+        &self,
+        user_id: UserId,
+        ban_type: BanType,
+        reason: Option<String>,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> anyhow::Result<()> {
+        let client = self.pool.get().await?;
+
+        client
+            .execute(
+                "INSERT INTO user_bans (user_id, reason, ban_type, expires_at)
+                 VALUES ($1, $2, $3, $4)",
+                &[&user_id, &reason, &ban_type.as_str(), &expires_at],
+            )
+            .await?;
+
+        Ok(())
     }
 }

@@ -84,6 +84,7 @@ async fn main() -> anyhow::Result<()> {
         config.oauth.github_client_id.clone(),
         config.oauth.github_client_secret.clone(),
         config.oauth.redirect_uri.clone(),
+        config.near.rpc_url.clone(),
     ));
 
     let user_service = Arc::new(UserServiceImpl::new(user_repo.clone()));
@@ -219,6 +220,8 @@ async fn main() -> anyhow::Result<()> {
         cloud_api_base_url: config.openai.base_url.clone().unwrap_or_default(),
         metrics_service,
         analytics_service,
+        near_rpc_url: config.near.rpc_url.clone(),
+        near_balance_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     };
 
     // Create router with CORS support

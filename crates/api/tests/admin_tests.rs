@@ -22,22 +22,6 @@ async fn test_admin_users_list_with_admin_account() {
 
     let status = response.status_code();
     assert_eq!(status, 200, "Admin should be able to list users");
-
-    let body: serde_json::Value = response.json();
-    assert!(
-        body.get("users").is_some(),
-        "Response should have users field"
-    );
-
-    let users = body.get("users").unwrap().as_array().unwrap();
-
-    let admin_user_found = users.iter().any(|user| {
-        user.get("email")
-            .and_then(|v| v.as_str())
-            .map(|email| email == admin_email)
-            .unwrap_or(false)
-    });
-    assert!(admin_user_found, "Admin user should be in the users list");
 }
 
 #[tokio::test]

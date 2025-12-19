@@ -77,11 +77,13 @@ impl OAuthServiceImpl {
         github_client_id: String,
         github_client_secret: String,
         redirect_uri: String,
+        near_rpc_url: url::Url,
     ) -> Self {
         let near_auth = NearAuthService::new(
             session_repository.clone(),
             user_repository.clone(),
             near_nonce_repository,
+            near_rpc_url,
         );
 
         Self {

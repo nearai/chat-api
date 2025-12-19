@@ -1,3 +1,6 @@
+/// Error message when a user is banned from using /v1/responses
+const NEAR_BAN_ERROR_MESSAGE: &str =
+    "User is temporarily banned from using this feature; please try again later";
 use crate::consts::LIST_FILES_LIMIT_MAX;
 use crate::middleware::auth::AuthenticatedUser;
 use axum::{
@@ -9,8 +12,10 @@ use axum::{
     Json, Router,
 };
 use bytes::Bytes;
+use chrono::{Duration, Utc};
 use flate2::read::GzDecoder;
 use futures::TryStreamExt;
+use near_api::{Account, AccountId, NetworkConfig};
 use serde::{Deserialize, Serialize};
 use services::analytics::{ActivityType, RecordActivityRequest};
 use services::conversation::ports::ConversationError;
@@ -19,8 +24,18 @@ use services::metrics::consts::{
     METRIC_CONVERSATION_CREATED, METRIC_FILE_UPLOADED, METRIC_RESPONSE_CREATED,
 };
 use services::response::ports::ProxyResponse;
+use services::user::ports::{BanType, OAuthProvider};
 use services::UserId;
 use std::io::Read;
+
+/// Minimum required NEAR balance (1 NEAR in yoctoNEAR: 10^24)
+const MIN_NEAR_BALANCE: u128 = 1_000_000_000_000_000_000_000_000;
+
+/// Duration of user ban after NEAR balance check fails (in seconds)
+const NEAR_BALANCE_BAN_DURATION_SECS: i64 = 60 * 60;
+
+/// Duration to cache NEAR balance checks in memory (in seconds)
+const NEAR_BALANCE_CACHE_TTL_SECS: i64 = 5 * 60;
 
 /// Create the OpenAI API proxy router
 pub fn create_api_router(
@@ -1052,6 +1067,13 @@ async fn proxy_responses(
         user.session_id
     );
 
+    // Check if user is currently banned before proceeding
+    ensure_user_not_banned(&state, &user).await?;
+
+    // Trigger an asynchronous NEAR balance check. This does NOT block the current request:
+    // if the balance is too low, a ban will be created and will affect subsequent requests.
+    spawn_near_balance_check(&state, &user);
+
     // Extract body bytes
     let body_bytes = extract_body_bytes(request).await?;
 
@@ -1135,6 +1157,229 @@ async fn proxy_responses(
         Body::from_stream(proxy_response.body),
     )
     .await
+}
+
+/// Ensure that if the authenticated user logged in with NEAR (has a NEAR-linked account),
+/// their on-chain balance is at least 1 NEAR before allowing expensive /v1/responses calls.
+async fn ensure_near_balance_for_near_user(
+    state: &crate::state::AppState,
+    user: &AuthenticatedUser,
+) -> Result<(), Response> {
+    // Fetch user profile to inspect linked OAuth accounts
+    let profile = state
+        .user_service
+        .get_user_profile(user.user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to get user profile for NEAR balance check (user_id={}): {}",
+                user.user_id,
+                e
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Failed to verify NEAR balance".to_string(),
+                }),
+            )
+                .into_response()
+        })?;
+
+    // Find a linked NEAR account (provider_user_id stores the NEAR account ID)
+    let near_account_id = profile
+        .linked_accounts
+        .iter()
+        .find(|acc| acc.provider == OAuthProvider::Near)
+        .map(|acc| acc.provider_user_id.clone());
+
+    // If the user does not have a NEAR-linked account, skip the balance check
+    let Some(account_id_str) = near_account_id else {
+        return Ok(());
+    };
+
+    tracing::info!(
+        "Checking NEAR balance for user_id={} account_id={} (with cache)",
+        user.user_id,
+        account_id_str
+    );
+
+    // First, check in-memory cache to avoid frequent RPC calls
+    {
+        let cache = state.near_balance_cache.read().await;
+        if let Some(entry) = cache.get(&account_id_str) {
+            let age = Utc::now().signed_duration_since(entry.last_checked_at);
+            if age.num_seconds() >= 0 && age.num_seconds() < NEAR_BALANCE_CACHE_TTL_SECS {
+                tracing::debug!(
+                    "Using cached NEAR balance for account '{}' (age={}s, balance={} yoctoNEAR)",
+                    account_id_str,
+                    age.num_seconds(),
+                    entry.balance
+                );
+
+                // We only treat cached values as authoritative if they meet the minimum balance.
+                // Low cached balances are ignored here so we can re-check on-chain after bans expire.
+                if entry.balance >= MIN_NEAR_BALANCE {
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    // Parse NEAR account ID
+    let account_id: AccountId = account_id_str.parse().map_err(|e| {
+        tracing::error!(
+            "Invalid NEAR account id '{}' for user_id={}: {}",
+            account_id_str,
+            user.user_id,
+            e
+        );
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Invalid NEAR account id for user".to_string(),
+            }),
+        )
+            .into_response()
+    })?;
+
+    let account = Account(account_id);
+
+    let network_config = NetworkConfig::from_rpc_url("near", state.near_rpc_url.clone());
+
+    let info = account
+        .view()
+        .fetch_from(&network_config)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to fetch NEAR account info for account_id='{}': {}",
+                account_id_str,
+                e
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Failed to fetch NEAR account info".to_string(),
+                }),
+            )
+                .into_response()
+        })?;
+
+    let balance = info.data.amount.as_yoctonear();
+
+    tracing::info!(
+        "NEAR balance for account '{}' (user_id={}): {} yoctoNEAR",
+        account_id_str,
+        user.user_id,
+        balance
+    );
+
+    if balance < MIN_NEAR_BALANCE {
+        tracing::warn!(
+            "NEAR balance too low for user_id={} account_id={} balance={} (required >= {})",
+            user.user_id,
+            account_id_str,
+            balance,
+            MIN_NEAR_BALANCE
+        );
+
+        // Ban user for a fixed duration when NEAR balance check fails
+        if let Err(e) = state
+            .user_service
+            .ban_user_for_duration(
+                user.user_id,
+                BanType::NearBalanceLow,
+                Some(format!(
+                    "NEAR balance {} is below required minimum {}",
+                    balance, MIN_NEAR_BALANCE
+                )),
+                Duration::seconds(NEAR_BALANCE_BAN_DURATION_SECS),
+            )
+            .await
+        {
+            tracing::error!(
+                "Failed to create NEAR balance ban for user_id={}: {}",
+                user.user_id,
+                e
+            );
+        }
+
+        Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: NEAR_BAN_ERROR_MESSAGE.to_string(),
+            }),
+        )
+            .into_response())
+    } else {
+        let mut cache = state.near_balance_cache.write().await;
+        cache.insert(
+            account_id_str.clone(),
+            crate::state::NearBalanceCacheEntry {
+                last_checked_at: Utc::now(),
+                balance,
+            },
+        );
+        Ok(())
+    }
+}
+
+/// Ensure the authenticated user is not currently banned
+async fn ensure_user_not_banned(
+    state: &crate::state::AppState,
+    user: &AuthenticatedUser,
+) -> Result<(), Response> {
+    let is_banned = state
+        .user_service
+        .has_active_ban(user.user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to check user ban status for user_id={}: {}",
+                user.user_id,
+                e
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Failed to verify user ban status".to_string(),
+                }),
+            )
+                .into_response()
+        })?;
+
+    if is_banned {
+        tracing::warn!("Blocked request for banned user_id={}", user.user_id);
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: NEAR_BAN_ERROR_MESSAGE.to_string(),
+            }),
+        )
+            .into_response());
+    }
+
+    Ok(())
+}
+
+/// Spawn an asynchronous NEAR balance check task.
+///
+/// This function is fire-and-forget: it does not affect the current request's outcome.
+/// If the user's NEAR balance is found to be insufficient, a ban will be created and
+/// subsequent requests will be blocked by `ensure_user_not_banned`.
+fn spawn_near_balance_check(state: &crate::state::AppState, user: &AuthenticatedUser) {
+    let state = state.clone();
+    let user = user.clone();
+
+    tokio::spawn(async move {
+        if let Err(resp) = ensure_near_balance_for_near_user(&state, &user).await {
+            tracing::debug!(
+                "Asynchronous NEAR balance check completed with status={} for user_id={}",
+                resp.status(),
+                user.user_id
+            );
+        }
+    });
 }
 
 async fn proxy_model_list(
