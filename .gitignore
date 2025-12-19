@@ -5,7 +5,13 @@ config/examples/production.yaml
 .cursor
 *.crt
 .env
+.env.*
 .idea
+
+# Ignore markdown files except project docs
+*.md
+!CLAUDE.md
+!**/README.md
 
 # Frontend build artifacts (for local development)
 frontend/
