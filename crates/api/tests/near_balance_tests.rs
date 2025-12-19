@@ -37,7 +37,7 @@ async fn test_near_balance_skipped_when_no_near_linked_account() {
 async fn test_near_balance_allows_rich_account() {
     let server = create_test_server().await;
 
-    // Real account in testnet
+    // Real account in mainnet
     let rich_account = "near";
 
     let login_request = json!({
@@ -87,7 +87,7 @@ async fn test_near_balance_allows_rich_account() {
 async fn test_near_balance_blocks_poor_account() {
     let server = create_test_server().await;
 
-    // Real account in testnet
+    // Real account in mainnet
     let poor_account = "zero-balance.near";
 
     let login_request = json!({
