@@ -113,7 +113,7 @@ async fn test_near_balance_blocks_poor_account() {
         .and_then(|v| v.as_str())
         .expect("Auth response should contain token");
 
-    let response = server
+    let first_response = server
         .post("/v1/responses")
         .add_header(
             http::HeaderName::from_static("authorization"),
@@ -125,26 +125,18 @@ async fn test_near_balance_blocks_poor_account() {
         }))
         .await;
 
-    // First call should fail due to NEAR balance check and also create a ban record
-    assert_eq!(
-        response.status_code(),
+    // First call should NOT yet be blocked by NEAR balance check, since the check is asynchronous
+    assert_ne!(
+        first_response.status_code(),
         403,
-        "Poor NEAR account should be blocked by NEAR balance check"
-    );
-
-    let body: serde_json::Value = response.json();
-    let error = body.get("error").and_then(|v| v.as_str());
-    assert_eq!(
-        error,
-        Some("NEAR balance is below, please top up before using this feature"),
-        "First failure should be due to NEAR balance check"
+        "First request from poor NEAR account should not be synchronously blocked"
     );
 
     // Wait long enough to avoid being affected by per-user rate limit (1 req/sec)
     sleep(std::time::Duration::from_millis(1100)).await;
 
-    // Second call should be blocked by blacklist (user ban), without hitting NEAR again
-    let response = server
+    // Second call should be blocked by blacklist (user ban), after async NEAR check has run
+    let second_response = server
         .post("/v1/responses")
         .add_header(
             http::HeaderName::from_static("authorization"),
@@ -157,16 +149,16 @@ async fn test_near_balance_blocks_poor_account() {
         .await;
 
     assert_eq!(
-        response.status_code(),
+        second_response.status_code(),
         403,
-        "Subsequent requests from poor NEAR account should be blocked by user ban"
+        "Subsequent requests from poor NEAR account should be blocked by NEAR balance ban"
     );
 
-    let body: serde_json::Value = response.json();
+    let body: serde_json::Value = second_response.json();
     let error = body.get("error").and_then(|v| v.as_str());
     assert_eq!(
         error,
-        Some("User is temporarily banned; please try again later"),
-        "Second failure should be due to user ban"
+        Some("User is temporarily banned from using this feature; please try again later"),
+        "Ban error message should indicate a temporary ban without exposing NEAR balance details"
     );
 }

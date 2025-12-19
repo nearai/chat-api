@@ -1,3 +1,6 @@
+/// Error message when a user is banned from using /v1/responses
+const NEAR_BAN_ERROR_MESSAGE: &str =
+    "User is temporarily banned from using this feature; please try again later";
 use crate::consts::LIST_FILES_LIMIT_MAX;
 use crate::middleware::auth::AuthenticatedUser;
 use axum::{
@@ -1067,8 +1070,9 @@ async fn proxy_responses(
     // Check if user is currently banned before proceeding
     ensure_user_not_banned(&state, &user).await?;
 
-    // If user has a NEAR-linked account, enforce minimum balance before proxying
-    ensure_near_balance_for_near_user(&state, &user).await?;
+    // Trigger an asynchronous NEAR balance check. This does NOT block the current request:
+    // if the balance is too low, a ban will be created and will affect subsequent requests.
+    spawn_near_balance_check(&state, &user);
 
     // Extract body bytes
     let body_bytes = extract_body_bytes(request).await?;
@@ -1303,7 +1307,7 @@ async fn ensure_near_balance_for_near_user(
         Err((
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {
-                error: "NEAR balance is below, please top up before using this feature".to_string(),
+                error: NEAR_BAN_ERROR_MESSAGE.to_string(),
             }),
         )
             .into_response())
@@ -1349,13 +1353,33 @@ async fn ensure_user_not_banned(
         return Err((
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {
-                error: "User is temporarily banned; please try again later".to_string(),
+                error: NEAR_BAN_ERROR_MESSAGE.to_string(),
             }),
         )
             .into_response());
     }
 
     Ok(())
+}
+
+/// Spawn an asynchronous NEAR balance check task.
+///
+/// This function is fire-and-forget: it does not affect the current request's outcome.
+/// If the user's NEAR balance is found to be insufficient, a ban will be created and
+/// subsequent requests will be blocked by `ensure_user_not_banned`.
+fn spawn_near_balance_check(state: &crate::state::AppState, user: &AuthenticatedUser) {
+    let state = state.clone();
+    let user = user.clone();
+
+    tokio::spawn(async move {
+        if let Err(resp) = ensure_near_balance_for_near_user(&state, &user).await {
+            tracing::debug!(
+                "Asynchronous NEAR balance check completed with status={} for user_id={}",
+                resp.status(),
+                user.user_id
+            );
+        }
+    });
 }
 
 async fn proxy_model_list(
