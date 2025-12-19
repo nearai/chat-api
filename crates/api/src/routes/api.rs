@@ -35,7 +35,7 @@ const NEAR_BALANCE_BAN_DURATION_SECS: i64 = 60 * 60;
 const NEAR_BALANCE_CACHE_TTL_SECS: i64 = 5 * 60;
 
 /// Error message when a user is banned
-const USER_BANNED_ERROR_MESSAGE: &str =
+pub const USER_BANNED_ERROR_MESSAGE: &str =
     "Access temporarily restricted. Please try again later.";
 
 /// Create the OpenAI API proxy router
