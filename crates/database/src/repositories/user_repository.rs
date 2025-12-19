@@ -342,12 +342,10 @@ impl UserRepository for PostgresUserRepository {
     ) -> anyhow::Result<()> {
         let client = self.pool.get().await?;
 
-        // Use ON CONFLICT with the partial unique index to avoid duplicate active bans
         client
             .execute(
                 "INSERT INTO user_bans (user_id, reason, ban_type, expires_at)
-                 VALUES ($1, $2, $3, $4)
-                 ON CONFLICT ON CONSTRAINT uniq_user_bans_user_type_active DO NOTHING",
+                 VALUES ($1, $2, $3, $4)",
                 &[&user_id, &reason, &ban_type.as_str(), &expires_at],
             )
             .await?;
