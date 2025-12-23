@@ -16,7 +16,7 @@ async fn test_upsert_global_config_and_get() {
     });
 
     let response = server
-        .post("/v1/admin/globals/config")
+        .post("/v1/admin/configs")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -42,7 +42,7 @@ async fn test_upsert_global_config_and_get() {
 
     // Get global config to verify it was persisted
     let response = server
-        .get("/v1/admin/globals/config")
+        .get("/v1/admin/configs")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -80,7 +80,7 @@ async fn test_update_global_config() {
     });
 
     let response = server
-        .post("/v1/admin/globals/config")
+        .post("/v1/admin/configs")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -105,7 +105,7 @@ async fn test_update_global_config() {
     });
 
     let response = server
-        .patch("/v1/admin/globals/config")
+        .patch("/v1/admin/configs")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -131,7 +131,7 @@ async fn test_update_global_config() {
 
     // Verify via GET
     let response = server
-        .get("/v1/admin/globals/config")
+        .get("/v1/admin/configs")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -161,7 +161,7 @@ async fn test_global_config_requires_admin() {
 
     // Non-admin trying to GET global config should receive 403
     let response = server
-        .get("/v1/admin/globals/config")
+        .get("/v1/admin/configs")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {non_admin_token}")).unwrap(),
