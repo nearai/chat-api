@@ -42,6 +42,10 @@ const NEAR_BALANCE_CACHE_TTL_SECS: i64 = 5 * 60;
 /// Duration to cache model settings needed by /v1/responses in memory (in seconds)
 const MODEL_SETTINGS_CACHE_TTL_SECS: i64 = 5 * 60;
 
+/// Error message when a user is banned
+pub const USER_BANNED_ERROR_MESSAGE: &str =
+    "Access temporarily restricted. Please try again later.";
+
 /// Create the OpenAI API proxy router
 pub fn create_api_router(
     rate_limit_state: crate::middleware::RateLimitState,
@@ -1540,7 +1544,7 @@ async fn ensure_near_balance_for_near_user(
         Err((
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {
-                error: NEAR_BAN_ERROR_MESSAGE.to_string(),
+                error: USER_BANNED_ERROR_MESSAGE.to_string(),
             }),
         )
             .into_response())
@@ -1586,7 +1590,7 @@ async fn ensure_user_not_banned(
         return Err((
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {
-                error: NEAR_BAN_ERROR_MESSAGE.to_string(),
+                error: USER_BANNED_ERROR_MESSAGE.to_string(),
             }),
         )
             .into_response());
