@@ -386,6 +386,20 @@ pub async fn upsert_model(
             ApiError::internal_server_error("Failed to upsert model")
         })?;
 
+    // Update in-memory cache for /v1/responses immediately
+    {
+        let mut cache = app_state.model_system_prompt_cache.write().await;
+        cache.insert(
+            model.model_id.clone(),
+            crate::state::ModelSystemPromptCacheEntry {
+                last_checked_at: Utc::now(),
+                exists: true,
+                public: model.settings.public,
+                system_prompt: model.settings.system_prompt.clone(),
+            },
+        );
+    }
+
     Ok(Json(model.into()))
 }
 
@@ -442,6 +456,20 @@ pub async fn update_model(
             ApiError::internal_server_error("Failed to update model")
         })?;
 
+    // Update in-memory cache for /v1/responses immediately
+    {
+        let mut cache = app_state.model_system_prompt_cache.write().await;
+        cache.insert(
+            model.model_id.clone(),
+            crate::state::ModelSystemPromptCacheEntry {
+                last_checked_at: Utc::now(),
+                exists: true,
+                public: model.settings.public,
+                system_prompt: model.settings.system_prompt.clone(),
+            },
+        );
+    }
+
     Ok(Json(model.into()))
 }
 
@@ -483,6 +511,12 @@ pub async fn delete_model(
 
     if !deleted {
         return Err(ApiError::not_found("Model not found"));
+    }
+
+    // Remove from in-memory cache
+    {
+        let mut cache = app_state.model_system_prompt_cache.write().await;
+        cache.remove(&model_id);
     }
 
     Ok(StatusCode::NO_CONTENT)

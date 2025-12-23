@@ -12,6 +12,7 @@ use bytes::Bytes;
 use chrono::{Duration, Utc};
 use flate2::read::GzDecoder;
 use futures::TryStreamExt;
+use http::{HeaderName, HeaderValue};
 use near_api::{Account, AccountId, NetworkConfig};
 use serde::{Deserialize, Serialize};
 use services::analytics::{ActivityType, RecordActivityRequest};
@@ -23,6 +24,7 @@ use services::metrics::consts::{
 use services::response::ports::ProxyResponse;
 use services::user::ports::{BanType, OAuthProvider};
 use services::UserId;
+use sha2::{Digest, Sha256};
 use std::io::Read;
 
 const NEAR_BAN_ERROR_MESSAGE: &str =
@@ -36,6 +38,9 @@ const NEAR_BALANCE_BAN_DURATION_SECS: i64 = 60 * 60;
 
 /// Duration to cache NEAR balance checks in memory (in seconds)
 const NEAR_BALANCE_CACHE_TTL_SECS: i64 = 5 * 60;
+
+/// Duration to cache model settings needed by /v1/responses in memory (in seconds)
+const MODEL_SETTINGS_CACHE_TTL_SECS: i64 = 5 * 60;
 
 /// Create the OpenAI API proxy router
 pub fn create_api_router(
@@ -1081,6 +1086,10 @@ async fn proxy_responses(
     let mut body_json: Option<serde_json::Value> = None;
     // Optional system prompt resolved from model settings
     let mut model_system_prompt: Option<String> = None;
+    // Model id from request body, if present
+    let mut model_id_from_body: Option<String> = None;
+    // Whether model settings came from cache
+    let mut model_settings_cache_hit: Option<bool> = None;
 
     tracing::debug!(
         "Extracted request body: {} bytes for POST /v1/responses",
@@ -1110,42 +1119,114 @@ async fn proxy_responses(
     // Enforce model-level visibility based on settings if a model is specified
     if let Some(ref body) = body_json {
         if let Some(model_id) = body.get("model").and_then(|v| v.as_str()) {
-            match state.model_service.get_model(model_id).await {
-                Ok(Some(model)) => {
-                    if !model.settings.public {
-                        tracing::warn!(
-                            "Blocking response request for non-public model '{}' from user {}",
-                            model_id,
-                            user.user_id
-                        );
+            model_id_from_body = Some(model_id.to_string());
+
+            // 1) Try cache first
+            {
+                let cache = state.model_system_prompt_cache.read().await;
+                if let Some(entry) = cache.get(model_id) {
+                    let age = Utc::now().signed_duration_since(entry.last_checked_at);
+                    if age.num_seconds() >= 0 && age.num_seconds() < MODEL_SETTINGS_CACHE_TTL_SECS {
+                        model_settings_cache_hit = Some(true);
+
+                        if !entry.exists {
+                            return Err((
+                                StatusCode::NOT_FOUND,
+                                Json(ErrorResponse {
+                                    error: "Model not found".to_string(),
+                                }),
+                            )
+                                .into_response());
+                        }
+
+                        if !entry.public {
+                            tracing::warn!(
+                                "Blocking response request for non-public model '{}' from user {} (cache)",
+                                model_id,
+                                user.user_id
+                            );
+                            return Err((
+                                StatusCode::FORBIDDEN,
+                                Json(ErrorResponse {
+                                    error: "This model is not available".to_string(),
+                                }),
+                            )
+                                .into_response());
+                        }
+
+                        model_system_prompt = entry.system_prompt.clone();
+                    }
+                }
+            }
+
+            // 2) Cache miss or expired: fetch from DB/service and populate cache
+            if model_settings_cache_hit.is_none() {
+                model_settings_cache_hit = Some(false);
+                match state.model_service.get_model(model_id).await {
+                    Ok(Some(model)) => {
+                        // Populate cache
+                        {
+                            let mut cache = state.model_system_prompt_cache.write().await;
+                            cache.insert(
+                                model_id.to_string(),
+                                crate::state::ModelSystemPromptCacheEntry {
+                                    last_checked_at: Utc::now(),
+                                    exists: true,
+                                    public: model.settings.public,
+                                    system_prompt: model.settings.system_prompt.clone(),
+                                },
+                            );
+                        }
+
+                        if !model.settings.public {
+                            tracing::warn!(
+                                "Blocking response request for non-public model '{}' from user {}",
+                                model_id,
+                                user.user_id
+                            );
+                            return Err((
+                                StatusCode::FORBIDDEN,
+                                Json(ErrorResponse {
+                                    error: "This model is not available".to_string(),
+                                }),
+                            )
+                                .into_response());
+                        }
+
+                        model_system_prompt = model.settings.system_prompt.clone();
+                    }
+                    Ok(None) => {
+                        // Negative cache to avoid repeated DB hits
+                        {
+                            let mut cache = state.model_system_prompt_cache.write().await;
+                            cache.insert(
+                                model_id.to_string(),
+                                crate::state::ModelSystemPromptCacheEntry {
+                                    last_checked_at: Utc::now(),
+                                    exists: false,
+                                    public: false,
+                                    system_prompt: None,
+                                },
+                            );
+                        }
+
                         return Err((
-                            StatusCode::FORBIDDEN,
+                            StatusCode::NOT_FOUND,
                             Json(ErrorResponse {
-                                error: "This model is not available".to_string(),
+                                error: "Model not found".to_string(),
                             }),
                         )
                             .into_response());
                     }
-
-                    model_system_prompt = model.settings.system_prompt.clone();
-                }
-                Ok(None) => {
-                    return Err((
-                        StatusCode::NOT_FOUND,
-                        Json(ErrorResponse {
-                            error: "Model not found".to_string(),
-                        }),
-                    )
-                        .into_response())
-                }
-                Err(_) => {
-                    return Err((
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorResponse {
-                            error: "Failed to get model".to_string(),
-                        }),
-                    )
-                        .into_response())
+                    Err(_) => {
+                        return Err((
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(ErrorResponse {
+                                error: "Failed to get model".to_string(),
+                            }),
+                        )
+                            .into_response())
+                    }
                 }
             }
         }
@@ -1234,6 +1315,41 @@ async fn proxy_responses(
         user.user_id
     );
 
+    // Access model system prompt cache during proxy response handling (for observability/debugging).
+    // We DO NOT expose the prompt itself; we only attach a stable hash + cache hit indicator.
+    let mut proxy_headers = proxy_response.headers.clone();
+    if let Some(ref model_id) = model_id_from_body {
+        let cached_prompt_opt = {
+            let cache = state.model_system_prompt_cache.read().await;
+            cache.get(model_id).and_then(|e| {
+                if e.exists {
+                    e.system_prompt.clone()
+                } else {
+                    None
+                }
+            })
+        };
+
+        if let Some(prompt) = cached_prompt_opt {
+            let mut hasher = Sha256::new();
+            hasher.update(prompt.as_bytes());
+            let prompt_hash = format!("{:x}", hasher.finalize());
+
+            let _ = proxy_headers.insert(
+                HeaderName::from_static("x-nearai-model-system-prompt-sha256"),
+                HeaderValue::from_str(&prompt_hash)
+                    .unwrap_or_else(|_| HeaderValue::from_static("")),
+            );
+        }
+
+        if let Some(hit) = model_settings_cache_hit {
+            let _ = proxy_headers.insert(
+                HeaderName::from_static("x-nearai-model-settings-cache"),
+                HeaderValue::from_static(if hit { "hit" } else { "miss" }),
+            );
+        }
+    }
+
     // Record metrics for successful responses
     if (200..300).contains(&proxy_response.status) {
         state
@@ -1247,7 +1363,20 @@ async fn proxy_responses(
                 user_id: user.user_id,
                 activity_type: ActivityType::Response,
                 auth_method: None,
-                metadata: None,
+                metadata: model_id_from_body.as_ref().map(|model_id| {
+                    let mut meta = serde_json::Map::new();
+                    meta.insert(
+                        "model_id".to_string(),
+                        serde_json::Value::String(model_id.clone()),
+                    );
+                    if let Some(hit) = model_settings_cache_hit {
+                        meta.insert(
+                            "model_settings_cache_hit".to_string(),
+                            serde_json::Value::Bool(hit),
+                        );
+                    }
+                    serde_json::Value::Object(meta)
+                }),
             })
             .await
         {
@@ -1257,7 +1386,7 @@ async fn proxy_responses(
 
     build_response(
         proxy_response.status,
-        proxy_response.headers,
+        proxy_headers,
         Body::from_stream(proxy_response.body),
     )
     .await

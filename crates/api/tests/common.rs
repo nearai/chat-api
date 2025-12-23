@@ -147,6 +147,9 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
         analytics_service,
         near_rpc_url: config.near.rpc_url.clone(),
         near_balance_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        model_system_prompt_cache: Arc::new(tokio::sync::RwLock::new(
+            std::collections::HashMap::new(),
+        )),
     };
 
     // Create router
