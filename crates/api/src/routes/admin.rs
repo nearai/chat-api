@@ -547,7 +547,7 @@ pub async fn get_global_config(
         .get_config()
         .await
         .map_err(|e| {
-            tracing::error!("Failed to get global config: {}", e);
+            tracing::error!(error = ?e, "Failed to get global config");
             ApiError::internal_server_error("Failed to get global config")
         })?;
 
@@ -584,7 +584,7 @@ pub async fn upsert_global_config(
         .upsert_config(config)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to upsert global config: {}", e);
+            tracing::error!(error = ?e, "Failed to upsert global config");
             ApiError::internal_server_error("Failed to upsert global config")
         })?;
 
@@ -621,7 +621,7 @@ pub async fn update_global_config(
         .update_config(partial)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to update global config: {}", e);
+            tracing::error!(error = ?e, "Failed to update global config");
             ApiError::internal_server_error("Failed to update global config")
         })?;
 

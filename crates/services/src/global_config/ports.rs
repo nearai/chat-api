@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Key for globals table entries
+/// Key for `global_configs` table entries
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum GlobalKey {
     /// Application-wide configuration
@@ -17,7 +17,7 @@ impl fmt::Display for GlobalKey {
     }
 }
 
-/// Application-wide configuration stored in globals table
+/// Application-wide configuration stored in `global_configs` table
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GlobalConfig {
     /// Default model identifier to use when not specified
@@ -47,7 +47,7 @@ impl GlobalConfig {
     }
 }
 
-/// Repository trait for accessing globals
+/// Repository trait for accessing global config
 #[async_trait]
 pub trait GlobalConfigRepository: Send + Sync {
     /// Get global config (if exists)
@@ -60,7 +60,7 @@ pub trait GlobalConfigRepository: Send + Sync {
     async fn update_config(&self, config: PartialGlobalConfig) -> anyhow::Result<GlobalConfig>;
 }
 
-/// Service trait for globals
+/// Service trait for global config
 #[async_trait]
 pub trait GlobalConfigService: Send + Sync {
     /// Get global config (if exists)

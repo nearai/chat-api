@@ -92,6 +92,8 @@ async fn test_update_global_config() {
         .json(&upsert_body)
         .await;
 
+    println!("{}", response.text());
+
     assert!(
         response.status_code().is_success(),
         "Admin should be able to upsert initial global config"

@@ -23,7 +23,7 @@ impl GlobalConfigRepository for PostgresGlobalConfigRepository {
         let key = GlobalKey::Config.to_string();
 
         let row = client
-            .query_opt("SELECT value FROM globals WHERE key = $1", &[&key])
+            .query_opt("SELECT value FROM global_configs WHERE key = $1", &[&key])
             .await?;
 
         if let Some(row) = row {
@@ -50,7 +50,7 @@ impl GlobalConfigRepository for PostgresGlobalConfigRepository {
 
         client
             .execute(
-                "INSERT INTO globals (key, value)
+                "INSERT INTO global_configs (key, value)
                  VALUES ($1, $2)
                  ON CONFLICT (key)
                  DO UPDATE SET value = $2, updated_at = NOW()",
