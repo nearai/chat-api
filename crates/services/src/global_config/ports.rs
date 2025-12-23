@@ -49,7 +49,7 @@ impl GlobalConfig {
 
 /// Repository trait for accessing globals
 #[async_trait]
-pub trait GlobalsRepository: Send + Sync {
+pub trait GlobalConfigRepository: Send + Sync {
     /// Get global config (if exists)
     async fn get_config(&self) -> anyhow::Result<Option<GlobalConfig>>;
 
@@ -62,7 +62,7 @@ pub trait GlobalsRepository: Send + Sync {
 
 /// Service trait for globals
 #[async_trait]
-pub trait GlobalsService: Send + Sync {
+pub trait GlobalConfigService: Send + Sync {
     /// Get global config (if exists)
     async fn get_config(&self) -> anyhow::Result<Option<GlobalConfig>>;
 

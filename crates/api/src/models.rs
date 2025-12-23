@@ -357,8 +357,8 @@ pub struct GlobalConfigResponse {
     pub default_model: Option<String>,
 }
 
-impl From<services::globals::ports::GlobalConfig> for GlobalConfigResponse {
-    fn from(config: services::globals::ports::GlobalConfig) -> Self {
+impl From<services::global_config::ports::GlobalConfig> for GlobalConfigResponse {
+    fn from(config: services::global_config::ports::GlobalConfig) -> Self {
         Self {
             default_model: config.default_model,
         }
@@ -373,9 +373,9 @@ pub struct UpsertGlobalConfigRequest {
     pub default_model: Option<String>,
 }
 
-impl From<UpsertGlobalConfigRequest> for services::globals::ports::GlobalConfig {
+impl From<UpsertGlobalConfigRequest> for services::global_config::ports::GlobalConfig {
     fn from(req: UpsertGlobalConfigRequest) -> Self {
-        services::globals::ports::GlobalConfig {
+        services::global_config::ports::GlobalConfig {
             default_model: req.default_model,
         }
     }
@@ -389,9 +389,9 @@ pub struct UpdateGlobalConfigRequest {
     pub default_model: Option<String>,
 }
 
-impl From<UpdateGlobalConfigRequest> for services::globals::ports::PartialGlobalConfig {
+impl From<UpdateGlobalConfigRequest> for services::global_config::ports::PartialGlobalConfig {
     fn from(req: UpdateGlobalConfigRequest) -> Self {
-        services::globals::ports::PartialGlobalConfig {
+        services::global_config::ports::PartialGlobalConfig {
             default_model: req.default_model,
         }
     }

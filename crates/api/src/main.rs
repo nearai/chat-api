@@ -155,9 +155,11 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize globals service
     tracing::info!("Initializing globals service...");
-    let globals_service = Arc::new(services::globals::service::GlobalsServiceImpl::new(
-        globals_repo as Arc<dyn services::globals::ports::GlobalsRepository>,
-    ));
+    let global_config_service = Arc::new(
+        services::global_config::service::GlobalConfigServiceImpl::new(
+            globals_repo as Arc<dyn services::global_config::ports::GlobalConfigRepository>,
+        ),
+    );
 
     // Initialize metrics service
     tracing::info!("Initializing metrics service...");
@@ -219,7 +221,7 @@ async fn main() -> anyhow::Result<()> {
         user_service,
         user_settings_service,
         model_service,
-        globals_service,
+        global_config_service,
         session_repository: session_repo,
         proxy_service,
         conversation_service,

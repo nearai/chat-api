@@ -1,6 +1,5 @@
--- Globals table for storing application-wide JSONB configuration
--- Similar to models table, but keyed by a logical string key
-CREATE TABLE globals (
+-- Table for storing application-wide JSONB configuration
+CREATE TABLE global_configs (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     key TEXT NOT NULL UNIQUE,
     value JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -9,8 +8,8 @@ CREATE TABLE globals (
 );
 
 -- Trigger for updating updated_at timestamp
-CREATE TRIGGER update_globals_updated_at
-    BEFORE UPDATE ON globals
+CREATE TRIGGER update_global_configs_updated_at
+    BEFORE UPDATE ON global_configs
     FOR EACH ROW
     EXECUTE FUNCTION update_updated_at_column();
 

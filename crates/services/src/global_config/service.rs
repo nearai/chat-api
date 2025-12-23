@@ -1,20 +1,22 @@
 use async_trait::async_trait;
 use std::sync::Arc;
 
-use super::ports::{GlobalConfig, GlobalsRepository, GlobalsService, PartialGlobalConfig};
+use super::ports::{
+    GlobalConfig, GlobalConfigRepository, GlobalConfigService, PartialGlobalConfig,
+};
 
-pub struct GlobalsServiceImpl {
-    repository: Arc<dyn GlobalsRepository>,
+pub struct GlobalConfigServiceImpl {
+    repository: Arc<dyn GlobalConfigRepository>,
 }
 
-impl GlobalsServiceImpl {
-    pub fn new(repository: Arc<dyn GlobalsRepository>) -> Self {
+impl GlobalConfigServiceImpl {
+    pub fn new(repository: Arc<dyn GlobalConfigRepository>) -> Self {
         Self { repository }
     }
 }
 
 #[async_trait]
-impl GlobalsService for GlobalsServiceImpl {
+impl GlobalConfigService for GlobalConfigServiceImpl {
     async fn get_config(&self) -> anyhow::Result<Option<GlobalConfig>> {
         tracing::info!("Getting global config");
 

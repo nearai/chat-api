@@ -508,10 +508,14 @@ pub async fn get_global_config(
 ) -> Result<Json<Option<GlobalConfigResponse>>, ApiError> {
     tracing::info!("Getting global config");
 
-    let config = app_state.globals_service.get_config().await.map_err(|e| {
-        tracing::error!("Failed to get global config: {}", e);
-        ApiError::internal_server_error("Failed to get global config")
-    })?;
+    let config = app_state
+        .global_config_service
+        .get_config()
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get global config: {}", e);
+            ApiError::internal_server_error("Failed to get global config")
+        })?;
 
     Ok(Json(config.map(Into::into)))
 }
@@ -539,10 +543,10 @@ pub async fn upsert_global_config(
 ) -> Result<Json<GlobalConfigResponse>, ApiError> {
     tracing::info!("Upserting global config: {:?}", request);
 
-    let config: services::globals::ports::GlobalConfig = request.into();
+    let config: services::global_config::ports::GlobalConfig = request.into();
 
     let updated = app_state
-        .globals_service
+        .global_config_service
         .upsert_config(config)
         .await
         .map_err(|e| {
@@ -576,10 +580,10 @@ pub async fn update_global_config(
 ) -> Result<Json<GlobalConfigResponse>, ApiError> {
     tracing::info!("Partially updating global config: {:?}", request);
 
-    let partial: services::globals::ports::PartialGlobalConfig = request.into();
+    let partial: services::global_config::ports::PartialGlobalConfig = request.into();
 
     let updated = app_state
-        .globals_service
+        .global_config_service
         .update_config(partial)
         .await
         .map_err(|e| {

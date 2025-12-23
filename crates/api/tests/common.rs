@@ -81,9 +81,11 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
 
     let model_service = Arc::new(services::model::service::ModelServiceImpl::new(model_repo));
 
-    let globals_service = Arc::new(services::globals::service::GlobalsServiceImpl::new(
-        globals_repo as Arc<dyn services::globals::ports::GlobalsRepository>,
-    ));
+    let globals_service = Arc::new(
+        services::global_config::service::GlobalConfigServiceImpl::new(
+            globals_repo as Arc<dyn services::global_config::ports::GlobalConfigRepository>,
+        ),
+    );
 
     // Create VPC credentials service based on provided credentials
     let vpc_credentials_service: Arc<dyn services::vpc::VpcCredentialsService> =
@@ -131,7 +133,7 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
         user_service,
         user_settings_service,
         model_service,
-        globals_service,
+        global_config_service: globals_service,
         session_repository: session_repo,
         vpc_credentials_service,
         user_repository: user_repo,

@@ -1,19 +1,21 @@
 use crate::pool::DbPool;
 use async_trait::async_trait;
-use services::globals::ports::{GlobalConfig, GlobalKey, GlobalsRepository, PartialGlobalConfig};
+use services::global_config::ports::{
+    GlobalConfig, GlobalConfigRepository, GlobalKey, PartialGlobalConfig,
+};
 
-pub struct PostgresGlobalsRepository {
+pub struct PostgresGlobalConfigRepository {
     pool: DbPool,
 }
 
-impl PostgresGlobalsRepository {
+impl PostgresGlobalConfigRepository {
     pub fn new(pool: DbPool) -> Self {
         Self { pool }
     }
 }
 
 #[async_trait]
-impl GlobalsRepository for PostgresGlobalsRepository {
+impl GlobalConfigRepository for PostgresGlobalConfigRepository {
     async fn get_config(&self) -> anyhow::Result<Option<GlobalConfig>> {
         tracing::debug!("Repository: Fetching global config");
 
