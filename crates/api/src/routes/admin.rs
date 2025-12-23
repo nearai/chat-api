@@ -525,7 +525,7 @@ pub async fn delete_model(
 /// Get global configuration
 #[utoipa::path(
     get,
-    path = "/v1/admin/configs",
+    path = "/v1/admin/globals/config",
     tag = "Admin",
     responses(
         (status = 200, description = "Global config retrieved", body = Option<GlobalConfigResponse>),
@@ -557,7 +557,7 @@ pub async fn get_global_config(
 /// Fully create or replace global configuration
 #[utoipa::path(
     post,
-    path = "/v1/admin/configs",
+    path = "/v1/admin/globals/config",
     tag = "Admin",
     request_body = UpsertGlobalConfigRequest,
     responses(
@@ -594,7 +594,7 @@ pub async fn upsert_global_config(
 /// Partially update global configuration
 #[utoipa::path(
     patch,
-    path = "/v1/admin/configs",
+    path = "/v1/admin/globals/config",
     tag = "Admin",
     request_body = UpdateGlobalConfigRequest,
     responses(
@@ -641,7 +641,7 @@ pub fn create_admin_router() -> Router<AppState> {
                 .delete(delete_model),
         )
         .route(
-            "/configs",
+            "/globals/config",
             get(get_global_config)
                 .post(upsert_global_config)
                 .patch(update_global_config),
