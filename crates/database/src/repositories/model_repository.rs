@@ -89,7 +89,7 @@ impl ModelsRepository for PostgresModelRepository {
             let created_at: DateTime<Utc> = row.get("created_at");
             let updated_at: DateTime<Utc> = row.get("updated_at");
 
-            let settings = load_settings_from_raw(&row)?;
+            let settings = load_settings_from_row(&row)?;
 
             let model = Model {
                 id,
@@ -205,8 +205,8 @@ impl ModelsRepository for PostgresModelRepository {
     }
 }
 
-fn load_settings_from_raw(raw: &Row) -> anyhow::Result<ModelSettings> {
-    let settings_json: serde_json::Value = raw.get("settings");
+fn load_settings_from_row(row: &Row) -> anyhow::Result<ModelSettings> {
+    let settings_json: serde_json::Value = row.get("settings");
     let default_settings = ModelSettings::default();
     let partial_settings = serde_json::from_value::<PartialModelSettings>(settings_json)?;
     let settings = default_settings.into_updated(partial_settings);

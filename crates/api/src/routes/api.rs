@@ -1633,7 +1633,7 @@ async fn proxy_model_list(
 
     *body_json
         .get_mut("models")
-        .expect("models key must exist after previous check") =
+        .expect("Models key must exist after previous check") =
         serde_json::Value::Array(decorated_models);
 
     let filtered_bytes = serde_json::to_vec(&body_json).unwrap_or_else(|e| {
