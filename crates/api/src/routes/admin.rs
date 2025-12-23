@@ -306,7 +306,7 @@ pub async fn get_top_users(
 /// Returns the current model (including settings). Requires admin authentication.
 #[utoipa::path(
     get,
-    path = "/v1/admin/model/{model_id}",
+    path = "/v1/admin/models/{model_id}",
     tag = "Admin",
     params(
         ("model_id" = String, Path, description = "Model identifier (e.g. gpt-4.1)")
@@ -344,7 +344,7 @@ pub async fn get_model(
 /// Overwrites the settings for a specific model. Requires admin authentication.
 #[utoipa::path(
     post,
-    path = "/v1/admin/model/{model_id}",
+    path = "/v1/admin/models/{model_id}",
     tag = "Admin",
     params(
         ("model_id" = String, Path, description = "Model identifier (e.g. gpt-4.1)")
@@ -394,7 +394,7 @@ pub async fn upsert_model(
 /// Partially updates the settings for a specific model. Requires admin authentication.
 #[utoipa::path(
     patch,
-    path = "/v1/admin/model/{model_id}",
+    path = "/v1/admin/models/{model_id}",
     tag = "Admin",
     params(
         ("model_id" = String, Path, description = "Model identifier (e.g. gpt-4.1)")
@@ -450,7 +450,7 @@ pub async fn update_model(
 /// Deletes a specific model and its settings. Requires admin authentication.
 #[utoipa::path(
     delete,
-    path = "/v1/admin/model/{model_id}",
+    path = "/v1/admin/models/{model_id}",
     tag = "Admin",
     params(
         ("model_id" = String, Path, description = "Model identifier (e.g. gpt-4.1)")
@@ -596,7 +596,7 @@ pub fn create_admin_router() -> Router<AppState> {
         .route("/users", get(list_users))
         .route("/users/{user_id}/activity", get(get_user_activity))
         .route(
-            "/model/{model_id}",
+            "/models/{model_id}",
             get(get_model)
                 .post(upsert_model)
                 .patch(update_model)
