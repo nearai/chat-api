@@ -254,36 +254,38 @@ impl VpcCredentialsServiceImpl {
             }
         }
 
-        // If we have a refresh token, try to refresh
-        if let Some(creds) = cached.as_mut() {
-            match self
-                .refresh_access_token(config, &creds.refresh_token)
-                .await
-            {
-                Ok(token_response) => {
-                    creds.access_token = token_response.access_token.clone();
-                    creds.access_token_created_at = std::time::Instant::now();
-                    creds.refresh_token = token_response.refresh_token.clone();
-
-                    // Update refresh token in database (it rotates)
-                    self.save_to_db(creds).await;
-
-                    return Ok(VpcCredentials {
-                        access_token: token_response.access_token,
-                        organization_id: creds.organization_id.clone(),
-                        api_key: creds.api_key.clone(),
-                    });
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to refresh access token, will re-authenticate: {}",
-                        e
-                    );
-                    // Clear cached to force re-auth
-                    *cached = None;
-                }
-            }
-        }
+        // Note: since access token is not used anymore, we don't need to refresh it
+        //
+        // // If we have a refresh token, try to refresh
+        // if let Some(creds) = cached.as_mut() {
+        //     match self
+        //         .refresh_access_token(config, &creds.refresh_token)
+        //         .await
+        //     {
+        //         Ok(token_response) => {
+        //             creds.access_token = token_response.access_token.clone();
+        //             creds.access_token_created_at = std::time::Instant::now();
+        //             creds.refresh_token = token_response.refresh_token.clone();
+        //
+        //             // Update refresh token in database (it rotates)
+        //             self.save_to_db(creds).await;
+        //
+        //             return Ok(VpcCredentials {
+        //                 access_token: token_response.access_token,
+        //                 organization_id: creds.organization_id.clone(),
+        //                 api_key: creds.api_key.clone(),
+        //             });
+        //         }
+        //         Err(e) => {
+        //             tracing::warn!(
+        //                 "Failed to refresh access token, will re-authenticate: {}",
+        //                 e
+        //             );
+        //             // Clear cached to force re-auth
+        //             *cached = None;
+        //         }
+        //     }
+        // }
 
         // No cached credentials or refresh failed - perform full VPC auth
         tracing::info!("Performing full VPC authentication...");
