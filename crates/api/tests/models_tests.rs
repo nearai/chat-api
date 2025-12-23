@@ -12,7 +12,7 @@ async fn test_get_model_not_found() {
     let admin_token = mock_login(&server, admin_email).await;
 
     let response = server
-        .get("/v1/admin/model/test-model-1")
+        .get("/v1/admin/models/test-model-1")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -47,7 +47,7 @@ async fn test_model_update_and_get() {
     });
 
     let response = server
-        .post("/v1/admin/model/test-model-2")
+        .post("/v1/admin/models/test-model-2")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -77,7 +77,7 @@ async fn test_model_update_and_get() {
 
     // Get model to verify persisted settings
     let response = server
-        .get("/v1/admin/model/test-model-2")
+        .get("/v1/admin/models/test-model-2")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -109,7 +109,7 @@ async fn test_model_requires_admin() {
     let non_admin_token = mock_login(&server, non_admin_email).await;
 
     let response = server
-        .get("/v1/admin/model/test-model-3")
+        .get("/v1/admin/models/test-model-3")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {non_admin_token}")).unwrap(),
@@ -142,7 +142,7 @@ async fn test_delete_model_success() {
     });
 
     let response = server
-        .post("/v1/admin/model/test-model-delete-1")
+        .post("/v1/admin/models/test-model-delete-1")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -161,7 +161,7 @@ async fn test_delete_model_success() {
 
     // Then, delete the model
     let response = server
-        .delete("/v1/admin/model/test-model-delete-1")
+        .delete("/v1/admin/models/test-model-delete-1")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -176,7 +176,7 @@ async fn test_delete_model_success() {
 
     // Verify the model is gone
     let response = server
-        .get("/v1/admin/model/test-model-delete-1")
+        .get("/v1/admin/models/test-model-delete-1")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -204,7 +204,7 @@ async fn test_delete_model_not_found() {
     let admin_token = mock_login(&server, admin_email).await;
 
     let response = server
-        .delete("/v1/admin/model/non-existent-model")
+        .delete("/v1/admin/models/non-existent-model")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -233,7 +233,7 @@ async fn test_delete_model_requires_admin() {
     let non_admin_token = mock_login(&server, non_admin_email).await;
 
     let response = server
-        .delete("/v1/admin/model/test-model-delete-requires-admin")
+        .delete("/v1/admin/models/test-model-delete-requires-admin")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {non_admin_token}")).unwrap(),
@@ -268,7 +268,7 @@ async fn test_responses_block_non_public_model() {
     });
 
     let response = server
-        .post("/v1/admin/model/test-non-public-model")
+        .post("/v1/admin/models/test-non-public-model")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -335,7 +335,7 @@ async fn test_responses_allow_public_model() {
     });
 
     let response = server
-        .post("/v1/admin/model/test-public-model")
+        .post("/v1/admin/models/test-public-model")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -400,7 +400,7 @@ async fn test_responses_injects_system_prompt_when_instructions_missing() {
     });
 
     let response = server
-        .post("/v1/admin/model/test-system-prompt-model-1")
+        .post("/v1/admin/models/test-system-prompt-model-1")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -469,7 +469,7 @@ async fn test_responses_prepends_system_prompt_when_instructions_present() {
     });
 
     let response = server
-        .post("/v1/admin/model/test-system-prompt-model-2")
+        .post("/v1/admin/models/test-system-prompt-model-2")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
