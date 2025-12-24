@@ -522,13 +522,13 @@ pub async fn delete_model(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Get global configuration
+/// Get system settings
 #[utoipa::path(
     get,
     path = "/v1/admin/configs",
     tag = "Admin",
     responses(
-        (status = 200, description = "Global config retrieved", body = Option<GlobalConfigResponse>),
+        (status = 200, description = "System settings retrieved", body = Option<SystemSettingsResponse>),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
         (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
@@ -537,31 +537,31 @@ pub async fn delete_model(
         ("session_token" = [])
     )
 )]
-pub async fn get_global_config(
+pub async fn get_system_settings(
     State(app_state): State<AppState>,
-) -> Result<Json<Option<GlobalConfigResponse>>, ApiError> {
-    tracing::info!("Getting global config");
+) -> Result<Json<Option<SystemSettingsResponse>>, ApiError> {
+    tracing::info!("Getting system settings");
 
     let config = app_state
-        .global_config_service
+        .system_settings_service
         .get_config()
         .await
         .map_err(|e| {
-            tracing::error!(error = ?e, "Failed to get global config");
-            ApiError::internal_server_error("Failed to get global config")
+            tracing::error!(error = ?e, "Failed to get system settings");
+            ApiError::internal_server_error("Failed to get system settings")
         })?;
 
     Ok(Json(config.map(Into::into)))
 }
 
-/// Fully create or replace global configuration
+/// Fully create or replace system settings
 #[utoipa::path(
     post,
     path = "/v1/admin/configs",
     tag = "Admin",
-    request_body = UpsertGlobalConfigRequest,
+    request_body = UpsertSystemSettingsRequest,
     responses(
-        (status = 200, description = "Global config upserted", body = GlobalConfigResponse),
+        (status = 200, description = "System settings upserted", body = SystemSettingsResponse),
         (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
@@ -571,34 +571,34 @@ pub async fn get_global_config(
         ("session_token" = [])
     )
 )]
-pub async fn upsert_global_config(
+pub async fn upsert_system_settings(
     State(app_state): State<AppState>,
-    Json(request): Json<UpsertGlobalConfigRequest>,
-) -> Result<Json<GlobalConfigResponse>, ApiError> {
-    tracing::info!("Upserting global config: {:?}", request);
+    Json(request): Json<UpsertSystemSettingsRequest>,
+) -> Result<Json<SystemSettingsResponse>, ApiError> {
+    tracing::info!("Upserting system settings: {:?}", request);
 
-    let config: services::global_config::ports::GlobalConfig = request.into();
+    let config: services::system_settings::ports::SystemSettings = request.into();
 
     let updated = app_state
-        .global_config_service
+        .system_settings_service
         .upsert_config(config)
         .await
         .map_err(|e| {
-            tracing::error!(error = ?e, "Failed to upsert global config");
-            ApiError::internal_server_error("Failed to upsert global config")
+            tracing::error!(error = ?e, "Failed to upsert system settings");
+            ApiError::internal_server_error("Failed to upsert system settings")
         })?;
 
     Ok(Json(updated.into()))
 }
 
-/// Partially update global configuration
+/// Partially update system settings
 #[utoipa::path(
     patch,
     path = "/v1/admin/configs",
     tag = "Admin",
-    request_body = UpdateGlobalConfigRequest,
+    request_body = UpdateSystemSettingsRequest,
     responses(
-        (status = 200, description = "Global config updated", body = GlobalConfigResponse),
+        (status = 200, description = "System settings updated", body = SystemSettingsResponse),
         (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
@@ -608,21 +608,21 @@ pub async fn upsert_global_config(
         ("session_token" = [])
     )
 )]
-pub async fn update_global_config(
+pub async fn update_system_settings(
     State(app_state): State<AppState>,
-    Json(request): Json<UpdateGlobalConfigRequest>,
-) -> Result<Json<GlobalConfigResponse>, ApiError> {
-    tracing::info!("Partially updating global config: {:?}", request);
+    Json(request): Json<UpdateSystemSettingsRequest>,
+) -> Result<Json<SystemSettingsResponse>, ApiError> {
+    tracing::info!("Partially updating system settings: {:?}", request);
 
-    let partial: services::global_config::ports::PartialGlobalConfig = request.into();
+    let partial: services::system_settings::ports::PartialSystemSettings = request.into();
 
     let updated = app_state
-        .global_config_service
+        .system_settings_service
         .update_config(partial)
         .await
         .map_err(|e| {
-            tracing::error!(error = ?e, "Failed to update global config");
-            ApiError::internal_server_error("Failed to update global config")
+            tracing::error!(error = ?e, "Failed to update system settings");
+            ApiError::internal_server_error("Failed to update system settings")
         })?;
 
     Ok(Json(updated.into()))
@@ -642,9 +642,9 @@ pub fn create_admin_router() -> Router<AppState> {
         )
         .route(
             "/configs",
-            get(get_global_config)
-                .post(upsert_global_config)
-                .patch(update_global_config),
+            get(get_system_settings)
+                .post(upsert_system_settings)
+                .patch(update_system_settings),
         )
         .route("/analytics", get(get_analytics))
         .route("/analytics/top-users", get(get_top_users))

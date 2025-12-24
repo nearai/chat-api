@@ -56,7 +56,7 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
     let file_repo = db.file_repository();
     let user_settings_repo = db.user_settings_repository();
     let model_repo = db.model_repository();
-    let globals_repo = db.globals_repository();
+    let system_settings_repo = db.system_settings_repository();
     let near_nonce_repo = db.near_nonce_repository();
 
     // Create services
@@ -81,9 +81,9 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
 
     let model_service = Arc::new(services::model::service::ModelServiceImpl::new(model_repo));
 
-    let globals_service = Arc::new(
-        services::global_config::service::GlobalConfigServiceImpl::new(
-            globals_repo as Arc<dyn services::global_config::ports::GlobalConfigRepository>,
+    let system_settings_service = Arc::new(
+        services::system_settings::service::SystemSettingsServiceImpl::new(
+            system_settings_repo as Arc<dyn services::system_settings::ports::SystemSettingsRepository>,
         ),
     );
 
@@ -133,7 +133,7 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
         user_service,
         user_settings_service,
         model_service,
-        global_config_service: globals_service,
+        system_settings_service,
         session_repository: session_repo,
         vpc_credentials_service,
         user_repository: user_repo,

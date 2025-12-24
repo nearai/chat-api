@@ -10,7 +10,7 @@ async fn test_upsert_global_config_and_get() {
     let admin_email = "test_admin_globals_upsert@admin.org";
     let admin_token = mock_login(&server, admin_email).await;
 
-    // Upsert global config with a default_model value
+    // Upsert system settings with a default_model value
     let upsert_body = json!({
         "default_model": "test-default-model-1"
     });
@@ -30,17 +30,17 @@ async fn test_upsert_global_config_and_get() {
 
     assert!(
         response.status_code().is_success(),
-        "Admin should be able to upsert global config"
+        "Admin should be able to upsert system settings"
     );
 
     let body: serde_json::Value = response.json();
     assert_eq!(
         body.get("default_model"),
         Some(&json!("test-default-model-1")),
-        "Upserted config should contain correct default_model"
+        "Upserted settings should contain correct default_model"
     );
 
-    // Get global config to verify it was persisted
+    // Get system settings to verify it was persisted
     let response = server
         .get("/v1/admin/configs")
         .add_header(
@@ -52,18 +52,18 @@ async fn test_upsert_global_config_and_get() {
     assert_eq!(
         response.status_code(),
         200,
-        "Admin should be able to get global config"
+        "Admin should be able to get system settings"
     );
 
     let body: serde_json::Value = response.json();
     assert!(
         body.is_object(),
-        "Global config GET after upsert should return an object, got: {body:?}"
+        "System settings GET after upsert should return an object, got: {body:?}"
     );
     assert_eq!(
         body.get("default_model"),
         Some(&json!("test-default-model-1")),
-        "Fetched global config should contain correct default_model"
+        "Fetched system settings should contain correct default_model"
     );
 }
 
@@ -96,10 +96,10 @@ async fn test_update_global_config() {
 
     assert!(
         response.status_code().is_success(),
-        "Admin should be able to upsert initial global config"
+        "Admin should be able to upsert initial system settings"
     );
 
-    // Partially update config (simulate PATCH behavior)
+    // Partially update settings (simulate PATCH behavior)
     let update_body = json!({
         "default_model": "updated-model"
     });
@@ -119,14 +119,14 @@ async fn test_update_global_config() {
 
     assert!(
         response.status_code().is_success(),
-        "Admin should be able to update global config"
+        "Admin should be able to update system settings"
     );
 
     let body: serde_json::Value = response.json();
     assert_eq!(
         body.get("default_model"),
         Some(&json!("updated-model")),
-        "Updated global config should contain new default_model"
+        "Updated system settings should contain new default_model"
     );
 
     // Verify via GET
@@ -141,14 +141,14 @@ async fn test_update_global_config() {
     assert_eq!(
         response.status_code(),
         200,
-        "Admin should be able to get updated global config"
+        "Admin should be able to get updated system settings"
     );
 
     let body: serde_json::Value = response.json();
     assert_eq!(
         body.get("default_model"),
         Some(&json!("updated-model")),
-        "Fetched global config should reflect updated default_model"
+        "Fetched system settings should reflect updated default_model"
     );
 }
 
@@ -159,7 +159,7 @@ async fn test_global_config_requires_admin() {
     let non_admin_email = "test_user_globals@no-admin.org";
     let non_admin_token = mock_login(&server, non_admin_email).await;
 
-    // Non-admin trying to GET global config should receive 403
+    // Non-admin trying to GET system settings should receive 403
     let response = server
         .get("/v1/admin/configs")
         .add_header(
@@ -171,7 +171,7 @@ async fn test_global_config_requires_admin() {
     assert_eq!(
         response.status_code(),
         403,
-        "Non-admin should receive 403 Forbidden when accessing global config"
+        "Non-admin should receive 403 Forbidden when accessing system settings"
     );
 
     let body: serde_json::Value = response.json();

@@ -1,38 +1,38 @@
 use crate::pool::DbPool;
 use async_trait::async_trait;
-use services::global_config::ports::{
-    GlobalConfig, GlobalConfigRepository, GlobalKey, PartialGlobalConfig,
+use services::system_settings::ports::{
+    SystemSettings, SystemSettingsRepository, SystemKey, PartialSystemSettings,
 };
 
-pub struct PostgresGlobalConfigRepository {
+pub struct PostgresSystemSettingsRepository {
     pool: DbPool,
 }
 
-impl PostgresGlobalConfigRepository {
+impl PostgresSystemSettingsRepository {
     pub fn new(pool: DbPool) -> Self {
         Self { pool }
     }
 }
 
 #[async_trait]
-impl GlobalConfigRepository for PostgresGlobalConfigRepository {
-    async fn get_config(&self) -> anyhow::Result<Option<GlobalConfig>> {
-        tracing::debug!("Repository: Fetching global config");
+impl SystemSettingsRepository for PostgresSystemSettingsRepository {
+    async fn get_config(&self) -> anyhow::Result<Option<SystemSettings>> {
+        tracing::debug!("Repository: Fetching system settings");
 
         let client = self.pool.get().await?;
-        let key = GlobalKey::Config.to_string();
+        let key = SystemKey::Config.to_string();
 
         let row = client
-            .query_opt("SELECT value FROM global_configs WHERE key = $1", &[&key])
+            .query_opt("SELECT value FROM system_settings WHERE key = $1", &[&key])
             .await?;
 
         if let Some(row) = row {
             let value_json: serde_json::Value = row.get("value");
 
-            let default_config = GlobalConfig::default();
+            let default_config = SystemSettings::default();
             // Missing fields will be filled from default config values
             let partial =
-                serde_json::from_value::<PartialGlobalConfig>(value_json).unwrap_or_default();
+                serde_json::from_value::<PartialSystemSettings>(value_json).unwrap_or_default();
             let config = default_config.into_updated(partial);
 
             Ok(Some(config))
@@ -41,16 +41,16 @@ impl GlobalConfigRepository for PostgresGlobalConfigRepository {
         }
     }
 
-    async fn upsert_config(&self, config: GlobalConfig) -> anyhow::Result<GlobalConfig> {
-        tracing::info!("Repository: Upserting global config");
+    async fn upsert_config(&self, config: SystemSettings) -> anyhow::Result<SystemSettings> {
+        tracing::info!("Repository: Upserting system settings");
 
         let client = self.pool.get().await?;
-        let key = GlobalKey::Config.to_string();
+        let key = SystemKey::Config.to_string();
         let value_json = serde_json::to_value(&config)?;
 
         client
             .execute(
-                "INSERT INTO global_configs (key, value)
+                "INSERT INTO system_settings (key, value)
                  VALUES ($1, $2)
                  ON CONFLICT (key)
                  DO UPDATE SET value = $2, updated_at = NOW()",
@@ -58,18 +58,18 @@ impl GlobalConfigRepository for PostgresGlobalConfigRepository {
             )
             .await?;
 
-        tracing::info!("Repository: Global config upserted successfully");
+        tracing::info!("Repository: System settings upserted successfully");
 
         Ok(config)
     }
 
-    async fn update_config(&self, config: PartialGlobalConfig) -> anyhow::Result<GlobalConfig> {
-        tracing::info!("Repository: Updating global config");
+    async fn update_config(&self, config: PartialSystemSettings) -> anyhow::Result<SystemSettings> {
+        tracing::info!("Repository: Updating system settings");
 
         // Load existing config, then merge with incoming partial
         let existing = self.get_config().await?;
         let Some(existing) = existing else {
-            anyhow::bail!("Global config not found for key: {}", GlobalKey::Config);
+            anyhow::bail!("System settings not found for key: {}", SystemKey::Config);
         };
 
         let merged = existing.into_updated(config);
@@ -78,3 +78,4 @@ impl GlobalConfigRepository for PostgresGlobalConfigRepository {
         self.upsert_config(merged).await
     }
 }
+

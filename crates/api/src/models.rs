@@ -349,49 +349,49 @@ pub struct UserListResponse {
     pub total: u64,
 }
 
-/// Global configuration response
+/// System settings response
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct GlobalConfigResponse {
+pub struct SystemSettingsResponse {
     /// Default model identifier to use when not specified
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
 }
 
-impl From<services::global_config::ports::GlobalConfig> for GlobalConfigResponse {
-    fn from(config: services::global_config::ports::GlobalConfig) -> Self {
+impl From<services::system_settings::ports::SystemSettings> for SystemSettingsResponse {
+    fn from(config: services::system_settings::ports::SystemSettings) -> Self {
         Self {
             default_model: config.default_model,
         }
     }
 }
 
-/// Global configuration upsert request (full replace)
+/// System settings upsert request (full replace)
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct UpsertGlobalConfigRequest {
+pub struct UpsertSystemSettingsRequest {
     /// Default model identifier to use when not specified
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
 }
 
-impl From<UpsertGlobalConfigRequest> for services::global_config::ports::GlobalConfig {
-    fn from(req: UpsertGlobalConfigRequest) -> Self {
-        services::global_config::ports::GlobalConfig {
+impl From<UpsertSystemSettingsRequest> for services::system_settings::ports::SystemSettings {
+    fn from(req: UpsertSystemSettingsRequest) -> Self {
+        services::system_settings::ports::SystemSettings {
             default_model: req.default_model,
         }
     }
 }
 
-/// Global configuration update request (partial)
+/// System settings update request (partial)
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct UpdateGlobalConfigRequest {
+pub struct UpdateSystemSettingsRequest {
     /// Default model identifier to use when not specified
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
 }
 
-impl From<UpdateGlobalConfigRequest> for services::global_config::ports::PartialGlobalConfig {
-    fn from(req: UpdateGlobalConfigRequest) -> Self {
-        services::global_config::ports::PartialGlobalConfig {
+impl From<UpdateSystemSettingsRequest> for services::system_settings::ports::PartialSystemSettings {
+    fn from(req: UpdateSystemSettingsRequest) -> Self {
+        services::system_settings::ports::PartialSystemSettings {
             default_model: req.default_model,
         }
     }
