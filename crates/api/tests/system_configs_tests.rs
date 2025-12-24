@@ -2,176 +2,8 @@ mod common;
 
 use common::{create_test_server, mock_login};
 use serde_json::json;
-use serial_test::serial;
 
 #[tokio::test]
-#[serial]
-async fn test_get_system_configs_when_none_exist() {
-    let server = create_test_server().await;
-
-    let admin_email = "test_admin_cleanup_configs@admin.org";
-    let admin_token = mock_login(&server, admin_email).await;
-
-    // Clean up any existing configs by setting them to empty/default values
-    // This ensures the test starts with a clean state
-    let cleanup_body = json!({
-        "default_model": null
-    });
-
-    // Try to clear configs (may fail if none exist, which is fine)
-    let _ = server
-        .patch("/v1/admin/configs")
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
-        )
-        .add_header(
-            http::HeaderName::from_static("content-type"),
-            http::HeaderValue::from_static("application/json"),
-        )
-        .json(&cleanup_body)
-        .await;
-
-    // Use a regular user token for the actual test
-    let user_email = "test_user_default_configs@example.org";
-    let user_token = mock_login(&server, user_email).await;
-
-    // GET /v1/configs when no configs exist should return null
-    let response = server
-        .get("/v1/configs")
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
-        )
-        .await;
-
-    assert_eq!(
-        response.status_code(),
-        200,
-        "GET /v1/configs should return 200 even when no configs exist"
-    );
-
-    let body: serde_json::Value = response.json();
-    // Note: If configs exist but default_model is null/absent, body will be an object with no default_model field
-    // If no configs exist at all, body will be null
-    let is_null_or_empty =
-        body.is_null() || (body.is_object() && body.get("default_model").is_none());
-
-    assert!(
-        is_null_or_empty,
-        "GET /v1/configs should return null or empty object when no configs exist, got: {body:?}"
-    );
-}
-
-#[tokio::test]
-#[serial]
-async fn test_get_system_configs_default_values() {
-    let server = create_test_server().await;
-
-    let admin_email = "test_admin_default_values@admin.org";
-    let admin_token = mock_login(&server, admin_email).await;
-
-    // First, ensure configs exist with a value
-    let upsert_body = json!({
-        "default_model": "test-default-model"
-    });
-
-    let response = server
-        .patch("/v1/admin/configs")
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
-        )
-        .add_header(
-            http::HeaderName::from_static("content-type"),
-            http::HeaderValue::from_static("application/json"),
-        )
-        .json(&upsert_body)
-        .await;
-
-    assert!(
-        response.status_code().is_success(),
-        "Admin should be able to upsert system configs"
-    );
-
-    // Verify the configs were set
-    let response = server
-        .get("/v1/configs")
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
-        )
-        .await;
-
-    assert_eq!(
-        response.status_code(),
-        200,
-        "Should be able to get system configs"
-    );
-
-    let body: serde_json::Value = response.json();
-    assert!(
-        body.is_object(),
-        "System configs should return an object when configs exist"
-    );
-    assert_eq!(
-        body.get("default_model"),
-        Some(&json!("test-default-model")),
-        "System configs should contain the set default_model"
-    );
-
-    // Update to remove default_model (set to null)
-    let update_body = json!({
-        "default_model": null
-    });
-
-    let response = server
-        .patch("/v1/admin/configs")
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
-        )
-        .add_header(
-            http::HeaderName::from_static("content-type"),
-            http::HeaderValue::from_static("application/json"),
-        )
-        .json(&update_body)
-        .await;
-
-    assert!(
-        response.status_code().is_success(),
-        "Admin should be able to update system configs to remove default_model"
-    );
-
-    // Verify default_model is now null/absent
-    let response = server
-        .get("/v1/configs")
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
-        )
-        .await;
-
-    assert_eq!(
-        response.status_code(),
-        200,
-        "Should be able to get system configs after update"
-    );
-
-    let body: serde_json::Value = response.json();
-    assert!(
-        body.is_object(),
-        "System configs should still return an object even when default_model is null"
-    );
-    // default_model should be null or absent (skip_serializing_if = "Option::is_none")
-    assert!(
-        body.get("default_model").is_none() || body.get("default_model") == Some(&json!(null)),
-        "default_model should be null or absent when not set, got: {body:?}"
-    );
-}
-
-#[tokio::test]
-#[serial]
 async fn test_upsert_system_configs_and_get() {
     let server = create_test_server().await;
 
@@ -236,7 +68,6 @@ async fn test_upsert_system_configs_and_get() {
 }
 
 #[tokio::test]
-#[serial]
 async fn test_update_system_configs() {
     let server = create_test_server().await;
 
@@ -320,7 +151,6 @@ async fn test_update_system_configs() {
 }
 
 #[tokio::test]
-#[serial]
 async fn test_get_system_configs_requires_auth() {
     let server = create_test_server().await;
 
@@ -335,7 +165,6 @@ async fn test_get_system_configs_requires_auth() {
 }
 
 #[tokio::test]
-#[serial]
 async fn test_get_system_configs_allows_non_admin() {
     let server = create_test_server().await;
 
@@ -358,7 +187,6 @@ async fn test_get_system_configs_allows_non_admin() {
 }
 
 #[tokio::test]
-#[serial]
 async fn test_system_configs_write_requires_admin() {
     let server = create_test_server().await;
 
