@@ -397,7 +397,6 @@ pub async fn batch_upsert_models(
     use services::model::ports::{ModelSettings, PartialModelSettings};
 
     let mut results = Vec::new();
-    let mut cache_keys_to_invalidate = Vec::new();
 
     for (model_id, partial_settings) in request.models {
         if model_id.trim().is_empty() {
@@ -462,16 +461,15 @@ pub async fn batch_upsert_models(
                 })?
         };
 
-        results.push(model.clone());
-        cache_keys_to_invalidate.push(model_id);
-    }
-
-    // Invalidate cache AFTER successful DB writes
-    {
-        let mut cache = app_state.model_settings_cache.write().await;
-        for model_id in cache_keys_to_invalidate {
+        // Invalidate cache immediately after each successful DB write
+        // NOTE: This only invalidates cache on the current instance. In multi-instance deployments,
+        // other instances may serve stale data for up to MODEL_SETTINGS_CACHE_TTL_SECS.
+        {
+            let mut cache = app_state.model_settings_cache.write().await;
             cache.remove(&model_id);
         }
+
+        results.push(model.clone());
     }
 
     Ok(Json(results.into_iter().map(Into::into).collect()))
