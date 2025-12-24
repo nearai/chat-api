@@ -26,7 +26,7 @@ pub async fn get_system_configs(
 
     let config = app_state
         .system_configs_service
-        .get_config()
+        .get_configs()
         .await
         .map_err(|e| {
             tracing::error!(error = ?e, "Failed to get system configs");

@@ -16,7 +16,7 @@ impl PostgresSystemConfigsRepository {
 
 #[async_trait]
 impl SystemConfigsRepository for PostgresSystemConfigsRepository {
-    async fn get_config(&self) -> anyhow::Result<Option<SystemConfigs>> {
+    async fn get_configs(&self) -> anyhow::Result<Option<SystemConfigs>> {
         tracing::debug!("Repository: Fetching system configs");
 
         let client = self.pool.get().await?;
@@ -41,7 +41,7 @@ impl SystemConfigsRepository for PostgresSystemConfigsRepository {
         }
     }
 
-    async fn upsert_config(&self, config: SystemConfigs) -> anyhow::Result<SystemConfigs> {
+    async fn upsert_configs(&self, config: SystemConfigs) -> anyhow::Result<SystemConfigs> {
         tracing::info!("Repository: Upserting system configs");
 
         let client = self.pool.get().await?;
@@ -63,11 +63,11 @@ impl SystemConfigsRepository for PostgresSystemConfigsRepository {
         Ok(config)
     }
 
-    async fn update_config(&self, config: PartialSystemConfigs) -> anyhow::Result<SystemConfigs> {
+    async fn update_configs(&self, config: PartialSystemConfigs) -> anyhow::Result<SystemConfigs> {
         tracing::info!("Repository: Updating system configs");
 
         // Load existing config, then merge with incoming partial
-        let existing = self.get_config().await?;
+        let existing = self.get_configs().await?;
         let Some(existing) = existing else {
             anyhow::bail!("System configs not found for key: {}", SystemKey::Config);
         };
@@ -75,6 +75,6 @@ impl SystemConfigsRepository for PostgresSystemConfigsRepository {
         let merged = existing.into_updated(config);
 
         // Reuse upsert logic to persist merged result
-        self.upsert_config(merged).await
+        self.upsert_configs(merged).await
     }
 }

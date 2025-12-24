@@ -17,21 +17,21 @@ impl SystemConfigsServiceImpl {
 
 #[async_trait]
 impl SystemConfigsService for SystemConfigsServiceImpl {
-    async fn get_config(&self) -> anyhow::Result<Option<SystemConfigs>> {
+    async fn get_configs(&self) -> anyhow::Result<Option<SystemConfigs>> {
         tracing::info!("Getting system configs");
 
-        self.repository.get_config().await
+        self.repository.get_configs().await
     }
 
-    async fn upsert_config(&self, config: SystemConfigs) -> anyhow::Result<SystemConfigs> {
+    async fn upsert_configs(&self, config: SystemConfigs) -> anyhow::Result<SystemConfigs> {
         tracing::info!("Upserting system configs: {:?}", config);
 
-        self.repository.upsert_config(config).await
+        self.repository.upsert_configs(config).await
     }
 
-    async fn update_config(&self, config: PartialSystemConfigs) -> anyhow::Result<SystemConfigs> {
+    async fn update_configs(&self, config: PartialSystemConfigs) -> anyhow::Result<SystemConfigs> {
         tracing::info!("Partially updating system configs: {:?}", config);
 
-        self.repository.update_config(config).await
+        self.repository.update_configs(config).await
     }
 }

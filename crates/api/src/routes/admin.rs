@@ -549,7 +549,7 @@ pub async fn upsert_system_configs(
 
     let updated = app_state
         .system_configs_service
-        .upsert_config(config)
+        .upsert_configs(config)
         .await
         .map_err(|e| {
             tracing::error!(error = ?e, "Failed to upsert system configs");
@@ -586,7 +586,7 @@ pub async fn update_system_configs(
 
     let updated = app_state
         .system_configs_service
-        .update_config(partial)
+        .update_configs(partial)
         .await
         .map_err(|e| {
             tracing::error!(error = ?e, "Failed to update system configs");

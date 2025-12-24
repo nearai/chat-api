@@ -51,24 +51,24 @@ impl SystemConfigs {
 #[async_trait]
 pub trait SystemConfigsRepository: Send + Sync {
     /// Get system configs (if exists)
-    async fn get_config(&self) -> anyhow::Result<Option<SystemConfigs>>;
+    async fn get_configs(&self) -> anyhow::Result<Option<SystemConfigs>>;
 
     /// Create or update system configs (full replace)
-    async fn upsert_config(&self, config: SystemConfigs) -> anyhow::Result<SystemConfigs>;
+    async fn upsert_configs(&self, config: SystemConfigs) -> anyhow::Result<SystemConfigs>;
 
     /// Partially update system configs
-    async fn update_config(&self, config: PartialSystemConfigs) -> anyhow::Result<SystemConfigs>;
+    async fn update_configs(&self, config: PartialSystemConfigs) -> anyhow::Result<SystemConfigs>;
 }
 
 /// Service trait for system configs
 #[async_trait]
 pub trait SystemConfigsService: Send + Sync {
     /// Get system configs (if exists)
-    async fn get_config(&self) -> anyhow::Result<Option<SystemConfigs>>;
+    async fn get_configs(&self) -> anyhow::Result<Option<SystemConfigs>>;
 
     /// Fully create or replace system configs (upsert)
-    async fn upsert_config(&self, config: SystemConfigs) -> anyhow::Result<SystemConfigs>;
+    async fn upsert_configs(&self, config: SystemConfigs) -> anyhow::Result<SystemConfigs>;
 
     /// Partially update system configs
-    async fn update_config(&self, config: PartialSystemConfigs) -> anyhow::Result<SystemConfigs>;
+    async fn update_configs(&self, config: PartialSystemConfigs) -> anyhow::Result<SystemConfigs>;
 }
