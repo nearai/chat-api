@@ -38,7 +38,7 @@ const NEAR_BALANCE_BAN_DURATION_SECS: i64 = 60 * 60;
 const NEAR_BALANCE_CACHE_TTL_SECS: i64 = 5 * 60;
 
 /// Duration to cache model settings needed by /v1/responses in memory (in seconds)
-const MODEL_SETTINGS_CACHE_TTL_SECS: i64 = 30;
+const MODEL_SETTINGS_CACHE_TTL_SECS: i64 = 60;
 
 /// Error message when a user is banned
 pub const USER_BANNED_ERROR_MESSAGE: &str =
