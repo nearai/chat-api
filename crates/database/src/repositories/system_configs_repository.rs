@@ -41,12 +41,12 @@ impl SystemConfigsRepository for PostgresSystemConfigsRepository {
         }
     }
 
-    async fn upsert_configs(&self, config: SystemConfigs) -> anyhow::Result<SystemConfigs> {
+    async fn upsert_configs(&self, configs: SystemConfigs) -> anyhow::Result<SystemConfigs> {
         tracing::info!("Repository: Upserting system configs");
 
         let client = self.pool.get().await?;
         let key = SystemKey::Config.to_string();
-        let value_json = serde_json::to_value(&config)?;
+        let value_json = serde_json::to_value(&configs)?;
 
         client
             .execute(
@@ -60,10 +60,10 @@ impl SystemConfigsRepository for PostgresSystemConfigsRepository {
 
         tracing::info!("Repository: System configs upserted successfully");
 
-        Ok(config)
+        Ok(configs)
     }
 
-    async fn update_configs(&self, config: PartialSystemConfigs) -> anyhow::Result<SystemConfigs> {
+    async fn update_configs(&self, configs: PartialSystemConfigs) -> anyhow::Result<SystemConfigs> {
         tracing::info!("Repository: Updating system configs");
 
         // Load existing config, then merge with incoming partial
@@ -72,7 +72,7 @@ impl SystemConfigsRepository for PostgresSystemConfigsRepository {
             anyhow::bail!("System configs not found for key: {}", SystemKey::Config);
         };
 
-        let merged = existing.into_updated(config);
+        let merged = existing.into_updated(configs);
 
         // Reuse upsert logic to persist merged result
         self.upsert_configs(merged).await

@@ -54,10 +54,10 @@ pub trait SystemConfigsRepository: Send + Sync {
     async fn get_configs(&self) -> anyhow::Result<Option<SystemConfigs>>;
 
     /// Create or update system configs (full replace)
-    async fn upsert_configs(&self, config: SystemConfigs) -> anyhow::Result<SystemConfigs>;
+    async fn upsert_configs(&self, configs: SystemConfigs) -> anyhow::Result<SystemConfigs>;
 
     /// Partially update system configs
-    async fn update_configs(&self, config: PartialSystemConfigs) -> anyhow::Result<SystemConfigs>;
+    async fn update_configs(&self, configs: PartialSystemConfigs) -> anyhow::Result<SystemConfigs>;
 }
 
 /// Service trait for system configs
@@ -67,8 +67,8 @@ pub trait SystemConfigsService: Send + Sync {
     async fn get_configs(&self) -> anyhow::Result<Option<SystemConfigs>>;
 
     /// Fully create or replace system configs (upsert)
-    async fn upsert_configs(&self, config: SystemConfigs) -> anyhow::Result<SystemConfigs>;
+    async fn upsert_configs(&self, configs: SystemConfigs) -> anyhow::Result<SystemConfigs>;
 
     /// Partially update system configs
-    async fn update_configs(&self, config: PartialSystemConfigs) -> anyhow::Result<SystemConfigs>;
+    async fn update_configs(&self, configs: PartialSystemConfigs) -> anyhow::Result<SystemConfigs>;
 }
