@@ -1,9 +1,5 @@
 use crate::{error::ApiError, models::*, state::AppState};
-use axum::{
-    extract::State,
-    routing::get,
-    Json, Router,
-};
+use axum::{extract::State, routing::get, Json, Router};
 
 /// Get system configs (requires user authentication, not admin)
 #[utoipa::path(
@@ -40,4 +36,3 @@ pub async fn get_system_configs(
 pub fn create_configs_router() -> Router<AppState> {
     Router::new().route("/v1/configs", get(get_system_configs))
 }
-
