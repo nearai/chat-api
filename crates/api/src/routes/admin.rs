@@ -383,9 +383,16 @@ pub async fn upsert_model(
     }
 
     let params = UpsertModelParams {
-        model_id,
+        model_id: model_id.clone(),
         settings: request.settings.into(),
     };
+
+    // Invalidate cache BEFORE DB write to prevent race condition
+    // Next request will fetch fresh data from DB
+    {
+        let mut cache = app_state.model_settings_cache.write().await;
+        cache.remove(&model_id);
+    }
 
     let model = app_state
         .model_service
@@ -395,20 +402,6 @@ pub async fn upsert_model(
             tracing::error!("Failed to upsert model: {}", e);
             ApiError::internal_server_error("Failed to upsert model")
         })?;
-
-    // Update in-memory cache for /v1/responses immediately
-    {
-        let mut cache = app_state.model_settings_cache.write().await;
-        cache.insert(
-            model.model_id.clone(),
-            crate::state::ModelSettingsCacheEntry {
-                last_checked_at: Utc::now(),
-                exists: true,
-                public: model.settings.public,
-                system_prompt: model.settings.system_prompt.clone(),
-            },
-        );
-    }
 
     Ok(Json(model.into()))
 }
@@ -466,6 +459,13 @@ pub async fn update_model(
         settings,
     };
 
+    // Invalidate cache BEFORE DB write to prevent race condition
+    // Next request will fetch fresh data from DB
+    {
+        let mut cache = app_state.model_settings_cache.write().await;
+        cache.remove(&model_id);
+    }
+
     let model = app_state
         .model_service
         .update_model(params)
@@ -477,20 +477,6 @@ pub async fn update_model(
             }
             ApiError::internal_server_error("Failed to update model")
         })?;
-
-    // Update in-memory cache for /v1/responses immediately
-    {
-        let mut cache = app_state.model_settings_cache.write().await;
-        cache.insert(
-            model.model_id.clone(),
-            crate::state::ModelSettingsCacheEntry {
-                last_checked_at: Utc::now(),
-                exists: true,
-                public: model.settings.public,
-                system_prompt: model.settings.system_prompt.clone(),
-            },
-        );
-    }
 
     Ok(Json(model.into()))
 }
@@ -522,6 +508,12 @@ pub async fn delete_model(
 ) -> Result<StatusCode, ApiError> {
     tracing::info!("Deleting model for model_id={}", model_id);
 
+    // Invalidate cache BEFORE DB delete to prevent race condition
+    {
+        let mut cache = app_state.model_settings_cache.write().await;
+        cache.remove(&model_id);
+    }
+
     let deleted = app_state
         .model_service
         .delete_model(&model_id)
@@ -533,12 +525,6 @@ pub async fn delete_model(
 
     if !deleted {
         return Err(ApiError::not_found("Model not found"));
-    }
-
-    // Remove from in-memory cache
-    {
-        let mut cache = app_state.model_settings_cache.write().await;
-        cache.remove(&model_id);
     }
 
     Ok(StatusCode::NO_CONTENT)
