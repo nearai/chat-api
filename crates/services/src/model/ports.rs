@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+
 use crate::consts::MODEL_PUBLIC_DEFAULT;
 
 /// Model settings content structure

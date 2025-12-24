@@ -1,4 +1,4 @@
-use crate::consts::{LIST_FILES_LIMIT_MAX, MODEL_PUBLIC_DEFAULT};
+use crate::consts::LIST_FILES_LIMIT_MAX;
 use crate::middleware::auth::AuthenticatedUser;
 use axum::{
     body::Body,
@@ -21,6 +21,7 @@ use services::file::ports::FileError;
 use services::metrics::consts::{
     METRIC_CONVERSATION_CREATED, METRIC_FILE_UPLOADED, METRIC_RESPONSE_CREATED,
 };
+use services::consts::MODEL_PUBLIC_DEFAULT;
 use services::response::ports::ProxyResponse;
 use services::user::ports::{BanType, OAuthProvider};
 use services::UserId;
@@ -1737,14 +1738,15 @@ async fn proxy_model_list(
     let settings_map = state
         .model_service
         .get_models_by_ids(&model_ids.iter().map(|s| s.as_str()).collect::<Vec<&str>>())
-        .await.unwrap_or_else(|e| {
-        tracing::warn!(
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(
                 "Failed to batch load model settings for model list: {}, defaulting all public={}",
                 e,
                 MODEL_PUBLIC_DEFAULT
             );
-        std::collections::HashMap::new()
-    });
+            std::collections::HashMap::new()
+        });
 
     // Attach `public` flag to each model based on its stored settings
     let mut decorated_models = Vec::new();
