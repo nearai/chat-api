@@ -42,9 +42,12 @@ async fn test_model_batch_update_and_list() {
     let admin_email = "test_admin_model_update@admin.org";
     let admin_token = mock_login(&server, admin_email).await;
 
+    // Use a unique model ID to avoid conflicts with other tests
+    let test_model_id = "test-model-batch-update-and-list";
+
     // Batch upsert model with settings.public = true
     let batch_body = json!({
-        "test-model-2": {
+        test_model_id: {
             "public": true
         }
     });
@@ -72,7 +75,7 @@ async fn test_model_batch_update_and_list() {
     let model = &models[0];
     assert_eq!(
         model.get("model_id"),
-        Some(&json!("test-model-2")),
+        Some(&json!(test_model_id)),
         "Response should include correct model_id"
     );
     let settings = model.get("settings").expect("Should have settings field");
@@ -84,7 +87,7 @@ async fn test_model_batch_update_and_list() {
 
     // List models to verify persisted settings
     let response = server
-        .get("/v1/admin/models?limit=10&offset=0")
+        .get("/v1/admin/models?limit=100&offset=0")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -95,23 +98,25 @@ async fn test_model_batch_update_and_list() {
     assert_eq!(status, 200, "Admin should be able to list models");
 
     let body: serde_json::Value = response.json();
-    assert_eq!(
-        body.get("total"),
-        Some(&json!(1)),
-        "Total should be 1 after creating a model"
-    );
     let models = body
         .get("models")
         .and_then(|v| v.as_array())
         .expect("Should have models array");
-    assert_eq!(models.len(), 1, "Should have one model in the list");
-    let model = &models[0];
+
+    // Find our model in the list (there may be other models from other tests)
+    let our_model = models
+        .iter()
+        .find(|m| m.get("model_id") == Some(&json!(test_model_id)))
+        .expect("Should find our model in the list");
+
     assert_eq!(
-        model.get("model_id"),
-        Some(&json!("test-model-2")),
+        our_model.get("model_id"),
+        Some(&json!(test_model_id)),
         "Listed model should have correct model_id"
     );
-    let settings = model.get("settings").expect("Should have settings field");
+    let settings = our_model
+        .get("settings")
+        .expect("Should have settings field");
     assert_eq!(
         settings.get("public"),
         Some(&json!(true)),
