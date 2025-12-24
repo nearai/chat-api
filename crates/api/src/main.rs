@@ -72,7 +72,7 @@ async fn main() -> anyhow::Result<()> {
     let app_config_repo = db.app_config_repository();
     let near_nonce_repo = db.near_nonce_repository();
     let analytics_repo = db.analytics_repository();
-    let system_settings_repo = db.system_settings_repository();
+    let system_configs_repo = db.system_configs_repository();
     let model_repo = db.model_repository();
 
     // Create services
@@ -153,11 +153,12 @@ async fn main() -> anyhow::Result<()> {
         analytics_repo as Arc<dyn services::analytics::AnalyticsRepository>,
     ));
 
-    // Initialize system settings service
-    tracing::info!("Initializing system settings service...");
-    let system_settings_service = Arc::new(
-        services::system_settings::service::SystemSettingsServiceImpl::new(
-            system_settings_repo as Arc<dyn services::system_settings::ports::SystemSettingsRepository>,
+    // Initialize system configs service
+    tracing::info!("Initializing system configs service...");
+    let system_configs_service = Arc::new(
+        services::system_configs::service::SystemConfigsServiceImpl::new(
+            system_configs_repo
+                as Arc<dyn services::system_configs::ports::SystemConfigsRepository>,
         ),
     );
 
@@ -221,7 +222,7 @@ async fn main() -> anyhow::Result<()> {
         user_service,
         user_settings_service,
         model_service,
-        system_settings_service,
+        system_configs_service,
         session_repository: session_repo,
         proxy_service,
         conversation_service,
@@ -235,9 +236,7 @@ async fn main() -> anyhow::Result<()> {
         analytics_service,
         near_rpc_url: config.near.rpc_url.clone(),
         near_balance_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        model_settings_cache: Arc::new(tokio::sync::RwLock::new(
-            std::collections::HashMap::new(),
-        )),
+        model_settings_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     };
 
     // Create router with CORS support

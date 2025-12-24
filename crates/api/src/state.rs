@@ -36,7 +36,7 @@ pub struct AppState {
     pub user_service: Arc<dyn services::user::ports::UserService>,
     pub user_settings_service: Arc<dyn services::user::ports::UserSettingsService>,
     pub model_service: Arc<dyn services::model::ports::ModelService>,
-    pub system_settings_service: Arc<dyn services::system_settings::ports::SystemSettingsService>,
+    pub system_configs_service: Arc<dyn services::system_configs::ports::SystemConfigsService>,
     pub session_repository: Arc<dyn services::auth::ports::SessionRepository>,
     pub user_repository: Arc<dyn services::user::ports::UserRepository>,
     pub proxy_service: Arc<dyn services::response::ports::OpenAIProxyService>,

@@ -5,7 +5,7 @@ pub mod file;
 pub mod metrics;
 pub mod model;
 pub mod response;
-pub mod system_settings;
+pub mod system_configs;
 pub mod types;
 pub mod user;
 pub mod vpc;

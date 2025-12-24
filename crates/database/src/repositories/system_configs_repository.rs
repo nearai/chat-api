@@ -1,38 +1,38 @@
 use crate::pool::DbPool;
 use async_trait::async_trait;
-use services::system_settings::ports::{
-    SystemSettings, SystemSettingsRepository, SystemKey, PartialSystemSettings,
+use services::system_configs::ports::{
+    PartialSystemConfigs, SystemConfigs, SystemConfigsRepository, SystemKey,
 };
 
-pub struct PostgresSystemSettingsRepository {
+pub struct PostgresSystemConfigsRepository {
     pool: DbPool,
 }
 
-impl PostgresSystemSettingsRepository {
+impl PostgresSystemConfigsRepository {
     pub fn new(pool: DbPool) -> Self {
         Self { pool }
     }
 }
 
 #[async_trait]
-impl SystemSettingsRepository for PostgresSystemSettingsRepository {
-    async fn get_config(&self) -> anyhow::Result<Option<SystemSettings>> {
-        tracing::debug!("Repository: Fetching system settings");
+impl SystemConfigsRepository for PostgresSystemConfigsRepository {
+    async fn get_config(&self) -> anyhow::Result<Option<SystemConfigs>> {
+        tracing::debug!("Repository: Fetching system configs");
 
         let client = self.pool.get().await?;
         let key = SystemKey::Config.to_string();
 
         let row = client
-            .query_opt("SELECT value FROM system_settings WHERE key = $1", &[&key])
+            .query_opt("SELECT value FROM system_configs WHERE key = $1", &[&key])
             .await?;
 
         if let Some(row) = row {
             let value_json: serde_json::Value = row.get("value");
 
-            let default_config = SystemSettings::default();
+            let default_config = SystemConfigs::default();
             // Missing fields will be filled from default config values
             let partial =
-                serde_json::from_value::<PartialSystemSettings>(value_json).unwrap_or_default();
+                serde_json::from_value::<PartialSystemConfigs>(value_json).unwrap_or_default();
             let config = default_config.into_updated(partial);
 
             Ok(Some(config))
@@ -41,8 +41,8 @@ impl SystemSettingsRepository for PostgresSystemSettingsRepository {
         }
     }
 
-    async fn upsert_config(&self, config: SystemSettings) -> anyhow::Result<SystemSettings> {
-        tracing::info!("Repository: Upserting system settings");
+    async fn upsert_config(&self, config: SystemConfigs) -> anyhow::Result<SystemConfigs> {
+        tracing::info!("Repository: Upserting system configs");
 
         let client = self.pool.get().await?;
         let key = SystemKey::Config.to_string();
@@ -50,7 +50,7 @@ impl SystemSettingsRepository for PostgresSystemSettingsRepository {
 
         client
             .execute(
-                "INSERT INTO system_settings (key, value)
+                "INSERT INTO system_configs (key, value)
                  VALUES ($1, $2)
                  ON CONFLICT (key)
                  DO UPDATE SET value = $2, updated_at = NOW()",
@@ -58,18 +58,18 @@ impl SystemSettingsRepository for PostgresSystemSettingsRepository {
             )
             .await?;
 
-        tracing::info!("Repository: System settings upserted successfully");
+        tracing::info!("Repository: System configs upserted successfully");
 
         Ok(config)
     }
 
-    async fn update_config(&self, config: PartialSystemSettings) -> anyhow::Result<SystemSettings> {
-        tracing::info!("Repository: Updating system settings");
+    async fn update_config(&self, config: PartialSystemConfigs) -> anyhow::Result<SystemConfigs> {
+        tracing::info!("Repository: Updating system configs");
 
         // Load existing config, then merge with incoming partial
         let existing = self.get_config().await?;
         let Some(existing) = existing else {
-            anyhow::bail!("System settings not found for key: {}", SystemKey::Config);
+            anyhow::bail!("System configs not found for key: {}", SystemKey::Config);
         };
 
         let merged = existing.into_updated(config);
@@ -78,4 +78,3 @@ impl SystemSettingsRepository for PostgresSystemSettingsRepository {
         self.upsert_config(merged).await
     }
 }
-

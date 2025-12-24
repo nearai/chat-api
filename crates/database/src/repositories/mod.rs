@@ -6,7 +6,7 @@ pub mod model_repository;
 pub mod near_nonce_repository;
 pub mod oauth_repository;
 pub mod session_repository;
-pub mod system_settings_repository;
+pub mod system_configs_repository;
 pub mod user_repository;
 pub mod user_settings_repository;
 
@@ -18,6 +18,6 @@ pub use model_repository::PostgresModelRepository;
 pub use near_nonce_repository::PostgresNearNonceRepository;
 pub use oauth_repository::PostgresOAuthRepository;
 pub use session_repository::PostgresSessionRepository;
-pub use system_settings_repository::PostgresSystemSettingsRepository;
+pub use system_configs_repository::PostgresSystemConfigsRepository;
 pub use user_repository::PostgresUserRepository;
 pub use user_settings_repository::PostgresUserSettingsRepository;

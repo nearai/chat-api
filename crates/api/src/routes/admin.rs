@@ -522,13 +522,13 @@ pub async fn delete_model(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Get system settings
+/// Get system configs
 #[utoipa::path(
     get,
     path = "/v1/admin/settings",
     tag = "Admin",
     responses(
-        (status = 200, description = "System settings retrieved", body = Option<SystemSettingsResponse>),
+        (status = 200, description = "System configs retrieved", body = Option<SystemConfigsResponse>),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
         (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
@@ -537,31 +537,31 @@ pub async fn delete_model(
         ("session_token" = [])
     )
 )]
-pub async fn get_system_settings(
+pub async fn get_system_configs(
     State(app_state): State<AppState>,
-) -> Result<Json<Option<SystemSettingsResponse>>, ApiError> {
-    tracing::info!("Getting system settings");
+) -> Result<Json<Option<SystemConfigsResponse>>, ApiError> {
+    tracing::info!("Getting system configs");
 
     let config = app_state
-        .system_settings_service
+        .system_configs_service
         .get_config()
         .await
         .map_err(|e| {
-            tracing::error!(error = ?e, "Failed to get system settings");
-            ApiError::internal_server_error("Failed to get system settings")
+            tracing::error!(error = ?e, "Failed to get system configs");
+            ApiError::internal_server_error("Failed to get system configs")
         })?;
 
     Ok(Json(config.map(Into::into)))
 }
 
-/// Fully create or replace system settings
+/// Fully create or replace system configs
 #[utoipa::path(
     post,
     path = "/v1/admin/settings",
     tag = "Admin",
-    request_body = UpsertSystemSettingsRequest,
+    request_body = UpsertSystemConfigsRequest,
     responses(
-        (status = 200, description = "System settings upserted", body = SystemSettingsResponse),
+        (status = 200, description = "System configs upserted", body = SystemConfigsResponse),
         (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
@@ -571,34 +571,34 @@ pub async fn get_system_settings(
         ("session_token" = [])
     )
 )]
-pub async fn upsert_system_settings(
+pub async fn upsert_system_configs(
     State(app_state): State<AppState>,
-    Json(request): Json<UpsertSystemSettingsRequest>,
-) -> Result<Json<SystemSettingsResponse>, ApiError> {
-    tracing::info!("Upserting system settings: {:?}", request);
+    Json(request): Json<UpsertSystemConfigsRequest>,
+) -> Result<Json<SystemConfigsResponse>, ApiError> {
+    tracing::info!("Upserting system configs: {:?}", request);
 
-    let config: services::system_settings::ports::SystemSettings = request.into();
+    let config: services::system_configs::ports::SystemConfigs = request.into();
 
     let updated = app_state
-        .system_settings_service
+        .system_configs_service
         .upsert_config(config)
         .await
         .map_err(|e| {
-            tracing::error!(error = ?e, "Failed to upsert system settings");
-            ApiError::internal_server_error("Failed to upsert system settings")
+            tracing::error!(error = ?e, "Failed to upsert system configs");
+            ApiError::internal_server_error("Failed to upsert system configs")
         })?;
 
     Ok(Json(updated.into()))
 }
 
-/// Partially update system settings
+/// Partially update system configs
 #[utoipa::path(
     patch,
     path = "/v1/admin/settings",
     tag = "Admin",
-    request_body = UpdateSystemSettingsRequest,
+    request_body = UpdateSystemConfigsRequest,
     responses(
-        (status = 200, description = "System settings updated", body = SystemSettingsResponse),
+        (status = 200, description = "System configs updated", body = SystemConfigsResponse),
         (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
@@ -608,21 +608,21 @@ pub async fn upsert_system_settings(
         ("session_token" = [])
     )
 )]
-pub async fn update_system_settings(
+pub async fn update_system_configs(
     State(app_state): State<AppState>,
-    Json(request): Json<UpdateSystemSettingsRequest>,
-) -> Result<Json<SystemSettingsResponse>, ApiError> {
-    tracing::info!("Partially updating system settings: {:?}", request);
+    Json(request): Json<UpdateSystemConfigsRequest>,
+) -> Result<Json<SystemConfigsResponse>, ApiError> {
+    tracing::info!("Partially updating system configs: {:?}", request);
 
-    let partial: services::system_settings::ports::PartialSystemSettings = request.into();
+    let partial: services::system_configs::ports::PartialSystemConfigs = request.into();
 
     let updated = app_state
-        .system_settings_service
+        .system_configs_service
         .update_config(partial)
         .await
         .map_err(|e| {
-            tracing::error!(error = ?e, "Failed to update system settings");
-            ApiError::internal_server_error("Failed to update system settings")
+            tracing::error!(error = ?e, "Failed to update system configs");
+            ApiError::internal_server_error("Failed to update system configs")
         })?;
 
     Ok(Json(updated.into()))
@@ -642,9 +642,9 @@ pub fn create_admin_router() -> Router<AppState> {
         )
         .route(
             "/settings",
-            get(get_system_settings)
-                .post(upsert_system_settings)
-                .patch(update_system_settings),
+            get(get_system_configs)
+                .post(upsert_system_configs)
+                .patch(update_system_configs),
         )
         .route("/analytics", get(get_analytics))
         .route("/analytics/top-users", get(get_top_users))
