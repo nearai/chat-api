@@ -325,6 +325,10 @@ pub async fn get_model(
     State(app_state): State<AppState>,
     Path(model_id): Path<String>,
 ) -> Result<Json<Option<ModelResponse>>, ApiError> {
+    if model_id.trim().is_empty() {
+        return Err(ApiError::bad_request("model_id cannot be empty"));
+    }
+
     tracing::info!("Getting model for model_id={}", model_id);
 
     let model = app_state
@@ -366,6 +370,10 @@ pub async fn upsert_model(
     Path(model_id): Path<String>,
     Json(request): Json<UpsertModelsRequest>,
 ) -> Result<Json<ModelResponse>, ApiError> {
+    if model_id.trim().is_empty() {
+        return Err(ApiError::bad_request("model_id cannot be empty"));
+    }
+
     tracing::info!(
         "Fully upserting model for model_id={}: {:?}",
         model_id,
@@ -434,6 +442,10 @@ pub async fn update_model(
     Path(model_id): Path<String>,
     Json(request): Json<UpdateModelRequest>,
 ) -> Result<Json<ModelResponse>, ApiError> {
+    if model_id.trim().is_empty() {
+        return Err(ApiError::bad_request("model_id cannot be empty"));
+    }
+
     tracing::info!(
         "Partially updating model for model_id={}: {:?}",
         model_id,
@@ -506,6 +518,10 @@ pub async fn delete_model(
     State(app_state): State<AppState>,
     Path(model_id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    if model_id.trim().is_empty() {
+        return Err(ApiError::bad_request("model_id cannot be empty"));
+    }
+
     tracing::info!("Deleting model for model_id={}", model_id);
 
     // Invalidate cache BEFORE DB delete to prevent race condition
