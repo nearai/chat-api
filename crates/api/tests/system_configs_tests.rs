@@ -221,3 +221,140 @@ async fn test_system_configs_write_requires_admin() {
     let error = body.get("message").and_then(|v| v.as_str());
     assert_eq!(error, Some("Admin access required"));
 }
+
+#[tokio::test]
+async fn test_get_system_configs_when_none_exist() {
+    let server = create_test_server().await;
+
+    // Use a unique email to ensure we're working with a fresh database state
+    // Note: This test assumes no configs exist in the database initially
+    let user_email = "test_user_default_configs@example.org";
+    let user_token = mock_login(&server, user_email).await;
+
+    // GET /v1/configs when no configs exist should return null
+    let response = server
+        .get("/v1/configs")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        200,
+        "GET /v1/configs should return 200 even when no configs exist"
+    );
+
+    let body: serde_json::Value = response.json();
+    assert!(
+        body.is_null(),
+        "GET /v1/configs should return null when no configs exist, got: {body:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_get_system_configs_default_values() {
+    let server = create_test_server().await;
+
+    let admin_email = "test_admin_default_values@admin.org";
+    let admin_token = mock_login(&server, admin_email).await;
+
+    // First, ensure configs exist with a value
+    let upsert_body = json!({
+        "default_model": "test-default-model"
+    });
+
+    let response = server
+        .patch("/v1/admin/configs")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&upsert_body)
+        .await;
+
+    assert!(
+        response.status_code().is_success(),
+        "Admin should be able to upsert system configs"
+    );
+
+    // Verify the configs were set
+    let response = server
+        .get("/v1/configs")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        200,
+        "Should be able to get system configs"
+    );
+
+    let body: serde_json::Value = response.json();
+    assert!(
+        body.is_object(),
+        "System configs should return an object when configs exist"
+    );
+    assert_eq!(
+        body.get("default_model"),
+        Some(&json!("test-default-model")),
+        "System configs should contain the set default_model"
+    );
+
+    // Update to remove default_model (set to null)
+    let update_body = json!({
+        "default_model": null
+    });
+
+    let response = server
+        .patch("/v1/admin/configs")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&update_body)
+        .await;
+
+    assert!(
+        response.status_code().is_success(),
+        "Admin should be able to update system configs to remove default_model"
+    );
+
+    // Verify default_model is now null/absent
+    let response = server
+        .get("/v1/configs")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        200,
+        "Should be able to get system configs after update"
+    );
+
+    let body: serde_json::Value = response.json();
+    assert!(
+        body.is_object(),
+        "System configs should still return an object even when default_model is null"
+    );
+    // default_model should be null or absent (skip_serializing_if = "Option::is_none")
+    assert!(
+        body.get("default_model").is_none() || body.get("default_model") == Some(&json!(null)),
+        "default_model should be null or absent when not set, got: {body:?}"
+    );
+}

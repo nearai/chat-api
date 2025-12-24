@@ -31,8 +31,7 @@ impl SystemConfigsRepository for PostgresSystemConfigsRepository {
 
             let default_config = SystemConfigs::default();
             // Missing fields will be filled from default config values
-            let partial =
-                serde_json::from_value::<PartialSystemConfigs>(value_json).unwrap_or_default();
+            let partial = serde_json::from_value::<PartialSystemConfigs>(value_json)?;
             let config = default_config.into_updated(partial);
 
             Ok(Some(config))
