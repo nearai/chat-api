@@ -25,8 +25,10 @@ fn validate_nonce_timestamp(nonce_timestamp_ms: u64) -> anyhow::Result<()> {
         ));
     }
 
-    let nonce_time =
-        DateTime::from_timestamp_millis(nonce_timestamp_ms as i64).ok_or_else(|| {
+    let nonce_time = i64::try_from(nonce_timestamp_ms)
+        .ok()
+        .and_then(DateTime::from_timestamp_millis)
+        .ok_or_else(|| {
             tracing::warn!(
                 "NEAR signature has invalid timestamp (out of range): {}ms",
                 nonce_timestamp_ms
@@ -256,28 +258,37 @@ mod tests {
     #[test]
     fn test_zero_timestamp_should_fail() {
         let result = validate_nonce_timestamp(0);
-        assert!(result.is_err(), "Zero timestamp should fail validation");
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Invalid signature timestamp: timestamp is zero"
+        );
     }
 
     #[test]
     fn test_large_timestamp_overflow() {
         let large_timestamp = u64::MAX;
         let result = validate_nonce_timestamp(large_timestamp);
-        assert!(result.is_err(), "Overflow timestamp should fail validation");
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Invalid signature timestamp: timestamp out of range"
+        );
     }
 
     #[test]
     fn test_future_timestamp_should_fail() {
         let future_ms = (Utc::now().timestamp_millis() + 3600 * 1000) as u64;
         let result = validate_nonce_timestamp(future_ms);
-        assert!(result.is_err(), "Future timestamp should fail validation");
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Invalid signature timestamp: timestamp is in the future"
+        );
     }
 
     #[test]
     fn test_expired_timestamp_should_fail() {
         let expired_ms = (Utc::now().timestamp_millis() - (MAX_NONCE_AGE_MS as i64 + 1000)) as u64;
         let result = validate_nonce_timestamp(expired_ms);
-        assert!(result.is_err(), "Expired timestamp should fail validation");
+        assert_eq!(result.unwrap_err().to_string(), "Signature expired");
     }
 
     #[test]
