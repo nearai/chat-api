@@ -28,9 +28,10 @@ use utoipa::OpenApi;
         crate::routes::admin::upsert_model,
         crate::routes::admin::update_model,
         crate::routes::admin::delete_model,
-        crate::routes::admin::get_system_configs,
         crate::routes::admin::upsert_system_configs,
         crate::routes::admin::update_system_configs,
+        // Configs endpoints
+        crate::routes::configs::get_system_configs,
         crate::routes::users::get_user_settings,
         crate::routes::users::update_user_settings_partially,
         crate::routes::users::update_user_settings,
@@ -73,6 +74,7 @@ use utoipa::OpenApi;
         (name = "Auth", description = "OAuth authentication endpoints"),
         (name = "Users", description = "User profile management endpoints"),
         (name = "Admin", description = "Admin management endpoints"),
+        (name = "Configs", description = "System configuration endpoints"),
         (name = "attestation", description = "Attestation reporting endpoints for TEE verification")
     )
 )]

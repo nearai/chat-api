@@ -16,7 +16,7 @@ async fn test_upsert_system_configs_and_get() {
     });
 
     let response = server
-        .post("/v1/admin/settings")
+        .post("/v1/admin/configs")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -40,9 +40,9 @@ async fn test_upsert_system_configs_and_get() {
         "Upserted configs should contain correct default_model"
     );
 
-    // Get system configs to verify it was persisted
+    // Get system configs to verify it was persisted (requires user auth)
     let response = server
-        .get("/v1/admin/settings")
+        .get("/v1/configs")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -80,7 +80,7 @@ async fn test_update_system_configs() {
     });
 
     let response = server
-        .post("/v1/admin/settings")
+        .post("/v1/admin/configs")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -105,7 +105,7 @@ async fn test_update_system_configs() {
     });
 
     let response = server
-        .patch("/v1/admin/settings")
+        .patch("/v1/admin/configs")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -129,9 +129,9 @@ async fn test_update_system_configs() {
         "Updated system configs should contain new default_model"
     );
 
-    // Verify via GET
+    // Verify via GET (requires user auth)
     let response = server
-        .get("/v1/admin/settings")
+        .get("/v1/configs")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -153,25 +153,70 @@ async fn test_update_system_configs() {
 }
 
 #[tokio::test]
-async fn test_system_configs_requires_admin() {
+async fn test_get_system_configs_requires_auth() {
+    let server = create_test_server().await;
+
+    // GET /v1/configs without authentication should return 401
+    let response = server.get("/v1/configs").await;
+
+    assert_eq!(
+        response.status_code(),
+        401,
+        "GET /v1/configs should require user authentication"
+    );
+}
+
+#[tokio::test]
+async fn test_get_system_configs_allows_non_admin() {
     let server = create_test_server().await;
 
     let non_admin_email = "test_user_configs@no-admin.org";
     let non_admin_token = mock_login(&server, non_admin_email).await;
 
-    // Non-admin trying to GET system configs should receive 403
+    // Non-admin user should be able to GET system configs (only write requires admin)
     let response = server
-        .get("/v1/admin/settings")
+        .get("/v1/configs")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {non_admin_token}")).unwrap(),
         )
         .await;
 
+    assert!(
+        response.status_code().is_success() || response.status_code() == 200,
+        "Non-admin users should be able to GET system configs with authentication"
+    );
+}
+
+#[tokio::test]
+async fn test_system_configs_write_requires_admin() {
+    let server = create_test_server().await;
+
+    let non_admin_email = "test_user_configs@no-admin.org";
+    let non_admin_token = mock_login(&server, non_admin_email).await;
+
+    // Non-admin trying to POST system configs should receive 403
+    let upsert_body = json!({
+        "default_model": "test-model"
+    });
+
+    let response = server
+        .post("/v1/admin/configs")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {non_admin_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&upsert_body)
+        .await;
+
     assert_eq!(
         response.status_code(),
         403,
-        "Non-admin should receive 403 Forbidden when accessing system configs"
+        "Non-admin should receive 403 Forbidden when writing system configs"
     );
 
     let body: serde_json::Value = response.json();

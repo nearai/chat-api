@@ -2,7 +2,7 @@ use crate::{consts::LIST_USERS_LIMIT_MAX, error::ApiError, models::*, state::App
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 use chrono::{DateTime, Utc};
@@ -522,42 +522,10 @@ pub async fn delete_model(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Get system configs
-#[utoipa::path(
-    get,
-    path = "/v1/admin/settings",
-    tag = "Admin",
-    responses(
-        (status = 200, description = "System configs retrieved", body = Option<SystemConfigsResponse>),
-        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
-        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
-        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
-    ),
-    security(
-        ("session_token" = [])
-    )
-)]
-pub async fn get_system_configs(
-    State(app_state): State<AppState>,
-) -> Result<Json<Option<SystemConfigsResponse>>, ApiError> {
-    tracing::info!("Getting system configs");
-
-    let config = app_state
-        .system_configs_service
-        .get_config()
-        .await
-        .map_err(|e| {
-            tracing::error!(error = ?e, "Failed to get system configs");
-            ApiError::internal_server_error("Failed to get system configs")
-        })?;
-
-    Ok(Json(config.map(Into::into)))
-}
-
 /// Fully create or replace system configs
 #[utoipa::path(
     post,
-    path = "/v1/admin/settings",
+    path = "/v1/admin/configs",
     tag = "Admin",
     request_body = UpsertSystemConfigsRequest,
     responses(
@@ -594,7 +562,7 @@ pub async fn upsert_system_configs(
 /// Partially update system configs
 #[utoipa::path(
     patch,
-    path = "/v1/admin/settings",
+    path = "/v1/admin/configs",
     tag = "Admin",
     request_body = UpdateSystemConfigsRequest,
     responses(
@@ -641,10 +609,8 @@ pub fn create_admin_router() -> Router<AppState> {
                 .delete(delete_model),
         )
         .route(
-            "/settings",
-            get(get_system_configs)
-                .post(upsert_system_configs)
-                .patch(update_system_configs),
+            "/configs",
+            post(upsert_system_configs).patch(update_system_configs),
         )
         .route("/analytics", get(get_analytics))
         .route("/analytics/top-users", get(get_top_users))

@@ -16,12 +16,12 @@ use http::{HeaderName, HeaderValue};
 use near_api::{Account, AccountId, NetworkConfig};
 use serde::{Deserialize, Serialize};
 use services::analytics::{ActivityType, RecordActivityRequest};
+use services::consts::MODEL_PUBLIC_DEFAULT;
 use services::conversation::ports::ConversationError;
 use services::file::ports::FileError;
 use services::metrics::consts::{
     METRIC_CONVERSATION_CREATED, METRIC_FILE_UPLOADED, METRIC_RESPONSE_CREATED,
 };
-use services::consts::MODEL_PUBLIC_DEFAULT;
 use services::response::ports::ProxyResponse;
 use services::user::ports::{BanType, OAuthProvider};
 use services::UserId;
