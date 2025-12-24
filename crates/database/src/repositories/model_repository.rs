@@ -151,38 +151,58 @@ impl ModelsRepository for PostgresModelRepository {
             params.model_id
         );
 
-        let existing_model = self.get_model(&params.model_id).await?;
-
-        let Some(existing_model) = existing_model else {
-            anyhow::bail!("Model not found for model id: {}", params.model_id);
-        };
-
         let client = self.pool.get().await?;
 
-        // Merge with incoming partial settings (if provided)
-        let new_settings = if let Some(delta) = params.settings {
-            existing_model.settings.into_updated(delta)
+        // Use atomic JSONB merge to prevent lost writes from concurrent updates
+        let row = if let Some(delta) = params.settings {
+            // Build JSON object with only fields that should be updated (skip None values)
+            let mut delta_json = serde_json::Map::new();
+            if let Some(public) = delta.public {
+                delta_json.insert("public".to_string(), serde_json::Value::Bool(public));
+            }
+            if let Some(ref system_prompt) = delta.system_prompt {
+                delta_json.insert(
+                    "system_prompt".to_string(),
+                    serde_json::Value::String(system_prompt.clone()),
+                );
+            }
+
+            let delta_value = serde_json::Value::Object(delta_json);
+
+            // Atomic merge: COALESCE handles NULL, || merges JSONB objects
+            // This ensures concurrent updates don't lose data
+            client
+                .query_one(
+                    "UPDATE models
+                     SET settings = COALESCE(settings, '{}'::jsonb) || $1::jsonb,
+                         updated_at = NOW()
+                     WHERE model_id = $2
+                     RETURNING id, model_id, settings, created_at, updated_at",
+                    &[&delta_value, &params.model_id],
+                )
+                .await?
         } else {
-            existing_model.settings
+            // No settings to update, just refresh updated_at
+            client
+                .query_one(
+                    "UPDATE models
+                     SET updated_at = NOW()
+                     WHERE model_id = $1
+                     RETURNING id, model_id, settings, created_at, updated_at",
+                    &[&params.model_id],
+                )
+                .await?
         };
 
-        let new_settings_json = serde_json::to_value(new_settings.clone())?;
-
-        // Persist updated settings
-        let row = client
-            .query_one(
-                "UPDATE models
-                 SET settings = $1
-                 WHERE model_id = $2
-                 RETURNING id, model_id, created_at, updated_at",
-                &[&new_settings_json, &params.model_id],
-            )
-            .await?;
+        // Deserialize the merged settings from database
+        // query_one will return an error if no rows found, so no need to check
+        let settings_json: serde_json::Value = row.get("settings");
+        let settings: ModelSettings = serde_json::from_value(settings_json)?;
 
         Ok(Model {
             id: row.get("id"),
             model_id: row.get("model_id"),
-            settings: new_settings,
+            settings,
             created_at: row.get("created_at"),
             updated_at: row.get("updated_at"),
         })

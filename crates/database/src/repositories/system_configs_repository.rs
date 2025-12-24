@@ -66,15 +66,39 @@ impl SystemConfigsRepository for PostgresSystemConfigsRepository {
     async fn update_configs(&self, configs: PartialSystemConfigs) -> anyhow::Result<SystemConfigs> {
         tracing::info!("Repository: Updating system configs");
 
-        // Load existing config, then merge with incoming partial
-        let existing = self.get_configs().await?;
-        let Some(existing) = existing else {
+        let client = self.pool.get().await?;
+        let key = SystemKey::Config.to_string();
+
+        // Build JSON object with only fields that should be updated (skip None values)
+        let mut delta_json = serde_json::Map::new();
+        if let Some(ref default_model) = configs.default_model {
+            delta_json.insert(
+                "default_model".to_string(),
+                serde_json::Value::String(default_model.clone()),
+            );
+        }
+
+        let delta_value = serde_json::Value::Object(delta_json);
+
+        // Use atomic JSONB merge to prevent lost writes from concurrent updates
+        // COALESCE handles NULL, || merges JSONB objects atomically
+        let rows_affected = client
+            .execute(
+                "UPDATE system_configs
+                 SET value = COALESCE(value, '{}'::jsonb) || $1::jsonb,
+                     updated_at = NOW()
+                 WHERE key = $2",
+                &[&delta_value, &key],
+            )
+            .await?;
+
+        if rows_affected == 0 {
             anyhow::bail!("System configs not found for key: {}", SystemKey::Config);
-        };
+        }
 
-        let merged = existing.into_updated(configs);
-
-        // Reuse upsert logic to persist merged result
-        self.upsert_configs(merged).await
+        // Fetch the merged result to return
+        self.get_configs()
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("System configs not found after update"))
     }
 }
