@@ -393,7 +393,6 @@ pub async fn batch_upsert_models(
     }
 
     tracing::info!("Batch upserting {} models", request.models.len());
-    tracing::debug!("Batch upserting models: {:?}", request.models);
 
     use services::model::ports::{ModelSettings, PartialModelSettings};
 

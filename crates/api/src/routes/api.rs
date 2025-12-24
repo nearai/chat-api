@@ -38,7 +38,7 @@ const NEAR_BALANCE_BAN_DURATION_SECS: i64 = 60 * 60;
 const NEAR_BALANCE_CACHE_TTL_SECS: i64 = 5 * 60;
 
 /// Duration to cache model settings needed by /v1/responses in memory (in seconds)
-const MODEL_SETTINGS_CACHE_TTL_SECS: i64 = 5 * 60;
+const MODEL_SETTINGS_CACHE_TTL_SECS: i64 = 30;
 
 /// Error message when a user is banned
 pub const USER_BANNED_ERROR_MESSAGE: &str =
@@ -1252,7 +1252,7 @@ async fn proxy_responses(
     // Set content-length header
     match HeaderValue::from_str(&modified_body_bytes.len().to_string()) {
         Ok(header_value) => {
-            headers.append("content-length", header_value);
+            headers.insert("content-length", header_value);
         }
         Err(e) => {
             tracing::error!("Failed to create content-length header value: {}", e);
