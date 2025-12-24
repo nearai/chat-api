@@ -525,7 +525,7 @@ pub async fn delete_model(
 /// Get system settings
 #[utoipa::path(
     get,
-    path = "/v1/admin/configs",
+    path = "/v1/admin/settings",
     tag = "Admin",
     responses(
         (status = 200, description = "System settings retrieved", body = Option<SystemSettingsResponse>),
@@ -557,7 +557,7 @@ pub async fn get_system_settings(
 /// Fully create or replace system settings
 #[utoipa::path(
     post,
-    path = "/v1/admin/configs",
+    path = "/v1/admin/settings",
     tag = "Admin",
     request_body = UpsertSystemSettingsRequest,
     responses(
@@ -594,7 +594,7 @@ pub async fn upsert_system_settings(
 /// Partially update system settings
 #[utoipa::path(
     patch,
-    path = "/v1/admin/configs",
+    path = "/v1/admin/settings",
     tag = "Admin",
     request_body = UpdateSystemSettingsRequest,
     responses(
@@ -641,7 +641,7 @@ pub fn create_admin_router() -> Router<AppState> {
                 .delete(delete_model),
         )
         .route(
-            "/configs",
+            "/settings",
             get(get_system_settings)
                 .post(upsert_system_settings)
                 .patch(update_system_settings),

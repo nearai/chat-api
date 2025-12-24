@@ -4,10 +4,10 @@ use common::{create_test_server, mock_login};
 use serde_json::json;
 
 #[tokio::test]
-async fn test_upsert_global_config_and_get() {
+async fn test_upsert_system_settings_and_get() {
     let server = create_test_server().await;
 
-    let admin_email = "test_admin_globals_upsert@admin.org";
+    let admin_email = "test_admin_settings_upsert@admin.org";
     let admin_token = mock_login(&server, admin_email).await;
 
     // Upsert system settings with a default_model value
@@ -16,7 +16,7 @@ async fn test_upsert_global_config_and_get() {
     });
 
     let response = server
-        .post("/v1/admin/configs")
+        .post("/v1/admin/settings")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -42,7 +42,7 @@ async fn test_upsert_global_config_and_get() {
 
     // Get system settings to verify it was persisted
     let response = server
-        .get("/v1/admin/configs")
+        .get("/v1/admin/settings")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -68,10 +68,10 @@ async fn test_upsert_global_config_and_get() {
 }
 
 #[tokio::test]
-async fn test_update_global_config() {
+async fn test_update_system_settings() {
     let server = create_test_server().await;
 
-    let admin_email = "test_admin_globals_update@admin.org";
+    let admin_email = "test_admin_settings_update@admin.org";
     let admin_token = mock_login(&server, admin_email).await;
 
     // Ensure a known initial config via upsert
@@ -80,7 +80,7 @@ async fn test_update_global_config() {
     });
 
     let response = server
-        .post("/v1/admin/configs")
+        .post("/v1/admin/settings")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -105,7 +105,7 @@ async fn test_update_global_config() {
     });
 
     let response = server
-        .patch("/v1/admin/configs")
+        .patch("/v1/admin/settings")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -131,7 +131,7 @@ async fn test_update_global_config() {
 
     // Verify via GET
     let response = server
-        .get("/v1/admin/configs")
+        .get("/v1/admin/settings")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -153,15 +153,15 @@ async fn test_update_global_config() {
 }
 
 #[tokio::test]
-async fn test_global_config_requires_admin() {
+async fn test_system_settings_requires_admin() {
     let server = create_test_server().await;
 
-    let non_admin_email = "test_user_globals@no-admin.org";
+    let non_admin_email = "test_user_settings@no-admin.org";
     let non_admin_token = mock_login(&server, non_admin_email).await;
 
     // Non-admin trying to GET system settings should receive 403
     let response = server
-        .get("/v1/admin/configs")
+        .get("/v1/admin/settings")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {non_admin_token}")).unwrap(),
@@ -178,3 +178,4 @@ async fn test_global_config_requires_admin() {
     let error = body.get("message").and_then(|v| v.as_str());
     assert_eq!(error, Some("Admin access required"));
 }
+
