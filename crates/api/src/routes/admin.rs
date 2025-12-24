@@ -372,6 +372,16 @@ pub async fn upsert_model(
         request
     );
 
+    // Validate system prompt length if provided
+    if let Some(ref system_prompt) = request.settings.system_prompt {
+        if system_prompt.len() > crate::consts::SYSTEM_PROMPT_MAX_LEN {
+            return Err(ApiError::bad_request(format!(
+                "System prompt exceeds maximum length of {} bytes",
+                crate::consts::SYSTEM_PROMPT_MAX_LEN
+            )));
+        }
+    }
+
     let params = UpsertModelParams {
         model_id,
         settings: request.settings.into(),
@@ -436,6 +446,18 @@ pub async fn update_model(
         model_id,
         request
     );
+
+    // Validate system prompt length if provided
+    if let Some(ref settings) = request.settings {
+        if let Some(ref system_prompt) = settings.system_prompt {
+            if system_prompt.len() > crate::consts::SYSTEM_PROMPT_MAX_LEN {
+                return Err(ApiError::bad_request(format!(
+                    "System prompt exceeds maximum length of {} bytes",
+                    crate::consts::SYSTEM_PROMPT_MAX_LEN
+                )));
+            }
+        }
+    }
 
     let settings = request.settings.map(Into::into);
 
