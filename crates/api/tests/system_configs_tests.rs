@@ -16,7 +16,7 @@ async fn test_upsert_system_configs_and_get() {
     });
 
     let response = server
-        .post("/v1/admin/configs")
+        .patch("/v1/admin/configs")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -80,7 +80,7 @@ async fn test_update_system_configs() {
     });
 
     let response = server
-        .post("/v1/admin/configs")
+        .patch("/v1/admin/configs")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -92,14 +92,12 @@ async fn test_update_system_configs() {
         .json(&upsert_body)
         .await;
 
-    println!("{}", response.text());
-
     assert!(
         response.status_code().is_success(),
         "Admin should be able to upsert initial system configs"
     );
 
-    // Partially update configs (simulate PATCH behavior)
+    // Partially update configs
     let update_body = json!({
         "default_model": "updated-model"
     });
@@ -195,13 +193,13 @@ async fn test_system_configs_write_requires_admin() {
     let non_admin_email = "test_user_configs@no-admin.org";
     let non_admin_token = mock_login(&server, non_admin_email).await;
 
-    // Non-admin trying to POST system configs should receive 403
+    // Non-admin trying to PATCH system configs should receive 403
     let upsert_body = json!({
         "default_model": "test-model"
     });
 
     let response = server
-        .post("/v1/admin/configs")
+        .patch("/v1/admin/configs")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {non_admin_token}")).unwrap(),

@@ -28,7 +28,6 @@ use utoipa::OpenApi;
         crate::routes::admin::batch_upsert_models,
         crate::routes::admin::delete_model,
         crate::routes::admin::upsert_system_configs,
-        crate::routes::admin::update_system_configs,
         // Configs endpoints
         crate::routes::configs::get_system_configs,
         crate::routes::users::get_user_settings,
@@ -61,7 +60,6 @@ use utoipa::OpenApi;
         crate::models::UpdateModelRequest,
         // System configs models
         crate::models::SystemConfigsResponse,
-        crate::models::UpsertSystemConfigsRequest,
         crate::models::UpdateSystemConfigsRequest,
         // Attestation models
         crate::models::ApiGatewayAttestation,

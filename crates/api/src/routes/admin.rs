@@ -2,7 +2,7 @@ use crate::{consts::LIST_USERS_LIMIT_MAX, error::ApiError, models::*, state::App
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
-    routing::{delete, get, post},
+    routing::{delete, get, patch},
     Json, Router,
 };
 use chrono::{DateTime, Utc};
@@ -531,14 +531,19 @@ pub async fn delete_model(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Fully create or replace system configs
+/// Create or update system configs
+///
+/// Creates new system configs or updates existing ones. All fields in the request are optional.
+/// If the configs don't exist, missing fields will use default values.
+/// If the configs exist, only provided fields will be updated.
+/// Requires admin authentication.
 #[utoipa::path(
-    post,
+    patch,
     path = "/v1/admin/configs",
     tag = "Admin",
-    request_body = UpsertSystemConfigsRequest,
+    request_body = UpdateSystemConfigsRequest,
     responses(
-        (status = 200, description = "System configs upserted", body = SystemConfigsResponse),
+        (status = 200, description = "System configs created or updated", body = SystemConfigsResponse),
         (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
@@ -550,57 +555,47 @@ pub async fn delete_model(
 )]
 pub async fn upsert_system_configs(
     State(app_state): State<AppState>,
-    Json(request): Json<UpsertSystemConfigsRequest>,
-) -> Result<Json<SystemConfigsResponse>, ApiError> {
-    tracing::info!("Upserting system configs: {:?}", request);
-
-    let config: services::system_configs::ports::SystemConfigs = request.into();
-
-    let updated = app_state
-        .system_configs_service
-        .upsert_configs(config)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = ?e, "Failed to upsert system configs");
-            ApiError::internal_server_error("Failed to upsert system configs")
-        })?;
-
-    Ok(Json(updated.into()))
-}
-
-/// Partially update system configs
-#[utoipa::path(
-    patch,
-    path = "/v1/admin/configs",
-    tag = "Admin",
-    request_body = UpdateSystemConfigsRequest,
-    responses(
-        (status = 200, description = "System configs updated", body = SystemConfigsResponse),
-        (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
-        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
-        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
-        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
-    ),
-    security(
-        ("session_token" = [])
-    )
-)]
-pub async fn update_system_configs(
-    State(app_state): State<AppState>,
     Json(request): Json<UpdateSystemConfigsRequest>,
 ) -> Result<Json<SystemConfigsResponse>, ApiError> {
-    tracing::info!("Partially updating system configs: {:?}", request);
+    tracing::info!("Upserting system configs");
 
     let partial: services::system_configs::ports::PartialSystemConfigs = request.into();
 
-    let updated = app_state
+    // Check if configs exist
+    let existing_configs = app_state
         .system_configs_service
-        .update_configs(partial)
+        .get_configs()
         .await
         .map_err(|e| {
-            tracing::error!(error = ?e, "Failed to update system configs");
-            ApiError::internal_server_error("Failed to update system configs")
+            tracing::error!("Failed to check if system configs exist: {}", e);
+            ApiError::internal_server_error("Failed to check if system configs exist")
         })?;
+
+    let updated = if existing_configs.is_some() {
+        // Configs exist: partial update
+        app_state
+            .system_configs_service
+            .update_configs(partial)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = ?e, "Failed to update system configs");
+                ApiError::internal_server_error("Failed to update system configs")
+            })?
+    } else {
+        // Configs don't exist: create with defaults + provided partial configs
+        use services::system_configs::ports::SystemConfigs;
+        let default_configs = SystemConfigs::default();
+        let full_configs = default_configs.into_updated(partial);
+
+        app_state
+            .system_configs_service
+            .upsert_configs(full_configs)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = ?e, "Failed to create system configs");
+                ApiError::internal_server_error("Failed to create system configs")
+            })?
+    };
 
     Ok(Json(updated.into()))
 }
@@ -612,10 +607,7 @@ pub fn create_admin_router() -> Router<AppState> {
         .route("/users/{user_id}/activity", get(get_user_activity))
         .route("/models", get(list_models).patch(batch_upsert_models))
         .route("/models/{model_id}", delete(delete_model))
-        .route(
-            "/configs",
-            post(upsert_system_configs).patch(update_system_configs),
-        )
+        .route("/configs", patch(upsert_system_configs))
         .route("/analytics", get(get_analytics))
         .route("/analytics/top-users", get(get_top_users))
 }
