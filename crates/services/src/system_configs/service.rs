@@ -24,13 +24,13 @@ impl SystemConfigsService for SystemConfigsServiceImpl {
     }
 
     async fn upsert_configs(&self, config: SystemConfigs) -> anyhow::Result<SystemConfigs> {
-        tracing::info!("Upserting system configs: {:?}", config);
+        tracing::info!("Upserting system configs");
 
         self.repository.upsert_configs(config).await
     }
 
     async fn update_configs(&self, config: PartialSystemConfigs) -> anyhow::Result<SystemConfigs> {
-        tracing::info!("Partially updating system configs: {:?}", config);
+        tracing::info!("Partially updating system configs");
 
         self.repository.update_configs(config).await
     }

@@ -29,21 +29,13 @@ impl ModelService for ModelServiceImpl {
     }
 
     async fn upsert_model(&self, params: UpsertModelParams) -> anyhow::Result<Model> {
-        tracing::info!(
-            "Upserting model for model_id={}: {:?}",
-            params.model_id,
-            params
-        );
+        tracing::info!("Upserting model for model_id={}", params.model_id);
 
         self.repository.upsert_model(params).await
     }
 
     async fn update_model(&self, params: UpdateModelParams) -> anyhow::Result<Model> {
-        tracing::info!(
-            "Updating model for model_id={}: {:?}",
-            params.model_id,
-            params
-        );
+        tracing::info!("Updating model for model_id={}", params.model_id);
 
         self.repository.update_model(params).await
     }
