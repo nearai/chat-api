@@ -1124,7 +1124,7 @@ async fn proxy_responses(
 
             // 1) Try cache first
             {
-                let cache = state.model_system_prompt_cache.read().await;
+                let cache = state.model_settings_cache.read().await;
                 if let Some(entry) = cache.get(model_id) {
                     let age = Utc::now().signed_duration_since(entry.last_checked_at);
                     if age.num_seconds() >= 0 && age.num_seconds() < MODEL_SETTINGS_CACHE_TTL_SECS {
@@ -1167,10 +1167,10 @@ async fn proxy_responses(
                     Ok(Some(model)) => {
                         // Populate cache
                         {
-                            let mut cache = state.model_system_prompt_cache.write().await;
+                            let mut cache = state.model_settings_cache.write().await;
                             cache.insert(
                                 model_id.to_string(),
-                                crate::state::ModelSystemPromptCacheEntry {
+                                crate::state::ModelSettingsCacheEntry {
                                     last_checked_at: Utc::now(),
                                     exists: true,
                                     public: model.settings.public,
@@ -1199,10 +1199,10 @@ async fn proxy_responses(
                     Ok(None) => {
                         // Negative cache to avoid repeated DB hits
                         {
-                            let mut cache = state.model_system_prompt_cache.write().await;
+                            let mut cache = state.model_settings_cache.write().await;
                             cache.insert(
                                 model_id.to_string(),
-                                crate::state::ModelSystemPromptCacheEntry {
+                                crate::state::ModelSettingsCacheEntry {
                                     last_checked_at: Utc::now(),
                                     exists: false,
                                     public: false,
@@ -1321,7 +1321,7 @@ async fn proxy_responses(
     let mut proxy_headers = proxy_response.headers.clone();
     if let Some(ref model_id) = model_id_from_body {
         let cached_prompt_opt = {
-            let cache = state.model_system_prompt_cache.read().await;
+            let cache = state.model_settings_cache.read().await;
             cache.get(model_id).and_then(|e| {
                 if e.exists {
                     e.system_prompt.clone()

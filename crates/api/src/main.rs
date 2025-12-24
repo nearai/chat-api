@@ -235,7 +235,7 @@ async fn main() -> anyhow::Result<()> {
         analytics_service,
         near_rpc_url: config.near.rpc_url.clone(),
         near_balance_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        model_system_prompt_cache: Arc::new(tokio::sync::RwLock::new(
+        model_settings_cache: Arc::new(tokio::sync::RwLock::new(
             std::collections::HashMap::new(),
         )),
     };

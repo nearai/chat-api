@@ -14,9 +14,9 @@ pub struct NearBalanceCacheEntry {
 /// Type alias for NEAR balance cache (per-account)
 pub type NearBalanceCache = Arc<RwLock<HashMap<String, NearBalanceCacheEntry>>>;
 
-/// Cached model system prompt entry for a given model_id
+/// Cached model settings entry for a given model_id
 #[derive(Debug, Clone)]
-pub struct ModelSystemPromptCacheEntry {
+pub struct ModelSettingsCacheEntry {
     pub last_checked_at: DateTime<Utc>,
     /// Whether the model exists in the admin models table
     pub exists: bool,
@@ -26,8 +26,8 @@ pub struct ModelSystemPromptCacheEntry {
     pub system_prompt: Option<String>,
 }
 
-/// Type alias for model system prompt cache (per-model)
-pub type ModelSystemPromptCache = Arc<RwLock<HashMap<String, ModelSystemPromptCacheEntry>>>;
+/// Type alias for model settings cache (per-model)
+pub type ModelSettingsCache = Arc<RwLock<HashMap<String, ModelSettingsCacheEntry>>>;
 
 /// Application state shared across all handlers
 #[derive(Clone)]
@@ -56,5 +56,5 @@ pub struct AppState {
     /// In-memory cache for NEAR account balances to avoid frequent RPC calls
     pub near_balance_cache: NearBalanceCache,
     /// In-memory cache for model settings needed by /v1/responses (public + system_prompt)
-    pub model_system_prompt_cache: ModelSystemPromptCache,
+    pub model_settings_cache: ModelSettingsCache,
 }

@@ -388,10 +388,10 @@ pub async fn upsert_model(
 
     // Update in-memory cache for /v1/responses immediately
     {
-        let mut cache = app_state.model_system_prompt_cache.write().await;
+        let mut cache = app_state.model_settings_cache.write().await;
         cache.insert(
             model.model_id.clone(),
-            crate::state::ModelSystemPromptCacheEntry {
+            crate::state::ModelSettingsCacheEntry {
                 last_checked_at: Utc::now(),
                 exists: true,
                 public: model.settings.public,
@@ -458,10 +458,10 @@ pub async fn update_model(
 
     // Update in-memory cache for /v1/responses immediately
     {
-        let mut cache = app_state.model_system_prompt_cache.write().await;
+        let mut cache = app_state.model_settings_cache.write().await;
         cache.insert(
             model.model_id.clone(),
-            crate::state::ModelSystemPromptCacheEntry {
+            crate::state::ModelSettingsCacheEntry {
                 last_checked_at: Utc::now(),
                 exists: true,
                 public: model.settings.public,
@@ -515,7 +515,7 @@ pub async fn delete_model(
 
     // Remove from in-memory cache
     {
-        let mut cache = app_state.model_system_prompt_cache.write().await;
+        let mut cache = app_state.model_settings_cache.write().await;
         cache.remove(&model_id);
     }
 
