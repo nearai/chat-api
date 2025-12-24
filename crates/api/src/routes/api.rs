@@ -1131,16 +1131,6 @@ async fn proxy_responses(
                     if age.num_seconds() >= 0 && age.num_seconds() < MODEL_SETTINGS_CACHE_TTL_SECS {
                         model_settings_cache_hit = Some(true);
 
-                        if !entry.exists {
-                            return Err((
-                                StatusCode::NOT_FOUND,
-                                Json(ErrorResponse {
-                                    error: "Model not found".to_string(),
-                                }),
-                            )
-                                .into_response());
-                        }
-
                         if !entry.public {
                             tracing::warn!(
                                 "Blocking response request for non-public model '{}' from user {} (cache)",
@@ -1198,27 +1188,23 @@ async fn proxy_responses(
                         model_system_prompt = model.settings.system_prompt.clone();
                     }
                     Ok(None) => {
-                        // Negative cache to avoid repeated DB hits
+                        // Model not in admin DB - allow by default per MODEL_PUBLIC_DEFAULT
+                        // Cache with defaults to avoid repeated DB hits, let OpenAI validate model existence
                         {
                             let mut cache = state.model_settings_cache.write().await;
                             cache.insert(
                                 model_id.to_string(),
                                 crate::state::ModelSettingsCacheEntry {
                                     last_checked_at: Utc::now(),
-                                    exists: false,
-                                    public: false,
+                                    exists: false, // Not in DB but allowed with defaults
+                                    public: MODEL_PUBLIC_DEFAULT, // true by default
                                     system_prompt: None,
                                 },
                             );
                         }
 
-                        return Err((
-                            StatusCode::NOT_FOUND,
-                            Json(ErrorResponse {
-                                error: "Model not found".to_string(),
-                            }),
-                        )
-                            .into_response());
+                        // Continue with defaults - let OpenAI validate model existence
+                        model_system_prompt = None;
                     }
                     Err(_) => {
                         return Err((
