@@ -29,13 +29,6 @@ struct VpcOrganization {
     id: String,
 }
 
-/// Response from access token refresh endpoint
-#[derive(serde::Deserialize)]
-struct AccessTokenResponse {
-    access_token: String,
-    refresh_token: String,
-}
-
 /// Cached credentials with tokens
 struct CachedCredentials {
     access_token: String,
@@ -120,42 +113,6 @@ impl VpcCredentialsServiceImpl {
         );
 
         Ok(login_response)
-    }
-
-    /// Refresh access token using refresh token
-    async fn refresh_access_token(
-        &self,
-        config: &VpcAuthConfig,
-        refresh_token: &str,
-    ) -> anyhow::Result<AccessTokenResponse> {
-        let url = format!(
-            "{}/users/me/access-tokens",
-            config.base_url.trim_end_matches('/')
-        );
-
-        tracing::debug!("Refreshing access token...");
-
-        let response = self
-            .http_client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", refresh_token))
-            .send()
-            .await?;
-
-        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-            anyhow::bail!("Refresh token expired");
-        }
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            anyhow::bail!("Token refresh failed with status {}: {}", status, body);
-        }
-
-        let token_response: AccessTokenResponse = response.json().await?;
-        tracing::info!("Access token refreshed successfully");
-
-        Ok(token_response)
     }
 
     /// Load credentials from database
@@ -251,37 +208,6 @@ impl VpcCredentialsServiceImpl {
         if cached.is_none() {
             if let Some(db_creds) = self.load_from_db().await? {
                 *cached = Some(db_creds);
-            }
-        }
-
-        // If we have a refresh token, try to refresh
-        if let Some(creds) = cached.as_mut() {
-            match self
-                .refresh_access_token(config, &creds.refresh_token)
-                .await
-            {
-                Ok(token_response) => {
-                    creds.access_token = token_response.access_token.clone();
-                    creds.access_token_created_at = std::time::Instant::now();
-                    creds.refresh_token = token_response.refresh_token.clone();
-
-                    // Update refresh token in database (it rotates)
-                    self.save_to_db(creds).await;
-
-                    return Ok(VpcCredentials {
-                        access_token: token_response.access_token,
-                        organization_id: creds.organization_id.clone(),
-                        api_key: creds.api_key.clone(),
-                    });
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to refresh access token, will re-authenticate: {}",
-                        e
-                    );
-                    // Clear cached to force re-auth
-                    *cached = None;
-                }
             }
         }
 

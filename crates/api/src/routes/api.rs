@@ -12,9 +12,11 @@ use bytes::Bytes;
 use chrono::{Duration, Utc};
 use flate2::read::GzDecoder;
 use futures::TryStreamExt;
+use http::{HeaderName, HeaderValue};
 use near_api::{Account, AccountId, NetworkConfig};
 use serde::{Deserialize, Serialize};
 use services::analytics::{ActivityType, RecordActivityRequest};
+use services::consts::MODEL_PUBLIC_DEFAULT;
 use services::conversation::ports::ConversationError;
 use services::file::ports::FileError;
 use services::metrics::consts::{
@@ -23,6 +25,7 @@ use services::metrics::consts::{
 use services::response::ports::ProxyResponse;
 use services::user::ports::{BanType, OAuthProvider};
 use services::UserId;
+use sha2::{Digest, Sha256};
 use std::io::Read;
 
 /// Minimum required NEAR balance (1 NEAR in yoctoNEAR: 10^24)
@@ -33,6 +36,9 @@ const NEAR_BALANCE_BAN_DURATION_SECS: i64 = 60 * 60;
 
 /// Duration to cache NEAR balance checks in memory (in seconds)
 const NEAR_BALANCE_CACHE_TTL_SECS: i64 = 5 * 60;
+
+/// Duration to cache model settings needed by /v1/responses in memory (in seconds)
+const MODEL_SETTINGS_CACHE_TTL_SECS: i64 = 60;
 
 /// Error message when a user is banned
 pub const USER_BANNED_ERROR_MESSAGE: &str =
@@ -1059,7 +1065,7 @@ async fn get_file_content(
 async fn proxy_responses(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    headers: HeaderMap,
+    mut headers: HeaderMap,
     request: Request,
 ) -> Result<Response, Response> {
     tracing::info!(
@@ -1078,6 +1084,15 @@ async fn proxy_responses(
     // Extract body bytes
     let body_bytes = extract_body_bytes(request).await?;
 
+    // Parsed JSON body (if applicable)
+    let mut body_json: Option<serde_json::Value> = None;
+    // Optional system prompt resolved from model settings
+    let mut model_system_prompt: Option<String> = None;
+    // Model id from request body, if present
+    let mut model_id_from_body: Option<String> = None;
+    // Whether model settings came from cache
+    let mut model_settings_cache_hit: Option<bool> = None;
+
     tracing::debug!(
         "Extracted request body: {} bytes for POST /v1/responses",
         body_bytes.len()
@@ -1087,11 +1102,175 @@ async fn proxy_responses(
         if let Ok(body_str) = std::str::from_utf8(&body_bytes) {
             tracing::debug!("Request body content: {}", body_str);
         }
+
+        // Try to parse JSON body once for further processing (model visibility + system prompt)
+        match serde_json::from_slice::<serde_json::Value>(&body_bytes) {
+            Ok(v) => {
+                body_json = Some(v);
+            }
+            Err(e) => {
+                tracing::debug!(
+                    "Failed to parse /responses request body as JSON for user_id={}: {}",
+                    user.user_id,
+                    e
+                );
+            }
+        }
+    }
+
+    // Enforce model-level visibility based on settings if a model is specified
+    if let Some(ref body) = body_json {
+        if let Some(model_id) = body.get("model").and_then(|v| v.as_str()) {
+            model_id_from_body = Some(model_id.to_string());
+
+            // 1) Try cache first
+            {
+                let cache = state.model_settings_cache.read().await;
+                if let Some(entry) = cache.get(model_id) {
+                    let age = Utc::now().signed_duration_since(entry.last_checked_at);
+                    if age.num_seconds() >= 0 && age.num_seconds() < MODEL_SETTINGS_CACHE_TTL_SECS {
+                        model_settings_cache_hit = Some(true);
+
+                        if !entry.public {
+                            tracing::warn!(
+                                "Blocking response request for non-public model '{}' from user {} (cache)",
+                                model_id,
+                                user.user_id
+                            );
+                            return Err((
+                                StatusCode::FORBIDDEN,
+                                Json(ErrorResponse {
+                                    error: "This model is not available".to_string(),
+                                }),
+                            )
+                                .into_response());
+                        }
+
+                        model_system_prompt = entry.system_prompt.clone();
+                    }
+                }
+            }
+
+            // 2) Cache miss or expired: fetch from DB/service and populate cache
+            if model_settings_cache_hit.is_none() {
+                model_settings_cache_hit = Some(false);
+                match state.model_service.get_model(model_id).await {
+                    Ok(Some(model)) => {
+                        // Populate cache
+                        {
+                            let mut cache = state.model_settings_cache.write().await;
+                            cache.insert(
+                                model_id.to_string(),
+                                crate::state::ModelSettingsCacheEntry {
+                                    last_checked_at: Utc::now(),
+                                    exists: true,
+                                    public: model.settings.public,
+                                    system_prompt: model.settings.system_prompt.clone(),
+                                },
+                            );
+                        }
+
+                        if !model.settings.public {
+                            tracing::warn!(
+                                "Blocking response request for non-public model '{}' from user {}",
+                                model_id,
+                                user.user_id
+                            );
+                            return Err((
+                                StatusCode::FORBIDDEN,
+                                Json(ErrorResponse {
+                                    error: "This model is not available".to_string(),
+                                }),
+                            )
+                                .into_response());
+                        }
+
+                        model_system_prompt = model.settings.system_prompt.clone();
+                    }
+                    Ok(None) => {
+                        // Model not in admin DB - allow by default per MODEL_PUBLIC_DEFAULT
+                        // Cache with defaults to avoid repeated DB hits, let OpenAI validate model existence
+                        {
+                            let mut cache = state.model_settings_cache.write().await;
+                            cache.insert(
+                                model_id.to_string(),
+                                crate::state::ModelSettingsCacheEntry {
+                                    last_checked_at: Utc::now(),
+                                    exists: false, // Not in DB but allowed with defaults
+                                    public: MODEL_PUBLIC_DEFAULT, // true by default
+                                    system_prompt: None,
+                                },
+                            );
+                        }
+
+                        // Continue with defaults - let OpenAI validate model existence
+                        model_system_prompt = None;
+                    }
+                    Err(_) => {
+                        return Err((
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(ErrorResponse {
+                                error: "Failed to get model".to_string(),
+                            }),
+                        )
+                            .into_response())
+                    }
+                }
+            }
+        }
+    }
+
+    // If we have a model-level system prompt, inject or prepend it into the request as `instructions`.
+    let modified_body_bytes =
+        if let (Some(mut body), Some(system_prompt)) = (body_json, model_system_prompt.clone()) {
+            // If client already provided instructions, prepend model system prompt with two newlines.
+            let new_instructions = match body.get("instructions").and_then(|v| v.as_str()) {
+                Some(existing) if !existing.is_empty() => {
+                    format!("{system_prompt}\n\n{existing}")
+                }
+                _ => system_prompt,
+            };
+
+            body["instructions"] = serde_json::Value::String(new_instructions);
+
+            match serde_json::to_vec(&body) {
+                Ok(serialized) => Bytes::from(serialized),
+                Err(_) => {
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error: "Failed to modify instructions".to_string(),
+                        }),
+                    )
+                        .into_response())
+                }
+            }
+        } else {
+            body_bytes
+        };
+
+    // Set content-length header
+    match HeaderValue::from_str(&modified_body_bytes.len().to_string()) {
+        Ok(header_value) => {
+            headers.insert("content-length", header_value);
+        }
+        Err(e) => {
+            tracing::error!("Failed to create content-length header value: {}", e);
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Failed to set content-length header".to_string(),
+                }),
+            )
+                .into_response());
+        }
     }
 
     // Track conversation from the request
     tracing::debug!("POST to /responses detected, attempting to track conversation");
-    if let Err(e) = track_conversation_from_request(&state, user.user_id, &body_bytes).await {
+    if let Err(e) =
+        track_conversation_from_request(&state, user.user_id, &modified_body_bytes).await
+    {
         tracing::error!(
             "Failed to track conversation for user {} from /responses: {}",
             user.user_id,
@@ -1108,7 +1287,12 @@ async fn proxy_responses(
     // Forward the request to OpenAI
     let proxy_response = state
         .proxy_service
-        .forward_request(Method::POST, "responses", headers.clone(), Some(body_bytes))
+        .forward_request(
+            Method::POST,
+            "responses",
+            headers.clone(),
+            Some(modified_body_bytes),
+        )
         .await
         .map_err(|e| {
             tracing::error!(
@@ -1131,6 +1315,41 @@ async fn proxy_responses(
         user.user_id
     );
 
+    // Access model system prompt cache during proxy response handling (for observability/debugging).
+    // We DO NOT expose the prompt itself; we only attach a stable hash + cache hit indicator.
+    let mut proxy_headers = proxy_response.headers.clone();
+    if let Some(ref model_id) = model_id_from_body {
+        let cached_prompt_opt = {
+            let cache = state.model_settings_cache.read().await;
+            cache.get(model_id).and_then(|e| {
+                if e.exists {
+                    e.system_prompt.clone()
+                } else {
+                    None
+                }
+            })
+        };
+
+        if let Some(prompt) = cached_prompt_opt {
+            let mut hasher = Sha256::new();
+            hasher.update(prompt.as_bytes());
+            let prompt_hash = format!("{:x}", hasher.finalize());
+
+            let _ = proxy_headers.insert(
+                HeaderName::from_static("x-nearai-model-system-prompt-sha256"),
+                HeaderValue::from_str(&prompt_hash)
+                    .unwrap_or_else(|_| HeaderValue::from_static("")),
+            );
+        }
+
+        if let Some(hit) = model_settings_cache_hit {
+            let _ = proxy_headers.insert(
+                HeaderName::from_static("x-nearai-model-settings-cache"),
+                HeaderValue::from_static(if hit { "hit" } else { "miss" }),
+            );
+        }
+    }
+
     // Record metrics for successful responses
     if (200..300).contains(&proxy_response.status) {
         state
@@ -1144,7 +1363,20 @@ async fn proxy_responses(
                 user_id: user.user_id,
                 activity_type: ActivityType::Response,
                 auth_method: None,
-                metadata: None,
+                metadata: model_id_from_body.as_ref().map(|model_id| {
+                    let mut meta = serde_json::Map::new();
+                    meta.insert(
+                        "model_id".to_string(),
+                        serde_json::Value::String(model_id.clone()),
+                    );
+                    if let Some(hit) = model_settings_cache_hit {
+                        meta.insert(
+                            "model_settings_cache_hit".to_string(),
+                            serde_json::Value::Bool(hit),
+                        );
+                    }
+                    serde_json::Value::Object(meta)
+                }),
             })
             .await
         {
@@ -1154,7 +1386,7 @@ async fn proxy_responses(
 
     build_response(
         proxy_response.status,
-        proxy_response.headers,
+        proxy_headers,
         Body::from_stream(proxy_response.body),
     )
     .await
@@ -1420,12 +1652,142 @@ async fn proxy_model_list(
         user.user_id
     );
 
-    build_response(
-        proxy_response.status,
-        proxy_response.headers,
-        Body::from_stream(proxy_response.body),
-    )
-    .await
+    // If upstream returned non-success, just proxy as-is
+    if !(200..300).contains(&proxy_response.status) {
+        return build_response(
+            proxy_response.status,
+            proxy_response.headers,
+            Body::from_stream(proxy_response.body),
+        )
+        .await;
+    }
+
+    // Buffer body into bytes
+    let body_bytes: Bytes = proxy_response
+        .body
+        .try_collect::<Vec<_>>()
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to read model list response body for user_id={}: {}",
+                user.user_id,
+                e
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("Failed to read response body: {e}"),
+                }),
+            )
+                .into_response()
+        })?
+        .into_iter()
+        .flatten()
+        .collect();
+
+    // Try to parse JSON
+    let mut body_json: serde_json::Value = match serde_json::from_slice(&body_bytes) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                "Failed to parse model list JSON for user_id={}: {}, returning original body",
+                user.user_id,
+                e
+            );
+            return build_response(
+                proxy_response.status,
+                proxy_response.headers,
+                Body::from(body_bytes),
+            )
+            .await;
+        }
+    };
+
+    let models_opt = body_json.get_mut("models").and_then(|v| v.as_array_mut());
+
+    let Some(models_array) = models_opt else {
+        tracing::debug!("No 'models' array found in model list response, returning original body");
+        return Response::builder()
+            .status(StatusCode::from_u16(proxy_response.status).unwrap_or(StatusCode::OK))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&body_json).unwrap_or_else(|_| body_bytes.to_vec()),
+            ))
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("Failed to build response: {e}"),
+                    }),
+                )
+                    .into_response()
+            });
+    };
+
+    // Collect all model IDs for batch settings lookup
+    let mut model_ids: Vec<String> = Vec::new();
+    for model in models_array.iter() {
+        if let Some(model_id) = model.get("modelId").and_then(|v| v.as_str()) {
+            model_ids.push(model_id.to_string());
+        }
+    }
+
+    // Batch fetch settings for all models from the admin models table
+    let settings_map = state
+        .model_service
+        .get_models_by_ids(&model_ids.iter().map(|s| s.as_str()).collect::<Vec<&str>>())
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                "Failed to batch load model settings for model list: {}, defaulting all public={}",
+                e,
+                MODEL_PUBLIC_DEFAULT
+            );
+            std::collections::HashMap::new()
+        });
+
+    // Attach `public` flag to each model based on its stored settings
+    let mut decorated_models = Vec::new();
+    for mut model in std::mem::take(models_array) {
+        let public_flag = model
+            .get("modelId")
+            .and_then(|v| v.as_str())
+            .and_then(|id| settings_map.get(id).map(|m| m.settings.public))
+            .unwrap_or(MODEL_PUBLIC_DEFAULT);
+
+        if let Some(obj) = model.as_object_mut() {
+            obj.insert("public".to_string(), serde_json::Value::Bool(public_flag));
+        }
+
+        decorated_models.push(model);
+    }
+
+    *body_json
+        .get_mut("models")
+        .expect("Models key must exist after previous check") =
+        serde_json::Value::Array(decorated_models);
+
+    let filtered_bytes = serde_json::to_vec(&body_json).unwrap_or_else(|e| {
+        tracing::error!(
+            "Failed to serialize filtered model list JSON: {}, returning original body",
+            e
+        );
+        body_bytes.to_vec()
+    });
+
+    Response::builder()
+        .status(StatusCode::from_u16(proxy_response.status).unwrap_or(StatusCode::OK))
+        .header("content-type", "application/json")
+        .body(Body::from(filtered_bytes))
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to build response: {e}"),
+                }),
+            )
+                .into_response()
+        })
 }
 
 async fn proxy_signature(

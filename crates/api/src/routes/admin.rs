@@ -1,12 +1,14 @@
 use crate::{consts::LIST_USERS_LIMIT_MAX, error::ApiError, models::*, state::AppState};
 use axum::{
     extract::{Path, Query, State},
-    routing::get,
+    http::StatusCode,
+    routing::{delete, get, patch},
     Json, Router,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use services::analytics::{ActivityLogEntry, AnalyticsSummary, TopActiveUsersResponse};
+use services::model::ports::{UpdateModelParams, UpsertModelParams};
 use services::UserId;
 
 /// Pagination query parameters
@@ -99,196 +101,6 @@ pub async fn list_users(
         limit: params.limit,
         offset: params.offset,
         total,
-    }))
-}
-
-#[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
-pub struct SystemPromptRequest {
-    pub system_prompt: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
-pub struct SystemPromptResponse {
-    pub system_prompt: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct CloudApiSettingsResponse {
-    settings: CloudApiSettings,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct CloudApiSettings {
-    system_prompt: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct CloudApiPatchRequest {
-    system_prompt: Option<String>,
-}
-
-/// Get system prompt for the organization
-///
-/// Fetches the system prompt from Cloud API. Requires admin authentication.
-/// Uses the VPC session token to authenticate with Cloud API.
-#[utoipa::path(
-    get,
-    path = "/v1/admin/system_prompt",
-    tag = "Admin",
-    responses(
-        (status = 200, description = "System prompt retrieved", body = SystemPromptResponse),
-        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
-        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
-        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
-    ),
-    security(
-        ("session_token" = [])
-    )
-)]
-pub async fn get_system_prompt(
-    State(app_state): State<AppState>,
-) -> Result<Json<SystemPromptResponse>, ApiError> {
-    if app_state.cloud_api_base_url.is_empty() {
-        tracing::error!("Cloud API base URL not configured");
-        return Err(ApiError::internal_server_error("Cloud API not configured"));
-    }
-
-    let credentials = app_state
-        .vpc_credentials_service
-        .get_credentials()
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to get VPC credentials: {}", e);
-            ApiError::internal_server_error("Failed to authenticate with VPC")
-        })?
-        .ok_or_else(|| {
-            tracing::error!("VPC not configured");
-            ApiError::internal_server_error("VPC authentication not configured")
-        })?;
-
-    let url = format!(
-        "{}/organizations/{}/settings",
-        app_state.cloud_api_base_url.trim_end_matches('/'),
-        credentials.organization_id
-    );
-
-    let client = reqwest::Client::new();
-    let response = client
-        .get(&url)
-        .header(
-            "Authorization",
-            format!("Bearer {}", credentials.access_token),
-        )
-        .send()
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to call Cloud API: {}", e);
-            ApiError::bad_gateway("Failed to connect to Cloud API")
-        })?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        tracing::error!("Cloud API error: status {}", status);
-        return Err(ApiError::internal_server_error(format!(
-            "Cloud API returned error: {}",
-            status
-        )));
-    }
-
-    let settings: CloudApiSettingsResponse = response.json().await.map_err(|e| {
-        tracing::error!("Failed to parse Cloud API response: {}", e);
-        ApiError::internal_server_error("Failed to parse Cloud API response")
-    })?;
-
-    Ok(Json(SystemPromptResponse {
-        system_prompt: settings.settings.system_prompt,
-    }))
-}
-
-/// Set system prompt for the organization
-///
-/// Updates the system prompt in Cloud API. Requires admin authentication.
-/// Uses the VPC session token to authenticate with Cloud API.
-#[utoipa::path(
-    post,
-    path = "/v1/admin/system_prompt",
-    tag = "Admin",
-    request_body = SystemPromptRequest,
-    responses(
-        (status = 200, description = "System prompt updated", body = SystemPromptResponse),
-        (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
-        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
-        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
-        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
-    ),
-    security(
-        ("session_token" = [])
-    )
-)]
-pub async fn set_system_prompt(
-    State(app_state): State<AppState>,
-    Json(request): Json<SystemPromptRequest>,
-) -> Result<Json<SystemPromptResponse>, ApiError> {
-    if app_state.cloud_api_base_url.is_empty() {
-        tracing::error!("Cloud API base URL not configured");
-        return Err(ApiError::internal_server_error("Cloud API not configured"));
-    }
-
-    let credentials = app_state
-        .vpc_credentials_service
-        .get_credentials()
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to get VPC credentials: {}", e);
-            ApiError::internal_server_error("Failed to authenticate with VPC")
-        })?
-        .ok_or_else(|| {
-            tracing::error!("VPC not configured");
-            ApiError::internal_server_error("VPC authentication not configured")
-        })?;
-
-    let url = format!(
-        "{}/organizations/{}/settings",
-        app_state.cloud_api_base_url.trim_end_matches('/'),
-        credentials.organization_id
-    );
-
-    let patch_request = CloudApiPatchRequest {
-        system_prompt: request.system_prompt,
-    };
-
-    let client = reqwest::Client::new();
-    let response = client
-        .patch(&url)
-        .header(
-            "Authorization",
-            format!("Bearer {}", credentials.access_token),
-        )
-        .header("Content-Type", "application/json")
-        .json(&patch_request)
-        .send()
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to call Cloud API: {}", e);
-            ApiError::bad_gateway("Failed to connect to Cloud API")
-        })?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        tracing::error!("Cloud API error: status {}", status);
-        return Err(ApiError::internal_server_error(format!(
-            "Cloud API returned error: {}",
-            status
-        )));
-    }
-
-    let settings: CloudApiSettingsResponse = response.json().await.map_err(|e| {
-        tracing::error!("Failed to parse Cloud API response: {}", e);
-        ApiError::internal_server_error("Failed to parse Cloud API response")
-    })?;
-
-    Ok(Json(SystemPromptResponse {
-        system_prompt: settings.settings.system_prompt,
     }))
 }
 
@@ -489,15 +301,310 @@ pub async fn get_top_users(
     }))
 }
 
+/// List all models with pagination
+///
+/// Returns a paginated list of all models. Requires admin authentication.
+#[utoipa::path(
+    get,
+    path = "/v1/admin/models",
+    tag = "Admin",
+    params(
+        ("limit" = i64, Query, description = "Maximum number of items to return"),
+        ("offset" = i64, Query, description = "Number of items to skip")
+    ),
+    responses(
+        (status = 200, description = "List of models", body = ModelListResponse),
+        (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn list_models(
+    State(app_state): State<AppState>,
+    Query(pagination): Query<PaginationQuery>,
+) -> Result<Json<ModelListResponse>, ApiError> {
+    pagination.validate()?;
+
+    tracing::info!(
+        "Listing models with limit={} and offset={}",
+        pagination.limit,
+        pagination.offset
+    );
+
+    let (models, total) = app_state
+        .model_service
+        .list_models(pagination.limit, pagination.offset)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to list models: {}", e);
+            ApiError::internal_server_error("Failed to list models")
+        })?;
+
+    Ok(Json(ModelListResponse {
+        models: models.into_iter().map(Into::into).collect(),
+        limit: pagination.limit,
+        offset: pagination.offset,
+        total,
+    }))
+}
+
+/// Batch create or update models
+///
+/// Creates new models or updates existing ones in batch. The request body should be a JSON object
+/// where keys are model IDs and values are partial settings to update.
+///
+/// Example:
+/// ```json
+/// {
+///   "gpt-4": { "public": true, "system_prompt": "..." },
+///   "gpt-3.5": { "public": false }
+/// }
+/// ```
+///
+/// If a model doesn't exist, missing fields will use default values.
+/// If a model exists, only provided fields will be updated.
+/// Requires admin authentication.
+#[utoipa::path(
+    patch,
+    path = "/v1/admin/models",
+    tag = "Admin",
+    request_body = BatchUpsertModelsRequest,
+    responses(
+        (status = 200, description = "Models created or updated", body = Vec<ModelResponse>),
+        (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn batch_upsert_models(
+    State(app_state): State<AppState>,
+    Json(request): Json<BatchUpsertModelsRequest>,
+) -> Result<Json<Vec<ModelResponse>>, ApiError> {
+    if request.models.is_empty() {
+        return Err(ApiError::bad_request("At least one model must be provided"));
+    }
+
+    tracing::info!("Batch upserting {} models", request.models.len());
+
+    use services::model::ports::{ModelSettings, PartialModelSettings};
+
+    let mut results = Vec::new();
+
+    for (model_id, partial_settings) in request.models {
+        if model_id.trim().is_empty() {
+            return Err(ApiError::bad_request("model_id cannot be empty"));
+        }
+
+        // Validate system prompt length if provided
+        if let Some(ref system_prompt) = partial_settings.system_prompt {
+            if system_prompt.len() > crate::consts::SYSTEM_PROMPT_MAX_LEN {
+                return Err(ApiError::bad_request(format!(
+                    "System prompt for model '{}' exceeds maximum length of {} bytes",
+                    model_id,
+                    crate::consts::SYSTEM_PROMPT_MAX_LEN
+                )));
+            }
+        }
+
+        // Check if model exists
+        let existing_model = app_state
+            .model_service
+            .get_model(&model_id)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to check if model exists: {}", e);
+                ApiError::internal_server_error("Failed to check if model exists")
+            })?;
+
+        let model = if existing_model.is_some() {
+            // Model exists: partial update
+            let settings: PartialModelSettings = partial_settings.into();
+            let params = UpdateModelParams {
+                model_id: model_id.clone(),
+                settings: Some(settings),
+            };
+
+            app_state
+                .model_service
+                .update_model(params)
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to update model {}: {}", model_id, e);
+                    ApiError::internal_server_error(format!("Failed to update model {}", model_id))
+                })?
+        } else {
+            // Model doesn't exist: create with defaults + provided partial settings
+            let default_settings = ModelSettings::default();
+            let partial: PartialModelSettings = partial_settings.into();
+            let full_settings = default_settings.into_updated(partial);
+
+            let params = UpsertModelParams {
+                model_id: model_id.clone(),
+                settings: full_settings,
+            };
+
+            app_state
+                .model_service
+                .upsert_model(params)
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to create model {}: {}", model_id, e);
+                    ApiError::internal_server_error(format!("Failed to create model {}", model_id))
+                })?
+        };
+
+        // Invalidate cache immediately after each successful DB write
+        // NOTE: This only invalidates cache on the current instance. In multi-instance deployments,
+        // other instances may serve stale data for up to MODEL_SETTINGS_CACHE_TTL_SECS.
+        {
+            let mut cache = app_state.model_settings_cache.write().await;
+            cache.remove(&model_id);
+        }
+
+        results.push(model.clone());
+    }
+
+    Ok(Json(results.into_iter().map(Into::into).collect()))
+}
+
+/// Delete a model
+///
+/// Deletes a specific model and its settings. Requires admin authentication.
+#[utoipa::path(
+    delete,
+    path = "/v1/admin/models/{model_id}",
+    tag = "Admin",
+    params(
+        ("model_id" = String, Path, description = "Model identifier (e.g. gpt-4.1)")
+    ),
+    responses(
+        (status = 204, description = "Model deleted"),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "Model not found", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn delete_model(
+    State(app_state): State<AppState>,
+    Path(model_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    if model_id.trim().is_empty() {
+        return Err(ApiError::bad_request("model_id cannot be empty"));
+    }
+
+    tracing::info!("Deleting model for model_id={}", model_id);
+
+    let deleted = app_state
+        .model_service
+        .delete_model(&model_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to delete model: {}", e);
+            ApiError::internal_server_error("Failed to delete model")
+        })?;
+
+    if !deleted {
+        return Err(ApiError::not_found("Model not found"));
+    }
+
+    // Invalidate cache AFTER successful DB delete
+    {
+        let mut cache = app_state.model_settings_cache.write().await;
+        cache.remove(&model_id);
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Create or update system configs
+///
+/// Creates new system configs or updates existing ones. All fields in the request are optional.
+/// If the configs don't exist, missing fields will use default values.
+/// If the configs exist, only provided fields will be updated.
+/// Requires admin authentication.
+#[utoipa::path(
+    patch,
+    path = "/v1/admin/configs",
+    tag = "Admin",
+    request_body = UpdateSystemConfigsRequest,
+    responses(
+        (status = 200, description = "System configs created or updated", body = SystemConfigsResponse),
+        (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn upsert_system_configs(
+    State(app_state): State<AppState>,
+    Json(request): Json<UpdateSystemConfigsRequest>,
+) -> Result<Json<SystemConfigsResponse>, ApiError> {
+    tracing::info!("Upserting system configs");
+
+    let partial: services::system_configs::ports::PartialSystemConfigs = request.into();
+
+    // Check if configs exist
+    let existing_configs = app_state
+        .system_configs_service
+        .get_configs()
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to check if system configs exist: {}", e);
+            ApiError::internal_server_error("Failed to check if system configs exist")
+        })?;
+
+    let updated = if existing_configs.is_some() {
+        // Configs exist: partial update
+        app_state
+            .system_configs_service
+            .update_configs(partial)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = ?e, "Failed to update system configs");
+                ApiError::internal_server_error("Failed to update system configs")
+            })?
+    } else {
+        // Configs don't exist: create with defaults + provided partial configs
+        use services::system_configs::ports::SystemConfigs;
+        let default_configs = SystemConfigs::default();
+        let full_configs = default_configs.into_updated(partial);
+
+        app_state
+            .system_configs_service
+            .upsert_configs(full_configs)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = ?e, "Failed to create system configs");
+                ApiError::internal_server_error("Failed to create system configs")
+            })?
+    };
+
+    Ok(Json(updated.into()))
+}
+
 /// Create admin router with all admin routes (requires admin authentication)
 pub fn create_admin_router() -> Router<AppState> {
     Router::new()
         .route("/users", get(list_users))
         .route("/users/{user_id}/activity", get(get_user_activity))
-        .route(
-            "/system_prompt",
-            get(get_system_prompt).post(set_system_prompt),
-        )
+        .route("/models", get(list_models).patch(batch_upsert_models))
+        .route("/models/{model_id}", delete(delete_model))
+        .route("/configs", patch(upsert_system_configs))
         .route("/analytics", get(get_analytics))
         .route("/analytics/top-users", get(get_top_users))
 }

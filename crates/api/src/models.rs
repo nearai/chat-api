@@ -191,16 +191,6 @@ impl From<services::user::ports::UserSettingsContent> for UserSettingsContent {
     }
 }
 
-/// User settings response
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct UserSettingsResponse {
-    /// User ID
-    pub user_id: UserId,
-    /// Settings content (serialized as "settings")
-    #[serde(rename = "settings")]
-    pub content: UserSettingsContent,
-}
-
 /// User settings update request
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UpdateUserSettingsRequest {
@@ -251,6 +241,124 @@ impl UpdateUserSettingsPartiallyRequest {
     }
 }
 
+/// User settings response
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UserSettingsResponse {
+    /// User ID
+    pub user_id: UserId,
+    /// Settings content (serialized as "settings")
+    #[serde(rename = "settings")]
+    pub content: UserSettingsContent,
+}
+
+/// Model settings content for API responses
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ModelSettings {
+    /// Whether models are public (visible/usable in responses)
+    pub public: bool,
+    /// Optional system-level system prompt for this model
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
+}
+
+impl From<services::model::ports::ModelSettings> for ModelSettings {
+    fn from(content: services::model::ports::ModelSettings) -> Self {
+        Self {
+            public: content.public,
+            system_prompt: content.system_prompt,
+        }
+    }
+}
+
+impl From<ModelSettings> for services::model::ports::ModelSettings {
+    fn from(content: ModelSettings) -> Self {
+        Self {
+            public: content.public,
+            system_prompt: content.system_prompt,
+        }
+    }
+}
+
+/// Partial model settings for API requests
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct PartialModelSettings {
+    /// Whether models are public (visible/usable in responses)
+    pub public: Option<bool>,
+    /// Optional system-level system prompt for this model
+    pub system_prompt: Option<String>,
+}
+
+impl From<services::model::ports::PartialModelSettings> for PartialModelSettings {
+    fn from(content: services::model::ports::PartialModelSettings) -> Self {
+        Self {
+            public: content.public,
+            system_prompt: content.system_prompt,
+        }
+    }
+}
+
+impl From<PartialModelSettings> for services::model::ports::PartialModelSettings {
+    fn from(content: PartialModelSettings) -> Self {
+        Self {
+            public: content.public,
+            system_prompt: content.system_prompt,
+        }
+    }
+}
+
+/// Complete model response
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ModelResponse {
+    /// External model identifier (e.g. "gpt-4.1")
+    pub model_id: String,
+    /// Settings stored for this model
+    pub settings: ModelSettings,
+}
+
+impl From<services::model::ports::Model> for ModelResponse {
+    fn from(model: services::model::ports::Model) -> Self {
+        Self {
+            model_id: model.model_id,
+            settings: model.settings.into(),
+        }
+    }
+}
+
+/// Model upsert request
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UpsertModelsRequest {
+    pub settings: ModelSettings,
+}
+
+/// Model settings update request (partial update)
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UpdateModelRequest {
+    pub settings: Option<PartialModelSettings>,
+}
+
+/// Batch model upsert request
+///
+/// Maps model_id to partial settings to update.
+/// Example: { "gpt-4": { "public": true }, "gpt-3.5": { "public": false, "system_prompt": "..." } }
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct BatchUpsertModelsRequest {
+    #[serde(flatten)]
+    pub models: std::collections::HashMap<String, PartialModelSettings>,
+}
+
+/// Model list response with pagination
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ModelListResponse {
+    /// List of models
+    pub models: Vec<ModelResponse>,
+    /// Maximum number of items returned
+    pub limit: i64,
+    /// Number of items skipped
+    pub offset: i64,
+    /// Total number of models
+    pub total: i64,
+}
+
 /// Paginated user list response
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UserListResponse {
@@ -262,6 +370,54 @@ pub struct UserListResponse {
     pub offset: i64,
     /// Total number of users
     pub total: u64,
+}
+
+/// System configs response
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct SystemConfigsResponse {
+    /// Default model identifier to use when not specified
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
+}
+
+impl From<services::system_configs::ports::SystemConfigs> for SystemConfigsResponse {
+    fn from(config: services::system_configs::ports::SystemConfigs) -> Self {
+        Self {
+            default_model: config.default_model,
+        }
+    }
+}
+
+/// System configs upsert request (full replace)
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UpsertSystemConfigsRequest {
+    /// Default model identifier to use when not specified
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
+}
+
+impl From<UpsertSystemConfigsRequest> for services::system_configs::ports::SystemConfigs {
+    fn from(req: UpsertSystemConfigsRequest) -> Self {
+        services::system_configs::ports::SystemConfigs {
+            default_model: req.default_model,
+        }
+    }
+}
+
+/// System configs update request (partial)
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UpdateSystemConfigsRequest {
+    /// Default model identifier to use when not specified
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
+}
+
+impl From<UpdateSystemConfigsRequest> for services::system_configs::ports::PartialSystemConfigs {
+    fn from(req: UpdateSystemConfigsRequest) -> Self {
+        services::system_configs::ports::PartialSystemConfigs {
+            default_model: req.default_model,
+        }
+    }
 }
 
 /// File list response with pagination

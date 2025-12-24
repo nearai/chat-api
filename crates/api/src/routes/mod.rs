@@ -1,6 +1,7 @@
 pub mod admin;
 pub mod api;
 pub mod attestation;
+pub mod configs;
 pub mod oauth;
 pub mod users;
 
@@ -114,6 +115,12 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
 
     let rate_limit_state = RateLimitState::new();
 
+    // Configs routes (requires user authentication, not admin)
+    let configs_routes = configs::create_configs_router().layer(from_fn_with_state(
+        auth_state.clone(),
+        crate::middleware::auth_middleware,
+    ));
+
     // API proxy routes (requires authentication)
     let api_routes = api::create_api_router(rate_limit_state).layer(from_fn_with_state(
         auth_state,
@@ -123,6 +130,7 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
     // Build the base router
     let router = Router::new()
         .route("/health", get(health_check))
+        .merge(configs_routes) // Configs route (requires user auth)
         .nest("/v1/auth", auth_routes)
         .nest("/v1/auth", logout_route) // Logout route with auth middleware
         .nest("/v1/users", user_routes)
