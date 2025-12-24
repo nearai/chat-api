@@ -21,6 +21,12 @@ impl ModelService for ModelServiceImpl {
         self.repository.get_model(model_id).await
     }
 
+    async fn list_models(&self, limit: i64, offset: i64) -> anyhow::Result<(Vec<Model>, i64)> {
+        tracing::info!("Listing models with limit={}, offset={}", limit, offset);
+
+        self.repository.list_models(limit, offset).await
+    }
+
     async fn get_models_by_ids(
         &self,
         model_ids: &[&str],

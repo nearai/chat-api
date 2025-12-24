@@ -57,6 +57,52 @@ impl ModelsRepository for PostgresModelRepository {
         }
     }
 
+    async fn list_models(&self, limit: i64, offset: i64) -> anyhow::Result<(Vec<Model>, i64)> {
+        tracing::debug!(
+            "Repository: Listing models with limit={}, offset={}",
+            limit,
+            offset
+        );
+
+        let client = self.pool.get().await?;
+
+        // Get total count
+        let count_row = client
+            .query_one("SELECT COUNT(*) as count FROM models", &[])
+            .await?;
+        let total: i64 = count_row.get("count");
+
+        // Get paginated models
+        let rows = client
+            .query(
+                "SELECT id, model_id, settings, created_at, updated_at
+                 FROM models
+                 ORDER BY model_id ASC
+                 LIMIT $1 OFFSET $2",
+                &[&limit, &offset],
+            )
+            .await?;
+
+        let mut models = Vec::new();
+        for row in rows {
+            let settings_json: serde_json::Value = row.get("settings");
+
+            let default_settings = ModelSettings::default();
+            let settings_delta = serde_json::from_value::<PartialModelSettings>(settings_json)?;
+            let settings = default_settings.into_updated(settings_delta);
+
+            models.push(Model {
+                id: row.get("id"),
+                model_id: row.get("model_id"),
+                settings,
+                created_at: row.get("created_at"),
+                updated_at: row.get("updated_at"),
+            });
+        }
+
+        Ok((models, total))
+    }
+
     async fn get_models_by_ids(
         &self,
         model_ids: &[&str],

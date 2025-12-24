@@ -2,7 +2,7 @@ use crate::{consts::LIST_USERS_LIMIT_MAX, error::ApiError, models::*, state::App
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use chrono::{DateTime, Utc};
@@ -301,61 +301,19 @@ pub async fn get_top_users(
     }))
 }
 
-/// Get model settings for a specific model
+/// List all models with pagination
 ///
-/// Returns the current model (including settings). Requires admin authentication.
+/// Returns a paginated list of all models. Requires admin authentication.
 #[utoipa::path(
     get,
-    path = "/v1/admin/models/{model_id}",
+    path = "/v1/admin/models",
     tag = "Admin",
     params(
-        ("model_id" = String, Path, description = "Model identifier (e.g. gpt-4.1)")
+        ("limit" = i64, Query, description = "Maximum number of items to return"),
+        ("offset" = i64, Query, description = "Number of items to skip")
     ),
     responses(
-        (status = 200, description = "Model settings retrieved", body = Option<ModelResponse>),
-        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
-        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
-        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
-    ),
-    security(
-        ("session_token" = [])
-    )
-)]
-pub async fn get_model(
-    State(app_state): State<AppState>,
-    Path(model_id): Path<String>,
-) -> Result<Json<Option<ModelResponse>>, ApiError> {
-    if model_id.trim().is_empty() {
-        return Err(ApiError::bad_request("model_id cannot be empty"));
-    }
-
-    tracing::info!("Getting model for model_id={}", model_id);
-
-    let model = app_state
-        .model_service
-        .get_model(&model_id)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to get model: {}", e);
-            ApiError::internal_server_error("Failed to get model")
-        })?;
-
-    Ok(Json(model.map(Into::into)))
-}
-
-/// Fully create or update a model
-///
-/// Overwrites the settings for a specific model. Requires admin authentication.
-#[utoipa::path(
-    post,
-    path = "/v1/admin/models/{model_id}",
-    tag = "Admin",
-    params(
-        ("model_id" = String, Path, description = "Model identifier (e.g. gpt-4.1)")
-    ),
-    request_body = UpsertModelsRequest,
-    responses(
-        (status = 200, description = "Model updated", body = ModelResponse),
+        (status = 200, description = "List of models", body = ModelListResponse),
         (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
@@ -365,132 +323,159 @@ pub async fn get_model(
         ("session_token" = [])
     )
 )]
-pub async fn upsert_model(
+pub async fn list_models(
     State(app_state): State<AppState>,
-    Path(model_id): Path<String>,
-    Json(request): Json<UpsertModelsRequest>,
-) -> Result<Json<ModelResponse>, ApiError> {
-    if model_id.trim().is_empty() {
-        return Err(ApiError::bad_request("model_id cannot be empty"));
-    }
+    Query(pagination): Query<PaginationQuery>,
+) -> Result<Json<ModelListResponse>, ApiError> {
+    pagination.validate()?;
 
     tracing::info!(
-        "Fully upserting model for model_id={}: {:?}",
-        model_id,
-        request
+        "Listing models with limit={} and offset={}",
+        pagination.limit,
+        pagination.offset
     );
 
-    // Validate system prompt length if provided
-    if let Some(ref system_prompt) = request.settings.system_prompt {
-        if system_prompt.len() > crate::consts::SYSTEM_PROMPT_MAX_LEN {
-            return Err(ApiError::bad_request(format!(
-                "System prompt exceeds maximum length of {} bytes",
-                crate::consts::SYSTEM_PROMPT_MAX_LEN
-            )));
-        }
-    }
-
-    let params = UpsertModelParams {
-        model_id: model_id.clone(),
-        settings: request.settings.into(),
-    };
-
-    let model = app_state
+    let (models, total) = app_state
         .model_service
-        .upsert_model(params)
+        .list_models(pagination.limit, pagination.offset)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to upsert model: {}", e);
-            ApiError::internal_server_error("Failed to upsert model")
+            tracing::error!("Failed to list models: {}", e);
+            ApiError::internal_server_error("Failed to list models")
         })?;
 
-    // Invalidate cache AFTER successful DB write
-    // Next request will fetch fresh data from DB
-    {
-        let mut cache = app_state.model_settings_cache.write().await;
-        cache.remove(&model_id);
-    }
-
-    Ok(Json(model.into()))
+    Ok(Json(ModelListResponse {
+        models: models.into_iter().map(Into::into).collect(),
+        limit: pagination.limit,
+        offset: pagination.offset,
+        total,
+    }))
 }
 
-/// Partially update a model
+/// Batch create or update models
 ///
-/// Partially updates the settings for a specific model. Requires admin authentication.
+/// Creates new models or updates existing ones in batch. The request body should be a JSON object
+/// where keys are model IDs and values are partial settings to update.
+///
+/// Example:
+/// ```json
+/// {
+///   "gpt-4": { "public": true, "system_prompt": "..." },
+///   "gpt-3.5": { "public": false }
+/// }
+/// ```
+///
+/// If a model doesn't exist, missing fields will use default values.
+/// If a model exists, only provided fields will be updated.
+/// Requires admin authentication.
 #[utoipa::path(
     patch,
-    path = "/v1/admin/models/{model_id}",
+    path = "/v1/admin/models",
     tag = "Admin",
-    params(
-        ("model_id" = String, Path, description = "Model identifier (e.g. gpt-4.1)")
-    ),
-    request_body = UpdateModelRequest,
+    request_body = BatchUpsertModelsRequest,
     responses(
-        (status = 200, description = "Model settings updated", body = ModelResponse),
+        (status = 200, description = "Models created or updated", body = Vec<ModelResponse>),
         (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
-        (status = 404, description = "Model not found", body = crate::error::ApiErrorResponse),
         (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
     ),
     security(
         ("session_token" = [])
     )
 )]
-pub async fn update_model(
+pub async fn batch_upsert_models(
     State(app_state): State<AppState>,
-    Path(model_id): Path<String>,
-    Json(request): Json<UpdateModelRequest>,
-) -> Result<Json<ModelResponse>, ApiError> {
-    if model_id.trim().is_empty() {
-        return Err(ApiError::bad_request("model_id cannot be empty"));
+    Json(request): Json<BatchUpsertModelsRequest>,
+) -> Result<Json<Vec<ModelResponse>>, ApiError> {
+    if request.models.is_empty() {
+        return Err(ApiError::bad_request("At least one model must be provided"));
     }
 
-    tracing::info!(
-        "Partially updating model for model_id={}: {:?}",
-        model_id,
-        request
-    );
+    tracing::info!("Batch upserting {} models", request.models.len());
+    tracing::debug!("Batch upserting models: {:?}", request.models);
 
-    // Validate system prompt length if provided
-    if let Some(ref settings) = request.settings {
-        if let Some(ref system_prompt) = settings.system_prompt {
+    use services::model::ports::{ModelSettings, PartialModelSettings};
+
+    let mut results = Vec::new();
+    let mut cache_keys_to_invalidate = Vec::new();
+
+    for (model_id, partial_settings) in request.models {
+        if model_id.trim().is_empty() {
+            return Err(ApiError::bad_request("model_id cannot be empty"));
+        }
+
+        // Validate system prompt length if provided
+        if let Some(ref system_prompt) = partial_settings.system_prompt {
             if system_prompt.len() > crate::consts::SYSTEM_PROMPT_MAX_LEN {
                 return Err(ApiError::bad_request(format!(
-                    "System prompt exceeds maximum length of {} bytes",
+                    "System prompt for model '{}' exceeds maximum length of {} bytes",
+                    model_id,
                     crate::consts::SYSTEM_PROMPT_MAX_LEN
                 )));
             }
         }
+
+        // Check if model exists
+        let existing_model = app_state
+            .model_service
+            .get_model(&model_id)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to check if model exists: {}", e);
+                ApiError::internal_server_error("Failed to check if model exists")
+            })?;
+
+        let model = if existing_model.is_some() {
+            // Model exists: partial update
+            let settings: PartialModelSettings = partial_settings.into();
+            let params = UpdateModelParams {
+                model_id: model_id.clone(),
+                settings: Some(settings),
+            };
+
+            app_state
+                .model_service
+                .update_model(params)
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to update model {}: {}", model_id, e);
+                    ApiError::internal_server_error(format!("Failed to update model {}", model_id))
+                })?
+        } else {
+            // Model doesn't exist: create with defaults + provided partial settings
+            let default_settings = ModelSettings::default();
+            let partial: PartialModelSettings = partial_settings.into();
+            let full_settings = default_settings.into_updated(partial);
+
+            let params = UpsertModelParams {
+                model_id: model_id.clone(),
+                settings: full_settings,
+            };
+
+            app_state
+                .model_service
+                .upsert_model(params)
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to create model {}: {}", model_id, e);
+                    ApiError::internal_server_error(format!("Failed to create model {}", model_id))
+                })?
+        };
+
+        results.push(model.clone());
+        cache_keys_to_invalidate.push(model_id);
     }
 
-    let settings = request.settings.map(Into::into);
-
-    let params = UpdateModelParams {
-        model_id: model_id.clone(),
-        settings,
-    };
-
-    let model = app_state
-        .model_service
-        .update_model(params)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to update model: {}", e);
-            if e.to_string().contains("Model not found") {
-                return ApiError::not_found("Model not found");
-            }
-            ApiError::internal_server_error("Failed to update model")
-        })?;
-
-    // Invalidate cache AFTER successful DB write
-    // Next request will fetch fresh data from DB
+    // Invalidate cache AFTER successful DB writes
     {
         let mut cache = app_state.model_settings_cache.write().await;
-        cache.remove(&model_id);
+        for model_id in cache_keys_to_invalidate {
+            cache.remove(&model_id);
+        }
     }
 
-    Ok(Json(model.into()))
+    Ok(Json(results.into_iter().map(Into::into).collect()))
 }
 
 /// Delete a model
@@ -625,13 +610,8 @@ pub fn create_admin_router() -> Router<AppState> {
     Router::new()
         .route("/users", get(list_users))
         .route("/users/{user_id}/activity", get(get_user_activity))
-        .route(
-            "/models/{model_id}",
-            get(get_model)
-                .post(upsert_model)
-                .patch(update_model)
-                .delete(delete_model),
-        )
+        .route("/models", get(list_models).patch(batch_upsert_models))
+        .route("/models/{model_id}", delete(delete_model))
         .route(
             "/configs",
             post(upsert_system_configs).patch(update_system_configs),

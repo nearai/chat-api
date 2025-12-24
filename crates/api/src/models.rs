@@ -336,6 +336,29 @@ pub struct UpdateModelRequest {
     pub settings: Option<PartialModelSettings>,
 }
 
+/// Batch model upsert request
+///
+/// Maps model_id to partial settings to update.
+/// Example: { "gpt-4": { "public": true }, "gpt-3.5": { "public": false, "system_prompt": "..." } }
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct BatchUpsertModelsRequest {
+    #[serde(flatten)]
+    pub models: std::collections::HashMap<String, PartialModelSettings>,
+}
+
+/// Model list response with pagination
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ModelListResponse {
+    /// List of models
+    pub models: Vec<ModelResponse>,
+    /// Maximum number of items returned
+    pub limit: i64,
+    /// Number of items skipped
+    pub offset: i64,
+    /// Total number of models
+    pub total: i64,
+}
+
 /// Paginated user list response
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UserListResponse {

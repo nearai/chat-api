@@ -24,9 +24,8 @@ use utoipa::OpenApi;
         crate::routes::users::get_current_user,
         // Admin endpoints
         crate::routes::admin::list_users,
-        crate::routes::admin::get_model,
-        crate::routes::admin::upsert_model,
-        crate::routes::admin::update_model,
+        crate::routes::admin::list_models,
+        crate::routes::admin::batch_upsert_models,
         crate::routes::admin::delete_model,
         crate::routes::admin::upsert_system_configs,
         crate::routes::admin::update_system_configs,
@@ -57,7 +56,8 @@ use utoipa::OpenApi;
         crate::models::UpdateUserSettingsRequest,
         // Model settings / model admin models
         crate::models::ModelResponse,
-        crate::models::UpsertModelsRequest,
+        crate::models::ModelListResponse,
+        crate::models::BatchUpsertModelsRequest,
         crate::models::UpdateModelRequest,
         // System configs models
         crate::models::SystemConfigsResponse,

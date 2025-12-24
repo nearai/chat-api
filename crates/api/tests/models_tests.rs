@@ -4,7 +4,7 @@ use common::{create_test_server, mock_login};
 use serde_json::json;
 
 #[tokio::test]
-async fn test_get_model_not_found() {
+async fn test_list_models_empty() {
     let server = create_test_server().await;
 
     // Use an admin account to access admin endpoints
@@ -12,7 +12,7 @@ async fn test_get_model_not_found() {
     let admin_token = mock_login(&server, admin_email).await;
 
     let response = server
-        .get("/v1/admin/models/test-model-1")
+        .get("/v1/admin/models?limit=10&offset=0")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -20,34 +20,37 @@ async fn test_get_model_not_found() {
         .await;
 
     let status = response.status_code();
-    assert_eq!(
-        status, 200,
-        "Should return 200 with null body when model does not exist"
-    );
+    assert_eq!(status, 200, "Should return 200 when listing models");
 
     let body: serde_json::Value = response.json();
-    assert!(
-        body.is_null(),
-        "Response body should be null when model does not exist, got: {body:?}"
+    assert_eq!(
+        body.get("total"),
+        Some(&json!(0)),
+        "Total should be 0 when no models exist"
+    );
+    assert_eq!(
+        body.get("models"),
+        Some(&json!([])),
+        "Models array should be empty when no models exist"
     );
 }
 
 #[tokio::test]
-async fn test_model_update_and_get() {
+async fn test_model_batch_update_and_list() {
     let server = create_test_server().await;
 
     let admin_email = "test_admin_model_update@admin.org";
     let admin_token = mock_login(&server, admin_email).await;
 
-    // Upsert model with settings.public = true
-    let update_body = json!({
-        "settings": {
+    // Batch upsert model with settings.public = true
+    let batch_body = json!({
+        "test-model-2": {
             "public": true
         }
     });
 
     let response = server
-        .post("/v1/admin/models/test-model-2")
+        .patch("/v1/admin/models")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -56,28 +59,32 @@ async fn test_model_update_and_get() {
             http::HeaderName::from_static("content-type"),
             http::HeaderValue::from_static("application/json"),
         )
-        .json(&update_body)
+        .json(&batch_body)
         .await;
 
     let status = response.status_code();
-    assert_eq!(status, 200, "Admin should be able to upsert model");
+    assert_eq!(status, 200, "Admin should be able to batch upsert model");
 
     let body: serde_json::Value = response.json();
+    assert!(body.is_array(), "Response should be an array of models");
+    let models = body.as_array().expect("Should be an array");
+    assert_eq!(models.len(), 1, "Should return one model");
+    let model = &models[0];
     assert_eq!(
-        body.get("model_id"),
+        model.get("model_id"),
         Some(&json!("test-model-2")),
         "Response should include correct model_id"
     );
-    let settings = body.get("settings").expect("Should have settings field");
+    let settings = model.get("settings").expect("Should have settings field");
     assert_eq!(
         settings.get("public"),
         Some(&json!(true)),
         "Public should be true after update"
     );
 
-    // Get model to verify persisted settings
+    // List models to verify persisted settings
     let response = server
-        .get("/v1/admin/models/test-model-2")
+        .get("/v1/admin/models?limit=10&offset=0")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -85,31 +92,42 @@ async fn test_model_update_and_get() {
         .await;
 
     let status = response.status_code();
-    assert_eq!(status, 200, "Admin should be able to get model");
+    assert_eq!(status, 200, "Admin should be able to list models");
 
     let body: serde_json::Value = response.json();
     assert_eq!(
-        body.get("model_id"),
-        Some(&json!("test-model-2")),
-        "Fetched model should have correct model_id"
+        body.get("total"),
+        Some(&json!(1)),
+        "Total should be 1 after creating a model"
     );
-    let settings = body.get("settings").expect("Should have settings field");
+    let models = body
+        .get("models")
+        .and_then(|v| v.as_array())
+        .expect("Should have models array");
+    assert_eq!(models.len(), 1, "Should have one model in the list");
+    let model = &models[0];
+    assert_eq!(
+        model.get("model_id"),
+        Some(&json!("test-model-2")),
+        "Listed model should have correct model_id"
+    );
+    let settings = model.get("settings").expect("Should have settings field");
     assert_eq!(
         settings.get("public"),
         Some(&json!(true)),
-        "Public should remain true when fetched"
+        "Public should remain true when listed"
     );
 }
 
 #[tokio::test]
-async fn test_model_requires_admin() {
+async fn test_list_models_requires_admin() {
     let server = create_test_server().await;
 
     let non_admin_email = "test_user_model@no-admin.org";
     let non_admin_token = mock_login(&server, non_admin_email).await;
 
     let response = server
-        .get("/v1/admin/models/test-model-3")
+        .get("/v1/admin/models?limit=10&offset=0")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {non_admin_token}")).unwrap(),
@@ -135,14 +153,14 @@ async fn test_delete_model_success() {
     let admin_token = mock_login(&server, admin_email).await;
 
     // First, create a model
-    let update_body = json!({
-        "settings": {
+    let batch_body = json!({
+        "test-model-delete-1": {
             "public": true
         }
     });
 
     let response = server
-        .post("/v1/admin/models/test-model-delete-1")
+        .patch("/v1/admin/models")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -151,12 +169,12 @@ async fn test_delete_model_success() {
             http::HeaderName::from_static("content-type"),
             http::HeaderValue::from_static("application/json"),
         )
-        .json(&update_body)
+        .json(&batch_body)
         .await;
 
     assert!(
         response.status_code().is_success(),
-        "Admin should be able to upsert model before deleting"
+        "Admin should be able to batch upsert model before deleting"
     );
 
     // Then, delete the model
@@ -174,9 +192,9 @@ async fn test_delete_model_success() {
         "Deleting existing model should return 204 No Content"
     );
 
-    // Verify the model is gone
+    // Verify the model is gone by listing models
     let response = server
-        .get("/v1/admin/models/test-model-delete-1")
+        .get("/v1/admin/models?limit=10&offset=0")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -186,13 +204,21 @@ async fn test_delete_model_success() {
     assert_eq!(
         response.status_code(),
         200,
-        "Getting a deleted model should return 200 with null body"
+        "Listing models after deletion should return 200"
     );
 
     let body: serde_json::Value = response.json();
+    let models = body
+        .get("models")
+        .and_then(|v| v.as_array())
+        .expect("Should have models array");
+    let model_ids: Vec<&str> = models
+        .iter()
+        .filter_map(|m| m.get("model_id").and_then(|v| v.as_str()))
+        .collect();
     assert!(
-        body.is_null(),
-        "Response body should be null after model is deleted, got: {body:?}"
+        !model_ids.contains(&"test-model-delete-1"),
+        "Deleted model should not appear in the list, got: {model_ids:?}"
     );
 }
 
@@ -261,14 +287,14 @@ async fn test_responses_block_non_public_model() {
     let admin_token = mock_login(&server, admin_email).await;
 
     // Explicitly create a non-public model via admin API
-    let update_body = json!({
-        "settings": {
+    let batch_body = json!({
+        "test-non-public-model": {
             "public": false
         }
     });
 
     let response = server
-        .post("/v1/admin/models/test-non-public-model")
+        .patch("/v1/admin/models")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -277,7 +303,7 @@ async fn test_responses_block_non_public_model() {
             http::HeaderName::from_static("content-type"),
             http::HeaderValue::from_static("application/json"),
         )
-        .json(&update_body)
+        .json(&batch_body)
         .await;
 
     assert!(
@@ -328,14 +354,14 @@ async fn test_responses_allow_public_model() {
     let admin_token = mock_login(&server, admin_email).await;
 
     // Mark the model as public via admin API
-    let update_body = json!({
-        "settings": {
+    let batch_body = json!({
+        "test-public-model": {
             "public": true
         }
     });
 
     let response = server
-        .post("/v1/admin/models/test-public-model")
+        .patch("/v1/admin/models")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -344,7 +370,7 @@ async fn test_responses_allow_public_model() {
             http::HeaderName::from_static("content-type"),
             http::HeaderValue::from_static("application/json"),
         )
-        .json(&update_body)
+        .json(&batch_body)
         .await;
 
     assert!(
@@ -392,15 +418,15 @@ async fn test_responses_injects_system_prompt_when_instructions_missing() {
 
     let system_prompt = "You are a helpful assistant (model-level).";
 
-    let update_body = json!({
-        "settings": {
+    let batch_body = json!({
+        "test-system-prompt-model-1": {
             "public": true,
             "system_prompt": system_prompt
         }
     });
 
     let response = server
-        .post("/v1/admin/models/test-system-prompt-model-1")
+        .patch("/v1/admin/models")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -409,7 +435,7 @@ async fn test_responses_injects_system_prompt_when_instructions_missing() {
             http::HeaderName::from_static("content-type"),
             http::HeaderValue::from_static("application/json"),
         )
-        .json(&update_body)
+        .json(&batch_body)
         .await;
 
     assert!(
@@ -461,15 +487,15 @@ async fn test_responses_prepends_system_prompt_when_instructions_present() {
 
     let system_prompt = "You are a helpful assistant (model-level, prepend).";
 
-    let update_body = json!({
-        "settings": {
+    let batch_body = json!({
+        "test-system-prompt-model-2": {
             "public": true,
             "system_prompt": system_prompt
         }
     });
 
     let response = server
-        .post("/v1/admin/models/test-system-prompt-model-2")
+        .patch("/v1/admin/models")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -478,7 +504,7 @@ async fn test_responses_prepends_system_prompt_when_instructions_present() {
             http::HeaderName::from_static("content-type"),
             http::HeaderValue::from_static("application/json"),
         )
-        .json(&update_body)
+        .json(&batch_body)
         .await;
 
     assert!(

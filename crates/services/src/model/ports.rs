@@ -69,6 +69,10 @@ pub trait ModelsRepository: Send + Sync {
     /// Returns `Ok(None)` if no settings exist yet for that model.
     async fn get_model(&self, model_id: &str) -> anyhow::Result<Option<Model>>;
 
+    /// List all models with pagination.
+    /// Returns a tuple of (models, total_count).
+    async fn list_models(&self, limit: i64, offset: i64) -> anyhow::Result<(Vec<Model>, i64)>;
+
     /// Batch get full model records for multiple model IDs.
     /// Returns a map from model_id to resolved `ModelSettings`.
     async fn get_models_by_ids(
@@ -94,6 +98,10 @@ pub trait ModelsRepository: Send + Sync {
 pub trait ModelService: Send + Sync {
     /// Get model
     async fn get_model(&self, model_id: &str) -> anyhow::Result<Option<Model>>;
+
+    /// List all models with pagination.
+    /// Returns a tuple of (models, total_count).
+    async fn list_models(&self, limit: i64, offset: i64) -> anyhow::Result<(Vec<Model>, i64)>;
 
     /// Batch get settings content for multiple models.
     /// Missing models will not appear in the map; callers should fall back to defaults.
