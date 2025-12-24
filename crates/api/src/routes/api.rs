@@ -1739,8 +1739,9 @@ async fn proxy_model_list(
         .get_models_by_ids(&model_ids.iter().map(|s| s.as_str()).collect::<Vec<&str>>())
         .await.unwrap_or_else(|e| {
         tracing::warn!(
-                "Failed to batch load model settings for model list: {}, defaulting all public=false",
-                e
+                "Failed to batch load model settings for model list: {}, defaulting all public={}",
+                e,
+                MODEL_PUBLIC_DEFAULT
             );
         std::collections::HashMap::new()
     });

@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use crate::consts::MODEL_PUBLIC_DEFAULT;
 
 /// Model settings content structure
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -20,10 +21,10 @@ pub struct PartialModelSettings {
 impl Default for ModelSettings {
     /// Default model settings.
     ///
-    /// By default, models are **not** public (public = false).
+    /// By default, models are **public** (public = true).
     fn default() -> Self {
         Self {
-            public: false,
+            public: MODEL_PUBLIC_DEFAULT,
             system_prompt: None,
         }
     }
