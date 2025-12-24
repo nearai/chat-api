@@ -395,13 +395,6 @@ pub async fn upsert_model(
         settings: request.settings.into(),
     };
 
-    // Invalidate cache BEFORE DB write to prevent race condition
-    // Next request will fetch fresh data from DB
-    {
-        let mut cache = app_state.model_settings_cache.write().await;
-        cache.remove(&model_id);
-    }
-
     let model = app_state
         .model_service
         .upsert_model(params)
@@ -410,6 +403,13 @@ pub async fn upsert_model(
             tracing::error!("Failed to upsert model: {}", e);
             ApiError::internal_server_error("Failed to upsert model")
         })?;
+
+    // Invalidate cache AFTER successful DB write
+    // Next request will fetch fresh data from DB
+    {
+        let mut cache = app_state.model_settings_cache.write().await;
+        cache.remove(&model_id);
+    }
 
     Ok(Json(model.into()))
 }
@@ -471,13 +471,6 @@ pub async fn update_model(
         settings,
     };
 
-    // Invalidate cache BEFORE DB write to prevent race condition
-    // Next request will fetch fresh data from DB
-    {
-        let mut cache = app_state.model_settings_cache.write().await;
-        cache.remove(&model_id);
-    }
-
     let model = app_state
         .model_service
         .update_model(params)
@@ -489,6 +482,13 @@ pub async fn update_model(
             }
             ApiError::internal_server_error("Failed to update model")
         })?;
+
+    // Invalidate cache AFTER successful DB write
+    // Next request will fetch fresh data from DB
+    {
+        let mut cache = app_state.model_settings_cache.write().await;
+        cache.remove(&model_id);
+    }
 
     Ok(Json(model.into()))
 }
@@ -524,12 +524,6 @@ pub async fn delete_model(
 
     tracing::info!("Deleting model for model_id={}", model_id);
 
-    // Invalidate cache BEFORE DB delete to prevent race condition
-    {
-        let mut cache = app_state.model_settings_cache.write().await;
-        cache.remove(&model_id);
-    }
-
     let deleted = app_state
         .model_service
         .delete_model(&model_id)
@@ -541,6 +535,12 @@ pub async fn delete_model(
 
     if !deleted {
         return Err(ApiError::not_found("Model not found"));
+    }
+
+    // Invalidate cache AFTER successful DB delete
+    {
+        let mut cache = app_state.model_settings_cache.write().await;
+        cache.remove(&model_id);
     }
 
     Ok(StatusCode::NO_CONTENT)
