@@ -167,7 +167,7 @@ impl ModelsRepository for PostgresModelRepository {
                 "INSERT INTO models (model_id, settings)
                  VALUES ($1, $2)
                  ON CONFLICT (model_id)
-                 DO UPDATE SET settings = EXCLUDED.settings
+                 DO UPDATE SET settings = EXCLUDED.settings, updated_at = NOW()
                  RETURNING *",
                 &[&params.model_id, &settings],
             )
