@@ -1249,10 +1249,22 @@ async fn proxy_responses(
             body_bytes
         };
 
-    headers.append(
-        "content-length",
-        modified_body_bytes.len().to_string().parse().unwrap(),
-    );
+    // Set content-length header
+    match HeaderValue::from_str(&modified_body_bytes.len().to_string()) {
+        Ok(header_value) => {
+            headers.append("content-length", header_value);
+        }
+        Err(e) => {
+            tracing::error!("Failed to create content-length header value: {}", e);
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Failed to set content-length header".to_string(),
+                }),
+            )
+                .into_response());
+        }
+    }
 
     // Track conversation from the request
     tracing::debug!("POST to /responses detected, attempting to track conversation");
