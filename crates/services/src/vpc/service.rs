@@ -174,7 +174,12 @@ impl VpcCredentialsServiceImpl {
         // Try to load from database if not cached
         if cached.is_none() {
             if let Some(db_creds) = self.load_from_db().await? {
+                let creds = VpcCredentials {
+                    organization_id: db_creds.organization_id.clone(),
+                    api_key: db_creds.api_key.clone(),
+                };
                 *cached = Some(db_creds);
+                return Ok(creds);
             }
         }
 
