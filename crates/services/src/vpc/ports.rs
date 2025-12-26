@@ -40,7 +40,7 @@ pub trait VpcCredentialsService: Send + Sync {
 
     /// Request a VPC re-authorization on the next use by deleting the stored API key (DB)
     /// and clearing any in-memory cache.
-    async fn request_reauthorize(&self) -> anyhow::Result<()>;
+    async fn request_reauthorization(&self) -> anyhow::Result<()>;
 
     /// Check if VPC is configured
     fn is_configured(&self) -> bool;

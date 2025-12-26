@@ -223,7 +223,7 @@ impl VpcCredentialsService for VpcCredentialsServiceImpl {
         }
     }
 
-    async fn request_reauthorize(&self) -> anyhow::Result<()> {
+    async fn request_reauthorization(&self) -> anyhow::Result<()> {
         // Only meaningful in VPC mode; in static API key mode we do nothing.
         if self.config.is_none() {
             return Ok(());
@@ -317,7 +317,7 @@ pub mod test_helpers {
             Ok("mock-api-key".to_string())
         }
 
-        async fn request_reauthorize(&self) -> anyhow::Result<()> {
+        async fn request_reauthorization(&self) -> anyhow::Result<()> {
             Ok(())
         }
 

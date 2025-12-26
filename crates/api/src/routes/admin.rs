@@ -535,7 +535,7 @@ pub async fn delete_model(
 /// next proxied request will re-auth via VPC.
 #[utoipa::path(
     post,
-    path = "/v1/admin/vpc/request-reauthorize",
+    path = "/v1/admin/vpc/reauthorize",
     tag = "Admin",
     responses(
         (status = 204, description = "VPC re-authorization requested"),
@@ -547,14 +547,14 @@ pub async fn delete_model(
         ("session_token" = [])
     )
 )]
-pub async fn request_reauthorize_vpc(
+pub async fn request_vpc_reauthorization(
     State(app_state): State<AppState>,
 ) -> Result<StatusCode, ApiError> {
     tracing::info!("Admin requested VPC re-authorization");
 
     app_state
         .vpc_credentials_service
-        .request_reauthorize()
+        .request_reauthorization()
         .await
         .map_err(|e| {
             tracing::error!("Failed to request VPC re-authorization: {}", e);
@@ -640,7 +640,7 @@ pub fn create_admin_router() -> Router<AppState> {
         .route("/users/{user_id}/activity", get(get_user_activity))
         .route("/models", get(list_models).patch(batch_upsert_models))
         .route("/models/{model_id}", delete(delete_model))
-        .route("/vpc/request-reauthorize", post(request_reauthorize_vpc))
+        .route("/vpc/reauthorize", post(request_vpc_reauthorization))
         .route("/configs", patch(upsert_system_configs))
         .route("/analytics", get(get_analytics))
         .route("/analytics/top-users", get(get_top_users))
