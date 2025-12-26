@@ -30,7 +30,6 @@ struct VpcOrganization {
     id: String,
 }
 
-/// Cached credentials with tokens
 struct CachedCredentials {
     organization_id: String,
     api_key: String,
@@ -179,7 +178,7 @@ impl VpcCredentialsServiceImpl {
             }
         }
 
-        // No cached credentials or refresh failed - perform full VPC auth
+        // No cached credentials - perform full VPC auth
         tracing::info!("Performing full VPC authentication...");
         let login_response = self.vpc_authenticate(config).await?;
 
