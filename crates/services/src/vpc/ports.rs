@@ -3,7 +3,6 @@ use async_trait::async_trait;
 /// VPC credentials for making authenticated API calls to Cloud API
 #[derive(Clone, Debug)]
 pub struct VpcCredentials {
-    pub access_token: String,
     pub organization_id: String,
     pub api_key: String,
 }

@@ -12,16 +12,17 @@ type HmacSha256 = Hmac<Sha256>;
 
 /// Database keys for storing VPC credentials
 const VPC_API_KEY_CONFIG_KEY: &str = "vpc_api_key";
-const VPC_REFRESH_TOKEN_CONFIG_KEY: &str = "vpc_refresh_token";
 const VPC_ORGANIZATION_ID_CONFIG_KEY: &str = "vpc_organization_id";
 
 /// Response from VPC login endpoint
 #[derive(serde::Deserialize)]
 struct VpcLoginResponse {
-    api_key: String,
-    access_token: String,
-    refresh_token: String,
     organization: VpcOrganization,
+    api_key: String,
+    #[allow(unused)]
+    access_token: String,
+    #[allow(unused)]
+    refresh_token: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -31,10 +32,6 @@ struct VpcOrganization {
 
 /// Cached credentials with tokens
 struct CachedCredentials {
-    access_token: String,
-    #[allow(unused)]
-    access_token_created_at: std::time::Instant,
-    refresh_token: String,
     organization_id: String,
     api_key: String,
 }
@@ -115,15 +112,11 @@ impl VpcCredentialsServiceImpl {
 
     /// Load credentials from database
     async fn load_from_db(&self) -> anyhow::Result<Option<CachedCredentials>> {
-        let refresh_token = self.repository.get(VPC_REFRESH_TOKEN_CONFIG_KEY).await?;
         let org_id = self.repository.get(VPC_ORGANIZATION_ID_CONFIG_KEY).await?;
         let api_key = self.repository.get(VPC_API_KEY_CONFIG_KEY).await?;
 
-        match (refresh_token, org_id, api_key) {
-            (Some(refresh_token), Some(org_id), Some(api_key)) => Ok(Some(CachedCredentials {
-                access_token: String::new(),                        // Will be refreshed
-                access_token_created_at: std::time::Instant::now(), // Will be updated on refresh
-                refresh_token,
+        match (org_id, api_key) {
+            (Some(org_id), Some(api_key)) => Ok(Some(CachedCredentials {
                 organization_id: org_id,
                 api_key,
             })),
@@ -145,14 +138,6 @@ impl VpcCredentialsServiceImpl {
 
         if let Err(e) = self
             .repository
-            .set(VPC_REFRESH_TOKEN_CONFIG_KEY, &creds.refresh_token)
-            .await
-        {
-            tracing::warn!("Failed to cache VPC refresh token: {}", e);
-        }
-
-        if let Err(e) = self
-            .repository
             .set(VPC_ORGANIZATION_ID_CONFIG_KEY, &creds.organization_id)
             .await
         {
@@ -170,7 +155,6 @@ impl VpcCredentialsServiceImpl {
             let cached = self.cached.read().await;
             if let Some(creds) = cached.as_ref() {
                 return Ok(VpcCredentials {
-                    access_token: creds.access_token.clone(),
                     organization_id: creds.organization_id.clone(),
                     api_key: creds.api_key.clone(),
                 });
@@ -183,7 +167,6 @@ impl VpcCredentialsServiceImpl {
         // Double-check after acquiring write lock
         if let Some(creds) = cached.as_ref() {
             return Ok(VpcCredentials {
-                access_token: creds.access_token.clone(),
                 organization_id: creds.organization_id.clone(),
                 api_key: creds.api_key.clone(),
             });
@@ -201,9 +184,6 @@ impl VpcCredentialsServiceImpl {
         let login_response = self.vpc_authenticate(config).await?;
 
         let new_creds = CachedCredentials {
-            access_token: login_response.access_token.clone(),
-            access_token_created_at: std::time::Instant::now(),
-            refresh_token: login_response.refresh_token.clone(),
             organization_id: login_response.organization.id.clone(),
             api_key: login_response.api_key.clone(),
         };
@@ -214,7 +194,6 @@ impl VpcCredentialsServiceImpl {
         *cached = Some(new_creds);
 
         Ok(VpcCredentials {
-            access_token: login_response.access_token,
             organization_id: login_response.organization.id,
             api_key: login_response.api_key,
         })
