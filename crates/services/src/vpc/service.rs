@@ -14,6 +14,8 @@ type HmacSha256 = Hmac<Sha256>;
 pub const VPC_API_KEY_CONFIG_KEY: &str = "vpc_api_key";
 const VPC_ORGANIZATION_ID_CONFIG_KEY: &str = "vpc_organization_id";
 
+const LEGACY_VPC_REFRESH_TOKEN_CONFIG_KEY: &str = "vpc_refresh_token";
+
 /// Response from VPC login endpoint
 #[derive(serde::Deserialize)]
 struct VpcLoginResponse {
@@ -111,6 +113,23 @@ impl VpcCredentialsServiceImpl {
 
     /// Load credentials from database
     async fn load_from_db(&self) -> anyhow::Result<Option<CachedCredentials>> {
+        // Clean up legacy refresh token if it exists
+        if self
+            .repository
+            .get(LEGACY_VPC_REFRESH_TOKEN_CONFIG_KEY)
+            .await?
+            .is_some()
+        {
+            tracing::info!("Removing legacy VPC refresh token from database");
+            if let Err(e) = self
+                .repository
+                .delete(LEGACY_VPC_REFRESH_TOKEN_CONFIG_KEY)
+                .await
+            {
+                tracing::warn!("Failed to delete legacy VPC refresh token: {}", e);
+            }
+        }
+
         let org_id = self.repository.get(VPC_ORGANIZATION_ID_CONFIG_KEY).await?;
         let api_key = self.repository.get(VPC_API_KEY_CONFIG_KEY).await?;
 
