@@ -11,7 +11,7 @@ use tokio::sync::RwLock;
 type HmacSha256 = Hmac<Sha256>;
 
 /// Database keys for storing VPC credentials
-const VPC_API_KEY_CONFIG_KEY: &str = "vpc_api_key";
+pub const VPC_API_KEY_CONFIG_KEY: &str = "vpc_api_key";
 const VPC_ORGANIZATION_ID_CONFIG_KEY: &str = "vpc_organization_id";
 
 /// Response from VPC login endpoint
@@ -144,12 +144,12 @@ impl VpcCredentialsServiceImpl {
         }
     }
 
-    /// Get or refresh credentials
-    async fn get_or_refresh_credentials(
+    /// Get or authorize credentials
+    async fn get_or_authorize_credentials(
         &self,
         config: &VpcAuthConfig,
     ) -> anyhow::Result<VpcCredentials> {
-        // First, try to use cached credentials if still valid
+        // First, try to use cached credentials
         {
             let cached = self.cached.read().await;
             if let Some(creds) = cached.as_ref() {
@@ -160,7 +160,6 @@ impl VpcCredentialsServiceImpl {
             }
         }
 
-        // Need to get/refresh credentials - acquire write lock
         let mut cached = self.cached.write().await;
 
         // Double-check after acquiring write lock
@@ -208,7 +207,7 @@ impl VpcCredentialsServiceImpl {
 impl VpcCredentialsService for VpcCredentialsServiceImpl {
     async fn get_credentials(&self) -> anyhow::Result<Option<VpcCredentials>> {
         match &self.config {
-            Some(config) => Ok(Some(self.get_or_refresh_credentials(config).await?)),
+            Some(config) => Ok(Some(self.get_or_authorize_credentials(config).await?)),
             None => Ok(None),
         }
     }
@@ -216,12 +215,27 @@ impl VpcCredentialsService for VpcCredentialsServiceImpl {
     async fn get_api_key(&self) -> anyhow::Result<String> {
         if let Some(config) = &self.config {
             // Ensure we have valid credentials (refresh/re-auth if needed)
-            let creds = self.get_or_refresh_credentials(config).await?;
+            let creds = self.get_or_authorize_credentials(config).await?;
             Ok(creds.api_key)
         } else {
             // Not configured for VPC, use static key
             Ok(self.static_api_key.clone().unwrap_or_default())
         }
+    }
+
+    async fn request_reauthorize(&self) -> anyhow::Result<()> {
+        // Only meaningful in VPC mode; in static API key mode we do nothing.
+        if self.config.is_none() {
+            return Ok(());
+        }
+
+        self.repository.delete(VPC_API_KEY_CONFIG_KEY).await?;
+
+        // Clear in-memory cache
+        let mut cached = self.cached.write().await;
+        *cached = None;
+
+        Ok(())
     }
 
     fn is_configured(&self) -> bool {
@@ -264,6 +278,10 @@ impl VpcCredentialsRepository for NoOpVpcRepository {
     async fn set(&self, _key: &str, _value: &str) -> anyhow::Result<()> {
         Ok(())
     }
+
+    async fn delete(&self, _key: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 /// Test helpers for VPC credentials
@@ -297,6 +315,10 @@ pub mod test_helpers {
 
         async fn get_api_key(&self) -> anyhow::Result<String> {
             Ok("mock-api-key".to_string())
+        }
+
+        async fn request_reauthorize(&self) -> anyhow::Result<()> {
+            Ok(())
         }
 
         fn is_configured(&self) -> bool {
