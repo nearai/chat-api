@@ -38,6 +38,15 @@ impl PostgresAppConfigRepository {
 
         Ok(())
     }
+
+    /// Delete a config value by key
+    pub async fn delete(&self, key: &str) -> anyhow::Result<()> {
+        let client = self.pool.get().await?;
+        client
+            .execute("DELETE FROM app_config WHERE key = $1", &[&key])
+            .await?;
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -48,5 +57,9 @@ impl VpcCredentialsRepository for PostgresAppConfigRepository {
 
     async fn set(&self, key: &str, value: &str) -> anyhow::Result<()> {
         PostgresAppConfigRepository::set(self, key, value).await
+    }
+
+    async fn delete(&self, key: &str) -> anyhow::Result<()> {
+        PostgresAppConfigRepository::delete(self, key).await
     }
 }

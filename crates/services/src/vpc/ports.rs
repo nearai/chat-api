@@ -3,7 +3,6 @@ use async_trait::async_trait;
 /// VPC credentials for making authenticated API calls to Cloud API
 #[derive(Clone, Debug)]
 pub struct VpcCredentials {
-    pub access_token: String,
     pub organization_id: String,
     pub api_key: String,
 }
@@ -16,6 +15,9 @@ pub trait VpcCredentialsRepository: Send + Sync {
 
     /// Set a credential value
     async fn set(&self, key: &str, value: &str) -> anyhow::Result<()>;
+
+    /// Delete a credential value by key
+    async fn delete(&self, key: &str) -> anyhow::Result<()>;
 }
 
 /// Configuration for VPC authentication
@@ -26,15 +28,19 @@ pub struct VpcAuthConfig {
     pub base_url: String,
 }
 
-/// Service for managing VPC credentials with automatic token refresh
+/// Service for managing VPC credentials
 #[async_trait]
 pub trait VpcCredentialsService: Send + Sync {
-    /// Get valid VPC credentials, refreshing tokens if necessary
+    /// Get VPC credentials, re-authenticating and requesting new credentials if necessary
     /// Returns None if VPC is not configured
     async fn get_credentials(&self) -> anyhow::Result<Option<VpcCredentials>>;
 
     /// Get the current API key (either static or from VPC auth)
     async fn get_api_key(&self) -> anyhow::Result<String>;
+
+    /// Revoke the stored API key (DB and in-memory cache)
+    /// This will request a new API key from the VPC on the next request.
+    async fn revoke_credentials(&self) -> anyhow::Result<()>;
 
     /// Check if VPC is configured
     fn is_configured(&self) -> bool;

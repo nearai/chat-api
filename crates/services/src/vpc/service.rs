@@ -12,16 +12,19 @@ type HmacSha256 = Hmac<Sha256>;
 
 /// Database keys for storing VPC credentials
 const VPC_API_KEY_CONFIG_KEY: &str = "vpc_api_key";
-const VPC_REFRESH_TOKEN_CONFIG_KEY: &str = "vpc_refresh_token";
 const VPC_ORGANIZATION_ID_CONFIG_KEY: &str = "vpc_organization_id";
+
+const LEGACY_VPC_REFRESH_TOKEN_CONFIG_KEY: &str = "vpc_refresh_token";
 
 /// Response from VPC login endpoint
 #[derive(serde::Deserialize)]
 struct VpcLoginResponse {
-    api_key: String,
-    access_token: String,
-    refresh_token: String,
     organization: VpcOrganization,
+    api_key: String,
+    #[allow(unused)]
+    access_token: String,
+    #[allow(unused)]
+    refresh_token: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -29,17 +32,11 @@ struct VpcOrganization {
     id: String,
 }
 
-/// Cached credentials with tokens
+/// In-memory cached VPC authentication data.
 struct CachedCredentials {
-    access_token: String,
-    access_token_created_at: std::time::Instant,
-    refresh_token: String,
     organization_id: String,
     api_key: String,
 }
-
-/// How long an access token is valid (refresh proactively before expiry)
-const ACCESS_TOKEN_REFRESH_BEFORE_SECS: u64 = 50 * 60; // Refresh if older than 50 minutes
 
 /// Implementation of VpcCredentialsService
 pub struct VpcCredentialsServiceImpl {
@@ -117,15 +114,28 @@ impl VpcCredentialsServiceImpl {
 
     /// Load credentials from database
     async fn load_from_db(&self) -> anyhow::Result<Option<CachedCredentials>> {
-        let refresh_token = self.repository.get(VPC_REFRESH_TOKEN_CONFIG_KEY).await?;
+        // Clean up legacy refresh token if it exists
+        if self
+            .repository
+            .get(LEGACY_VPC_REFRESH_TOKEN_CONFIG_KEY)
+            .await?
+            .is_some()
+        {
+            tracing::info!("Removing legacy VPC refresh token from database");
+            if let Err(e) = self
+                .repository
+                .delete(LEGACY_VPC_REFRESH_TOKEN_CONFIG_KEY)
+                .await
+            {
+                tracing::warn!("Failed to delete legacy VPC refresh token: {}", e);
+            }
+        }
+
         let org_id = self.repository.get(VPC_ORGANIZATION_ID_CONFIG_KEY).await?;
         let api_key = self.repository.get(VPC_API_KEY_CONFIG_KEY).await?;
 
-        match (refresh_token, org_id, api_key) {
-            (Some(refresh_token), Some(org_id), Some(api_key)) => Ok(Some(CachedCredentials {
-                access_token: String::new(),                        // Will be refreshed
-                access_token_created_at: std::time::Instant::now(), // Will be updated on refresh
-                refresh_token,
+        match (org_id, api_key) {
+            (Some(org_id), Some(api_key)) => Ok(Some(CachedCredentials {
                 organization_id: org_id,
                 api_key,
             })),
@@ -147,14 +157,6 @@ impl VpcCredentialsServiceImpl {
 
         if let Err(e) = self
             .repository
-            .set(VPC_REFRESH_TOKEN_CONFIG_KEY, &creds.refresh_token)
-            .await
-        {
-            tracing::warn!("Failed to cache VPC refresh token: {}", e);
-        }
-
-        if let Err(e) = self
-            .repository
             .set(VPC_ORGANIZATION_ID_CONFIG_KEY, &creds.organization_id)
             .await
         {
@@ -162,63 +164,49 @@ impl VpcCredentialsServiceImpl {
         }
     }
 
-    /// Check if cached access token is still valid
-    fn is_access_token_valid(creds: &CachedCredentials) -> bool {
-        if creds.access_token.is_empty() {
-            return false;
-        }
-        // Refresh proactively if the token is older than 50 minutes
-        creds.access_token_created_at.elapsed().as_secs() < ACCESS_TOKEN_REFRESH_BEFORE_SECS
-    }
-
-    /// Get or refresh credentials
-    async fn get_or_refresh_credentials(
+    /// Get or authenticate credentials
+    async fn get_or_authenticate_credentials(
         &self,
         config: &VpcAuthConfig,
     ) -> anyhow::Result<VpcCredentials> {
-        // First, try to use cached credentials if still valid
+        // First, try to use cached credentials
         {
             let cached = self.cached.read().await;
             if let Some(creds) = cached.as_ref() {
-                if Self::is_access_token_valid(creds) {
-                    return Ok(VpcCredentials {
-                        access_token: creds.access_token.clone(),
-                        organization_id: creds.organization_id.clone(),
-                        api_key: creds.api_key.clone(),
-                    });
-                }
-            }
-        }
-
-        // Need to get/refresh credentials - acquire write lock
-        let mut cached = self.cached.write().await;
-
-        // Double-check after acquiring write lock
-        if let Some(creds) = cached.as_ref() {
-            if Self::is_access_token_valid(creds) {
                 return Ok(VpcCredentials {
-                    access_token: creds.access_token.clone(),
                     organization_id: creds.organization_id.clone(),
                     api_key: creds.api_key.clone(),
                 });
             }
         }
 
+        let mut cached = self.cached.write().await;
+
+        // Double-check after acquiring write lock
+        if let Some(creds) = cached.as_ref() {
+            return Ok(VpcCredentials {
+                organization_id: creds.organization_id.clone(),
+                api_key: creds.api_key.clone(),
+            });
+        }
+
         // Try to load from database if not cached
         if cached.is_none() {
             if let Some(db_creds) = self.load_from_db().await? {
+                let creds = VpcCredentials {
+                    organization_id: db_creds.organization_id.clone(),
+                    api_key: db_creds.api_key.clone(),
+                };
                 *cached = Some(db_creds);
+                return Ok(creds);
             }
         }
 
-        // No cached credentials or refresh failed - perform full VPC auth
+        // No cached credentials - perform full VPC auth
         tracing::info!("Performing full VPC authentication...");
         let login_response = self.vpc_authenticate(config).await?;
 
         let new_creds = CachedCredentials {
-            access_token: login_response.access_token.clone(),
-            access_token_created_at: std::time::Instant::now(),
-            refresh_token: login_response.refresh_token.clone(),
             organization_id: login_response.organization.id.clone(),
             api_key: login_response.api_key.clone(),
         };
@@ -229,7 +217,6 @@ impl VpcCredentialsServiceImpl {
         *cached = Some(new_creds);
 
         Ok(VpcCredentials {
-            access_token: login_response.access_token,
             organization_id: login_response.organization.id,
             api_key: login_response.api_key,
         })
@@ -240,20 +227,38 @@ impl VpcCredentialsServiceImpl {
 impl VpcCredentialsService for VpcCredentialsServiceImpl {
     async fn get_credentials(&self) -> anyhow::Result<Option<VpcCredentials>> {
         match &self.config {
-            Some(config) => Ok(Some(self.get_or_refresh_credentials(config).await?)),
+            Some(config) => Ok(Some(self.get_or_authenticate_credentials(config).await?)),
             None => Ok(None),
         }
     }
 
     async fn get_api_key(&self) -> anyhow::Result<String> {
         if let Some(config) = &self.config {
-            // Ensure we have valid credentials (refresh/re-auth if needed)
-            let creds = self.get_or_refresh_credentials(config).await?;
+            // Ensure we have valid credentials (re-authenticate if needed)
+            let creds = self.get_or_authenticate_credentials(config).await?;
             Ok(creds.api_key)
         } else {
             // Not configured for VPC, use static key
             Ok(self.static_api_key.clone().unwrap_or_default())
         }
+    }
+
+    async fn revoke_credentials(&self) -> anyhow::Result<()> {
+        // Only meaningful in VPC mode; in static API key mode we do nothing.
+        if self.config.is_none() {
+            return Ok(());
+        }
+
+        self.repository.delete(VPC_API_KEY_CONFIG_KEY).await?;
+        self.repository
+            .delete(VPC_ORGANIZATION_ID_CONFIG_KEY)
+            .await?;
+
+        // Clear in-memory cache
+        let mut cached = self.cached.write().await;
+        *cached = None;
+
+        Ok(())
     }
 
     fn is_configured(&self) -> bool {
@@ -296,6 +301,10 @@ impl VpcCredentialsRepository for NoOpVpcRepository {
     async fn set(&self, _key: &str, _value: &str) -> anyhow::Result<()> {
         Ok(())
     }
+
+    async fn delete(&self, _key: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 /// Test helpers for VPC credentials
@@ -329,6 +338,10 @@ pub mod test_helpers {
 
         async fn get_api_key(&self) -> anyhow::Result<String> {
             Ok("mock-api-key".to_string())
+        }
+
+        async fn revoke_credentials(&self) -> anyhow::Result<()> {
+            Ok(())
         }
 
         fn is_configured(&self) -> bool {

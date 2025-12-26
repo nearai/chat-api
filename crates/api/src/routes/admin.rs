@@ -1,4 +1,5 @@
 use crate::{consts::LIST_USERS_LIMIT_MAX, error::ApiError, models::*, state::AppState};
+use axum::routing::post;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -528,6 +529,41 @@ pub async fn delete_model(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Revoke VPC credentials
+///
+/// Deletes the stored `vpc_api_key` from database and clears the in-memory VPC cache so the
+/// next proxied request will request a new API key from the VPC.
+#[utoipa::path(
+    post,
+    path = "/v1/admin/vpc/revoke",
+    tag = "Admin",
+    responses(
+        (status = 204, description = "VPC credentials revoked"),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn revoke_vpc_credentials(
+    State(app_state): State<AppState>,
+) -> Result<StatusCode, ApiError> {
+    tracing::info!("Admin revoked VPC credentials");
+
+    app_state
+        .vpc_credentials_service
+        .revoke_credentials()
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to revoke VPC credentials: {}", e);
+            ApiError::internal_server_error("Failed to revoke VPC credentials")
+        })?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Create or update system configs
 ///
 /// Creates new system configs or updates existing ones. All fields in the request are optional.
@@ -604,6 +640,7 @@ pub fn create_admin_router() -> Router<AppState> {
         .route("/users/{user_id}/activity", get(get_user_activity))
         .route("/models", get(list_models).patch(batch_upsert_models))
         .route("/models/{model_id}", delete(delete_model))
+        .route("/vpc/revoke", post(revoke_vpc_credentials))
         .route("/configs", patch(upsert_system_configs))
         .route("/analytics", get(get_analytics))
         .route("/analytics/top-users", get(get_top_users))
