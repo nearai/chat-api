@@ -11,7 +11,7 @@ use tokio::sync::RwLock;
 type HmacSha256 = Hmac<Sha256>;
 
 /// Database keys for storing VPC credentials
-pub const VPC_API_KEY_CONFIG_KEY: &str = "vpc_api_key";
+const VPC_API_KEY_CONFIG_KEY: &str = "vpc_api_key";
 const VPC_ORGANIZATION_ID_CONFIG_KEY: &str = "vpc_organization_id";
 
 const LEGACY_VPC_REFRESH_TOKEN_CONFIG_KEY: &str = "vpc_refresh_token";
