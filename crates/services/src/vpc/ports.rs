@@ -38,9 +38,9 @@ pub trait VpcCredentialsService: Send + Sync {
     /// Get the current API key (either static or from VPC auth)
     async fn get_api_key(&self) -> anyhow::Result<String>;
 
-    /// Request a VPC re-authorization on the next use by deleting the stored API key (DB)
-    /// and clearing any in-memory cache.
-    async fn request_reauthorization(&self) -> anyhow::Result<()>;
+    /// Revoke the stored API key (DB and in-memory cache)
+    /// This will request a new API key from the VPC in next request.
+    async fn revoke(&self) -> anyhow::Result<()>;
 
     /// Check if VPC is configured
     fn is_configured(&self) -> bool;

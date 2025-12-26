@@ -164,7 +164,7 @@ impl VpcCredentialsServiceImpl {
     }
 
     /// Get or authenticate credentials
-    async fn get_or_authorize_credentials(
+    async fn get_or_authenticate_credentials(
         &self,
         config: &VpcAuthConfig,
     ) -> anyhow::Result<VpcCredentials> {
@@ -226,15 +226,15 @@ impl VpcCredentialsServiceImpl {
 impl VpcCredentialsService for VpcCredentialsServiceImpl {
     async fn get_credentials(&self) -> anyhow::Result<Option<VpcCredentials>> {
         match &self.config {
-            Some(config) => Ok(Some(self.get_or_authorize_credentials(config).await?)),
+            Some(config) => Ok(Some(self.get_or_authenticate_credentials(config).await?)),
             None => Ok(None),
         }
     }
 
     async fn get_api_key(&self) -> anyhow::Result<String> {
         if let Some(config) = &self.config {
-            // Ensure we have valid credentials (refresh/re-auth if needed)
-            let creds = self.get_or_authorize_credentials(config).await?;
+            // Ensure we have valid credentials (re-authenticate if needed)
+            let creds = self.get_or_authenticate_credentials(config).await?;
             Ok(creds.api_key)
         } else {
             // Not configured for VPC, use static key
@@ -242,13 +242,16 @@ impl VpcCredentialsService for VpcCredentialsServiceImpl {
         }
     }
 
-    async fn request_reauthorization(&self) -> anyhow::Result<()> {
+    async fn revoke(&self) -> anyhow::Result<()> {
         // Only meaningful in VPC mode; in static API key mode we do nothing.
         if self.config.is_none() {
             return Ok(());
         }
 
         self.repository.delete(VPC_API_KEY_CONFIG_KEY).await?;
+        self.repository
+            .delete(VPC_ORGANIZATION_ID_CONFIG_KEY)
+            .await?;
 
         // Clear in-memory cache
         let mut cached = self.cached.write().await;
@@ -336,7 +339,7 @@ pub mod test_helpers {
             Ok("mock-api-key".to_string())
         }
 
-        async fn request_reauthorization(&self) -> anyhow::Result<()> {
+        async fn revoke(&self) -> anyhow::Result<()> {
             Ok(())
         }
 
