@@ -32,14 +32,12 @@ struct VpcOrganization {
 /// Cached credentials with tokens
 struct CachedCredentials {
     access_token: String,
+    #[allow(unused)]
     access_token_created_at: std::time::Instant,
     refresh_token: String,
     organization_id: String,
     api_key: String,
 }
-
-/// How long an access token is valid (refresh proactively before expiry)
-const ACCESS_TOKEN_REFRESH_BEFORE_SECS: u64 = 50 * 60; // Refresh if older than 50 minutes
 
 /// Implementation of VpcCredentialsService
 pub struct VpcCredentialsServiceImpl {
@@ -162,15 +160,6 @@ impl VpcCredentialsServiceImpl {
         }
     }
 
-    /// Check if cached access token is still valid
-    fn is_access_token_valid(creds: &CachedCredentials) -> bool {
-        if creds.access_token.is_empty() {
-            return false;
-        }
-        // Refresh proactively if the token is older than 50 minutes
-        creds.access_token_created_at.elapsed().as_secs() < ACCESS_TOKEN_REFRESH_BEFORE_SECS
-    }
-
     /// Get or refresh credentials
     async fn get_or_refresh_credentials(
         &self,
@@ -180,13 +169,11 @@ impl VpcCredentialsServiceImpl {
         {
             let cached = self.cached.read().await;
             if let Some(creds) = cached.as_ref() {
-                if Self::is_access_token_valid(creds) {
-                    return Ok(VpcCredentials {
-                        access_token: creds.access_token.clone(),
-                        organization_id: creds.organization_id.clone(),
-                        api_key: creds.api_key.clone(),
-                    });
-                }
+                return Ok(VpcCredentials {
+                    access_token: creds.access_token.clone(),
+                    organization_id: creds.organization_id.clone(),
+                    api_key: creds.api_key.clone(),
+                });
             }
         }
 
@@ -195,13 +182,11 @@ impl VpcCredentialsServiceImpl {
 
         // Double-check after acquiring write lock
         if let Some(creds) = cached.as_ref() {
-            if Self::is_access_token_valid(creds) {
-                return Ok(VpcCredentials {
-                    access_token: creds.access_token.clone(),
-                    organization_id: creds.organization_id.clone(),
-                    api_key: creds.api_key.clone(),
-                });
-            }
+            return Ok(VpcCredentials {
+                access_token: creds.access_token.clone(),
+                organization_id: creds.organization_id.clone(),
+                api_key: creds.api_key.clone(),
+            });
         }
 
         // Try to load from database if not cached
