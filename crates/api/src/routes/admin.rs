@@ -554,7 +554,7 @@ pub async fn revoke_vpc_credentials(
 
     app_state
         .vpc_credentials_service
-        .revoke()
+        .revoke_credentials()
         .await
         .map_err(|e| {
             tracing::error!("Failed to revoke VPC credentials: {}", e);

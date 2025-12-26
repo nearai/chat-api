@@ -31,7 +31,7 @@ pub struct VpcAuthConfig {
 /// Service for managing VPC credentials
 #[async_trait]
 pub trait VpcCredentialsService: Send + Sync {
-    /// Get valid VPC credentials, refreshing tokens if necessary
+    /// Get VPC credentials, requesting new tokens if necessary
     /// Returns None if VPC is not configured
     async fn get_credentials(&self) -> anyhow::Result<Option<VpcCredentials>>;
 
@@ -39,8 +39,8 @@ pub trait VpcCredentialsService: Send + Sync {
     async fn get_api_key(&self) -> anyhow::Result<String>;
 
     /// Revoke the stored API key (DB and in-memory cache)
-    /// This will request a new API key from the VPC in next request.
-    async fn revoke(&self) -> anyhow::Result<()>;
+    /// This will request a new API key from the VPC on the next request.
+    async fn revoke_credentials(&self) -> anyhow::Result<()>;
 
     /// Check if VPC is configured
     fn is_configured(&self) -> bool;

@@ -242,7 +242,7 @@ impl VpcCredentialsService for VpcCredentialsServiceImpl {
         }
     }
 
-    async fn revoke(&self) -> anyhow::Result<()> {
+    async fn revoke_credentials(&self) -> anyhow::Result<()> {
         // Only meaningful in VPC mode; in static API key mode we do nothing.
         if self.config.is_none() {
             return Ok(());
@@ -339,7 +339,7 @@ pub mod test_helpers {
             Ok("mock-api-key".to_string())
         }
 
-        async fn revoke(&self) -> anyhow::Result<()> {
+        async fn revoke_credentials(&self) -> anyhow::Result<()> {
             Ok(())
         }
 
