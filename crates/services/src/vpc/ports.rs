@@ -28,7 +28,7 @@ pub struct VpcAuthConfig {
     pub base_url: String,
 }
 
-/// Service for managing VPC credentials with automatic token refresh
+/// Service for managing VPC credentials
 #[async_trait]
 pub trait VpcCredentialsService: Send + Sync {
     /// Get valid VPC credentials, refreshing tokens if necessary
