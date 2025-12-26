@@ -144,7 +144,7 @@ impl VpcCredentialsServiceImpl {
         }
     }
 
-    /// Get or authorize credentials
+    /// Get or authenticate credentials
     async fn get_or_authorize_credentials(
         &self,
         config: &VpcAuthConfig,
