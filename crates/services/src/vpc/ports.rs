@@ -31,7 +31,7 @@ pub struct VpcAuthConfig {
 /// Service for managing VPC credentials
 #[async_trait]
 pub trait VpcCredentialsService: Send + Sync {
-    /// Get VPC credentials, requesting new tokens if necessary
+    /// Get VPC credentials, re-authenticating and requesting new credentials if necessary
     /// Returns None if VPC is not configured
     async fn get_credentials(&self) -> anyhow::Result<Option<VpcCredentials>>;
 

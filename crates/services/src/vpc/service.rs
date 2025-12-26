@@ -32,6 +32,7 @@ struct VpcOrganization {
     id: String,
 }
 
+/// In-memory cached VPC authentication data.
 struct CachedCredentials {
     organization_id: String,
     api_key: String,
