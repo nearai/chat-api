@@ -4,7 +4,7 @@
 //! - Maximum 2 concurrent in-flight requests per user
 //! - Maximum 1 request per second per user (sliding window)
 
-use crate::{middleware::auth::AuthenticatedUser, state::AppState};
+use crate::middleware::auth::AuthenticatedUser;
 use axum::{
     extract::{Extension, State},
     http::StatusCode,
@@ -20,7 +20,6 @@ use services::{
 };
 use std::{
     collections::{HashMap, VecDeque},
-    env,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -270,12 +269,12 @@ impl IntoResponse for RateLimitError {
 }
 
 pub async fn rate_limit_middleware(
-    State(state): State<AppState>,
+    State(state): State<RateLimitState>,
     Extension(user): Extension<AuthenticatedUser>,
     request: axum::extract::Request,
     next: Next,
 ) -> Response {
-    let _guard = match state.rate_limit_state.try_acquire(user.user_id).await {
+    let _guard = match state.try_acquire(user.user_id).await {
         Ok(guard) => guard,
         Err(e) => return e.into_response(),
     };
@@ -397,11 +396,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_daily_limit_exceeded() {
-        let mut config = RateLimitConfig::default();
-        config.max_concurrent = 1;
-        config.max_requests_per_window = 100;
-        config.window_duration = Duration::from_secs(10);
-        config.daily_request_limit = Some(1);
+        let config = RateLimitConfig {
+            max_concurrent: 1,
+            max_requests_per_window: 10,
+            window_duration: Duration::from_secs(10),
+            daily_request_limit: Some(1),
+        };
 
         let state = configured_state(config);
         let user = test_user_id(1);

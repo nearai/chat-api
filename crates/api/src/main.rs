@@ -1,3 +1,4 @@
+use api::middleware::{RateLimitConfig, RateLimitState};
 use api::{create_router_with_cors, ApiDoc, AppState};
 use config::LoggingConfig;
 use opentelemetry::global;
@@ -22,8 +23,6 @@ use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
-
-use crate::middleware::{RateLimitConfig, RateLimitState};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -159,8 +158,8 @@ async fn main() -> anyhow::Result<()> {
     let daily_usage_store: Arc<dyn services::analytics::DailyUsageStore> = analytics_impl.clone();
 
     // Initialize rate limit state
-    let rate_limit_config = RateLimitConfig::from_env();
-    let rate_limit_state = RateLimitState::with_config(rate_limit_config, daily_usage_store);
+    let rate_limit_state =
+        RateLimitState::with_config(RateLimitConfig::default(), daily_usage_store);
 
     // Initialize system configs service
     tracing::info!("Initializing system configs service...");
@@ -243,14 +242,13 @@ async fn main() -> anyhow::Result<()> {
         cloud_api_base_url: config.openai.base_url.clone().unwrap_or_default(),
         metrics_service,
         analytics_service,
-        rate_limit_state,
         near_rpc_url: config.near.rpc_url.clone(),
         near_balance_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         model_settings_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     };
 
     // Create router with CORS support
-    let app = create_router_with_cors(app_state, config.cors.clone())
+    let app = create_router_with_cors(app_state, rate_limit_state, config.cors.clone())
         .merge(SwaggerUi::new("/docs").url("/api-docs/openapi.json", ApiDoc::openapi()));
 
     // Start server

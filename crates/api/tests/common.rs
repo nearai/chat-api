@@ -131,6 +131,7 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
     let analytics_service: Arc<dyn services::analytics::AnalyticsServiceTrait> =
         analytics_impl.clone();
     let daily_usage_store: Arc<dyn services::analytics::DailyUsageStore> = analytics_impl.clone();
+
     let rate_limit_state =
         RateLimitState::with_config(RateLimitConfig::default(), daily_usage_store);
 
@@ -152,14 +153,13 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
         cloud_api_base_url: test_config.cloud_api_base_url.clone(),
         metrics_service,
         analytics_service,
-        rate_limit_state,
         near_rpc_url: config.near.rpc_url.clone(),
         near_balance_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         model_settings_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     };
 
     // Create router
-    let app = create_router_with_cors(app_state, config::CorsConfig::default());
+    let app = create_router_with_cors(app_state, rate_limit_state, config::CorsConfig::default());
 
     // Create test server
     TestServer::new(app).expect("Failed to create test server")
