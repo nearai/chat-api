@@ -212,7 +212,6 @@ impl RateLimitState {
             user_id,
             usage_date: today,
             request_increment: 1,
-            token_increment: None,
         };
         tokio::spawn(async move {
             if let Err(err) = analytics_store

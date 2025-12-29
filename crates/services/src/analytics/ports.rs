@@ -76,7 +76,6 @@ pub struct RecordDailyUsageRequest {
     pub user_id: UserId,
     pub usage_date: NaiveDate,
     pub request_increment: i64,
-    pub token_increment: Option<i64>,
 }
 
 /// A single activity log entry
@@ -139,7 +138,6 @@ pub struct DailyUsageSnapshot {
     pub user_id: UserId,
     pub usage_date: NaiveDate,
     pub request_count: i64,
-    pub token_count: i64,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -149,7 +147,6 @@ impl DailyUsageSnapshot {
             user_id,
             usage_date,
             request_count: 0,
-            token_count: 0,
             updated_at: Utc::now(),
         }
     }
