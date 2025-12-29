@@ -1,4 +1,6 @@
 use crate::{consts::LIST_USERS_LIMIT_MAX, error::ApiError, models::*, state::AppState};
+#[cfg(not(test))]
+use axum::http::{HeaderMap, Method};
 use axum::routing::post;
 use axum::{
     extract::{Path, Query, State},
@@ -415,6 +417,9 @@ pub async fn batch_upsert_models(
             }
         }
 
+        #[cfg(not(test))]
+        ensure_proxy_model_exists(app_state.proxy_service.clone(), &model_id).await?;
+
         // Check if model exists
         let existing_model = app_state
             .model_service
@@ -474,6 +479,42 @@ pub async fn batch_upsert_models(
     }
 
     Ok(Json(results.into_iter().map(Into::into).collect()))
+}
+
+#[cfg(not(test))]
+async fn ensure_proxy_model_exists(
+    proxy_service: std::sync::Arc<dyn services::response::ports::OpenAIProxyService>,
+    model_id: &str,
+) -> Result<(), ApiError> {
+    let path = format!("model/{model_id}"); // TODO: API get model by id
+
+    let response = proxy_service
+        .forward_request(Method::GET, &path, HeaderMap::new(), None)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to verify model '{}' via proxy: {}", model_id, e);
+            ApiError::internal_server_error("Failed to verify model existence with proxy")
+        })?;
+
+    if (200..300).contains(&response.status) {
+        Ok(())
+    } else if response.status == 404 {
+        tracing::warn!("Model '{}' not found via proxy", model_id);
+        Err(ApiError::bad_request(format!(
+            "Model '{}' does not exist in proxy service",
+            model_id
+        )))
+    } else {
+        tracing::error!(
+            "Unexpected proxy status {} while checking model '{}'",
+            response.status,
+            model_id
+        );
+        Err(ApiError::internal_server_error(format!(
+            "Failed to verify model '{}' with proxy",
+            model_id
+        )))
+    }
 }
 
 /// Delete a model
