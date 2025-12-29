@@ -53,8 +53,6 @@ struct UserRateLimitState {
     daily_count: i64,
 }
 
-type SharedUserRateLimitState = Arc<Mutex<UserRateLimitState>>;
-
 impl UserRateLimitState {
     fn new(max_concurrent: usize) -> Self {
         Self {
@@ -76,7 +74,7 @@ impl UserRateLimitState {
 
 #[derive(Clone)]
 pub struct RateLimitState {
-    user_limits: Arc<Mutex<HashMap<UserId, SharedUserRateLimitState>>>,
+    user_limits: Arc<Mutex<HashMap<UserId, Arc<Mutex<UserRateLimitState>>>>>,
     config: Arc<RateLimitConfig>,
     analytics_store: Arc<dyn DailyUsageStore>,
 }
