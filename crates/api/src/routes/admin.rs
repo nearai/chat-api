@@ -1,6 +1,4 @@
 use crate::{consts::LIST_USERS_LIMIT_MAX, error::ApiError, models::*, state::AppState};
-#[cfg(not(test))]
-use axum::http::{HeaderMap, Method};
 use axum::routing::post;
 use axum::{
     extract::{Path, Query, State},
@@ -490,7 +488,12 @@ async fn ensure_proxy_model_exists(
     let path = format!("model/{}", encoded_model_id);
 
     let response = proxy_service
-        .forward_request(Method::GET, &path, HeaderMap::new(), None)
+        .forward_request(
+            axum::http::Method::GET,
+            &path,
+            axum::http::HeaderMap::new(),
+            None,
+        )
         .await
         .map_err(|e| {
             tracing::error!("Failed to verify model '{}' via proxy: {}", model_id, e);
