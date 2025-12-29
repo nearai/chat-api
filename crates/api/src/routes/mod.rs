@@ -12,7 +12,7 @@ use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use utoipa::ToSchema;
 
 use crate::{
-    middleware::{AuthState, MetricsState, RateLimitState},
+    middleware::{AuthState, MetricsState},
     state::AppState,
     static_files,
 };
@@ -113,8 +113,6 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         crate::middleware::auth_middleware,
     ));
 
-    let rate_limit_state = RateLimitState::new();
-
     // Configs routes (requires user authentication, not admin)
     let configs_routes = configs::create_configs_router().layer(from_fn_with_state(
         auth_state.clone(),
@@ -122,7 +120,7 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
     ));
 
     // API proxy routes (requires authentication)
-    let api_routes = api::create_api_router(rate_limit_state).layer(from_fn_with_state(
+    let api_routes = api::create_api_router().layer(from_fn_with_state(
         auth_state,
         crate::middleware::auth_middleware,
     ));

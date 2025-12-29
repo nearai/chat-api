@@ -2,11 +2,12 @@
 
 use crate::pool::DbPool;
 use async_trait::async_trait;
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use services::{
     analytics::{
         ActivityLogEntry, ActivityMetricsSummary, AnalyticsRepository, AnalyticsSummary,
-        AuthMethodBreakdown, RecordActivityRequest, TopActiveUser, UserMetricsSummary,
+        AuthMethodBreakdown, DailyUsageSnapshot, RecordActivityRequest, RecordDailyUsageRequest,
+        TopActiveUser, UserMetricsSummary,
     },
     UserId,
 };
@@ -45,6 +46,62 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
             .await?;
 
         Ok(())
+    }
+
+    async fn record_daily_usage(&self, request: RecordDailyUsageRequest) -> anyhow::Result<()> {
+        let client = self.pool.get().await?;
+
+        client
+            .execute(
+                r#"
+                INSERT INTO user_daily_usage (user_id, usage_date, request_count, token_count)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (user_id, usage_date) DO UPDATE
+                  SET request_count = user_daily_usage.request_count + $3,
+                      token_count = user_daily_usage.token_count + $4,
+                      updated_at = NOW()
+                "#,
+                &[
+                    &request.user_id,
+                    &request.usage_date,
+                    &request.request_increment,
+                    &request.token_increment.unwrap_or(0),
+                ],
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    async fn get_user_daily_usage(
+        &self,
+        user_id: UserId,
+        usage_date: NaiveDate,
+    ) -> anyhow::Result<DailyUsageSnapshot> {
+        let client = self.pool.get().await?;
+
+        let row = client
+            .query_opt(
+                r#"
+                SELECT user_id, usage_date, request_count, token_count, updated_at
+                FROM user_daily_usage
+                WHERE user_id = $1 AND usage_date = $2
+                "#,
+                &[&user_id, &usage_date],
+            )
+            .await?;
+
+        if let Some(row) = row {
+            Ok(DailyUsageSnapshot {
+                user_id: row.get(0),
+                usage_date: row.get(1),
+                request_count: row.get(2),
+                token_count: row.get(3),
+                updated_at: row.get(4),
+            })
+        } else {
+            Ok(DailyUsageSnapshot::zero(user_id, usage_date))
+        }
     }
 
     async fn get_analytics_summary(

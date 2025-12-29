@@ -1,3 +1,4 @@
+use crate::middleware::RateLimitState;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -51,6 +52,8 @@ pub struct AppState {
     pub metrics_service: Arc<dyn services::metrics::MetricsServiceTrait>,
     /// Analytics service for database-backed analytics
     pub analytics_service: Arc<dyn services::analytics::AnalyticsServiceTrait>,
+    /// Daily usage tracker for rate limiting
+    pub rate_limit_state: RateLimitState,
     /// NEAR RPC URL used for on-chain balance checks (if configured)
     pub near_rpc_url: Url,
     /// In-memory cache for NEAR account balances to avoid frequent RPC calls

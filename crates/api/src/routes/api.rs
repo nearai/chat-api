@@ -45,9 +45,7 @@ pub const USER_BANNED_ERROR_MESSAGE: &str =
     "Access temporarily restricted. Please try again later.";
 
 /// Create the OpenAI API proxy router
-pub fn create_api_router(
-    rate_limit_state: crate::middleware::RateLimitState,
-) -> Router<crate::state::AppState> {
+pub fn create_api_router() -> Router<crate::state::AppState> {
     let conversations_router = Router::new()
         .route("/v1/conversations", post(create_conversation))
         .route("/v1/conversations", get(list_conversations))
@@ -98,8 +96,7 @@ pub fn create_api_router(
 
     let responses_router = Router::new()
         .route("/v1/responses", post(proxy_responses))
-        .layer(axum::middleware::from_fn_with_state(
-            rate_limit_state,
+        .layer(axum::middleware::from_fn(
             crate::middleware::rate_limit_middleware,
         ));
 

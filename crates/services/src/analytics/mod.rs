@@ -8,7 +8,7 @@ pub mod ports;
 pub use ports::*;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use std::sync::Arc;
 
 use crate::UserId;
@@ -124,6 +124,30 @@ impl AnalyticsServiceTrait for AnalyticsServiceImpl {
     ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
         self.repository
             .get_top_active_users(start, end, limit)
+            .await
+            .map_err(|e| AnalyticsError::InternalError(e.to_string()))
+    }
+}
+
+#[async_trait]
+impl DailyUsageStore for AnalyticsServiceImpl {
+    async fn record_daily_usage(
+        &self,
+        request: RecordDailyUsageRequest,
+    ) -> Result<(), AnalyticsError> {
+        self.repository
+            .record_daily_usage(request)
+            .await
+            .map_err(|e| AnalyticsError::InternalError(e.to_string()))
+    }
+
+    async fn get_user_daily_usage(
+        &self,
+        user_id: UserId,
+        usage_date: NaiveDate,
+    ) -> Result<DailyUsageSnapshot, AnalyticsError> {
+        self.repository
+            .get_user_daily_usage(user_id, usage_date)
             .await
             .map_err(|e| AnalyticsError::InternalError(e.to_string()))
     }
