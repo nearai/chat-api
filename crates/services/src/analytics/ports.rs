@@ -180,16 +180,6 @@ pub trait AnalyticsRepository: Send + Sync {
     /// Record a user activity
     async fn record_activity(&self, request: RecordActivityRequest) -> anyhow::Result<()>;
 
-    /// Increment a user's daily usage tally
-    async fn record_daily_usage(&self, request: RecordDailyUsageRequest) -> anyhow::Result<()>;
-
-    /// Read a user's usage totals for a specific day
-    async fn get_user_daily_usage(
-        &self,
-        user_id: UserId,
-        usage_date: NaiveDate,
-    ) -> anyhow::Result<DailyUsageSnapshot>;
-
     /// Get analytics summary for a time period
     async fn get_analytics_summary(
         &self,
@@ -221,6 +211,16 @@ pub trait AnalyticsRepository: Send + Sync {
         end: DateTime<Utc>,
         limit: i64,
     ) -> anyhow::Result<Vec<TopActiveUser>>;
+
+    /// Increment a user's daily usage tally
+    async fn record_daily_usage(&self, request: RecordDailyUsageRequest) -> anyhow::Result<()>;
+
+    /// Read a user's usage totals for a specific day
+    async fn get_user_daily_usage(
+        &self,
+        user_id: UserId,
+        usage_date: NaiveDate,
+    ) -> anyhow::Result<DailyUsageSnapshot>;
 }
 
 /// Error types for analytics operations
