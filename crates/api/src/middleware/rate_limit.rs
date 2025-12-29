@@ -53,6 +53,8 @@ struct UserRateLimitState {
     daily_count: i64,
 }
 
+type SharedUserRateLimitState = Arc<Mutex<UserRateLimitState>>;
+
 impl UserRateLimitState {
     fn new(max_concurrent: usize) -> Self {
         Self {
@@ -74,7 +76,7 @@ impl UserRateLimitState {
 
 #[derive(Clone)]
 pub struct RateLimitState {
-    user_limits: Arc<Mutex<HashMap<UserId, UserRateLimitState>>>,
+    user_limits: Arc<Mutex<HashMap<UserId, SharedUserRateLimitState>>>,
     config: Arc<RateLimitConfig>,
     analytics_store: Arc<dyn DailyUsageStore>,
 }
@@ -93,27 +95,42 @@ impl RateLimitState {
     }
 
     async fn try_acquire(&self, user_id: UserId) -> Result<RateLimitGuard, RateLimitError> {
-        let mut user_limits = self.user_limits.lock().await;
+        let user_state = {
+            let mut user_limits = self.user_limits.lock().await;
 
-        user_limits.retain(|_, state| !state.is_idle(Duration::from_secs(3600)));
+            user_limits.retain(|_, state| match state.try_lock() {
+                Ok(guard) => !guard.is_idle(Duration::from_secs(3600)),
+                Err(_) => true,
+            });
 
-        let user_state = user_limits
-            .entry(user_id)
-            .or_insert_with(|| UserRateLimitState::new(self.config.max_concurrent));
+            let entry = user_limits.entry(user_id).or_insert_with(|| {
+                Arc::new(Mutex::new(UserRateLimitState::new(
+                    self.config.max_concurrent,
+                )))
+            });
+
+            Arc::clone(entry)
+        };
 
         let now = Instant::now();
-        user_state.last_activity = now;
-
         let today = Utc::now().date_naive();
-        if user_state.daily_date != today {
-            match self
+
+        let needs_snapshot = {
+            let guard = user_state.lock().await;
+            guard.daily_date != today
+        };
+
+        if needs_snapshot {
+            let snapshot_result = self
                 .analytics_store
                 .get_user_daily_usage(user_id, today)
-                .await
-            {
+                .await;
+
+            let mut guard = user_state.lock().await;
+            match snapshot_result {
                 Ok(snapshot) => {
-                    user_state.daily_date = today;
-                    user_state.daily_count = snapshot.request_count;
+                    guard.daily_date = today;
+                    guard.daily_count = snapshot.request_count;
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -121,11 +138,14 @@ impl RateLimitState {
                         "Failed to refresh daily usage counts: {}",
                         e
                     );
-                    user_state.daily_date = today;
-                    user_state.daily_count = 0;
+                    guard.daily_date = today;
+                    guard.daily_count = 0;
                 }
             }
         }
+
+        let mut user_state = user_state.lock().await;
+        user_state.last_activity = now;
 
         while let Some(front) = user_state.request_timestamps.front() {
             if now.duration_since(*front) > self.config.window_duration {
