@@ -415,7 +415,7 @@ pub async fn batch_upsert_models(
             }
         }
 
-        #[cfg(not(test))]
+        #[cfg(not(feature = "test"))]
         ensure_proxy_model_exists(app_state.proxy_service.clone(), &model_id).await?;
 
         // Check if model exists
@@ -479,7 +479,7 @@ pub async fn batch_upsert_models(
     Ok(Json(results.into_iter().map(Into::into).collect()))
 }
 
-#[cfg(not(test))]
+#[cfg(not(feature = "test"))]
 async fn ensure_proxy_model_exists(
     proxy_service: std::sync::Arc<dyn services::response::ports::OpenAIProxyService>,
     model_id: &str,
