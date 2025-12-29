@@ -9,7 +9,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use services::analytics::{ActivityLogEntry, AnalyticsSummary, TopActiveUsersResponse};
-use services::model::ports::{UpdateModelParams, UpsertModelParams};
+use services::model::ports::{PartialModelSettings, UpdateModelParams};
 use services::UserId;
 
 /// Pagination query parameters
@@ -366,8 +366,7 @@ pub async fn list_models(
 /// }
 /// ```
 ///
-/// If a model doesn't exist, missing fields will use default values.
-/// If a model exists, only provided fields will be updated.
+/// All provided model IDs must already exist; missing IDs return 400.
 /// Requires admin authentication.
 #[utoipa::path(
     patch,
@@ -395,13 +394,16 @@ pub async fn batch_upsert_models(
 
     tracing::info!("Batch upserting {} models", request.models.len());
 
-    use services::model::ports::{ModelSettings, PartialModelSettings};
-
     let mut results = Vec::new();
 
     for (model_id, partial_settings) in request.models {
         if model_id.trim().is_empty() {
             return Err(ApiError::bad_request("model_id cannot be empty"));
+        }
+
+        #[cfg(not(feature = "test"))]
+        {
+            ensure_model_exists(&app_state, &model_id).await?;
         }
 
         // Validate system prompt length if provided
@@ -415,52 +417,19 @@ pub async fn batch_upsert_models(
             }
         }
 
-        // Check if model exists
-        let existing_model = app_state
+        let settings: PartialModelSettings = partial_settings.into();
+        let params = UpdateModelParams {
+            model_id: model_id.clone(),
+            settings: Some(settings),
+        };
+        let model = app_state
             .model_service
-            .get_model(&model_id)
+            .update_model(params)
             .await
             .map_err(|e| {
-                tracing::error!("Failed to check if model exists: {}", e);
-                ApiError::internal_server_error("Failed to check if model exists")
+                tracing::error!("Failed to update model {}: {}", model_id, e);
+                ApiError::internal_server_error(format!("Failed to update model {}", model_id))
             })?;
-
-        let model = if existing_model.is_some() {
-            // Model exists: partial update
-            let settings: PartialModelSettings = partial_settings.into();
-            let params = UpdateModelParams {
-                model_id: model_id.clone(),
-                settings: Some(settings),
-            };
-
-            app_state
-                .model_service
-                .update_model(params)
-                .await
-                .map_err(|e| {
-                    tracing::error!("Failed to update model {}: {}", model_id, e);
-                    ApiError::internal_server_error(format!("Failed to update model {}", model_id))
-                })?
-        } else {
-            // Model doesn't exist: create with defaults + provided partial settings
-            let default_settings = ModelSettings::default();
-            let partial: PartialModelSettings = partial_settings.into();
-            let full_settings = default_settings.into_updated(partial);
-
-            let params = UpsertModelParams {
-                model_id: model_id.clone(),
-                settings: full_settings,
-            };
-
-            app_state
-                .model_service
-                .upsert_model(params)
-                .await
-                .map_err(|e| {
-                    tracing::error!("Failed to create model {}: {}", model_id, e);
-                    ApiError::internal_server_error(format!("Failed to create model {}", model_id))
-                })?
-        };
 
         // Invalidate cache immediately after each successful DB write
         // NOTE: This only invalidates cache on the current instance. In multi-instance deployments,
@@ -592,6 +561,13 @@ pub async fn upsert_system_configs(
 ) -> Result<Json<SystemConfigsResponse>, ApiError> {
     tracing::info!("Upserting system configs");
 
+    #[cfg(not(feature = "test"))]
+    {
+        if let Some(ref model_id) = request.default_model {
+            ensure_model_exists(&app_state, model_id).await?;
+        }
+    }
+
     let partial: services::system_configs::ports::PartialSystemConfigs = request.into();
 
     // Check if configs exist
@@ -631,6 +607,27 @@ pub async fn upsert_system_configs(
     };
 
     Ok(Json(updated.into()))
+}
+
+#[cfg(not(feature = "test"))]
+async fn ensure_model_exists(app_state: &AppState, model_id: &str) -> Result<(), ApiError> {
+    let exists = app_state
+        .model_service
+        .get_model(model_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get model '{}': {}", model_id, e);
+            ApiError::internal_server_error("Failed to get model")
+        })?;
+
+    if exists.is_none() {
+        return Err(ApiError::bad_request(format!(
+            "Model '{}' does not exist",
+            model_id
+        )));
+    }
+
+    Ok(())
 }
 
 /// Create admin router with all admin routes (requires admin authentication)
