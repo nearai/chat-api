@@ -633,6 +633,11 @@ pub async fn upsert_system_configs(
 ) -> Result<Json<SystemConfigsResponse>, ApiError> {
     tracing::info!("Upserting system configs");
 
+    #[cfg(not(feature = "test"))]
+    if let Some(ref model_id) = request.default_model {
+        ensure_proxy_model_exists(app_state.proxy_service.clone(), model_id).await?;
+    }
+
     let partial: services::system_configs::ports::PartialSystemConfigs = request.into();
 
     // Check if configs exist
