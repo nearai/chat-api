@@ -486,7 +486,8 @@ async fn ensure_proxy_model_exists(
     proxy_service: std::sync::Arc<dyn services::response::ports::OpenAIProxyService>,
     model_id: &str,
 ) -> Result<(), ApiError> {
-    let path = format!("model/{model_id}"); // TODO: API get model by id
+    let encoded_model_id = urlencoding::encode(model_id);
+    let path = format!("model/{}", encoded_model_id);
 
     let response = proxy_service
         .forward_request(Method::GET, &path, HeaderMap::new(), None)
