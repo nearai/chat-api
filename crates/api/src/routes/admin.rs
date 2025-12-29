@@ -9,7 +9,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use services::analytics::{ActivityLogEntry, AnalyticsSummary, TopActiveUsersResponse};
-use services::model::ports::{PartialModelSettings, UpdateModelParams};
+use services::model::ports::UpsertModelParams;
 use services::UserId;
 
 /// Pagination query parameters
@@ -417,14 +417,17 @@ pub async fn batch_upsert_models(
             }
         }
 
-        let settings: PartialModelSettings = partial_settings.into();
-        let params = UpdateModelParams {
+        let settings =
+            services::model::ports::ModelSettings::default().into_updated(partial_settings.into());
+
+        let params = UpsertModelParams {
             model_id: model_id.clone(),
-            settings: Some(settings),
+            settings,
         };
+
         let model = app_state
             .model_service
-            .update_model(params)
+            .upsert_model(params)
             .await
             .map_err(|e| {
                 tracing::error!("Failed to update model {}: {}", model_id, e);
