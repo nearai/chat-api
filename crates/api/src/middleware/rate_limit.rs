@@ -144,8 +144,8 @@ impl RateLimitState {
                             "Failed to refresh daily usage counts: {}",
                             e
                         );
-                        new_guard.daily_date = today;
-                        new_guard.daily_count = 0;
+
+                        return Err(RateLimitError::InternalServerError);
                     }
                 }
             }
@@ -200,11 +200,7 @@ impl RateLimitState {
             }
         }
 
-        let permit = match user_state_guard
-            .semaphore
-            .clone()
-            .try_acquire_owned()
-        {
+        let permit = match user_state_guard.semaphore.clone().try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
                 tracing::warn!(
@@ -241,6 +237,7 @@ impl RateLimitState {
     }
 }
 
+#[derive(Debug)]
 pub struct RateLimitGuard {
     _permit: OwnedSemaphorePermit,
 }
@@ -250,6 +247,7 @@ enum RateLimitError {
     TooManyConcurrent,
     RateLimitExceeded { retry_after_ms: u64 },
     DailyLimitExceeded { limit: usize, retry_after_ms: u64 },
+    InternalServerError,
 }
 
 #[derive(Serialize)]
@@ -284,6 +282,11 @@ impl IntoResponse for RateLimitError {
                     "Daily request limit of {limit} reached. Please retry after {retry_after_ms}ms."
                 ),
                 Some(retry_after_ms),
+            ),
+            RateLimitError::InternalServerError => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to load daily usage.".to_string(),
+                None,
             ),
         };
 
