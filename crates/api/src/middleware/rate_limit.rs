@@ -113,25 +113,30 @@ impl RateLimitState {
         let now = Instant::now();
         let today = Utc::now().date_naive();
 
-        let needs_snapshot = {
-            let guard = user_state.lock().await;
-            guard.daily_date != today
-        };
+        // Acquire the per-user lock once and hold it for the whole rate-limit decision path.
+        // If we need to refresh the daily snapshot (requires an await), we drop the lock,
+        // fetch the snapshot, then re-acquire and re-check before applying.
+        let user_state_lock = Arc::clone(&user_state);
+        let mut user_state_guard = user_state_lock.lock().await;
+        if user_state_guard.daily_date != today {
+            // Drop lock while awaiting the DB call to avoid blocking concurrent requests for
+            // the *same* user longer than necessary.
+            drop(user_state_guard);
 
-        if needs_snapshot {
             let snapshot_result = self
                 .analytics_store
                 .get_user_daily_usage(user_id, today)
                 .await;
 
-            let mut guard = user_state.lock().await;
-            // Re-check under the lock to avoid a race at midnight where multiple concurrent
-            // requests decide a snapshot is needed and then overwrite each other's updates.
-            if guard.daily_date != today {
+            // Re-acquire and re-check under the lock to avoid a race at midnight where multiple
+            // concurrent requests decide a snapshot is needed and then overwrite each other's
+            // updates.
+            let mut new_guard = user_state_lock.lock().await;
+            if new_guard.daily_date != today {
                 match snapshot_result {
                     Ok(snapshot) => {
-                        guard.daily_date = today;
-                        guard.daily_count = snapshot.request_count;
+                        new_guard.daily_date = today;
+                        new_guard.daily_count = snapshot.request_count;
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -139,26 +144,26 @@ impl RateLimitState {
                             "Failed to refresh daily usage counts: {}",
                             e
                         );
-                        guard.daily_date = today;
-                        guard.daily_count = 0;
+                        new_guard.daily_date = today;
+                        new_guard.daily_count = 0;
                     }
                 }
             }
+            user_state_guard = new_guard;
         }
 
-        let mut user_state = user_state.lock().await;
-        user_state.last_activity = now;
+        user_state_guard.last_activity = now;
 
-        while let Some(front) = user_state.request_timestamps.front() {
+        while let Some(front) = user_state_guard.request_timestamps.front() {
             if now.duration_since(*front) > self.config.window_duration {
-                user_state.request_timestamps.pop_front();
+                user_state_guard.request_timestamps.pop_front();
             } else {
                 break;
             }
         }
 
         if let Some(limit) = self.config.daily_request_limit {
-            if user_state.daily_count >= limit as i64 {
+            if user_state_guard.daily_count >= limit as i64 {
                 let next_day = today.succ_opt().unwrap_or(today);
                 let midnight = next_day.and_hms_opt(0, 0, 0).unwrap();
                 let reset_at = DateTime::<Utc>::from_naive_utc_and_offset(midnight, Utc);
@@ -181,8 +186,8 @@ impl RateLimitState {
             }
         }
 
-        if user_state.request_timestamps.len() >= self.config.max_requests_per_window {
-            if let Some(oldest) = user_state.request_timestamps.front() {
+        if user_state_guard.request_timestamps.len() >= self.config.max_requests_per_window {
+            if let Some(oldest) = user_state_guard.request_timestamps.front() {
                 let wait_time = self.config.window_duration - now.duration_since(*oldest);
                 tracing::warn!(
                     user_id = %user_id.0,
@@ -195,7 +200,11 @@ impl RateLimitState {
             }
         }
 
-        let permit = match user_state.semaphore.clone().try_acquire_owned() {
+        let permit = match user_state_guard
+            .semaphore
+            .clone()
+            .try_acquire_owned()
+        {
             Ok(permit) => permit,
             Err(_) => {
                 tracing::warn!(
@@ -206,8 +215,8 @@ impl RateLimitState {
             }
         };
 
-        user_state.request_timestamps.push_back(now);
-        user_state.daily_count += 1;
+        user_state_guard.request_timestamps.push_back(now);
+        user_state_guard.daily_count += 1;
 
         let analytics_store = self.analytics_store.clone();
         let usage_request = RecordDailyUsageRequest {
