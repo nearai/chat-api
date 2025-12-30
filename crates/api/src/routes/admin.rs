@@ -399,6 +399,11 @@ pub async fn batch_upsert_models(
 
     let mut results = Vec::new();
 
+    #[cfg(not(feature = "test"))]
+    for (model_id, _) in &request.models {
+        ensure_proxy_model_exists(app_state.proxy_service.clone(), &model_id).await?;
+    }
+
     for (model_id, partial_settings) in request.models {
         if model_id.trim().is_empty() {
             return Err(ApiError::bad_request("model_id cannot be empty"));
@@ -414,9 +419,6 @@ pub async fn batch_upsert_models(
                 )));
             }
         }
-
-        #[cfg(not(feature = "test"))]
-        ensure_proxy_model_exists(app_state.proxy_service.clone(), &model_id).await?;
 
         // Check if model exists
         let existing_model = app_state
@@ -497,7 +499,10 @@ async fn ensure_proxy_model_exists(
         .await
         .map_err(|e| {
             tracing::error!("Failed to verify model '{}' via proxy: {}", model_id, e);
-            ApiError::internal_server_error("Failed to verify model existence with proxy")
+            ApiError::internal_server_error(format!(
+                "Failed to verify existence of model '{}' with proxy",
+                model_id
+            ))
         })?;
 
     if (200..300).contains(&response.status) {
@@ -639,7 +644,7 @@ pub async fn upsert_system_configs(
 
     #[cfg(not(feature = "test"))]
     if let Some(ref model_id) = request.default_model {
-        ensure_proxy_model_exists(app_state.proxy_service.clone(), model_id).await?;
+        ensure_proxy_model_exists(app_state.proxy_service, model_id).await?;
     }
 
     let partial: services::system_configs::ports::PartialSystemConfigs = request.into();
