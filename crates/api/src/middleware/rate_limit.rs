@@ -156,9 +156,7 @@ impl RateLimitState {
         if let Some(limit) = self.config.daily_request_limit {
             if user_state.daily_count >= limit as i64 {
                 let next_day = today.succ_opt().unwrap_or(today);
-                let midnight = next_day
-                    .and_hms_opt(0, 0, 0)
-                    .unwrap_or_else(|| next_day.and_hms_opt(0, 0, 0).unwrap());
+                let midnight = next_day.and_hms_opt(0, 0, 0).unwrap();
                 let reset_at = DateTime::<Utc>::from_naive_utc_and_offset(midnight, Utc);
                 let retry_after_ms = reset_at
                     .signed_duration_since(Utc::now())
