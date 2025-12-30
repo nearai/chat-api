@@ -399,6 +399,11 @@ pub async fn batch_upsert_models(
 
     let mut results = Vec::new();
 
+    #[cfg(not(feature = "test"))]
+    for (model_id, _) in &request.models {
+        ensure_proxy_model_exists(app_state.proxy_service.clone(), &model_id).await?;
+    }
+
     for (model_id, partial_settings) in request.models {
         if model_id.trim().is_empty() {
             return Err(ApiError::bad_request("model_id cannot be empty"));
@@ -474,6 +479,51 @@ pub async fn batch_upsert_models(
     }
 
     Ok(Json(results.into_iter().map(Into::into).collect()))
+}
+
+#[cfg(not(feature = "test"))]
+async fn ensure_proxy_model_exists(
+    proxy_service: std::sync::Arc<dyn services::response::ports::OpenAIProxyService>,
+    model_id: &str,
+) -> Result<(), ApiError> {
+    let encoded_model_id = urlencoding::encode(model_id);
+    let path = format!("model/{}", encoded_model_id);
+
+    let response = proxy_service
+        .forward_request(
+            axum::http::Method::GET,
+            &path,
+            axum::http::HeaderMap::new(),
+            None,
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to verify model '{}' via proxy: {}", model_id, e);
+            ApiError::internal_server_error(format!(
+                "Failed to verify existence of model '{}' with proxy",
+                model_id
+            ))
+        })?;
+
+    if (200..300).contains(&response.status) {
+        Ok(())
+    } else if response.status == 404 {
+        tracing::warn!("Model '{}' not found via proxy", model_id);
+        Err(ApiError::bad_request(format!(
+            "Model '{}' does not exist in proxy service",
+            model_id
+        )))
+    } else {
+        tracing::error!(
+            "Unexpected proxy status {} while checking model '{}'",
+            response.status,
+            model_id
+        );
+        Err(ApiError::internal_server_error(format!(
+            "Failed to verify model '{}' with proxy",
+            model_id
+        )))
+    }
 }
 
 /// Delete a model
@@ -591,6 +641,11 @@ pub async fn upsert_system_configs(
     Json(request): Json<UpdateSystemConfigsRequest>,
 ) -> Result<Json<SystemConfigsResponse>, ApiError> {
     tracing::info!("Upserting system configs");
+
+    #[cfg(not(feature = "test"))]
+    if let Some(ref model_id) = request.default_model {
+        ensure_proxy_model_exists(app_state.proxy_service, model_id).await?;
+    }
 
     let partial: services::system_configs::ports::PartialSystemConfigs = request.into();
 
