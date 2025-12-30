@@ -1,3 +1,4 @@
+use api::middleware::{RateLimitConfig, RateLimitState};
 use api::{create_router_with_cors, ApiDoc, AppState};
 use config::LoggingConfig;
 use opentelemetry::global;
@@ -149,9 +150,16 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize analytics service
     tracing::info!("Initializing analytics service...");
-    let analytics_service = Arc::new(AnalyticsServiceImpl::new(
+    let analytics_impl = Arc::new(AnalyticsServiceImpl::new(
         analytics_repo as Arc<dyn services::analytics::AnalyticsRepository>,
     ));
+    let analytics_service: Arc<dyn services::analytics::AnalyticsServiceTrait> =
+        analytics_impl.clone();
+    let daily_usage_store: Arc<dyn services::analytics::DailyUsageStore> = analytics_impl.clone();
+
+    // Initialize rate limit state
+    let rate_limit_state =
+        RateLimitState::with_config(RateLimitConfig::default(), daily_usage_store);
 
     // Initialize system configs service
     tracing::info!("Initializing system configs service...");
@@ -240,7 +248,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Create router with CORS support
-    let app = create_router_with_cors(app_state, config.cors.clone())
+    let app = create_router_with_cors(app_state, rate_limit_state, config.cors.clone())
         .merge(SwaggerUi::new("/docs").url("/api-docs/openapi.json", ApiDoc::openapi()));
 
     // Start server

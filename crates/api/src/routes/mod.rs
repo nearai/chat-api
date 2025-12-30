@@ -11,8 +11,9 @@ use serde::Serialize;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use utoipa::ToSchema;
 
+use crate::middleware::RateLimitState;
 use crate::{
-    middleware::{AuthState, MetricsState, RateLimitState},
+    middleware::{AuthState, MetricsState},
     state::AppState,
     static_files,
 };
@@ -74,7 +75,11 @@ fn is_origin_allowed(origin_str: &str, cors_config: &config::CorsConfig) -> bool
 }
 
 /// Create the main API router with CORS configuration
-pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsConfig) -> Router {
+pub fn create_router_with_cors(
+    app_state: AppState,
+    rate_limit_state: RateLimitState,
+    cors_config: config::CorsConfig,
+) -> Router {
     // Create auth state for middleware
     let auth_state = AuthState {
         session_repository: app_state.session_repository.clone(),
@@ -112,8 +117,6 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         auth_state.clone(),
         crate::middleware::auth_middleware,
     ));
-
-    let rate_limit_state = RateLimitState::new();
 
     // Configs routes (requires user authentication, not admin)
     let configs_routes = configs::create_configs_router().layer(from_fn_with_state(

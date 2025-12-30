@@ -1,5 +1,6 @@
 use crate::consts::LIST_FILES_LIMIT_MAX;
 use crate::middleware::auth::AuthenticatedUser;
+use crate::middleware::RateLimitState;
 use axum::{
     body::Body,
     extract::{Extension, Path, Request, State},
@@ -45,9 +46,7 @@ pub const USER_BANNED_ERROR_MESSAGE: &str =
     "Access temporarily restricted. Please try again later.";
 
 /// Create the OpenAI API proxy router
-pub fn create_api_router(
-    rate_limit_state: crate::middleware::RateLimitState,
-) -> Router<crate::state::AppState> {
+pub fn create_api_router(rate_limit_state: RateLimitState) -> Router<crate::state::AppState> {
     let conversations_router = Router::new()
         .route("/v1/conversations", post(create_conversation))
         .route("/v1/conversations", get(list_conversations))
