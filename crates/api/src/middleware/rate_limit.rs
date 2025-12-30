@@ -125,19 +125,23 @@ impl RateLimitState {
                 .await;
 
             let mut guard = user_state.lock().await;
-            match snapshot_result {
-                Ok(snapshot) => {
-                    guard.daily_date = today;
-                    guard.daily_count = snapshot.request_count;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        user_id = %user_id.0,
-                        "Failed to refresh daily usage counts: {}",
-                        e
-                    );
-                    guard.daily_date = today;
-                    guard.daily_count = 0;
+            // Re-check under the lock to avoid a race at midnight where multiple concurrent
+            // requests decide a snapshot is needed and then overwrite each other's updates.
+            if guard.daily_date != today {
+                match snapshot_result {
+                    Ok(snapshot) => {
+                        guard.daily_date = today;
+                        guard.daily_count = snapshot.request_count;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            user_id = %user_id.0,
+                            "Failed to refresh daily usage counts: {}",
+                            e
+                        );
+                        guard.daily_date = today;
+                        guard.daily_count = 0;
+                    }
                 }
             }
         }
