@@ -15,6 +15,46 @@ fn expected_recipient() -> String {
     std::env::var("NEAR_EXPECTED_RECIPIENT").unwrap_or_else(|_| "private.near.ai".to_string())
 }
 
+/// Validates a nonce timestamp for replay protection
+/// Returns Ok(()) if timestamp is valid, Err otherwise
+fn validate_nonce_timestamp(nonce_timestamp_ms: u64) -> anyhow::Result<()> {
+    if nonce_timestamp_ms == 0 {
+        tracing::warn!("NEAR signature has invalid timestamp (zero)");
+        return Err(anyhow::anyhow!(
+            "Invalid signature timestamp: timestamp is zero"
+        ));
+    }
+
+    let nonce_time = i64::try_from(nonce_timestamp_ms)
+        .ok()
+        .and_then(DateTime::from_timestamp_millis)
+        .ok_or_else(|| {
+            tracing::warn!(
+                "NEAR signature has invalid timestamp (out of range): {}ms",
+                nonce_timestamp_ms
+            );
+            anyhow::anyhow!("Invalid signature timestamp: timestamp out of range")
+        })?;
+
+    let age = Utc::now().signed_duration_since(nonce_time);
+    if age > Duration::milliseconds(MAX_NONCE_AGE_MS as i64) {
+        tracing::warn!(
+            "NEAR signature expired: age={}ms, max_age={}ms",
+            age.num_milliseconds(),
+            MAX_NONCE_AGE_MS
+        );
+        return Err(anyhow::anyhow!("Signature expired"));
+    }
+    if age < Duration::zero() {
+        tracing::warn!("NEAR signature has future timestamp");
+        return Err(anyhow::anyhow!(
+            "Invalid signature timestamp: timestamp is in the future"
+        ));
+    }
+
+    Ok(())
+}
+
 /// Signed message data received from the wallet (NEP-413 output)
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SignedMessage {
@@ -165,28 +205,7 @@ impl NearAuthService {
 
         // 4. Check nonce timestamp (replay protection)
         let nonce_timestamp_ms = payload.extract_timestamp_from_nonce();
-        if nonce_timestamp_ms > 0 {
-            let nonce_time = DateTime::from_timestamp_millis(nonce_timestamp_ms as i64);
-            if let Some(nonce_time) = nonce_time {
-                let age = Utc::now().signed_duration_since(nonce_time);
-                if age > Duration::milliseconds(MAX_NONCE_AGE_MS as i64) {
-                    tracing::warn!(
-                        "NEAR signature expired for account {}: age={:?}ms, max_age={}ms",
-                        account_id,
-                        age.num_milliseconds(),
-                        MAX_NONCE_AGE_MS
-                    );
-                    return Err(anyhow::anyhow!("Signature expired"));
-                }
-                if age < Duration::zero() {
-                    tracing::warn!(
-                        "NEAR signature has future timestamp for account {}",
-                        account_id
-                    );
-                    return Err(anyhow::anyhow!("Invalid signature timestamp"));
-                }
-            }
-        }
+        validate_nonce_timestamp(nonce_timestamp_ms)?;
 
         // 5. Verify signature AND public key ownership via near-api
         let is_valid = payload
@@ -228,5 +247,57 @@ impl NearAuthService {
         );
 
         Ok((session, is_new_user))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    #[test]
+    fn test_zero_timestamp_should_fail() {
+        let result = validate_nonce_timestamp(0);
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Invalid signature timestamp: timestamp is zero"
+        );
+    }
+
+    #[test]
+    fn test_large_timestamp_overflow() {
+        let large_timestamp = u64::MAX;
+        let result = validate_nonce_timestamp(large_timestamp);
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Invalid signature timestamp: timestamp out of range"
+        );
+    }
+
+    #[test]
+    fn test_future_timestamp_should_fail() {
+        let future_ms = (Utc::now().timestamp_millis() + 3600 * 1000) as u64;
+        let result = validate_nonce_timestamp(future_ms);
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Invalid signature timestamp: timestamp is in the future"
+        );
+    }
+
+    #[test]
+    fn test_expired_timestamp_should_fail() {
+        let expired_ms = (Utc::now().timestamp_millis() - (MAX_NONCE_AGE_MS as i64 + 1000)) as u64;
+        let result = validate_nonce_timestamp(expired_ms);
+        assert_eq!(result.unwrap_err().to_string(), "Signature expired");
+    }
+
+    #[test]
+    fn test_valid_recent_timestamp_should_succeed() {
+        let recent_ms = (Utc::now().timestamp_millis() - 60 * 1000) as u64;
+        let result = validate_nonce_timestamp(recent_ms);
+        assert!(
+            result.is_ok(),
+            "Recent valid timestamp should pass validation"
+        );
     }
 }
