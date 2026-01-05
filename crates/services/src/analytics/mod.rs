@@ -151,4 +151,16 @@ impl DailyUsageStore for AnalyticsServiceImpl {
             .await
             .map_err(|e| AnalyticsError::InternalError(e.to_string()))
     }
+
+    async fn increment_daily_usage_if_below_limit(
+        &self,
+        user_id: UserId,
+        usage_date: NaiveDate,
+        limit: i64,
+    ) -> Result<(i64, bool), AnalyticsError> {
+        self.repository
+            .increment_daily_usage_if_below_limit(user_id, usage_date, limit)
+            .await
+            .map_err(|e| AnalyticsError::InternalError(e.to_string()))
+    }
 }

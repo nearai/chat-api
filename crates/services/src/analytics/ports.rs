@@ -212,6 +212,16 @@ pub trait AnalyticsRepository: Send + Sync {
     /// Increment a user's daily usage tally
     async fn record_daily_usage(&self, request: RecordDailyUsageRequest) -> anyhow::Result<()>;
 
+    /// Atomically increment a user's daily usage count if it's below the provided limit.
+    ///
+    /// Returns the current count after the attempt, and whether the increment was applied.
+    async fn increment_daily_usage_if_below_limit(
+        &self,
+        user_id: UserId,
+        usage_date: NaiveDate,
+        limit: i64,
+    ) -> anyhow::Result<(i64, bool)>;
+
     /// Read a user's usage totals for a specific day
     async fn get_user_daily_usage(
         &self,
@@ -240,4 +250,14 @@ pub trait DailyUsageStore: Send + Sync {
         user_id: UserId,
         usage_date: NaiveDate,
     ) -> Result<DailyUsageSnapshot, AnalyticsError>;
+
+    /// Atomically increment a user's daily usage count if it's below the provided limit.
+    ///
+    /// Returns the current count after the attempt, and whether the increment was applied.
+    async fn increment_daily_usage_if_below_limit(
+        &self,
+        user_id: UserId,
+        usage_date: NaiveDate,
+        limit: i64,
+    ) -> Result<(i64, bool), AnalyticsError>;
 }

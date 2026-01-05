@@ -14,10 +14,7 @@ use axum::{
 };
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::Serialize;
-use services::{
-    analytics::{DailyUsageStore, RecordDailyUsageRequest},
-    UserId,
-};
+use services::{analytics::DailyUsageStore, UserId};
 use std::{
     collections::{HashMap, VecDeque},
     sync::Arc,
@@ -113,58 +110,79 @@ impl RateLimitState {
         let now = Instant::now();
         let today = Utc::now().date_naive();
 
-        // Acquire the per-user lock once and hold it for the whole rate-limit decision path.
-        // If we need to refresh the daily snapshot (requires an await), we drop the lock,
-        // fetch the snapshot, then re-acquire and re-check before applying.
+        // Phase 1: per-user in-memory checks (fast, no await).
+        // We reserve a window slot and a concurrency permit before doing the daily-limit DB
+        // check. If the daily limit rejects the request, we intentionally keep the window
+        // reservation (i.e. daily limit rejections still consume the short-window quota).
         let user_state_lock = Arc::clone(&user_state);
-        let mut user_state_guard = user_state_lock.lock().await;
-        if user_state_guard.daily_date != today {
-            // Drop lock while awaiting the DB call to avoid blocking concurrent requests for
-            // the *same* user longer than necessary.
-            drop(user_state_guard);
+        let permit = {
+            let mut user_state_guard = user_state_lock.lock().await;
 
-            let snapshot_result = self
-                .analytics_store
-                .get_user_daily_usage(user_id, today)
-                .await;
+            user_state_guard.last_activity = now;
 
-            // Re-acquire and re-check under the lock to avoid a race at midnight where multiple
-            // concurrent requests decide a snapshot is needed and then overwrite each other's
-            // updates.
-            let mut new_guard = user_state_lock.lock().await;
-            if new_guard.daily_date != today {
-                match snapshot_result {
-                    Ok(snapshot) => {
-                        new_guard.daily_date = today;
-                        new_guard.daily_count = snapshot.request_count;
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            user_id = %user_id.0,
-                            "Failed to refresh daily usage counts: {}",
-                            e
-                        );
-
-                        return Err(RateLimitError::InternalServerError);
-                    }
+            while let Some(front) = user_state_guard.request_timestamps.front() {
+                if now.duration_since(*front) > self.config.window_duration {
+                    user_state_guard.request_timestamps.pop_front();
+                } else {
+                    break;
                 }
             }
-            user_state_guard = new_guard;
-        }
 
-        user_state_guard.last_activity = now;
-
-        while let Some(front) = user_state_guard.request_timestamps.front() {
-            if now.duration_since(*front) > self.config.window_duration {
-                user_state_guard.request_timestamps.pop_front();
-            } else {
-                break;
+            if user_state_guard.request_timestamps.len() >= self.config.max_requests_per_window {
+                if let Some(oldest) = user_state_guard.request_timestamps.front() {
+                    let wait_time = self.config.window_duration - now.duration_since(*oldest);
+                    tracing::warn!(
+                        user_id = %user_id.0,
+                        "Rate limit exceeded for user, retry in {:?}",
+                        wait_time
+                    );
+                    return Err(RateLimitError::RateLimitExceeded {
+                        retry_after_ms: wait_time.as_millis() as u64,
+                    });
+                }
             }
-        }
 
+            let permit = match user_state_guard.semaphore.clone().try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(_) => {
+                    tracing::warn!(
+                        user_id = %user_id.0,
+                        "Max concurrent requests exceeded for user"
+                    );
+                    return Err(RateLimitError::TooManyConcurrent);
+                }
+            };
+
+            // Reserve a slot in the per-user sliding window.
+            user_state_guard.request_timestamps.push_back(now);
+
+            permit
+        };
+
+        // Phase 2: daily limit (multi-instance consistent via DB).
         if let Some(limit) = self.config.daily_request_limit {
-            if user_state_guard.daily_count >= limit as i64 {
-                let next_day = today.succ_opt().unwrap_or(today);
+            let (count, incremented) = self
+                .analytics_store
+                .increment_daily_usage_if_below_limit(user_id, today, limit as i64)
+                .await
+                .map_err(|e| {
+                    tracing::warn!(
+                        user_id = %user_id.0,
+                        "Failed to increment daily usage: {}",
+                        e
+                    );
+                    RateLimitError::InternalServerError
+                })?;
+
+            // Update local snapshot for observability/compatibility (not used for enforcement).
+            {
+                let mut guard = user_state_lock.lock().await;
+                guard.daily_date = today;
+                guard.daily_count = count;
+            }
+
+            if !incremented {
+                let next_day = today.succ_opt().unwrap();
                 let midnight = next_day.and_hms_opt(0, 0, 0).unwrap();
                 let reset_at = DateTime::<Utc>::from_naive_utc_and_offset(midnight, Utc);
                 let retry_after_ms = reset_at
@@ -185,53 +203,6 @@ impl RateLimitState {
                 });
             }
         }
-
-        if user_state_guard.request_timestamps.len() >= self.config.max_requests_per_window {
-            if let Some(oldest) = user_state_guard.request_timestamps.front() {
-                let wait_time = self.config.window_duration - now.duration_since(*oldest);
-                tracing::warn!(
-                    user_id = %user_id.0,
-                    "Rate limit exceeded for user, retry in {:?}",
-                    wait_time
-                );
-                return Err(RateLimitError::RateLimitExceeded {
-                    retry_after_ms: wait_time.as_millis() as u64,
-                });
-            }
-        }
-
-        let permit = match user_state_guard.semaphore.clone().try_acquire_owned() {
-            Ok(permit) => permit,
-            Err(_) => {
-                tracing::warn!(
-                    user_id = %user_id.0,
-                    "Max concurrent requests exceeded for user"
-                );
-                return Err(RateLimitError::TooManyConcurrent);
-            }
-        };
-
-        user_state_guard.request_timestamps.push_back(now);
-        user_state_guard.daily_count += 1;
-
-        let analytics_store = self.analytics_store.clone();
-        let usage_request = RecordDailyUsageRequest {
-            user_id,
-            usage_date: today,
-            request_increment: 1,
-        };
-        tokio::spawn(async move {
-            if let Err(err) = analytics_store
-                .record_daily_usage(usage_request.clone())
-                .await
-            {
-                tracing::warn!(
-                    user_id = %usage_request.user_id.0,
-                    "Failed to persist daily usage: {}",
-                    err
-                );
-            }
-        });
 
         Ok(RateLimitGuard { _permit: permit })
     }
@@ -320,10 +291,13 @@ mod tests {
     use services::analytics::{
         AnalyticsError, DailyUsageSnapshot, DailyUsageStore, RecordDailyUsageRequest,
     };
-    use std::sync::Arc;
+    use std::{collections::HashMap, sync::Arc};
     use uuid::Uuid;
 
-    struct MockDailyUsageStore;
+    #[derive(Default)]
+    struct MockDailyUsageStore {
+        counts: Mutex<HashMap<(UserId, NaiveDate), i64>>,
+    }
 
     #[async_trait]
     impl DailyUsageStore for MockDailyUsageStore {
@@ -339,16 +313,38 @@ mod tests {
             user_id: UserId,
             usage_date: NaiveDate,
         ) -> Result<DailyUsageSnapshot, AnalyticsError> {
-            Ok(DailyUsageSnapshot::zero(user_id, usage_date))
+            let counts = self.counts.lock().await;
+            let count = counts.get(&(user_id, usage_date)).copied().unwrap_or(0);
+            Ok(DailyUsageSnapshot {
+                user_id,
+                usage_date,
+                request_count: count,
+                updated_at: Utc::now(),
+            })
+        }
+
+        async fn increment_daily_usage_if_below_limit(
+            &self,
+            user_id: UserId,
+            usage_date: NaiveDate,
+            limit: i64,
+        ) -> Result<(i64, bool), AnalyticsError> {
+            let mut counts = self.counts.lock().await;
+            let entry = counts.entry((user_id, usage_date)).or_insert(0);
+            if *entry >= limit {
+                return Ok((*entry, false));
+            }
+            *entry += 1;
+            Ok((*entry, true))
         }
     }
 
     fn default_state() -> RateLimitState {
-        RateLimitState::new(Arc::new(MockDailyUsageStore))
+        RateLimitState::new(Arc::new(MockDailyUsageStore::default()))
     }
 
     fn configured_state(config: RateLimitConfig) -> RateLimitState {
-        RateLimitState::with_config(config, Arc::new(MockDailyUsageStore))
+        RateLimitState::with_config(config, Arc::new(MockDailyUsageStore::default()))
     }
 
     fn test_user_id(id: u128) -> UserId {
@@ -441,6 +437,36 @@ mod tests {
         drop(first);
 
         let result = state.try_acquire(user).await;
+        assert!(matches!(
+            result,
+            Err(RateLimitError::DailyLimitExceeded { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_daily_limit_multi_instance_shared_store() {
+        let store = Arc::new(MockDailyUsageStore::default());
+        let config = RateLimitConfig {
+            max_concurrent: 5,
+            max_requests_per_window: 100,
+            window_duration: Duration::from_secs(1),
+            daily_request_limit: Some(2),
+        };
+
+        // Simulate two API instances by using two independent RateLimitState values
+        // that share the same underlying daily usage store.
+        let state_a = RateLimitState::with_config(config.clone(), store.clone());
+        let state_b = RateLimitState::with_config(config, store);
+
+        let user = test_user_id(42);
+
+        let g1 = state_a.try_acquire(user).await.unwrap();
+        drop(g1);
+        let g2 = state_b.try_acquire(user).await.unwrap();
+        drop(g2);
+
+        // Third request (across instances) should exceed daily limit.
+        let result = state_a.try_acquire(user).await;
         assert!(matches!(
             result,
             Err(RateLimitError::DailyLimitExceeded { .. })

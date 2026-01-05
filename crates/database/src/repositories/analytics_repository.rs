@@ -334,6 +334,50 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
         Ok(())
     }
 
+    async fn increment_daily_usage_if_below_limit(
+        &self,
+        user_id: UserId,
+        usage_date: NaiveDate,
+        limit: i64,
+    ) -> anyhow::Result<(i64, bool)> {
+        let client = self.pool.get().await?;
+
+        // Atomically increment count if still below limit. If already at/over limit, do not update.
+        // This is designed to be multi-instance safe and to avoid write amplification after a user
+        // has reached their daily limit.
+        let row = client
+            .query_one(
+                r#"
+                WITH updated AS (
+                    INSERT INTO user_daily_usage (user_id, usage_date, request_count)
+                    VALUES ($1, $2, 1)
+                    ON CONFLICT (user_id, usage_date) DO UPDATE
+                      SET request_count = user_daily_usage.request_count + 1,
+                          updated_at = NOW()
+                      WHERE user_daily_usage.request_count < $3
+                    RETURNING request_count
+                )
+                SELECT
+                    request_count,
+                    true as incremented
+                FROM updated
+                UNION ALL
+                SELECT
+                    u.request_count,
+                    false as incremented
+                FROM user_daily_usage u
+                WHERE u.user_id = $1 AND u.usage_date = $2
+                  AND NOT EXISTS (SELECT 1 FROM updated)
+                "#,
+                &[&user_id, &usage_date, &limit],
+            )
+            .await?;
+
+        let count: i64 = row.get(0);
+        let incremented: bool = row.get(1);
+        Ok((count, incremented))
+    }
+
     async fn get_user_daily_usage(
         &self,
         user_id: UserId,
