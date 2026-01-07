@@ -475,7 +475,7 @@ pub async fn mock_login(
                 .await
             {
                 Ok(user) => user,
-                Err(e) => {
+                Err(_) => {
                     // This can happen if tests run in parallel: two requests race between
                     // "get_user_by_email(None)" and "create_user", leading to a unique constraint
                     // violation for the email. In that case, treat it as success by re-fetching.
@@ -483,7 +483,7 @@ pub async fn mock_login(
                         .user_repository
                         .get_user_by_email(&request.email)
                         .await
-                        .map_err(|e| {
+                        .map_err(|_| {
                             ApiError::internal_server_error(
                                 "Failed to re-fetch user after create_user failure",
                             )
