@@ -2,8 +2,10 @@ mod common;
 
 use common::{create_test_server, mock_login};
 use serde_json::json;
+use serial_test::serial;
 
 #[tokio::test]
+#[serial(write_system_configs)]
 async fn test_upsert_system_configs_and_get() {
     let server = create_test_server().await;
 
@@ -68,6 +70,7 @@ async fn test_upsert_system_configs_and_get() {
 }
 
 #[tokio::test]
+#[serial(write_system_configs)]
 async fn test_update_system_configs() {
     let server = create_test_server().await;
 
