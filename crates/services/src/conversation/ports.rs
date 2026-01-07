@@ -1,4 +1,6 @@
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use uuid::Uuid;
 
 use crate::UserId;
 
@@ -12,6 +14,105 @@ pub enum ConversationError {
     ApiError(String),
     #[error("Access denied")]
     AccessDenied,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SharePermission {
+    Read,
+    Write,
+}
+
+impl SharePermission {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SharePermission::Read => "read",
+            SharePermission::Write => "write",
+        }
+    }
+
+    pub fn allows_write(&self) -> bool {
+        matches!(self, SharePermission::Write)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShareRecipientKind {
+    Email,
+    NearAccount,
+}
+
+impl ShareRecipientKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ShareRecipientKind::Email => "email",
+            ShareRecipientKind::NearAccount => "near",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ShareRecipient {
+    pub kind: ShareRecipientKind,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShareType {
+    Direct,
+    Group,
+    Organization,
+    Public,
+}
+
+impl ShareType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ShareType::Direct => "direct",
+            ShareType::Group => "group",
+            ShareType::Organization => "organization",
+            ShareType::Public => "public",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ShareGroup {
+    pub id: Uuid,
+    pub owner_user_id: UserId,
+    pub name: String,
+    pub members: Vec<ShareRecipient>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConversationShare {
+    pub id: Uuid,
+    pub conversation_id: String,
+    pub owner_user_id: UserId,
+    pub share_type: ShareType,
+    pub permission: SharePermission,
+    pub recipient: Option<ShareRecipient>,
+    pub group_id: Option<Uuid>,
+    pub org_email_pattern: Option<String>,
+    pub public_token: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewConversationShare {
+    pub conversation_id: String,
+    pub owner_user_id: UserId,
+    pub share_type: ShareType,
+    pub permission: SharePermission,
+    pub recipient: Option<ShareRecipient>,
+    pub group_id: Option<Uuid>,
+    pub org_email_pattern: Option<String>,
+    pub public_token: Option<String>,
 }
 
 #[async_trait]
@@ -39,6 +140,70 @@ pub trait ConversationRepository: Send + Sync {
         conversation_id: &str,
         user_id: UserId,
     ) -> Result<(), ConversationError>;
+}
+
+#[async_trait]
+pub trait ConversationShareRepository: Send + Sync {
+    async fn create_group(
+        &self,
+        owner_user_id: UserId,
+        name: &str,
+        members: &[ShareRecipient],
+    ) -> Result<ShareGroup, ConversationError>;
+
+    async fn list_groups(
+        &self,
+        owner_user_id: UserId,
+    ) -> Result<Vec<ShareGroup>, ConversationError>;
+
+    async fn get_group(
+        &self,
+        owner_user_id: UserId,
+        group_id: Uuid,
+    ) -> Result<Option<ShareGroup>, ConversationError>;
+
+    async fn update_group(
+        &self,
+        owner_user_id: UserId,
+        group_id: Uuid,
+        name: Option<&str>,
+        members: Option<&[ShareRecipient]>,
+    ) -> Result<ShareGroup, ConversationError>;
+
+    async fn delete_group(
+        &self,
+        owner_user_id: UserId,
+        group_id: Uuid,
+    ) -> Result<(), ConversationError>;
+
+    async fn create_share(
+        &self,
+        share: NewConversationShare,
+    ) -> Result<ConversationShare, ConversationError>;
+
+    async fn list_shares(
+        &self,
+        owner_user_id: UserId,
+        conversation_id: &str,
+    ) -> Result<Vec<ConversationShare>, ConversationError>;
+
+    async fn delete_share(
+        &self,
+        owner_user_id: UserId,
+        share_id: Uuid,
+    ) -> Result<(), ConversationError>;
+
+    async fn get_share_permission_for_user(
+        &self,
+        conversation_id: &str,
+        email: &str,
+        near_accounts: &[String],
+    ) -> Result<Option<SharePermission>, ConversationError>;
+
+    async fn get_public_share_by_token(
+        &self,
+        token: &str,
+    ) -> Result<Option<ConversationShare>, ConversationError>;
 }
 
 #[async_trait]
@@ -76,4 +241,74 @@ pub trait ConversationService: Send + Sync {
         conversation_id: &str,
         user_id: UserId,
     ) -> Result<serde_json::Value, ConversationError>;
+}
+
+#[derive(Debug, Clone)]
+pub enum ShareTarget {
+    Direct(Vec<ShareRecipient>),
+    Group(Uuid),
+    Organization(String),
+    Public,
+}
+
+#[async_trait]
+pub trait ConversationShareService: Send + Sync {
+    async fn ensure_access(
+        &self,
+        conversation_id: &str,
+        user_id: UserId,
+        required_permission: SharePermission,
+    ) -> Result<(), ConversationError>;
+
+    async fn get_public_access(
+        &self,
+        token: &str,
+        required_permission: SharePermission,
+    ) -> Result<ConversationShare, ConversationError>;
+
+    async fn create_group(
+        &self,
+        owner_user_id: UserId,
+        name: &str,
+        members: Vec<ShareRecipient>,
+    ) -> Result<ShareGroup, ConversationError>;
+
+    async fn list_groups(
+        &self,
+        owner_user_id: UserId,
+    ) -> Result<Vec<ShareGroup>, ConversationError>;
+
+    async fn update_group(
+        &self,
+        owner_user_id: UserId,
+        group_id: Uuid,
+        name: Option<String>,
+        members: Option<Vec<ShareRecipient>>,
+    ) -> Result<ShareGroup, ConversationError>;
+
+    async fn delete_group(
+        &self,
+        owner_user_id: UserId,
+        group_id: Uuid,
+    ) -> Result<(), ConversationError>;
+
+    async fn create_share(
+        &self,
+        owner_user_id: UserId,
+        conversation_id: &str,
+        permission: SharePermission,
+        target: ShareTarget,
+    ) -> Result<Vec<ConversationShare>, ConversationError>;
+
+    async fn list_shares(
+        &self,
+        owner_user_id: UserId,
+        conversation_id: &str,
+    ) -> Result<Vec<ConversationShare>, ConversationError>;
+
+    async fn delete_share(
+        &self,
+        owner_user_id: UserId,
+        share_id: Uuid,
+    ) -> Result<(), ConversationError>;
 }

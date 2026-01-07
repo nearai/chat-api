@@ -10,6 +10,7 @@ use services::{
     analytics::AnalyticsServiceImpl,
     auth::OAuthServiceImpl,
     conversation::service::ConversationServiceImpl,
+    conversation::share_service::ConversationShareServiceImpl,
     file::service::FileServiceImpl,
     metrics::{MockMetricsService, OtlpMetricsService},
     model::service::ModelServiceImpl,
@@ -67,6 +68,7 @@ async fn main() -> anyhow::Result<()> {
     let session_repo = db.session_repository();
     let oauth_repo = db.oauth_repository();
     let conversation_repo = db.conversation_repository();
+    let conversation_share_repo = db.conversation_share_repository();
     let file_repo = db.file_repository();
     let user_settings_repo = db.user_settings_repository();
     let app_config_repo = db.app_config_repository();
@@ -142,6 +144,12 @@ async fn main() -> anyhow::Result<()> {
     let conversation_service = Arc::new(ConversationServiceImpl::new(
         conversation_repo,
         proxy_service.clone(),
+    ));
+
+    let conversation_share_service = Arc::new(ConversationShareServiceImpl::new(
+        db.conversation_repository(),
+        conversation_share_repo,
+        user_repo.clone(),
     ));
 
     // Initialize file service
@@ -226,6 +234,7 @@ async fn main() -> anyhow::Result<()> {
         session_repository: session_repo,
         proxy_service,
         conversation_service,
+        conversation_share_service,
         file_service,
         redirect_uri: config.oauth.redirect_uri,
         admin_domains: Arc::new(config.admin.admin_domains),

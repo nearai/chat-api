@@ -5,7 +5,7 @@ use axum::{
     extract::{Extension, Path, Request, State},
     http::{HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
     Json, Router,
 };
 use bytes::Bytes;
@@ -17,7 +17,9 @@ use near_api::{Account, AccountId, NetworkConfig};
 use serde::{Deserialize, Serialize};
 use services::analytics::{ActivityType, RecordActivityRequest};
 use services::consts::MODEL_PUBLIC_DEFAULT;
-use services::conversation::ports::ConversationError;
+use services::conversation::ports::{
+    ConversationError, SharePermission, ShareRecipient, ShareRecipientKind, ShareTarget,
+};
 use services::file::ports::FileError;
 use services::metrics::consts::{
     METRIC_CONVERSATION_CREATED, METRIC_FILE_UPLOADED, METRIC_RESPONSE_CREATED,
@@ -27,6 +29,7 @@ use services::user::ports::{BanType, OAuthProvider};
 use services::UserId;
 use sha2::{Digest, Sha256};
 use std::io::Read;
+use uuid::Uuid;
 
 /// Minimum required NEAR balance (1 NEAR in yoctoNEAR: 10^24)
 const MIN_NEAR_BALANCE: u128 = 1_000_000_000_000_000_000_000_000;
@@ -61,6 +64,18 @@ pub fn create_api_router(
             delete(delete_conversation),
         )
         .route(
+            "/v1/conversations/{conversation_id}/shares",
+            post(create_conversation_share),
+        )
+        .route(
+            "/v1/conversations/{conversation_id}/shares",
+            get(list_conversation_shares),
+        )
+        .route(
+            "/v1/conversations/{conversation_id}/shares/{share_id}",
+            delete(delete_conversation_share),
+        )
+        .route(
             "/v1/conversations/{conversation_id}/items",
             post(create_conversation_items),
         )
@@ -89,6 +104,12 @@ pub fn create_api_router(
             post(clone_conversation),
         );
 
+    let share_groups_router = Router::new()
+        .route("/v1/share-groups", post(create_share_group))
+        .route("/v1/share-groups", get(list_share_groups))
+        .route("/v1/share-groups/{group_id}", patch(update_share_group))
+        .route("/v1/share-groups/{group_id}", delete(delete_share_group));
+
     let files_router = Router::new()
         .route("/v1/files", post(upload_file))
         .route("/v1/files", get(list_files))
@@ -109,9 +130,27 @@ pub fn create_api_router(
 
     Router::new()
         .merge(conversations_router)
+        .merge(share_groups_router)
         .merge(files_router)
         .merge(responses_router)
         .merge(proxy_router)
+}
+
+/// Create the public conversation share router (no auth)
+pub fn create_public_share_router() -> Router<crate::state::AppState> {
+    Router::new()
+        .route(
+            "/v1/shared/conversations/{share_token}",
+            get(get_shared_conversation),
+        )
+        .route(
+            "/v1/shared/conversations/{share_token}/items",
+            get(list_shared_conversation_items),
+        )
+        .route(
+            "/v1/shared/conversations/{share_token}/items",
+            post(create_shared_conversation_items),
+        )
 }
 
 /// Type of resource to track in the response
@@ -126,6 +165,117 @@ enum TrackableResource {
 #[derive(Serialize, Deserialize)]
 pub struct ErrorResponse {
     pub error: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ShareRecipientPayload {
+    pub kind: ShareRecipientKind,
+    pub value: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum ShareTargetPayload {
+    Direct {
+        recipients: Vec<ShareRecipientPayload>,
+    },
+    Group {
+        group_id: Uuid,
+    },
+    Organization {
+        email_pattern: String,
+    },
+    Public,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateConversationShareRequest {
+    pub permission: SharePermission,
+    pub target: ShareTargetPayload,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConversationShareResponse {
+    pub id: Uuid,
+    pub conversation_id: String,
+    pub permission: SharePermission,
+    pub share_type: String,
+    pub recipient: Option<ShareRecipientPayload>,
+    pub group_id: Option<Uuid>,
+    pub org_email_pattern: Option<String>,
+    pub public_token: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateShareGroupRequest {
+    pub name: String,
+    pub members: Vec<ShareRecipientPayload>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UpdateShareGroupRequest {
+    pub name: Option<String>,
+    pub members: Option<Vec<ShareRecipientPayload>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ShareGroupResponse {
+    pub id: Uuid,
+    pub name: String,
+    pub members: Vec<ShareRecipientPayload>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl From<ShareRecipientPayload> for ShareRecipient {
+    fn from(payload: ShareRecipientPayload) -> Self {
+        ShareRecipient {
+            kind: payload.kind,
+            value: payload.value,
+        }
+    }
+}
+
+impl From<ShareRecipient> for ShareRecipientPayload {
+    fn from(recipient: ShareRecipient) -> Self {
+        ShareRecipientPayload {
+            kind: recipient.kind,
+            value: recipient.value,
+        }
+    }
+}
+
+fn to_share_response(
+    share: services::conversation::ports::ConversationShare,
+) -> ConversationShareResponse {
+    ConversationShareResponse {
+        id: share.id,
+        conversation_id: share.conversation_id,
+        permission: share.permission,
+        share_type: share.share_type.as_str().to_string(),
+        recipient: share.recipient.map(ShareRecipientPayload::from),
+        group_id: share.group_id,
+        org_email_pattern: share.org_email_pattern,
+        public_token: share.public_token,
+        created_at: share.created_at,
+        updated_at: share.updated_at,
+    }
+}
+
+fn to_share_group_response(group: services::conversation::ports::ShareGroup) -> ShareGroupResponse {
+    ShareGroupResponse {
+        id: group.id,
+        name: group.name,
+        members: group
+            .members
+            .into_iter()
+            .map(ShareRecipientPayload::from)
+            .collect(),
+        created_at: group.created_at,
+        updated_at: group.updated_at,
+    }
 }
 
 /// Raw query parameters for listing files
@@ -278,7 +428,7 @@ async fn update_conversation(
     );
 
     // Validate user has access to the conversation
-    validate_user_conversation(&state, &user, &conversation_id).await?;
+    validate_user_conversation(&state, &user, &conversation_id, SharePermission::Write).await?;
 
     // Extract body
     let body_bytes = extract_body_bytes(request).await?;
@@ -381,26 +531,9 @@ async fn get_conversation(
         conversation_id
     );
 
-    let conversation = state
-        .conversation_service
-        .get_conversation(&conversation_id, user.user_id)
-        .await
-        .map_err(|e| {
-            let (status, error) = match e {
-                ConversationError::NotFound => {
-                    (StatusCode::NOT_FOUND, "Conversation not found".to_string())
-                }
-                ConversationError::ApiError(msg) => {
-                    (StatusCode::BAD_GATEWAY, format!("OpenAI API error: {msg}"))
-                }
-                _ => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Failed to get conversation".to_string(),
-                ),
-            };
+    validate_user_conversation(&state, &user, &conversation_id, SharePermission::Read).await?;
 
-            (status, Json(ErrorResponse { error })).into_response()
-        })?;
+    let conversation = fetch_conversation_from_openai(&state, &conversation_id).await?;
 
     Ok(Json(conversation))
 }
@@ -416,6 +549,8 @@ async fn delete_conversation(
         user.user_id,
         conversation_id
     );
+
+    validate_owner_conversation(&state, &user, &conversation_id).await?;
 
     // Delete from DB and OpenAI
     let deleted = state
@@ -449,6 +584,208 @@ async fn delete_conversation(
     Ok(Json(deleted).into_response())
 }
 
+async fn create_conversation_share(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(conversation_id): Path<String>,
+    Json(request): Json<CreateConversationShareRequest>,
+) -> Result<Json<Vec<ConversationShareResponse>>, Response> {
+    let target = match request.target {
+        ShareTargetPayload::Direct { recipients } => {
+            if recipients.is_empty() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "Recipients list cannot be empty".to_string(),
+                    }),
+                )
+                    .into_response());
+            }
+
+            ShareTarget::Direct(
+                recipients
+                    .into_iter()
+                    .map(ShareRecipient::from)
+                    .collect::<Vec<_>>(),
+            )
+        }
+        ShareTargetPayload::Group { group_id } => ShareTarget::Group(group_id),
+        ShareTargetPayload::Organization { email_pattern } => {
+            if email_pattern.trim().is_empty() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "Email pattern cannot be empty".to_string(),
+                    }),
+                )
+                    .into_response());
+            }
+            ShareTarget::Organization(email_pattern)
+        }
+        ShareTargetPayload::Public => ShareTarget::Public,
+    };
+
+    let shares = state
+        .conversation_share_service
+        .create_share(user.user_id, &conversation_id, request.permission, target)
+        .await
+        .map_err(map_share_error)?;
+
+    Ok(Json(
+        shares
+            .into_iter()
+            .map(to_share_response)
+            .collect::<Vec<_>>(),
+    ))
+}
+
+async fn list_conversation_shares(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(conversation_id): Path<String>,
+) -> Result<Json<Vec<ConversationShareResponse>>, Response> {
+    let shares = state
+        .conversation_share_service
+        .list_shares(user.user_id, &conversation_id)
+        .await
+        .map_err(map_share_error)?;
+
+    Ok(Json(
+        shares
+            .into_iter()
+            .map(to_share_response)
+            .collect::<Vec<_>>(),
+    ))
+}
+
+async fn delete_conversation_share(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path((_conversation_id, share_id)): Path<(String, Uuid)>,
+) -> Result<Response, Response> {
+    state
+        .conversation_share_service
+        .delete_share(user.user_id, share_id)
+        .await
+        .map_err(map_share_error)?;
+
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn create_share_group(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Json(request): Json<CreateShareGroupRequest>,
+) -> Result<Json<ShareGroupResponse>, Response> {
+    if request.name.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Group name cannot be empty".to_string(),
+            }),
+        )
+            .into_response());
+    }
+
+    if request.members.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Group must include at least one member".to_string(),
+            }),
+        )
+            .into_response());
+    }
+
+    let members = request
+        .members
+        .into_iter()
+        .map(ShareRecipient::from)
+        .collect();
+
+    let group = state
+        .conversation_share_service
+        .create_group(user.user_id, &request.name, members)
+        .await
+        .map_err(map_share_error)?;
+
+    Ok(Json(to_share_group_response(group)))
+}
+
+async fn list_share_groups(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+) -> Result<Json<Vec<ShareGroupResponse>>, Response> {
+    let groups = state
+        .conversation_share_service
+        .list_groups(user.user_id)
+        .await
+        .map_err(map_share_error)?;
+
+    Ok(Json(
+        groups
+            .into_iter()
+            .map(to_share_group_response)
+            .collect::<Vec<_>>(),
+    ))
+}
+
+async fn update_share_group(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(group_id): Path<Uuid>,
+    Json(request): Json<UpdateShareGroupRequest>,
+) -> Result<Json<ShareGroupResponse>, Response> {
+    if matches!(request.name.as_deref(), Some(name) if name.trim().is_empty()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Group name cannot be empty".to_string(),
+            }),
+        )
+            .into_response());
+    }
+
+    if matches!(request.members.as_ref(), Some(members) if members.is_empty()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Group members cannot be empty".to_string(),
+            }),
+        )
+            .into_response());
+    }
+
+    let members = request.members.map(|members| {
+        members
+            .into_iter()
+            .map(ShareRecipient::from)
+            .collect::<Vec<_>>()
+    });
+
+    let group = state
+        .conversation_share_service
+        .update_group(user.user_id, group_id, request.name, members)
+        .await
+        .map_err(map_share_error)?;
+
+    Ok(Json(to_share_group_response(group)))
+}
+
+async fn delete_share_group(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(group_id): Path<Uuid>,
+) -> Result<Response, Response> {
+    state
+        .conversation_share_service
+        .delete_group(user.user_id, group_id)
+        .await
+        .map_err(map_share_error)?;
+
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
 async fn create_conversation_items(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -462,7 +799,7 @@ async fn create_conversation_items(
         user.session_id
     );
 
-    validate_user_conversation(&state, &user, &conversation_id).await?;
+    validate_user_conversation(&state, &user, &conversation_id, SharePermission::Read).await?;
 
     // Extract body
     let body_bytes = extract_body_bytes(request).await?;
@@ -527,7 +864,7 @@ async fn list_conversation_items(
         user.session_id
     );
 
-    validate_user_conversation(&state, &user, &conversation_id).await?;
+    validate_user_conversation(&state, &user, &conversation_id, SharePermission::Read).await?;
 
     tracing::debug!(
         "Forwarding conversation items list request to OpenAI for user_id={}",
@@ -567,6 +904,108 @@ async fn list_conversation_items(
     .await
 }
 
+async fn get_shared_conversation(
+    State(state): State<crate::state::AppState>,
+    Path(share_token): Path<String>,
+) -> Result<Json<serde_json::Value>, Response> {
+    let share = state
+        .conversation_share_service
+        .get_public_access(&share_token, SharePermission::Read)
+        .await
+        .map_err(map_share_error)?;
+
+    let conversation = fetch_conversation_from_openai(&state, &share.conversation_id).await?;
+
+    Ok(Json(conversation))
+}
+
+async fn list_shared_conversation_items(
+    State(state): State<crate::state::AppState>,
+    Path(share_token): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, Response> {
+    let share = state
+        .conversation_share_service
+        .get_public_access(&share_token, SharePermission::Read)
+        .await
+        .map_err(map_share_error)?;
+
+    let proxy_response = state
+        .proxy_service
+        .forward_request(
+            Method::GET,
+            &format!("conversations/{}/items", share.conversation_id),
+            headers.clone(),
+            None,
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "OpenAI API error during shared conversation items list: {}",
+                e
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("OpenAI API error: {e}"),
+                }),
+            )
+                .into_response()
+        })?;
+
+    build_response(
+        proxy_response.status,
+        proxy_response.headers,
+        Body::from_stream(proxy_response.body),
+    )
+    .await
+}
+
+async fn create_shared_conversation_items(
+    State(state): State<crate::state::AppState>,
+    Path(share_token): Path<String>,
+    headers: HeaderMap,
+    request: Request,
+) -> Result<Response, Response> {
+    let share = state
+        .conversation_share_service
+        .get_public_access(&share_token, SharePermission::Write)
+        .await
+        .map_err(map_share_error)?;
+
+    let body_bytes = extract_body_bytes(request).await?;
+
+    let proxy_response = state
+        .proxy_service
+        .forward_request(
+            Method::POST,
+            &format!("conversations/{}/items", share.conversation_id),
+            headers.clone(),
+            Some(body_bytes),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "OpenAI API error during shared conversation items creation: {}",
+                e
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("OpenAI API error: {e}"),
+                }),
+            )
+                .into_response()
+        })?;
+
+    build_response(
+        proxy_response.status,
+        proxy_response.headers,
+        Body::from_stream(proxy_response.body),
+    )
+    .await
+}
+
 async fn pin_conversation(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -580,7 +1019,7 @@ async fn pin_conversation(
         conversation_id
     );
 
-    validate_user_conversation(&state, &user, &conversation_id).await?;
+    validate_user_conversation(&state, &user, &conversation_id, SharePermission::Write).await?;
 
     tracing::debug!(
         "Forwarding conversation pin request to OpenAI for user_id={}",
@@ -633,7 +1072,7 @@ async fn unpin_conversation(
         conversation_id
     );
 
-    validate_user_conversation(&state, &user, &conversation_id).await?;
+    validate_user_conversation(&state, &user, &conversation_id, SharePermission::Write).await?;
 
     tracing::debug!(
         "Forwarding conversation unpin request to OpenAI for user_id={}",
@@ -686,7 +1125,7 @@ async fn archive_conversation(
         conversation_id
     );
 
-    validate_user_conversation(&state, &user, &conversation_id).await?;
+    validate_user_conversation(&state, &user, &conversation_id, SharePermission::Write).await?;
 
     tracing::debug!(
         "Forwarding conversation archive request to OpenAI for user_id={}",
@@ -739,7 +1178,7 @@ async fn unarchive_conversation(
         conversation_id
     );
 
-    validate_user_conversation(&state, &user, &conversation_id).await?;
+    validate_user_conversation(&state, &user, &conversation_id, SharePermission::Write).await?;
 
     tracing::debug!(
         "Forwarding conversation unarchive request to OpenAI for user_id={}",
@@ -793,7 +1232,7 @@ async fn clone_conversation(
     );
 
     // Validate user has access to the source conversation
-    validate_user_conversation(&state, &user, &conversation_id).await?;
+    validate_user_conversation(&state, &user, &conversation_id, SharePermission::Write).await?;
 
     tracing::debug!(
         "Forwarding conversation clone request to OpenAI for user_id={}",
@@ -2078,6 +2517,19 @@ async fn validate_user_conversation(
     state: &crate::state::AppState,
     user: &AuthenticatedUser,
     conversation_id: &str,
+    required_permission: SharePermission,
+) -> Result<(), Response> {
+    state
+        .conversation_share_service
+        .ensure_access(conversation_id, user.user_id, required_permission)
+        .await
+        .map_err(map_share_error)
+}
+
+async fn validate_owner_conversation(
+    state: &crate::state::AppState,
+    user: &AuthenticatedUser,
+    conversation_id: &str,
 ) -> Result<(), Response> {
     state
         .conversation_service
@@ -2096,6 +2548,85 @@ async fn validate_user_conversation(
 
             (status, Json(ErrorResponse { error })).into_response()
         })
+}
+
+fn map_share_error(error: ConversationError) -> Response {
+    let (status, message) = match error {
+        ConversationError::NotFound => {
+            (StatusCode::NOT_FOUND, "Conversation not found".to_string())
+        }
+        ConversationError::AccessDenied => (StatusCode::FORBIDDEN, "Access denied".to_string()),
+        ConversationError::ApiError(msg) => (StatusCode::BAD_GATEWAY, msg),
+        ConversationError::DatabaseError(msg) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to access conversation: {msg}"),
+        ),
+    };
+
+    (status, Json(ErrorResponse { error: message })).into_response()
+}
+
+async fn fetch_conversation_from_openai(
+    state: &crate::state::AppState,
+    conversation_id: &str,
+) -> Result<serde_json::Value, Response> {
+    let proxy_response = state
+        .proxy_service
+        .forward_request(
+            Method::GET,
+            &format!("conversations/{conversation_id}"),
+            HeaderMap::new(),
+            None,
+        )
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("OpenAI API error: {e}"),
+                }),
+            )
+                .into_response()
+        })?;
+
+    if proxy_response.status != StatusCode::OK.as_u16() {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            Json(ErrorResponse {
+                error: format!("OpenAI API returned status {}", proxy_response.status),
+            }),
+        )
+            .into_response());
+    }
+
+    let body_bytes: Bytes = proxy_response
+        .body
+        .try_collect::<Vec<_>>()
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("Failed to read response: {e}"),
+                }),
+            )
+                .into_response()
+        })?
+        .into_iter()
+        .flatten()
+        .collect();
+
+    let conversation: serde_json::Value = serde_json::from_slice(&body_bytes).map_err(|e| {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(ErrorResponse {
+                error: format!("Failed to parse JSON: {e}"),
+            }),
+        )
+            .into_response()
+    })?;
+
+    Ok(conversation)
 }
 
 async fn validate_user_file(

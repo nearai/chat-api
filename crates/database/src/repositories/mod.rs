@@ -1,6 +1,7 @@
 pub mod analytics_repository;
 pub mod app_config_repository;
 pub mod conversation_repository;
+pub mod conversation_share_repository;
 pub mod file_repository;
 pub mod model_repository;
 pub mod near_nonce_repository;
@@ -13,6 +14,7 @@ pub mod user_settings_repository;
 pub use analytics_repository::PostgresAnalyticsRepository;
 pub use app_config_repository::PostgresAppConfigRepository;
 pub use conversation_repository::PostgresConversationRepository;
+pub use conversation_share_repository::PostgresConversationShareRepository;
 pub use file_repository::PostgresFileRepository;
 pub use model_repository::PostgresModelRepository;
 pub use near_nonce_repository::PostgresNearNonceRepository;

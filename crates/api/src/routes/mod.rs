@@ -121,6 +121,9 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         crate::middleware::auth_middleware,
     ));
 
+    // Public conversation share routes (no auth required)
+    let public_share_routes = api::create_public_share_router();
+
     // API proxy routes (requires authentication)
     let api_routes = api::create_api_router(rate_limit_state).layer(from_fn_with_state(
         auth_state,
@@ -135,6 +138,7 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         .nest("/v1/auth", logout_route) // Logout route with auth middleware
         .nest("/v1/users", user_routes)
         .nest("/v1/admin", admin_routes)
+        .merge(public_share_routes)
         .merge(api_routes) // Merge instead of nest since api routes already have /v1 prefix
         .merge(attestation_routes) // Merge attestation routes (already have /v1 prefix)
         .with_state(app_state)
