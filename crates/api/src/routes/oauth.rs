@@ -479,30 +479,16 @@ pub async fn mock_login(
                     // This can happen if tests run in parallel: two requests race between
                     // "get_user_by_email(None)" and "create_user", leading to a unique constraint
                     // violation for the email. In that case, treat it as success by re-fetching.
-                    tracing::warn!(
-                        "Mock login create_user failed for email='{}' (possibly due to race); retrying get_user_by_email: {}",
-                        request.email,
-                        e
-                    );
-
                     app_state
                         .user_repository
                         .get_user_by_email(&request.email)
                         .await
                         .map_err(|e| {
-                            tracing::error!(
-                                "Failed to re-fetch user after create_user failure: {}",
-                                e
-                            );
-                            ApiError::internal_server_error("Failed to check user")
+                            ApiError::internal_server_error(
+                                "Failed to re-fetch user after create_user failure",
+                            )
                         })?
-                        .ok_or_else(|| {
-                            tracing::error!(
-                                "create_user failed and user still not found for email='{}'",
-                                request.email
-                            );
-                            ApiError::internal_server_error("Failed to create user")
-                        })?
+                        .ok_or_else(|| ApiError::internal_server_error("Failed to create user"))?
                 }
             }
         }

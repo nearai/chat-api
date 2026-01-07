@@ -190,6 +190,7 @@ async fn test_get_system_configs_allows_non_admin() {
 }
 
 #[tokio::test]
+#[serial(write_system_configs)]
 async fn test_system_configs_write_requires_admin() {
     let server = create_test_server().await;
 
