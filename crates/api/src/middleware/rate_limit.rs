@@ -444,6 +444,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_daily_limit_zero_rejects_first_request() {
+        let config = RateLimitConfig {
+            max_concurrent: 1,
+            max_requests_per_window: 10,
+            window_duration: Duration::from_secs(10),
+            daily_request_limit: Some(0),
+        };
+
+        let state = configured_state(config);
+        let user = test_user_id(1);
+
+        let result = state.try_acquire(user).await;
+        assert!(matches!(
+            result,
+            Err(RateLimitError::DailyLimitExceeded { limit: 0, .. })
+        ));
+    }
+
+    #[tokio::test]
     async fn test_daily_limit_multi_instance_shared_store() {
         let store = Arc::new(MockDailyUsageStore::default());
         let config = RateLimitConfig {
