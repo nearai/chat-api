@@ -340,6 +340,13 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
         usage_date: NaiveDate,
         limit: i64,
     ) -> anyhow::Result<(i64, bool)> {
+        // Fast path: limit <= 0 means the increment is never allowed.
+        // Returning (0, false) avoids a DB round-trip; callers should treat incremented=false
+        // as "blocked by limit".
+        if limit <= 0 {
+            return Ok((0, false));
+        }
+
         let client = self.pool.get().await?;
 
         // Atomically increment count if still below limit. If already at/over limit, do not update.

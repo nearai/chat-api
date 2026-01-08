@@ -256,7 +256,7 @@ impl IntoResponse for RateLimitError {
             ),
             RateLimitError::InternalServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to load daily usage.".to_string(),
+                "Failed to check daily usage limit.".to_string(),
                 None,
             ),
         };
