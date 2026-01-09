@@ -1,7 +1,7 @@
 //! Analytics repository traits and data structures.
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -70,6 +70,14 @@ pub struct RecordActivityRequest {
     pub metadata: Option<serde_json::Value>,
 }
 
+/// Request to increment a user's daily usage counts
+#[derive(Debug, Clone)]
+pub struct RecordDailyUsageRequest {
+    pub user_id: UserId,
+    pub usage_date: NaiveDate,
+    pub request_increment: i64,
+}
+
 /// A single activity log entry
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -121,6 +129,27 @@ pub struct AnalyticsSummary {
     pub user_metrics: UserMetricsSummary,
     pub activity_metrics: ActivityMetricsSummary,
     pub by_auth_method: Vec<AuthMethodBreakdown>,
+}
+
+/// Snapshot of a user's usage for a single day.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct DailyUsageSnapshot {
+    pub user_id: UserId,
+    pub usage_date: NaiveDate,
+    pub request_count: i64,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl DailyUsageSnapshot {
+    pub fn zero(user_id: UserId, usage_date: NaiveDate) -> Self {
+        Self {
+            user_id,
+            usage_date,
+            request_count: 0,
+            updated_at: Utc::now(),
+        }
+    }
 }
 
 /// A user with their activity count (for top users query)
@@ -179,6 +208,26 @@ pub trait AnalyticsRepository: Send + Sync {
         end: DateTime<Utc>,
         limit: i64,
     ) -> anyhow::Result<Vec<TopActiveUser>>;
+
+    /// Increment a user's daily usage tally
+    async fn record_daily_usage(&self, request: RecordDailyUsageRequest) -> anyhow::Result<()>;
+
+    /// Atomically increment a user's daily usage count if it's below the provided limit.
+    ///
+    /// Returns the current count after the attempt, and whether the increment was applied.
+    async fn increment_daily_usage_if_below_limit(
+        &self,
+        user_id: UserId,
+        usage_date: NaiveDate,
+        limit: i64,
+    ) -> anyhow::Result<(i64, bool)>;
+
+    /// Read a user's usage totals for a specific day
+    async fn get_user_daily_usage(
+        &self,
+        user_id: UserId,
+        usage_date: NaiveDate,
+    ) -> anyhow::Result<DailyUsageSnapshot>;
 }
 
 /// Error types for analytics operations
@@ -186,4 +235,29 @@ pub trait AnalyticsRepository: Send + Sync {
 pub enum AnalyticsError {
     #[error("Internal error: {0}")]
     InternalError(String),
+}
+
+/// Thin trait for services like rate limiting that need daily usage counts.
+#[async_trait]
+pub trait DailyUsageStore: Send + Sync {
+    async fn record_daily_usage(
+        &self,
+        request: RecordDailyUsageRequest,
+    ) -> Result<(), AnalyticsError>;
+
+    async fn get_user_daily_usage(
+        &self,
+        user_id: UserId,
+        usage_date: NaiveDate,
+    ) -> Result<DailyUsageSnapshot, AnalyticsError>;
+
+    /// Atomically increment a user's daily usage count if it's below the provided limit.
+    ///
+    /// Returns the current count after the attempt, and whether the increment was applied.
+    async fn increment_daily_usage_if_below_limit(
+        &self,
+        user_id: UserId,
+        usage_date: NaiveDate,
+        limit: i64,
+    ) -> Result<(i64, bool), AnalyticsError>;
 }
