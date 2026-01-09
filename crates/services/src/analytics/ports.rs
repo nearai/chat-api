@@ -43,6 +43,7 @@ pub enum AuthMethod {
     Google,
     Github,
     Near,
+    Passkey,
 }
 
 impl AuthMethod {
@@ -51,6 +52,7 @@ impl AuthMethod {
             AuthMethod::Google => "google",
             AuthMethod::Github => "github",
             AuthMethod::Near => "near",
+            AuthMethod::Passkey => "passkey",
         }
     }
 }

@@ -8,7 +8,7 @@ use opentelemetry_sdk::{
 };
 use services::{
     analytics::AnalyticsServiceImpl,
-    auth::OAuthServiceImpl,
+    auth::{OAuthServiceImpl, PasskeyServiceImpl},
     conversation::service::ConversationServiceImpl,
     file::service::FileServiceImpl,
     metrics::{MockMetricsService, OtlpMetricsService},
@@ -71,6 +71,7 @@ async fn main() -> anyhow::Result<()> {
     let user_settings_repo = db.user_settings_repository();
     let app_config_repo = db.app_config_repository();
     let near_nonce_repo = db.near_nonce_repository();
+    let passkey_repo = db.passkey_repository();
     let analytics_repo = db.analytics_repository();
     let system_configs_repo = db.system_configs_repository();
     let model_repo = db.model_repository();
@@ -91,6 +92,11 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     let user_service = Arc::new(UserServiceImpl::new(user_repo.clone()));
+
+    let passkey_service = Arc::new(PasskeyServiceImpl::new(
+        passkey_repo.clone(),
+        config.passkey.origin.clone(),
+    )?);
 
     let user_settings_service = Arc::new(UserSettingsServiceImpl::new(user_settings_repo));
 
@@ -219,6 +225,7 @@ async fn main() -> anyhow::Result<()> {
     // Create application state
     let app_state = AppState {
         oauth_service,
+        passkey_service,
         user_service,
         user_settings_service,
         model_service,

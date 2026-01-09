@@ -7,11 +7,12 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use near_api::signer::NEP413Payload;
 use serde::{Deserialize, Serialize};
 use services::analytics::{ActivityType, AuthMethod, RecordActivityRequest};
-use services::auth::near::SignedMessage;
 use services::auth::ports::OAuthProvider;
+use services::auth::{near::SignedMessage, AssertionCredential, PasskeyAssertionOptions};
 use services::metrics::consts::{
     METRIC_USER_LOGIN, METRIC_USER_SIGNUP, TAG_AUTH_METHOD, TAG_IS_NEW_USER,
 };
@@ -139,6 +140,44 @@ pub struct NearAuthResponse {
     pub expires_at: String,
     /// Whether this is a new user
     pub is_new_user: bool,
+}
+
+/// Response containing the WebAuthn options used to prompt a passkey assertion on the client
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PasskeyOptionsResponse {
+    #[serde(flatten)]
+    pub options: PasskeyAssertionOptions,
+    pub user_verification: String,
+}
+
+impl From<PasskeyAssertionOptions> for PasskeyOptionsResponse {
+    fn from(options: PasskeyAssertionOptions) -> Self {
+        Self {
+            options,
+            user_verification: "preferred".to_string(),
+        }
+    }
+}
+
+/// WebAuthn credential response payload coming from the browser
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct PasskeyAssertionRequest {
+    pub id: String,
+    #[serde(rename = "raw_id")]
+    pub raw_id: String,
+    #[serde(rename = "type")]
+    pub credential_type: String,
+    pub response: PasskeyAssertionResponsePayload,
+}
+
+/// Nested WebAuthn assertion response body
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct PasskeyAssertionResponsePayload {
+    pub client_data_json: String,
+    pub authenticator_data: String,
+    pub signature: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_handle: Option<String>,
 }
 
 /// Handler for initiating Google OAuth flow
@@ -666,6 +705,146 @@ pub async fn near_auth(
     }))
 }
 
+/// Retrieve WebAuthn assertion options for passkey authentication
+#[utoipa::path(
+    get,
+    path = "/v1/auth/passkey/options",
+    tag = "Auth",
+    responses(
+        (status = 200, description = "Generated passkey assertion options", body = PasskeyOptionsResponse),
+        (status = 500, description = "Failed to generate options", body = crate::error::ApiErrorResponse)
+    )
+)]
+pub async fn passkey_options(
+    State(app_state): State<AppState>,
+) -> Result<Json<PasskeyOptionsResponse>, ApiError> {
+    tracing::debug!("Generating passkey assertion options");
+    let options = app_state
+        .passkey_service
+        .generate_assertion_options(None)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to create passkey assertion challenge: {}", e);
+            ApiError::internal_server_error("Failed to create passkey challenge")
+        })?;
+
+    Ok(Json(PasskeyOptionsResponse::from(options)))
+}
+
+/// Verify a WebAuthn assertion response and create a session
+#[utoipa::path(
+    post,
+    path = "/v1/auth/passkey/verify",
+    tag = "Auth",
+    request_body = PasskeyAssertionRequest,
+    responses(
+        (status = 200, description = "Successfully authenticated with passkey", body = NearAuthResponse),
+        (status = 401, description = "Invalid challenge response", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    )
+)]
+pub async fn passkey_verify(
+    State(app_state): State<AppState>,
+    Json(request): Json<PasskeyAssertionRequest>,
+) -> Result<Json<NearAuthResponse>, ApiError> {
+    tracing::info!("Passkey verification attempt for credential {}", request.id);
+
+    if request.credential_type != "public-key" {
+        return Err(ApiError::bad_request("Unsupported credential type"));
+    }
+
+    let authenticator_data =
+        decode_passkey_field(&request.response.authenticator_data, "authenticator_data")?;
+    let client_data_json =
+        decode_passkey_field(&request.response.client_data_json, "client_data_json")?;
+    let signature = decode_passkey_field(&request.response.signature, "signature")?;
+
+    let credential = AssertionCredential {
+        credential_id: request.id.clone(),
+        authenticator_data,
+        client_data_json,
+        signature,
+    };
+
+    let passkey = app_state
+        .passkey_service
+        .verify_assertion(credential)
+        .await
+        .map_err(|e| {
+            tracing::warn!("Passkey verification failed for {}: {}", request.id, e);
+            ApiError::unauthorized("Invalid passkey challenge response")
+        })?;
+
+    let session = app_state
+        .session_repository
+        .create_session(passkey.user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to create session for passkey user {}: {}",
+                passkey.user_id,
+                e
+            );
+            ApiError::internal_server_error("Failed to create session")
+        })?;
+
+    let token = session.token.ok_or_else(|| {
+        tracing::error!(
+            "Passkey session token missing for session_id={}",
+            session.session_id
+        );
+        ApiError::internal_server_error("Failed to create session")
+    })?;
+
+    let is_new_user = passkey.last_used_at.is_none();
+    let auth_method = AuthMethod::Passkey;
+    let metric_name = if is_new_user {
+        METRIC_USER_SIGNUP
+    } else {
+        METRIC_USER_LOGIN
+    };
+    let tags = [
+        format!("{}:{}", TAG_AUTH_METHOD, auth_method.as_str()),
+        format!("{}:{}", TAG_IS_NEW_USER, is_new_user),
+    ];
+    let tag_refs: Vec<&str> = tags.iter().map(|s| s.as_str()).collect();
+    app_state
+        .metrics_service
+        .record_count(metric_name, 1, &tag_refs);
+
+    let activity_type = if is_new_user {
+        ActivityType::Signup
+    } else {
+        ActivityType::Login
+    };
+    if let Err(e) = app_state
+        .analytics_service
+        .record_activity(RecordActivityRequest {
+            user_id: passkey.user_id,
+            activity_type,
+            auth_method: Some(auth_method),
+            metadata: None,
+        })
+        .await
+    {
+        tracing::warn!("Failed to record passkey analytics event: {}", e);
+    }
+
+    tracing::info!(
+        "Passkey authentication successful - user_id={}, session_id={}, is_new_user={}",
+        passkey.user_id,
+        session.session_id,
+        is_new_user
+    );
+
+    Ok(Json(NearAuthResponse {
+        token,
+        session_id: session.session_id.to_string(),
+        expires_at: session.expires_at.to_rfc3339(),
+        is_new_user,
+    }))
+}
+
 /// Create OAuth router with all routes (excluding logout, which requires auth)
 pub fn create_oauth_router() -> Router<AppState> {
     let router = Router::new()
@@ -674,6 +853,9 @@ pub fn create_oauth_router() -> Router<AppState> {
         .route("/github", get(github_login))
         // NEAR wallet authentication
         .route("/near", post(near_auth))
+        // Passkey authentication
+        .route("/passkey/options", get(passkey_options))
+        .route("/passkey/verify", post(passkey_verify))
         // Unified callback route for all providers
         .route("/callback", get(oauth_callback));
 
@@ -682,4 +864,10 @@ pub fn create_oauth_router() -> Router<AppState> {
     let router = router.route("/mock-login", axum::routing::post(mock_login));
 
     router
+}
+
+fn decode_passkey_field(value: &str, field_name: &str) -> Result<Vec<u8>, ApiError> {
+    URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| ApiError::bad_request(format!("Invalid passkey {field_name} payload")))
 }

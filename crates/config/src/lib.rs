@@ -260,6 +260,25 @@ impl Default for NearConfig {
     }
 }
 
+/// Configuration for WebAuthn / passkey support
+#[derive(Debug, Clone, Deserialize)]
+pub struct PasskeyConfig {
+    /// Origin (scheme + host + optional port) that matches the frontend hosting passkey flows
+    pub origin: Url,
+}
+
+impl Default for PasskeyConfig {
+    fn default() -> Self {
+        let raw_origin = std::env::var("PASSKEY_ORIGIN")
+            .or_else(|_| std::env::var("FRONTEND_URL"))
+            .unwrap_or_else(|_| "http://localhost:3000".to_string());
+        Self {
+            origin: Url::parse(&raw_origin)
+                .unwrap_or_else(|e| panic!("PASSKEY_ORIGIN must be a valid URL: {e}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 /// Configuration for global and per-module logging settings.
 pub struct LoggingConfig {
@@ -307,6 +326,8 @@ pub struct Config {
     pub openai: OpenAIConfig,
     /// NEAR-related configuration
     pub near: NearConfig,
+    /// WebAuthn / passkey configuration
+    pub passkey: PasskeyConfig,
     pub cors: CorsConfig,
     pub admin: AdminConfig,
     pub vpc_auth: VpcAuthConfig,
@@ -322,6 +343,7 @@ impl Config {
             server: ServerConfig::default(),
             openai: OpenAIConfig::default(),
             near: NearConfig::default(),
+            passkey: PasskeyConfig::default(),
             cors: CorsConfig::default(),
             admin: AdminConfig::default(),
             vpc_auth: VpcAuthConfig::default(),

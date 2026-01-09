@@ -8,8 +8,8 @@ pub use pool::DbPool;
 pub use repositories::{
     PostgresAnalyticsRepository, PostgresAppConfigRepository, PostgresConversationRepository,
     PostgresFileRepository, PostgresModelRepository, PostgresNearNonceRepository,
-    PostgresOAuthRepository, PostgresSessionRepository, PostgresSystemConfigsRepository,
-    PostgresUserRepository, PostgresUserSettingsRepository,
+    PostgresOAuthRepository, PostgresPasskeyRepository, PostgresSessionRepository,
+    PostgresSystemConfigsRepository, PostgresUserRepository, PostgresUserSettingsRepository,
 };
 
 use crate::pool::create_pool_with_native_tls;
@@ -32,6 +32,7 @@ pub struct Database {
     system_configs_repository: Arc<PostgresSystemConfigsRepository>,
     app_config_repository: Arc<PostgresAppConfigRepository>,
     near_nonce_repository: Arc<PostgresNearNonceRepository>,
+    passkey_repository: Arc<PostgresPasskeyRepository>,
     analytics_repository: Arc<PostgresAnalyticsRepository>,
     model_repository: Arc<PostgresModelRepository>,
     cluster_manager: Option<Arc<ClusterManager>>,
@@ -50,6 +51,7 @@ impl Database {
             Arc::new(PostgresSystemConfigsRepository::new(pool.clone()));
         let app_config_repository = Arc::new(PostgresAppConfigRepository::new(pool.clone()));
         let near_nonce_repository = Arc::new(PostgresNearNonceRepository::new(pool.clone()));
+        let passkey_repository = Arc::new(PostgresPasskeyRepository::new(pool.clone()));
         let analytics_repository = Arc::new(PostgresAnalyticsRepository::new(pool.clone()));
         let model_repository = Arc::new(PostgresModelRepository::new(pool.clone()));
 
@@ -64,6 +66,7 @@ impl Database {
             system_configs_repository,
             app_config_repository,
             near_nonce_repository,
+            passkey_repository,
             analytics_repository,
             model_repository,
             cluster_manager: None,
@@ -228,6 +231,11 @@ impl Database {
     /// Get the NEAR nonce repository
     pub fn near_nonce_repository(&self) -> Arc<PostgresNearNonceRepository> {
         self.near_nonce_repository.clone()
+    }
+
+    /// Get the passkey repository
+    pub fn passkey_repository(&self) -> Arc<PostgresPasskeyRepository> {
+        self.passkey_repository.clone()
     }
 
     /// Get the analytics repository
