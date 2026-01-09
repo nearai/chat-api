@@ -799,7 +799,7 @@ async fn create_conversation_items(
         user.session_id
     );
 
-    validate_user_conversation(&state, &user, &conversation_id, SharePermission::Read).await?;
+    validate_user_conversation(&state, &user, &conversation_id, SharePermission::Write).await?;
 
     // Extract body
     let body_bytes = extract_body_bytes(request).await?;

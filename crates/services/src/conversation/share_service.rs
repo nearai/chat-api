@@ -795,6 +795,36 @@ mod tests {
         }
     }
 
+    fn setup_service_with_owner(
+        conversation_id: &str,
+        owner_email: &str,
+    ) -> (
+        ConversationShareServiceImpl,
+        Arc<InMemoryConversationRepo>,
+        Arc<InMemoryShareRepo>,
+        Arc<InMemoryUserRepo>,
+        User,
+    ) {
+        let conversation_repo = Arc::new(InMemoryConversationRepo::default());
+        let share_repo = Arc::new(InMemoryShareRepo::default());
+        let user_repo = Arc::new(InMemoryUserRepo::default());
+        let owner = build_user(owner_email);
+        conversation_repo.insert_owner(conversation_id, owner.id);
+        user_repo.insert_user(owner.clone());
+
+        (
+            ConversationShareServiceImpl::new(
+                conversation_repo.clone(),
+                share_repo.clone(),
+                user_repo.clone(),
+            ),
+            conversation_repo,
+            share_repo,
+            user_repo,
+            owner,
+        )
+    }
+
     #[tokio::test]
     async fn ensure_access_allows_owner() {
         let conversation_repo = Arc::new(InMemoryConversationRepo::default());
@@ -924,5 +954,294 @@ mod tests {
             .await;
 
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn ensure_access_denies_write_when_only_read_share() {
+        let conversation_repo = Arc::new(InMemoryConversationRepo::default());
+        let share_repo = Arc::new(InMemoryShareRepo::default());
+        let user_repo = Arc::new(InMemoryUserRepo::default());
+
+        let user = build_user("reader@example.com");
+        user_repo.insert_user(user.clone());
+
+        share_repo
+            .create_share(NewConversationShare {
+                conversation_id: "conv_read".to_string(),
+                owner_user_id: UserId::new(),
+                share_type: ShareType::Direct,
+                permission: SharePermission::Read,
+                recipient: Some(ShareRecipient {
+                    kind: ShareRecipientKind::Email,
+                    value: "reader@example.com".to_string(),
+                }),
+                group_id: None,
+                org_email_pattern: None,
+                public_token: None,
+            })
+            .await
+            .expect("share create");
+
+        let service = ConversationShareServiceImpl::new(conversation_repo, share_repo, user_repo);
+
+        let result = service
+            .ensure_access("conv_read", user.id, SharePermission::Write)
+            .await;
+
+        assert!(matches!(result, Err(ConversationError::AccessDenied)));
+    }
+
+    #[tokio::test]
+    async fn ensure_access_respects_near_account_recipients() {
+        let conversation_repo = Arc::new(InMemoryConversationRepo::default());
+        let share_repo = Arc::new(InMemoryShareRepo::default());
+        let user_repo = Arc::new(InMemoryUserRepo::default());
+
+        let user = build_user("linked@example.com");
+        user_repo.insert_user(user.clone());
+        user_repo.insert_linked_account(
+            user.id,
+            LinkedOAuthAccount {
+                provider: OAuthProvider::Near,
+                provider_user_id: "alice.near".to_string(),
+                linked_at: Utc::now(),
+            },
+        );
+
+        share_repo
+            .create_share(NewConversationShare {
+                conversation_id: "conv_near".to_string(),
+                owner_user_id: UserId::new(),
+                share_type: ShareType::Direct,
+                permission: SharePermission::Read,
+                recipient: Some(ShareRecipient {
+                    kind: ShareRecipientKind::NearAccount,
+                    value: "alice.near".to_string(),
+                }),
+                group_id: None,
+                org_email_pattern: None,
+                public_token: None,
+            })
+            .await
+            .expect("share create");
+
+        let service = ConversationShareServiceImpl::new(conversation_repo, share_repo, user_repo);
+
+        service
+            .ensure_access("conv_near", user.id, SharePermission::Read)
+            .await
+            .expect("near access");
+    }
+
+    #[tokio::test]
+    async fn ensure_access_respects_org_shares() {
+        let conversation_repo = Arc::new(InMemoryConversationRepo::default());
+        let share_repo = Arc::new(InMemoryShareRepo::default());
+        let user_repo = Arc::new(InMemoryUserRepo::default());
+
+        let user = build_user("someone@team.example.com");
+        user_repo.insert_user(user.clone());
+
+        share_repo
+            .create_share(NewConversationShare {
+                conversation_id: "conv_org".to_string(),
+                owner_user_id: UserId::new(),
+                share_type: ShareType::Organization,
+                permission: SharePermission::Read,
+                recipient: None,
+                group_id: None,
+                org_email_pattern: Some("%@example.com".to_string()),
+                public_token: None,
+            })
+            .await
+            .expect("share create");
+
+        let service = ConversationShareServiceImpl::new(conversation_repo, share_repo, user_repo);
+
+        service
+            .ensure_access("conv_org", user.id, SharePermission::Read)
+            .await
+            .expect("org access");
+    }
+
+    #[tokio::test]
+    async fn public_shares_enforce_permissions() {
+        let (service, _conversation_repo, share_repo, user_repo, owner) =
+            setup_service_with_owner("conv_public_enforce", "owner@example.com");
+
+        let shares = service
+            .create_share(
+                owner.id,
+                "conv_public_enforce",
+                SharePermission::Read,
+                ShareTarget::Public,
+            )
+            .await
+            .expect("create public share");
+
+        let token = shares[0]
+            .public_token
+            .as_ref()
+            .expect("missing token")
+            .clone();
+
+        // Ensure read succeeds
+        service
+            .get_public_access(&token, SharePermission::Read)
+            .await
+            .expect("read token");
+
+        // Write should fail for read-only public shares
+        let err = service
+            .get_public_access(&token, SharePermission::Write)
+            .await
+            .expect_err("write should fail");
+        assert!(matches!(err, ConversationError::AccessDenied));
+
+        // Unknown tokens error with NotFound
+        let err = service
+            .get_public_access("does-not-exist", SharePermission::Read)
+            .await
+            .expect_err("missing share");
+        assert!(matches!(err, ConversationError::NotFound));
+
+        // Avoid unused warnings
+        drop((share_repo, user_repo));
+    }
+
+    #[tokio::test]
+    async fn create_share_normalizes_recipients_and_patterns() {
+        let (service, _conversation_repo, _share_repo, _user_repo, owner) =
+            setup_service_with_owner("conv_norm", "owner@example.com");
+
+        let shares = service
+            .create_share(
+                owner.id,
+                "conv_norm",
+                SharePermission::Read,
+                ShareTarget::Direct(vec![
+                    ShareRecipient {
+                        kind: ShareRecipientKind::Email,
+                        value: " MixedCase@Example.COM  ".to_string(),
+                    },
+                    ShareRecipient {
+                        kind: ShareRecipientKind::NearAccount,
+                        value: "   alice.near  ".to_string(),
+                    },
+                ]),
+            )
+            .await
+            .expect("create direct shares");
+
+        assert_eq!(shares.len(), 2);
+        assert_eq!(
+            shares[0].recipient.as_ref().expect("email recipient").value,
+            "mixedcase@example.com"
+        );
+        assert_eq!(
+            shares[1].recipient.as_ref().expect("near recipient").value,
+            "alice.near"
+        );
+
+        service
+            .create_share(
+                owner.id,
+                "conv_norm",
+                SharePermission::Read,
+                ShareTarget::Organization("example.com".to_string()),
+            )
+            .await
+            .expect("create org share");
+
+        let stored = service
+            .list_shares(owner.id, "conv_norm")
+            .await
+            .expect("list shares");
+        let org_share = stored
+            .iter()
+            .find(|share| share.share_type == ShareType::Organization)
+            .expect("org share missing");
+        assert_eq!(
+            org_share.org_email_pattern.as_deref(),
+            Some("%@example.com")
+        );
+    }
+
+    #[tokio::test]
+    async fn organization_patterns_preserve_existing_wildcards() {
+        let (service, _conversation_repo, _share_repo, _user_repo, owner) =
+            setup_service_with_owner("conv_org_norm", "owner@example.com");
+
+        service
+            .create_share(
+                owner.id,
+                "conv_org_norm",
+                SharePermission::Read,
+                ShareTarget::Organization("%@partner.example.com".to_string()),
+            )
+            .await
+            .expect("create org share");
+
+        let stored = service
+            .list_shares(owner.id, "conv_org_norm")
+            .await
+            .expect("list shares");
+        let org_share = stored
+            .iter()
+            .find(|share| share.share_type == ShareType::Organization)
+            .expect("org share missing");
+        assert_eq!(
+            org_share.org_email_pattern.as_deref(),
+            Some("%@partner.example.com")
+        );
+    }
+
+    #[tokio::test]
+    async fn share_group_lifecycle_normalizes_members() {
+        let (service, _conversation_repo, _share_repo, _user_repo, owner) =
+            setup_service_with_owner("conv_groups", "owner@example.com");
+
+        let group = service
+            .create_group(
+                owner.id,
+                " Team ",
+                vec![ShareRecipient {
+                    kind: ShareRecipientKind::Email,
+                    value: " TEAM@Example.Com  ".to_string(),
+                }],
+            )
+            .await
+            .expect("create group");
+
+        assert_eq!(group.name, " Team ");
+        assert_eq!(group.members.len(), 1);
+        assert_eq!(group.members[0].value, "team@example.com");
+
+        let groups = service.list_groups(owner.id).await.expect("list groups");
+        assert_eq!(groups.len(), 1);
+
+        let updated = service
+            .update_group(
+                owner.id,
+                group.id,
+                Some("Renamed Group".to_string()),
+                Some(vec![ShareRecipient {
+                    kind: ShareRecipientKind::NearAccount,
+                    value: "  alice.near ".to_string(),
+                }]),
+            )
+            .await
+            .expect("update group");
+
+        assert_eq!(updated.name, "Renamed Group");
+        assert_eq!(updated.members[0].value, "alice.near");
+
+        service
+            .delete_group(owner.id, group.id)
+            .await
+            .expect("delete group");
+
+        let remaining = service.list_groups(owner.id).await.expect("list groups");
+        assert!(remaining.is_empty());
     }
 }

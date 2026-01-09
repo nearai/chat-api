@@ -134,7 +134,7 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
         name: &str,
         members: &[ShareRecipient],
     ) -> Result<ShareGroup, ConversationError> {
-        let client = self
+        let mut client = self
             .pool
             .get()
             .await
@@ -249,7 +249,7 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
         name: Option<&str>,
         members: Option<&[ShareRecipient]>,
     ) -> Result<ShareGroup, ConversationError> {
-        let client = self
+        let mut client = self
             .pool
             .get()
             .await
