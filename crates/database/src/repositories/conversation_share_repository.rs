@@ -421,6 +421,7 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
     async fn delete_share(
         &self,
         owner_user_id: UserId,
+        conversation_id: &str,
         share_id: Uuid,
     ) -> Result<(), ConversationError> {
         let client = self
@@ -431,8 +432,9 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
 
         let deleted = client
             .execute(
-                "DELETE FROM conversation_shares WHERE owner_user_id = $1 AND id = $2",
-                &[&owner_user_id.0, &share_id],
+                "DELETE FROM conversation_shares
+                 WHERE owner_user_id = $1 AND conversation_id = $2 AND id = $3",
+                &[&owner_user_id.0, &conversation_id, &share_id],
             )
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;

@@ -307,10 +307,11 @@ impl ConversationShareService for ConversationShareServiceImpl {
     async fn delete_share(
         &self,
         owner_user_id: UserId,
+        conversation_id: &str,
         share_id: uuid::Uuid,
     ) -> Result<(), ConversationError> {
         self.share_repository
-            .delete_share(owner_user_id, share_id)
+            .delete_share(owner_user_id, conversation_id, share_id)
             .await
     }
 }
@@ -534,11 +535,16 @@ mod tests {
         async fn delete_share(
             &self,
             owner_user_id: UserId,
+            conversation_id: &str,
             share_id: Uuid,
         ) -> Result<(), ConversationError> {
             let mut shares = self.shares.lock().expect("lock shares");
             let original_len = shares.len();
-            shares.retain(|share| !(share.owner_user_id == owner_user_id && share.id == share_id));
+            shares.retain(|share| {
+                !(share.owner_user_id == owner_user_id
+                    && share.conversation_id == conversation_id
+                    && share.id == share_id)
+            });
             if shares.len() == original_len {
                 return Err(ConversationError::NotFound);
             }
@@ -1243,5 +1249,67 @@ mod tests {
 
         let remaining = service.list_groups(owner.id).await.expect("list groups");
         assert!(remaining.is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_share_requires_matching_conversation() {
+        let (service, _conversation_repo, _share_repo, _user_repo, owner) =
+            setup_service_with_owner("conv_consistent", "owner@example.com");
+
+        let share = service
+            .create_share(
+                owner.id,
+                "conv_consistent",
+                SharePermission::Read,
+                ShareTarget::Public,
+            )
+            .await
+            .expect("create share")
+            .into_iter()
+            .next()
+            .expect("share");
+
+        let err = service
+            .delete_share(owner.id, "other_conversation", share.id)
+            .await
+            .expect_err("should fail mismatch");
+        assert!(matches!(err, ConversationError::NotFound));
+
+        let shares = service
+            .list_shares(owner.id, "conv_consistent")
+            .await
+            .expect("list shares");
+        assert_eq!(shares.len(), 1, "share should remain untouched");
+    }
+
+    #[tokio::test]
+    async fn delete_share_requires_owner() {
+        let (service, _conversation_repo, share_repo, user_repo, owner) =
+            setup_service_with_owner("conv_protected", "owner@example.com");
+
+        let other_user = build_user("intruder@example.com");
+        user_repo.insert_user(other_user.clone());
+
+        let share = service
+            .create_share(
+                owner.id,
+                "conv_protected",
+                SharePermission::Read,
+                ShareTarget::Public,
+            )
+            .await
+            .expect("create share")
+            .into_iter()
+            .next()
+            .expect("share");
+
+        let err = service
+            .delete_share(other_user.id, "conv_protected", share.id)
+            .await
+            .expect_err("should fail for non-owner");
+        assert!(matches!(err, ConversationError::NotFound));
+
+        // Avoid warnings about unused repos
+        drop((share_repo, user_repo));
     }
 }

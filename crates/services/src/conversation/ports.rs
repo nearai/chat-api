@@ -190,6 +190,7 @@ pub trait ConversationShareRepository: Send + Sync {
     async fn delete_share(
         &self,
         owner_user_id: UserId,
+        conversation_id: &str,
         share_id: Uuid,
     ) -> Result<(), ConversationError>;
 
@@ -309,6 +310,7 @@ pub trait ConversationShareService: Send + Sync {
     async fn delete_share(
         &self,
         owner_user_id: UserId,
+        conversation_id: &str,
         share_id: Uuid,
     ) -> Result<(), ConversationError>;
 }

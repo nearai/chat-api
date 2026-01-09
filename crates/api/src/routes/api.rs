@@ -524,6 +524,7 @@ async fn get_conversation(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path(conversation_id): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, Response> {
     tracing::info!(
         "get_conversation called for user_id={}, conversation_id={}",
@@ -533,7 +534,8 @@ async fn get_conversation(
 
     validate_user_conversation(&state, &user, &conversation_id, SharePermission::Read).await?;
 
-    let conversation = fetch_conversation_from_openai(&state, &conversation_id).await?;
+    let conversation =
+        fetch_conversation_from_proxy(&state, &conversation_id, headers.clone()).await?;
 
     Ok(Json(conversation))
 }
@@ -661,11 +663,11 @@ async fn list_conversation_shares(
 async fn delete_conversation_share(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    Path((_conversation_id, share_id)): Path<(String, Uuid)>,
+    Path((conversation_id, share_id)): Path<(String, Uuid)>,
 ) -> Result<Response, Response> {
     state
         .conversation_share_service
-        .delete_share(user.user_id, share_id)
+        .delete_share(user.user_id, &conversation_id, share_id)
         .await
         .map_err(map_share_error)?;
 
@@ -914,7 +916,8 @@ async fn get_shared_conversation(
         .await
         .map_err(map_share_error)?;
 
-    let conversation = fetch_conversation_from_openai(&state, &share.conversation_id).await?;
+    let conversation =
+        fetch_conversation_from_proxy(&state, &share.conversation_id, HeaderMap::new()).await?;
 
     Ok(Json(conversation))
 }
@@ -2566,65 +2569,55 @@ fn map_share_error(error: ConversationError) -> Response {
     (status, Json(ErrorResponse { error: message })).into_response()
 }
 
-async fn fetch_conversation_from_openai(
+async fn fetch_conversation_from_proxy(
     state: &crate::state::AppState,
     conversation_id: &str,
+    headers: HeaderMap,
 ) -> Result<serde_json::Value, Response> {
+    fn bad_gateway(message: impl Into<String>) -> Response {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(ErrorResponse {
+                error: message.into(),
+            }),
+        )
+            .into_response()
+    }
+
     let proxy_response = state
         .proxy_service
         .forward_request(
             Method::GET,
             &format!("conversations/{conversation_id}"),
-            HeaderMap::new(),
+            headers,
             None,
         )
         .await
-        .map_err(|e| {
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(ErrorResponse {
-                    error: format!("OpenAI API error: {e}"),
-                }),
-            )
-                .into_response()
-        })?;
+        .map_err(|e| bad_gateway(format!("OpenAI API error: {e}")))?;
 
-    if proxy_response.status != StatusCode::OK.as_u16() {
-        return Err((
-            StatusCode::BAD_GATEWAY,
-            Json(ErrorResponse {
-                error: format!("OpenAI API returned status {}", proxy_response.status),
-            }),
-        )
-            .into_response());
+    let status = StatusCode::from_u16(proxy_response.status).unwrap_or(StatusCode::BAD_GATEWAY);
+    if !status.is_success() {
+        let reason = status
+            .canonical_reason()
+            .map(|r| format!(" ({r})"))
+            .unwrap_or_default();
+        return Err(bad_gateway(format!(
+            "OpenAI API returned status {}{reason}",
+            status.as_u16()
+        )));
     }
 
     let body_bytes: Bytes = proxy_response
         .body
         .try_collect::<Vec<_>>()
         .await
-        .map_err(|e| {
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(ErrorResponse {
-                    error: format!("Failed to read response: {e}"),
-                }),
-            )
-                .into_response()
-        })?
+        .map_err(|e| bad_gateway(format!("Failed to read response: {e}")))?
         .into_iter()
         .flatten()
         .collect();
 
-    let conversation: serde_json::Value = serde_json::from_slice(&body_bytes).map_err(|e| {
-        (
-            StatusCode::BAD_GATEWAY,
-            Json(ErrorResponse {
-                error: format!("Failed to parse JSON: {e}"),
-            }),
-        )
-            .into_response()
-    })?;
+    let conversation: serde_json::Value = serde_json::from_slice(&body_bytes)
+        .map_err(|e| bad_gateway(format!("Failed to parse JSON: {e}")))?;
 
     Ok(conversation)
 }
