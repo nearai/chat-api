@@ -40,6 +40,12 @@ pub async fn static_handler(req: Request<Body>) -> Response {
 
     match result {
         Ok(mut res) => {
+            // SPA history-based routing: unknown non-asset routes should return index.html with 200.
+            // tower_http's `not_found_service` serves the fallback body but keeps the 404 status.
+            if !has_extension && res.status() == StatusCode::NOT_FOUND {
+                *res.status_mut() = StatusCode::OK;
+            }
+
             if let Some(content_type) = res.headers().get(header::CONTENT_TYPE) {
                 let is_html = content_type
                     .to_str()
