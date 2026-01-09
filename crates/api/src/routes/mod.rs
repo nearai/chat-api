@@ -11,9 +11,8 @@ use serde::Serialize;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use utoipa::ToSchema;
 
-use crate::middleware::RateLimitState;
 use crate::{
-    middleware::{AuthState, MetricsState},
+    middleware::{AuthState, MetricsState, RateLimitState},
     state::AppState,
     static_files,
 };
