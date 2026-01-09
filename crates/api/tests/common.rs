@@ -1,11 +1,19 @@
 #![allow(dead_code)]
 
+use anyhow::anyhow;
 use api::{create_router_with_cors, AppState};
+use async_trait::async_trait;
 use axum_test::TestServer;
 use serde_json::json;
 use services::analytics::AnalyticsServiceImpl;
+use services::auth::passkey::PasskeyRecord;
+use services::auth::{
+    AssertionCredential, PasskeyAssertionOptions, PasskeyRegistrationOptions, PasskeyService,
+    RegistrationCredential,
+};
 use services::file::service::FileServiceImpl;
 use services::metrics::MockMetricsService;
+use services::types::UserId;
 use services::vpc::test_helpers::MockVpcCredentialsService;
 use services::vpc::VpcCredentials;
 use std::sync::Arc;
@@ -19,6 +27,50 @@ static MIGRATIONS_INITIALIZED: OnceCell<()> = OnceCell::const_new();
 pub struct TestServerConfig {
     pub vpc_credentials: Option<VpcCredentials>,
     pub cloud_api_base_url: String,
+}
+
+struct DummyPasskeyService;
+
+#[async_trait]
+impl PasskeyService for DummyPasskeyService {
+    async fn generate_registration_options(
+        &self,
+        _user_id: UserId,
+        _friendly_name: Option<String>,
+    ) -> anyhow::Result<PasskeyRegistrationOptions> {
+        Err(anyhow!("passkey registration not available in tests"))
+    }
+
+    async fn complete_registration(
+        &self,
+        _user_id: UserId,
+        _challenge: String,
+        _credential: RegistrationCredential,
+    ) -> anyhow::Result<PasskeyRecord> {
+        Err(anyhow!("passkey registration not available in tests"))
+    }
+
+    async fn generate_assertion_options(
+        &self,
+        _user_id: Option<UserId>,
+    ) -> anyhow::Result<PasskeyAssertionOptions> {
+        Err(anyhow!("passkey assertion not available in tests"))
+    }
+
+    async fn verify_assertion(
+        &self,
+        _credential: AssertionCredential,
+    ) -> anyhow::Result<PasskeyRecord> {
+        Err(anyhow!("passkey assertion not available in tests"))
+    }
+
+    async fn list_user_passkeys(&self, _user_id: UserId) -> anyhow::Result<Vec<PasskeyRecord>> {
+        Ok(vec![])
+    }
+
+    async fn delete_passkey(&self, _user_id: UserId, _credential_id: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 /// Create a test server with all services initialized (VPC not configured)
@@ -131,6 +183,7 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
     // Create application state
     let app_state = AppState {
         oauth_service,
+        passkey_service: Arc::new(DummyPasskeyService),
         user_service,
         user_settings_service,
         model_service,
