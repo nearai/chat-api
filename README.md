@@ -183,7 +183,7 @@ OpenAPI docs available at `/docs` (local) or `/api/docs` (production).
 **Key endpoints**:
 - `/v1/auth/*` - OAuth authentication
 - `/v1/conversations/*` - Conversation management
-- `/v1/chat/completions` - OpenAI-compatible completions (proxied to NEAR AI Cloud API)
+- `/v1/responses` - OpenAI-compatible Responses API (proxied to NEAR AI Cloud API)
 - `/v1/attestation/report` - TEE attestation reports
 - `/v1/users/*` - User management
 - `/v1/admin/*` - Admin operations
