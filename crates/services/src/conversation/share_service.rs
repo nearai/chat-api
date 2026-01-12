@@ -87,7 +87,7 @@ impl ConversationShareService for ConversationShareServiceImpl {
             .await
         {
             Ok(()) => return Ok(()),
-            Err(ConversationError::NotFound) => {}
+            Err(ConversationError::NotFound) | Err(ConversationError::AccessDenied) => {}
             Err(error) => return Err(error),
         }
 
@@ -912,6 +912,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_share_requires_existing_conversation() {
+        let conversation_repo = Arc::new(InMemoryConversationRepo::default());
+        let share_repo = Arc::new(InMemoryShareRepo::default());
+        let user_repo = Arc::new(InMemoryUserRepo::default());
+
+        let owner = build_user("owner@example.com");
+        user_repo.insert_user(owner.clone());
+
+        let service = ConversationShareServiceImpl::new(conversation_repo, share_repo, user_repo);
+
+        let err = service
+            .create_share(
+                owner.id,
+                "missing_conv",
+                SharePermission::Read,
+                ShareTarget::Public,
+            )
+            .await
+            .expect_err("should fail when conversation missing");
+        assert!(matches!(err, ConversationError::NotFound));
+    }
+
+    #[tokio::test]
     async fn ensure_access_matches_group_members() {
         let conversation_repo = Arc::new(InMemoryConversationRepo::default());
         let share_repo = Arc::new(InMemoryShareRepo::default());
@@ -957,6 +980,144 @@ mod tests {
             .await;
 
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn create_group_share_requires_owners_group() {
+        let (service, _conversation_repo, share_repo, _user_repo, owner) =
+            setup_service_with_owner("conv_group_owner", "owner@example.com");
+
+        let outsider = build_user("outsider@example.com");
+
+        let outsider_group = share_repo
+            .create_group(
+                outsider.id,
+                "outsiders",
+                &[ShareRecipient {
+                    kind: ShareRecipientKind::Email,
+                    value: "outsider@example.com".to_string(),
+                }],
+            )
+            .await
+            .expect("outsider group");
+
+        let err = service
+            .create_share(
+                owner.id,
+                "conv_group_owner",
+                SharePermission::Read,
+                ShareTarget::Group(outsider_group.id),
+            )
+            .await
+            .expect_err("should reject group owned by someone else");
+        assert!(matches!(err, ConversationError::AccessDenied));
+    }
+
+    #[tokio::test]
+    async fn ensure_access_denies_group_non_member() {
+        let (service, _conversation_repo, share_repo, user_repo, owner) =
+            setup_service_with_owner("conv_group_access", "owner@example.com");
+
+        let sharee = build_user("someone@example.com");
+        user_repo.insert_user(sharee.clone());
+
+        let group = share_repo
+            .create_group(
+                owner.id,
+                "team",
+                &[ShareRecipient {
+                    kind: ShareRecipientKind::Email,
+                    value: "member@example.com".to_string(),
+                }],
+            )
+            .await
+            .expect("create group");
+
+        share_repo
+            .create_share(NewConversationShare {
+                conversation_id: "conv_group_access".to_string(),
+                owner_user_id: owner.id,
+                share_type: ShareType::Group,
+                permission: SharePermission::Read,
+                recipient: None,
+                group_id: Some(group.id),
+                org_email_pattern: None,
+                public_token: None,
+            })
+            .await
+            .expect("create share");
+
+        let err = service
+            .ensure_access("conv_group_access", sharee.id, SharePermission::Read)
+            .await
+            .expect_err("non member should not access");
+        assert!(matches!(err, ConversationError::AccessDenied));
+    }
+
+    #[tokio::test]
+    async fn ensure_access_prefers_write_when_multiple_shares() {
+        let conversation_repo = Arc::new(InMemoryConversationRepo::default());
+        let share_repo = Arc::new(InMemoryShareRepo::default());
+        let user_repo = Arc::new(InMemoryUserRepo::default());
+        let owner = build_user("owner@example.com");
+        let sharee = build_user("writer@example.com");
+        conversation_repo.insert_owner("conv_write", owner.id);
+        user_repo.insert_user(owner.clone());
+        user_repo.insert_user(sharee.clone());
+
+        let service = ConversationShareServiceImpl::new(
+            conversation_repo.clone(),
+            share_repo.clone(),
+            user_repo.clone(),
+        );
+
+        share_repo
+            .create_share(NewConversationShare {
+                conversation_id: "conv_write".to_string(),
+                owner_user_id: owner.id,
+                share_type: ShareType::Direct,
+                permission: SharePermission::Read,
+                recipient: Some(ShareRecipient {
+                    kind: ShareRecipientKind::Email,
+                    value: "writer@example.com".to_string(),
+                }),
+                group_id: None,
+                org_email_pattern: None,
+                public_token: None,
+            })
+            .await
+            .expect("create read share");
+
+        share_repo
+            .create_share(NewConversationShare {
+                conversation_id: "conv_write".to_string(),
+                owner_user_id: owner.id,
+                share_type: ShareType::Direct,
+                permission: SharePermission::Write,
+                recipient: Some(ShareRecipient {
+                    kind: ShareRecipientKind::NearAccount,
+                    value: "writer.near".to_string(),
+                }),
+                group_id: None,
+                org_email_pattern: None,
+                public_token: None,
+            })
+            .await
+            .expect("create write share");
+
+        user_repo.insert_linked_account(
+            sharee.id,
+            LinkedOAuthAccount {
+                provider: OAuthProvider::Near,
+                provider_user_id: "writer.near".to_string(),
+                linked_at: Utc::now(),
+            },
+        );
+
+        service
+            .ensure_access("conv_write", sharee.id, SharePermission::Write)
+            .await
+            .expect("should allow write with matching share");
     }
 
     #[tokio::test]
@@ -1110,6 +1271,28 @@ mod tests {
 
         // Avoid unused warnings
         drop((share_repo, user_repo));
+    }
+
+    #[tokio::test]
+    async fn public_shares_allow_write_permission() {
+        let (service, _conversation_repo, _share_repo, _user_repo, owner) =
+            setup_service_with_owner("conv_public_write", "owner@example.com");
+
+        let shares = service
+            .create_share(
+                owner.id,
+                "conv_public_write",
+                SharePermission::Write,
+                ShareTarget::Public,
+            )
+            .await
+            .expect("create public share");
+        let token = shares[0].public_token.as_ref().expect("token").clone();
+
+        service
+            .get_public_access(&token, SharePermission::Write)
+            .await
+            .expect("write access should succeed for write token");
     }
 
     #[tokio::test]
