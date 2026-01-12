@@ -521,10 +521,7 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
             permissions.push(Self::map_permission(&permission)?);
         }
 
-        let has_write = permissions
-            .iter()
-            .any(|permission| *permission == SharePermission::Write);
-        if has_write {
+        if permissions.contains(&SharePermission::Write) {
             return Ok(Some(SharePermission::Write));
         }
 

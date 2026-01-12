@@ -613,10 +613,7 @@ mod tests {
                 }
             }
 
-            if permissions
-                .iter()
-                .any(|permission| *permission == SharePermission::Write)
-            {
+            if permissions.contains(&SharePermission::Write) {
                 return Ok(Some(SharePermission::Write));
             }
 
