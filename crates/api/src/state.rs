@@ -51,6 +51,8 @@ pub struct AppState {
     pub metrics_service: Arc<dyn services::metrics::MetricsServiceTrait>,
     /// Analytics service for database-backed analytics
     pub analytics_service: Arc<dyn services::analytics::AnalyticsServiceTrait>,
+    /// Usage limit store for rate limiting (same underlying service as analytics_service)
+    pub usage_limit_store: Arc<dyn services::analytics::UsageLimitStore>,
     /// NEAR RPC URL used for on-chain balance checks (if configured)
     pub near_rpc_url: Url,
     /// In-memory cache for NEAR account balances to avoid frequent RPC calls

@@ -128,3 +128,20 @@ impl AnalyticsServiceTrait for AnalyticsServiceImpl {
             .map_err(|e| AnalyticsError::InternalError(e.to_string()))
     }
 }
+
+#[async_trait]
+impl UsageLimitStore for AnalyticsServiceImpl {
+    async fn check_and_record_activity(
+        &self,
+        user_id: UserId,
+        activity_type: ActivityType,
+        window: TimeWindow,
+        limit: i64,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<(i64, bool), AnalyticsError> {
+        self.repository
+            .check_and_record_activity(user_id, activity_type, window, limit, metadata)
+            .await
+            .map_err(|e| AnalyticsError::InternalError(e.to_string()))
+    }
+}

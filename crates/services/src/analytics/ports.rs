@@ -179,6 +179,17 @@ pub trait AnalyticsRepository: Send + Sync {
         end: DateTime<Utc>,
         limit: i64,
     ) -> anyhow::Result<Vec<TopActiveUser>>;
+
+    /// Check if usage is below limit and atomically record activity if allowed.
+    /// Uses sliding window based on activity_log table.
+    async fn check_and_record_activity(
+        &self,
+        user_id: UserId,
+        activity_type: ActivityType,
+        window: TimeWindow,
+        limit: i64,
+        metadata: Option<serde_json::Value>,
+    ) -> anyhow::Result<(i64, bool)>;
 }
 
 /// Error types for analytics operations
@@ -186,4 +197,54 @@ pub trait AnalyticsRepository: Send + Sync {
 pub enum AnalyticsError {
     #[error("Internal error: {0}")]
     InternalError(String),
+}
+
+/// Time window for sliding window rate limiting (in days)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TimeWindow {
+    /// Number of days for the sliding window
+    pub days: i32,
+}
+
+impl TimeWindow {
+    /// Create a time window with specified number of days
+    pub fn new(days: i32) -> Self {
+        Self { days }
+    }
+
+    /// Day window (1 day)
+    pub fn day() -> Self {
+        Self { days: 1 }
+    }
+
+    /// Week window (7 days)
+    pub fn week() -> Self {
+        Self { days: 7 }
+    }
+
+    /// Month window (30 days)
+    pub fn month() -> Self {
+        Self { days: 30 }
+    }
+}
+
+/// Trait for rate limiting that uses activity log for sliding window limits
+#[async_trait]
+pub trait UsageLimitStore: Send + Sync {
+    /// Atomically check if usage is below limit and record activity if allowed.
+    ///
+    /// This method:
+    /// 1. Counts activities of the specified type in the sliding window
+    /// 2. If below limit, inserts a new activity log entry
+    /// 3. Returns the current count after the attempt and whether the activity was recorded
+    ///
+    /// Returns: (current_count, was_recorded)
+    async fn check_and_record_activity(
+        &self,
+        user_id: UserId,
+        activity_type: ActivityType,
+        window: TimeWindow,
+        limit: i64,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<(i64, bool), AnalyticsError>;
 }

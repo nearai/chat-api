@@ -13,7 +13,10 @@ use axum::{
     Json,
 };
 use serde::Serialize;
-use services::UserId;
+use services::{
+    analytics::{ActivityType, TimeWindow, UsageLimitStore},
+    UserId,
+};
 use std::{
     collections::{HashMap, VecDeque},
     sync::Arc,
@@ -21,11 +24,22 @@ use std::{
 };
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 
+/// Configuration for a single time window limit
+#[derive(Debug, Clone)]
+pub struct WindowLimit {
+    pub window: TimeWindow,
+    pub limit: usize,
+    pub activity_type: ActivityType,
+}
+
 #[derive(Clone)]
 pub struct RateLimitConfig {
     pub max_concurrent: usize,
     pub max_requests_per_window: usize,
     pub window_duration: Duration,
+    /// Sliding window limits based on activity_log
+    /// Each limit applies independently
+    pub window_limits: Vec<WindowLimit>,
 }
 
 impl Default for RateLimitConfig {
@@ -34,6 +48,11 @@ impl Default for RateLimitConfig {
             max_concurrent: 2,
             max_requests_per_window: 1,
             window_duration: Duration::from_secs(1),
+            window_limits: vec![WindowLimit {
+                window: TimeWindow::day(),
+                limit: 1000,
+                activity_type: ActivityType::Response,
+            }],
         }
     }
 }
@@ -66,17 +85,19 @@ impl UserRateLimitState {
 pub struct RateLimitState {
     user_limits: Arc<Mutex<HashMap<UserId, UserRateLimitState>>>,
     config: Arc<RateLimitConfig>,
+    usage_store: Arc<dyn UsageLimitStore>,
 }
 
 impl RateLimitState {
-    pub fn new() -> Self {
-        Self::with_config(RateLimitConfig::default())
+    pub fn new(usage_store: Arc<dyn UsageLimitStore>) -> Self {
+        Self::with_config(RateLimitConfig::default(), usage_store)
     }
 
-    pub fn with_config(config: RateLimitConfig) -> Self {
+    pub fn with_config(config: RateLimitConfig, usage_store: Arc<dyn UsageLimitStore>) -> Self {
         Self {
             user_limits: Arc::new(Mutex::new(HashMap::new())),
             config: Arc::new(config),
+            usage_store,
         }
     }
 
@@ -127,13 +148,52 @@ impl RateLimitState {
 
         user_state.request_timestamps.push_back(now);
 
-        Ok(RateLimitGuard { _permit: permit })
-    }
-}
+        // Phase 2: Check sliding window limits based on activity_log
+        // We check all configured window limits and fail if any is exceeded
+        for window_limit in &self.config.window_limits {
+            let (count, was_recorded) = self
+                .usage_store
+                .check_and_record_activity(
+                    user_id,
+                    window_limit.activity_type,
+                    window_limit.window,
+                    window_limit.limit as i64,
+                    None, // metadata can be added later if needed
+                )
+                .await
+                .map_err(|e| {
+                    tracing::warn!(
+                        user_id = %user_id.0,
+                        window_days = window_limit.window.days,
+                        "Failed to check usage limit: {}",
+                        e
+                    );
+                    RateLimitError::InternalServerError
+                })?;
 
-impl Default for RateLimitState {
-    fn default() -> Self {
-        Self::new()
+            if !was_recorded {
+                // Calculate retry_after: when the oldest activity in the window expires
+                // For sliding window, we estimate based on window size
+                let window_duration_secs = (window_limit.window.days as u64) * 24 * 3600;
+                let retry_after_ms = window_duration_secs * 1000; // Conservative estimate
+
+                tracing::warn!(
+                    user_id = %user_id.0,
+                    window_days = window_limit.window.days,
+                    limit = window_limit.limit,
+                    current_count = count,
+                    "Sliding window limit exceeded"
+                );
+
+                return Err(RateLimitError::WindowLimitExceeded {
+                    window_days: window_limit.window.days,
+                    limit: window_limit.limit,
+                    retry_after_ms,
+                });
+            }
+        }
+
+        Ok(RateLimitGuard { _permit: permit })
     }
 }
 
@@ -144,7 +204,15 @@ pub struct RateLimitGuard {
 #[derive(Debug)]
 enum RateLimitError {
     TooManyConcurrent,
-    RateLimitExceeded { retry_after_ms: u64 },
+    RateLimitExceeded {
+        retry_after_ms: u64,
+    },
+    WindowLimitExceeded {
+        window_days: i32,
+        limit: usize,
+        retry_after_ms: u64,
+    },
+    InternalServerError,
 }
 
 #[derive(Serialize)]
@@ -169,6 +237,23 @@ impl IntoResponse for RateLimitError {
                     retry_after_ms
                 ),
                 Some(retry_after_ms),
+            ),
+            RateLimitError::WindowLimitExceeded {
+                window_days,
+                limit,
+                retry_after_ms,
+            } => (
+                StatusCode::TOO_MANY_REQUESTS,
+                format!(
+                    "Request limit of {} reached for {} day window. Please retry later.",
+                    limit, window_days
+                ),
+                Some(retry_after_ms),
+            ),
+            RateLimitError::InternalServerError => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to check usage limit.".to_string(),
+                None,
             ),
         };
 
@@ -198,22 +283,50 @@ pub async fn rate_limit_middleware(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use services::analytics::{ActivityType, AnalyticsError, TimeWindow, UsageLimitStore};
+    use std::sync::Arc;
     use uuid::Uuid;
 
     fn test_user_id(id: u128) -> UserId {
         UserId(Uuid::from_u128(id))
     }
 
+    struct MockUsageLimitStore;
+
+    #[async_trait]
+    impl UsageLimitStore for MockUsageLimitStore {
+        async fn check_and_record_activity(
+            &self,
+            _user_id: UserId,
+            _activity_type: ActivityType,
+            _window: TimeWindow,
+            _limit: i64,
+            _metadata: Option<serde_json::Value>,
+        ) -> Result<(i64, bool), AnalyticsError> {
+            // Always allow in tests (unless we want to test limit behavior)
+            Ok((0, true))
+        }
+    }
+
+    fn default_state() -> RateLimitState {
+        RateLimitState::new(Arc::new(MockUsageLimitStore))
+    }
+
+    fn configured_state(config: RateLimitConfig) -> RateLimitState {
+        RateLimitState::with_config(config, Arc::new(MockUsageLimitStore))
+    }
+
     #[tokio::test]
     async fn test_rate_limit_allows_first_request() {
-        let state = RateLimitState::new();
+        let state = default_state();
         let result = state.try_acquire(test_user_id(1)).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_rate_limit_blocks_second_request_within_window() {
-        let state = RateLimitState::new();
+        let state = default_state();
         let user = test_user_id(1);
 
         // First request should succeed
@@ -229,10 +342,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrency_limit_per_user() {
-        let state = RateLimitState::with_config(RateLimitConfig {
+        let state = configured_state(RateLimitConfig {
             max_concurrent: 2,
             max_requests_per_window: 100, // High limit to avoid rate limiting
             window_duration: Duration::from_secs(1),
+            window_limits: vec![], // No window limits for this test
         });
 
         let user = test_user_id(1);
@@ -248,10 +362,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_different_users_have_separate_limits() {
-        let state = RateLimitState::with_config(RateLimitConfig {
+        let state = configured_state(RateLimitConfig {
             max_concurrent: 1,
             max_requests_per_window: 100, // High to test concurrency, not rate
             window_duration: Duration::from_secs(1),
+            window_limits: vec![], // No window limits for this test
         });
 
         let user1 = test_user_id(1);
@@ -274,10 +389,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_permit_released_after_drop() {
-        let state = RateLimitState::with_config(RateLimitConfig {
+        let state = configured_state(RateLimitConfig {
             max_concurrent: 1,
             max_requests_per_window: 100,
             window_duration: Duration::from_secs(1),
+            window_limits: vec![], // No window limits for this test
         });
 
         let user = test_user_id(1);
@@ -299,10 +415,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_no_permit_leak_on_rate_limit_rejection() {
-        let state = RateLimitState::with_config(RateLimitConfig {
+        let state = configured_state(RateLimitConfig {
             max_concurrent: 2,
             max_requests_per_window: 1,
             window_duration: Duration::from_millis(50),
+            window_limits: vec![], // No window limits for this test
         });
 
         let user = test_user_id(1);
@@ -337,10 +454,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_idle_user_cleanup() {
-        let state = RateLimitState::with_config(RateLimitConfig {
+        let state = configured_state(RateLimitConfig {
             max_concurrent: 2,
             max_requests_per_window: 10,
             window_duration: Duration::from_millis(10),
+            window_limits: vec![], // No window limits for this test
         });
 
         let user1 = test_user_id(1);

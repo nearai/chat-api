@@ -149,9 +149,12 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize analytics service
     tracing::info!("Initializing analytics service...");
-    let analytics_service = Arc::new(AnalyticsServiceImpl::new(
+    let analytics_impl = Arc::new(AnalyticsServiceImpl::new(
         analytics_repo as Arc<dyn services::analytics::AnalyticsRepository>,
     ));
+    let analytics_service: Arc<dyn services::analytics::AnalyticsServiceTrait> =
+        analytics_impl.clone();
+    let usage_limit_store: Arc<dyn services::analytics::UsageLimitStore> = analytics_impl;
 
     // Initialize system configs service
     tracing::info!("Initializing system configs service...");
@@ -234,6 +237,7 @@ async fn main() -> anyhow::Result<()> {
         cloud_api_base_url: config.openai.base_url.clone().unwrap_or_default(),
         metrics_service,
         analytics_service,
+        usage_limit_store,
         near_rpc_url: config.near.rpc_url.clone(),
         near_balance_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         model_settings_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),

@@ -5,8 +5,9 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use services::{
     analytics::{
-        ActivityLogEntry, ActivityMetricsSummary, AnalyticsRepository, AnalyticsSummary,
-        AuthMethodBreakdown, RecordActivityRequest, TopActiveUser, UserMetricsSummary,
+        ActivityLogEntry, ActivityMetricsSummary, ActivityType, AnalyticsRepository,
+        AnalyticsSummary, AuthMethodBreakdown, RecordActivityRequest, TimeWindow, TopActiveUser,
+        UserMetricsSummary,
     },
     UserId,
 };
@@ -308,5 +309,71 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
                 last_active: row.get(3),
             })
             .collect())
+    }
+
+    /// Check if usage is below limit and atomically record activity if allowed.
+    /// Uses sliding window based on activity_log table.
+    async fn check_and_record_activity(
+        &self,
+        user_id: UserId,
+        activity_type: ActivityType,
+        window: TimeWindow,
+        limit: i64,
+        metadata: Option<serde_json::Value>,
+    ) -> anyhow::Result<(i64, bool)> {
+        // Fast path: limit <= 0 means the increment is never allowed.
+        if limit <= 0 {
+            return Ok((0, false));
+        }
+
+        let client = self.pool.get().await?;
+        let activity_type_str = activity_type.as_str();
+
+        // Use a single query to atomically:
+        // 1. Count activities in the sliding window
+        // 2. Insert new activity if below limit
+        // 3. Return the count and whether insertion happened
+        let window_days = window.days as i64;
+        let row = client
+            .query_one(
+                r#"
+                WITH window_start AS (
+                    SELECT NOW() - make_interval(days => $3) as start_time
+                ),
+                current_count AS (
+                    SELECT COUNT(*)::bigint as cnt
+                    FROM user_activity_log, window_start
+                    WHERE user_id = $1
+                      AND activity_type = $2
+                      AND created_at >= window_start.start_time
+                ),
+                can_insert AS (
+                    SELECT (SELECT cnt FROM current_count) < $4 as allowed
+                ),
+                inserted AS (
+                    INSERT INTO user_activity_log (user_id, activity_type, metadata, created_at)
+                    SELECT $1, $2, $5, NOW()
+                    WHERE (SELECT allowed FROM can_insert) = true
+                    RETURNING id
+                )
+                SELECT 
+                    (SELECT cnt FROM current_count) + 
+                    CASE WHEN EXISTS (SELECT 1 FROM inserted) THEN 1 ELSE 0 END as total_count,
+                    EXISTS (SELECT 1 FROM inserted) as was_inserted
+                "#,
+                &[
+                    &user_id,
+                    &activity_type_str,
+                    &window_days,
+                    &limit,
+                    &metadata,
+                ],
+            )
+            .await?;
+
+        let count: i64 = row.get(0);
+        let was_inserted: bool = row.get(1);
+
+        Ok((count, was_inserted))
     }
 }
