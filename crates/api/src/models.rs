@@ -128,6 +128,7 @@ pub struct CombinedAttestationReport {
     pub cloud_api_gateway_attestation: ApiGatewayAttestation,
 
     /// Model provider attestations (can be multiple when routing to different models)
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub model_attestations: Option<Vec<ModelAttestation>>,
 }
 
