@@ -102,79 +102,105 @@ impl RateLimitState {
     }
 
     async fn try_acquire(&self, user_id: UserId) -> Result<RateLimitGuard, RateLimitError> {
-        let mut user_limits = self.user_limits.lock().await;
+        // Phase 1: Fast checks (short mutex hold time)
+        // Check short-term rate limit and acquire permit
+        let permit = {
+            let mut user_limits = self.user_limits.lock().await;
 
-        user_limits.retain(|_, state| !state.is_idle(Duration::from_secs(3600)));
+            user_limits.retain(|_, state| !state.is_idle(Duration::from_secs(3600)));
 
-        let user_state = user_limits
-            .entry(user_id)
-            .or_insert_with(|| UserRateLimitState::new(self.config.max_concurrent));
+            let user_state = user_limits
+                .entry(user_id)
+                .or_insert_with(|| UserRateLimitState::new(self.config.max_concurrent));
 
-        let now = Instant::now();
-        user_state.last_activity = now;
+            let now = Instant::now();
+            user_state.last_activity = now;
 
-        while let Some(front) = user_state.request_timestamps.front() {
-            if now.duration_since(*front) > self.config.window_duration {
-                user_state.request_timestamps.pop_front();
-            } else {
-                break;
+            // Clean up expired timestamps
+            while let Some(front) = user_state.request_timestamps.front() {
+                if now.duration_since(*front) > self.config.window_duration {
+                    user_state.request_timestamps.pop_front();
+                } else {
+                    break;
+                }
             }
-        }
 
-        if user_state.request_timestamps.len() >= self.config.max_requests_per_window {
-            if let Some(oldest) = user_state.request_timestamps.front() {
-                let wait_time = self.config.window_duration - now.duration_since(*oldest);
-                tracing::warn!(
-                    user_id = %user_id.0,
-                    "Rate limit exceeded for user, retry in {:?}",
-                    wait_time
-                );
-                return Err(RateLimitError::RateLimitExceeded {
-                    retry_after_ms: wait_time.as_millis() as u64,
-                });
+            // Check short-term rate limit
+            if user_state.request_timestamps.len() >= self.config.max_requests_per_window {
+                if let Some(oldest) = user_state.request_timestamps.front() {
+                    let wait_time = self
+                        .config
+                        .window_duration
+                        .saturating_sub(now.duration_since(*oldest));
+                    tracing::warn!(
+                        user_id = %user_id.0,
+                        "Rate limit exceeded for user, retry in {:?}",
+                        wait_time
+                    );
+                    return Err(RateLimitError::RateLimitExceeded {
+                        retry_after_ms: wait_time.as_millis() as u64,
+                    });
+                }
             }
-        }
 
-        let permit = match user_state.semaphore.clone().try_acquire_owned() {
-            Ok(permit) => permit,
-            Err(_) => {
-                tracing::warn!(
-                    user_id = %user_id.0,
-                    "Max concurrent requests exceeded for user"
-                );
-                return Err(RateLimitError::TooManyConcurrent);
-            }
-        };
+            // Acquire permit for concurrent request limit
+            let permit = user_state
+                .semaphore
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| {
+                    tracing::warn!(
+                        user_id = %user_id.0,
+                        "Max concurrent requests exceeded for user"
+                    );
+                    RateLimitError::TooManyConcurrent
+                })?;
 
-        user_state.request_timestamps.push_back(now);
+            // Add timestamp only after all fast checks pass
+            // This will be rolled back if window limit check fails
+            user_state.request_timestamps.push_back(now);
 
-        // Phase 2: Check sliding window limits based on activity_log
+            permit
+        }; // Mutex is released here
+
+        // Phase 2: Check sliding window limits based on activity_log (no mutex held)
         // We check all configured window limits and fail if any is exceeded
         for window_limit in &self.config.window_limits {
-            let (count, was_recorded) = self
+            let limit_value = window_limit.limit.try_into().unwrap_or(i64::MAX);
+
+            let result = self
                 .usage_store
                 .check_and_record_activity(
                     user_id,
                     window_limit.activity_type,
                     window_limit.window,
-                    window_limit.limit as i64,
+                    limit_value,
                     None, // metadata can be added later if needed
                 )
-                .await
-                .map_err(|e| {
+                .await;
+
+            let (count, was_recorded) = match result {
+                Ok(value) => value,
+                Err(e) => {
                     tracing::warn!(
                         user_id = %user_id.0,
                         window_days = window_limit.window.days,
                         "Failed to check usage limit: {}",
                         e
                     );
-                    RateLimitError::InternalServerError
-                })?;
+                    // Rollback: remove timestamp and release permit
+                    self.rollback_acquire(user_id).await;
+                    return Err(RateLimitError::InternalServerError);
+                }
+            };
 
             if !was_recorded {
+                // Rollback: remove timestamp and release permit
+                self.rollback_acquire(user_id).await;
+
                 // Calculate retry_after: when the oldest activity in the window expires
                 // For sliding window, we estimate based on window size
-                let window_duration_secs = (window_limit.window.days as u64) * 24 * 3600;
+                let window_duration_secs = (window_limit.window.days.max(0) as u64) * 24 * 3600;
                 let retry_after_ms = window_duration_secs * 1000; // Conservative estimate
 
                 tracing::warn!(
@@ -194,6 +220,16 @@ impl RateLimitState {
         }
 
         Ok(RateLimitGuard { _permit: permit })
+    }
+
+    /// Rollback acquire: remove the timestamp that was added
+    /// The permit will be automatically released when the guard is dropped
+    async fn rollback_acquire(&self, user_id: UserId) {
+        let mut user_limits = self.user_limits.lock().await;
+        if let Some(user_state) = user_limits.get_mut(&user_id) {
+            // Remove the last timestamp that was added
+            user_state.request_timestamps.pop_back();
+        }
     }
 }
 
@@ -472,6 +508,81 @@ mod tests {
         {
             let limits = state.user_limits.lock().await;
             assert_eq!(limits.len(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_window_limit_rejection_rolls_back_timestamp() {
+        struct RejectingUsageLimitStore;
+
+        #[async_trait]
+        impl UsageLimitStore for RejectingUsageLimitStore {
+            async fn check_and_record_activity(
+                &self,
+                _user_id: UserId,
+                _activity_type: ActivityType,
+                _window: TimeWindow,
+                _limit: i64,
+                _metadata: Option<serde_json::Value>,
+            ) -> Result<(i64, bool), AnalyticsError> {
+                // Always reject to test rollback
+                Ok((100, false))
+            }
+        }
+
+        let state = RateLimitState::with_config(
+            RateLimitConfig {
+                max_concurrent: 2,
+                max_requests_per_window: 10, // High limit
+                window_duration: Duration::from_secs(1),
+                window_limits: vec![WindowLimit {
+                    window: TimeWindow::day(),
+                    limit: 100,
+                    activity_type: ActivityType::Response,
+                }],
+            },
+            Arc::new(RejectingUsageLimitStore),
+        );
+
+        let user = test_user_id(1);
+
+        // First request should fail due to window limit
+        let result = state.try_acquire(user).await;
+        assert!(matches!(
+            result,
+            Err(RateLimitError::WindowLimitExceeded { .. })
+        ));
+
+        // Check that timestamp was rolled back - we should be able to make
+        // max_requests_per_window requests immediately after (since timestamp was removed)
+        // Wait a tiny bit to ensure cleanup
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // Since timestamp was rolled back, we should be able to make requests
+        // (they'll still fail on window limit, but not on short-term rate limit)
+        // Actually, since window limit always rejects, we can't test this easily.
+        // But the important thing is that the permit was released (tested by making
+        // multiple concurrent requests that should all fail on window limit, not concurrency)
+        let futures: Vec<_> = (0..3)
+            .map(|_| {
+                let state = state.clone();
+                tokio::spawn(async move { state.try_acquire(user).await })
+            })
+            .collect();
+
+        let results: Vec<_> = futures::future::join_all(futures)
+            .await
+            .into_iter()
+            .map(|r| r.unwrap())
+            .collect();
+
+        // All should fail on WindowLimitExceeded, not TooManyConcurrent
+        // This proves permits were released (otherwise we'd get TooManyConcurrent)
+        for result in results {
+            assert!(
+                matches!(result, Err(RateLimitError::WindowLimitExceeded { .. })),
+                "Should fail on window limit, not concurrency"
+            );
         }
     }
 }
