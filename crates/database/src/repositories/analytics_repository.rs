@@ -64,13 +64,13 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
         }
 
         let client = self.pool.get().await?;
-        let activity_type_str = request.activity_type.as_str();
+        let activity_type = request.activity_type.as_str();
+        let window_days = request.window.days;
 
         // Use a single query to atomically:
         // 1. Count activities in the sliding window
         // 2. Insert new activity if below limit
         // 3. Return the count and whether insertion happened
-        let window_days = request.window.days as i64;
         let row = client
             .query_one(
                 r#"
@@ -100,7 +100,7 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
                 "#,
                 &[
                     &request.user_id,
-                    &activity_type_str,
+                    &activity_type,
                     &window_days,
                     &request.limit,
                     &request.metadata,
@@ -125,7 +125,7 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
     ) -> anyhow::Result<i64> {
         let client = self.pool.get().await?;
         let activity_type = activity_type.as_str();
-        let window_days = window.days as i64;
+        let window_days = window.days;
 
         let row = client
             .query_one(
