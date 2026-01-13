@@ -81,7 +81,7 @@ docker compose down               # Stop services
 ```bash
 cargo test --features test                                    # All tests
 cargo test --test admin_tests --features test                # Admin tests only
-cargo test --test e2e_api_tests --features test -- --ignored # E2E tests (real API calls)
+cargo test --test e2e_api_tests --features test -- --ignored --nocapture # E2E tests (real API calls)
 ```
 
 ### Code Quality
@@ -202,7 +202,7 @@ This service prioritizes privacy and data security. See `CLAUDE.md` for detailed
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) file for details.
+PolyForm Strict License 1.0.0 - see [LICENSE](LICENSE) file for details.
 
 ## Support
 
