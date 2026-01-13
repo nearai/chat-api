@@ -124,7 +124,7 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
         window: TimeWindow,
     ) -> anyhow::Result<i64> {
         let client = self.pool.get().await?;
-        let activity_type_str = activity_type.as_str();
+        let activity_type = activity_type.as_str();
         let window_days = window.days as i64;
 
         let row = client
@@ -139,7 +139,7 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
                   AND activity_type = $2
                   AND created_at >= window_start.start_time
                 "#,
-                &[&user_id, &activity_type_str, &window_days],
+                &[&user_id, &activity_type, &window_days],
             )
             .await?;
 
