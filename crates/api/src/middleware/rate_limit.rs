@@ -14,7 +14,7 @@ use axum::{
 };
 use serde::Serialize;
 use services::{
-    analytics::{ActivityType, AnalyticsServiceTrait, TimeWindow},
+    analytics::{ActivityType, AnalyticsServiceTrait, CheckAndRecordActivityRequest, TimeWindow},
     UserId,
 };
 use std::{
@@ -51,7 +51,7 @@ impl Default for RateLimitConfig {
             window_limits: vec![WindowLimit {
                 window: TimeWindow::day(),
                 limit: 1000,
-                activity_type: ActivityType::Response,
+                activity_type: ActivityType::RateLimitedRequest,
             }],
         }
     }
@@ -173,16 +173,16 @@ impl RateLimitState {
 
             let result = self
                 .analytics_service
-                .check_and_record_activity(
+                .check_and_record_activity(CheckAndRecordActivityRequest {
                     user_id,
-                    window_limit.activity_type,
-                    window_limit.window,
-                    limit_value,
-                    None, // metadata can be added later if needed
-                )
+                    activity_type: ActivityType::RateLimitedRequest,
+                    metadata: None,
+                    window: window_limit.window,
+                    limit: limit_value,
+                })
                 .await;
 
-            let (count, was_recorded) = match result {
+            let result = match result {
                 Ok(value) => value,
                 Err(e) => {
                     tracing::warn!(
@@ -197,7 +197,7 @@ impl RateLimitState {
                 }
             };
 
-            if !was_recorded {
+            if !result.was_recorded {
                 // Rollback: remove timestamp and release permit
                 self.rollback_acquire(user_id).await;
 
@@ -210,7 +210,7 @@ impl RateLimitState {
                     user_id = %user_id.0,
                     window_days = window_limit.window.days,
                     limit = window_limit.limit,
-                    current_count = count,
+                    current_count = result.current_count,
                     "Sliding window limit exceeded"
                 );
 
@@ -326,7 +326,7 @@ mod tests {
     use chrono::Utc;
     use services::analytics::{
         ActivityLogEntry, ActivityType, AnalyticsError, AnalyticsServiceTrait, AnalyticsSummary,
-        RecordActivityRequest, TimeWindow, TopActiveUser,
+        CheckAndRecordActivityResult, RecordActivityRequest, TimeWindow, TopActiveUser,
     };
     use std::sync::Arc;
     use uuid::Uuid;
@@ -344,6 +344,17 @@ mod tests {
             _request: RecordActivityRequest,
         ) -> Result<(), AnalyticsError> {
             Ok(())
+        }
+
+        async fn check_and_record_activity(
+            &self,
+            _request: CheckAndRecordActivityRequest,
+        ) -> Result<CheckAndRecordActivityResult, AnalyticsError> {
+            // Always allow in tests (unless we want to test limit behavior)
+            Ok(CheckAndRecordActivityResult {
+                current_count: 0,
+                was_recorded: true,
+            })
         }
 
         async fn get_analytics_summary(
@@ -391,18 +402,6 @@ mod tests {
             _limit: i64,
         ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
             unreachable!()
-        }
-
-        async fn check_and_record_activity(
-            &self,
-            _user_id: UserId,
-            _activity_type: ActivityType,
-            _window: TimeWindow,
-            _limit: i64,
-            _metadata: Option<serde_json::Value>,
-        ) -> Result<(i64, bool), AnalyticsError> {
-            // Always allow in tests (unless we want to test limit behavior)
-            Ok((0, true))
         }
     }
 
@@ -585,6 +584,17 @@ mod tests {
                 unreachable!()
             }
 
+            async fn check_and_record_activity(
+                &self,
+                _request: CheckAndRecordActivityRequest,
+            ) -> Result<CheckAndRecordActivityResult, AnalyticsError> {
+                // Always reject to test rollback
+                Ok(CheckAndRecordActivityResult {
+                    current_count: 100,
+                    was_recorded: false,
+                })
+            }
+
             async fn get_analytics_summary(
                 &self,
                 _start: chrono::DateTime<Utc>,
@@ -631,18 +641,6 @@ mod tests {
             ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
                 unreachable!()
             }
-
-            async fn check_and_record_activity(
-                &self,
-                _user_id: UserId,
-                _activity_type: ActivityType,
-                _window: TimeWindow,
-                _limit: i64,
-                _metadata: Option<serde_json::Value>,
-            ) -> Result<(i64, bool), AnalyticsError> {
-                // Always reject to test rollback
-                Ok((100, false))
-            }
         }
 
         let state = RateLimitState::with_config(
@@ -653,7 +651,7 @@ mod tests {
                 window_limits: vec![WindowLimit {
                     window: TimeWindow::day(),
                     limit: 100,
-                    activity_type: ActivityType::Response,
+                    activity_type: ActivityType::RateLimitedRequest,
                 }],
             },
             Arc::new(RejectingAnalyticsService),

@@ -25,16 +25,10 @@ pub trait AnalyticsServiceTrait: Send + Sync {
     /// 1. Counts activities of the specified type in the sliding window
     /// 2. If below limit, inserts a new activity log entry
     /// 3. Returns the current count after the attempt and whether the activity was recorded
-    ///
-    /// Returns: (current_count, was_recorded)
     async fn check_and_record_activity(
         &self,
-        user_id: UserId,
-        activity_type: ActivityType,
-        window: TimeWindow,
-        limit: i64,
-        metadata: Option<serde_json::Value>,
-    ) -> Result<(i64, bool), AnalyticsError>;
+        request: CheckAndRecordActivityRequest,
+    ) -> Result<CheckAndRecordActivityResult, AnalyticsError>;
 
     /// Get analytics summary for a time period
     async fn get_analytics_summary(
@@ -91,14 +85,10 @@ impl AnalyticsServiceTrait for AnalyticsServiceImpl {
 
     async fn check_and_record_activity(
         &self,
-        user_id: UserId,
-        activity_type: ActivityType,
-        window: TimeWindow,
-        limit: i64,
-        metadata: Option<serde_json::Value>,
-    ) -> Result<(i64, bool), AnalyticsError> {
+        request: CheckAndRecordActivityRequest,
+    ) -> Result<CheckAndRecordActivityResult, AnalyticsError> {
         self.repository
-            .check_and_record_activity(user_id, activity_type, window, limit, metadata)
+            .check_and_record_activity(request)
             .await
             .map_err(|e| AnalyticsError::InternalError(e.to_string()))
     }
