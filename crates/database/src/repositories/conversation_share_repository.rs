@@ -458,77 +458,55 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
-        let mut permissions: Vec<SharePermission> = Vec::new();
-
-        let direct_rows = client
+        let rows = client
             .query(
-                "SELECT permission
-                 FROM conversation_shares
-                 WHERE conversation_id = $1
-                   AND share_type = 'direct'
-                   AND (
-                        (recipient_type = 'email' AND recipient_value = $2)
-                        OR
-                        (recipient_type = 'near' AND recipient_value = ANY($3))
-                   )",
+                "SELECT permission FROM (
+                     SELECT permission
+                     FROM conversation_shares
+                     WHERE conversation_id = $1
+                       AND share_type = 'direct'
+                       AND (
+                            (recipient_type = 'email' AND recipient_value = $2)
+                            OR
+                            (recipient_type = 'near' AND recipient_value = ANY($3))
+                       )
+                     UNION ALL
+                     SELECT cs.permission
+                     FROM conversation_shares cs
+                     JOIN conversation_share_group_members cgm
+                       ON cs.group_id = cgm.group_id
+                     WHERE cs.conversation_id = $1
+                       AND cs.share_type = 'group'
+                       AND (
+                            (cgm.member_type = 'email' AND cgm.member_value = $2)
+                            OR
+                            (cgm.member_type = 'near' AND cgm.member_value = ANY($3))
+                       )
+                     UNION ALL
+                     SELECT permission
+                     FROM conversation_shares
+                     WHERE conversation_id = $1
+                       AND share_type = 'organization'
+                       AND $2 ILIKE org_email_pattern
+                 ) perms",
                 &[&conversation_id, &email, &near_accounts],
             )
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
-        for row in direct_rows {
+        let mut has_read = false;
+        for row in rows {
             let permission: String = row.get("permission");
-            permissions.push(Self::map_permission(&permission)?);
+            if permission == "write" {
+                return Ok(Some(SharePermission::Write));
+            }
+            has_read = true;
         }
 
-        let group_rows = client
-            .query(
-                "SELECT DISTINCT cs.permission
-                 FROM conversation_shares cs
-                 JOIN conversation_share_group_members cgm
-                   ON cs.group_id = cgm.group_id
-                 WHERE cs.conversation_id = $1
-                   AND cs.share_type = 'group'
-                   AND (
-                        (cgm.member_type = 'email' AND cgm.member_value = $2)
-                        OR
-                        (cgm.member_type = 'near' AND cgm.member_value = ANY($3))
-                   )",
-                &[&conversation_id, &email, &near_accounts],
-            )
-            .await
-            .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
-
-        for row in group_rows {
-            let permission: String = row.get("permission");
-            permissions.push(Self::map_permission(&permission)?);
-        }
-
-        let org_rows = client
-            .query(
-                "SELECT permission
-                 FROM conversation_shares
-                 WHERE conversation_id = $1
-                   AND share_type = 'organization'
-                   AND $2 ILIKE org_email_pattern",
-                &[&conversation_id, &email],
-            )
-            .await
-            .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
-
-        for row in org_rows {
-            let permission: String = row.get("permission");
-            permissions.push(Self::map_permission(&permission)?);
-        }
-
-        if permissions.contains(&SharePermission::Write) {
-            return Ok(Some(SharePermission::Write));
-        }
-
-        if permissions.is_empty() {
-            Ok(None)
-        } else {
+        if has_read {
             Ok(Some(SharePermission::Read))
+        } else {
+            Ok(None)
         }
     }
 
