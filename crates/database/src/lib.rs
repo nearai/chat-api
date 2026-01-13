@@ -7,9 +7,9 @@ pub mod repositories;
 pub use pool::DbPool;
 pub use repositories::{
     PostgresAnalyticsRepository, PostgresAppConfigRepository, PostgresConversationRepository,
-    PostgresFileRepository, PostgresModelRepository, PostgresNearNonceRepository,
-    PostgresOAuthRepository, PostgresSessionRepository, PostgresSystemConfigsRepository,
-    PostgresUserRepository, PostgresUserSettingsRepository,
+    PostgresConversationShareRepository, PostgresFileRepository, PostgresModelRepository,
+    PostgresNearNonceRepository, PostgresOAuthRepository, PostgresSessionRepository,
+    PostgresSystemConfigsRepository, PostgresUserRepository, PostgresUserSettingsRepository,
 };
 
 use crate::pool::create_pool_with_native_tls;
@@ -27,6 +27,7 @@ pub struct Database {
     session_repository: Arc<PostgresSessionRepository>,
     oauth_repository: Arc<PostgresOAuthRepository>,
     conversation_repository: Arc<PostgresConversationRepository>,
+    conversation_share_repository: Arc<PostgresConversationShareRepository>,
     file_repository: Arc<PostgresFileRepository>,
     user_settings_repository: Arc<PostgresUserSettingsRepository>,
     system_configs_repository: Arc<PostgresSystemConfigsRepository>,
@@ -44,6 +45,8 @@ impl Database {
         let session_repository = Arc::new(PostgresSessionRepository::new(pool.clone()));
         let oauth_repository = Arc::new(PostgresOAuthRepository::new(pool.clone()));
         let conversation_repository = Arc::new(PostgresConversationRepository::new(pool.clone()));
+        let conversation_share_repository =
+            Arc::new(PostgresConversationShareRepository::new(pool.clone()));
         let file_repository = Arc::new(PostgresFileRepository::new(pool.clone()));
         let user_settings_repository = Arc::new(PostgresUserSettingsRepository::new(pool.clone()));
         let system_configs_repository =
@@ -59,6 +62,7 @@ impl Database {
             session_repository,
             oauth_repository,
             conversation_repository,
+            conversation_share_repository,
             file_repository,
             user_settings_repository,
             system_configs_repository,
@@ -208,6 +212,11 @@ impl Database {
     /// Get the conversation repository
     pub fn conversation_repository(&self) -> Arc<PostgresConversationRepository> {
         self.conversation_repository.clone()
+    }
+
+    /// Get the conversation share repository
+    pub fn conversation_share_repository(&self) -> Arc<PostgresConversationShareRepository> {
+        self.conversation_share_repository.clone()
     }
 
     /// Get the file repository
