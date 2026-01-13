@@ -178,7 +178,7 @@ Migrations are in `crates/database/src/migrations/sql/` and run automatically on
 
 ## API Documentation
 
-OpenAPI docs available at `/docs` (local) or `/api/docs` (production).
+OpenAPI docs available at `/docs`.
 
 **Key endpoints**:
 - `/v1/auth/*` - OAuth authentication
@@ -203,8 +203,3 @@ This service prioritizes privacy and data security. See `CLAUDE.md` for detailed
 ## License
 
 PolyForm Strict License 1.0.0 - see [LICENSE](LICENSE) file for details.
-
-## Support
-
-For issues, questions, or contributions, please contact support@near.ai or open an issue in the repository.
-
