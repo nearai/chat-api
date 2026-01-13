@@ -227,24 +227,3 @@ impl TimeWindow {
         Self { days: 30 }
     }
 }
-
-/// Trait for rate limiting that uses activity log for sliding window limits
-#[async_trait]
-pub trait UsageLimitStore: Send + Sync {
-    /// Atomically check if usage is below limit and record activity if allowed.
-    ///
-    /// This method:
-    /// 1. Counts activities of the specified type in the sliding window
-    /// 2. If below limit, inserts a new activity log entry
-    /// 3. Returns the current count after the attempt and whether the activity was recorded
-    ///
-    /// Returns: (current_count, was_recorded)
-    async fn check_and_record_activity(
-        &self,
-        user_id: UserId,
-        activity_type: ActivityType,
-        window: TimeWindow,
-        limit: i64,
-        metadata: Option<serde_json::Value>,
-    ) -> Result<(i64, bool), AnalyticsError>;
-}

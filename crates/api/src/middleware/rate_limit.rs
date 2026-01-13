@@ -14,7 +14,7 @@ use axum::{
 };
 use serde::Serialize;
 use services::{
-    analytics::{ActivityType, TimeWindow, UsageLimitStore},
+    analytics::{ActivityType, AnalyticsServiceTrait, TimeWindow},
     UserId,
 };
 use std::{
@@ -85,19 +85,22 @@ impl UserRateLimitState {
 pub struct RateLimitState {
     user_limits: Arc<Mutex<HashMap<UserId, UserRateLimitState>>>,
     config: Arc<RateLimitConfig>,
-    usage_store: Arc<dyn UsageLimitStore>,
+    analytics_service: Arc<dyn AnalyticsServiceTrait>,
 }
 
 impl RateLimitState {
-    pub fn new(usage_store: Arc<dyn UsageLimitStore>) -> Self {
-        Self::with_config(RateLimitConfig::default(), usage_store)
+    pub fn new(analytics_service: Arc<dyn AnalyticsServiceTrait>) -> Self {
+        Self::with_config(RateLimitConfig::default(), analytics_service)
     }
 
-    pub fn with_config(config: RateLimitConfig, usage_store: Arc<dyn UsageLimitStore>) -> Self {
+    pub fn with_config(
+        config: RateLimitConfig,
+        analytics_service: Arc<dyn AnalyticsServiceTrait>,
+    ) -> Self {
         Self {
             user_limits: Arc::new(Mutex::new(HashMap::new())),
             config: Arc::new(config),
-            usage_store,
+            analytics_service,
         }
     }
 
@@ -169,7 +172,7 @@ impl RateLimitState {
             let limit_value = window_limit.limit.try_into().unwrap_or(i64::MAX);
 
             let result = self
-                .usage_store
+                .analytics_service
                 .check_and_record_activity(
                     user_id,
                     window_limit.activity_type,
@@ -320,7 +323,11 @@ pub async fn rate_limit_middleware(
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use services::analytics::{ActivityType, AnalyticsError, TimeWindow, UsageLimitStore};
+    use chrono::Utc;
+    use services::analytics::{
+        ActivityLogEntry, ActivityType, AnalyticsError, AnalyticsServiceTrait, AnalyticsSummary,
+        RecordActivityRequest, TimeWindow, TopActiveUser,
+    };
     use std::sync::Arc;
     use uuid::Uuid;
 
@@ -328,10 +335,64 @@ mod tests {
         UserId(Uuid::from_u128(id))
     }
 
-    struct MockUsageLimitStore;
+    struct MockAnalyticsService;
 
     #[async_trait]
-    impl UsageLimitStore for MockUsageLimitStore {
+    impl AnalyticsServiceTrait for MockAnalyticsService {
+        async fn record_activity(
+            &self,
+            _request: RecordActivityRequest,
+        ) -> Result<(), AnalyticsError> {
+            Ok(())
+        }
+
+        async fn get_analytics_summary(
+            &self,
+            _start: chrono::DateTime<Utc>,
+            _end: chrono::DateTime<Utc>,
+        ) -> Result<AnalyticsSummary, AnalyticsError> {
+            unreachable!()
+        }
+
+        async fn get_daily_active_users(
+            &self,
+            _date: chrono::DateTime<Utc>,
+        ) -> Result<i64, AnalyticsError> {
+            unreachable!()
+        }
+
+        async fn get_weekly_active_users(
+            &self,
+            _date: chrono::DateTime<Utc>,
+        ) -> Result<i64, AnalyticsError> {
+            unreachable!()
+        }
+
+        async fn get_monthly_active_users(
+            &self,
+            _date: chrono::DateTime<Utc>,
+        ) -> Result<i64, AnalyticsError> {
+            unreachable!()
+        }
+
+        async fn get_user_activity(
+            &self,
+            _user_id: UserId,
+            _limit: Option<i64>,
+            _offset: Option<i64>,
+        ) -> Result<Vec<ActivityLogEntry>, AnalyticsError> {
+            unreachable!()
+        }
+
+        async fn get_top_active_users(
+            &self,
+            _start: chrono::DateTime<Utc>,
+            _end: chrono::DateTime<Utc>,
+            _limit: i64,
+        ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
+            unreachable!()
+        }
+
         async fn check_and_record_activity(
             &self,
             _user_id: UserId,
@@ -346,11 +407,11 @@ mod tests {
     }
 
     fn default_state() -> RateLimitState {
-        RateLimitState::new(Arc::new(MockUsageLimitStore))
+        RateLimitState::new(Arc::new(MockAnalyticsService))
     }
 
     fn configured_state(config: RateLimitConfig) -> RateLimitState {
-        RateLimitState::with_config(config, Arc::new(MockUsageLimitStore))
+        RateLimitState::with_config(config, Arc::new(MockAnalyticsService))
     }
 
     #[tokio::test]
@@ -513,10 +574,64 @@ mod tests {
 
     #[tokio::test]
     async fn test_window_limit_rejection_rolls_back_timestamp() {
-        struct RejectingUsageLimitStore;
+        struct RejectingAnalyticsService;
 
         #[async_trait]
-        impl UsageLimitStore for RejectingUsageLimitStore {
+        impl AnalyticsServiceTrait for RejectingAnalyticsService {
+            async fn record_activity(
+                &self,
+                _request: RecordActivityRequest,
+            ) -> Result<(), AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_analytics_summary(
+                &self,
+                _start: chrono::DateTime<Utc>,
+                _end: chrono::DateTime<Utc>,
+            ) -> Result<AnalyticsSummary, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_daily_active_users(
+                &self,
+                _date: chrono::DateTime<Utc>,
+            ) -> Result<i64, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_weekly_active_users(
+                &self,
+                _date: chrono::DateTime<Utc>,
+            ) -> Result<i64, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_monthly_active_users(
+                &self,
+                _date: chrono::DateTime<Utc>,
+            ) -> Result<i64, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_user_activity(
+                &self,
+                _user_id: UserId,
+                _limit: Option<i64>,
+                _offset: Option<i64>,
+            ) -> Result<Vec<ActivityLogEntry>, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_top_active_users(
+                &self,
+                _start: chrono::DateTime<Utc>,
+                _end: chrono::DateTime<Utc>,
+                _limit: i64,
+            ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
+                unreachable!()
+            }
+
             async fn check_and_record_activity(
                 &self,
                 _user_id: UserId,
@@ -541,7 +656,7 @@ mod tests {
                     activity_type: ActivityType::Response,
                 }],
             },
-            Arc::new(RejectingUsageLimitStore),
+            Arc::new(RejectingAnalyticsService),
         );
 
         let user = test_user_id(1);

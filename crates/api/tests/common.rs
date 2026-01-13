@@ -124,12 +124,10 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
 
     // Create analytics service
     let analytics_repo = db.analytics_repository();
-    let analytics_impl = Arc::new(AnalyticsServiceImpl::new(
-        analytics_repo as Arc<dyn services::analytics::AnalyticsRepository>,
-    ));
     let analytics_service: Arc<dyn services::analytics::AnalyticsServiceTrait> =
-        analytics_impl.clone();
-    let usage_limit_store: Arc<dyn services::analytics::UsageLimitStore> = analytics_impl;
+        Arc::new(AnalyticsServiceImpl::new(
+            analytics_repo as Arc<dyn services::analytics::AnalyticsRepository>,
+        ));
 
     // Create application state
     let app_state = AppState {
@@ -149,7 +147,6 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
         cloud_api_base_url: test_config.cloud_api_base_url.clone(),
         metrics_service,
         analytics_service,
-        usage_limit_store,
         near_rpc_url: config.near.rpc_url.clone(),
         near_balance_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         model_settings_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
