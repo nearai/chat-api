@@ -30,6 +30,15 @@ pub trait AnalyticsServiceTrait: Send + Sync {
         request: CheckAndRecordActivityRequest,
     ) -> Result<CheckAndRecordActivityResult, AnalyticsError>;
 
+    /// Check activity count in a window without recording.
+    /// Used when multiple windows need to be checked before inserting a single record.
+    async fn check_activity_count(
+        &self,
+        user_id: UserId,
+        activity_type: ActivityType,
+        window: TimeWindow,
+    ) -> Result<i64, AnalyticsError>;
+
     /// Get analytics summary for a time period
     async fn get_analytics_summary(
         &self,
@@ -89,6 +98,18 @@ impl AnalyticsServiceTrait for AnalyticsServiceImpl {
     ) -> Result<CheckAndRecordActivityResult, AnalyticsError> {
         self.repository
             .check_and_record_activity(request)
+            .await
+            .map_err(|e| AnalyticsError::InternalError(e.to_string()))
+    }
+
+    async fn check_activity_count(
+        &self,
+        user_id: UserId,
+        activity_type: ActivityType,
+        window: TimeWindow,
+    ) -> Result<i64, AnalyticsError> {
+        self.repository
+            .check_activity_count(user_id, activity_type, window)
             .await
             .map_err(|e| AnalyticsError::InternalError(e.to_string()))
     }

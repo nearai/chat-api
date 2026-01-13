@@ -183,6 +183,15 @@ pub trait AnalyticsRepository: Send + Sync {
         request: CheckAndRecordActivityRequest,
     ) -> anyhow::Result<CheckAndRecordActivityResult>;
 
+    /// Check activity count in a window without recording.
+    /// Used when multiple windows need to be checked before inserting a single record.
+    async fn check_activity_count(
+        &self,
+        user_id: UserId,
+        activity_type: ActivityType,
+        window: TimeWindow,
+    ) -> anyhow::Result<i64>;
+
     /// Get analytics summary for a time period
     async fn get_analytics_summary(
         &self,

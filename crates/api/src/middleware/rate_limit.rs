@@ -167,23 +167,22 @@ impl RateLimitState {
         }; // Mutex is released here
 
         // Phase 2: Check sliding window limits based on activity_log (no mutex held)
-        // We check all configured window limits and fail if any is exceeded
+        // First, check all windows without inserting to avoid duplicate records
+        // If all windows pass, insert a single record that all windows will count
         for window_limit in &self.config.window_limits {
             let limit_value = window_limit.limit.try_into().unwrap_or(i64::MAX);
 
-            let result = self
+            // Check count without inserting
+            let count = match self
                 .analytics_service
-                .check_and_record_activity(CheckAndRecordActivityRequest {
+                .check_activity_count(
                     user_id,
-                    activity_type: ActivityType::RateLimitedRequest,
-                    metadata: None,
-                    window: window_limit.window,
-                    limit: limit_value,
-                })
-                .await;
-
-            let result = match result {
-                Ok(value) => value,
+                    ActivityType::RateLimitedRequest,
+                    window_limit.window,
+                )
+                .await
+            {
+                Ok(count) => count,
                 Err(e) => {
                     tracing::warn!(
                         user_id = %user_id.0,
@@ -197,7 +196,8 @@ impl RateLimitState {
                 }
             };
 
-            if !result.was_recorded {
+            // Check if limit is exceeded (using >= to be safe, accounting for the record we'll insert)
+            if count >= limit_value {
                 // Rollback: remove timestamp and release permit
                 self.rollback_acquire(user_id).await;
 
@@ -210,7 +210,7 @@ impl RateLimitState {
                     user_id = %user_id.0,
                     window_days = window_limit.window.days,
                     limit = window_limit.limit,
-                    current_count = result.current_count,
+                    current_count = count,
                     "Sliding window limit exceeded"
                 );
 
@@ -219,6 +219,38 @@ impl RateLimitState {
                     limit: window_limit.limit,
                     retry_after_ms,
                 });
+            }
+        }
+
+        // All windows passed, now insert a single record that all windows will count
+        // Use the first window's limit for the insert check (but the record will be counted by all windows)
+        if let Some(first_window) = self.config.window_limits.first() {
+            let limit_value = first_window.limit.try_into().unwrap_or(i64::MAX);
+            let result = self
+                .analytics_service
+                .check_and_record_activity(CheckAndRecordActivityRequest {
+                    user_id,
+                    activity_type: ActivityType::RateLimitedRequest,
+                    metadata: None,
+                    window: first_window.window,
+                    limit: limit_value,
+                })
+                .await;
+
+            match result {
+                Ok(_) => {
+                    // Record inserted successfully, all windows will count it
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        user_id = %user_id.0,
+                        "Failed to record activity after window checks passed: {}",
+                        e
+                    );
+                    // Rollback: remove timestamp and release permit
+                    self.rollback_acquire(user_id).await;
+                    return Err(RateLimitError::InternalServerError);
+                }
             }
         }
 
@@ -355,6 +387,16 @@ mod tests {
                 current_count: 0,
                 was_recorded: true,
             })
+        }
+
+        async fn check_activity_count(
+            &self,
+            _user_id: UserId,
+            _activity_type: ActivityType,
+            _window: TimeWindow,
+        ) -> Result<i64, AnalyticsError> {
+            // Always return 0 in tests (unless we want to test limit behavior)
+            Ok(0)
         }
 
         async fn get_analytics_summary(
@@ -593,6 +635,16 @@ mod tests {
                     current_count: 100,
                     was_recorded: false,
                 })
+            }
+
+            async fn check_activity_count(
+                &self,
+                _user_id: UserId,
+                _activity_type: ActivityType,
+                _window: TimeWindow,
+            ) -> Result<i64, AnalyticsError> {
+                // Always return 100 to test limit exceeded
+                Ok(100)
             }
 
             async fn get_analytics_summary(

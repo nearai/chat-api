@@ -6,9 +6,9 @@ use chrono::{DateTime, Duration, Utc};
 use services::analytics::CheckAndRecordActivityRequest;
 use services::{
     analytics::{
-        ActivityLogEntry, ActivityMetricsSummary, AnalyticsRepository, AnalyticsSummary,
-        AuthMethodBreakdown, CheckAndRecordActivityResult, RecordActivityRequest, TopActiveUser,
-        UserMetricsSummary,
+        ActivityLogEntry, ActivityMetricsSummary, ActivityType, AnalyticsRepository,
+        AnalyticsSummary, AuthMethodBreakdown, CheckAndRecordActivityResult, RecordActivityRequest,
+        TimeWindow, TopActiveUser, UserMetricsSummary,
     },
     UserId,
 };
@@ -115,6 +115,35 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
             current_count: count,
             was_recorded: was_inserted,
         })
+    }
+
+    async fn check_activity_count(
+        &self,
+        user_id: UserId,
+        activity_type: ActivityType,
+        window: TimeWindow,
+    ) -> anyhow::Result<i64> {
+        let client = self.pool.get().await?;
+        let activity_type_str = activity_type.as_str();
+        let window_days = window.days as i64;
+
+        let row = client
+            .query_one(
+                r#"
+                WITH window_start AS (
+                    SELECT NOW() - make_interval(days => $3) as start_time
+                )
+                SELECT COUNT(*)::bigint as cnt
+                FROM user_activity_log, window_start
+                WHERE user_id = $1
+                  AND activity_type = $2
+                  AND created_at >= window_start.start_time
+                "#,
+                &[&user_id, &activity_type_str, &window_days],
+            )
+            .await?;
+
+        Ok(row.get(0))
     }
 
     async fn get_analytics_summary(
