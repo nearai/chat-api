@@ -238,7 +238,30 @@ impl RateLimitState {
                 .await;
 
             match result {
-                Ok(_) => {
+                Ok(record_result) => {
+                    // Check if the record was actually inserted
+                    // If was_recorded is false, it means the limit was exceeded during
+                    // the atomic insert (e.g., another request inserted between our check and insert)
+                    if !record_result.was_recorded {
+                        tracing::warn!(
+                            user_id = %user_id.0,
+                            current_count = record_result.current_count,
+                            "Activity record was not inserted due to limit exceeded during atomic insert"
+                        );
+                        // Rollback: remove timestamp and release permit
+                        self.rollback_acquire(user_id).await;
+
+                        // Calculate retry_after based on window size
+                        let window_duration_secs =
+                            (first_window.window.days.max(0) as u64) * 24 * 3600;
+                        let retry_after_ms = window_duration_secs * 1000;
+
+                        return Err(RateLimitError::WindowLimitExceeded {
+                            window_days: first_window.window.days,
+                            limit: first_window.limit,
+                            retry_after_ms,
+                        });
+                    }
                     // Record inserted successfully, all windows will count it
                 }
                 Err(e) => {
@@ -316,7 +339,7 @@ impl IntoResponse for RateLimitError {
             } => (
                 StatusCode::TOO_MANY_REQUESTS,
                 format!(
-                    "Request limit of {} reached for {} day window. Please retry later.",
+                    "Request limit of {} reached for {} day(s) window. Please retry later.",
                     limit, window_days
                 ),
                 Some(retry_after_ms),
