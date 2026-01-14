@@ -121,6 +121,15 @@ impl ConversationService for ConversationServiceImpl {
             .await
     }
 
+    async fn get_conversation_owner(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Option<UserId>, ConversationError> {
+        self.repository
+            .get_conversation_owner(conversation_id)
+            .await
+    }
+
     async fn delete_conversation(
         &self,
         conversation_id: &str,

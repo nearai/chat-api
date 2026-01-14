@@ -182,6 +182,13 @@ pub struct ConversationShareResponse {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct ConversationSharesListResponse {
+    pub is_owner: bool,
+    pub can_share: bool,
+    pub shares: Vec<ConversationShareResponse>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateShareGroupRequest {
     pub name: String,
@@ -619,19 +626,41 @@ async fn list_conversation_shares(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path(conversation_id): Path<String>,
-) -> Result<Json<Vec<ConversationShareResponse>>, Response> {
-    let shares = state
-        .conversation_share_service
-        .list_shares(user.user_id, &conversation_id)
+) -> Result<Json<ConversationSharesListResponse>, Response> {
+    // Get the actual owner of the conversation from the database
+    let owner = state
+        .conversation_service
+        .get_conversation_owner(&conversation_id)
         .await
         .map_err(map_share_error)?;
 
-    Ok(Json(
-        shares
-            .into_iter()
-            .map(to_share_response)
-            .collect::<Vec<_>>(),
-    ))
+    // Check if current user is the owner
+    let is_owner = owner.map(|o| o == user.user_id).unwrap_or(false);
+
+    // Check if user has write access (owner OR shared with write permission)
+    let has_write_access = is_owner
+        || state
+            .conversation_share_service
+            .ensure_access(&conversation_id, user.user_id, SharePermission::Write)
+            .await
+            .is_ok();
+
+    // Try to list shares - only owners get results
+    let shares = if is_owner {
+        state
+            .conversation_share_service
+            .list_shares(user.user_id, &conversation_id)
+            .await
+            .map_err(map_share_error)?
+    } else {
+        Vec::new()
+    };
+
+    Ok(Json(ConversationSharesListResponse {
+        is_owner,
+        can_share: has_write_access,
+        shares: shares.into_iter().map(to_share_response).collect(),
+    }))
 }
 
 async fn delete_conversation_share(

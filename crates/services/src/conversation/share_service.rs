@@ -202,8 +202,8 @@ impl ConversationShareService for ConversationShareServiceImpl {
         permission: SharePermission,
         target: ShareTarget,
     ) -> Result<Vec<ConversationShare>, ConversationError> {
-        self.conversation_repository
-            .access_conversation(conversation_id, owner_user_id)
+        // Allow owners OR users with write permission to create shares
+        self.ensure_access(conversation_id, owner_user_id, SharePermission::Write)
             .await?;
 
         let mut shares = Vec::new();

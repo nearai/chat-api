@@ -134,6 +134,12 @@ pub trait ConversationRepository: Send + Sync {
         user_id: UserId,
     ) -> Result<(), ConversationError>;
 
+    /// Get the owner of a conversation (returns None if conversation doesn't exist)
+    async fn get_conversation_owner(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Option<UserId>, ConversationError>;
+
     /// Delete a conversation for a user
     async fn delete_conversation(
         &self,
@@ -243,6 +249,12 @@ pub trait ConversationService: Send + Sync {
         conversation_id: &str,
         user_id: UserId,
     ) -> Result<(), ConversationError>;
+
+    /// Get the owner of a conversation (returns None if conversation doesn't exist)
+    async fn get_conversation_owner(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Option<UserId>, ConversationError>;
 
     /// Delete a conversation for a user
     async fn delete_conversation(
