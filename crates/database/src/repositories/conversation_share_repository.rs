@@ -458,8 +458,8 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
-        let rows = client
-            .query(
+        let row = client
+            .query_opt(
                 "SELECT permission FROM (
                      SELECT permission
                      FROM conversation_shares
@@ -488,25 +488,21 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                      WHERE conversation_id = $1
                        AND share_type = 'organization'
                        AND $2 ILIKE org_email_pattern
-                 ) perms",
+                 ) perms
+                 ORDER BY CASE WHEN permission = 'write' THEN 0 ELSE 1 END
+                 LIMIT 1",
                 &[&conversation_id, &email, &near_accounts],
             )
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
-        let mut has_read = false;
-        for row in rows {
-            let permission: String = row.get("permission");
-            if permission == "write" {
-                return Ok(Some(SharePermission::Write));
+        match row {
+            Some(row) => {
+                let permission: String = row.get("permission");
+                let permission = Self::map_permission(&permission)?;
+                Ok(Some(permission))
             }
-            has_read = true;
-        }
-
-        if has_read {
-            Ok(Some(SharePermission::Read))
-        } else {
-            Ok(None)
+            None => Ok(None),
         }
     }
 
@@ -536,5 +532,79 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
             Some(row) => Ok(Some(Self::map_share_row(&row)?)),
             None => Ok(None),
         }
+    }
+
+    async fn list_conversations_shared_with_user(
+        &self,
+        user_id: UserId,
+        email: &str,
+        near_accounts: &[String],
+    ) -> Result<Vec<(String, SharePermission)>, ConversationError> {
+        let client = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
+
+        // Query to find all conversations shared with the user via direct shares,
+        // group memberships, or organization patterns. We take the highest permission
+        // (write > read) for each conversation. Excludes conversations owned by the user.
+        let rows = client
+            .query(
+                "SELECT conversation_id, MAX(CASE WHEN permission = 'write' THEN 1 ELSE 0 END) as has_write
+                 FROM (
+                     -- Direct shares by email or NEAR account (exclude own)
+                     SELECT conversation_id, permission
+                     FROM conversation_shares
+                     WHERE share_type = 'direct'
+                       AND owner_user_id != $3
+                       AND (
+                            (recipient_type = 'email' AND recipient_value = $1)
+                            OR
+                            (recipient_type = 'near' AND recipient_value = ANY($2))
+                       )
+                     UNION ALL
+                     -- Group shares where user is a member (exclude own)
+                     SELECT cs.conversation_id, cs.permission
+                     FROM conversation_shares cs
+                     JOIN conversation_share_group_members cgm
+                       ON cs.group_id = cgm.group_id
+                     WHERE cs.share_type = 'group'
+                       AND cs.owner_user_id != $3
+                       AND (
+                            (cgm.member_type = 'email' AND cgm.member_value = $1)
+                            OR
+                            (cgm.member_type = 'near' AND cgm.member_value = ANY($2))
+                       )
+                     UNION ALL
+                     -- Organization shares matching email pattern (exclude own)
+                     SELECT conversation_id, permission
+                     FROM conversation_shares
+                     WHERE share_type = 'organization'
+                       AND owner_user_id != $3
+                       AND $1 ILIKE org_email_pattern
+                 ) shares
+                 GROUP BY conversation_id
+                 ORDER BY conversation_id",
+                &[&email, &near_accounts, &user_id.0],
+            )
+            .await
+            .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
+
+        let result = rows
+            .iter()
+            .map(|row| {
+                let conversation_id: String = row.get("conversation_id");
+                let has_write: i32 = row.get("has_write");
+                let permission = if has_write == 1 {
+                    SharePermission::Write
+                } else {
+                    SharePermission::Read
+                };
+                (conversation_id, permission)
+            })
+            .collect();
+
+        Ok(result)
     }
 }

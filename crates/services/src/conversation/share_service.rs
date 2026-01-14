@@ -314,6 +314,36 @@ impl ConversationShareService for ConversationShareServiceImpl {
             .delete_share(owner_user_id, conversation_id, share_id)
             .await
     }
+
+    async fn list_shared_with_me(
+        &self,
+        user_id: UserId,
+    ) -> Result<Vec<(String, SharePermission)>, ConversationError> {
+        let user = self
+            .user_repository
+            .get_user(user_id)
+            .await
+            .map_err(|e| ConversationError::DatabaseError(e.to_string()))?
+            .ok_or(ConversationError::AccessDenied)?;
+
+        let linked_accounts = self
+            .user_repository
+            .get_linked_accounts(user_id)
+            .await
+            .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
+
+        let near_accounts: Vec<String> = linked_accounts
+            .into_iter()
+            .filter(|account| account.provider == OAuthProvider::Near)
+            .map(|account| account.provider_user_id)
+            .collect();
+
+        let email = user.email.to_lowercase();
+
+        self.share_repository
+            .list_conversations_shared_with_user(user_id, &email, &near_accounts)
+            .await
+    }
 }
 
 #[cfg(test)]
@@ -636,6 +666,75 @@ mod tests {
                         && share.public_token.as_deref() == Some(token)
                 })
                 .cloned())
+        }
+
+        async fn list_conversations_shared_with_user(
+            &self,
+            user_id: UserId,
+            email: &str,
+            near_accounts: &[String],
+        ) -> Result<Vec<(String, SharePermission)>, ConversationError> {
+            let shares = self.shares.lock().expect("lock shares");
+            let groups = self.groups.lock().expect("lock groups");
+            let mut result: std::collections::HashMap<String, SharePermission> =
+                std::collections::HashMap::new();
+
+            for share in shares.iter() {
+                // Exclude own conversations
+                if share.owner_user_id == user_id {
+                    continue;
+                }
+
+                let matches = match share.share_type {
+                    ShareType::Direct => {
+                        if let Some(recipient) = &share.recipient {
+                            match recipient.kind {
+                                ShareRecipientKind::Email => recipient.value == email,
+                                ShareRecipientKind::NearAccount => {
+                                    near_accounts.contains(&recipient.value)
+                                }
+                            }
+                        } else {
+                            false
+                        }
+                    }
+                    ShareType::Group => {
+                        if let Some(group_id) = share.group_id {
+                            if let Some(group) = groups.get(&group_id) {
+                                group.members.iter().any(|member| match member.kind {
+                                    ShareRecipientKind::Email => member.value == email,
+                                    ShareRecipientKind::NearAccount => {
+                                        near_accounts.contains(&member.value)
+                                    }
+                                })
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    }
+                    ShareType::Organization => {
+                        if let Some(pattern) = &share.org_email_pattern {
+                            email.ends_with(pattern.trim_start_matches("%@"))
+                        } else {
+                            false
+                        }
+                    }
+                    ShareType::Public => false,
+                };
+
+                if matches {
+                    let entry = result
+                        .entry(share.conversation_id.clone())
+                        .or_insert(SharePermission::Read);
+                    if share.permission == SharePermission::Write {
+                        *entry = SharePermission::Write;
+                    }
+                }
+            }
+
+            Ok(result.into_iter().collect())
         }
     }
 
@@ -1491,5 +1590,109 @@ mod tests {
 
         // Avoid warnings about unused repos
         drop((share_repo, user_repo));
+    }
+
+    #[tokio::test]
+    async fn delete_share_removes_share_for_owner() {
+        let (service, _conversation_repo, _share_repo, user_repo, owner) =
+            setup_service_with_owner("conv_delete_success", "owner@example.com");
+
+        let sharee = build_user("reader@example.com");
+        user_repo.insert_user(sharee.clone());
+
+        let share = service
+            .create_share(
+                owner.id,
+                "conv_delete_success",
+                SharePermission::Read,
+                ShareTarget::Direct(vec![ShareRecipient {
+                    kind: ShareRecipientKind::Email,
+                    value: sharee.email.clone(),
+                }]),
+            )
+            .await
+            .expect("create share")
+            .into_iter()
+            .next()
+            .expect("share");
+
+        service
+            .delete_share(owner.id, "conv_delete_success", share.id)
+            .await
+            .expect("owner should delete share");
+
+        let shares = service
+            .list_shares(owner.id, "conv_delete_success")
+            .await
+            .expect("list shares");
+        assert!(shares.is_empty(), "share should be removed after deletion");
+    }
+
+    #[tokio::test]
+    async fn delete_share_revokes_recipient_access() {
+        let (service, _conversation_repo, _share_repo, user_repo, owner) =
+            setup_service_with_owner("conv_revoke_access", "owner@example.com");
+
+        let sharee = build_user("reader@example.com");
+        user_repo.insert_user(sharee.clone());
+
+        let share = service
+            .create_share(
+                owner.id,
+                "conv_revoke_access",
+                SharePermission::Read,
+                ShareTarget::Direct(vec![ShareRecipient {
+                    kind: ShareRecipientKind::Email,
+                    value: sharee.email.clone(),
+                }]),
+            )
+            .await
+            .expect("create share")
+            .into_iter()
+            .next()
+            .expect("share");
+
+        service
+            .ensure_access("conv_revoke_access", sharee.id, SharePermission::Read)
+            .await
+            .expect("recipient should have access");
+
+        service
+            .delete_share(owner.id, "conv_revoke_access", share.id)
+            .await
+            .expect("owner should delete share");
+
+        let err = service
+            .ensure_access("conv_revoke_access", sharee.id, SharePermission::Read)
+            .await
+            .expect_err("access should be revoked");
+        assert!(matches!(err, ConversationError::AccessDenied));
+    }
+
+    #[tokio::test]
+    async fn ensure_access_denies_missing_user_record() {
+        let (service, _conversation_repo, _share_repo, _user_repo, owner) =
+            setup_service_with_owner("conv_missing_user", "owner@example.com");
+
+        let ghost_user = build_user("ghost@example.com");
+
+        service
+            .create_share(
+                owner.id,
+                "conv_missing_user",
+                SharePermission::Read,
+                ShareTarget::Direct(vec![ShareRecipient {
+                    kind: ShareRecipientKind::Email,
+                    value: ghost_user.email.clone(),
+                }]),
+            )
+            .await
+            .expect("create share");
+
+        let err = service
+            .ensure_access("conv_missing_user", ghost_user.id, SharePermission::Read)
+            .await
+            .expect_err("missing user should be denied");
+        assert!(matches!(err, ConversationError::AccessDenied));
     }
 }

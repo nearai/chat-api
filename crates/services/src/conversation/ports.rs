@@ -205,6 +205,14 @@ pub trait ConversationShareRepository: Send + Sync {
         &self,
         token: &str,
     ) -> Result<Option<ConversationShare>, ConversationError>;
+
+    /// List all conversation IDs that have been shared with the user (excludes user's own conversations)
+    async fn list_conversations_shared_with_user(
+        &self,
+        user_id: UserId,
+        email: &str,
+        near_accounts: &[String],
+    ) -> Result<Vec<(String, SharePermission)>, ConversationError>;
 }
 
 #[async_trait]
@@ -313,4 +321,10 @@ pub trait ConversationShareService: Send + Sync {
         conversation_id: &str,
         share_id: Uuid,
     ) -> Result<(), ConversationError>;
+
+    /// List all conversations that have been shared with the user
+    async fn list_shared_with_me(
+        &self,
+        user_id: UserId,
+    ) -> Result<Vec<(String, SharePermission)>, ConversationError>;
 }

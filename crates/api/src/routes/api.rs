@@ -1,7 +1,7 @@
 use crate::consts::LIST_FILES_LIMIT_MAX;
 use crate::middleware::auth::AuthenticatedUser;
 use axum::{
-    body::Body,
+    body::{to_bytes, Body},
     extract::{Extension, Path, Request, State},
     http::{HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
@@ -11,7 +11,6 @@ use axum::{
 use bytes::Bytes;
 use chrono::{Duration, Utc};
 use flate2::read::GzDecoder;
-use futures::TryStreamExt;
 use http::{HeaderName, HeaderValue};
 use near_api::{Account, AccountId, NetworkConfig};
 use serde::{Deserialize, Serialize};
@@ -52,24 +51,14 @@ pub fn create_api_router(
     rate_limit_state: crate::middleware::RateLimitState,
 ) -> Router<crate::state::AppState> {
     let conversations_router = Router::new()
-        .route("/v1/conversations", post(create_conversation))
-        .route("/v1/conversations", get(list_conversations))
-        .route("/v1/conversations/{conversation_id}", get(get_conversation))
+        .route("/v1/conversations", post(create_conversation).get(list_conversations))
         .route(
             "/v1/conversations/{conversation_id}",
-            post(update_conversation),
-        )
-        .route(
-            "/v1/conversations/{conversation_id}",
-            delete(delete_conversation),
+            get(get_conversation).post(update_conversation).delete(delete_conversation),
         )
         .route(
             "/v1/conversations/{conversation_id}/shares",
-            post(create_conversation_share),
-        )
-        .route(
-            "/v1/conversations/{conversation_id}/shares",
-            get(list_conversation_shares),
+            post(create_conversation_share).get(list_conversation_shares),
         )
         .route(
             "/v1/conversations/{conversation_id}/shares/{share_id}",
@@ -77,27 +66,15 @@ pub fn create_api_router(
         )
         .route(
             "/v1/conversations/{conversation_id}/items",
-            post(create_conversation_items),
-        )
-        .route(
-            "/v1/conversations/{conversation_id}/items",
-            get(list_conversation_items),
+            post(create_conversation_items).get(list_conversation_items),
         )
         .route(
             "/v1/conversations/{conversation_id}/pin",
-            post(pin_conversation),
-        )
-        .route(
-            "/v1/conversations/{conversation_id}/pin",
-            delete(unpin_conversation),
+            post(pin_conversation).delete(unpin_conversation),
         )
         .route(
             "/v1/conversations/{conversation_id}/archive",
-            post(archive_conversation),
-        )
-        .route(
-            "/v1/conversations/{conversation_id}/archive",
-            delete(unarchive_conversation),
+            post(archive_conversation).delete(unarchive_conversation),
         )
         .route(
             "/v1/conversations/{conversation_id}/clone",
@@ -105,16 +82,13 @@ pub fn create_api_router(
         );
 
     let share_groups_router = Router::new()
-        .route("/v1/share-groups", post(create_share_group))
-        .route("/v1/share-groups", get(list_share_groups))
-        .route("/v1/share-groups/{group_id}", patch(update_share_group))
-        .route("/v1/share-groups/{group_id}", delete(delete_share_group));
+        .route("/v1/share-groups", post(create_share_group).get(list_share_groups))
+        .route("/v1/share-groups/{group_id}", patch(update_share_group).delete(delete_share_group))
+        .route("/v1/shared-with-me", get(list_shared_with_me));
 
     let files_router = Router::new()
-        .route("/v1/files", post(upload_file))
-        .route("/v1/files", get(list_files))
-        .route("/v1/files/{file_id}", get(get_file))
-        .route("/v1/files/{file_id}", delete(delete_file))
+        .route("/v1/files", post(upload_file).get(list_files))
+        .route("/v1/files/{file_id}", get(get_file).delete(delete_file))
         .route("/v1/files/{file_id}/content", get(get_file_content));
 
     let responses_router = Router::new()
@@ -788,6 +762,33 @@ async fn delete_share_group(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+#[derive(Serialize)]
+struct SharedConversationInfo {
+    conversation_id: String,
+    permission: SharePermission,
+}
+
+async fn list_shared_with_me(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+) -> Result<Json<Vec<SharedConversationInfo>>, Response> {
+    let shared = state
+        .conversation_share_service
+        .list_shared_with_me(user.user_id)
+        .await
+        .map_err(map_share_error)?;
+
+    Ok(Json(
+        shared
+            .into_iter()
+            .map(|(conversation_id, permission)| SharedConversationInfo {
+                conversation_id,
+                permission,
+            })
+            .collect(),
+    ))
+}
+
 async fn create_conversation_items(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -909,6 +910,7 @@ async fn list_conversation_items(
 async fn get_shared_conversation(
     State(state): State<crate::state::AppState>,
     Path(share_token): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, Response> {
     let share = state
         .conversation_share_service
@@ -917,7 +919,7 @@ async fn get_shared_conversation(
         .map_err(map_share_error)?;
 
     let conversation =
-        fetch_conversation_from_proxy(&state, &share.conversation_id, HeaderMap::new()).await?;
+        fetch_conversation_from_proxy(&state, &share.conversation_id, headers.clone()).await?;
 
     Ok(Json(conversation))
 }
@@ -2105,27 +2107,21 @@ async fn proxy_model_list(
     }
 
     // Buffer body into bytes
-    let body_bytes: Bytes = proxy_response
-        .body
-        .try_collect::<Vec<_>>()
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                "Failed to read model list response body for user_id={}: {}",
-                user.user_id,
-                e
-            );
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(ErrorResponse {
-                    error: format!("Failed to read response body: {e}"),
-                }),
-            )
-                .into_response()
-        })?
-        .into_iter()
-        .flatten()
-        .collect();
+    let proxy_body = Body::from_stream(proxy_response.body);
+    let body_bytes: Bytes = to_bytes(proxy_body, usize::MAX).await.map_err(|e| {
+        tracing::error!(
+            "Failed to read model list response body for user_id={}: {}",
+            user.user_id,
+            e
+        );
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(ErrorResponse {
+                error: format!("Failed to read response body: {e}"),
+            }),
+        )
+            .into_response()
+    })?;
 
     // Try to parse JSON
     let mut body_json: serde_json::Value = match serde_json::from_slice(&body_bytes) {
@@ -2296,23 +2292,16 @@ async fn handle_trackable_response(
     tracing::debug!("Response headers: {:?}", response_headers);
 
     // Buffer the response to extract the resource ID
-    // Collect the stream into bytes
-    let body_bytes: Bytes = proxy_response
-        .body
-        .try_collect::<Vec<_>>()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(ErrorResponse {
-                    error: format!("Failed to read response: {e}"),
-                }),
-            )
-                .into_response()
-        })?
-        .into_iter()
-        .flatten()
-        .collect();
+    let proxy_body = Body::from_stream(proxy_response.body);
+    let body_bytes: Bytes = to_bytes(proxy_body, usize::MAX).await.map_err(|e| {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(ErrorResponse {
+                error: format!("Failed to read response: {e}"),
+            }),
+        )
+            .into_response()
+    })?;
 
     if !(200..300).contains(&status) {
         return build_response(status, response_headers, Body::from(body_bytes)).await;
@@ -2607,14 +2596,10 @@ async fn fetch_conversation_from_proxy(
         )));
     }
 
-    let body_bytes: Bytes = proxy_response
-        .body
-        .try_collect::<Vec<_>>()
+    let proxy_body = Body::from_stream(proxy_response.body);
+    let body_bytes: Bytes = to_bytes(proxy_body, usize::MAX)
         .await
-        .map_err(|e| bad_gateway(format!("Failed to read response: {e}")))?
-        .into_iter()
-        .flatten()
-        .collect();
+        .map_err(|e| bad_gateway(format!("Failed to read response: {e}")))?;
 
     let conversation: serde_json::Value = serde_json::from_slice(&body_bytes)
         .map_err(|e| bad_gateway(format!("Failed to parse JSON: {e}")))?;

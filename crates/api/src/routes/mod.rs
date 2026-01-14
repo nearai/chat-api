@@ -8,7 +8,9 @@ pub mod users;
 use axum::{middleware::from_fn_with_state, routing::get, Json, Router};
 use http::HeaderValue;
 use serde::Serialize;
-use tower_http::cors::{AllowOrigin, Any, CorsLayer};
+use http::header::{HeaderName, AUTHORIZATION, CONTENT_TYPE, ACCEPT};
+use http::Method;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use utoipa::ToSchema;
 
 use crate::{
@@ -156,9 +158,14 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
                 is_origin_allowed(origin_str, &cors_config_clone)
             },
         ))
-        .allow_methods(Any)
-        .allow_headers(Any)
-        .expose_headers(Any);
+        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::PATCH, Method::DELETE, Method::OPTIONS])
+        .allow_headers([
+            AUTHORIZATION,
+            CONTENT_TYPE,
+            ACCEPT,
+            HeaderName::from_static("ngrok-skip-browser-warning"),
+        ])
+        .allow_credentials(true);
 
     // Add HTTP metrics middleware to track request counts and latencies
     router.layer(cors).layer(from_fn_with_state(
