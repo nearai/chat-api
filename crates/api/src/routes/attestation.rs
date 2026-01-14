@@ -1,6 +1,6 @@
 use crate::common::is_dev;
 use crate::{
-    models::{ApiGatewayAttestation, AttestationReport, CombinedAttestationReport, VpcInfo},
+    models::{ApiGatewayAttestation, AttestationReport, CombinedAttestationReport},
     state::AppState,
     ApiError,
 };
@@ -123,10 +123,7 @@ pub async fn get_attestation_report(
     report_data[32..].copy_from_slice(&nonce_bytes);
 
     // Load VPC info once
-    let vpc_info = load_vpc_info().map(|v| VpcInfo {
-        vpc_server_app_id: v.vpc_server_app_id,
-        vpc_hostname: v.vpc_hostname,
-    });
+    let vpc_info = load_vpc_info().map(Into::into);
 
     let chat_api_gateway_attestation = if is_dev() {
         ApiGatewayAttestation {

@@ -88,6 +88,15 @@ pub struct VpcInfo {
     pub vpc_hostname: Option<String>,
 }
 
+impl From<services::vpc::VpcInfo> for VpcInfo {
+    fn from(v: services::vpc::VpcInfo) -> Self {
+        Self {
+            vpc_server_app_id: v.vpc_server_app_id,
+            vpc_hostname: v.vpc_hostname,
+        }
+    }
+}
+
 /// Cloud-API gateway attestation (forwarded from dependency)
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ApiGatewayAttestation {
