@@ -51,7 +51,12 @@ services:
       timeout: 5s
       retries: 3
   api:
-    build: .
+    build:
+      context: .
+      args:
+        PRIVATE_CHAT_FRONTEND_VERSION: ${PRIVATE_CHAT_FRONTEND_VERSION}
+        POSTHOG_KEY: ${POSTHOG_KEY}
+        POSTHOG_HOST: ${POSTHOG_HOST}
     ports:
       - "8080:8080"
     environment:
@@ -69,6 +74,13 @@ services:
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
       GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
+      # Redirect URIs for local development
+      REDIRECT_URI: ${REDIRECT_URI:-http://localhost:8080}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      NEAR_EXPECTED_RECIPIENT: ${NEAR_EXPECTED_RECIPIENT:-localhost:3000}
+      # OpenAI/Cloud API proxy configuration
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://cloud-api.near.ai/v1}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
       # Logging
       RUST_LOG: info,api=debug,services=debug,database=debug
       RUST_BACKTRACE: "1"
