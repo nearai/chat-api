@@ -87,14 +87,14 @@ pub struct CheckAndRecordActivityRequest {
     /// Time window for the sliding window rate limit
     pub window: TimeWindow,
     /// Maximum number of activities allowed in the window
-    pub limit: i64,
+    pub limit: u64,
 }
 
 /// Result of checking and recording activity
 #[derive(Debug, Clone)]
 pub struct CheckAndRecordActivityResult {
     /// Current count of activities in the window after the check
-    pub current_count: i64,
+    pub current_count: u64,
     /// Whether the activity was actually recorded (inserted into the database)
     pub was_recorded: bool,
 }
@@ -236,12 +236,12 @@ pub enum AnalyticsError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TimeWindow {
     /// Number of days for the sliding window
-    pub days: i32,
+    pub days: u32,
 }
 
 impl TimeWindow {
     /// Create a time window with specified number of days
-    pub fn new(days: i32) -> Self {
+    pub fn new(days: u32) -> Self {
         Self { days }
     }
 

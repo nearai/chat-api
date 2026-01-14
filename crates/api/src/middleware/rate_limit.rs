@@ -203,7 +203,7 @@ impl RateLimitState {
 
                 // Calculate retry_after: when the oldest activity in the window expires
                 // For sliding window, we estimate based on window size
-                let window_duration_secs = (window_limit.window.days.max(0) as u64) * 24 * 3600;
+                let window_duration_secs = window_limit.window.days * 24 * 3600;
                 let retry_after_ms = window_duration_secs * 1000; // Conservative estimate
 
                 tracing::warn!(
@@ -217,7 +217,7 @@ impl RateLimitState {
                 return Err(RateLimitError::WindowLimitExceeded {
                     window_days: window_limit.window.days,
                     limit: window_limit.limit,
-                    retry_after_ms,
+                    retry_after_ms: retry_after_ms.into(),
                 });
             }
         }
@@ -225,7 +225,7 @@ impl RateLimitState {
         // All windows passed, now insert a single record that all windows will count
         // Use the first window's limit for the insert check (but the record will be counted by all windows)
         if let Some(first_window) = self.config.window_limits.first() {
-            let limit_value = first_window.limit.try_into().unwrap_or(i64::MAX);
+            let limit_value = first_window.limit as u64;
             let result = self
                 .analytics_service
                 .check_and_record_activity(CheckAndRecordActivityRequest {
@@ -252,14 +252,13 @@ impl RateLimitState {
                         self.rollback_acquire(user_id).await;
 
                         // Calculate retry_after based on window size
-                        let window_duration_secs =
-                            (first_window.window.days.max(0) as u64) * 24 * 3600;
+                        let window_duration_secs = first_window.window.days * 24 * 3600;
                         let retry_after_ms = window_duration_secs * 1000;
 
                         return Err(RateLimitError::WindowLimitExceeded {
                             window_days: first_window.window.days,
                             limit: first_window.limit,
-                            retry_after_ms,
+                            retry_after_ms: retry_after_ms.into(),
                         });
                     }
                     // Record inserted successfully, all windows will count it
@@ -302,7 +301,7 @@ enum RateLimitError {
         retry_after_ms: u64,
     },
     WindowLimitExceeded {
-        window_days: i32,
+        window_days: u32,
         limit: usize,
         retry_after_ms: u64,
     },

@@ -55,8 +55,8 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
         &self,
         request: CheckAndRecordActivityRequest,
     ) -> anyhow::Result<CheckAndRecordActivityResult> {
-        // Fast path: limit <= 0 means the increment is never allowed.
-        if request.limit <= 0 {
+        // Fast path: limit = 0 means the increment is never allowed.
+        if request.limit == 0 {
             return Ok(CheckAndRecordActivityResult {
                 current_count: 0,
                 was_recorded: false,
@@ -65,7 +65,6 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
 
         let client = self.pool.get().await?;
         let activity_type = request.activity_type.as_str();
-        let window_days = request.window.days;
 
         // Use a single query to atomically:
         // 1. Count activities in the sliding window
@@ -101,8 +100,8 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
                 &[
                     &request.user_id,
                     &activity_type,
-                    &window_days,
-                    &request.limit,
+                    &(request.window.days as i32),
+                    &(request.limit as i64),
                     &request.metadata,
                 ],
             )
@@ -112,7 +111,7 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
         let was_inserted: bool = row.get(1);
 
         Ok(CheckAndRecordActivityResult {
-            current_count: count,
+            current_count: count as u64,
             was_recorded: was_inserted,
         })
     }
@@ -125,7 +124,6 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
     ) -> anyhow::Result<i64> {
         let client = self.pool.get().await?;
         let activity_type = activity_type.as_str();
-        let window_days = window.days;
 
         let row = client
             .query_one(
@@ -139,7 +137,7 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
                   AND activity_type = $2
                   AND created_at >= window_start.start_time
                 "#,
-                &[&user_id, &activity_type, &window_days],
+                &[&user_id, &activity_type, &(window.days as i32)],
             )
             .await?;
 
