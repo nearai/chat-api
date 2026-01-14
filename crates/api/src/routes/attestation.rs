@@ -1,6 +1,6 @@
 use crate::common::is_dev;
 use crate::{
-    models::{ApiGatewayAttestation, AttestationReport, CombinedAttestationReport},
+    models::{ApiGatewayAttestation, AttestationReport, CombinedAttestationReport, VpcInfo},
     state::AppState,
     ApiError,
 };
@@ -8,6 +8,7 @@ use axum::{extract::Query, extract::State, response::Json, routing::get, Router}
 use futures::TryStreamExt;
 use http::Method;
 use serde::{Deserialize, Serialize};
+use services::vpc::load_vpc_info;
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct AttestationQuery {
@@ -121,12 +122,19 @@ pub async fn get_attestation_report(
 
     report_data[32..].copy_from_slice(&nonce_bytes);
 
+    // Load VPC info once
+    let vpc_info = load_vpc_info().map(|v| VpcInfo {
+        vpc_server_app_id: v.vpc_server_app_id,
+        vpc_hostname: v.vpc_hostname,
+    });
+
     let chat_api_gateway_attestation = if is_dev() {
         ApiGatewayAttestation {
             intel_quote: "0x1234567890abcdef".to_string(),
             event_log: None,
             request_nonce,
             info: None,
+            vpc: vpc_info,
         }
     } else {
         let client = dstack_sdk::dstack_client::DstackClient::new(None);
@@ -155,6 +163,7 @@ pub async fn get_attestation_report(
                 ApiError::internal_server_error("Failed to serialize attestation info")
             })?),
             request_nonce,
+            vpc: vpc_info,
         }
     };
 

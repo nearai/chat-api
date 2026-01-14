@@ -77,6 +77,17 @@ impl From<services::user::ports::UserProfile> for UserProfileResponse {
     }
 }
 
+/// VPC information in attestation
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct VpcInfo {
+    /// VPC server app ID
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vpc_server_app_id: Option<String>,
+    /// VPC hostname of this node
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vpc_hostname: Option<String>,
+}
+
 /// Cloud-API gateway attestation (forwarded from dependency)
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ApiGatewayAttestation {
@@ -90,6 +101,9 @@ pub struct ApiGatewayAttestation {
     /// Attestation info
     #[serde(skip_serializing_if = "Option::is_none")]
     pub info: Option<serde_json::Value>,
+    /// VPC information (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vpc: Option<VpcInfo>,
 }
 
 /// Model attestation from VLLM inference providers
