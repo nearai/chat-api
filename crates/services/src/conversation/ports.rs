@@ -207,9 +207,10 @@ pub trait ConversationShareRepository: Send + Sync {
         near_accounts: &[String],
     ) -> Result<Option<SharePermission>, ConversationError>;
 
-    async fn get_public_share_by_token(
+    /// Get the public share for a conversation by conversation ID (if one exists)
+    async fn get_public_share_by_conversation_id(
         &self,
-        token: &str,
+        conversation_id: &str,
     ) -> Result<Option<ConversationShare>, ConversationError>;
 
     /// List all conversation IDs that have been shared with the user (excludes user's own conversations)
@@ -281,9 +282,10 @@ pub trait ConversationShareService: Send + Sync {
         required_permission: SharePermission,
     ) -> Result<(), ConversationError>;
 
-    async fn get_public_access(
+    /// Get public access for a conversation by ID (if it has a public share)
+    async fn get_public_access_by_conversation_id(
         &self,
-        token: &str,
+        conversation_id: &str,
         required_permission: SharePermission,
     ) -> Result<ConversationShare, ConversationError>;
 

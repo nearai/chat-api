@@ -46,15 +46,28 @@ const MODEL_SETTINGS_CACHE_TTL_SECS: i64 = 60;
 pub const USER_BANNED_ERROR_MESSAGE: &str =
     "Access temporarily restricted. Please try again later.";
 
-/// Create the OpenAI API proxy router
+/// Create router for conversation read routes that work with optional authentication
+/// These routes can be accessed by both authenticated users and unauthenticated users
+/// (for publicly shared conversations)
+pub fn create_optional_auth_router() -> Router<crate::state::AppState> {
+    Router::new()
+        .route("/v1/conversations/{conversation_id}", get(get_conversation))
+        .route(
+            "/v1/conversations/{conversation_id}/items",
+            get(list_conversation_items),
+        )
+}
+
+/// Create the OpenAI API proxy router (requires authentication)
 pub fn create_api_router(
     rate_limit_state: crate::middleware::RateLimitState,
 ) -> Router<crate::state::AppState> {
+    // Conversation routes that require authentication
     let conversations_router = Router::new()
         .route("/v1/conversations", post(create_conversation).get(list_conversations))
         .route(
             "/v1/conversations/{conversation_id}",
-            get(get_conversation).post(update_conversation).delete(delete_conversation),
+            post(update_conversation).delete(delete_conversation),
         )
         .route(
             "/v1/conversations/{conversation_id}/shares",
@@ -66,7 +79,7 @@ pub fn create_api_router(
         )
         .route(
             "/v1/conversations/{conversation_id}/items",
-            post(create_conversation_items).get(list_conversation_items),
+            post(create_conversation_items),
         )
         .route(
             "/v1/conversations/{conversation_id}/pin",
@@ -110,22 +123,6 @@ pub fn create_api_router(
         .merge(proxy_router)
 }
 
-/// Create the public conversation share router (no auth)
-pub fn create_public_share_router() -> Router<crate::state::AppState> {
-    Router::new()
-        .route(
-            "/v1/shared/conversations/{share_token}",
-            get(get_shared_conversation),
-        )
-        .route(
-            "/v1/shared/conversations/{share_token}/items",
-            get(list_shared_conversation_items),
-        )
-        .route(
-            "/v1/shared/conversations/{share_token}/items",
-            post(create_shared_conversation_items),
-        )
-}
 
 /// Type of resource to track in the response
 enum TrackableResource {
@@ -186,6 +183,8 @@ pub struct ConversationShareResponse {
 pub struct ConversationSharesListResponse {
     pub is_owner: bool,
     pub can_share: bool,
+    /// Whether the user can send messages (has write access)
+    pub can_write: bool,
     pub shares: Vec<ConversationShareResponse>,
 }
 
@@ -500,20 +499,29 @@ async fn list_conversations(
     Ok(Json(conversations).into_response())
 }
 
-/// Get a conversation - validates user access and fetches details via service/OpenAI
+/// Get a conversation - validates user access or public share and fetches details via service/OpenAI
+/// Works with optional authentication - authenticated users get their access checked,
+/// unauthenticated users can only access publicly shared conversations
 async fn get_conversation(
     State(state): State<crate::state::AppState>,
-    Extension(user): Extension<AuthenticatedUser>,
+    Extension(user): Extension<Option<AuthenticatedUser>>,
     Path(conversation_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, Response> {
     tracing::info!(
-        "get_conversation called for user_id={}, conversation_id={}",
-        user.user_id,
+        "get_conversation called for user_id={:?}, conversation_id={}",
+        user.as_ref().map(|u| u.user_id),
         conversation_id
     );
 
-    validate_user_conversation(&state, &user, &conversation_id, SharePermission::Read).await?;
+    // Check user access OR public share access
+    validate_conversation_access_optional_auth(
+        &state,
+        user.as_ref(),
+        &conversation_id,
+        SharePermission::Read,
+    )
+    .await?;
 
     let conversation =
         fetch_conversation_from_proxy(&state, &conversation_id, headers.clone()).await?;
@@ -659,6 +667,7 @@ async fn list_conversation_shares(
     Ok(Json(ConversationSharesListResponse {
         is_owner,
         can_share: has_write_access,
+        can_write: has_write_access,
         shares: shares.into_iter().map(to_share_response).collect(),
     }))
 }
@@ -884,23 +893,32 @@ async fn create_conversation_items(
     .await
 }
 
+/// List conversation items - works with optional authentication
+/// Authenticated users get their access checked, unauthenticated users can only access public conversations
 async fn list_conversation_items(
     State(state): State<crate::state::AppState>,
-    Extension(user): Extension<AuthenticatedUser>,
+    Extension(user): Extension<Option<AuthenticatedUser>>,
     Path(conversation_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, Response> {
     tracing::info!(
-        "list_conversation_items called for user_id={}, session_id={}",
-        user.user_id,
-        user.session_id
+        "list_conversation_items called for user_id={:?}, conversation_id={}",
+        user.as_ref().map(|u| u.user_id),
+        conversation_id
     );
 
-    validate_user_conversation(&state, &user, &conversation_id, SharePermission::Read).await?;
+    // Check user access OR public share access
+    validate_conversation_access_optional_auth(
+        &state,
+        user.as_ref(),
+        &conversation_id,
+        SharePermission::Read,
+    )
+    .await?;
 
     tracing::debug!(
-        "Forwarding conversation items list request to OpenAI for user_id={}",
-        user.user_id
+        "Forwarding conversation items list request to OpenAI for user_id={:?}",
+        user.as_ref().map(|u| u.user_id)
     );
 
     // Forward to OpenAI
@@ -915,112 +933,7 @@ async fn list_conversation_items(
         .await
         .map_err(|e| {
             tracing::error!(
-                "OpenAI API error during conversation items list for user_id={}: {}",
-                user.user_id,
-                e
-            );
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(ErrorResponse {
-                    error: format!("OpenAI API error: {e}"),
-                }),
-            )
-                .into_response()
-        })?;
-
-    build_response(
-        proxy_response.status,
-        proxy_response.headers,
-        Body::from_stream(proxy_response.body),
-    )
-    .await
-}
-
-async fn get_shared_conversation(
-    State(state): State<crate::state::AppState>,
-    Path(share_token): Path<String>,
-    headers: HeaderMap,
-) -> Result<Json<serde_json::Value>, Response> {
-    let share = state
-        .conversation_share_service
-        .get_public_access(&share_token, SharePermission::Read)
-        .await
-        .map_err(map_share_error)?;
-
-    let conversation =
-        fetch_conversation_from_proxy(&state, &share.conversation_id, headers.clone()).await?;
-
-    Ok(Json(conversation))
-}
-
-async fn list_shared_conversation_items(
-    State(state): State<crate::state::AppState>,
-    Path(share_token): Path<String>,
-    headers: HeaderMap,
-) -> Result<Response, Response> {
-    let share = state
-        .conversation_share_service
-        .get_public_access(&share_token, SharePermission::Read)
-        .await
-        .map_err(map_share_error)?;
-
-    let proxy_response = state
-        .proxy_service
-        .forward_request(
-            Method::GET,
-            &format!("conversations/{}/items", share.conversation_id),
-            headers.clone(),
-            None,
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                "OpenAI API error during shared conversation items list: {}",
-                e
-            );
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(ErrorResponse {
-                    error: format!("OpenAI API error: {e}"),
-                }),
-            )
-                .into_response()
-        })?;
-
-    build_response(
-        proxy_response.status,
-        proxy_response.headers,
-        Body::from_stream(proxy_response.body),
-    )
-    .await
-}
-
-async fn create_shared_conversation_items(
-    State(state): State<crate::state::AppState>,
-    Path(share_token): Path<String>,
-    headers: HeaderMap,
-    request: Request,
-) -> Result<Response, Response> {
-    let share = state
-        .conversation_share_service
-        .get_public_access(&share_token, SharePermission::Write)
-        .await
-        .map_err(map_share_error)?;
-
-    let body_bytes = extract_body_bytes(request).await?;
-
-    let proxy_response = state
-        .proxy_service
-        .forward_request(
-            Method::POST,
-            &format!("conversations/{}/items", share.conversation_id),
-            headers.clone(),
-            Some(body_bytes),
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                "OpenAI API error during shared conversation items creation: {}",
+                "OpenAI API error during conversation items list: {}",
                 e
             );
             (
@@ -1265,8 +1178,9 @@ async fn clone_conversation(
         conversation_id
     );
 
-    // Validate user has access to the source conversation
-    validate_user_conversation(&state, &user, &conversation_id, SharePermission::Write).await?;
+    // Validate user has access to the source conversation OR it's publicly shared
+    // (read access is sufficient for cloning)
+    validate_user_or_public_conversation(&state, &user, &conversation_id, SharePermission::Read).await?;
 
     tracing::debug!(
         "Forwarding conversation clone request to OpenAI for user_id={}",
@@ -1693,34 +1607,64 @@ async fn proxy_responses(
         }
     }
 
-    // If we have a model-level system prompt, inject or prepend it into the request as `instructions`.
-    let modified_body_bytes =
-        if let (Some(mut body), Some(system_prompt)) = (body_json, model_system_prompt.clone()) {
-            // If client already provided instructions, prepend model system prompt with two newlines.
+    // Fetch user profile to inject author metadata into messages
+    let user_profile = state
+        .user_service
+        .get_user_profile(user.user_id)
+        .await
+        .ok();
+
+    // Modify request body to inject system prompt and/or author metadata
+    let modified_body_bytes = if let Some(mut body) = body_json {
+        // Inject model-level system prompt if present
+        if let Some(system_prompt) = model_system_prompt.clone() {
             let new_instructions = match body.get("instructions").and_then(|v| v.as_str()) {
                 Some(existing) if !existing.is_empty() => {
                     format!("{system_prompt}\n\n{existing}")
                 }
                 _ => system_prompt,
             };
-
             body["instructions"] = serde_json::Value::String(new_instructions);
+        }
 
-            match serde_json::to_vec(&body) {
-                Ok(serialized) => Bytes::from(serialized),
-                Err(_) => {
-                    return Err((
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorResponse {
-                            error: "Failed to modify instructions".to_string(),
-                        }),
-                    )
-                        .into_response())
-                }
+        // Inject author metadata with user info
+        // This allows shared conversations to show who sent each message
+        if let Some(profile) = user_profile {
+            let mut metadata = body
+                .get("metadata")
+                .and_then(|m| m.as_object())
+                .cloned()
+                .unwrap_or_default();
+
+            metadata.insert(
+                "author_id".to_string(),
+                serde_json::Value::String(user.user_id.to_string()),
+            );
+            if let Some(name) = profile.user.name.as_ref() {
+                metadata.insert(
+                    "author_name".to_string(),
+                    serde_json::Value::String(name.clone()),
+                );
             }
-        } else {
-            body_bytes
-        };
+
+            body["metadata"] = serde_json::Value::Object(metadata);
+        }
+
+        match serde_json::to_vec(&body) {
+            Ok(serialized) => Bytes::from(serialized),
+            Err(_) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "Failed to modify request body".to_string(),
+                    }),
+                )
+                    .into_response())
+            }
+        }
+    } else {
+        body_bytes
+    };
 
     // Set content-length header
     match HeaderValue::from_str(&modified_body_bytes.len().to_string()) {
@@ -2545,6 +2489,56 @@ async fn validate_user_conversation(
         .ensure_access(conversation_id, user.user_id, required_permission)
         .await
         .map_err(map_share_error)
+}
+
+/// Validate user has access OR the conversation is publicly shared
+async fn validate_user_or_public_conversation(
+    state: &crate::state::AppState,
+    user: &AuthenticatedUser,
+    conversation_id: &str,
+    required_permission: SharePermission,
+) -> Result<(), Response> {
+    // First check regular access
+    let user_access = state
+        .conversation_share_service
+        .ensure_access(conversation_id, user.user_id, required_permission)
+        .await;
+
+    if user_access.is_ok() {
+        return Ok(());
+    }
+
+    // If no user access, check if publicly shared
+    state
+        .conversation_share_service
+        .get_public_access_by_conversation_id(conversation_id, required_permission)
+        .await
+        .map(|_| ())
+        .map_err(map_share_error)
+}
+
+/// Validate conversation access with optional authentication
+/// - If user is authenticated: check their access (owner, shared, or public)
+/// - If user is not authenticated: only check if publicly shared
+async fn validate_conversation_access_optional_auth(
+    state: &crate::state::AppState,
+    user: Option<&AuthenticatedUser>,
+    conversation_id: &str,
+    required_permission: SharePermission,
+) -> Result<(), Response> {
+    if let Some(user) = user {
+        // User is authenticated - check their access or public share
+        validate_user_or_public_conversation(state, user, conversation_id, required_permission)
+            .await
+    } else {
+        // User is not authenticated - only public share is allowed
+        state
+            .conversation_share_service
+            .get_public_access_by_conversation_id(conversation_id, required_permission)
+            .await
+            .map(|_| ())
+            .map_err(map_share_error)
+    }
 }
 
 async fn validate_owner_conversation(

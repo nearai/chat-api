@@ -123,8 +123,13 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         crate::middleware::auth_middleware,
     ));
 
-    // Public conversation share routes (no auth required)
-    let public_share_routes = api::create_public_share_router();
+    // Conversation read routes with optional authentication
+    // These routes work for both authenticated users and unauthenticated users
+    // (for accessing publicly shared conversations)
+    let optional_auth_routes = api::create_optional_auth_router().layer(from_fn_with_state(
+        auth_state.clone(),
+        crate::middleware::optional_auth_middleware,
+    ));
 
     // API proxy routes (requires authentication)
     let api_routes = api::create_api_router(rate_limit_state).layer(from_fn_with_state(
@@ -133,6 +138,8 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
     ));
 
     // Build the base router
+    // Note: optional_auth_routes must come BEFORE api_routes since they share paths
+    // but have different HTTP methods (optional auth for GET, required auth for POST/DELETE)
     let router = Router::new()
         .route("/health", get(health_check))
         .merge(configs_routes) // Configs route (requires user auth)
@@ -140,8 +147,8 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         .nest("/v1/auth", logout_route) // Logout route with auth middleware
         .nest("/v1/users", user_routes)
         .nest("/v1/admin", admin_routes)
-        .merge(public_share_routes)
-        .merge(api_routes) // Merge instead of nest since api routes already have /v1 prefix
+        .merge(optional_auth_routes) // Conversation read routes (optional auth)
+        .merge(api_routes) // API routes (required auth)
         .merge(attestation_routes) // Merge attestation routes (already have /v1 prefix)
         .with_state(app_state)
         // Add static file serving as fallback (must be last)

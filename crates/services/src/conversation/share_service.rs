@@ -125,14 +125,14 @@ impl ConversationShareService for ConversationShareServiceImpl {
         }
     }
 
-    async fn get_public_access(
+    async fn get_public_access_by_conversation_id(
         &self,
-        token: &str,
+        conversation_id: &str,
         required_permission: SharePermission,
     ) -> Result<ConversationShare, ConversationError> {
         let share = self
             .share_repository
-            .get_public_share_by_token(token)
+            .get_public_share_by_conversation_id(conversation_id)
             .await?
             .ok_or(ConversationError::NotFound)?;
 
@@ -202,6 +202,15 @@ impl ConversationShareService for ConversationShareServiceImpl {
         permission: SharePermission,
         target: ShareTarget,
     ) -> Result<Vec<ConversationShare>, ConversationError> {
+        // First verify the conversation exists
+        let owner = self
+            .conversation_repository
+            .get_conversation_owner(conversation_id)
+            .await?;
+        if owner.is_none() {
+            return Err(ConversationError::NotFound);
+        }
+
         // Allow owners OR users with write permission to create shares
         self.ensure_access(conversation_id, owner_user_id, SharePermission::Write)
             .await?;
@@ -404,6 +413,14 @@ mod tests {
                 Some(_) => Err(ConversationError::AccessDenied),
                 None => Err(ConversationError::NotFound),
             }
+        }
+
+        async fn get_conversation_owner(
+            &self,
+            conversation_id: &str,
+        ) -> Result<Option<UserId>, ConversationError> {
+            let owners = self.owners.lock().expect("lock owners");
+            Ok(owners.get(conversation_id).copied())
         }
 
         async fn delete_conversation(
@@ -654,16 +671,16 @@ mod tests {
             }
         }
 
-        async fn get_public_share_by_token(
+        async fn get_public_share_by_conversation_id(
             &self,
-            token: &str,
+            conversation_id: &str,
         ) -> Result<Option<ConversationShare>, ConversationError> {
             let shares = self.shares.lock().expect("lock shares");
             Ok(shares
                 .iter()
                 .find(|share| {
                     share.share_type == ShareType::Public
-                        && share.public_token.as_deref() == Some(token)
+                        && share.conversation_id == conversation_id
                 })
                 .cloned())
         }
@@ -1328,73 +1345,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn public_shares_enforce_permissions() {
-        let (service, _conversation_repo, share_repo, user_repo, owner) =
-            setup_service_with_owner("conv_public_enforce", "owner@example.com");
-
-        let shares = service
-            .create_share(
-                owner.id,
-                "conv_public_enforce",
-                SharePermission::Read,
-                ShareTarget::Public,
-            )
-            .await
-            .expect("create public share");
-
-        let token = shares[0]
-            .public_token
-            .as_ref()
-            .expect("missing token")
-            .clone();
-
-        // Ensure read succeeds
-        service
-            .get_public_access(&token, SharePermission::Read)
-            .await
-            .expect("read token");
-
-        // Write should fail for read-only public shares
-        let err = service
-            .get_public_access(&token, SharePermission::Write)
-            .await
-            .expect_err("write should fail");
-        assert!(matches!(err, ConversationError::AccessDenied));
-
-        // Unknown tokens error with NotFound
-        let err = service
-            .get_public_access("does-not-exist", SharePermission::Read)
-            .await
-            .expect_err("missing share");
-        assert!(matches!(err, ConversationError::NotFound));
-
-        // Avoid unused warnings
-        drop((share_repo, user_repo));
-    }
-
-    #[tokio::test]
-    async fn public_shares_allow_write_permission() {
-        let (service, _conversation_repo, _share_repo, _user_repo, owner) =
-            setup_service_with_owner("conv_public_write", "owner@example.com");
-
-        let shares = service
-            .create_share(
-                owner.id,
-                "conv_public_write",
-                SharePermission::Write,
-                ShareTarget::Public,
-            )
-            .await
-            .expect("create public share");
-        let token = shares[0].public_token.as_ref().expect("token").clone();
-
-        service
-            .get_public_access(&token, SharePermission::Write)
-            .await
-            .expect("write access should succeed for write token");
-    }
-
-    #[tokio::test]
     async fn create_share_normalizes_recipients_and_patterns() {
         let (service, _conversation_repo, _share_repo, _user_repo, owner) =
             setup_service_with_owner("conv_norm", "owner@example.com");
@@ -1693,6 +1643,119 @@ mod tests {
             .ensure_access("conv_missing_user", ghost_user.id, SharePermission::Read)
             .await
             .expect_err("missing user should be denied");
+        assert!(matches!(err, ConversationError::AccessDenied));
+    }
+
+    #[tokio::test]
+    async fn public_access_by_conversation_id_allows_read_when_public() {
+        let (service, _conversation_repo, _share_repo, _user_repo, owner) =
+            setup_service_with_owner("conv_public_read", "owner@example.com");
+
+        // Create a public share with read permission
+        service
+            .create_share(
+                owner.id,
+                "conv_public_read",
+                SharePermission::Read,
+                ShareTarget::Public,
+            )
+            .await
+            .expect("create public share");
+
+        // Public access by conversation ID should work for read
+        let share = service
+            .get_public_access_by_conversation_id("conv_public_read", SharePermission::Read)
+            .await
+            .expect("public read access should succeed");
+
+        assert_eq!(share.conversation_id, "conv_public_read");
+        assert_eq!(share.permission, SharePermission::Read);
+    }
+
+    #[tokio::test]
+    async fn public_access_by_conversation_id_denied_when_not_public() {
+        let (service, _conversation_repo, _share_repo, _user_repo, _owner) =
+            setup_service_with_owner("conv_private", "owner@example.com");
+
+        // No public share created - should be denied
+        let err = service
+            .get_public_access_by_conversation_id("conv_private", SharePermission::Read)
+            .await
+            .expect_err("should be denied for private conversation");
+
+        assert!(matches!(err, ConversationError::NotFound));
+    }
+
+    #[tokio::test]
+    async fn public_access_by_conversation_id_denied_for_nonexistent() {
+        let (service, _conversation_repo, _share_repo, _user_repo, _owner) =
+            setup_service_with_owner("conv_exists", "owner@example.com");
+
+        // Non-existent conversation should return NotFound
+        let err = service
+            .get_public_access_by_conversation_id("conv_nonexistent", SharePermission::Read)
+            .await
+            .expect_err("should be denied for nonexistent conversation");
+
+        assert!(matches!(err, ConversationError::NotFound));
+    }
+
+    #[tokio::test]
+    async fn public_access_enforces_write_permission() {
+        let (service, _conversation_repo, _share_repo, _user_repo, owner) =
+            setup_service_with_owner("conv_public_write", "owner@example.com");
+
+        // Create a public share with write permission
+        service
+            .create_share(
+                owner.id,
+                "conv_public_write",
+                SharePermission::Write,
+                ShareTarget::Public,
+            )
+            .await
+            .expect("create public share");
+
+        // Both read and write access should work
+        service
+            .get_public_access_by_conversation_id("conv_public_write", SharePermission::Read)
+            .await
+            .expect("public read access should succeed");
+
+        service
+            .get_public_access_by_conversation_id("conv_public_write", SharePermission::Write)
+            .await
+            .expect("public write access should succeed");
+    }
+
+    #[tokio::test]
+    async fn public_access_denies_write_when_only_read() {
+        let (service, _conversation_repo, _share_repo, _user_repo, owner) =
+            setup_service_with_owner("conv_public_readonly", "owner@example.com");
+
+        // Create a public share with read-only permission
+        service
+            .create_share(
+                owner.id,
+                "conv_public_readonly",
+                SharePermission::Read,
+                ShareTarget::Public,
+            )
+            .await
+            .expect("create public share");
+
+        // Read should work
+        service
+            .get_public_access_by_conversation_id("conv_public_readonly", SharePermission::Read)
+            .await
+            .expect("public read access should succeed");
+
+        // Write should be denied
+        let err = service
+            .get_public_access_by_conversation_id("conv_public_readonly", SharePermission::Write)
+            .await
+            .expect_err("write access should be denied");
+
         assert!(matches!(err, ConversationError::AccessDenied));
     }
 }

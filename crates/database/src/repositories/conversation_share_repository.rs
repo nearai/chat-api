@@ -506,9 +506,9 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
         }
     }
 
-    async fn get_public_share_by_token(
+    async fn get_public_share_by_conversation_id(
         &self,
-        token: &str,
+        conversation_id: &str,
     ) -> Result<Option<ConversationShare>, ConversationError> {
         let client = self
             .pool
@@ -522,8 +522,8 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                         recipient_type, recipient_value, group_id, org_email_pattern,
                         public_token, created_at, updated_at
                  FROM conversation_shares
-                 WHERE share_type = 'public' AND public_token = $1",
-                &[&token],
+                 WHERE share_type = 'public' AND conversation_id = $1",
+                &[&conversation_id],
             )
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
