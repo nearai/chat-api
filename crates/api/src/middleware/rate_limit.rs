@@ -29,7 +29,6 @@ use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 pub struct WindowLimit {
     pub window: TimeWindow,
     pub limit: usize,
-    pub activity_type: ActivityType,
 }
 
 #[derive(Clone)]
@@ -51,7 +50,6 @@ impl Default for RateLimitConfig {
             window_limits: vec![WindowLimit {
                 window: TimeWindow::day(),
                 limit: 1500,
-                activity_type: ActivityType::RateLimitedRequest,
             }],
         }
     }
@@ -222,16 +220,28 @@ impl RateLimitState {
         }
 
         // All windows passed, now insert a single record that all windows will count
-        // Use the first window's limit for the insert check (but the record will be counted by all windows)
-        if let Some(first_window) = self.config.window_limits.first() {
-            let limit_value = first_window.limit as u64;
+        // We use the most restrictive window (smallest limit) for the atomic insert check.
+        // This ensures the most restrictive window won't be exceeded, and since we've
+        // already verified all windows are below their limits, this provides reasonable
+        // protection against race conditions.
+        //
+        // Note: While check_and_record_activity only checks one window's limit, using
+        // the most restrictive window ensures that at least the strictest limit is enforced
+        // atomically. The other windows were already checked individually above, and any
+        // race condition that causes them to exceed limits is acceptable as a trade-off
+        // for simplicity (a full multi-window atomic check would require significant
+        // interface changes).
+        if let Some(most_restrictive_window) =
+            self.config.window_limits.iter().min_by_key(|w| w.limit)
+        {
+            let limit_value = most_restrictive_window.limit as u64;
             let result = self
                 .analytics_service
                 .check_and_record_activity(CheckAndRecordActivityRequest {
                     user_id,
                     activity_type: ActivityType::RateLimitedRequest,
                     metadata: None,
-                    window: first_window.window,
+                    window: most_restrictive_window.window,
                     limit: limit_value,
                 })
                 .await;
@@ -251,11 +261,11 @@ impl RateLimitState {
                         self.rollback_acquire(user_id).await;
 
                         // Calculate retry_after based on window size
-                        let retry_after_ms = first_window.window.seconds * 1000;
+                        let retry_after_ms = most_restrictive_window.window.seconds * 1000;
 
                         return Err(RateLimitError::WindowLimitExceeded {
-                            window_seconds: first_window.window.seconds,
-                            limit: first_window.limit,
+                            window_seconds: most_restrictive_window.window.seconds,
+                            limit: most_restrictive_window.limit,
                             retry_after_ms,
                         });
                     }
@@ -377,7 +387,7 @@ pub async fn rate_limit_middleware(
 mod tests {
     use super::*;
     use chrono::Utc;
-    use services::analytics::{ActivityType, TimeWindow};
+    use services::analytics::TimeWindow;
     use std::sync::Arc;
     use uuid::Uuid;
 
@@ -1287,7 +1297,6 @@ mod tests {
                 window_limits: vec![WindowLimit {
                     window: TimeWindow::day(),
                     limit: 100,
-                    activity_type: ActivityType::RateLimitedRequest,
                 }],
             },
             Arc::new(test_services::RejectingAnalyticsService),
@@ -1346,7 +1355,6 @@ mod tests {
                 window_limits: vec![WindowLimit {
                     window: TimeWindow::day(),
                     limit: 10,
-                    activity_type: ActivityType::RateLimitedRequest,
                 }],
             },
             analytics_service.clone(),
@@ -1382,7 +1390,6 @@ mod tests {
                 window_limits: vec![WindowLimit {
                     window: TimeWindow::day(),
                     limit,
-                    activity_type: ActivityType::RateLimitedRequest,
                 }],
             },
             Arc::new(test_services::fixed_count_service(limit as i64)),
@@ -1422,7 +1429,6 @@ mod tests {
                 window_limits: vec![WindowLimit {
                     window: TimeWindow::day(),
                     limit,
-                    activity_type: ActivityType::RateLimitedRequest,
                 }],
             },
             Arc::new(test_services::fixed_count_service(limit as i64 + 5)), // Above limit
@@ -1453,12 +1459,10 @@ mod tests {
                     WindowLimit {
                         window: TimeWindow::day(),
                         limit: day_limit,
-                        activity_type: ActivityType::RateLimitedRequest,
                     },
                     WindowLimit {
                         window: TimeWindow::week(),
                         limit: week_limit,
-                        activity_type: ActivityType::RateLimitedRequest,
                     },
                 ],
             },
@@ -1485,12 +1489,10 @@ mod tests {
                     WindowLimit {
                         window: TimeWindow::day(),
                         limit: day_limit,
-                        activity_type: ActivityType::RateLimitedRequest,
                     },
                     WindowLimit {
                         window: TimeWindow::week(),
                         limit: week_limit,
-                        activity_type: ActivityType::RateLimitedRequest,
                     },
                 ],
             },
@@ -1522,12 +1524,10 @@ mod tests {
                     WindowLimit {
                         window: TimeWindow::day(),
                         limit: day_limit,
-                        activity_type: ActivityType::RateLimitedRequest,
                     },
                     WindowLimit {
                         window: TimeWindow::week(),
                         limit: week_limit,
-                        activity_type: ActivityType::RateLimitedRequest,
                     },
                 ],
             },
@@ -1560,7 +1560,6 @@ mod tests {
                 window_limits: vec![WindowLimit {
                     window: TimeWindow::day(),
                     limit: 10,
-                    activity_type: ActivityType::RateLimitedRequest,
                 }],
             },
             Arc::new(test_services::AtomicInsertFailureService),
@@ -1589,7 +1588,6 @@ mod tests {
                 window_limits: vec![WindowLimit {
                     window: TimeWindow::day(),
                     limit: 10,
-                    activity_type: ActivityType::RateLimitedRequest,
                 }],
             },
             Arc::new(test_services::WindowSizeTestService { count: 10 }),
@@ -1617,7 +1615,6 @@ mod tests {
                 window_limits: vec![WindowLimit {
                     window: TimeWindow::week(),
                     limit: 10,
-                    activity_type: ActivityType::RateLimitedRequest,
                 }],
             },
             Arc::new(test_services::WindowSizeTestService { count: 10 }),
@@ -1645,7 +1642,6 @@ mod tests {
                 window_limits: vec![WindowLimit {
                     window: TimeWindow::month(),
                     limit: 10,
-                    activity_type: ActivityType::RateLimitedRequest,
                 }],
             },
             Arc::new(test_services::WindowSizeTestService { count: 10 }),
@@ -1675,7 +1671,6 @@ mod tests {
                 window_limits: vec![WindowLimit {
                     window: TimeWindow::day(),
                     limit: 10,
-                    activity_type: ActivityType::RateLimitedRequest,
                 }],
             },
             Arc::new(test_services::ErrorAnalyticsService),
@@ -1726,7 +1721,6 @@ mod tests {
                 window_limits: vec![WindowLimit {
                     window: TimeWindow::new(window_seconds),
                     limit,
-                    activity_type: ActivityType::RateLimitedRequest,
                 }],
             },
             analytics_service.clone(),
@@ -1781,6 +1775,5 @@ mod tests {
             matches!(result, Err(RateLimitError::WindowLimitExceeded { .. })),
             "Request should fail when at limit again"
         );
-        drop(result.unwrap());
     }
 }
