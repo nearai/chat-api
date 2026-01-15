@@ -742,9 +742,6 @@ mod tests {
 
         // Check that timestamp was rolled back - we should be able to make
         // max_requests_per_window requests immediately after (since timestamp was removed)
-        // Wait a tiny bit to ensure cleanup
-        tokio::time::sleep(Duration::from_millis(10)).await;
-
         // Since timestamp was rolled back, we should be able to make requests
         // (they'll still fail on window limit, but not on short-term rate limit)
         // Actually, since window limit always rejects, we can't test this easily.
