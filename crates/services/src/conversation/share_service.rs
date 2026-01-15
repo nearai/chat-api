@@ -47,9 +47,17 @@ impl ConversationShareServiceImpl {
 
     fn normalize_org_pattern(pattern: String) -> String {
         let trimmed = pattern.trim().to_string();
-        if trimmed.contains('%') || trimmed.contains('_') || trimmed.contains('@') {
+        // If pattern contains wildcards (% or _), keep as-is
+        if trimmed.contains('%') || trimmed.contains('_') {
+            trimmed
+        } else if trimmed.starts_with('@') {
+            // @company.com -> %@company.com
+            format!("%{trimmed}")
+        } else if trimmed.contains('@') {
+            // user@company.com -> keep as-is (specific email match)
             trimmed
         } else {
+            // company.com -> %@company.com
             format!("%@{trimmed}")
         }
     }
@@ -1481,6 +1489,36 @@ mod tests {
         assert_eq!(
             org_share.org_email_pattern.as_deref(),
             Some("%@partner.example.com")
+        );
+    }
+
+    #[tokio::test]
+    async fn organization_patterns_normalize_at_prefix() {
+        let (service, _conversation_repo, _share_repo, _user_repo, owner) =
+            setup_service_with_owner("conv_org_at", "owner@example.com");
+
+        // @company.com should be normalized to %@company.com
+        service
+            .create_share(
+                owner.id,
+                "conv_org_at",
+                SharePermission::Read,
+                ShareTarget::Organization("@acme.com".to_string()),
+            )
+            .await
+            .expect("create org share");
+
+        let stored = service
+            .list_shares(owner.id, "conv_org_at")
+            .await
+            .expect("list shares");
+        let org_share = stored
+            .iter()
+            .find(|share| share.share_type == ShareType::Organization)
+            .expect("org share missing");
+        assert_eq!(
+            org_share.org_email_pattern.as_deref(),
+            Some("%@acme.com")
         );
     }
 
