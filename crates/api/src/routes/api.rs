@@ -863,11 +863,21 @@ async fn delete_share_group(
 struct SharedConversationInfo {
     conversation_id: String,
     permission: SharePermission,
+    /// Conversation title (None if fetch failed)
+    title: Option<String>,
+    /// Conversation created_at timestamp (None if fetch failed)
+    created_at: Option<i64>,
+    /// Error message if conversation details couldn't be fetched
+    error: Option<String>,
 }
+
+/// Maximum concurrent requests when fetching conversation details
+const SHARED_CONVERSATIONS_FETCH_CONCURRENCY: usize = 10;
 
 async fn list_shared_with_me(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
 ) -> Result<Json<Vec<SharedConversationInfo>>, Response> {
     let shared = state
         .conversation_share_service
@@ -875,15 +885,61 @@ async fn list_shared_with_me(
         .await
         .map_err(map_share_error)?;
 
-    Ok(Json(
-        shared
-            .into_iter()
-            .map(|(conversation_id, permission)| SharedConversationInfo {
-                conversation_id,
-                permission,
-            })
-            .collect(),
-    ))
+    if shared.is_empty() {
+        return Ok(Json(vec![]));
+    }
+
+    // Fetch conversation details with concurrency limit
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(
+        SHARED_CONVERSATIONS_FETCH_CONCURRENCY,
+    ));
+
+    let fetch_tasks: Vec<_> = shared
+        .into_iter()
+        .map(|(conversation_id, permission)| {
+            let state = state.clone();
+            let headers = headers.clone();
+            let semaphore = semaphore.clone();
+
+            async move {
+                let _permit = semaphore.acquire().await;
+                let result =
+                    fetch_conversation_from_proxy(&state, &conversation_id, headers).await;
+
+                match result {
+                    Ok(conversation) => {
+                        let title = conversation
+                            .get("metadata")
+                            .and_then(|m| m.get("title"))
+                            .and_then(|t| t.as_str())
+                            .map(|s| s.to_string());
+                        let created_at = conversation
+                            .get("created_at")
+                            .and_then(|c| c.as_i64());
+
+                        SharedConversationInfo {
+                            conversation_id,
+                            permission,
+                            title,
+                            created_at,
+                            error: None,
+                        }
+                    }
+                    Err(_) => SharedConversationInfo {
+                        conversation_id,
+                        permission,
+                        title: None,
+                        created_at: None,
+                        error: Some("Failed to fetch conversation details".to_string()),
+                    },
+                }
+            }
+        })
+        .collect();
+
+    let results = futures::future::join_all(fetch_tasks).await;
+
+    Ok(Json(results))
 }
 
 async fn create_conversation_items(
