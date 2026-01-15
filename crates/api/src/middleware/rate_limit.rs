@@ -277,8 +277,10 @@ impl RateLimitState {
         Ok(RateLimitGuard { _permit: permit })
     }
 
-    /// Rollback acquire: remove the timestamp that was added
-    /// The permit will be automatically released when the guard is dropped
+    /// Rollback acquire: remove the timestamp that was added during try_acquire.
+    ///
+    /// Note: This function only removes the timestamp. The permit acquired in `try_acquire`
+    /// is owned by the `permit` variable in that function and will be automatically released
     async fn rollback_acquire(&self, user_id: UserId) {
         let mut user_limits = self.user_limits.lock().await;
         if let Some(user_state) = user_limits.get_mut(&user_id) {
