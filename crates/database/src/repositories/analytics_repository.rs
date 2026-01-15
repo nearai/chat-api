@@ -74,7 +74,7 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
             .query_one(
                 r#"
                 WITH window_start AS (
-                    SELECT NOW() - make_interval(days => $3) as start_time
+                    SELECT NOW() - make_interval(secs => $3::bigint) as start_time
                 ),
                 current_count AS (
                     SELECT COUNT(*)::bigint as cnt
@@ -100,7 +100,7 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
                 &[
                     &request.user_id,
                     &activity_type,
-                    &(request.window.days as i32),
+                    &(request.window.seconds as i64),
                     &(request.limit as i64),
                     &request.metadata,
                 ],
@@ -129,7 +129,7 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
             .query_one(
                 r#"
                 WITH window_start AS (
-                    SELECT NOW() - make_interval(days => $3) as start_time
+                    SELECT NOW() - make_interval(secs => $3::bigint) as start_time
                 )
                 SELECT COUNT(*)::bigint as cnt
                 FROM user_activity_log, window_start
@@ -137,7 +137,7 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
                   AND activity_type = $2
                   AND created_at >= window_start.start_time
                 "#,
-                &[&user_id, &activity_type, &(window.days as i32)],
+                &[&user_id, &activity_type, &(window.seconds as i64)],
             )
             .await?;
 

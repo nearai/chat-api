@@ -232,31 +232,31 @@ pub enum AnalyticsError {
     InternalError(String),
 }
 
-/// Time window for sliding window rate limiting (in days)
+/// Time window for sliding window rate limiting (in seconds)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TimeWindow {
-    /// Number of days for the sliding window
-    pub days: u32,
+    /// Number of seconds for the sliding window
+    pub seconds: u64,
 }
 
 impl TimeWindow {
-    /// Create a time window with specified number of days
-    pub fn new(days: u32) -> Self {
-        Self { days }
+    /// Create a time window with specified number of seconds
+    pub fn new(seconds: u64) -> Self {
+        Self { seconds }
     }
 
-    /// Day window (1 day)
+    /// Day window (86400 seconds = 1 day)
     pub fn day() -> Self {
-        Self { days: 1 }
+        Self { seconds: 86400 }
     }
 
-    /// Week window (7 days)
+    /// Week window (604800 seconds = 7 days)
     pub fn week() -> Self {
-        Self { days: 7 }
+        Self { seconds: 604800 }
     }
 
-    /// Month window (30 days)
+    /// Month window (2592000 seconds = 30 days)
     pub fn month() -> Self {
-        Self { days: 30 }
+        Self { seconds: 2592000 }
     }
 }

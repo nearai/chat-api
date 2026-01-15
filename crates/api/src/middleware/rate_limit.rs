@@ -186,7 +186,7 @@ impl RateLimitState {
                 Err(e) => {
                     tracing::warn!(
                         user_id = %user_id.0,
-                        window_days = window_limit.window.days,
+                        window_seconds = window_limit.window.seconds,
                         "Failed to check usage limit: {}",
                         e
                     );
@@ -203,21 +203,20 @@ impl RateLimitState {
 
                 // Calculate retry_after: when the oldest activity in the window expires
                 // For sliding window, we estimate based on window size
-                let window_duration_secs = window_limit.window.days * 24 * 3600;
-                let retry_after_ms = window_duration_secs * 1000; // Conservative estimate
+                let retry_after_ms = window_limit.window.seconds * 1000; // Conservative estimate
 
                 tracing::warn!(
                     user_id = %user_id.0,
-                    window_days = window_limit.window.days,
+                    window_seconds = window_limit.window.seconds,
                     limit = window_limit.limit,
                     current_count = count,
                     "Sliding window limit exceeded"
                 );
 
                 return Err(RateLimitError::WindowLimitExceeded {
-                    window_days: window_limit.window.days,
+                    window_seconds: window_limit.window.seconds,
                     limit: window_limit.limit,
-                    retry_after_ms: retry_after_ms.into(),
+                    retry_after_ms,
                 });
             }
         }
@@ -252,13 +251,12 @@ impl RateLimitState {
                         self.rollback_acquire(user_id).await;
 
                         // Calculate retry_after based on window size
-                        let window_duration_secs = first_window.window.days * 24 * 3600;
-                        let retry_after_ms = window_duration_secs * 1000;
+                        let retry_after_ms = first_window.window.seconds * 1000;
 
                         return Err(RateLimitError::WindowLimitExceeded {
-                            window_days: first_window.window.days,
+                            window_seconds: first_window.window.seconds,
                             limit: first_window.limit,
-                            retry_after_ms: retry_after_ms.into(),
+                            retry_after_ms,
                         });
                     }
                     // Record inserted successfully, all windows will count it
@@ -301,7 +299,7 @@ enum RateLimitError {
         retry_after_ms: u64,
     },
     WindowLimitExceeded {
-        window_days: u32,
+        window_seconds: u64,
         limit: usize,
         retry_after_ms: u64,
     },
@@ -332,14 +330,14 @@ impl IntoResponse for RateLimitError {
                 Some(retry_after_ms),
             ),
             RateLimitError::WindowLimitExceeded {
-                window_days,
+                window_seconds,
                 limit,
                 retry_after_ms,
             } => (
                 StatusCode::TOO_MANY_REQUESTS,
                 format!(
-                    "Request limit of {} reached for {} day(s) window. Please retry later.",
-                    limit, window_days
+                    "Request limit of {} reached for {} second(s) window. Please retry later.",
+                    limit, window_seconds
                 ),
                 Some(retry_after_ms),
             ),
@@ -683,7 +681,7 @@ mod tests {
                 request: CheckAndRecordActivityRequest,
             ) -> Result<CheckAndRecordActivityResult, AnalyticsError> {
                 // Use the first window for recording
-                let count = if request.window.days == 1 {
+                let count = if request.window.seconds == 86400 {
                     self.day_count
                 } else {
                     self.week_count
@@ -700,7 +698,7 @@ mod tests {
                 _activity_type: ActivityType,
                 window: TimeWindow,
             ) -> Result<i64, AnalyticsError> {
-                Ok(if window.days == 1 {
+                Ok(if window.seconds == 86400 {
                     self.day_count
                 } else {
                     self.week_count
@@ -1285,15 +1283,15 @@ mod tests {
         ));
 
         if let Err(RateLimitError::WindowLimitExceeded {
-            window_days,
+            window_seconds,
             limit: reported_limit,
             retry_after_ms,
         }) = result
         {
-            assert_eq!(window_days, 1);
+            assert_eq!(window_seconds, 86400); // 1 day in seconds
             assert_eq!(reported_limit, limit);
             // retry_after_ms should be approximately 1 day in milliseconds
-            let expected_retry_ms = 24 * 3600 * 1000;
+            let expected_retry_ms = 86400 * 1000;
             assert_eq!(retry_after_ms, expected_retry_ms);
         }
     }
@@ -1391,7 +1389,10 @@ mod tests {
         assert!(
             matches!(
                 result,
-                Err(RateLimitError::WindowLimitExceeded { window_days: 1, .. })
+                Err(RateLimitError::WindowLimitExceeded {
+                    window_seconds: 86400,
+                    ..
+                })
             ),
             "Should fail when day window is at limit"
         );
@@ -1425,7 +1426,10 @@ mod tests {
         assert!(
             matches!(
                 result,
-                Err(RateLimitError::WindowLimitExceeded { window_days: 7, .. })
+                Err(RateLimitError::WindowLimitExceeded {
+                    window_seconds: 604800,
+                    ..
+                })
             ),
             "Should fail when week window is at limit"
         );
@@ -1478,13 +1482,13 @@ mod tests {
 
         let result = state_day.try_acquire(user).await;
         if let Err(RateLimitError::WindowLimitExceeded {
-            window_days,
+            window_seconds,
             retry_after_ms,
             ..
         }) = result
         {
-            assert_eq!(window_days, 1);
-            assert_eq!(retry_after_ms, 24 * 3600 * 1000);
+            assert_eq!(window_seconds, 86400); // 1 day in seconds
+            assert_eq!(retry_after_ms, 86400 * 1000);
         } else {
             panic!("Expected WindowLimitExceeded for day window");
         }
@@ -1506,13 +1510,13 @@ mod tests {
 
         let result = state_week.try_acquire(user).await;
         if let Err(RateLimitError::WindowLimitExceeded {
-            window_days,
+            window_seconds,
             retry_after_ms,
             ..
         }) = result
         {
-            assert_eq!(window_days, 7);
-            assert_eq!(retry_after_ms, 7 * 24 * 3600 * 1000);
+            assert_eq!(window_seconds, 604800); // 7 days in seconds
+            assert_eq!(retry_after_ms, 604800 * 1000);
         } else {
             panic!("Expected WindowLimitExceeded for week window");
         }
@@ -1534,13 +1538,13 @@ mod tests {
 
         let result = state_month.try_acquire(user).await;
         if let Err(RateLimitError::WindowLimitExceeded {
-            window_days,
+            window_seconds,
             retry_after_ms,
             ..
         }) = result
         {
-            assert_eq!(window_days, 30);
-            assert_eq!(retry_after_ms, 30 * 24 * 3600 * 1000);
+            assert_eq!(window_seconds, 2592000); // 30 days in seconds
+            assert_eq!(retry_after_ms, 2592000 * 1000);
         } else {
             panic!("Expected WindowLimitExceeded for month window");
         }
