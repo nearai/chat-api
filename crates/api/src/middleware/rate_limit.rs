@@ -376,105 +376,635 @@ pub async fn rate_limit_middleware(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
     use chrono::Utc;
-    use services::analytics::{
-        ActivityLogEntry, ActivityType, AnalyticsError, AnalyticsServiceTrait, AnalyticsSummary,
-        CheckAndRecordActivityResult, RecordActivityRequest, TimeWindow, TopActiveUser,
-    };
+    use services::analytics::{ActivityType, TimeWindow};
     use std::sync::Arc;
     use uuid::Uuid;
+
+    mod test_services {
+        use super::*;
+        use async_trait::async_trait;
+        use services::analytics::{
+            ActivityLogEntry, ActivityType, AnalyticsError, AnalyticsServiceTrait,
+            AnalyticsSummary, CheckAndRecordActivityRequest, CheckAndRecordActivityResult,
+            RecordActivityRequest, TimeWindow, TopActiveUser,
+        };
+        use tokio::sync::Mutex;
+
+        /// Always allows requests (returns 0 count)
+        pub struct AlwaysAllowAnalyticsService;
+
+        #[async_trait]
+        impl AnalyticsServiceTrait for AlwaysAllowAnalyticsService {
+            async fn record_activity(
+                &self,
+                _request: RecordActivityRequest,
+            ) -> Result<(), AnalyticsError> {
+                Ok(())
+            }
+
+            async fn check_and_record_activity(
+                &self,
+                _request: CheckAndRecordActivityRequest,
+            ) -> Result<CheckAndRecordActivityResult, AnalyticsError> {
+                // Always allow in tests (unless we want to test limit behavior)
+                Ok(CheckAndRecordActivityResult {
+                    current_count: 0,
+                    was_recorded: true,
+                })
+            }
+
+            async fn check_activity_count(
+                &self,
+                _user_id: UserId,
+                _activity_type: ActivityType,
+                _window: TimeWindow,
+            ) -> Result<i64, AnalyticsError> {
+                // Always return 0 in tests (unless we want to test limit behavior)
+                Ok(0)
+            }
+
+            async fn get_analytics_summary(
+                &self,
+                _start: chrono::DateTime<Utc>,
+                _end: chrono::DateTime<Utc>,
+            ) -> Result<AnalyticsSummary, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_daily_active_users(
+                &self,
+                _date: chrono::DateTime<Utc>,
+            ) -> Result<i64, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_weekly_active_users(
+                &self,
+                _date: chrono::DateTime<Utc>,
+            ) -> Result<i64, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_monthly_active_users(
+                &self,
+                _date: chrono::DateTime<Utc>,
+            ) -> Result<i64, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_user_activity(
+                &self,
+                _user_id: UserId,
+                _limit: Option<i64>,
+                _offset: Option<i64>,
+            ) -> Result<Vec<ActivityLogEntry>, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_top_active_users(
+                &self,
+                _start: chrono::DateTime<Utc>,
+                _end: chrono::DateTime<Utc>,
+                _limit: i64,
+            ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
+                unreachable!()
+            }
+        }
+
+        /// Always rejects requests (returns 100 count, was_recorded: false)
+        pub struct RejectingAnalyticsService;
+
+        #[async_trait]
+        impl AnalyticsServiceTrait for RejectingAnalyticsService {
+            async fn record_activity(
+                &self,
+                _request: RecordActivityRequest,
+            ) -> Result<(), AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn check_and_record_activity(
+                &self,
+                _request: CheckAndRecordActivityRequest,
+            ) -> Result<CheckAndRecordActivityResult, AnalyticsError> {
+                // Always reject to test rollback
+                Ok(CheckAndRecordActivityResult {
+                    current_count: 100,
+                    was_recorded: false,
+                })
+            }
+
+            async fn check_activity_count(
+                &self,
+                _user_id: UserId,
+                _activity_type: ActivityType,
+                _window: TimeWindow,
+            ) -> Result<i64, AnalyticsError> {
+                // Always return 100 to test limit exceeded
+                Ok(100)
+            }
+
+            async fn get_analytics_summary(
+                &self,
+                _start: chrono::DateTime<Utc>,
+                _end: chrono::DateTime<Utc>,
+            ) -> Result<AnalyticsSummary, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_daily_active_users(
+                &self,
+                _date: chrono::DateTime<Utc>,
+            ) -> Result<i64, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_weekly_active_users(
+                &self,
+                _date: chrono::DateTime<Utc>,
+            ) -> Result<i64, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_monthly_active_users(
+                &self,
+                _date: chrono::DateTime<Utc>,
+            ) -> Result<i64, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_user_activity(
+                &self,
+                _user_id: UserId,
+                _limit: Option<i64>,
+                _offset: Option<i64>,
+            ) -> Result<Vec<ActivityLogEntry>, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_top_active_users(
+                &self,
+                _start: chrono::DateTime<Utc>,
+                _end: chrono::DateTime<Utc>,
+                _limit: i64,
+            ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
+                unreachable!()
+            }
+        }
+
+        /// Counter-based analytics service that can be used for both mutable and fixed counts
+        /// - If `increment` is true: increments count on each check_and_record_activity call
+        /// - If `increment` is false: returns fixed count without incrementing
+        pub struct CounterAnalyticsService {
+            pub count: Arc<Mutex<i64>>,
+            pub increment: bool,
+            pub was_recorded: bool,
+        }
+
+        #[async_trait]
+        impl AnalyticsServiceTrait for CounterAnalyticsService {
+            async fn record_activity(
+                &self,
+                _request: RecordActivityRequest,
+            ) -> Result<(), AnalyticsError> {
+                Ok(())
+            }
+
+            async fn check_and_record_activity(
+                &self,
+                _request: CheckAndRecordActivityRequest,
+            ) -> Result<CheckAndRecordActivityResult, AnalyticsError> {
+                let count = if self.increment {
+                    let mut count = self.count.lock().await;
+                    *count += 1;
+                    *count
+                } else {
+                    *self.count.lock().await
+                };
+                Ok(CheckAndRecordActivityResult {
+                    current_count: count as u64,
+                    was_recorded: self.was_recorded,
+                })
+            }
+
+            async fn check_activity_count(
+                &self,
+                _user_id: UserId,
+                _activity_type: ActivityType,
+                _window: TimeWindow,
+            ) -> Result<i64, AnalyticsError> {
+                Ok(*self.count.lock().await)
+            }
+
+            async fn get_analytics_summary(
+                &self,
+                _start: chrono::DateTime<Utc>,
+                _end: chrono::DateTime<Utc>,
+            ) -> Result<AnalyticsSummary, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_daily_active_users(
+                &self,
+                _date: chrono::DateTime<Utc>,
+            ) -> Result<i64, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_weekly_active_users(
+                &self,
+                _date: chrono::DateTime<Utc>,
+            ) -> Result<i64, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_monthly_active_users(
+                &self,
+                _date: chrono::DateTime<Utc>,
+            ) -> Result<i64, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_user_activity(
+                &self,
+                _user_id: UserId,
+                _limit: Option<i64>,
+                _offset: Option<i64>,
+            ) -> Result<Vec<ActivityLogEntry>, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_top_active_users(
+                &self,
+                _start: chrono::DateTime<Utc>,
+                _end: chrono::DateTime<Utc>,
+                _limit: i64,
+            ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
+                unreachable!()
+            }
+        }
+
+        /// Helper to create a counting service (increments on each call)
+        pub fn counting_service(initial_count: i64) -> CounterAnalyticsService {
+            CounterAnalyticsService {
+                count: Arc::new(Mutex::new(initial_count)),
+                increment: true,
+                was_recorded: true,
+            }
+        }
+
+        /// Helper to create a fixed count service (doesn't increment)
+        pub fn fixed_count_service(count: i64) -> CounterAnalyticsService {
+            CounterAnalyticsService {
+                count: Arc::new(Mutex::new(count)),
+                increment: false,
+                was_recorded: false,
+            }
+        }
+
+        /// Supports multiple windows with different counts
+        pub struct MultiWindowAnalyticsService {
+            pub day_count: i64,
+            pub week_count: i64,
+        }
+
+        #[async_trait]
+        impl AnalyticsServiceTrait for MultiWindowAnalyticsService {
+            async fn record_activity(
+                &self,
+                _request: RecordActivityRequest,
+            ) -> Result<(), AnalyticsError> {
+                Ok(())
+            }
+
+            async fn check_and_record_activity(
+                &self,
+                request: CheckAndRecordActivityRequest,
+            ) -> Result<CheckAndRecordActivityResult, AnalyticsError> {
+                // Use the first window for recording
+                let count = if request.window.days == 1 {
+                    self.day_count
+                } else {
+                    self.week_count
+                };
+                Ok(CheckAndRecordActivityResult {
+                    current_count: count as u64,
+                    was_recorded: true,
+                })
+            }
+
+            async fn check_activity_count(
+                &self,
+                _user_id: UserId,
+                _activity_type: ActivityType,
+                window: TimeWindow,
+            ) -> Result<i64, AnalyticsError> {
+                Ok(if window.days == 1 {
+                    self.day_count
+                } else {
+                    self.week_count
+                })
+            }
+
+            async fn get_analytics_summary(
+                &self,
+                _start: chrono::DateTime<Utc>,
+                _end: chrono::DateTime<Utc>,
+            ) -> Result<AnalyticsSummary, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_daily_active_users(
+                &self,
+                _date: chrono::DateTime<Utc>,
+            ) -> Result<i64, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_weekly_active_users(
+                &self,
+                _date: chrono::DateTime<Utc>,
+            ) -> Result<i64, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_monthly_active_users(
+                &self,
+                _date: chrono::DateTime<Utc>,
+            ) -> Result<i64, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_user_activity(
+                &self,
+                _user_id: UserId,
+                _limit: Option<i64>,
+                _offset: Option<i64>,
+            ) -> Result<Vec<ActivityLogEntry>, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_top_active_users(
+                &self,
+                _start: chrono::DateTime<Utc>,
+                _end: chrono::DateTime<Utc>,
+                _limit: i64,
+            ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
+                unreachable!()
+            }
+        }
+
+        /// Simulates atomic insert failure (check passes but insert fails)
+        pub struct AtomicInsertFailureService;
+
+        #[async_trait]
+        impl AnalyticsServiceTrait for AtomicInsertFailureService {
+            async fn record_activity(
+                &self,
+                _request: RecordActivityRequest,
+            ) -> Result<(), AnalyticsError> {
+                Ok(())
+            }
+
+            async fn check_and_record_activity(
+                &self,
+                _request: CheckAndRecordActivityRequest,
+            ) -> Result<CheckAndRecordActivityResult, AnalyticsError> {
+                // Simulate race condition: check passed but insert failed
+                Ok(CheckAndRecordActivityResult {
+                    current_count: 10,   // At limit
+                    was_recorded: false, // Insert failed
+                })
+            }
+
+            async fn check_activity_count(
+                &self,
+                _user_id: UserId,
+                _activity_type: ActivityType,
+                _window: TimeWindow,
+            ) -> Result<i64, AnalyticsError> {
+                // Return count just under limit (so check passes)
+                Ok(9)
+            }
+
+            async fn get_analytics_summary(
+                &self,
+                _start: chrono::DateTime<Utc>,
+                _end: chrono::DateTime<Utc>,
+            ) -> Result<AnalyticsSummary, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_daily_active_users(
+                &self,
+                _date: chrono::DateTime<Utc>,
+            ) -> Result<i64, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_weekly_active_users(
+                &self,
+                _date: chrono::DateTime<Utc>,
+            ) -> Result<i64, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_monthly_active_users(
+                &self,
+                _date: chrono::DateTime<Utc>,
+            ) -> Result<i64, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_user_activity(
+                &self,
+                _user_id: UserId,
+                _limit: Option<i64>,
+                _offset: Option<i64>,
+            ) -> Result<Vec<ActivityLogEntry>, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_top_active_users(
+                &self,
+                _start: chrono::DateTime<Utc>,
+                _end: chrono::DateTime<Utc>,
+                _limit: i64,
+            ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
+                unreachable!()
+            }
+        }
+
+        /// Returns a fixed count for window size testing
+        pub struct WindowSizeTestService {
+            pub count: i64,
+        }
+
+        #[async_trait]
+        impl AnalyticsServiceTrait for WindowSizeTestService {
+            async fn record_activity(
+                &self,
+                _request: RecordActivityRequest,
+            ) -> Result<(), AnalyticsError> {
+                Ok(())
+            }
+
+            async fn check_and_record_activity(
+                &self,
+                _request: CheckAndRecordActivityRequest,
+            ) -> Result<CheckAndRecordActivityResult, AnalyticsError> {
+                Ok(CheckAndRecordActivityResult {
+                    current_count: self.count as u64,
+                    was_recorded: true,
+                })
+            }
+
+            async fn check_activity_count(
+                &self,
+                _user_id: UserId,
+                _activity_type: ActivityType,
+                _window: TimeWindow,
+            ) -> Result<i64, AnalyticsError> {
+                // Return count based on window size for testing
+                Ok(self.count)
+            }
+
+            async fn get_analytics_summary(
+                &self,
+                _start: chrono::DateTime<Utc>,
+                _end: chrono::DateTime<Utc>,
+            ) -> Result<AnalyticsSummary, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_daily_active_users(
+                &self,
+                _date: chrono::DateTime<Utc>,
+            ) -> Result<i64, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_weekly_active_users(
+                &self,
+                _date: chrono::DateTime<Utc>,
+            ) -> Result<i64, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_monthly_active_users(
+                &self,
+                _date: chrono::DateTime<Utc>,
+            ) -> Result<i64, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_user_activity(
+                &self,
+                _user_id: UserId,
+                _limit: Option<i64>,
+                _offset: Option<i64>,
+            ) -> Result<Vec<ActivityLogEntry>, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_top_active_users(
+                &self,
+                _start: chrono::DateTime<Utc>,
+                _end: chrono::DateTime<Utc>,
+                _limit: i64,
+            ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
+                unreachable!()
+            }
+        }
+
+        /// Always returns an error
+        pub struct ErrorAnalyticsService;
+
+        #[async_trait]
+        impl AnalyticsServiceTrait for ErrorAnalyticsService {
+            async fn record_activity(
+                &self,
+                _request: RecordActivityRequest,
+            ) -> Result<(), AnalyticsError> {
+                Ok(())
+            }
+
+            async fn check_and_record_activity(
+                &self,
+                _request: CheckAndRecordActivityRequest,
+            ) -> Result<CheckAndRecordActivityResult, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn check_activity_count(
+                &self,
+                _user_id: UserId,
+                _activity_type: ActivityType,
+                _window: TimeWindow,
+            ) -> Result<i64, AnalyticsError> {
+                Err(AnalyticsError::InternalError("Database error".to_string()))
+            }
+
+            async fn get_analytics_summary(
+                &self,
+                _start: chrono::DateTime<Utc>,
+                _end: chrono::DateTime<Utc>,
+            ) -> Result<AnalyticsSummary, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_daily_active_users(
+                &self,
+                _date: chrono::DateTime<Utc>,
+            ) -> Result<i64, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_weekly_active_users(
+                &self,
+                _date: chrono::DateTime<Utc>,
+            ) -> Result<i64, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_monthly_active_users(
+                &self,
+                _date: chrono::DateTime<Utc>,
+            ) -> Result<i64, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_user_activity(
+                &self,
+                _user_id: UserId,
+                _limit: Option<i64>,
+                _offset: Option<i64>,
+            ) -> Result<Vec<ActivityLogEntry>, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_top_active_users(
+                &self,
+                _start: chrono::DateTime<Utc>,
+                _end: chrono::DateTime<Utc>,
+                _limit: i64,
+            ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
+                unreachable!()
+            }
+        }
+    }
 
     fn test_user_id(id: u128) -> UserId {
         UserId(Uuid::from_u128(id))
     }
 
-    struct MockAnalyticsService;
-
-    #[async_trait]
-    impl AnalyticsServiceTrait for MockAnalyticsService {
-        async fn record_activity(
-            &self,
-            _request: RecordActivityRequest,
-        ) -> Result<(), AnalyticsError> {
-            Ok(())
-        }
-
-        async fn check_and_record_activity(
-            &self,
-            _request: CheckAndRecordActivityRequest,
-        ) -> Result<CheckAndRecordActivityResult, AnalyticsError> {
-            // Always allow in tests (unless we want to test limit behavior)
-            Ok(CheckAndRecordActivityResult {
-                current_count: 0,
-                was_recorded: true,
-            })
-        }
-
-        async fn check_activity_count(
-            &self,
-            _user_id: UserId,
-            _activity_type: ActivityType,
-            _window: TimeWindow,
-        ) -> Result<i64, AnalyticsError> {
-            // Always return 0 in tests (unless we want to test limit behavior)
-            Ok(0)
-        }
-
-        async fn get_analytics_summary(
-            &self,
-            _start: chrono::DateTime<Utc>,
-            _end: chrono::DateTime<Utc>,
-        ) -> Result<AnalyticsSummary, AnalyticsError> {
-            unreachable!()
-        }
-
-        async fn get_daily_active_users(
-            &self,
-            _date: chrono::DateTime<Utc>,
-        ) -> Result<i64, AnalyticsError> {
-            unreachable!()
-        }
-
-        async fn get_weekly_active_users(
-            &self,
-            _date: chrono::DateTime<Utc>,
-        ) -> Result<i64, AnalyticsError> {
-            unreachable!()
-        }
-
-        async fn get_monthly_active_users(
-            &self,
-            _date: chrono::DateTime<Utc>,
-        ) -> Result<i64, AnalyticsError> {
-            unreachable!()
-        }
-
-        async fn get_user_activity(
-            &self,
-            _user_id: UserId,
-            _limit: Option<i64>,
-            _offset: Option<i64>,
-        ) -> Result<Vec<ActivityLogEntry>, AnalyticsError> {
-            unreachable!()
-        }
-
-        async fn get_top_active_users(
-            &self,
-            _start: chrono::DateTime<Utc>,
-            _end: chrono::DateTime<Utc>,
-            _limit: i64,
-        ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
-            unreachable!()
-        }
-    }
-
     fn default_state() -> RateLimitState {
-        RateLimitState::new(Arc::new(MockAnalyticsService))
+        RateLimitState::new(Arc::new(test_services::AlwaysAllowAnalyticsService))
     }
 
     fn configured_state(config: RateLimitConfig) -> RateLimitState {
-        RateLimitState::with_config(config, Arc::new(MockAnalyticsService))
+        RateLimitState::with_config(config, Arc::new(test_services::AlwaysAllowAnalyticsService))
     }
 
     #[tokio::test]
@@ -637,86 +1167,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_window_limit_rejection_rolls_back_timestamp() {
-        struct RejectingAnalyticsService;
-
-        #[async_trait]
-        impl AnalyticsServiceTrait for RejectingAnalyticsService {
-            async fn record_activity(
-                &self,
-                _request: RecordActivityRequest,
-            ) -> Result<(), AnalyticsError> {
-                unreachable!()
-            }
-
-            async fn check_and_record_activity(
-                &self,
-                _request: CheckAndRecordActivityRequest,
-            ) -> Result<CheckAndRecordActivityResult, AnalyticsError> {
-                // Always reject to test rollback
-                Ok(CheckAndRecordActivityResult {
-                    current_count: 100,
-                    was_recorded: false,
-                })
-            }
-
-            async fn check_activity_count(
-                &self,
-                _user_id: UserId,
-                _activity_type: ActivityType,
-                _window: TimeWindow,
-            ) -> Result<i64, AnalyticsError> {
-                // Always return 100 to test limit exceeded
-                Ok(100)
-            }
-
-            async fn get_analytics_summary(
-                &self,
-                _start: chrono::DateTime<Utc>,
-                _end: chrono::DateTime<Utc>,
-            ) -> Result<AnalyticsSummary, AnalyticsError> {
-                unreachable!()
-            }
-
-            async fn get_daily_active_users(
-                &self,
-                _date: chrono::DateTime<Utc>,
-            ) -> Result<i64, AnalyticsError> {
-                unreachable!()
-            }
-
-            async fn get_weekly_active_users(
-                &self,
-                _date: chrono::DateTime<Utc>,
-            ) -> Result<i64, AnalyticsError> {
-                unreachable!()
-            }
-
-            async fn get_monthly_active_users(
-                &self,
-                _date: chrono::DateTime<Utc>,
-            ) -> Result<i64, AnalyticsError> {
-                unreachable!()
-            }
-
-            async fn get_user_activity(
-                &self,
-                _user_id: UserId,
-                _limit: Option<i64>,
-                _offset: Option<i64>,
-            ) -> Result<Vec<ActivityLogEntry>, AnalyticsError> {
-                unreachable!()
-            }
-
-            async fn get_top_active_users(
-                &self,
-                _start: chrono::DateTime<Utc>,
-                _end: chrono::DateTime<Utc>,
-                _limit: i64,
-            ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
-                unreachable!()
-            }
-        }
-
         let state = RateLimitState::with_config(
             RateLimitConfig {
                 max_concurrent: 2,
@@ -728,7 +1178,7 @@ mod tests {
                     activity_type: ActivityType::RateLimitedRequest,
                 }],
             },
-            Arc::new(RejectingAnalyticsService),
+            Arc::new(test_services::RejectingAnalyticsService),
         );
 
         let user = test_user_id(1);
@@ -774,91 +1224,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_window_limit_allows_request_under_limit() {
-        struct CountingAnalyticsService {
-            count: Arc<Mutex<i64>>,
-        }
-
-        #[async_trait]
-        impl AnalyticsServiceTrait for CountingAnalyticsService {
-            async fn record_activity(
-                &self,
-                _request: RecordActivityRequest,
-            ) -> Result<(), AnalyticsError> {
-                Ok(())
-            }
-
-            async fn check_and_record_activity(
-                &self,
-                _request: CheckAndRecordActivityRequest,
-            ) -> Result<CheckAndRecordActivityResult, AnalyticsError> {
-                let mut count = self.count.lock().await;
-                *count += 1;
-                Ok(CheckAndRecordActivityResult {
-                    current_count: *count as u64,
-                    was_recorded: true,
-                })
-            }
-
-            async fn check_activity_count(
-                &self,
-                _user_id: UserId,
-                _activity_type: ActivityType,
-                _window: TimeWindow,
-            ) -> Result<i64, AnalyticsError> {
-                Ok(*self.count.lock().await)
-            }
-
-            async fn get_analytics_summary(
-                &self,
-                _start: chrono::DateTime<Utc>,
-                _end: chrono::DateTime<Utc>,
-            ) -> Result<AnalyticsSummary, AnalyticsError> {
-                unreachable!()
-            }
-
-            async fn get_daily_active_users(
-                &self,
-                _date: chrono::DateTime<Utc>,
-            ) -> Result<i64, AnalyticsError> {
-                unreachable!()
-            }
-
-            async fn get_weekly_active_users(
-                &self,
-                _date: chrono::DateTime<Utc>,
-            ) -> Result<i64, AnalyticsError> {
-                unreachable!()
-            }
-
-            async fn get_monthly_active_users(
-                &self,
-                _date: chrono::DateTime<Utc>,
-            ) -> Result<i64, AnalyticsError> {
-                unreachable!()
-            }
-
-            async fn get_user_activity(
-                &self,
-                _user_id: UserId,
-                _limit: Option<i64>,
-                _offset: Option<i64>,
-            ) -> Result<Vec<ActivityLogEntry>, AnalyticsError> {
-                unreachable!()
-            }
-
-            async fn get_top_active_users(
-                &self,
-                _start: chrono::DateTime<Utc>,
-                _end: chrono::DateTime<Utc>,
-                _limit: i64,
-            ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
-                unreachable!()
-            }
-        }
-
-        let analytics_service = Arc::new(CountingAnalyticsService {
-            count: Arc::new(Mutex::new(0)),
-        });
+        let analytics_service = Arc::new(test_services::counting_service(0));
 
         let state = RateLimitState::with_config(
             RateLimitConfig {
@@ -894,88 +1260,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_window_limit_blocks_request_at_limit() {
-        struct FixedCountAnalyticsService {
-            count: i64,
-        }
-
-        #[async_trait]
-        impl AnalyticsServiceTrait for FixedCountAnalyticsService {
-            async fn record_activity(
-                &self,
-                _request: RecordActivityRequest,
-            ) -> Result<(), AnalyticsError> {
-                Ok(())
-            }
-
-            async fn check_and_record_activity(
-                &self,
-                _request: CheckAndRecordActivityRequest,
-            ) -> Result<CheckAndRecordActivityResult, AnalyticsError> {
-                // Return that we're at the limit
-                Ok(CheckAndRecordActivityResult {
-                    current_count: self.count as u64,
-                    was_recorded: false,
-                })
-            }
-
-            async fn check_activity_count(
-                &self,
-                _user_id: UserId,
-                _activity_type: ActivityType,
-                _window: TimeWindow,
-            ) -> Result<i64, AnalyticsError> {
-                // Return count at the limit
-                Ok(self.count)
-            }
-
-            async fn get_analytics_summary(
-                &self,
-                _start: chrono::DateTime<Utc>,
-                _end: chrono::DateTime<Utc>,
-            ) -> Result<AnalyticsSummary, AnalyticsError> {
-                unreachable!()
-            }
-
-            async fn get_daily_active_users(
-                &self,
-                _date: chrono::DateTime<Utc>,
-            ) -> Result<i64, AnalyticsError> {
-                unreachable!()
-            }
-
-            async fn get_weekly_active_users(
-                &self,
-                _date: chrono::DateTime<Utc>,
-            ) -> Result<i64, AnalyticsError> {
-                unreachable!()
-            }
-
-            async fn get_monthly_active_users(
-                &self,
-                _date: chrono::DateTime<Utc>,
-            ) -> Result<i64, AnalyticsError> {
-                unreachable!()
-            }
-
-            async fn get_user_activity(
-                &self,
-                _user_id: UserId,
-                _limit: Option<i64>,
-                _offset: Option<i64>,
-            ) -> Result<Vec<ActivityLogEntry>, AnalyticsError> {
-                unreachable!()
-            }
-
-            async fn get_top_active_users(
-                &self,
-                _start: chrono::DateTime<Utc>,
-                _end: chrono::DateTime<Utc>,
-                _limit: i64,
-            ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
-                unreachable!()
-            }
-        }
-
         let limit = 10;
         let state = RateLimitState::with_config(
             RateLimitConfig {
@@ -988,9 +1272,7 @@ mod tests {
                     activity_type: ActivityType::RateLimitedRequest,
                 }],
             },
-            Arc::new(FixedCountAnalyticsService {
-                count: limit as i64,
-            }),
+            Arc::new(test_services::fixed_count_service(limit as i64)),
         );
 
         let user = test_user_id(1);
@@ -1018,83 +1300,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_window_limit_blocks_request_above_limit() {
-        struct FixedCountAnalyticsService {
-            count: i64,
-        }
-
-        #[async_trait]
-        impl AnalyticsServiceTrait for FixedCountAnalyticsService {
-            async fn record_activity(
-                &self,
-                _request: RecordActivityRequest,
-            ) -> Result<(), AnalyticsError> {
-                Ok(())
-            }
-
-            async fn check_and_record_activity(
-                &self,
-                _request: CheckAndRecordActivityRequest,
-            ) -> Result<CheckAndRecordActivityResult, AnalyticsError> {
-                unreachable!() // Should fail at check_activity_count stage
-            }
-
-            async fn check_activity_count(
-                &self,
-                _user_id: UserId,
-                _activity_type: ActivityType,
-                _window: TimeWindow,
-            ) -> Result<i64, AnalyticsError> {
-                Ok(self.count)
-            }
-
-            async fn get_analytics_summary(
-                &self,
-                _start: chrono::DateTime<Utc>,
-                _end: chrono::DateTime<Utc>,
-            ) -> Result<AnalyticsSummary, AnalyticsError> {
-                unreachable!()
-            }
-
-            async fn get_daily_active_users(
-                &self,
-                _date: chrono::DateTime<Utc>,
-            ) -> Result<i64, AnalyticsError> {
-                unreachable!()
-            }
-
-            async fn get_weekly_active_users(
-                &self,
-                _date: chrono::DateTime<Utc>,
-            ) -> Result<i64, AnalyticsError> {
-                unreachable!()
-            }
-
-            async fn get_monthly_active_users(
-                &self,
-                _date: chrono::DateTime<Utc>,
-            ) -> Result<i64, AnalyticsError> {
-                unreachable!()
-            }
-
-            async fn get_user_activity(
-                &self,
-                _user_id: UserId,
-                _limit: Option<i64>,
-                _offset: Option<i64>,
-            ) -> Result<Vec<ActivityLogEntry>, AnalyticsError> {
-                unreachable!()
-            }
-
-            async fn get_top_active_users(
-                &self,
-                _start: chrono::DateTime<Utc>,
-                _end: chrono::DateTime<Utc>,
-                _limit: i64,
-            ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
-                unreachable!()
-            }
-        }
-
         let limit = 10;
         let state = RateLimitState::with_config(
             RateLimitConfig {
@@ -1107,9 +1312,7 @@ mod tests {
                     activity_type: ActivityType::RateLimitedRequest,
                 }],
             },
-            Arc::new(FixedCountAnalyticsService {
-                count: limit as i64 + 5, // Above limit
-            }),
+            Arc::new(test_services::fixed_count_service(limit as i64 + 5)), // Above limit
         );
 
         let user = test_user_id(1);
@@ -1124,97 +1327,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_multiple_window_limits_all_must_pass() {
-        struct MultiWindowAnalyticsService {
-            day_count: i64,
-            week_count: i64,
-        }
-
-        #[async_trait]
-        impl AnalyticsServiceTrait for MultiWindowAnalyticsService {
-            async fn record_activity(
-                &self,
-                _request: RecordActivityRequest,
-            ) -> Result<(), AnalyticsError> {
-                Ok(())
-            }
-
-            async fn check_and_record_activity(
-                &self,
-                request: CheckAndRecordActivityRequest,
-            ) -> Result<CheckAndRecordActivityResult, AnalyticsError> {
-                // Use the first window for recording
-                let count = if request.window.days == 1 {
-                    self.day_count
-                } else {
-                    self.week_count
-                };
-                Ok(CheckAndRecordActivityResult {
-                    current_count: count as u64,
-                    was_recorded: true,
-                })
-            }
-
-            async fn check_activity_count(
-                &self,
-                _user_id: UserId,
-                _activity_type: ActivityType,
-                window: TimeWindow,
-            ) -> Result<i64, AnalyticsError> {
-                Ok(if window.days == 1 {
-                    self.day_count
-                } else {
-                    self.week_count
-                })
-            }
-
-            async fn get_analytics_summary(
-                &self,
-                _start: chrono::DateTime<Utc>,
-                _end: chrono::DateTime<Utc>,
-            ) -> Result<AnalyticsSummary, AnalyticsError> {
-                unreachable!()
-            }
-
-            async fn get_daily_active_users(
-                &self,
-                _date: chrono::DateTime<Utc>,
-            ) -> Result<i64, AnalyticsError> {
-                unreachable!()
-            }
-
-            async fn get_weekly_active_users(
-                &self,
-                _date: chrono::DateTime<Utc>,
-            ) -> Result<i64, AnalyticsError> {
-                unreachable!()
-            }
-
-            async fn get_monthly_active_users(
-                &self,
-                _date: chrono::DateTime<Utc>,
-            ) -> Result<i64, AnalyticsError> {
-                unreachable!()
-            }
-
-            async fn get_user_activity(
-                &self,
-                _user_id: UserId,
-                _limit: Option<i64>,
-                _offset: Option<i64>,
-            ) -> Result<Vec<ActivityLogEntry>, AnalyticsError> {
-                unreachable!()
-            }
-
-            async fn get_top_active_users(
-                &self,
-                _start: chrono::DateTime<Utc>,
-                _end: chrono::DateTime<Utc>,
-                _limit: i64,
-            ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
-                unreachable!()
-            }
-        }
-
         let day_limit = 10;
         let week_limit = 50;
 
@@ -1237,7 +1349,7 @@ mod tests {
                     },
                 ],
             },
-            Arc::new(MultiWindowAnalyticsService {
+            Arc::new(test_services::MultiWindowAnalyticsService {
                 day_count: 5,
                 week_count: 20,
             }),
@@ -1269,7 +1381,7 @@ mod tests {
                     },
                 ],
             },
-            Arc::new(MultiWindowAnalyticsService {
+            Arc::new(test_services::MultiWindowAnalyticsService {
                 day_count: day_limit as i64,
                 week_count: 20,
             }),
@@ -1303,7 +1415,7 @@ mod tests {
                     },
                 ],
             },
-            Arc::new(MultiWindowAnalyticsService {
+            Arc::new(test_services::MultiWindowAnalyticsService {
                 day_count: 5,
                 week_count: week_limit as i64,
             }),
@@ -1321,86 +1433,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_window_limit_atomic_insert_failure() {
-        struct AtomicInsertFailureService;
-
-        #[async_trait]
-        impl AnalyticsServiceTrait for AtomicInsertFailureService {
-            async fn record_activity(
-                &self,
-                _request: RecordActivityRequest,
-            ) -> Result<(), AnalyticsError> {
-                Ok(())
-            }
-
-            async fn check_and_record_activity(
-                &self,
-                _request: CheckAndRecordActivityRequest,
-            ) -> Result<CheckAndRecordActivityResult, AnalyticsError> {
-                // Simulate race condition: check passed but insert failed
-                Ok(CheckAndRecordActivityResult {
-                    current_count: 10,   // At limit
-                    was_recorded: false, // Insert failed
-                })
-            }
-
-            async fn check_activity_count(
-                &self,
-                _user_id: UserId,
-                _activity_type: ActivityType,
-                _window: TimeWindow,
-            ) -> Result<i64, AnalyticsError> {
-                // Return count just under limit (so check passes)
-                Ok(9)
-            }
-
-            async fn get_analytics_summary(
-                &self,
-                _start: chrono::DateTime<Utc>,
-                _end: chrono::DateTime<Utc>,
-            ) -> Result<AnalyticsSummary, AnalyticsError> {
-                unreachable!()
-            }
-
-            async fn get_daily_active_users(
-                &self,
-                _date: chrono::DateTime<Utc>,
-            ) -> Result<i64, AnalyticsError> {
-                unreachable!()
-            }
-
-            async fn get_weekly_active_users(
-                &self,
-                _date: chrono::DateTime<Utc>,
-            ) -> Result<i64, AnalyticsError> {
-                unreachable!()
-            }
-
-            async fn get_monthly_active_users(
-                &self,
-                _date: chrono::DateTime<Utc>,
-            ) -> Result<i64, AnalyticsError> {
-                unreachable!()
-            }
-
-            async fn get_user_activity(
-                &self,
-                _user_id: UserId,
-                _limit: Option<i64>,
-                _offset: Option<i64>,
-            ) -> Result<Vec<ActivityLogEntry>, AnalyticsError> {
-                unreachable!()
-            }
-
-            async fn get_top_active_users(
-                &self,
-                _start: chrono::DateTime<Utc>,
-                _end: chrono::DateTime<Utc>,
-                _limit: i64,
-            ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
-                unreachable!()
-            }
-        }
-
         let state = RateLimitState::with_config(
             RateLimitConfig {
                 max_concurrent: 10,
@@ -1412,7 +1444,7 @@ mod tests {
                     activity_type: ActivityType::RateLimitedRequest,
                 }],
             },
-            Arc::new(AtomicInsertFailureService),
+            Arc::new(test_services::AtomicInsertFailureService),
         );
 
         let user = test_user_id(1);
@@ -1427,87 +1459,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_window_limit_different_window_sizes() {
-        struct WindowSizeTestService {
-            count: i64,
-        }
-
-        #[async_trait]
-        impl AnalyticsServiceTrait for WindowSizeTestService {
-            async fn record_activity(
-                &self,
-                _request: RecordActivityRequest,
-            ) -> Result<(), AnalyticsError> {
-                Ok(())
-            }
-
-            async fn check_and_record_activity(
-                &self,
-                _request: CheckAndRecordActivityRequest,
-            ) -> Result<CheckAndRecordActivityResult, AnalyticsError> {
-                Ok(CheckAndRecordActivityResult {
-                    current_count: self.count as u64,
-                    was_recorded: true,
-                })
-            }
-
-            async fn check_activity_count(
-                &self,
-                _user_id: UserId,
-                _activity_type: ActivityType,
-                _window: TimeWindow,
-            ) -> Result<i64, AnalyticsError> {
-                // Return count based on window size for testing
-                Ok(self.count)
-            }
-
-            async fn get_analytics_summary(
-                &self,
-                _start: chrono::DateTime<Utc>,
-                _end: chrono::DateTime<Utc>,
-            ) -> Result<AnalyticsSummary, AnalyticsError> {
-                unreachable!()
-            }
-
-            async fn get_daily_active_users(
-                &self,
-                _date: chrono::DateTime<Utc>,
-            ) -> Result<i64, AnalyticsError> {
-                unreachable!()
-            }
-
-            async fn get_weekly_active_users(
-                &self,
-                _date: chrono::DateTime<Utc>,
-            ) -> Result<i64, AnalyticsError> {
-                unreachable!()
-            }
-
-            async fn get_monthly_active_users(
-                &self,
-                _date: chrono::DateTime<Utc>,
-            ) -> Result<i64, AnalyticsError> {
-                unreachable!()
-            }
-
-            async fn get_user_activity(
-                &self,
-                _user_id: UserId,
-                _limit: Option<i64>,
-                _offset: Option<i64>,
-            ) -> Result<Vec<ActivityLogEntry>, AnalyticsError> {
-                unreachable!()
-            }
-
-            async fn get_top_active_users(
-                &self,
-                _start: chrono::DateTime<Utc>,
-                _end: chrono::DateTime<Utc>,
-                _limit: i64,
-            ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
-                unreachable!()
-            }
-        }
-
         let user = test_user_id(1);
 
         // Test day window (1 day)
@@ -1522,7 +1473,7 @@ mod tests {
                     activity_type: ActivityType::RateLimitedRequest,
                 }],
             },
-            Arc::new(WindowSizeTestService { count: 10 }),
+            Arc::new(test_services::WindowSizeTestService { count: 10 }),
         );
 
         let result = state_day.try_acquire(user).await;
@@ -1550,7 +1501,7 @@ mod tests {
                     activity_type: ActivityType::RateLimitedRequest,
                 }],
             },
-            Arc::new(WindowSizeTestService { count: 10 }),
+            Arc::new(test_services::WindowSizeTestService { count: 10 }),
         );
 
         let result = state_week.try_acquire(user).await;
@@ -1578,7 +1529,7 @@ mod tests {
                     activity_type: ActivityType::RateLimitedRequest,
                 }],
             },
-            Arc::new(WindowSizeTestService { count: 10 }),
+            Arc::new(test_services::WindowSizeTestService { count: 10 }),
         );
 
         let result = state_month.try_acquire(user).await;
@@ -1597,81 +1548,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_window_limit_analytics_service_error() {
-        struct ErrorAnalyticsService;
-
-        #[async_trait]
-        impl AnalyticsServiceTrait for ErrorAnalyticsService {
-            async fn record_activity(
-                &self,
-                _request: RecordActivityRequest,
-            ) -> Result<(), AnalyticsError> {
-                Ok(())
-            }
-
-            async fn check_and_record_activity(
-                &self,
-                _request: CheckAndRecordActivityRequest,
-            ) -> Result<CheckAndRecordActivityResult, AnalyticsError> {
-                unreachable!()
-            }
-
-            async fn check_activity_count(
-                &self,
-                _user_id: UserId,
-                _activity_type: ActivityType,
-                _window: TimeWindow,
-            ) -> Result<i64, AnalyticsError> {
-                Err(AnalyticsError::InternalError("Database error".to_string()))
-            }
-
-            async fn get_analytics_summary(
-                &self,
-                _start: chrono::DateTime<Utc>,
-                _end: chrono::DateTime<Utc>,
-            ) -> Result<AnalyticsSummary, AnalyticsError> {
-                unreachable!()
-            }
-
-            async fn get_daily_active_users(
-                &self,
-                _date: chrono::DateTime<Utc>,
-            ) -> Result<i64, AnalyticsError> {
-                unreachable!()
-            }
-
-            async fn get_weekly_active_users(
-                &self,
-                _date: chrono::DateTime<Utc>,
-            ) -> Result<i64, AnalyticsError> {
-                unreachable!()
-            }
-
-            async fn get_monthly_active_users(
-                &self,
-                _date: chrono::DateTime<Utc>,
-            ) -> Result<i64, AnalyticsError> {
-                unreachable!()
-            }
-
-            async fn get_user_activity(
-                &self,
-                _user_id: UserId,
-                _limit: Option<i64>,
-                _offset: Option<i64>,
-            ) -> Result<Vec<ActivityLogEntry>, AnalyticsError> {
-                unreachable!()
-            }
-
-            async fn get_top_active_users(
-                &self,
-                _start: chrono::DateTime<Utc>,
-                _end: chrono::DateTime<Utc>,
-                _limit: i64,
-            ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
-                unreachable!()
-            }
-        }
-
         let state = RateLimitState::with_config(
             RateLimitConfig {
                 max_concurrent: 10,
@@ -1683,7 +1559,7 @@ mod tests {
                     activity_type: ActivityType::RateLimitedRequest,
                 }],
             },
-            Arc::new(ErrorAnalyticsService),
+            Arc::new(test_services::ErrorAnalyticsService),
         );
 
         let user = test_user_id(1);
@@ -1703,7 +1579,7 @@ mod tests {
                 window_duration: Duration::from_secs(1),
                 window_limits: vec![], // No window limits
             },
-            Arc::new(MockAnalyticsService),
+            Arc::new(test_services::AlwaysAllowAnalyticsService),
         );
 
         let user = test_user_id(1);
