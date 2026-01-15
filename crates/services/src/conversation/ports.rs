@@ -162,6 +162,12 @@ pub trait ConversationShareRepository: Send + Sync {
         owner_user_id: UserId,
     ) -> Result<Vec<ShareGroup>, ConversationError>;
 
+    /// List groups where the user is a member (by email or NEAR account)
+    async fn list_groups_for_member(
+        &self,
+        member_identifiers: &[ShareRecipient],
+    ) -> Result<Vec<ShareGroup>, ConversationError>;
+
     async fn get_group(
         &self,
         owner_user_id: UserId,
@@ -299,6 +305,13 @@ pub trait ConversationShareService: Send + Sync {
     async fn list_groups(
         &self,
         owner_user_id: UserId,
+    ) -> Result<Vec<ShareGroup>, ConversationError>;
+
+    /// List all groups accessible to a user (owned + member of)
+    async fn list_accessible_groups(
+        &self,
+        owner_user_id: UserId,
+        member_identifiers: &[ShareRecipient],
     ) -> Result<Vec<ShareGroup>, ConversationError>;
 
     async fn update_group(

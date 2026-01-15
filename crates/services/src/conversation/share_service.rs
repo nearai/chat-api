@@ -166,6 +166,37 @@ impl ConversationShareService for ConversationShareServiceImpl {
         self.share_repository.list_groups(owner_user_id).await
     }
 
+    async fn list_accessible_groups(
+        &self,
+        owner_user_id: UserId,
+        member_identifiers: &[ShareRecipient],
+    ) -> Result<Vec<ShareGroup>, ConversationError> {
+        // Get groups owned by the user
+        let owned_groups = self.share_repository.list_groups(owner_user_id).await?;
+
+        // Get groups where the user is a member
+        let member_groups = self
+            .share_repository
+            .list_groups_for_member(member_identifiers)
+            .await?;
+
+        // Combine and deduplicate (owned groups take precedence)
+        let owned_ids: std::collections::HashSet<_> =
+            owned_groups.iter().map(|g| g.id).collect();
+
+        let mut all_groups = owned_groups;
+        for group in member_groups {
+            if !owned_ids.contains(&group.id) {
+                all_groups.push(group);
+            }
+        }
+
+        // Sort by name
+        all_groups.sort_by(|a, b| a.name.cmp(&b.name));
+
+        Ok(all_groups)
+    }
+
     async fn update_group(
         &self,
         owner_user_id: UserId,
@@ -493,6 +524,28 @@ mod tests {
                 .expect("lock groups")
                 .values()
                 .filter(|group| group.owner_user_id == owner_user_id)
+                .cloned()
+                .collect();
+            Ok(groups)
+        }
+
+        async fn list_groups_for_member(
+            &self,
+            member_identifiers: &[ShareRecipient],
+        ) -> Result<Vec<ShareGroup>, ConversationError> {
+            let groups = self
+                .groups
+                .lock()
+                .expect("lock groups")
+                .values()
+                .filter(|group| {
+                    group.members.iter().any(|member| {
+                        member_identifiers.iter().any(|identifier| {
+                            member.kind == identifier.kind
+                                && member.value.to_lowercase() == identifier.value.to_lowercase()
+                        })
+                    })
+                })
                 .cloned()
                 .collect();
             Ok(groups)
@@ -1478,6 +1531,71 @@ mod tests {
 
         let remaining = service.list_groups(owner.id).await.expect("list groups");
         assert!(remaining.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_accessible_groups_includes_member_groups() {
+        let (service, _conversation_repo, share_repo, user_repo, owner) =
+            setup_service_with_owner("conv_accessible", "owner@example.com");
+
+        // Create a group owned by the owner with another member
+        let group1 = service
+            .create_group(
+                owner.id,
+                "Owner's Group",
+                vec![ShareRecipient {
+                    kind: ShareRecipientKind::Email,
+                    value: "member@example.com".to_string(),
+                }],
+            )
+            .await
+            .expect("create group 1");
+
+        // Create another user who owns a different group that includes the owner
+        let other_owner = build_user("other@example.com");
+        user_repo.insert_user(other_owner.clone());
+
+        let group2 = share_repo
+            .create_group(
+                other_owner.id,
+                "Other's Group",
+                &[ShareRecipient {
+                    kind: ShareRecipientKind::Email,
+                    value: "owner@example.com".to_string(),
+                }],
+            )
+            .await
+            .expect("create group 2");
+
+        // The owner should see both groups when listing accessible groups
+        let member_identifiers = vec![ShareRecipient {
+            kind: ShareRecipientKind::Email,
+            value: "owner@example.com".to_string(),
+        }];
+
+        let accessible = service
+            .list_accessible_groups(owner.id, &member_identifiers)
+            .await
+            .expect("list accessible groups");
+
+        assert_eq!(accessible.len(), 2);
+        let group_ids: Vec<_> = accessible.iter().map(|g| g.id).collect();
+        assert!(group_ids.contains(&group1.id));
+        assert!(group_ids.contains(&group2.id));
+
+        // The other owner should only see their owned group (and not member groups of owner)
+        let other_member_identifiers = vec![ShareRecipient {
+            kind: ShareRecipientKind::Email,
+            value: "other@example.com".to_string(),
+        }];
+
+        let other_accessible = service
+            .list_accessible_groups(other_owner.id, &other_member_identifiers)
+            .await
+            .expect("list accessible groups for other");
+
+        assert_eq!(other_accessible.len(), 1);
+        assert_eq!(other_accessible[0].id, group2.id);
     }
 
     #[tokio::test]

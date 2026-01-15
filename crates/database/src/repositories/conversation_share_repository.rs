@@ -212,6 +212,72 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
         Ok(groups)
     }
 
+    async fn list_groups_for_member(
+        &self,
+        member_identifiers: &[ShareRecipient],
+    ) -> Result<Vec<ShareGroup>, ConversationError> {
+        if member_identifiers.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let client = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
+
+        // Build a query to find groups where any of the member identifiers match
+        // We use a parameterized query with multiple (member_type, member_value) pairs
+        let mut conditions = Vec::new();
+        let mut param_idx = 1;
+
+        for _ in member_identifiers {
+            conditions.push(format!(
+                "(m.member_type = ${} AND LOWER(m.member_value) = LOWER(${}))",
+                param_idx,
+                param_idx + 1
+            ));
+            param_idx += 2;
+        }
+
+        // Build the params vector with references to the actual values
+        let member_types: Vec<String> = member_identifiers.iter().map(|m| m.kind.as_str().to_string()).collect();
+        let member_values: Vec<String> = member_identifiers.iter().map(|m| m.value.clone()).collect();
+
+        let mut typed_params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = Vec::new();
+        for i in 0..member_identifiers.len() {
+            typed_params.push(&member_types[i]);
+            typed_params.push(&member_values[i]);
+        }
+
+        let query = format!(
+            "SELECT DISTINCT g.id, g.owner_user_id, g.name, g.created_at, g.updated_at
+             FROM conversation_share_groups g
+             JOIN conversation_share_group_members m ON g.id = m.group_id
+             WHERE {}
+             ORDER BY g.name",
+            conditions.join(" OR ")
+        );
+
+        let rows = client
+            .query(&query, &typed_params)
+            .await
+            .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
+
+        let group_ids: Vec<Uuid> = rows.iter().map(|row| row.get("id")).collect();
+        let members = self.load_group_members(&group_ids).await?;
+
+        let groups = rows
+            .iter()
+            .map(|row| {
+                let id: Uuid = row.get("id");
+                Self::to_share_group(row, members.get(&id).cloned().unwrap_or_default())
+            })
+            .collect();
+
+        Ok(groups)
+    }
+
     async fn get_group(
         &self,
         owner_user_id: UserId,

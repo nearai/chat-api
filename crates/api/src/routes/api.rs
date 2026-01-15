@@ -180,12 +180,20 @@ pub struct ConversationShareResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub struct OwnerInfo {
+    pub user_id: String,
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct ConversationSharesListResponse {
     pub is_owner: bool,
     pub can_share: bool,
     /// Whether the user can send messages (has write access)
     pub can_write: bool,
     pub shares: Vec<ConversationShareResponse>,
+    /// Owner information for displaying author names on messages
+    pub owner: Option<OwnerInfo>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -636,14 +644,14 @@ async fn list_conversation_shares(
     Path(conversation_id): Path<String>,
 ) -> Result<Json<ConversationSharesListResponse>, Response> {
     // Get the actual owner of the conversation from the database
-    let owner = state
+    let owner_id = state
         .conversation_service
         .get_conversation_owner(&conversation_id)
         .await
         .map_err(map_share_error)?;
 
     // Check if current user is the owner
-    let is_owner = owner.map(|o| o == user.user_id).unwrap_or(false);
+    let is_owner = owner_id.map(|o| o == user.user_id).unwrap_or(false);
 
     // Check if user has write access (owner OR shared with write permission)
     let has_write_access = is_owner
@@ -653,13 +661,32 @@ async fn list_conversation_shares(
             .await
             .is_ok();
 
-    // Try to list shares - only owners get results
-    let shares = if is_owner {
+    // Get owner info for displaying author names on messages
+    let owner_info = if let Some(owner_user_id) = owner_id {
         state
-            .conversation_share_service
-            .list_shares(user.user_id, &conversation_id)
+            .user_service
+            .get_user_profile(owner_user_id)
             .await
-            .map_err(map_share_error)?
+            .ok()
+            .map(|profile| OwnerInfo {
+                user_id: owner_user_id.to_string(),
+                name: profile.user.name,
+            })
+    } else {
+        None
+    };
+
+    // List shares - owners and users with write access can see shares
+    let shares = if has_write_access {
+        if let Some(owner_user_id) = owner_id {
+            state
+                .conversation_share_service
+                .list_shares(owner_user_id, &conversation_id)
+                .await
+                .map_err(map_share_error)?
+        } else {
+            Vec::new()
+        }
     } else {
         Vec::new()
     };
@@ -669,6 +696,7 @@ async fn list_conversation_shares(
         can_share: has_write_access,
         can_write: has_write_access,
         shares: shares.into_iter().map(to_share_response).collect(),
+        owner: owner_info,
     }))
 }
 
@@ -730,9 +758,40 @@ async fn list_share_groups(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
 ) -> Result<Json<Vec<ShareGroupResponse>>, Response> {
+    // Get user profile to extract email and NEAR accounts for membership matching
+    let user_profile = state
+        .user_service
+        .get_user_profile(user.user_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to get user profile: {}", e),
+                }),
+            )
+                .into_response()
+        })?;
+
+    // Build member identifiers from user's email and linked NEAR accounts
+    let mut member_identifiers = vec![ShareRecipient {
+        kind: ShareRecipientKind::Email,
+        value: user_profile.user.email.to_lowercase(),
+    }];
+
+    // Add NEAR accounts from linked accounts
+    for account in &user_profile.linked_accounts {
+        if account.provider == services::user::ports::OAuthProvider::Near {
+            member_identifiers.push(ShareRecipient {
+                kind: ShareRecipientKind::NearAccount,
+                value: account.provider_user_id.clone(),
+            });
+        }
+    }
+
     let groups = state
         .conversation_share_service
-        .list_groups(user.user_id)
+        .list_accessible_groups(user.user_id, &member_identifiers)
         .await
         .map_err(map_share_error)?;
 
