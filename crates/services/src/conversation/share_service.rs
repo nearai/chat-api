@@ -54,12 +54,12 @@ impl ConversationShareServiceImpl {
         }
     }
 
-    fn generate_public_token() -> String {
+    fn generate_public_token() -> Result<String, ConversationError> {
         let mut bytes = [0u8; PUBLIC_TOKEN_BYTES];
         let mut rng = OsRng;
         rng.try_fill_bytes(&mut bytes)
-            .expect("Failed to generate share token");
-        hex::encode(bytes)
+            .map_err(|e| ConversationError::InternalError(format!("Failed to generate share token: {}", e)))?;
+        Ok(hex::encode(bytes))
     }
 
     fn has_required_permission(
@@ -312,7 +312,7 @@ impl ConversationShareService for ConversationShareServiceImpl {
                 shares.push(share);
             }
             ShareTarget::Public => {
-                let token = Self::generate_public_token();
+                let token = Self::generate_public_token()?;
                 let share = self
                     .share_repository
                     .create_share(NewConversationShare {

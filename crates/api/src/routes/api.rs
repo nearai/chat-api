@@ -2635,6 +2635,7 @@ fn map_share_error(error: ConversationError) -> Response {
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Failed to access conversation: {msg}"),
         ),
+        ConversationError::InternalError(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
     };
 
     (status, Json(ErrorResponse { error: message })).into_response()

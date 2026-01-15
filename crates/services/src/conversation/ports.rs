@@ -14,6 +14,8 @@ pub enum ConversationError {
     ApiError(String),
     #[error("Access denied")]
     AccessDenied,
+    #[error("Internal error: {0}")]
+    InternalError(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
