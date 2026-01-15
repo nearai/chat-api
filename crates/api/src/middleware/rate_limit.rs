@@ -50,7 +50,7 @@ impl Default for RateLimitConfig {
             window_duration: Duration::from_secs(1),
             window_limits: vec![WindowLimit {
                 window: TimeWindow::day(),
-                limit: 1000,
+                limit: 1500,
                 activity_type: ActivityType::RateLimitedRequest,
             }],
         }
