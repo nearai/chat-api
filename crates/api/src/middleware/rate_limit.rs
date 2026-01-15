@@ -916,6 +916,118 @@ mod tests {
             }
         }
 
+        /// Simulates sliding window behavior with time-based expiration
+        /// Stores activity timestamps and only counts activities within the window
+        pub struct SlidingWindowAnalyticsService {
+            pub activities: Arc<Mutex<Vec<chrono::DateTime<chrono::Utc>>>>,
+        }
+
+        #[async_trait]
+        impl AnalyticsServiceTrait for SlidingWindowAnalyticsService {
+            async fn record_activity(
+                &self,
+                _request: RecordActivityRequest,
+            ) -> Result<(), AnalyticsError> {
+                Ok(())
+            }
+
+            async fn check_and_record_activity(
+                &self,
+                request: CheckAndRecordActivityRequest,
+            ) -> Result<CheckAndRecordActivityResult, AnalyticsError> {
+                let now = chrono::Utc::now();
+                let window_start = now - chrono::Duration::seconds(request.window.seconds as i64);
+
+                let mut activities = self.activities.lock().await;
+
+                // Remove expired activities (outside the window)
+                activities.retain(|&ts| ts >= window_start);
+
+                // Count activities in window
+                let current_count = activities.len() as i64;
+
+                // Check if we can insert
+                let can_insert = (current_count as u64) < request.limit;
+
+                if can_insert {
+                    activities.push(now);
+                    Ok(CheckAndRecordActivityResult {
+                        current_count: (current_count + 1) as u64,
+                        was_recorded: true,
+                    })
+                } else {
+                    Ok(CheckAndRecordActivityResult {
+                        current_count: current_count as u64,
+                        was_recorded: false,
+                    })
+                }
+            }
+
+            async fn check_activity_count(
+                &self,
+                _user_id: UserId,
+                _activity_type: ActivityType,
+                window: TimeWindow,
+            ) -> Result<i64, AnalyticsError> {
+                let now = chrono::Utc::now();
+                let window_start = now - chrono::Duration::seconds(window.seconds as i64);
+
+                let activities = self.activities.lock().await;
+
+                // Count activities within the window
+                let count = activities.iter().filter(|&&ts| ts >= window_start).count() as i64;
+
+                Ok(count)
+            }
+
+            async fn get_analytics_summary(
+                &self,
+                _start: chrono::DateTime<Utc>,
+                _end: chrono::DateTime<Utc>,
+            ) -> Result<AnalyticsSummary, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_daily_active_users(
+                &self,
+                _date: chrono::DateTime<Utc>,
+            ) -> Result<i64, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_weekly_active_users(
+                &self,
+                _date: chrono::DateTime<Utc>,
+            ) -> Result<i64, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_monthly_active_users(
+                &self,
+                _date: chrono::DateTime<Utc>,
+            ) -> Result<i64, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_user_activity(
+                &self,
+                _user_id: UserId,
+                _limit: Option<i64>,
+                _offset: Option<i64>,
+            ) -> Result<Vec<ActivityLogEntry>, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_top_active_users(
+                &self,
+                _start: chrono::DateTime<Utc>,
+                _end: chrono::DateTime<Utc>,
+                _limit: i64,
+            ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
+                unreachable!()
+            }
+        }
+
         /// Always returns an error
         pub struct ErrorAnalyticsService;
 
@@ -1249,7 +1361,8 @@ mod tests {
                 i,
                 *analytics_service.count.lock().await
             );
-            drop(result.unwrap());
+            // Guard is automatically dropped at end of loop iteration
+            let _guard = result.unwrap();
         }
 
         // Verify count is 5
@@ -1591,5 +1704,81 @@ mod tests {
         // Should succeed (only checked against short-term rate limit and concurrency)
         let result = state.try_acquire(user).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_window_sliding_effect_expires_old_activities() {
+        // Test that old activities expire from the window and new requests can be allowed
+        let window_seconds = 2; // Small window for testing
+        let limit = 3;
+
+        let analytics_service = Arc::new(test_services::SlidingWindowAnalyticsService {
+            activities: Arc::new(Mutex::new(Vec::new())),
+        });
+
+        let state = RateLimitState::with_config(
+            RateLimitConfig {
+                max_concurrent: 10,
+                max_requests_per_window: 100, // High limit to avoid short-term rate limiting
+                window_duration: Duration::from_secs(1),
+                window_limits: vec![WindowLimit {
+                    window: TimeWindow::new(window_seconds),
+                    limit,
+                    activity_type: ActivityType::RateLimitedRequest,
+                }],
+            },
+            analytics_service.clone(),
+        );
+
+        let user = test_user_id(1);
+
+        // Make requests up to the limit - all should succeed
+        for i in 0..limit {
+            let result = state.try_acquire(user).await;
+            assert!(
+                result.is_ok(),
+                "Request {} should succeed (under limit of {})",
+                i,
+                limit
+            );
+            drop(result.unwrap());
+        }
+
+        // Next request should fail (at limit)
+        let result = state.try_acquire(user).await;
+        assert!(
+            matches!(result, Err(RateLimitError::WindowLimitExceeded { .. })),
+            "Request should fail when at limit"
+        );
+
+        // Wait for the window to expire (window_seconds + small buffer)
+        tokio::time::sleep(Duration::from_secs(window_seconds + 1)).await;
+
+        // Now the old activities should have expired, so we should be able to make new requests
+        let result = state.try_acquire(user).await;
+        assert!(
+            result.is_ok(),
+            "Request should succeed after window expires"
+        );
+        drop(result.unwrap());
+
+        // Verify we can make more requests up to the limit again
+        for i in 0..(limit - 1) {
+            let result = state.try_acquire(user).await;
+            assert!(
+                result.is_ok(),
+                "Request {} after window expiration should succeed",
+                i
+            );
+            drop(result.unwrap());
+        }
+
+        // Should be at limit again
+        let result = state.try_acquire(user).await;
+        assert!(
+            matches!(result, Err(RateLimitError::WindowLimitExceeded { .. })),
+            "Request should fail when at limit again"
+        );
+        drop(result.unwrap());
     }
 }
