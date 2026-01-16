@@ -1,33 +1,26 @@
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
+use chrono::Duration;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 
-/// Time window for sliding window rate limiting (in seconds)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct TimeWindow {
-    /// Number of seconds for the sliding window
-    pub seconds: u64,
-}
+/// Helper module for serializing/deserializing Duration as seconds
+mod duration_serde {
+    use super::*;
 
-impl TimeWindow {
-    /// Create a time window with specified number of seconds
-    pub fn new(seconds: u64) -> Self {
-        Self { seconds }
+    pub fn serialize<S>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let seconds = duration.num_seconds();
+        serializer.serialize_i64(seconds)
     }
 
-    /// Day window (86400 seconds = 1 day)
-    pub fn day() -> Self {
-        Self { seconds: 86400 }
-    }
-
-    /// Week window (604800 seconds = 7 days)
-    pub fn week() -> Self {
-        Self { seconds: 604800 }
-    }
-
-    /// Month window (2592000 seconds = 30 days)
-    pub fn month() -> Self {
-        Self { seconds: 2592000 }
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let seconds = i64::deserialize(deserializer)?;
+        Ok(Duration::seconds(seconds))
     }
 }
 
@@ -49,8 +42,9 @@ impl fmt::Display for SystemKey {
 /// Configuration for a single time window limit
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowLimit {
-    /// Time window for the limit
-    pub window: TimeWindow,
+    /// Duration of the time window for the limit
+    #[serde(with = "duration_serde")]
+    pub window_duration: Duration,
     /// Maximum number of requests allowed in this window
     pub limit: usize,
 }
@@ -77,7 +71,7 @@ impl Default for RateLimitConfig {
             max_requests_per_window: 1,
             window_duration_seconds: 1,
             window_limits: vec![WindowLimit {
-                window: TimeWindow::day(),
+                window_duration: Duration::days(1),
                 limit: 1500,
             }],
         }

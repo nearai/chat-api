@@ -1,7 +1,7 @@
 //! Analytics repository traits and data structures.
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -84,8 +84,8 @@ pub struct CheckAndRecordActivityRequest {
     pub activity_type: ActivityType,
     /// Optional metadata for the activity
     pub metadata: Option<serde_json::Value>,
-    /// Time window for the sliding window rate limit
-    pub window: TimeWindow,
+    /// Duration of the time window for the sliding window rate limit
+    pub window_duration: Duration,
     /// Maximum number of activities allowed in the window
     pub limit: u64,
 }
@@ -189,7 +189,7 @@ pub trait AnalyticsRepository: Send + Sync {
         &self,
         user_id: UserId,
         activity_type: ActivityType,
-        window: TimeWindow,
+        window_duration: Duration,
     ) -> anyhow::Result<i64>;
 
     /// Get analytics summary for a time period
@@ -232,6 +232,4 @@ pub enum AnalyticsError {
     InternalError(String),
 }
 
-// TimeWindow has been moved to system_configs::ports
-// Re-export for backward compatibility
-pub use crate::system_configs::ports::TimeWindow;
+// TimeWindow has been removed, use chrono::Duration directly

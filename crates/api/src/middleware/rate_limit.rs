@@ -16,7 +16,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 use services::{
     analytics::{ActivityType, AnalyticsServiceTrait, CheckAndRecordActivityRequest},
-    system_configs::ports::{TimeWindow, WindowLimit},
+    system_configs::ports::WindowLimit,
     UserId,
 };
 use std::{
@@ -42,7 +42,7 @@ impl Default for RateLimitConfig {
             max_requests_per_window: 1,
             window_duration: Duration::seconds(1),
             window_limits: vec![WindowLimit {
-                window: TimeWindow::day(),
+                window_duration: Duration::days(1),
                 limit: 1500,
             }],
         }
@@ -127,7 +127,7 @@ impl RateLimitState {
         let timestamp = {
             let mut user_limits = self.user_limits.lock().await;
 
-            user_limits.retain(|_, state| !state.is_idle(Duration::seconds(3600)));
+            user_limits.retain(|_, state| !state.is_idle(Duration::hours(1)));
 
             let user_state = user_limits
                 .entry(user_id)
@@ -220,7 +220,7 @@ impl RateLimitState {
                 .check_activity_count(
                     user_id,
                     ActivityType::RateLimitedRequest,
-                    window_limit.window,
+                    window_limit.window_duration,
                 )
                 .await
             {
@@ -228,7 +228,7 @@ impl RateLimitState {
                 Err(e) => {
                     tracing::warn!(
                         user_id = %user_id.0,
-                        window_seconds = window_limit.window.seconds,
+                        window_seconds = window_limit.window_duration.num_seconds(),
                         "Failed to check usage limit: {}",
                         e
                     );
@@ -245,18 +245,19 @@ impl RateLimitState {
 
                 // Calculate retry_after: when the oldest activity in the window expires
                 // For sliding window, we estimate based on window size
-                let retry_after_ms = window_limit.window.seconds * 1000; // Conservative estimate
+                let window_seconds = window_limit.window_duration.num_seconds();
+                let retry_after_ms = u64::try_from(window_seconds * 1000).unwrap_or(u64::MAX); // Conservative estimate
 
                 tracing::warn!(
                     user_id = %user_id.0,
-                    window_seconds = window_limit.window.seconds,
+                    window_seconds = window_seconds,
                     limit = window_limit.limit,
                     current_count = count,
                     "Sliding window limit exceeded"
                 );
 
                 return Err(RateLimitError::WindowLimitExceeded {
-                    window_seconds: window_limit.window.seconds,
+                    window_seconds: u64::try_from(window_seconds).unwrap_or(u64::MAX),
                     limit: window_limit.limit,
                     retry_after_ms,
                 });
@@ -296,7 +297,7 @@ impl RateLimitState {
                     user_id,
                     activity_type: ActivityType::RateLimitedRequest,
                     metadata: None,
-                    window: most_restrictive_window.window,
+                    window_duration: most_restrictive_window.window_duration,
                     limit: limit_value,
                 })
                 .await;
@@ -316,10 +317,12 @@ impl RateLimitState {
                         self.rollback_acquire(user_id, added_timestamp).await;
 
                         // Calculate retry_after based on window size
-                        let retry_after_ms = most_restrictive_window.window.seconds * 1000;
+                        let window_seconds = most_restrictive_window.window_duration.num_seconds();
+                        let retry_after_ms =
+                            u64::try_from(window_seconds * 1000).unwrap_or(u64::MAX);
 
                         return Err(RateLimitError::WindowLimitExceeded {
-                            window_seconds: most_restrictive_window.window.seconds,
+                            window_seconds: u64::try_from(window_seconds).unwrap_or(u64::MAX),
                             limit: most_restrictive_window.limit,
                             retry_after_ms,
                         });
@@ -462,7 +465,6 @@ pub async fn rate_limit_middleware(
 mod tests {
     use super::*;
     use chrono::Utc;
-    use services::system_configs::ports::TimeWindow;
     use std::sync::Arc;
     use uuid::Uuid;
 
@@ -472,7 +474,7 @@ mod tests {
         use services::analytics::{
             ActivityLogEntry, ActivityType, AnalyticsError, AnalyticsServiceTrait,
             AnalyticsSummary, CheckAndRecordActivityRequest, CheckAndRecordActivityResult,
-            RecordActivityRequest, TimeWindow, TopActiveUser,
+            RecordActivityRequest, TopActiveUser,
         };
         use tokio::sync::Mutex;
 
@@ -503,7 +505,7 @@ mod tests {
                 &self,
                 _user_id: UserId,
                 _activity_type: ActivityType,
-                _window: TimeWindow,
+                _window_duration: Duration,
             ) -> Result<i64, AnalyticsError> {
                 // Always return 0 in tests (unless we want to test limit behavior)
                 Ok(0)
@@ -584,7 +586,7 @@ mod tests {
                 &self,
                 _user_id: UserId,
                 _activity_type: ActivityType,
-                _window: TimeWindow,
+                _window_duration: Duration,
             ) -> Result<i64, AnalyticsError> {
                 // Always return 100 to test limit exceeded
                 Ok(100)
@@ -677,7 +679,7 @@ mod tests {
                 &self,
                 _user_id: UserId,
                 _activity_type: ActivityType,
-                _window: TimeWindow,
+                _window_duration: Duration,
             ) -> Result<i64, AnalyticsError> {
                 Ok(*self.count.lock().await)
             }
@@ -768,7 +770,7 @@ mod tests {
                 request: CheckAndRecordActivityRequest,
             ) -> Result<CheckAndRecordActivityResult, AnalyticsError> {
                 // Use the first window for recording
-                let count = if request.window.seconds == 86400 {
+                let count = if request.window_duration.num_seconds() == 86400 {
                     self.day_count
                 } else {
                     self.week_count
@@ -783,9 +785,9 @@ mod tests {
                 &self,
                 _user_id: UserId,
                 _activity_type: ActivityType,
-                window: TimeWindow,
+                window_duration: Duration,
             ) -> Result<i64, AnalyticsError> {
-                Ok(if window.seconds == 86400 {
+                Ok(if window_duration.num_seconds() == 86400 {
                     self.day_count
                 } else {
                     self.week_count
@@ -867,7 +869,7 @@ mod tests {
                 &self,
                 _user_id: UserId,
                 _activity_type: ActivityType,
-                _window: TimeWindow,
+                _window_duration: Duration,
             ) -> Result<i64, AnalyticsError> {
                 // Return count just under limit (so check passes)
                 Ok(9)
@@ -949,7 +951,7 @@ mod tests {
                 &self,
                 _user_id: UserId,
                 _activity_type: ActivityType,
-                _window: TimeWindow,
+                _window_duration: Duration,
             ) -> Result<i64, AnalyticsError> {
                 // Return count based on window size for testing
                 Ok(self.count)
@@ -1023,8 +1025,7 @@ mod tests {
                 request: CheckAndRecordActivityRequest,
             ) -> Result<CheckAndRecordActivityResult, AnalyticsError> {
                 let now = Utc::now();
-                let window_start = now
-                    - Duration::seconds(i64::try_from(request.window.seconds).unwrap_or(i64::MAX));
+                let window_start = now - request.window_duration;
 
                 let mut activities = self.activities.lock().await;
 
@@ -1055,11 +1056,10 @@ mod tests {
                 &self,
                 _user_id: UserId,
                 _activity_type: ActivityType,
-                window: TimeWindow,
+                window_duration: Duration,
             ) -> Result<i64, AnalyticsError> {
                 let now = Utc::now();
-                let window_start =
-                    now - Duration::seconds(i64::try_from(window.seconds).unwrap_or(i64::MAX));
+                let window_start = now - window_duration;
 
                 let activities = self.activities.lock().await;
 
@@ -1140,7 +1140,7 @@ mod tests {
                 &self,
                 _user_id: UserId,
                 _activity_type: ActivityType,
-                _window: TimeWindow,
+                _window_duration: Duration,
             ) -> Result<i64, AnalyticsError> {
                 Err(AnalyticsError::InternalError("Database error".to_string()))
             }
@@ -1382,7 +1382,7 @@ mod tests {
                 max_requests_per_window: 10, // High limit
                 window_duration: Duration::seconds(1),
                 window_limits: vec![WindowLimit {
-                    window: TimeWindow::day(),
+                    window_duration: Duration::days(1),
                     limit: 100,
                 }],
             },
@@ -1440,7 +1440,7 @@ mod tests {
                 max_requests_per_window: 100, // High limit to avoid short-term rate limiting
                 window_duration: Duration::seconds(1),
                 window_limits: vec![WindowLimit {
-                    window: TimeWindow::day(),
+                    window_duration: Duration::days(1),
                     limit: 10,
                 }],
             },
@@ -1475,7 +1475,7 @@ mod tests {
                 max_requests_per_window: 100,
                 window_duration: Duration::seconds(1),
                 window_limits: vec![WindowLimit {
-                    window: TimeWindow::day(),
+                    window_duration: Duration::days(1),
                     limit,
                 }],
             },
@@ -1514,7 +1514,7 @@ mod tests {
                 max_requests_per_window: 100,
                 window_duration: Duration::seconds(1),
                 window_limits: vec![WindowLimit {
-                    window: TimeWindow::day(),
+                    window_duration: Duration::days(1),
                     limit,
                 }],
             },
@@ -1544,11 +1544,11 @@ mod tests {
                 window_duration: Duration::seconds(1),
                 window_limits: vec![
                     WindowLimit {
-                        window: TimeWindow::day(),
+                        window_duration: Duration::days(1),
                         limit: day_limit,
                     },
                     WindowLimit {
-                        window: TimeWindow::week(),
+                        window_duration: Duration::weeks(1),
                         limit: week_limit,
                     },
                 ],
@@ -1574,11 +1574,11 @@ mod tests {
                 window_duration: Duration::seconds(1),
                 window_limits: vec![
                     WindowLimit {
-                        window: TimeWindow::day(),
+                        window_duration: Duration::days(1),
                         limit: day_limit,
                     },
                     WindowLimit {
-                        window: TimeWindow::week(),
+                        window_duration: Duration::weeks(1),
                         limit: week_limit,
                     },
                 ],
@@ -1609,11 +1609,11 @@ mod tests {
                 window_duration: Duration::seconds(1),
                 window_limits: vec![
                     WindowLimit {
-                        window: TimeWindow::day(),
+                        window_duration: Duration::days(1),
                         limit: day_limit,
                     },
                     WindowLimit {
-                        window: TimeWindow::week(),
+                        window_duration: Duration::weeks(1),
                         limit: week_limit,
                     },
                 ],
@@ -1645,7 +1645,7 @@ mod tests {
                 max_requests_per_window: 100,
                 window_duration: Duration::seconds(1),
                 window_limits: vec![WindowLimit {
-                    window: TimeWindow::day(),
+                    window_duration: Duration::days(1),
                     limit: 10,
                 }],
             },
@@ -1673,7 +1673,7 @@ mod tests {
                 max_requests_per_window: 100,
                 window_duration: Duration::seconds(1),
                 window_limits: vec![WindowLimit {
-                    window: TimeWindow::day(),
+                    window_duration: Duration::days(1),
                     limit: 10,
                 }],
             },
@@ -1700,7 +1700,7 @@ mod tests {
                 max_requests_per_window: 100,
                 window_duration: Duration::seconds(1),
                 window_limits: vec![WindowLimit {
-                    window: TimeWindow::week(),
+                    window_duration: Duration::weeks(1),
                     limit: 10,
                 }],
             },
@@ -1727,7 +1727,7 @@ mod tests {
                 max_requests_per_window: 100,
                 window_duration: Duration::seconds(1),
                 window_limits: vec![WindowLimit {
-                    window: TimeWindow::month(),
+                    window_duration: Duration::days(30),
                     limit: 10,
                 }],
             },
@@ -1756,7 +1756,7 @@ mod tests {
                 max_requests_per_window: 100,
                 window_duration: Duration::seconds(1),
                 window_limits: vec![WindowLimit {
-                    window: TimeWindow::day(),
+                    window_duration: Duration::days(1),
                     limit: 10,
                 }],
             },
@@ -1806,7 +1806,9 @@ mod tests {
                 max_requests_per_window: 100, // High limit to avoid short-term rate limiting
                 window_duration: Duration::seconds(1),
                 window_limits: vec![WindowLimit {
-                    window: TimeWindow::new(window_seconds),
+                    window_duration: Duration::seconds(
+                        i64::try_from(window_seconds).unwrap_or(i64::MAX),
+                    ),
                     limit,
                 }],
             },

@@ -396,28 +396,8 @@ pub struct UserListResponse {
     pub total: u64,
 }
 
-/// Time window for sliding window rate limiting (in seconds) (API model)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
-pub struct TimeWindow {
-    /// Number of seconds for the sliding window
-    pub seconds: u64,
-}
-
-impl From<services::system_configs::ports::TimeWindow> for TimeWindow {
-    fn from(window: services::system_configs::ports::TimeWindow) -> Self {
-        Self {
-            seconds: window.seconds,
-        }
-    }
-}
-
-impl From<TimeWindow> for services::system_configs::ports::TimeWindow {
-    fn from(api_window: TimeWindow) -> Self {
-        Self {
-            seconds: api_window.seconds,
-        }
-    }
-}
+// TimeWindow has been removed, use chrono::Duration directly in API models
+// For API serialization, we'll use seconds as i64
 
 /// Rate limit configuration (API model)
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -435,8 +415,8 @@ pub struct RateLimitConfig {
 /// Configuration for a single time window limit (API model)
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct WindowLimit {
-    /// Time window for the limit
-    pub window: TimeWindow,
+    /// Duration of the time window for the limit (in seconds)
+    pub window_duration_seconds: i64,
     /// Maximum number of requests allowed in this window
     pub limit: usize,
 }
@@ -455,7 +435,7 @@ impl From<services::system_configs::ports::RateLimitConfig> for RateLimitConfig 
 impl From<services::system_configs::ports::WindowLimit> for WindowLimit {
     fn from(limit: services::system_configs::ports::WindowLimit) -> Self {
         Self {
-            window: limit.window.into(),
+            window_duration_seconds: limit.window_duration.num_seconds(),
             limit: limit.limit,
         }
     }
@@ -478,8 +458,9 @@ impl From<RateLimitConfig> for services::system_configs::ports::RateLimitConfig 
 
 impl From<WindowLimit> for services::system_configs::ports::WindowLimit {
     fn from(api_limit: WindowLimit) -> Self {
+        use chrono::Duration;
         Self {
-            window: api_limit.window.into(),
+            window_duration: Duration::seconds(api_limit.window_duration_seconds),
             limit: api_limit.limit,
         }
     }
@@ -520,9 +501,9 @@ impl RateLimitConfig {
         }
 
         for (index, window_limit) in self.window_limits.iter().enumerate() {
-            if window_limit.window.seconds == 0 {
+            if window_limit.window_duration_seconds <= 0 {
                 return Err(ApiError::bad_request(format!(
-                    "window_limits[{}].window.seconds must be greater than 0",
+                    "window_limits[{}].window_duration_seconds must be greater than 0",
                     index
                 )));
             }
