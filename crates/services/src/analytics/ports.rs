@@ -232,31 +232,6 @@ pub enum AnalyticsError {
     InternalError(String),
 }
 
-/// Time window for sliding window rate limiting (in seconds)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct TimeWindow {
-    /// Number of seconds for the sliding window
-    pub seconds: u64,
-}
-
-impl TimeWindow {
-    /// Create a time window with specified number of seconds
-    pub fn new(seconds: u64) -> Self {
-        Self { seconds }
-    }
-
-    /// Day window (86400 seconds = 1 day)
-    pub fn day() -> Self {
-        Self { seconds: 86400 }
-    }
-
-    /// Week window (604800 seconds = 7 days)
-    pub fn week() -> Self {
-        Self { seconds: 604800 }
-    }
-
-    /// Month window (2592000 seconds = 30 days)
-    pub fn month() -> Self {
-        Self { seconds: 2592000 }
-    }
-}
+// TimeWindow has been moved to system_configs::ports
+// Re-export for backward compatibility
+pub use crate::system_configs::ports::TimeWindow;

@@ -396,18 +396,110 @@ pub struct UserListResponse {
     pub total: u64,
 }
 
+/// Time window for sliding window rate limiting (in seconds) (API model)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
+pub struct TimeWindow {
+    /// Number of seconds for the sliding window
+    pub seconds: u64,
+}
+
+impl From<services::system_configs::ports::TimeWindow> for TimeWindow {
+    fn from(window: services::system_configs::ports::TimeWindow) -> Self {
+        Self {
+            seconds: window.seconds,
+        }
+    }
+}
+
+impl From<TimeWindow> for services::system_configs::ports::TimeWindow {
+    fn from(api_window: TimeWindow) -> Self {
+        Self {
+            seconds: api_window.seconds,
+        }
+    }
+}
+
+/// Rate limit configuration (API model)
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct RateLimitConfig {
+    /// Maximum number of concurrent requests per user
+    pub max_concurrent: usize,
+    /// Maximum number of requests per time window per user
+    pub max_requests_per_window: usize,
+    /// Duration of the short-term rate limit window in seconds
+    pub window_duration_seconds: u64,
+    /// Sliding window limits based on activity_log
+    pub window_limits: Vec<WindowLimit>,
+}
+
+/// Configuration for a single time window limit (API model)
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct WindowLimit {
+    /// Time window for the limit
+    pub window: TimeWindow,
+    /// Maximum number of requests allowed in this window
+    pub limit: usize,
+}
+
+impl From<services::system_configs::ports::RateLimitConfig> for RateLimitConfig {
+    fn from(config: services::system_configs::ports::RateLimitConfig) -> Self {
+        Self {
+            max_concurrent: config.max_concurrent,
+            max_requests_per_window: config.max_requests_per_window,
+            window_duration_seconds: config.window_duration_seconds,
+            window_limits: config.window_limits.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<services::system_configs::ports::WindowLimit> for WindowLimit {
+    fn from(limit: services::system_configs::ports::WindowLimit) -> Self {
+        Self {
+            window: limit.window.into(),
+            limit: limit.limit,
+        }
+    }
+}
+
+impl From<RateLimitConfig> for services::system_configs::ports::RateLimitConfig {
+    fn from(api_config: RateLimitConfig) -> Self {
+        Self {
+            max_concurrent: api_config.max_concurrent,
+            max_requests_per_window: api_config.max_requests_per_window,
+            window_duration_seconds: api_config.window_duration_seconds,
+            window_limits: api_config
+                .window_limits
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        }
+    }
+}
+
+impl From<WindowLimit> for services::system_configs::ports::WindowLimit {
+    fn from(api_limit: WindowLimit) -> Self {
+        Self {
+            window: api_limit.window.into(),
+            limit: api_limit.limit,
+        }
+    }
+}
+
 /// System configs response
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct SystemConfigsResponse {
     /// Default model identifier to use when not specified
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
+    /// Rate limit configuration (always present, uses defaults if not set)
+    pub rate_limit: RateLimitConfig,
 }
 
 impl From<services::system_configs::ports::SystemConfigs> for SystemConfigsResponse {
     fn from(config: services::system_configs::ports::SystemConfigs) -> Self {
         Self {
             default_model: config.default_model,
+            rate_limit: config.rate_limit.into(),
         }
     }
 }
@@ -424,6 +516,7 @@ impl From<UpsertSystemConfigsRequest> for services::system_configs::ports::Syste
     fn from(req: UpsertSystemConfigsRequest) -> Self {
         services::system_configs::ports::SystemConfigs {
             default_model: req.default_model,
+            rate_limit: services::system_configs::ports::RateLimitConfig::default(),
         }
     }
 }
@@ -434,12 +527,16 @@ pub struct UpdateSystemConfigsRequest {
     /// Default model identifier to use when not specified
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
+    /// Rate limit configuration (full replace, not partial)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<RateLimitConfig>,
 }
 
 impl From<UpdateSystemConfigsRequest> for services::system_configs::ports::PartialSystemConfigs {
     fn from(req: UpdateSystemConfigsRequest) -> Self {
         services::system_configs::ports::PartialSystemConfigs {
             default_model: req.default_model,
+            rate_limit: req.rate_limit.map(Into::into),
         }
     }
 }

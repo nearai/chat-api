@@ -1,3 +1,4 @@
+use api::middleware::RateLimitConfig;
 use api::{create_router_with_cors, ApiDoc, AppState};
 use config::LoggingConfig;
 use opentelemetry::global;
@@ -14,6 +15,7 @@ use services::{
     metrics::{MockMetricsService, OtlpMetricsService},
     model::service::ModelServiceImpl,
     response::service::OpenAIProxy,
+    system_configs::ports::SystemConfigsService,
     user::UserServiceImpl,
     user::UserSettingsServiceImpl,
     vpc::{initialize_vpc_credentials, VpcAuthConfig},
@@ -220,7 +222,7 @@ async fn main() -> anyhow::Result<()> {
         user_service,
         user_settings_service,
         model_service,
-        system_configs_service,
+        system_configs_service: system_configs_service.clone(),
         session_repository: session_repo,
         proxy_service,
         conversation_service,
@@ -237,8 +239,27 @@ async fn main() -> anyhow::Result<()> {
         model_settings_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     };
 
+    // Load rate limit config from system configs
+    let rate_limit_config = match system_configs_service.get_configs().await {
+        Ok(Some(system_configs)) => {
+            tracing::info!("Loaded rate limit config from system configs");
+            RateLimitConfig::from_system_config(Some(&system_configs.rate_limit))
+        }
+        Ok(None) => {
+            tracing::info!("No system configs found, using default rate limit config");
+            RateLimitConfig::default()
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = ?e,
+                "Failed to load system configs, using default rate limit config"
+            );
+            RateLimitConfig::default()
+        }
+    };
+
     // Create router with CORS support
-    let app = create_router_with_cors(app_state, config.cors.clone())
+    let app = create_router_with_cors(app_state, config.cors.clone(), Some(rate_limit_config))
         .merge(SwaggerUi::new("/docs").url("/api-docs/openapi.json", ApiDoc::openapi()));
 
     // Start server

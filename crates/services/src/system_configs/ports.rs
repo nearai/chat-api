@@ -2,6 +2,35 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+/// Time window for sliding window rate limiting (in seconds)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TimeWindow {
+    /// Number of seconds for the sliding window
+    pub seconds: u64,
+}
+
+impl TimeWindow {
+    /// Create a time window with specified number of seconds
+    pub fn new(seconds: u64) -> Self {
+        Self { seconds }
+    }
+
+    /// Day window (86400 seconds = 1 day)
+    pub fn day() -> Self {
+        Self { seconds: 86400 }
+    }
+
+    /// Week window (604800 seconds = 7 days)
+    pub fn week() -> Self {
+        Self { seconds: 604800 }
+    }
+
+    /// Month window (2592000 seconds = 30 days)
+    pub fn month() -> Self {
+        Self { seconds: 2592000 }
+    }
+}
+
 /// Key for `system_configs` table entries
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SystemKey {
@@ -17,17 +46,58 @@ impl fmt::Display for SystemKey {
     }
 }
 
+/// Configuration for a single time window limit
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowLimit {
+    /// Time window for the limit
+    pub window: TimeWindow,
+    /// Maximum number of requests allowed in this window
+    pub limit: usize,
+}
+
+/// Rate limit configuration stored in system configs
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RateLimitConfig {
+    /// Maximum number of concurrent requests per user
+    pub max_concurrent: usize,
+    /// Maximum number of requests per time window per user
+    pub max_requests_per_window: usize,
+    /// Duration of the short-term rate limit window in seconds
+    /// (converted from Duration for serialization)
+    pub window_duration_seconds: u64,
+    /// Sliding window limits based on activity_log
+    /// Each limit applies independently
+    pub window_limits: Vec<WindowLimit>,
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent: 2,
+            max_requests_per_window: 1,
+            window_duration_seconds: 1,
+            window_limits: vec![WindowLimit {
+                window: TimeWindow::day(),
+                limit: 1500,
+            }],
+        }
+    }
+}
+
 /// Application-wide configuration stored in `system_configs` table
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemConfigs {
     /// Default model identifier to use when not specified
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
+    /// Rate limit configuration (always present, uses defaults if not set)
+    pub rate_limit: RateLimitConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PartialSystemConfigs {
     pub default_model: Option<String>,
+    pub rate_limit: Option<RateLimitConfig>,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -35,6 +105,7 @@ impl Default for SystemConfigs {
     fn default() -> Self {
         Self {
             default_model: None,
+            rate_limit: RateLimitConfig::default(),
         }
     }
 }
@@ -43,6 +114,7 @@ impl SystemConfigs {
     pub fn into_updated(self, partial: PartialSystemConfigs) -> Self {
         Self {
             default_model: partial.default_model.or(self.default_model),
+            rate_limit: partial.rate_limit.unwrap_or(self.rate_limit),
         }
     }
 }

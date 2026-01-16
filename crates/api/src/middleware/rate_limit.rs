@@ -14,7 +14,8 @@ use axum::{
 };
 use serde::Serialize;
 use services::{
-    analytics::{ActivityType, AnalyticsServiceTrait, CheckAndRecordActivityRequest, TimeWindow},
+    analytics::{ActivityType, AnalyticsServiceTrait, CheckAndRecordActivityRequest},
+    system_configs::ports::{TimeWindow, WindowLimit},
     UserId,
 };
 use std::{
@@ -23,13 +24,6 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
-
-/// Configuration for a single time window limit
-#[derive(Debug, Clone)]
-pub struct WindowLimit {
-    pub window: TimeWindow,
-    pub limit: usize,
-}
 
 #[derive(Clone)]
 pub struct RateLimitConfig {
@@ -51,6 +45,27 @@ impl Default for RateLimitConfig {
                 window: TimeWindow::day(),
                 limit: 1500,
             }],
+        }
+    }
+}
+
+impl RateLimitConfig {
+    /// Convert from system configs rate limit config
+    pub fn from_system_config(
+        config: Option<&services::system_configs::ports::RateLimitConfig>,
+    ) -> Self {
+        match config {
+            None => Self::default(),
+            Some(cfg) => {
+                let window_limits = cfg.window_limits.clone();
+
+                Self {
+                    max_concurrent: cfg.max_concurrent,
+                    max_requests_per_window: cfg.max_requests_per_window,
+                    window_duration: Duration::from_secs(cfg.window_duration_seconds),
+                    window_limits,
+                }
+            }
         }
     }
 }
@@ -443,7 +458,7 @@ pub async fn rate_limit_middleware(
 mod tests {
     use super::*;
     use chrono::Utc;
-    use services::analytics::TimeWindow;
+    use services::system_configs::ports::TimeWindow;
     use std::sync::Arc;
     use uuid::Uuid;
 
