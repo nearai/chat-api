@@ -485,6 +485,60 @@ impl From<WindowLimit> for services::system_configs::ports::WindowLimit {
     }
 }
 
+impl RateLimitConfig {
+    /// Validate the rate limit configuration
+    ///
+    /// Returns an error if any field is invalid:
+    /// - `max_concurrent` must be greater than 0
+    /// - `max_requests_per_window` must be greater than 0
+    /// - `window_duration_seconds` must be greater than 0
+    /// - `window_limits` must contain at least one limit
+    /// - Each `window_limits` entry must have `window.seconds > 0` and `limit > 0`
+    pub fn validate(&self) -> Result<(), ApiError> {
+        if self.max_concurrent == 0 {
+            return Err(ApiError::bad_request(
+                "max_concurrent must be greater than 0",
+            ));
+        }
+
+        if self.max_requests_per_window == 0 {
+            return Err(ApiError::bad_request(
+                "max_requests_per_window must be greater than 0",
+            ));
+        }
+
+        if self.window_duration_seconds == 0 {
+            return Err(ApiError::bad_request(
+                "window_duration_seconds must be greater than 0",
+            ));
+        }
+
+        if self.window_limits.is_empty() {
+            return Err(ApiError::bad_request(
+                "window_limits must contain at least one limit",
+            ));
+        }
+
+        for (index, window_limit) in self.window_limits.iter().enumerate() {
+            if window_limit.window.seconds == 0 {
+                return Err(ApiError::bad_request(format!(
+                    "window_limits[{}].window.seconds must be greater than 0",
+                    index
+                )));
+            }
+
+            if window_limit.limit == 0 {
+                return Err(ApiError::bad_request(format!(
+                    "window_limits[{}].limit must be greater than 0",
+                    index
+                )));
+            }
+        }
+
+        Ok(())
+    }
+}
+
 /// System configs response
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct SystemConfigsResponse {
