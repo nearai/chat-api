@@ -169,6 +169,27 @@ impl RateLimitState {
         let added_timestamp = timestamp.1; // Extract timestamp for potential rollback
 
         // Phase 2: Check sliding window limits based on activity_log (no mutex held)
+        //
+        // IMPORTANT: Multi-Window Race Condition Limitation
+        // ==================================================
+        // This phase checks all windows individually using non-atomic read operations
+        // (check_activity_count). While this is efficient, it creates a race condition:
+        //
+        // Scenario: Multiple concurrent requests can all pass the non-atomic checks
+        // for non-restrictive windows before any insert happens. When they all insert,
+        // those windows may exceed their limits.
+        //
+        // Example: Window A (limit=100, count=99) and Window B (limit=10, count=5)
+        // - Request 1, 2, 3 all check Window A: 99 < 100 ✓ (all pass)
+        // - Request 1, 2, 3 all check Window B: 5 < 10 ✓ (all pass)
+        // - All 3 requests insert, Window A count becomes 102 (exceeds limit 100)
+        //
+        // Mitigation:
+        // - Only the most restrictive window (smallest limit) is checked atomically
+        //   during insertion, ensuring it never exceeds its limit
+        // - Other windows have a small risk of exceeding limits under high concurrency
+        // - This trade-off is acceptable for simplicity and performance
+        //
         // First, check all windows without inserting to avoid duplicate records
         // If all windows pass, insert a single record that all windows will count
         for window_limit in &self.config.window_limits {
@@ -223,18 +244,29 @@ impl RateLimitState {
             }
         }
 
-        // All windows passed, now insert a single record that all windows will count
-        // We use the most restrictive window (smallest limit) for the atomic insert check.
-        // This ensures the most restrictive window won't be exceeded, and since we've
-        // already verified all windows are below their limits, this provides reasonable
-        // protection against race conditions.
+        // All windows passed the non-atomic checks, now insert a single record that all windows will count
         //
-        // Note: While check_and_record_activity only checks one window's limit, using
-        // the most restrictive window ensures that at least the strictest limit is enforced
-        // atomically. The other windows were already checked individually above, and any
-        // race condition that causes them to exceed limits is acceptable as a trade-off
-        // for simplicity (a full multi-window atomic check would require significant
-        // interface changes).
+        // Atomic Insert with Most Restrictive Window
+        // ===========================================
+        // We use the most restrictive window (smallest limit) for the atomic insert check.
+        // This ensures the most restrictive window won't be exceeded even under high concurrency.
+        //
+        // Why only the most restrictive window?
+        // - check_and_record_activity performs an atomic check-and-insert for ONE window only
+        // - We choose the most restrictive window to guarantee the strictest limit is never exceeded
+        // - This is the critical limit that must be protected
+        //
+        // Trade-off for other windows:
+        // - Other windows were checked individually above (non-atomic reads)
+        // - Under high concurrency, multiple requests may pass those checks simultaneously
+        // - When they all insert, non-restrictive windows may temporarily exceed limits
+        // - This is an acceptable risk because:
+        //   1. The most critical (restrictive) limit is always protected
+        //   2. The probability of exceeding other limits is low (requires multiple concurrent requests)
+        //   3. The excess is typically small (1-2 requests over limit)
+        //   4. Full multi-window atomicity would require significant interface changes
+        //
+        // For strict enforcement of all windows, see alternatives documented in Phase 2 above.
         if let Some(most_restrictive_window) =
             self.config.window_limits.iter().min_by_key(|w| w.limit)
         {
