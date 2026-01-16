@@ -124,9 +124,10 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
 
     // Create analytics service
     let analytics_repo = db.analytics_repository();
-    let analytics_service = Arc::new(AnalyticsServiceImpl::new(
-        analytics_repo as Arc<dyn services::analytics::AnalyticsRepository>,
-    ));
+    let analytics_service: Arc<dyn services::analytics::AnalyticsServiceTrait> =
+        Arc::new(AnalyticsServiceImpl::new(
+            analytics_repo as Arc<dyn services::analytics::AnalyticsRepository>,
+        ));
 
     // Create application state
     let app_state = AppState {

@@ -19,6 +19,26 @@ pub trait AnalyticsServiceTrait: Send + Sync {
     /// Record a user activity
     async fn record_activity(&self, request: RecordActivityRequest) -> Result<(), AnalyticsError>;
 
+    /// Atomically check if usage is below limit and record activity if allowed.
+    ///
+    /// This method:
+    /// 1. Counts activities of the specified type in the sliding window
+    /// 2. If below limit, inserts a new activity log entry
+    /// 3. Returns the current count after the attempt and whether the activity was recorded
+    async fn check_and_record_activity(
+        &self,
+        request: CheckAndRecordActivityRequest,
+    ) -> Result<CheckAndRecordActivityResult, AnalyticsError>;
+
+    /// Check activity count in a window without recording.
+    /// Used when multiple windows need to be checked before inserting a single record.
+    async fn check_activity_count(
+        &self,
+        user_id: UserId,
+        activity_type: ActivityType,
+        window: TimeWindow,
+    ) -> Result<i64, AnalyticsError>;
+
     /// Get analytics summary for a time period
     async fn get_analytics_summary(
         &self,
@@ -68,6 +88,28 @@ impl AnalyticsServiceTrait for AnalyticsServiceImpl {
     async fn record_activity(&self, request: RecordActivityRequest) -> Result<(), AnalyticsError> {
         self.repository
             .record_activity(request)
+            .await
+            .map_err(|e| AnalyticsError::InternalError(e.to_string()))
+    }
+
+    async fn check_and_record_activity(
+        &self,
+        request: CheckAndRecordActivityRequest,
+    ) -> Result<CheckAndRecordActivityResult, AnalyticsError> {
+        self.repository
+            .check_and_record_activity(request)
+            .await
+            .map_err(|e| AnalyticsError::InternalError(e.to_string()))
+    }
+
+    async fn check_activity_count(
+        &self,
+        user_id: UserId,
+        activity_type: ActivityType,
+        window: TimeWindow,
+    ) -> Result<i64, AnalyticsError> {
+        self.repository
+            .check_activity_count(user_id, activity_type, window)
             .await
             .map_err(|e| AnalyticsError::InternalError(e.to_string()))
     }

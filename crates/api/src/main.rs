@@ -149,9 +149,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize analytics service
     tracing::info!("Initializing analytics service...");
-    let analytics_service = Arc::new(AnalyticsServiceImpl::new(
-        analytics_repo as Arc<dyn services::analytics::AnalyticsRepository>,
-    ));
+    let analytics_service = Arc::new(AnalyticsServiceImpl::new(analytics_repo));
 
     // Initialize system configs service
     tracing::info!("Initializing system configs service...");
