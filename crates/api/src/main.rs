@@ -14,6 +14,7 @@ use services::{
     metrics::{MockMetricsService, OtlpMetricsService},
     model::service::ModelServiceImpl,
     response::service::OpenAIProxy,
+    system_configs::ports::SystemConfigsService,
     user::UserServiceImpl,
     user::UserSettingsServiceImpl,
     vpc::{initialize_vpc_credentials, VpcAuthConfig},
@@ -220,7 +221,7 @@ async fn main() -> anyhow::Result<()> {
         user_service,
         user_settings_service,
         model_service,
-        system_configs_service,
+        system_configs_service: system_configs_service.clone(),
         session_repository: session_repo,
         proxy_service,
         conversation_service,
@@ -237,8 +238,15 @@ async fn main() -> anyhow::Result<()> {
         model_settings_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     };
 
+    // Load rate limit config from system configs
+    let rate_limit_config = system_configs_service
+        .get_configs()
+        .await?
+        .unwrap_or_default()
+        .rate_limit;
+
     // Create router with CORS support
-    let app = create_router_with_cors(app_state, config.cors.clone())
+    let app = create_router_with_cors(app_state, config.cors.clone(), Some(rate_limit_config))
         .merge(SwaggerUi::new("/docs").url("/api-docs/openapi.json", ApiDoc::openapi()));
 
     // Start server

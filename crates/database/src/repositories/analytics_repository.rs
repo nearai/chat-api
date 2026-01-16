@@ -8,7 +8,7 @@ use services::{
     analytics::{
         ActivityLogEntry, ActivityMetricsSummary, ActivityType, AnalyticsRepository,
         AnalyticsSummary, AuthMethodBreakdown, CheckAndRecordActivityResult, RecordActivityRequest,
-        TimeWindow, TopActiveUser, UserMetricsSummary,
+        TopActiveUser, UserMetricsSummary,
     },
     UserId,
 };
@@ -100,7 +100,7 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
                 &[
                     &request.user_id,
                     &activity_type,
-                    &(request.window.seconds as i64),
+                    &request.window_duration.num_seconds(),
                     &(request.limit as i64),
                     &request.metadata,
                 ],
@@ -120,7 +120,7 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
         &self,
         user_id: UserId,
         activity_type: ActivityType,
-        window: TimeWindow,
+        window_duration: Duration,
     ) -> anyhow::Result<i64> {
         let client = self.pool.get().await?;
         let activity_type = activity_type.as_str();
@@ -137,7 +137,7 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
                   AND activity_type = $2
                   AND created_at >= window_start.start_time
                 "#,
-                &[&user_id, &activity_type, &(window.seconds as i64)],
+                &[&user_id, &activity_type, &window_duration.num_seconds()],
             )
             .await?;
 

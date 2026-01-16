@@ -647,6 +647,11 @@ pub async fn upsert_system_configs(
         ensure_proxy_model_exists(app_state.proxy_service, model_id).await?;
     }
 
+    // Validate rate limit config if provided
+    if let Some(ref rate_limit) = request.rate_limit {
+        rate_limit.validate()?;
+    }
+
     let partial: services::system_configs::ports::PartialSystemConfigs = request.into();
 
     // Check if configs exist
