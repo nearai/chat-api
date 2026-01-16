@@ -1060,12 +1060,16 @@ async fn list_conversation_items(
                 .into_response()
         })?;
 
-    build_response(
-        proxy_response.status,
-        proxy_response.headers,
-        Body::from_stream(proxy_response.body),
-    )
-    .await
+    // Collect response body to inject author metadata
+    let body_bytes = collect_stream_to_bytes(proxy_response.body).await;
+
+    // Try to inject author metadata into the response
+    let final_body = match inject_author_metadata(&state, &conversation_id, body_bytes).await {
+        Ok(modified_bytes) => Body::from(modified_bytes),
+        Err(original_bytes) => Body::from(original_bytes),
+    };
+
+    build_response(proxy_response.status, proxy_response.headers, final_body).await
 }
 
 async fn pin_conversation(
@@ -1729,6 +1733,15 @@ async fn proxy_responses(
         .await
         .ok();
 
+    // Save conversation_id and author_name for response author tracking
+    // (before body_json and user_profile are consumed)
+    let conversation_id_for_author = body_json
+        .as_ref()
+        .and_then(|b| b.get("conversation"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let author_name_for_tracking = user_profile.as_ref().and_then(|p| p.user.name.clone());
+
     // Modify request body to inject system prompt and/or author metadata
     let modified_body_bytes = if let Some(mut body) = body_json {
         // Inject model-level system prompt if present
@@ -1916,12 +1929,22 @@ async fn proxy_responses(
         }
     }
 
-    build_response(
-        proxy_response.status,
-        proxy_headers,
-        Body::from_stream(proxy_response.body),
-    )
-    .await
+    // Wrap the response stream to extract response_id and store author info
+    let response_body =
+        if conversation_id_for_author.is_some() && (200..300).contains(&proxy_response.status) {
+            let repo = state.response_author_repository.clone();
+            let conv_id = conversation_id_for_author.unwrap();
+            let user_id = user.user_id;
+            let author = author_name_for_tracking;
+
+            let wrapped_stream =
+                AuthorTrackingStream::new(proxy_response.body, repo, conv_id, user_id, author);
+            Body::from_stream(wrapped_stream)
+        } else {
+            Body::from_stream(proxy_response.body)
+        };
+
+    build_response(proxy_response.status, proxy_headers, response_body).await
 }
 
 /// Ensure that if the authenticated user logged in with NEAR (has a NEAR-linked account),
@@ -2813,4 +2836,186 @@ fn decompress_if_gzipped(bytes: &[u8], headers: &HeaderMap) -> Result<Vec<u8>, s
 
     // Not gzipped, return as-is
     Ok(bytes.to_vec())
+}
+
+/// Stream wrapper that extracts response_id from SSE events and stores author info
+use database::repositories::ResponseAuthorRepository;
+use futures::Stream;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
+/// Try to extract response_id from SSE data text
+fn try_extract_response_id(text: &str) -> Option<String> {
+    // Look for response_id in SSE data
+    // Format: data: {"id":"resp_xxx",...}
+    for line in text.lines() {
+        if let Some(data) = line.strip_prefix("data: ") {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                if let Some(id) = json.get("id").and_then(|v| v.as_str()) {
+                    if id.starts_with("resp_") {
+                        return Some(id.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+struct AuthorTrackingStream<S> {
+    inner: S,
+    buffer: String,
+    response_id_found: bool,
+    repo: std::sync::Arc<ResponseAuthorRepository>,
+    conversation_id: String,
+    user_id: UserId,
+    author_name: Option<String>,
+}
+
+impl<S> AuthorTrackingStream<S> {
+    fn new(
+        inner: S,
+        repo: std::sync::Arc<ResponseAuthorRepository>,
+        conversation_id: String,
+        user_id: UserId,
+        author_name: Option<String>,
+    ) -> Self {
+        Self {
+            inner,
+            buffer: String::new(),
+            response_id_found: false,
+            repo,
+            conversation_id,
+            user_id,
+            author_name,
+        }
+    }
+}
+
+impl<S, E> Stream for AuthorTrackingStream<S>
+where
+    S: Stream<Item = Result<Bytes, E>> + Unpin,
+{
+    type Item = Result<Bytes, E>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match Pin::new(&mut self.inner).poll_next(cx) {
+            Poll::Ready(Some(Ok(bytes))) => {
+                // Try to extract response_id if not found yet
+                if !self.response_id_found {
+                    if let Ok(text) = std::str::from_utf8(&bytes) {
+                        self.buffer.push_str(text);
+
+                        if let Some(response_id) = try_extract_response_id(&self.buffer) {
+                            self.response_id_found = true;
+
+                            // Store author info asynchronously
+                            let repo = self.repo.clone();
+                            let conv_id = self.conversation_id.clone();
+                            let user_id = self.user_id;
+                            let author = self.author_name.clone();
+
+                            tokio::spawn(async move {
+                                if let Err(e) = repo
+                                    .store_author(&conv_id, &response_id, user_id.into(), author.as_deref())
+                                    .await
+                                {
+                                    tracing::warn!("Failed to store response author: {}", e);
+                                }
+                            });
+                        }
+                    }
+                }
+
+                Poll::Ready(Some(Ok(bytes)))
+            }
+            other => other,
+        }
+    }
+}
+
+/// Collect a stream into bytes
+async fn collect_stream_to_bytes(
+    stream: impl futures::Stream<Item = Result<Bytes, reqwest::Error>>,
+) -> Bytes {
+    use futures::StreamExt;
+
+    let mut collected = Vec::new();
+    tokio::pin!(stream);
+
+    while let Some(result) = stream.next().await {
+        if let Ok(bytes) = result {
+            collected.extend_from_slice(&bytes);
+        }
+    }
+
+    Bytes::from(collected)
+}
+
+/// Inject author metadata into conversation items response
+/// Returns Ok(modified_bytes) on success, Err(original_bytes) on failure
+async fn inject_author_metadata(
+    state: &crate::state::AppState,
+    conversation_id: &str,
+    body_bytes: Bytes,
+) -> Result<Bytes, Bytes> {
+    // Parse the response as JSON
+    let mut json: serde_json::Value =
+        serde_json::from_slice(&body_bytes).map_err(|_| body_bytes.clone())?;
+
+    // Get authors for this conversation from the database
+    let authors = state
+        .response_author_repository
+        .get_authors_for_conversation(conversation_id)
+        .await
+        .unwrap_or_default();
+
+    if authors.is_empty() {
+        // No authors to inject, return original
+        return Err(body_bytes);
+    }
+
+    // Navigate to the data array containing items
+    let items = json
+        .get_mut("data")
+        .and_then(|d| d.as_array_mut())
+        .ok_or_else(|| body_bytes.clone())?;
+
+    let mut modified = false;
+
+    for item in items.iter_mut() {
+        // Get the response_id from each item (items can have a response_id field)
+        let response_id = item.get("response_id").and_then(|v| v.as_str());
+
+        if let Some(resp_id) = response_id {
+            if let Some(author) = authors.get(resp_id) {
+                // Ensure metadata object exists
+                if item.get("metadata").is_none() {
+                    item["metadata"] = serde_json::json!({});
+                }
+
+                if let Some(metadata) = item.get_mut("metadata").and_then(|m| m.as_object_mut()) {
+                    metadata.insert(
+                        "author_id".to_string(),
+                        serde_json::Value::String(author.user_id.to_string()),
+                    );
+                    if let Some(name) = &author.author_name {
+                        metadata.insert(
+                            "author_name".to_string(),
+                            serde_json::Value::String(name.clone()),
+                        );
+                    }
+                    modified = true;
+                }
+            }
+        }
+    }
+
+    if modified {
+        serde_json::to_vec(&json)
+            .map(Bytes::from)
+            .map_err(|_| body_bytes)
+    } else {
+        Err(body_bytes)
+    }
 }

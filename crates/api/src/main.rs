@@ -76,6 +76,7 @@ async fn main() -> anyhow::Result<()> {
     let analytics_repo = db.analytics_repository();
     let system_configs_repo = db.system_configs_repository();
     let model_repo = db.model_repository();
+    let response_author_repo = db.response_author_repository();
 
     // Create services
     tracing::info!("Initializing services...");
@@ -246,6 +247,7 @@ async fn main() -> anyhow::Result<()> {
         near_rpc_url: config.near.rpc_url.clone(),
         near_balance_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         model_settings_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        response_author_repository: response_author_repo,
     };
 
     // Create router with CORS support
