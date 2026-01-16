@@ -105,7 +105,8 @@ impl RateLimitState {
     async fn try_acquire(&self, user_id: UserId) -> Result<RateLimitGuard, RateLimitError> {
         // Phase 1: Fast checks (short mutex hold time)
         // Check short-term rate limit and acquire permit
-        let permit = {
+        // Store the timestamp so we can rollback the exact one we added
+        let timestamp = {
             let mut user_limits = self.user_limits.lock().await;
 
             user_limits.retain(|_, state| !state.is_idle(Duration::from_secs(3600)));
@@ -161,8 +162,11 @@ impl RateLimitState {
             // This will be rolled back if window limit check fails
             user_state.request_timestamps.push_back(now);
 
-            permit
+            (permit, now)
         }; // Mutex is released here
+
+        let permit = timestamp.0; // Extract permit
+        let added_timestamp = timestamp.1; // Extract timestamp for potential rollback
 
         // Phase 2: Check sliding window limits based on activity_log (no mutex held)
         // First, check all windows without inserting to avoid duplicate records
@@ -189,7 +193,7 @@ impl RateLimitState {
                         e
                     );
                     // Rollback: remove timestamp and release permit
-                    self.rollback_acquire(user_id).await;
+                    self.rollback_acquire(user_id, added_timestamp).await;
                     return Err(RateLimitError::InternalServerError);
                 }
             };
@@ -197,7 +201,7 @@ impl RateLimitState {
             // Check if limit is already reached or exceeded
             if count >= limit_value {
                 // Rollback: remove timestamp and release permit
-                self.rollback_acquire(user_id).await;
+                self.rollback_acquire(user_id, added_timestamp).await;
 
                 // Calculate retry_after: when the oldest activity in the window expires
                 // For sliding window, we estimate based on window size
@@ -258,7 +262,7 @@ impl RateLimitState {
                             "Activity record was not inserted due to limit exceeded during atomic insert"
                         );
                         // Rollback: remove timestamp and release permit
-                        self.rollback_acquire(user_id).await;
+                        self.rollback_acquire(user_id, added_timestamp).await;
 
                         // Calculate retry_after based on window size
                         let retry_after_ms = most_restrictive_window.window.seconds * 1000;
@@ -278,7 +282,7 @@ impl RateLimitState {
                         e
                     );
                     // Rollback: remove timestamp and release permit
-                    self.rollback_acquire(user_id).await;
+                    self.rollback_acquire(user_id, added_timestamp).await;
                     return Err(RateLimitError::InternalServerError);
                 }
             }
@@ -287,16 +291,35 @@ impl RateLimitState {
         Ok(RateLimitGuard { _permit: permit })
     }
 
-    /// Rollback acquire: remove the timestamp that was added during try_acquire.
+    /// Rollback acquire: remove the specific timestamp that was added during try_acquire.
+    ///
+    /// This function removes the exact timestamp that was added, not just the last one.
+    /// This prevents race conditions where multiple concurrent requests might try to
+    /// rollback at the same time, ensuring each request removes its own timestamp.
     ///
     /// Note: This function only removes the timestamp. The permit acquired in `try_acquire`
     /// is owned by the `permit` variable in that function and will be automatically released
     /// when it goes out of scope.
-    async fn rollback_acquire(&self, user_id: UserId) {
+    async fn rollback_acquire(&self, user_id: UserId, timestamp: Instant) {
         let mut user_limits = self.user_limits.lock().await;
         if let Some(user_state) = user_limits.get_mut(&user_id) {
-            // Remove the last timestamp that was added
-            user_state.request_timestamps.pop_back();
+            // Remove the specific timestamp that was added by this request
+            // Search from the back (most recent) to front, and remove the first match
+            // This handles the common case where the timestamp is at the end
+            if let Some(pos) = user_state
+                .request_timestamps
+                .iter()
+                .rposition(|&t| t == timestamp)
+            {
+                user_state.request_timestamps.remove(pos);
+            } else {
+                // Timestamp not found - this could happen if it was already cleaned up
+                // or in rare cases where timestamps are identical. Log a warning but don't panic.
+                tracing::warn!(
+                    user_id = %user_id.0,
+                    "Attempted to rollback timestamp that was not found in queue"
+                );
+            }
         }
     }
 }
