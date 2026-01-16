@@ -426,7 +426,8 @@ impl From<services::system_configs::ports::RateLimitConfig> for RateLimitConfig 
         Self {
             max_concurrent: config.max_concurrent,
             max_requests_per_window: config.max_requests_per_window,
-            window_duration_seconds: config.window_duration_seconds,
+            window_duration_seconds: u64::try_from(config.window_duration.num_seconds())
+                .unwrap_or(u64::MAX),
             window_limits: config.window_limits.into_iter().map(Into::into).collect(),
         }
     }
@@ -443,10 +444,13 @@ impl From<services::system_configs::ports::WindowLimit> for WindowLimit {
 
 impl From<RateLimitConfig> for services::system_configs::ports::RateLimitConfig {
     fn from(api_config: RateLimitConfig) -> Self {
+        use chrono::Duration;
         Self {
             max_concurrent: api_config.max_concurrent,
             max_requests_per_window: api_config.max_requests_per_window,
-            window_duration_seconds: api_config.window_duration_seconds,
+            window_duration: Duration::seconds(
+                i64::try_from(api_config.window_duration_seconds).unwrap_or(i64::MAX),
+            ),
             window_limits: api_config
                 .window_limits
                 .into_iter()

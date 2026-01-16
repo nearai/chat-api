@@ -56,8 +56,9 @@ pub struct RateLimitConfig {
     pub max_concurrent: usize,
     /// Maximum number of requests per time window per user
     pub max_requests_per_window: usize,
-    /// Duration of the short-term rate limit window in seconds
-    pub window_duration_seconds: u64,
+    /// Duration of the short-term rate limit window
+    #[serde(with = "duration_serde")]
+    pub window_duration: Duration,
     /// Sliding window limits based on activity logs
     /// Each limit applies independently
     pub window_limits: Vec<WindowLimit>,
@@ -68,7 +69,7 @@ impl Default for RateLimitConfig {
         Self {
             max_concurrent: 2,
             max_requests_per_window: 1,
-            window_duration_seconds: 1,
+            window_duration: Duration::seconds(1),
             window_limits: vec![WindowLimit {
                 window_duration: Duration::days(1),
                 limit: 1500,

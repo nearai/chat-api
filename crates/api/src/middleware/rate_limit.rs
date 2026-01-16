@@ -16,7 +16,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 use services::{
     analytics::{ActivityType, AnalyticsServiceTrait, CheckAndRecordActivityRequest},
-    system_configs::ports::WindowLimit,
+    system_configs::ports::RateLimitConfig,
     UserId,
 };
 use std::{
@@ -24,53 +24,6 @@ use std::{
     sync::Arc,
 };
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
-
-#[derive(Clone)]
-pub struct RateLimitConfig {
-    pub max_concurrent: usize,
-    pub max_requests_per_window: usize,
-    pub window_duration: Duration,
-    /// Sliding window limits based on activity_log
-    /// Each limit applies independently
-    pub window_limits: Vec<WindowLimit>,
-}
-
-impl Default for RateLimitConfig {
-    fn default() -> Self {
-        Self {
-            max_concurrent: 2,
-            max_requests_per_window: 1,
-            window_duration: Duration::seconds(1),
-            window_limits: vec![WindowLimit {
-                window_duration: Duration::days(1),
-                limit: 1500,
-            }],
-        }
-    }
-}
-
-impl RateLimitConfig {
-    /// Convert from system configs rate limit config
-    pub fn from_system_config(
-        config: Option<&services::system_configs::ports::RateLimitConfig>,
-    ) -> Self {
-        match config {
-            None => Self::default(),
-            Some(cfg) => {
-                let window_limits = cfg.window_limits.clone();
-
-                Self {
-                    max_concurrent: cfg.max_concurrent,
-                    max_requests_per_window: cfg.max_requests_per_window,
-                    window_duration: Duration::seconds(
-                        i64::try_from(cfg.window_duration_seconds).unwrap_or(i64::MAX),
-                    ),
-                    window_limits,
-                }
-            }
-        }
-    }
-}
 
 struct UserRateLimitState {
     semaphore: Arc<Semaphore>,
@@ -465,6 +418,7 @@ pub async fn rate_limit_middleware(
 mod tests {
     use super::*;
     use chrono::Utc;
+    use services::system_configs::ports::WindowLimit;
     use std::sync::Arc;
     use uuid::Uuid;
 

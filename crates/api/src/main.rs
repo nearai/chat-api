@@ -1,4 +1,3 @@
-use api::middleware::RateLimitConfig;
 use api::{create_router_with_cors, ApiDoc, AppState};
 use config::LoggingConfig;
 use opentelemetry::global;
@@ -240,23 +239,11 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Load rate limit config from system configs
-    let rate_limit_config = match system_configs_service.get_configs().await {
-        Ok(Some(system_configs)) => {
-            tracing::info!("Loaded rate limit config from system configs");
-            RateLimitConfig::from_system_config(Some(&system_configs.rate_limit))
-        }
-        Ok(None) => {
-            tracing::info!("No system configs found, using default rate limit config");
-            RateLimitConfig::default()
-        }
-        Err(e) => {
-            tracing::warn!(
-                error = ?e,
-                "Failed to load system configs, using default rate limit config"
-            );
-            RateLimitConfig::default()
-        }
-    };
+    let rate_limit_config = system_configs_service
+        .get_configs()
+        .await?
+        .unwrap_or_default()
+        .rate_limit;
 
     // Create router with CORS support
     let app = create_router_with_cors(app_state, config.cors.clone(), Some(rate_limit_config))
