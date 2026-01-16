@@ -57,9 +57,8 @@ pub struct RateLimitConfig {
     /// Maximum number of requests per time window per user
     pub max_requests_per_window: usize,
     /// Duration of the short-term rate limit window in seconds
-    /// (converted from Duration for serialization)
     pub window_duration_seconds: u64,
-    /// Sliding window limits based on activity_log
+    /// Sliding window limits based on activity logs
     /// Each limit applies independently
     pub window_limits: Vec<WindowLimit>,
 }
@@ -84,7 +83,7 @@ pub struct SystemConfigs {
     /// Default model identifier to use when not specified
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
-    /// Rate limit configuration (always present, uses defaults if not set)
+    /// Rate limit configuration
     pub rate_limit: RateLimitConfig,
 }
 
