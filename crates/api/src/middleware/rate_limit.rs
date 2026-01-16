@@ -12,6 +12,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 use services::{
     analytics::{ActivityType, AnalyticsServiceTrait, CheckAndRecordActivityRequest},
@@ -21,7 +22,6 @@ use services::{
 use std::{
     collections::{HashMap, VecDeque},
     sync::Arc,
-    time::{Duration, Instant},
 };
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 
@@ -40,7 +40,7 @@ impl Default for RateLimitConfig {
         Self {
             max_concurrent: 2,
             max_requests_per_window: 1,
-            window_duration: Duration::from_secs(1),
+            window_duration: Duration::seconds(1),
             window_limits: vec![WindowLimit {
                 window: TimeWindow::day(),
                 limit: 1500,
@@ -62,7 +62,9 @@ impl RateLimitConfig {
                 Self {
                     max_concurrent: cfg.max_concurrent,
                     max_requests_per_window: cfg.max_requests_per_window,
-                    window_duration: Duration::from_secs(cfg.window_duration_seconds),
+                    window_duration: Duration::seconds(
+                        i64::try_from(cfg.window_duration_seconds).unwrap_or(i64::MAX),
+                    ),
                     window_limits,
                 }
             }
@@ -73,8 +75,8 @@ impl RateLimitConfig {
 struct UserRateLimitState {
     semaphore: Arc<Semaphore>,
     max_permits: usize,
-    request_timestamps: VecDeque<Instant>,
-    last_activity: Instant,
+    request_timestamps: VecDeque<DateTime<Utc>>,
+    last_activity: DateTime<Utc>,
 }
 
 impl UserRateLimitState {
@@ -83,12 +85,13 @@ impl UserRateLimitState {
             semaphore: Arc::new(Semaphore::new(max_concurrent)),
             max_permits: max_concurrent,
             request_timestamps: VecDeque::new(),
-            last_activity: Instant::now(),
+            last_activity: Utc::now(),
         }
     }
 
     fn is_idle(&self, max_idle: Duration) -> bool {
-        self.last_activity.elapsed() > max_idle
+        let elapsed = Utc::now().signed_duration_since(self.last_activity);
+        elapsed > max_idle
             && self.request_timestamps.is_empty()
             && self.semaphore.available_permits() == self.max_permits
     }
@@ -124,18 +127,18 @@ impl RateLimitState {
         let timestamp = {
             let mut user_limits = self.user_limits.lock().await;
 
-            user_limits.retain(|_, state| !state.is_idle(Duration::from_secs(3600)));
+            user_limits.retain(|_, state| !state.is_idle(Duration::seconds(3600)));
 
             let user_state = user_limits
                 .entry(user_id)
                 .or_insert_with(|| UserRateLimitState::new(self.config.max_concurrent));
 
-            let now = Instant::now();
+            let now = Utc::now();
             user_state.last_activity = now;
 
             // Clean up expired timestamps
             while let Some(front) = user_state.request_timestamps.front() {
-                if now.duration_since(*front) > self.config.window_duration {
+                if now.signed_duration_since(*front) > self.config.window_duration {
                     user_state.request_timestamps.pop_front();
                 } else {
                     break;
@@ -145,17 +148,17 @@ impl RateLimitState {
             // Check short-term rate limit
             if user_state.request_timestamps.len() >= self.config.max_requests_per_window {
                 if let Some(oldest) = user_state.request_timestamps.front() {
-                    let wait_time = self
-                        .config
-                        .window_duration
-                        .saturating_sub(now.duration_since(*oldest));
+                    let elapsed = now.signed_duration_since(*oldest);
+                    let wait_time = self.config.window_duration - elapsed;
+                    let wait_time_ms =
+                        u64::try_from(wait_time.num_milliseconds().max(0)).unwrap_or(0);
                     tracing::warn!(
                         user_id = %user_id.0,
-                        "Rate limit exceeded for user, retry in {:?}",
-                        wait_time
+                        "Rate limit exceeded for user, retry in {}ms",
+                        wait_time_ms
                     );
                     return Err(RateLimitError::RateLimitExceeded {
-                        retry_after_ms: wait_time.as_millis() as u64,
+                        retry_after_ms: wait_time_ms,
                     });
                 }
             }
@@ -175,9 +178,10 @@ impl RateLimitState {
 
             // Add timestamp only after all fast checks pass
             // This will be rolled back if window limit check fails
-            user_state.request_timestamps.push_back(now);
+            let timestamp = now;
+            user_state.request_timestamps.push_back(timestamp);
 
-            (permit, now)
+            (permit, timestamp)
         }; // Mutex is released here
 
         let permit = timestamp.0; // Extract permit
@@ -347,7 +351,7 @@ impl RateLimitState {
     /// Note: This function only removes the timestamp. The permit acquired in `try_acquire`
     /// is owned by the `permit` variable in that function and will be automatically released
     /// when it goes out of scope.
-    async fn rollback_acquire(&self, user_id: UserId, timestamp: Instant) {
+    async fn rollback_acquire(&self, user_id: UserId, timestamp: DateTime<Utc>) {
         let mut user_limits = self.user_limits.lock().await;
         if let Some(user_state) = user_limits.get_mut(&user_id) {
             // Remove the specific timestamp that was added by this request
@@ -1018,8 +1022,9 @@ mod tests {
                 &self,
                 request: CheckAndRecordActivityRequest,
             ) -> Result<CheckAndRecordActivityResult, AnalyticsError> {
-                let now = chrono::Utc::now();
-                let window_start = now - chrono::Duration::seconds(request.window.seconds as i64);
+                let now = Utc::now();
+                let window_start = now
+                    - Duration::seconds(i64::try_from(request.window.seconds).unwrap_or(i64::MAX));
 
                 let mut activities = self.activities.lock().await;
 
@@ -1052,8 +1057,9 @@ mod tests {
                 _activity_type: ActivityType,
                 window: TimeWindow,
             ) -> Result<i64, AnalyticsError> {
-                let now = chrono::Utc::now();
-                let window_start = now - chrono::Duration::seconds(window.seconds as i64);
+                let now = Utc::now();
+                let window_start =
+                    now - Duration::seconds(i64::try_from(window.seconds).unwrap_or(i64::MAX));
 
                 let activities = self.activities.lock().await;
 
@@ -1228,7 +1234,7 @@ mod tests {
         let state = configured_state(RateLimitConfig {
             max_concurrent: 2,
             max_requests_per_window: 100, // High limit to avoid rate limiting
-            window_duration: Duration::from_secs(1),
+            window_duration: Duration::seconds(1),
             window_limits: vec![], // No window limits for this test
         });
 
@@ -1248,7 +1254,7 @@ mod tests {
         let state = configured_state(RateLimitConfig {
             max_concurrent: 1,
             max_requests_per_window: 100, // High to test concurrency, not rate
-            window_duration: Duration::from_secs(1),
+            window_duration: Duration::seconds(1),
             window_limits: vec![], // No window limits for this test
         });
 
@@ -1275,7 +1281,7 @@ mod tests {
         let state = configured_state(RateLimitConfig {
             max_concurrent: 1,
             max_requests_per_window: 100,
-            window_duration: Duration::from_secs(1),
+            window_duration: Duration::seconds(1),
             window_limits: vec![], // No window limits for this test
         });
 
@@ -1301,7 +1307,7 @@ mod tests {
         let state = configured_state(RateLimitConfig {
             max_concurrent: 2,
             max_requests_per_window: 1,
-            window_duration: Duration::from_millis(50),
+            window_duration: Duration::milliseconds(50),
             window_limits: vec![], // No window limits for this test
         });
 
@@ -1319,14 +1325,24 @@ mod tests {
         );
 
         // Wait for rate limit window to fully expire
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(
+            Duration::milliseconds(100)
+                .to_std()
+                .unwrap_or_else(|_| std::time::Duration::from_millis(100)),
+        )
+        .await;
 
         // Now we should be able to make max_concurrent requests simultaneously
         // proving no permits were leaked when rate limit rejected the request
         let guard_a = state.try_acquire(user).await.unwrap();
 
         // Wait for rate limit window again before second concurrent request
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(
+            Duration::milliseconds(100)
+                .to_std()
+                .unwrap_or_else(|_| std::time::Duration::from_millis(100)),
+        )
+        .await;
 
         let guard_b = state.try_acquire(user).await.unwrap();
 
@@ -1340,7 +1356,7 @@ mod tests {
         let state = configured_state(RateLimitConfig {
             max_concurrent: 2,
             max_requests_per_window: 10,
-            window_duration: Duration::from_millis(10),
+            window_duration: Duration::milliseconds(10),
             window_limits: vec![], // No window limits for this test
         });
 
@@ -1364,7 +1380,7 @@ mod tests {
             RateLimitConfig {
                 max_concurrent: 2,
                 max_requests_per_window: 10, // High limit
-                window_duration: Duration::from_secs(1),
+                window_duration: Duration::seconds(1),
                 window_limits: vec![WindowLimit {
                     window: TimeWindow::day(),
                     limit: 100,
@@ -1422,7 +1438,7 @@ mod tests {
             RateLimitConfig {
                 max_concurrent: 10,
                 max_requests_per_window: 100, // High limit to avoid short-term rate limiting
-                window_duration: Duration::from_secs(1),
+                window_duration: Duration::seconds(1),
                 window_limits: vec![WindowLimit {
                     window: TimeWindow::day(),
                     limit: 10,
@@ -1457,7 +1473,7 @@ mod tests {
             RateLimitConfig {
                 max_concurrent: 10,
                 max_requests_per_window: 100,
-                window_duration: Duration::from_secs(1),
+                window_duration: Duration::seconds(1),
                 window_limits: vec![WindowLimit {
                     window: TimeWindow::day(),
                     limit,
@@ -1496,7 +1512,7 @@ mod tests {
             RateLimitConfig {
                 max_concurrent: 10,
                 max_requests_per_window: 100,
-                window_duration: Duration::from_secs(1),
+                window_duration: Duration::seconds(1),
                 window_limits: vec![WindowLimit {
                     window: TimeWindow::day(),
                     limit,
@@ -1525,7 +1541,7 @@ mod tests {
             RateLimitConfig {
                 max_concurrent: 10,
                 max_requests_per_window: 100,
-                window_duration: Duration::from_secs(1),
+                window_duration: Duration::seconds(1),
                 window_limits: vec![
                     WindowLimit {
                         window: TimeWindow::day(),
@@ -1555,7 +1571,7 @@ mod tests {
             RateLimitConfig {
                 max_concurrent: 10,
                 max_requests_per_window: 100,
-                window_duration: Duration::from_secs(1),
+                window_duration: Duration::seconds(1),
                 window_limits: vec![
                     WindowLimit {
                         window: TimeWindow::day(),
@@ -1590,7 +1606,7 @@ mod tests {
             RateLimitConfig {
                 max_concurrent: 10,
                 max_requests_per_window: 100,
-                window_duration: Duration::from_secs(1),
+                window_duration: Duration::seconds(1),
                 window_limits: vec![
                     WindowLimit {
                         window: TimeWindow::day(),
@@ -1627,7 +1643,7 @@ mod tests {
             RateLimitConfig {
                 max_concurrent: 10,
                 max_requests_per_window: 100,
-                window_duration: Duration::from_secs(1),
+                window_duration: Duration::seconds(1),
                 window_limits: vec![WindowLimit {
                     window: TimeWindow::day(),
                     limit: 10,
@@ -1655,7 +1671,7 @@ mod tests {
             RateLimitConfig {
                 max_concurrent: 10,
                 max_requests_per_window: 100,
-                window_duration: Duration::from_secs(1),
+                window_duration: Duration::seconds(1),
                 window_limits: vec![WindowLimit {
                     window: TimeWindow::day(),
                     limit: 10,
@@ -1682,7 +1698,7 @@ mod tests {
             RateLimitConfig {
                 max_concurrent: 10,
                 max_requests_per_window: 100,
-                window_duration: Duration::from_secs(1),
+                window_duration: Duration::seconds(1),
                 window_limits: vec![WindowLimit {
                     window: TimeWindow::week(),
                     limit: 10,
@@ -1709,7 +1725,7 @@ mod tests {
             RateLimitConfig {
                 max_concurrent: 10,
                 max_requests_per_window: 100,
-                window_duration: Duration::from_secs(1),
+                window_duration: Duration::seconds(1),
                 window_limits: vec![WindowLimit {
                     window: TimeWindow::month(),
                     limit: 10,
@@ -1738,7 +1754,7 @@ mod tests {
             RateLimitConfig {
                 max_concurrent: 10,
                 max_requests_per_window: 100,
-                window_duration: Duration::from_secs(1),
+                window_duration: Duration::seconds(1),
                 window_limits: vec![WindowLimit {
                     window: TimeWindow::day(),
                     limit: 10,
@@ -1761,7 +1777,7 @@ mod tests {
             RateLimitConfig {
                 max_concurrent: 10,
                 max_requests_per_window: 100,
-                window_duration: Duration::from_secs(1),
+                window_duration: Duration::seconds(1),
                 window_limits: vec![], // No window limits
             },
             Arc::new(test_services::AlwaysAllowAnalyticsService),
@@ -1788,7 +1804,7 @@ mod tests {
             RateLimitConfig {
                 max_concurrent: 10,
                 max_requests_per_window: 100, // High limit to avoid short-term rate limiting
-                window_duration: Duration::from_secs(1),
+                window_duration: Duration::seconds(1),
                 window_limits: vec![WindowLimit {
                     window: TimeWindow::new(window_seconds),
                     limit,
@@ -1819,7 +1835,12 @@ mod tests {
         );
 
         // Wait for the window to expire (window_seconds + small buffer)
-        tokio::time::sleep(Duration::from_secs(window_seconds + 1)).await;
+        tokio::time::sleep(
+            Duration::seconds(window_seconds as i64 + 1)
+                .to_std()
+                .unwrap_or_else(|_| std::time::Duration::from_secs(window_seconds + 1)),
+        )
+        .await;
 
         // Now the old activities should have expired, so we should be able to make new requests
         let result = state.try_acquire(user).await;
