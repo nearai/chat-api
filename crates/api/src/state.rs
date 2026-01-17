@@ -57,4 +57,26 @@ pub struct AppState {
     pub near_balance_cache: NearBalanceCache,
     /// In-memory cache for model settings needed by /v1/responses (public + system_prompt)
     pub model_settings_cache: ModelSettingsCache,
+
+    // Enterprise services
+    /// Organization service for managing organizations
+    pub organization_service: Arc<dyn services::organization::ports::OrganizationService>,
+    /// Organization repository for tenant middleware
+    pub organization_repository: Arc<dyn services::organization::ports::OrganizationRepository>,
+    /// Workspace service for managing workspaces
+    pub workspace_service: Arc<dyn services::workspace::ports::WorkspaceService>,
+    /// Workspace repository for tenant middleware
+    pub workspace_repository: Arc<dyn services::workspace::ports::WorkspaceRepository>,
+    /// Permission service for RBAC
+    pub permission_service: Arc<dyn services::rbac::ports::PermissionService>,
+    /// Role service for RBAC
+    pub role_service: Arc<dyn services::rbac::ports::RoleService>,
+    /// Role repository for tenant middleware
+    pub role_repository: Arc<dyn services::rbac::ports::RoleRepository>,
+    /// Audit service for logging
+    pub audit_service: Arc<dyn services::audit::ports::AuditService>,
+    /// SAML service for SSO (optional, only enabled if configured)
+    pub saml_service: Option<Arc<dyn services::saml::ports::SamlService>>,
+    /// Domain verification service
+    pub domain_service: Arc<dyn services::domain::ports::DomainVerificationService>,
 }

@@ -8,15 +8,20 @@ use opentelemetry_sdk::{
 };
 use services::{
     analytics::AnalyticsServiceImpl,
+    audit::service::AuditServiceImpl,
     auth::OAuthServiceImpl,
     conversation::service::ConversationServiceImpl,
+    domain::service::DomainVerificationServiceImpl,
     file::service::FileServiceImpl,
     metrics::{MockMetricsService, OtlpMetricsService},
     model::service::ModelServiceImpl,
+    organization::service::OrganizationServiceImpl,
+    rbac::service::{PermissionServiceImpl, RoleServiceImpl},
     response::service::OpenAIProxy,
     user::UserServiceImpl,
     user::UserSettingsServiceImpl,
     vpc::{initialize_vpc_credentials, VpcAuthConfig},
+    workspace::service::WorkspaceServiceImpl,
 };
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
@@ -74,6 +79,16 @@ async fn main() -> anyhow::Result<()> {
     let analytics_repo = db.analytics_repository();
     let system_configs_repo = db.system_configs_repository();
     let model_repo = db.model_repository();
+
+    // Enterprise repositories
+    let organization_repo = db.organization_repository();
+    let workspace_repo = db.workspace_repository();
+    let permission_repo = db.permission_repository();
+    let role_repo = db.role_repository();
+    let audit_repo = db.audit_repository();
+    let saml_idp_config_repo = db.saml_idp_config_repository();
+    let saml_auth_state_repo = db.saml_auth_state_repository();
+    let domain_repo = db.domain_repository();
 
     // Create services
     tracing::info!("Initializing services...");
@@ -150,6 +165,47 @@ async fn main() -> anyhow::Result<()> {
     // Initialize analytics service
     tracing::info!("Initializing analytics service...");
     let analytics_service = Arc::new(AnalyticsServiceImpl::new(analytics_repo));
+
+    // Initialize enterprise services
+    tracing::info!("Initializing enterprise services...");
+
+    let organization_service = Arc::new(OrganizationServiceImpl::new(
+        organization_repo.clone(),
+        workspace_repo.clone(),
+    ));
+
+    let workspace_service = Arc::new(WorkspaceServiceImpl::new(
+        workspace_repo.clone(),
+    ));
+
+    let permission_service = Arc::new(PermissionServiceImpl::new(
+        permission_repo.clone(),
+        role_repo.clone(),
+    ));
+
+    let role_service = Arc::new(RoleServiceImpl::new(
+        role_repo.clone(),
+        permission_repo.clone(),
+    ));
+
+    let audit_service = Arc::new(AuditServiceImpl::new(audit_repo.clone()));
+
+    let domain_service = Arc::new(DomainVerificationServiceImpl::new(domain_repo));
+
+    // SAML service is optional - only initialize if SAML is configured
+    // For now, set to None until SAML configuration is added
+    let saml_service: Option<Arc<dyn services::saml::ports::SamlService>> = None;
+    // TODO: Initialize SAML service when config is available:
+    // let saml_service = Some(Arc::new(SamlServiceImpl::new(
+    //     saml_idp_config_repo,
+    //     saml_auth_state_repo,
+    //     session_repo.clone(),
+    //     user_repo.clone(),
+    //     organization_repo.clone(),
+    //     config.saml.entity_id.clone(),
+    //     config.saml.acs_url.clone(),
+    // )));
+    let _ = (saml_idp_config_repo, saml_auth_state_repo); // Suppress unused warnings
 
     // Initialize system configs service
     tracing::info!("Initializing system configs service...");
@@ -235,6 +291,17 @@ async fn main() -> anyhow::Result<()> {
         near_rpc_url: config.near.rpc_url.clone(),
         near_balance_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         model_settings_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        // Enterprise services
+        organization_service,
+        organization_repository: organization_repo,
+        workspace_service,
+        workspace_repository: workspace_repo,
+        permission_service,
+        role_service,
+        role_repository: role_repo,
+        audit_service,
+        saml_service,
+        domain_service,
     };
 
     // Create router with CORS support

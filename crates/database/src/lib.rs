@@ -6,10 +6,13 @@ pub mod repositories;
 
 pub use pool::DbPool;
 pub use repositories::{
-    PostgresAnalyticsRepository, PostgresAppConfigRepository, PostgresConversationRepository,
-    PostgresFileRepository, PostgresModelRepository, PostgresNearNonceRepository,
-    PostgresOAuthRepository, PostgresSessionRepository, PostgresSystemConfigsRepository,
-    PostgresUserRepository, PostgresUserSettingsRepository,
+    PostgresAnalyticsRepository, PostgresAppConfigRepository, PostgresAuditRepository,
+    PostgresConversationRepository, PostgresDomainRepository, PostgresFileRepository,
+    PostgresModelRepository, PostgresNearNonceRepository, PostgresOAuthRepository,
+    PostgresOrganizationRepository, PostgresPermissionRepository, PostgresRoleRepository,
+    PostgresSamlAuthStateRepository, PostgresSamlIdpConfigRepository, PostgresSessionRepository,
+    PostgresSystemConfigsRepository, PostgresUserRepository, PostgresUserSettingsRepository,
+    PostgresWorkspaceRepository,
 };
 
 use crate::pool::create_pool_with_native_tls;
@@ -35,6 +38,15 @@ pub struct Database {
     analytics_repository: Arc<PostgresAnalyticsRepository>,
     model_repository: Arc<PostgresModelRepository>,
     cluster_manager: Option<Arc<ClusterManager>>,
+    // Enterprise repositories
+    organization_repository: Arc<PostgresOrganizationRepository>,
+    workspace_repository: Arc<PostgresWorkspaceRepository>,
+    permission_repository: Arc<PostgresPermissionRepository>,
+    role_repository: Arc<PostgresRoleRepository>,
+    audit_repository: Arc<PostgresAuditRepository>,
+    saml_idp_config_repository: Arc<PostgresSamlIdpConfigRepository>,
+    saml_auth_state_repository: Arc<PostgresSamlAuthStateRepository>,
+    domain_repository: Arc<PostgresDomainRepository>,
 }
 
 impl Database {
@@ -53,6 +65,18 @@ impl Database {
         let analytics_repository = Arc::new(PostgresAnalyticsRepository::new(pool.clone()));
         let model_repository = Arc::new(PostgresModelRepository::new(pool.clone()));
 
+        // Enterprise repositories
+        let organization_repository = Arc::new(PostgresOrganizationRepository::new(pool.clone()));
+        let workspace_repository = Arc::new(PostgresWorkspaceRepository::new(pool.clone()));
+        let permission_repository = Arc::new(PostgresPermissionRepository::new(pool.clone()));
+        let role_repository = Arc::new(PostgresRoleRepository::new(pool.clone()));
+        let audit_repository = Arc::new(PostgresAuditRepository::new(pool.clone()));
+        let saml_idp_config_repository =
+            Arc::new(PostgresSamlIdpConfigRepository::new(pool.clone()));
+        let saml_auth_state_repository =
+            Arc::new(PostgresSamlAuthStateRepository::new(pool.clone()));
+        let domain_repository = Arc::new(PostgresDomainRepository::new(pool.clone()));
+
         Self {
             pool,
             user_repository,
@@ -67,6 +91,14 @@ impl Database {
             analytics_repository,
             model_repository,
             cluster_manager: None,
+            organization_repository,
+            workspace_repository,
+            permission_repository,
+            role_repository,
+            audit_repository,
+            saml_idp_config_repository,
+            saml_auth_state_repository,
+            domain_repository,
         }
     }
 
@@ -243,5 +275,45 @@ impl Database {
     /// Get the system configs repository
     pub fn system_configs_repository(&self) -> Arc<PostgresSystemConfigsRepository> {
         self.system_configs_repository.clone()
+    }
+
+    /// Get the organization repository
+    pub fn organization_repository(&self) -> Arc<PostgresOrganizationRepository> {
+        self.organization_repository.clone()
+    }
+
+    /// Get the workspace repository
+    pub fn workspace_repository(&self) -> Arc<PostgresWorkspaceRepository> {
+        self.workspace_repository.clone()
+    }
+
+    /// Get the permission repository
+    pub fn permission_repository(&self) -> Arc<PostgresPermissionRepository> {
+        self.permission_repository.clone()
+    }
+
+    /// Get the role repository
+    pub fn role_repository(&self) -> Arc<PostgresRoleRepository> {
+        self.role_repository.clone()
+    }
+
+    /// Get the audit repository
+    pub fn audit_repository(&self) -> Arc<PostgresAuditRepository> {
+        self.audit_repository.clone()
+    }
+
+    /// Get the SAML IdP config repository
+    pub fn saml_idp_config_repository(&self) -> Arc<PostgresSamlIdpConfigRepository> {
+        self.saml_idp_config_repository.clone()
+    }
+
+    /// Get the SAML auth state repository
+    pub fn saml_auth_state_repository(&self) -> Arc<PostgresSamlAuthStateRepository> {
+        self.saml_auth_state_repository.clone()
+    }
+
+    /// Get the domain repository
+    pub fn domain_repository(&self) -> Arc<PostgresDomainRepository> {
+        self.domain_repository.clone()
     }
 }

@@ -96,6 +96,13 @@ macro_rules! impl_id_type {
 // Define all our ID types
 impl_id_type!(UserId);
 impl_id_type!(SessionId);
+impl_id_type!(OrganizationId);
+impl_id_type!(WorkspaceId);
+impl_id_type!(RoleId);
+impl_id_type!(PermissionId);
+impl_id_type!(WorkspaceMembershipId);
+impl_id_type!(DomainVerificationId);
+impl_id_type!(AuditLogId);
 
 #[cfg(test)]
 mod tests {

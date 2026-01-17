@@ -1,7 +1,12 @@
 pub mod auth;
 pub mod metrics;
 pub mod rate_limit;
+pub mod tenant;
 
 pub use auth::{admin_auth_middleware, auth_middleware, AuthState, AuthenticatedUser};
 pub use metrics::{http_metrics_middleware, MetricsState};
 pub use rate_limit::{rate_limit_middleware, RateLimitConfig, RateLimitState};
+pub use tenant::{
+    has_all_permissions, has_any_permission, require_permission, tenant_middleware, TenantContext,
+    TenantState,
+};

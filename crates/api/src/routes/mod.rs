@@ -1,9 +1,15 @@
 pub mod admin;
 pub mod api;
 pub mod attestation;
+pub mod audit;
 pub mod configs;
+pub mod domains;
 pub mod oauth;
+pub mod organizations;
+pub mod roles;
+pub mod saml;
 pub mod users;
+pub mod workspaces;
 
 use axum::{middleware::from_fn_with_state, routing::get, Json, Router};
 use http::HeaderValue;
@@ -12,7 +18,7 @@ use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use utoipa::ToSchema;
 
 use crate::{
-    middleware::{AuthState, MetricsState, RateLimitState},
+    middleware::{AuthState, MetricsState, RateLimitState, TenantState},
     state::AppState,
     static_files,
 };
@@ -82,6 +88,13 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         admin_domains: app_state.admin_domains.clone(),
     };
 
+    // Create tenant state for middleware
+    let tenant_state = TenantState {
+        organization_repository: app_state.organization_repository.clone(),
+        workspace_repository: app_state.workspace_repository.clone(),
+        role_repository: app_state.role_repository.clone(),
+    };
+
     // Create metrics state for middleware
     let metrics_state = MetricsState {
         metrics_service: app_state.metrics_service.clone(),
@@ -98,6 +111,9 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
             crate::middleware::auth_middleware,
         ));
 
+    // SAML auth routes (public, for SSO flow)
+    let saml_auth_routes = saml::create_saml_auth_router();
+
     // Attestation routes (public, no auth required)
     let attestation_routes = attestation::create_attestation_router();
 
@@ -113,6 +129,17 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         crate::middleware::auth_middleware,
     ));
 
+    // User roles routes (requires authentication + tenant context)
+    let user_roles_routes = roles::create_user_roles_router()
+        .layer(from_fn_with_state(
+            tenant_state.clone(),
+            crate::middleware::tenant_middleware,
+        ))
+        .layer(from_fn_with_state(
+            auth_state.clone(),
+            crate::middleware::auth_middleware,
+        ));
+
     // Create rate limit state with analytics service from app state
     let rate_limit_state = RateLimitState::new(app_state.analytics_service.clone());
 
@@ -124,9 +151,75 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
 
     // API proxy routes (requires authentication)
     let api_routes = api::create_api_router(rate_limit_state).layer(from_fn_with_state(
-        auth_state,
+        auth_state.clone(),
         crate::middleware::auth_middleware,
     ));
+
+    // Organization routes (requires authentication + tenant context)
+    let organization_routes = organizations::create_organizations_router()
+        .layer(from_fn_with_state(
+            tenant_state.clone(),
+            crate::middleware::tenant_middleware,
+        ))
+        .layer(from_fn_with_state(
+            auth_state.clone(),
+            crate::middleware::auth_middleware,
+        ));
+
+    // Workspace routes (requires authentication + tenant context)
+    let workspace_routes = workspaces::create_workspaces_router()
+        .layer(from_fn_with_state(
+            tenant_state.clone(),
+            crate::middleware::tenant_middleware,
+        ))
+        .layer(from_fn_with_state(
+            auth_state.clone(),
+            crate::middleware::auth_middleware,
+        ));
+
+    // Roles routes (requires authentication + tenant context)
+    let roles_routes = roles::create_roles_router()
+        .layer(from_fn_with_state(
+            tenant_state.clone(),
+            crate::middleware::tenant_middleware,
+        ))
+        .layer(from_fn_with_state(
+            auth_state.clone(),
+            crate::middleware::auth_middleware,
+        ));
+
+    // Audit routes (requires authentication + tenant context)
+    let audit_routes = audit::create_audit_router()
+        .layer(from_fn_with_state(
+            tenant_state.clone(),
+            crate::middleware::tenant_middleware,
+        ))
+        .layer(from_fn_with_state(
+            auth_state.clone(),
+            crate::middleware::auth_middleware,
+        ));
+
+    // SAML admin routes (requires authentication + tenant context)
+    let saml_admin_routes = saml::create_saml_admin_router()
+        .layer(from_fn_with_state(
+            tenant_state.clone(),
+            crate::middleware::tenant_middleware,
+        ))
+        .layer(from_fn_with_state(
+            auth_state.clone(),
+            crate::middleware::auth_middleware,
+        ));
+
+    // Domain routes (requires authentication + tenant context)
+    let domain_routes = domains::create_domains_router()
+        .layer(from_fn_with_state(
+            tenant_state,
+            crate::middleware::tenant_middleware,
+        ))
+        .layer(from_fn_with_state(
+            auth_state,
+            crate::middleware::auth_middleware,
+        ));
 
     // Build the base router
     let router = Router::new()
@@ -134,8 +227,16 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         .merge(configs_routes) // Configs route (requires user auth)
         .nest("/v1/auth", auth_routes)
         .nest("/v1/auth", logout_route) // Logout route with auth middleware
+        .nest("/v1/auth/saml", saml_auth_routes) // SAML SSO routes (public)
         .nest("/v1/users", user_routes)
+        .nest("/v1/users", user_roles_routes) // User roles routes with tenant context
         .nest("/v1/admin", admin_routes)
+        .nest("/v1/admin/audit-logs", audit_routes) // Audit log routes
+        .nest("/v1/admin/saml", saml_admin_routes) // SAML admin routes
+        .nest("/v1/admin/domains", domain_routes) // Domain verification routes
+        .nest("/v1/organizations", organization_routes) // Organization routes
+        .nest("/v1/workspaces", workspace_routes) // Workspace routes
+        .nest("/v1/roles", roles_routes) // Roles routes
         .merge(api_routes) // Merge instead of nest since api routes already have /v1 prefix
         .merge(attestation_routes) // Merge attestation routes (already have /v1 prefix)
         .with_state(app_state)
