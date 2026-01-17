@@ -92,6 +92,10 @@ pub fn create_api_router(
         .route(
             "/v1/conversations/{conversation_id}/clone",
             post(clone_conversation),
+        )
+        .route(
+            "/v1/conversations/{conversation_id}/typing",
+            post(send_typing_indicator),
         );
 
     let share_groups_router = Router::new()
@@ -957,6 +961,14 @@ async fn create_conversation_items(
 
     validate_user_conversation(&state, &user, &conversation_id, SharePermission::Write).await?;
 
+    // Get user profile for author tracking
+    let author_name = state
+        .user_service
+        .get_user_profile(user.user_id)
+        .await
+        .ok()
+        .and_then(|p| p.user.name);
+
     // Extract body
     let body_bytes = extract_body_bytes(request).await?;
 
@@ -1000,12 +1012,104 @@ async fn create_conversation_items(
                 .into_response()
         })?;
 
-    build_response(
-        proxy_response.status,
-        proxy_response.headers,
-        Body::from_stream(proxy_response.body),
-    )
-    .await
+    // If successful, buffer response to extract response_ids for author tracking and WebSocket broadcast
+    if (200..300).contains(&proxy_response.status) {
+        use futures::StreamExt;
+
+        // Collect the response body
+        let mut response_bytes = Vec::new();
+        let mut body_stream = proxy_response.body;
+        while let Some(chunk) = body_stream.next().await {
+            if let Ok(bytes) = chunk {
+                response_bytes.extend_from_slice(&bytes);
+            }
+        }
+
+        // Try to parse the response to extract response_ids and inject author info
+        if let Ok(mut response_json) = serde_json::from_slice::<serde_json::Value>(&response_bytes) {
+            // Inject author info into each item's metadata and store in DB
+            if let Some(items) = response_json.as_array_mut() {
+                for item in items.iter_mut() {
+                    if let Some(response_id) = item.get("response_id").and_then(|v| v.as_str()) {
+                        // Store author info for this response_id
+                        if let Err(e) = state
+                            .response_author_repository
+                            .store_author(
+                                &conversation_id,
+                                response_id,
+                                user.user_id.into(),
+                                author_name.as_deref(),
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                "Failed to store author for response_id={}: {}",
+                                response_id,
+                                e
+                            );
+                        }
+                    }
+
+                    // Inject author_id and author_name into item metadata
+                    if let Some(item_obj) = item.as_object_mut() {
+                        let metadata = item_obj
+                            .entry("metadata")
+                            .or_insert_with(|| serde_json::json!({}));
+                        if let Some(metadata_obj) = metadata.as_object_mut() {
+                            metadata_obj.insert(
+                                "author_id".to_string(),
+                                serde_json::json!(user.user_id.to_string()),
+                            );
+                            if let Some(name) = &author_name {
+                                metadata_obj.insert(
+                                    "author_name".to_string(),
+                                    serde_json::json!(name),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Broadcast response items with author info to WebSocket subscribers
+            let subscriber_count = state
+                .connection_manager
+                .broadcast_new_items(&conversation_id, response_json.clone())
+                .await;
+            if subscriber_count > 0 {
+                tracing::debug!(
+                    "Broadcast new items to {} WebSocket subscribers for conversation_id={}",
+                    subscriber_count,
+                    conversation_id
+                );
+            }
+
+            // Return the modified response with author info injected
+            let modified_response = serde_json::to_vec(&response_json).unwrap_or(response_bytes);
+            build_response(
+                proxy_response.status,
+                proxy_response.headers,
+                Body::from(modified_response),
+            )
+            .await
+        } else {
+            // If parsing failed, return original response
+            build_response(
+                proxy_response.status,
+                proxy_response.headers,
+                Body::from(response_bytes),
+            )
+            .await
+        }
+    } else {
+        // For non-success responses, just stream through
+        build_response(
+            proxy_response.status,
+            proxy_response.headers,
+            Body::from_stream(proxy_response.body),
+        )
+        .await
+    }
 }
 
 /// List conversation items - works with optional authentication
@@ -1338,6 +1442,47 @@ async fn clone_conversation(
         TrackableResource::Conversation,
     )
     .await
+}
+
+/// Send a typing indicator to all WebSocket subscribers of a conversation
+///
+/// This endpoint broadcasts a typing event to all connected clients watching this conversation.
+/// Used for real-time "user is typing..." indicators in shared conversations.
+async fn send_typing_indicator(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(conversation_id): Path<String>,
+) -> Result<StatusCode, Response> {
+    tracing::debug!(
+        "send_typing_indicator called for user_id={}, conversation_id={}",
+        user.user_id,
+        conversation_id
+    );
+
+    // Validate user has at least read access to the conversation
+    validate_user_conversation(&state, &user, &conversation_id, SharePermission::Read).await?;
+
+    // Get user profile for display name
+    let user_name = state
+        .user_service
+        .get_user_profile(user.user_id)
+        .await
+        .ok()
+        .and_then(|p| p.user.name);
+
+    // Broadcast typing event to WebSocket subscribers
+    let subscriber_count = state
+        .connection_manager
+        .broadcast_typing(&conversation_id, &user.user_id.to_string(), user_name)
+        .await;
+
+    tracing::debug!(
+        "Broadcast typing indicator to {} WebSocket subscribers for conversation_id={}",
+        subscriber_count,
+        conversation_id
+    );
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Upload a file - forwards to OpenAI and tracks in DB
@@ -1933,12 +2078,19 @@ async fn proxy_responses(
     let response_body =
         if conversation_id_for_author.is_some() && (200..300).contains(&proxy_response.status) {
             let repo = state.response_author_repository.clone();
+            let connection_manager = state.connection_manager.clone();
             let conv_id = conversation_id_for_author.unwrap();
             let user_id = user.user_id;
             let author = author_name_for_tracking;
 
-            let wrapped_stream =
-                AuthorTrackingStream::new(proxy_response.body, repo, conv_id, user_id, author);
+            let wrapped_stream = AuthorTrackingStream::new(
+                proxy_response.body,
+                repo,
+                connection_manager,
+                conv_id,
+                user_id,
+                author,
+            );
             Body::from_stream(wrapped_stream)
         } else {
             Body::from_stream(proxy_response.body)
@@ -2866,7 +3018,10 @@ struct AuthorTrackingStream<S> {
     inner: S,
     buffer: String,
     response_id_found: bool,
+    response_id: Option<String>,
+    stream_ended: bool,
     repo: std::sync::Arc<ResponseAuthorRepository>,
+    connection_manager: std::sync::Arc<crate::websocket::ConnectionManager>,
     conversation_id: String,
     user_id: UserId,
     author_name: Option<String>,
@@ -2876,6 +3031,7 @@ impl<S> AuthorTrackingStream<S> {
     fn new(
         inner: S,
         repo: std::sync::Arc<ResponseAuthorRepository>,
+        connection_manager: std::sync::Arc<crate::websocket::ConnectionManager>,
         conversation_id: String,
         user_id: UserId,
         author_name: Option<String>,
@@ -2884,7 +3040,10 @@ impl<S> AuthorTrackingStream<S> {
             inner,
             buffer: String::new(),
             response_id_found: false,
+            response_id: None,
+            stream_ended: false,
             repo,
+            connection_manager,
             conversation_id,
             user_id,
             author_name,
@@ -2901,13 +3060,15 @@ where
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match Pin::new(&mut self.inner).poll_next(cx) {
             Poll::Ready(Some(Ok(bytes))) => {
-                // Try to extract response_id if not found yet
-                if !self.response_id_found {
-                    if let Ok(text) = std::str::from_utf8(&bytes) {
-                        self.buffer.push_str(text);
+                // Try to extract response_id if not found yet, and detect stream completion
+                if let Ok(text) = std::str::from_utf8(&bytes) {
+                    self.buffer.push_str(text);
 
+                    // Check for response_id
+                    if !self.response_id_found {
                         if let Some(response_id) = try_extract_response_id(&self.buffer) {
                             self.response_id_found = true;
+                            self.response_id = Some(response_id.clone());
 
                             // Store author info asynchronously
                             let repo = self.repo.clone();
@@ -2925,9 +3086,84 @@ where
                             });
                         }
                     }
+
+                    // Check for SSE [DONE] marker which signals stream completion
+                    // OpenAI sends "data: [DONE]" at the end of the stream
+                    if !self.stream_ended && text.contains("[DONE]") {
+                        self.stream_ended = true;
+                        let connection_manager = self.connection_manager.clone();
+                        let conv_id = self.conversation_id.clone();
+                        let response_id = self.response_id.clone();
+
+                        tracing::info!(
+                            "AuthorTrackingStream: detected [DONE] marker for conversation_id={}, response_id={:?}",
+                            conv_id,
+                            response_id
+                        );
+
+                        tokio::spawn(async move {
+                            let subscriber_count = connection_manager
+                                .broadcast_response_created(&conv_id, response_id.as_deref())
+                                .await;
+                            tracing::info!(
+                                "Broadcast response_created to {} WebSocket subscribers for conversation_id={}",
+                                subscriber_count,
+                                conv_id
+                            );
+                        });
+                    }
                 }
 
                 Poll::Ready(Some(Ok(bytes)))
+            }
+            Poll::Ready(None) => {
+                // Stream ended - broadcast to WebSocket subscribers so they can refresh
+                if !self.stream_ended {
+                    self.stream_ended = true;
+                    let connection_manager = self.connection_manager.clone();
+                    let conv_id = self.conversation_id.clone();
+                    let response_id = self.response_id.clone();
+
+                    tracing::info!(
+                        "AuthorTrackingStream: stream ended for conversation_id={}, response_id={:?}",
+                        conv_id,
+                        response_id
+                    );
+
+                    tokio::spawn(async move {
+                        // Broadcast a "response_created" event so other users can refresh
+                        let subscriber_count = connection_manager
+                            .broadcast_response_created(&conv_id, response_id.as_deref())
+                            .await;
+                        tracing::info!(
+                            "Broadcast response_created to {} WebSocket subscribers for conversation_id={}",
+                            subscriber_count,
+                            conv_id
+                        );
+                    });
+                }
+                Poll::Ready(None)
+            }
+            Poll::Ready(Some(Err(e))) => {
+                // Stream error - still broadcast so other users can refresh
+                if !self.stream_ended {
+                    self.stream_ended = true;
+                    let connection_manager = self.connection_manager.clone();
+                    let conv_id = self.conversation_id.clone();
+                    let response_id = self.response_id.clone();
+
+                    tracing::warn!(
+                        "AuthorTrackingStream: stream error for conversation_id={}, broadcasting anyway",
+                        conv_id
+                    );
+
+                    tokio::spawn(async move {
+                        connection_manager
+                            .broadcast_response_created(&conv_id, response_id.as_deref())
+                            .await;
+                    });
+                }
+                Poll::Ready(Some(Err(e)))
             }
             other => other,
         }
