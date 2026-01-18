@@ -69,7 +69,6 @@ impl PostgresConversationShareRepository {
             recipient,
             group_id: row.get("group_id"),
             org_email_pattern: row.get("org_email_pattern"),
-            public_token: row.get("public_token"),
             created_at: row.get("created_at"),
             updated_at: row.get("updated_at"),
         })
@@ -424,13 +423,12 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                      recipient_type,
                      recipient_value,
                      group_id,
-                     org_email_pattern,
-                     public_token
+                     org_email_pattern
                  )
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                  RETURNING id, conversation_id, owner_user_id, share_type, permission,
                            recipient_type, recipient_value, group_id, org_email_pattern,
-                           public_token, created_at, updated_at",
+                           created_at, updated_at",
                 &[
                     &share.conversation_id,
                     &share.owner_user_id.0,
@@ -446,7 +444,6 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                         .map(|recipient| recipient.value.as_str()),
                     &share.group_id,
                     &share.org_email_pattern,
-                    &share.public_token,
                 ],
             )
             .await
@@ -470,7 +467,7 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
             .query(
                 "SELECT id, conversation_id, owner_user_id, share_type, permission,
                         recipient_type, recipient_value, group_id, org_email_pattern,
-                        public_token, created_at, updated_at
+                        created_at, updated_at
                  FROM conversation_shares
                  WHERE owner_user_id = $1 AND conversation_id = $2
                  ORDER BY created_at",
@@ -586,7 +583,7 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
             .query_opt(
                 "SELECT id, conversation_id, owner_user_id, share_type, permission,
                         recipient_type, recipient_value, group_id, org_email_pattern,
-                        public_token, created_at, updated_at
+                        created_at, updated_at
                  FROM conversation_shares
                  WHERE share_type = 'public' AND conversation_id = $1",
                 &[&conversation_id],

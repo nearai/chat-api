@@ -1,6 +1,4 @@
 use async_trait::async_trait;
-use rand::rngs::OsRng;
-use rand::TryRngCore;
 use std::sync::Arc;
 
 use super::ports::{
@@ -10,8 +8,6 @@ use super::ports::{
 };
 use crate::user::ports::{OAuthProvider, UserRepository};
 use crate::UserId;
-
-const PUBLIC_TOKEN_BYTES: usize = 32;
 
 pub struct ConversationShareServiceImpl {
     conversation_repository: Arc<dyn ConversationRepository>,
@@ -60,14 +56,6 @@ impl ConversationShareServiceImpl {
             // company.com -> %@company.com
             format!("%@{trimmed}")
         }
-    }
-
-    fn generate_public_token() -> Result<String, ConversationError> {
-        let mut bytes = [0u8; PUBLIC_TOKEN_BYTES];
-        let mut rng = OsRng;
-        rng.try_fill_bytes(&mut bytes)
-            .map_err(|e| ConversationError::InternalError(format!("Failed to generate share token: {}", e)))?;
-        Ok(hex::encode(bytes))
     }
 
     fn has_required_permission(
@@ -269,7 +257,6 @@ impl ConversationShareService for ConversationShareServiceImpl {
                             recipient: Some(recipient),
                             group_id: None,
                             org_email_pattern: None,
-                            public_token: None,
                         })
                         .await?;
                     shares.push(share);
@@ -295,7 +282,6 @@ impl ConversationShareService for ConversationShareServiceImpl {
                         recipient: None,
                         group_id: Some(group_id),
                         org_email_pattern: None,
-                        public_token: None,
                     })
                     .await?;
 
@@ -313,14 +299,12 @@ impl ConversationShareService for ConversationShareServiceImpl {
                         recipient: None,
                         group_id: None,
                         org_email_pattern: Some(normalized),
-                        public_token: None,
                     })
                     .await?;
 
                 shares.push(share);
             }
             ShareTarget::Public => {
-                let token = Self::generate_public_token()?;
                 let share = self
                     .share_repository
                     .create_share(NewConversationShare {
@@ -331,7 +315,6 @@ impl ConversationShareService for ConversationShareServiceImpl {
                         recipient: None,
                         group_id: None,
                         org_email_pattern: None,
-                        public_token: Some(token),
                     })
                     .await?;
 
@@ -489,7 +472,6 @@ mod tests {
                 recipient: share.recipient,
                 group_id: share.group_id,
                 org_email_pattern: share.org_email_pattern,
-                public_token: share.public_token,
                 created_at: now,
                 updated_at: now,
             }
@@ -1045,7 +1027,6 @@ mod tests {
                 }),
                 group_id: None,
                 org_email_pattern: None,
-                public_token: None,
             })
             .await
             .expect("share create");
@@ -1062,7 +1043,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_public_share_generates_token() {
+    async fn create_public_share() {
         let conversation_repo = Arc::new(InMemoryConversationRepo::default());
         let share_repo = Arc::new(InMemoryShareRepo::default());
         let user_repo = Arc::new(InMemoryUserRepo::default());
@@ -1084,8 +1065,8 @@ mod tests {
             .expect("create public share");
 
         let share = shares.first().expect("share");
-        let token = share.public_token.as_deref().expect("token");
-        assert_eq!(token.len(), 64);
+        assert_eq!(share.share_type, ShareType::Public);
+        assert_eq!(share.permission, SharePermission::Read);
     }
 
     #[tokio::test]
@@ -1145,7 +1126,6 @@ mod tests {
                 recipient: None,
                 group_id: Some(group.id),
                 org_email_pattern: None,
-                public_token: None,
             })
             .await
             .expect("create share");
@@ -1219,7 +1199,6 @@ mod tests {
                 recipient: None,
                 group_id: Some(group.id),
                 org_email_pattern: None,
-                public_token: None,
             })
             .await
             .expect("create share");
@@ -1260,7 +1239,6 @@ mod tests {
                 }),
                 group_id: None,
                 org_email_pattern: None,
-                public_token: None,
             })
             .await
             .expect("create read share");
@@ -1277,7 +1255,6 @@ mod tests {
                 }),
                 group_id: None,
                 org_email_pattern: None,
-                public_token: None,
             })
             .await
             .expect("create write share");
@@ -1318,7 +1295,6 @@ mod tests {
                 }),
                 group_id: None,
                 org_email_pattern: None,
-                public_token: None,
             })
             .await
             .expect("share create");
@@ -1361,7 +1337,6 @@ mod tests {
                 }),
                 group_id: None,
                 org_email_pattern: None,
-                public_token: None,
             })
             .await
             .expect("share create");
@@ -1392,7 +1367,6 @@ mod tests {
                 recipient: None,
                 group_id: None,
                 org_email_pattern: Some("%@example.com".to_string()),
-                public_token: None,
             })
             .await
             .expect("share create");

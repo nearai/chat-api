@@ -100,7 +100,6 @@ pub struct ConversationShare {
     pub recipient: Option<ShareRecipient>,
     pub group_id: Option<Uuid>,
     pub org_email_pattern: Option<String>,
-    pub public_token: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -114,7 +113,6 @@ pub struct NewConversationShare {
     pub recipient: Option<ShareRecipient>,
     pub group_id: Option<Uuid>,
     pub org_email_pattern: Option<String>,
-    pub public_token: Option<String>,
 }
 
 #[async_trait]

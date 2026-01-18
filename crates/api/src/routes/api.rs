@@ -174,7 +174,6 @@ pub struct ConversationShareResponse {
     pub recipient: Option<ShareRecipientPayload>,
     pub group_id: Option<Uuid>,
     pub org_email_pattern: Option<String>,
-    pub public_token: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -246,7 +245,6 @@ fn to_share_response(
         recipient: share.recipient.map(ShareRecipientPayload::from),
         group_id: share.group_id,
         org_email_pattern: share.org_email_pattern,
-        public_token: share.public_token,
         created_at: share.created_at,
         updated_at: share.updated_at,
     }
@@ -1804,6 +1802,13 @@ async fn proxy_responses(
         .map(|s| s.to_string());
     let author_name_for_tracking = user_profile.as_ref().and_then(|p| p.user.name.clone());
 
+    tracing::info!(
+        "create_response: conversation_id_for_author={:?}, author_name={:?}, user_id={}",
+        conversation_id_for_author,
+        author_name_for_tracking,
+        user.user_id
+    );
+
     // Modify request body to inject system prompt and/or author metadata
     let modified_body_bytes = if let Some(mut body) = body_json {
         // Inject model-level system prompt if present
@@ -1999,10 +2004,22 @@ async fn proxy_responses(
             let user_id = user.user_id;
             let author = author_name_for_tracking;
 
+            tracing::info!(
+                "create_response: Using AuthorTrackingStream for conv_id={}, user_id={}, author={:?}",
+                conv_id,
+                user_id,
+                author
+            );
+
             let wrapped_stream =
                 AuthorTrackingStream::new(proxy_response.body, repo, conv_id, user_id, author);
             Body::from_stream(wrapped_stream)
         } else {
+            tracing::info!(
+                "create_response: NOT using AuthorTrackingStream - conv_id={:?}, status={}",
+                conversation_id_for_author,
+                proxy_response.status
+            );
             Body::from_stream(proxy_response.body)
         };
 
@@ -2609,8 +2626,12 @@ async fn build_response(status: u16, headers: HeaderMap, body: Body) -> Result<R
     // Copy headers from OpenAI response
     if let Some(response_headers) = response.headers_mut() {
         for (key, value) in headers.iter() {
-            // Skip certain headers that shouldn't be forwarded
-            if key != "transfer-encoding" && key != "connection" {
+            // Skip certain headers that shouldn't be forwarded:
+            // - transfer-encoding: hyper handles this
+            // - connection: hop-by-hop header
+            // - content-length: may be incorrect if we modified the body (e.g., injecting author metadata)
+            //   hyper will calculate the correct content-length automatically
+            if key != "transfer-encoding" && key != "connection" && key != "content-length" {
                 response_headers.insert(key, value.clone());
             }
         }
@@ -2978,6 +2999,10 @@ where
                             let author = self.author_name.clone();
 
                             tokio::spawn(async move {
+                                tracing::info!(
+                                    "Storing author for response_id={}, conversation_id={}, user_id={}, author_name={:?}",
+                                    response_id, conv_id, user_id, author
+                                );
                                 if let Err(e) = repo
                                     .store_author(&conv_id, &response_id, user_id.into(), author.as_deref())
                                     .await
@@ -3016,7 +3041,7 @@ async fn collect_stream_to_bytes(
 
 /// Inject author metadata into conversation items response
 /// Returns Ok(modified_bytes) on success, Err(original_bytes) on failure
-/// For messages without stored author info (legacy pre-V16), falls back to conversation owner
+/// Only injects author info for messages that have explicit records in response_authors table
 async fn inject_author_metadata(
     state: &crate::state::AppState,
     conversation_id: &str,
@@ -3033,20 +3058,17 @@ async fn inject_author_metadata(
         .await
         .unwrap_or_default();
 
-    // Get owner info for fallback (legacy messages without author records)
-    let owner_info = state
-        .conversation_service
-        .get_conversation_owner(conversation_id)
-        .await
-        .ok()
-        .flatten();
+    tracing::info!(
+        "inject_author_metadata: conversation_id={}, found {} stored authors: {:?}",
+        conversation_id,
+        authors.len(),
+        authors.keys().collect::<Vec<_>>()
+    );
 
-    // Fetch owner's profile for the name (if owner exists)
-    let owner_profile = if let Some(owner_id) = owner_info {
-        state.user_service.get_user_profile(owner_id).await.ok()
-    } else {
-        None
-    };
+    if authors.is_empty() {
+        // No stored authors, return original response
+        return Err(body_bytes);
+    }
 
     // Navigate to the data array containing items
     let items = json
@@ -3066,24 +3088,12 @@ async fn inject_author_metadata(
             continue;
         }
 
-        // Get the response_id from each item (items can have a response_id field)
+        // Get the response_id from each item
         let response_id = item.get("response_id").and_then(|v| v.as_str());
 
         if let Some(resp_id) = response_id {
-            // Try to find stored author, fall back to owner for legacy messages
-            let (author_id, author_name) = if let Some(author) = authors.get(resp_id) {
-                (Some(author.user_id), author.author_name.clone())
-            } else if let Some(owner_id) = owner_info {
-                // Legacy fallback: use conversation owner
-                (
-                    Some(owner_id.into()),
-                    owner_profile.as_ref().and_then(|p| p.user.name.clone()),
-                )
-            } else {
-                (None, None)
-            };
-
-            if let Some(aid) = author_id {
+            // Only inject author info if we have an explicit record
+            if let Some(author) = authors.get(resp_id) {
                 // Ensure metadata object exists
                 if item.get("metadata").is_none() {
                     item["metadata"] = serde_json::json!({});
@@ -3092,10 +3102,13 @@ async fn inject_author_metadata(
                 if let Some(metadata) = item.get_mut("metadata").and_then(|m| m.as_object_mut()) {
                     metadata.insert(
                         "author_id".to_string(),
-                        serde_json::Value::String(aid.to_string()),
+                        serde_json::Value::String(author.user_id.to_string()),
                     );
-                    if let Some(name) = author_name {
-                        metadata.insert("author_name".to_string(), serde_json::Value::String(name));
+                    if let Some(name) = &author.author_name {
+                        metadata.insert(
+                            "author_name".to_string(),
+                            serde_json::Value::String(name.clone()),
+                        );
                     }
                     modified = true;
                 }
