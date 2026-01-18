@@ -36,7 +36,7 @@ CREATE TABLE conversation_shares (
     owner_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     share_type VARCHAR(20) NOT NULL CHECK (share_type IN ('direct', 'group', 'organization', 'public')),
     permission VARCHAR(10) NOT NULL CHECK (permission IN ('read', 'write')),
-    recipient_type VARCHAR(20),
+    recipient_type VARCHAR(20) CHECK (recipient_type IN ('email', 'near')),
     recipient_value VARCHAR(255),
     group_id UUID REFERENCES conversation_share_groups(id) ON DELETE CASCADE,
     org_email_pattern VARCHAR(255),
@@ -66,6 +66,27 @@ CREATE INDEX idx_conversation_shares_recipient
     ON conversation_shares(recipient_type, recipient_value);
 CREATE INDEX idx_conversation_shares_group ON conversation_shares(group_id);
 CREATE INDEX idx_conversation_shares_org_pattern ON conversation_shares(org_email_pattern);
+
+-- Unique constraints to prevent duplicate shares
+-- For direct shares: prevent duplicate (conversation_id, recipient_type, recipient_value)
+CREATE UNIQUE INDEX idx_conversation_shares_direct_unique
+    ON conversation_shares(conversation_id, recipient_type, recipient_value)
+    WHERE share_type = 'direct';
+
+-- For group shares: prevent duplicate (conversation_id, group_id)
+CREATE UNIQUE INDEX idx_conversation_shares_group_unique
+    ON conversation_shares(conversation_id, group_id)
+    WHERE share_type = 'group';
+
+-- For organization shares: prevent duplicate (conversation_id, org_email_pattern)
+CREATE UNIQUE INDEX idx_conversation_shares_org_unique
+    ON conversation_shares(conversation_id, org_email_pattern)
+    WHERE share_type = 'organization';
+
+-- For public shares: only one public share per conversation
+CREATE UNIQUE INDEX idx_conversation_shares_public_unique
+    ON conversation_shares(conversation_id)
+    WHERE share_type = 'public';
 
 CREATE TRIGGER update_conversation_shares_updated_at
     BEFORE UPDATE ON conversation_shares

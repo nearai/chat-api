@@ -608,16 +608,16 @@ async fn create_conversation_share(
         }
         ShareTargetPayload::Group { group_id } => ShareTarget::Group(group_id),
         ShareTargetPayload::Organization { email_pattern } => {
-            if email_pattern.trim().is_empty() {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrorResponse {
-                        error: "Email pattern cannot be empty".to_string(),
-                    }),
-                )
-                    .into_response());
-            }
-            ShareTarget::Organization(email_pattern)
+            let validated_pattern = crate::validation::validate_org_email_pattern(&email_pattern)
+                .map_err(|error| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse { error }),
+                    )
+                        .into_response()
+                })?;
+
+            ShareTarget::Organization(validated_pattern)
         }
         ShareTargetPayload::Public => ShareTarget::Public,
     };
@@ -627,6 +627,24 @@ async fn create_conversation_share(
         .create_share(user.user_id, &conversation_id, request.permission, target)
         .await
         .map_err(map_share_error)?;
+
+    // Record share activity in analytics
+    if let Err(e) = state
+        .analytics_service
+        .record_activity(RecordActivityRequest {
+            user_id: user.user_id,
+            activity_type: ActivityType::Share,
+            auth_method: None,
+            metadata: Some(serde_json::json!({
+                "conversation_id": conversation_id,
+                "share_count": shares.len(),
+                "permission": request.permission.as_str(),
+            })),
+        })
+        .await
+    {
+        tracing::warn!("Failed to record analytics for share creation: {}", e);
+    }
 
     Ok(Json(
         shares
@@ -969,6 +987,9 @@ async fn create_conversation_items(
     );
 
     // Parse and modify body to inject author metadata
+    // NOTE: We inject metadata into the request AND store it in the database (below).
+    // This dual approach ensures author info is available even if OpenAI doesn't preserve
+    // custom metadata fields. When listing items, we retrieve from DB via inject_author_metadata().
     let modified_body = if let Ok(mut body_json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
         // Inject author metadata
         let mut metadata = body_json
@@ -1824,6 +1845,9 @@ async fn proxy_responses(
 
         // Inject author metadata with user info
         // This allows shared conversations to show who sent each message
+        // NOTE: We inject metadata into the request AND store it in the database (see response stream wrapper below).
+        // This dual approach ensures author info is available even if OpenAI doesn't preserve
+        // custom metadata fields. When listing items, we retrieve from DB via inject_author_metadata().
         if let Some(profile) = user_profile {
             let mut metadata = body
                 .get("metadata")

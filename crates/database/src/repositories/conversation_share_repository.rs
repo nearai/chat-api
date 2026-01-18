@@ -452,6 +452,76 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
         Self::map_share_row(&row)
     }
 
+    /// Create multiple shares atomically (all succeed or all fail)
+    async fn create_shares_batch(
+        &self,
+        shares: Vec<NewConversationShare>,
+    ) -> Result<Vec<ConversationShare>, ConversationError> {
+        if shares.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let mut client = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
+
+        let transaction = client
+            .transaction()
+            .await
+            .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
+
+        let mut results = Vec::with_capacity(shares.len());
+
+        for share in shares {
+            let row = transaction
+                .query_one(
+                    "INSERT INTO conversation_shares (
+                         conversation_id,
+                         owner_user_id,
+                         share_type,
+                         permission,
+                         recipient_type,
+                         recipient_value,
+                         group_id,
+                         org_email_pattern
+                     )
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                     RETURNING id, conversation_id, owner_user_id, share_type, permission,
+                               recipient_type, recipient_value, group_id, org_email_pattern,
+                               created_at, updated_at",
+                    &[
+                        &share.conversation_id,
+                        &share.owner_user_id.0,
+                        &share.share_type.as_str(),
+                        &share.permission.as_str(),
+                        &share
+                            .recipient
+                            .as_ref()
+                            .map(|recipient| recipient.kind.as_str()),
+                        &share
+                            .recipient
+                            .as_ref()
+                            .map(|recipient| recipient.value.as_str()),
+                        &share.group_id,
+                        &share.org_email_pattern,
+                    ],
+                )
+                .await
+                .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
+
+            results.push(Self::map_share_row(&row)?);
+        }
+
+        transaction
+            .commit()
+            .await
+            .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
+
+        Ok(results)
+    }
+
     async fn list_shares(
         &self,
         owner_user_id: UserId,

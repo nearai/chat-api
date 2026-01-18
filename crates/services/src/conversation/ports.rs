@@ -193,6 +193,12 @@ pub trait ConversationShareRepository: Send + Sync {
         share: NewConversationShare,
     ) -> Result<ConversationShare, ConversationError>;
 
+    /// Create multiple shares atomically (all succeed or all fail)
+    async fn create_shares_batch(
+        &self,
+        shares: Vec<NewConversationShare>,
+    ) -> Result<Vec<ConversationShare>, ConversationError>;
+
     async fn list_shares(
         &self,
         owner_user_id: UserId,

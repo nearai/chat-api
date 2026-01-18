@@ -16,6 +16,7 @@ pub enum ActivityType {
     Response,
     Conversation,
     FileUpload,
+    Share,
 }
 
 impl ActivityType {
@@ -26,6 +27,7 @@ impl ActivityType {
             ActivityType::Response => "response",
             ActivityType::Conversation => "conversation",
             ActivityType::FileUpload => "file_upload",
+            ActivityType::Share => "share",
         }
     }
 }

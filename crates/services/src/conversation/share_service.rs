@@ -246,21 +246,25 @@ impl ConversationShareService for ConversationShareServiceImpl {
 
         match target {
             ShareTarget::Direct(recipients) => {
-                for recipient in recipients.into_iter().map(Self::normalize_recipient) {
-                    let share = self
-                        .share_repository
-                        .create_share(NewConversationShare {
-                            conversation_id: conversation_id.to_string(),
-                            owner_user_id,
-                            share_type: ShareType::Direct,
-                            permission,
-                            recipient: Some(recipient),
-                            group_id: None,
-                            org_email_pattern: None,
-                        })
-                        .await?;
-                    shares.push(share);
-                }
+                // Use batch creation for atomicity - all shares succeed or all fail
+                let share_requests: Vec<NewConversationShare> = recipients
+                    .into_iter()
+                    .map(Self::normalize_recipient)
+                    .map(|recipient| NewConversationShare {
+                        conversation_id: conversation_id.to_string(),
+                        owner_user_id,
+                        share_type: ShareType::Direct,
+                        permission,
+                        recipient: Some(recipient),
+                        group_id: None,
+                        org_email_pattern: None,
+                    })
+                    .collect();
+
+                shares = self
+                    .share_repository
+                    .create_shares_batch(share_requests)
+                    .await?;
             }
             ShareTarget::Group(group_id) => {
                 let group = self
