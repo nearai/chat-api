@@ -1,14 +1,17 @@
 use crate::{error::ApiError, middleware::TenantContext, state::AppState};
 use axum::{
     extract::{Extension, Path, Query, State},
-    http::StatusCode,
+    http::{header, StatusCode},
     response::{IntoResponse, Redirect, Response},
     routing::{get, post},
     Json, Router,
 };
+use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use services::{
+    organization::ports::OrgRole,
     saml::ports::{CreateSamlConfigParams, SamlAttributeMapping, SamlConfig, UpdateSamlConfigParams},
+    workspace::ports::WorkspaceRole,
     OrganizationId, WorkspaceId,
 };
 
@@ -63,12 +66,22 @@ pub struct CreateSamlConfigRequest {
     pub sp_entity_id: String,
     /// SP ACS URL
     pub sp_acs_url: String,
+    /// Attribute mapping configuration
+    pub attribute_mapping: Option<SamlAttributeMappingRequest>,
     /// Enable JIT provisioning
     pub jit_provisioning_enabled: Option<bool>,
     /// Default role for JIT-provisioned users
     pub jit_default_role: Option<String>,
     /// Default workspace for JIT-provisioned users
     pub jit_default_workspace_id: Option<WorkspaceId>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct SamlAttributeMappingRequest {
+    pub email: Option<String>,
+    pub first_name: Option<String>,
+    pub last_name: Option<String>,
+    pub display_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -81,6 +94,8 @@ pub struct UpdateSamlConfigRequest {
     pub idp_slo_url: Option<String>,
     /// IdP Certificate (PEM format)
     pub idp_certificate: Option<String>,
+    /// Attribute mapping configuration
+    pub attribute_mapping: Option<SamlAttributeMappingRequest>,
     /// Enable JIT provisioning
     pub jit_provisioning_enabled: Option<bool>,
     /// Default role for JIT-provisioned users
@@ -174,6 +189,17 @@ pub async fn create_saml_config(
         ApiError::internal_server_error("SAML SSO is not configured for this deployment")
     })?;
 
+    let attribute_mapping = if let Some(mapping) = request.attribute_mapping {
+        SamlAttributeMapping {
+            email: mapping.email.unwrap_or_else(|| "email".to_string()),
+            first_name: mapping.first_name.unwrap_or_else(|| "firstName".to_string()),
+            last_name: mapping.last_name.unwrap_or_else(|| "lastName".to_string()),
+            display_name: mapping.display_name.unwrap_or_else(|| "displayName".to_string()),
+        }
+    } else {
+        SamlAttributeMapping::default()
+    };
+
     let params = CreateSamlConfigParams {
         organization_id: tenant.organization_id,
         idp_entity_id: request.idp_entity_id,
@@ -182,7 +208,7 @@ pub async fn create_saml_config(
         idp_certificate: request.idp_certificate,
         sp_entity_id: request.sp_entity_id,
         sp_acs_url: request.sp_acs_url,
-        attribute_mapping: SamlAttributeMapping::default(),
+        attribute_mapping,
         jit_provisioning_enabled: request.jit_provisioning_enabled.unwrap_or(true),
         jit_default_role: request.jit_default_role.unwrap_or_else(|| "member".to_string()),
         jit_default_workspace_id: request.jit_default_workspace_id,
@@ -192,7 +218,7 @@ pub async fn create_saml_config(
         tracing::error!("Failed to create SAML config: {}", e);
         if e.to_string().contains("already exists") {
             ApiError::bad_request("SAML configuration already exists for this organization")
-        } else if e.to_string().contains("invalid") {
+        } else if e.to_string().contains("Invalid") {
             ApiError::bad_request(&e.to_string())
         } else {
             ApiError::internal_server_error("Failed to create SAML configuration")
@@ -237,12 +263,19 @@ pub async fn update_saml_config(
         ApiError::internal_server_error("SAML SSO is not configured for this deployment")
     })?;
 
+    let attribute_mapping = request.attribute_mapping.map(|mapping| SamlAttributeMapping {
+        email: mapping.email.unwrap_or_else(|| "email".to_string()),
+        first_name: mapping.first_name.unwrap_or_else(|| "firstName".to_string()),
+        last_name: mapping.last_name.unwrap_or_else(|| "lastName".to_string()),
+        display_name: mapping.display_name.unwrap_or_else(|| "displayName".to_string()),
+    });
+
     let params = UpdateSamlConfigParams {
         idp_entity_id: request.idp_entity_id,
         idp_sso_url: request.idp_sso_url,
         idp_slo_url: request.idp_slo_url,
         idp_certificate: request.idp_certificate,
-        attribute_mapping: None,
+        attribute_mapping,
         jit_provisioning_enabled: request.jit_provisioning_enabled,
         jit_default_role: request.jit_default_role,
         jit_default_workspace_id: None,
@@ -256,7 +289,7 @@ pub async fn update_saml_config(
             tracing::error!("Failed to update SAML config: {}", e);
             if e.to_string().contains("not found") {
                 ApiError::not_found("SAML configuration not found")
-            } else if e.to_string().contains("invalid") {
+            } else if e.to_string().contains("Invalid") {
                 ApiError::bad_request(&e.to_string())
             } else {
                 ApiError::internal_server_error("Failed to update SAML configuration")
@@ -439,7 +472,8 @@ pub async fn saml_acs(
 
     let relay_state = form.get("RelayState").map(|s| s.as_str());
 
-    let auth_result = saml_service
+    // Process the SAML response
+    let mut auth_result = saml_service
         .process_saml_response(saml_response, relay_state)
         .await
         .map_err(|e| {
@@ -451,17 +485,158 @@ pub async fn saml_acs(
             }
         })?;
 
+    // Get SAML config for JIT provisioning settings
+    let saml_config = saml_service
+        .get_saml_config(auth_result.organization_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get SAML config: {}", e);
+            ApiError::internal_server_error("Failed to get SAML configuration")
+        })?
+        .ok_or_else(|| ApiError::internal_server_error("SAML configuration not found"))?;
+
+    // Look up or create user
+    let existing_user = app_state
+        .user_repository
+        .get_user_by_email(&auth_result.email)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to look up user: {}", e);
+            ApiError::internal_server_error("Failed to look up user")
+        })?;
+
+    let (user_id, is_new_user) = match existing_user {
+        Some(user) => {
+            tracing::info!(
+                "SAML auth: existing user found, user_id={}",
+                user.id
+            );
+            (user.id, false)
+        }
+        None => {
+            // JIT provisioning
+            if !saml_config.jit_provisioning_enabled {
+                return Err(ApiError::forbidden(
+                    "User not found and JIT provisioning is disabled",
+                ));
+            }
+
+            tracing::info!(
+                "SAML auth: JIT provisioning new user, email_domain={}",
+                auth_result.email.split('@').last().unwrap_or("unknown")
+            );
+
+            // Build display name from attributes
+            let display_name = auth_result
+                .display_name
+                .clone()
+                .or_else(|| {
+                    match (&auth_result.first_name, &auth_result.last_name) {
+                        (Some(f), Some(l)) => Some(format!("{} {}", f, l)),
+                        (Some(f), None) => Some(f.clone()),
+                        (None, Some(l)) => Some(l.clone()),
+                        _ => None,
+                    }
+                });
+
+            // Create user via the repository
+            let new_user = app_state
+                .user_repository
+                .create_user(
+                    auth_result.email.clone(),
+                    display_name,
+                    None, // No avatar URL from SAML
+                )
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to create user via JIT: {}", e);
+                    ApiError::internal_server_error("Failed to create user")
+                })?;
+
+            // Parse the JIT default role
+            let org_role = match saml_config.jit_default_role.as_str() {
+                "owner" => OrgRole::Owner,
+                "admin" => OrgRole::Admin,
+                _ => OrgRole::Member,
+            };
+
+            // Add user to organization
+            app_state
+                .organization_service
+                .add_user_to_organization(new_user.id, auth_result.organization_id, org_role)
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to add user to organization: {}", e);
+                    ApiError::internal_server_error("Failed to assign user to organization")
+                })?;
+
+            // Add to default workspace if configured
+            if let Some(workspace_id) = saml_config.jit_default_workspace_id {
+                if let Err(e) = app_state
+                    .workspace_service
+                    .add_workspace_member(workspace_id, new_user.id, WorkspaceRole::Member)
+                    .await
+                {
+                    // Non-fatal - log but continue
+                    tracing::warn!("Failed to add user to default workspace: {}", e);
+                }
+            }
+
+            (new_user.id, true)
+        }
+    };
+
+    auth_result.user_id = Some(user_id);
+    auth_result.is_new_user = is_new_user;
+
+    // Create app session
+    let session = app_state
+        .session_repository
+        .create_session(user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to create session: {}", e);
+            ApiError::internal_server_error("Failed to create session")
+        })?;
+
+    // Create SAML session for SLO support
+    let session_expires_at = Utc::now() + Duration::days(7);
+    saml_service
+        .create_saml_session(session.session_id, &auth_result, session_expires_at)
+        .await
+        .map_err(|e| {
+            tracing::warn!("Failed to create SAML session (non-fatal): {}", e);
+            // Non-fatal - SLO won't work but login should succeed
+        })
+        .ok();
+
     tracing::info!(
-        "SAML authentication successful: email={}, is_new_user={}",
-        auth_result.email,
-        auth_result.is_new_user
+        "SAML authentication successful: user_id={}, is_new_user={}, organization_id={}",
+        user_id,
+        is_new_user,
+        auth_result.organization_id
     );
 
-    // For now, redirect to the relay state or home
-    // A full implementation would create a session here
-    let redirect_location = relay_state.unwrap_or("/");
+    // Build redirect response with session cookie
+    let session_token = session.token.unwrap_or_default();
+    let redirect_location = "/"; // Default redirect
 
-    Ok(Redirect::temporary(redirect_location).into_response())
+    // Set cookie and redirect
+    let cookie_value = format!(
+        "session_token={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}",
+        session_token,
+        60 * 60 * 24 * 7 // 7 days
+    );
+
+    Ok((
+        StatusCode::FOUND,
+        [
+            (header::LOCATION, redirect_location),
+            (header::SET_COOKIE, &cookie_value),
+        ],
+        "",
+    )
+        .into_response())
 }
 
 /// Create SAML admin router (requires auth + tenant middleware)

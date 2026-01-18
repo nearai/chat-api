@@ -18,6 +18,7 @@ use services::{
     organization::service::OrganizationServiceImpl,
     rbac::service::{PermissionServiceImpl, RoleServiceImpl},
     response::service::OpenAIProxy,
+    saml::service::SamlServiceImpl,
     user::UserServiceImpl,
     user::UserSettingsServiceImpl,
     vpc::{initialize_vpc_credentials, VpcAuthConfig},
@@ -192,20 +193,24 @@ async fn main() -> anyhow::Result<()> {
 
     let domain_service = Arc::new(DomainVerificationServiceImpl::new(domain_repo));
 
-    // SAML service is optional - only initialize if SAML is configured
-    // For now, set to None until SAML configuration is added
-    let saml_service: Option<Arc<dyn services::saml::ports::SamlService>> = None;
-    // TODO: Initialize SAML service when config is available:
-    // let saml_service = Some(Arc::new(SamlServiceImpl::new(
-    //     saml_idp_config_repo,
-    //     saml_auth_state_repo,
-    //     session_repo.clone(),
-    //     user_repo.clone(),
-    //     organization_repo.clone(),
-    //     config.saml.entity_id.clone(),
-    //     config.saml.acs_url.clone(),
-    // )));
-    let _ = (saml_idp_config_repo, saml_auth_state_repo); // Suppress unused warnings
+    // SAML service is optional - only initialize if SAML is enabled
+    let saml_service: Option<Arc<dyn services::saml::ports::SamlService>> = if config.saml.enabled {
+        tracing::info!("Initializing SAML SSO service...");
+        tracing::info!(
+            "SAML SP Base URL: {}, Entity ID: {}",
+            config.saml.sp_base_url,
+            config.saml.get_sp_entity_id()
+        );
+        Some(Arc::new(SamlServiceImpl::new(
+            saml_idp_config_repo,
+            saml_auth_state_repo,
+            config.saml.sp_base_url.clone(),
+        )))
+    } else {
+        tracing::info!("SAML SSO is disabled (set SAML_ENABLED=true to enable)");
+        let _ = (saml_idp_config_repo, saml_auth_state_repo); // Suppress unused warnings
+        None
+    };
 
     // Initialize system configs service
     tracing::info!("Initializing system configs service...");

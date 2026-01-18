@@ -299,6 +299,45 @@ impl Default for LoggingConfig {
     }
 }
 
+/// SAML SSO configuration
+#[derive(Debug, Clone, Deserialize)]
+pub struct SamlConfig {
+    /// Whether SAML SSO is enabled for this deployment
+    pub enabled: bool,
+    /// Base URL for the Service Provider (e.g., "https://chat.near.ai")
+    pub sp_base_url: String,
+    /// SP Entity ID (defaults to sp_base_url if not set)
+    pub sp_entity_id: Option<String>,
+}
+
+impl Default for SamlConfig {
+    fn default() -> Self {
+        Self {
+            enabled: std::env::var("SAML_ENABLED")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(false),
+            sp_base_url: std::env::var("SAML_SP_BASE_URL")
+                .unwrap_or_else(|_| "http://localhost:8080".to_string()),
+            sp_entity_id: std::env::var("SAML_SP_ENTITY_ID").ok(),
+        }
+    }
+}
+
+impl SamlConfig {
+    /// Returns the effective SP Entity ID
+    pub fn get_sp_entity_id(&self) -> String {
+        self.sp_entity_id
+            .clone()
+            .unwrap_or_else(|| self.sp_base_url.clone())
+    }
+
+    /// Returns the ACS URL
+    pub fn get_acs_url(&self) -> String {
+        format!("{}/v1/auth/saml/acs", self.sp_base_url)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct Config {
     pub database: DatabaseConfig,
@@ -312,6 +351,8 @@ pub struct Config {
     pub vpc_auth: VpcAuthConfig,
     pub telemetry: TelemetryConfig,
     pub logging: LoggingConfig,
+    /// SAML SSO configuration
+    pub saml: SamlConfig,
 }
 
 impl Config {
@@ -327,6 +368,7 @@ impl Config {
             vpc_auth: VpcAuthConfig::default(),
             telemetry: TelemetryConfig::default(),
             logging: LoggingConfig::default(),
+            saml: SamlConfig::default(),
         }
     }
 }
