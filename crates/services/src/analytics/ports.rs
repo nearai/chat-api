@@ -17,6 +17,10 @@ pub enum ActivityType {
     Conversation,
     FileUpload,
     Share,
+    /// Activity type specifically for rate limiting purposes.
+    /// This is used to track requests for quota/rate limit enforcement,
+    /// separate from business analytics (which use Response, Conversation, etc.).
+    RateLimitedRequest,
 }
 
 impl ActivityType {
@@ -28,6 +32,7 @@ impl ActivityType {
             ActivityType::Conversation => "conversation",
             ActivityType::FileUpload => "file_upload",
             ActivityType::Share => "share",
+            ActivityType::RateLimitedRequest => "rate_limited_request",
         }
     }
 }
@@ -70,6 +75,30 @@ pub struct RecordActivityRequest {
     pub activity_type: ActivityType,
     pub auth_method: Option<AuthMethod>,
     pub metadata: Option<serde_json::Value>,
+}
+
+/// Request to check usage limit and record activity if allowed
+#[derive(Debug, Clone)]
+pub struct CheckAndRecordActivityRequest {
+    /// User ID for the activity
+    pub user_id: UserId,
+    /// Type of activity to check and record
+    pub activity_type: ActivityType,
+    /// Optional metadata for the activity
+    pub metadata: Option<serde_json::Value>,
+    /// Time window for the sliding window rate limit
+    pub window: TimeWindow,
+    /// Maximum number of activities allowed in the window
+    pub limit: u64,
+}
+
+/// Result of checking and recording activity
+#[derive(Debug, Clone)]
+pub struct CheckAndRecordActivityResult {
+    /// Current count of activities in the window after the check
+    pub current_count: u64,
+    /// Whether the activity was actually recorded (inserted into the database)
+    pub was_recorded: bool,
 }
 
 /// A single activity log entry
@@ -150,6 +179,21 @@ pub trait AnalyticsRepository: Send + Sync {
     /// Record a user activity
     async fn record_activity(&self, request: RecordActivityRequest) -> anyhow::Result<()>;
 
+    /// Check if usage is below limit and record activity if allowed.
+    async fn check_and_record_activity(
+        &self,
+        request: CheckAndRecordActivityRequest,
+    ) -> anyhow::Result<CheckAndRecordActivityResult>;
+
+    /// Check activity count in a window without recording.
+    /// Used when multiple windows need to be checked before inserting a single record.
+    async fn check_activity_count(
+        &self,
+        user_id: UserId,
+        activity_type: ActivityType,
+        window: TimeWindow,
+    ) -> anyhow::Result<i64>;
+
     /// Get analytics summary for a time period
     async fn get_analytics_summary(
         &self,
@@ -188,4 +232,33 @@ pub trait AnalyticsRepository: Send + Sync {
 pub enum AnalyticsError {
     #[error("Internal error: {0}")]
     InternalError(String),
+}
+
+/// Time window for sliding window rate limiting (in seconds)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TimeWindow {
+    /// Number of seconds for the sliding window
+    pub seconds: u64,
+}
+
+impl TimeWindow {
+    /// Create a time window with specified number of seconds
+    pub fn new(seconds: u64) -> Self {
+        Self { seconds }
+    }
+
+    /// Day window (86400 seconds = 1 day)
+    pub fn day() -> Self {
+        Self { seconds: 86400 }
+    }
+
+    /// Week window (604800 seconds = 7 days)
+    pub fn week() -> Self {
+        Self { seconds: 604800 }
+    }
+
+    /// Month window (2592000 seconds = 30 days)
+    pub fn month() -> Self {
+        Self { seconds: 2592000 }
+    }
 }

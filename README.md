@@ -1,158 +1,205 @@
-# NEAR AI Chat API
+# NEAR AI Private Chat API
 
-Rust backend that proxies OpenAI requests while tracking conversations in PostgreSQL.
+A Rust backend service that proxies requests to **NEAR AI Cloud API** (using OpenAI-compatible API format) while tracking user conversations in PostgreSQL. Provides OAuth authentication (Google/GitHub), user session management, and serves a frontend as static files. Designed to run in a Trusted Execution Environment (TEE) for enhanced security and privacy.
 
-## Local development setup (macOS + Linux)
+## Features
+
+- 🔒 **TEE Execution**: Runs in a Trusted Execution Environment with cryptographic attestation
+- 🤖 **OpenAI-Compatible API**: Drop-in replacement for OpenAI API endpoints (proxies to NEAR AI Cloud API)
+- 🔐 **OAuth Authentication**: Google and GitHub OAuth support
+- 💬 **Conversation Tracking**: Persistent conversation management in PostgreSQL
+- 📊 **User Management**: Session management, user settings, and analytics
+- ⚡ **Streaming**: Real-time SSE streaming for AI responses
+
+## Architecture
+
+### Crate Structure
+
+```
+crates/
+├── api/          # Axum HTTP server, routes, middleware, OpenAPI docs (utoipa)
+├── services/     # Business logic: auth, conversation, response proxy, user management
+├── database/     # PostgreSQL (tokio-postgres, deadpool), migrations, repositories
+└── config/       # Environment-based configuration structs
+```
+
+### Key Patterns
+
+- **Repository Pattern**: Database access through trait-based repositories (`PostgresUserRepository`, etc.)
+- **Service Layer**: Business logic in `services` crate, injected into `AppState`
+- **NEAR AI Cloud API Proxy**: All `/v1/*` routes forward to NEAR AI Cloud API with auth; conversation endpoints (`/v1/conversations/*`) track IDs in PostgreSQL
+- **Patroni Support**: Optional cluster discovery for HA PostgreSQL via `DATABASE_PRIMARY_APP_ID`
+
+### Request Flow
+
+1. Request → Auth middleware (validates session token) → Route handler
+2. Conversation operations → Forward to NEAR AI Cloud API → Parse response → Track in DB
+3. Generic `/v1/{*path}` → Forward to NEAR AI Cloud API (pass-through)
+
+## Development
 
 ### Prerequisites
 
-- Rust toolchain `1.90.0` (see `rust-toolchain.toml`)
-- PostgreSQL 16 (or Docker to run it)
-- Optional (frontend build): `pnpm`, `git`
+- Rust 1.90.0 (see `rust-toolchain.toml`)
+- PostgreSQL 16+ (or use Docker Compose)
+- Docker and Docker Compose
+- For reproducible builds: `skopeo`, `jq`, Docker BuildKit
 
-### Install dependencies
+### Setup
 
-macOS (Homebrew):
-```bash
-brew install postgresql@16
-brew services start postgresql@16
-```
+1. **Clone and configure**:
+   ```bash
+   git clone <repository-url>
+   cd chat-api
+   cp env.example .env
+   # Edit .env with your configuration
+   ```
 
-Ubuntu/Debian:
-```bash
-sudo apt-get update
-sudo apt-get install postgresql
-sudo systemctl enable --now postgresql
-```
+2. **Start PostgreSQL**:
+   ```bash
+   docker compose up -d postgres
+   ```
 
-### Configure environment
+3. **Run the server** (migrations run automatically):
+   ```bash
+   cargo run --bin api
+   ```
 
-```bash
-cp env.example .env
-```
+   Server starts on `http://localhost:8081`. Visit `/docs` for OpenAPI documentation.
 
-Edit `.env` with your values.
-
-#### Required environment variables
-
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `OPENAI_BASE_URL` | Cloud API endpoint (must include `/v1`) | `https://cloud-api.near.ai/v1` |
-| `OPENAI_API_KEY` | API key for the cloud API | Your NEAR AI API key |
-| `DATABASE_USER` | PostgreSQL username | `postgres` or your macOS username |
-| `DATABASE_PASSWORD` | PostgreSQL password | `postgres` or empty for local |
-| `DATABASE_NAME` | Database name | `chat_api` |
-
-#### Optional environment variables (for OAuth)
-
-| Variable | Description |
-|----------|-------------|
-| `GOOGLE_CLIENT_ID` | Google OAuth client ID |
-| `GOOGLE_CLIENT_SECRET` | Google OAuth client secret |
-| `GITHUB_CLIENT_ID` | GitHub OAuth client ID |
-| `GITHUB_CLIENT_SECRET` | GitHub OAuth client secret |
-| `FRONTEND_URL` | Frontend URL for OAuth redirects (default: `http://localhost:3000`) |
-| `REDIRECT_URI` | OAuth callback base URL (default: `http://localhost:8081`) |
-
-#### Minimal `.env` for local development
+### Docker Development
 
 ```bash
-# Cloud API (required)
-OPENAI_BASE_URL=https://cloud-api.near.ai/v1
-OPENAI_API_KEY=your_api_key_here
-
-# Database - adjust DATABASE_USER if 'postgres' role doesn't exist
-DATABASE_HOST=localhost
-DATABASE_PORT=5432
-DATABASE_NAME=chat_api
-DATABASE_USER=postgres
-DATABASE_PASSWORD=postgres
-
-# Frontend
-FRONTEND_URL=http://localhost:3000
-CORS_ALLOWED_ORIGINS=http://localhost:3000
+docker compose up -d              # Start all services
+docker compose up -d --build      # Rebuild and start
+docker compose logs -f api        # View logs
+docker compose down               # Stop services
 ```
 
-> **Note for macOS users:** If you get `FATAL: role "postgres" does not exist`, either:
-> - Create the role: `createuser -s postgres`
-> - Or use your username: `DATABASE_USER=$(whoami)` and `DATABASE_PASSWORD=`
-
-### Run locally (host PostgreSQL)
-
-Create the database if you are not using Docker:
-```bash
-createdb chat_api
-```
-
-Start the API:
-```bash
-cargo run --bin api
-```
-
-The server listens on `SERVER_HOST:SERVER_PORT` (defaults to `0.0.0.0:8081`).
-
-### Run everything locally (Docker)
-
-Create a `.env` file with at minimum:
-```bash
-# Required for cloud API proxy
-OPENAI_API_KEY=your_api_key_here
-
-# Optional: OAuth credentials for Google/GitHub login
-GOOGLE_CLIENT_ID=your_google_client_id
-GOOGLE_CLIENT_SECRET=your_google_client_secret
-```
-
-> **Note:** `OPENAI_BASE_URL` defaults to `https://cloud-api.near.ai/v1` in docker-compose.yml
-
-Start PostgreSQL and the API:
-```bash
-docker compose up -d
-```
-
-Rebuild after code changes:
-```bash
-docker compose up -d --build
-```
-
-Docker builds the bundled frontend. Ensure `.env` includes
-`PRIVATE_CHAT_FRONTEND_VERSION` (see `build-config.toml`).
-
-The API is exposed on `http://localhost:8080` in the Compose setup.
-
-### Run API locally with Docker PostgreSQL
-
-If you want native `cargo run` but Docker DB:
-```bash
-docker compose up -d postgres
-cargo run --bin api
-```
-
-## Tests
+### Testing
 
 ```bash
-# All tests with mock-login endpoint enabled
-cargo test --features test
-
-# Admin tests only
-cargo test --test admin_tests --features test
-
-# E2E tests (real OpenAI calls, ignored by default)
-cargo test --test e2e_api_tests --features test -- --ignored --nocapture
+cargo test --features test                                    # All tests
+cargo test --test admin_tests --features test                # Admin tests only
+cargo test --test e2e_api_tests --features test -- --ignored --nocapture # E2E tests (real API calls)
 ```
 
-## Frontend build (optional)
+### Code Quality
 
-The API can serve a bundled frontend if you build it locally:
 ```bash
-./scripts/build-frontend.sh
+cargo fmt          # Format code
+cargo clippy       # Run linter
+cargo clippy --fix # Auto-fix issues
 ```
 
-This clones the private frontend repo and places the build in
-`crates/api/frontend/dist`.
+See `env.example` for all configuration options.
 
-## Useful notes
+## Building
 
-- `.env` is loaded automatically on startup via `dotenvy`.
-- Database migrations run automatically when the API starts.
-- For verbose logging, set `RUST_LOG` (e.g. `info,api=debug,services=debug`).
+### Local Build
+
+```bash
+cargo build              # Debug build
+cargo build --release    # Release build (output: target/release/api)
+```
+
+### Docker Build
+
+**Standard build** (for development):
+```bash
+docker build -t chat-api .
+```
+
+**Reproducible build** (for production):
+```bash
+./scripts/build-image.sh                              # Build
+./scripts/build-image.sh --push <registry>/<tag>     # Build and push
+```
+
+### Reproducible Builds
+
+This project implements **reproducible builds** to ensure bit-for-bit identical Docker images from the same source code. Critical for security, auditability, and TEE attestation verification.
+
+**Features**:
+- Pinned Debian package versions (via APT preferences)
+- Debian snapshot archives (date: `20250411T024939Z`)
+- Deterministic timestamps (`SOURCE_DATE_EPOCH=0`)
+- Pinned base images (SHA256 digests, not tags)
+- Locked dependencies (`Cargo.lock`, `pnpm-lock.yaml`, `build-config.toml`)
+
+**Verify reproducibility**:
+```bash
+./scripts/build-image.sh
+DIGEST1=$(skopeo inspect oci-archive:./oci.tar | jq -r .Digest)
+rm -f oci.tar
+./scripts/build-image.sh
+DIGEST2=$(skopeo inspect oci-archive:./oci.tar | jq -r .Digest)
+# Digests should match
+```
+
+**Build output**: OCI archive at `./oci.tar` with manifest digest for verification.
+
+## TEE Hosting
+
+This API is designed to run in a **Trusted Execution Environment (TEE)** (Intel TDX CVM), providing hardware-level security and cryptographic attestation.
+
+**Benefits**:
+- 🔒 Code integrity: Isolated, tamper-proof environment
+- 🛡️ Data privacy: User data and API keys protected from host access
+- ✅ Attestation: Cryptographic proofs verify execution environment
+- 🔐 Confidentiality: Even cloud providers cannot access application memory
+
+### Attestation
+
+The API provides attestation reports via `/v1/attestation/report`:
+
+```bash
+NONCE=$(openssl rand -hex 32)
+curl "https://private.near.ai/v1/attestation/report?nonce=${NONCE}&signing_algo=ecdsa"
+```
+
+Reports include:
+- Intel TDX quotes (hardware-level proofs)
+- Image digests (from reproducible builds)
+- Event logs and cryptographic signatures
+- Model provider attestations (end-to-end security)
+
+### Deployment
+
+- **Automatic TEE detection** via `dstack-sdk`
+- **VPC authentication** for secure key management (set `VPC_SHARED_SECRET_FILE`)
+- **Reproducible builds** required for attestation verification
+- **Development mode**: `DEV=true` returns mock attestation data
+- **Production mode**: `DEV=false` requires TEE execution and generates real attestation reports
+
+## Database
+
+Migrations are in `crates/database/src/migrations/sql/` and run automatically on startup. Supports PostgreSQL and Patroni clusters (via `DATABASE_PRIMARY_APP_ID`).
+
+## API Documentation
+
+OpenAPI docs available at `/docs`.
+
+**Key endpoints**:
+- `/v1/auth/*` - OAuth authentication
+- `/v1/conversations/*` - Conversation management
+- `/v1/responses` - OpenAI-compatible Responses API (proxied to NEAR AI Cloud API)
+- `/v1/attestation/report` - TEE attestation reports
+- `/v1/users/*` - User management
+- `/v1/admin/*` - Admin operations
+
+**Note**: All requests are proxied to **NEAR AI Cloud API** (with OpenAI compatible endpoints). Set `OPENAI_BASE_URL` to your NEAR AI Cloud API endpoint.
+
+## Security & Privacy
+
+This service prioritizes privacy and data security. See `CLAUDE.md` for detailed logging and security guidelines.
+
+**Critical Rules**:
+- Never log customer conversation content, titles, or user input
+- Never log security credentials (API keys, tokens, passwords)
+- Only log IDs and system metrics, never user data
+- All customer data must be encrypted at rest and in transit
+
+## License
+
+PolyForm Strict License 1.0.0 - see [LICENSE](LICENSE) file for details.

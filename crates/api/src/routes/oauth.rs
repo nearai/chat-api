@@ -465,7 +465,7 @@ pub async fn mock_login(
         None => {
             // Create new user
             tracing::info!("Creating new user with email: {}", request.email);
-            app_state
+            match app_state
                 .user_repository
                 .create_user(
                     request.email.clone(),
@@ -473,10 +473,24 @@ pub async fn mock_login(
                     request.avatar_url.clone(),
                 )
                 .await
-                .map_err(|e| {
-                    tracing::error!("Failed to create user: {}", e);
-                    ApiError::internal_server_error("Failed to create user")
-                })?
+            {
+                Ok(user) => user,
+                Err(_) => {
+                    // This can happen if tests run in parallel: two requests race between
+                    // "get_user_by_email(None)" and "create_user", leading to a unique constraint
+                    // violation for the email. In that case, treat it as success by re-fetching.
+                    app_state
+                        .user_repository
+                        .get_user_by_email(&request.email)
+                        .await
+                        .map_err(|_| {
+                            ApiError::internal_server_error(
+                                "Failed to re-fetch user after create_user failure",
+                            )
+                        })?
+                        .ok_or_else(|| ApiError::internal_server_error("Failed to create user"))?
+                }
+            }
         }
     };
 

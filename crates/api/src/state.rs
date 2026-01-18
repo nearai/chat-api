@@ -52,7 +52,7 @@ pub struct AppState {
     pub cloud_api_base_url: String,
     /// Metrics service for recording usage metrics
     pub metrics_service: Arc<dyn services::metrics::MetricsServiceTrait>,
-    /// Analytics service for database-backed analytics
+    /// Analytics service for database-backed analytics and rate limiting
     pub analytics_service: Arc<dyn services::analytics::AnalyticsServiceTrait>,
     /// NEAR RPC URL used for on-chain balance checks (if configured)
     pub near_rpc_url: Url,
