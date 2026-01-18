@@ -136,6 +136,9 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
         analytics_repo as Arc<dyn services::analytics::AnalyticsRepository>,
     ));
 
+    // Get response author repository
+    let response_author_repository = db.response_author_repository();
+
     // Create application state
     let app_state = AppState {
         oauth_service,
@@ -158,6 +161,7 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
         near_rpc_url: config.near.rpc_url.clone(),
         near_balance_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         model_settings_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        response_author_repository,
     };
 
     // Create router

@@ -957,6 +957,10 @@ async fn create_conversation_items(
 
     validate_user_conversation(&state, &user, &conversation_id, SharePermission::Write).await?;
 
+    // Fetch user profile for author metadata
+    let user_profile = state.user_service.get_user_profile(user.user_id).await.ok();
+    let author_name = user_profile.as_ref().and_then(|p| p.user.name.clone());
+
     // Extract body
     let body_bytes = extract_body_bytes(request).await?;
 
@@ -966,9 +970,31 @@ async fn create_conversation_items(
         user.user_id
     );
 
-    if let Ok(body_str) = std::str::from_utf8(&body_bytes) {
-        tracing::debug!("Request body: {}", body_str);
-    }
+    // Parse and modify body to inject author metadata
+    let modified_body = if let Ok(mut body_json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
+        // Inject author metadata
+        let mut metadata = body_json
+            .get("metadata")
+            .and_then(|m| m.as_object())
+            .cloned()
+            .unwrap_or_default();
+
+        metadata.insert(
+            "author_id".to_string(),
+            serde_json::Value::String(user.user_id.to_string()),
+        );
+        if let Some(name) = author_name.as_ref() {
+            metadata.insert(
+                "author_name".to_string(),
+                serde_json::Value::String(name.clone()),
+            );
+        }
+        body_json["metadata"] = serde_json::Value::Object(metadata);
+
+        serde_json::to_vec(&body_json).unwrap_or_else(|_| body_bytes.to_vec())
+    } else {
+        body_bytes.to_vec()
+    };
 
     tracing::debug!(
         "Forwarding conversation items creation request to OpenAI for user_id={}",
@@ -982,7 +1008,7 @@ async fn create_conversation_items(
             Method::POST,
             &format!("conversations/{conversation_id}/items"),
             headers.clone(),
-            Some(body_bytes),
+            Some(Bytes::from(modified_body)),
         )
         .await
         .map_err(|e| {
@@ -1000,12 +1026,48 @@ async fn create_conversation_items(
                 .into_response()
         })?;
 
-    build_response(
-        proxy_response.status,
-        proxy_response.headers,
-        Body::from_stream(proxy_response.body),
-    )
-    .await
+    // For successful responses, collect the body to extract response_id and store author info
+    if (200..300).contains(&proxy_response.status) {
+        let response_bytes = collect_stream_to_bytes(proxy_response.body).await;
+
+        // Try to extract response_id from the response and store author info
+        if let Ok(response_json) = serde_json::from_slice::<serde_json::Value>(&response_bytes) {
+            if let Some(response_id) = response_json
+                .get("response_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+            {
+                let repo = state.response_author_repository.clone();
+                let conv_id = conversation_id.clone();
+                let uid = user.user_id;
+                let author = author_name.clone();
+
+                // Store author info asynchronously
+                tokio::spawn(async move {
+                    if let Err(e) = repo
+                        .store_author(&conv_id, &response_id, uid.into(), author.as_deref())
+                        .await
+                    {
+                        tracing::warn!("Failed to store response author: {}", e);
+                    }
+                });
+            }
+        }
+
+        build_response(
+            proxy_response.status,
+            proxy_response.headers,
+            Body::from(response_bytes),
+        )
+        .await
+    } else {
+        build_response(
+            proxy_response.status,
+            proxy_response.headers,
+            Body::from_stream(proxy_response.body),
+        )
+        .await
+    }
 }
 
 /// List conversation items - works with optional authentication
@@ -2954,6 +3016,7 @@ async fn collect_stream_to_bytes(
 
 /// Inject author metadata into conversation items response
 /// Returns Ok(modified_bytes) on success, Err(original_bytes) on failure
+/// For messages without stored author info (legacy pre-V16), falls back to conversation owner
 async fn inject_author_metadata(
     state: &crate::state::AppState,
     conversation_id: &str,
@@ -2970,10 +3033,20 @@ async fn inject_author_metadata(
         .await
         .unwrap_or_default();
 
-    if authors.is_empty() {
-        // No authors to inject, return original
-        return Err(body_bytes);
-    }
+    // Get owner info for fallback (legacy messages without author records)
+    let owner_info = state
+        .conversation_service
+        .get_conversation_owner(conversation_id)
+        .await
+        .ok()
+        .flatten();
+
+    // Fetch owner's profile for the name (if owner exists)
+    let owner_profile = if let Some(owner_id) = owner_info {
+        state.user_service.get_user_profile(owner_id).await.ok()
+    } else {
+        None
+    };
 
     // Navigate to the data array containing items
     let items = json
@@ -2984,11 +3057,33 @@ async fn inject_author_metadata(
     let mut modified = false;
 
     for item in items.iter_mut() {
+        // Skip items that already have author_id in metadata
+        if item
+            .get("metadata")
+            .and_then(|m| m.get("author_id"))
+            .is_some()
+        {
+            continue;
+        }
+
         // Get the response_id from each item (items can have a response_id field)
         let response_id = item.get("response_id").and_then(|v| v.as_str());
 
         if let Some(resp_id) = response_id {
-            if let Some(author) = authors.get(resp_id) {
+            // Try to find stored author, fall back to owner for legacy messages
+            let (author_id, author_name) = if let Some(author) = authors.get(resp_id) {
+                (Some(author.user_id), author.author_name.clone())
+            } else if let Some(owner_id) = owner_info {
+                // Legacy fallback: use conversation owner
+                (
+                    Some(owner_id.into()),
+                    owner_profile.as_ref().and_then(|p| p.user.name.clone()),
+                )
+            } else {
+                (None, None)
+            };
+
+            if let Some(aid) = author_id {
                 // Ensure metadata object exists
                 if item.get("metadata").is_none() {
                     item["metadata"] = serde_json::json!({});
@@ -2997,13 +3092,10 @@ async fn inject_author_metadata(
                 if let Some(metadata) = item.get_mut("metadata").and_then(|m| m.as_object_mut()) {
                     metadata.insert(
                         "author_id".to_string(),
-                        serde_json::Value::String(author.user_id.to_string()),
+                        serde_json::Value::String(aid.to_string()),
                     );
-                    if let Some(name) = &author.author_name {
-                        metadata.insert(
-                            "author_name".to_string(),
-                            serde_json::Value::String(name.clone()),
-                        );
+                    if let Some(name) = author_name {
+                        metadata.insert("author_name".to_string(), serde_json::Value::String(name));
                     }
                     modified = true;
                 }
