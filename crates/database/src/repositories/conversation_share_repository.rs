@@ -225,41 +225,31 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
-        // Build a query to find groups where any of the member identifiers match
-        // We use a parameterized query with multiple (member_type, member_value) pairs
-        let mut conditions = Vec::new();
-        let mut param_idx = 1;
+        // Use UNNEST to create pairs of (type, value) from arrays
+        // This is safer than dynamic SQL construction and maintains correct pair matching
+        // UNNEST with multiple arrays creates rows where elements at the same position are paired
+        let member_types: Vec<String> = member_identifiers
+            .iter()
+            .map(|m| m.kind.as_str().to_string())
+            .collect();
+        let member_values_lower: Vec<String> = member_identifiers
+            .iter()
+            .map(|m| m.value.to_lowercase())
+            .collect();
 
-        for _ in member_identifiers {
-            conditions.push(format!(
-                "(m.member_type = ${} AND LOWER(m.member_value) = LOWER(${}))",
-                param_idx,
-                param_idx + 1
-            ));
-            param_idx += 2;
-        }
-
-        // Build the params vector with references to the actual values
-        let member_types: Vec<String> = member_identifiers.iter().map(|m| m.kind.as_str().to_string()).collect();
-        let member_values: Vec<String> = member_identifiers.iter().map(|m| m.value.clone()).collect();
-
-        let mut typed_params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = Vec::new();
-        for i in 0..member_identifiers.len() {
-            typed_params.push(&member_types[i]);
-            typed_params.push(&member_values[i]);
-        }
-
-        let query = format!(
-            "SELECT DISTINCT g.id, g.owner_user_id, g.name, g.created_at, g.updated_at
-             FROM conversation_share_groups g
-             JOIN conversation_share_group_members m ON g.id = m.group_id
-             WHERE {}
-             ORDER BY g.name",
-            conditions.join(" OR ")
-        );
-
+        // Use parameterized query with UNNEST to safely match (type, value) pairs
+        // This avoids dynamic SQL construction while maintaining correct pairing semantics
         let rows = client
-            .query(&query, &typed_params)
+            .query(
+                "SELECT DISTINCT g.id, g.owner_user_id, g.name, g.created_at, g.updated_at
+                 FROM conversation_share_groups g
+                 JOIN conversation_share_group_members m ON g.id = m.group_id
+                 JOIN UNNEST($1::text[], $2::text[]) AS search(member_type, member_value)
+                   ON m.member_type = search.member_type
+                   AND LOWER(m.member_value) = search.member_value
+                 ORDER BY g.name",
+                &[&member_types, &member_values_lower],
+            )
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 

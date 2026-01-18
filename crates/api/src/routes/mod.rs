@@ -170,6 +170,10 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
             AUTHORIZATION,
             CONTENT_TYPE,
             ACCEPT,
+            // Allow ngrok-skip-browser-warning header for development with ngrok tunnels
+            // When using ngrok for local development/testing, this header prevents the
+            // ngrok browser warning page from appearing on the first request
+            // This is safe for production as unknown headers are simply ignored
             HeaderName::from_static("ngrok-skip-browser-warning"),
         ])
         .allow_credentials(true);

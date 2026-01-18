@@ -1,4 +1,4 @@
-use crate::consts::LIST_FILES_LIMIT_MAX;
+use crate::consts::{LIST_FILES_LIMIT_MAX, MAX_REQUEST_BODY_SIZE, MAX_RESPONSE_BODY_SIZE};
 use crate::middleware::auth::AuthenticatedUser;
 use axum::{
     body::{to_bytes, Body},
@@ -332,7 +332,7 @@ async fn create_conversation(
     );
 
     // Extract body
-    let body_bytes = axum::body::to_bytes(request.into_body(), usize::MAX)
+    let body_bytes = axum::body::to_bytes(request.into_body(), MAX_REQUEST_BODY_SIZE)
         .await
         .map_err(|e| {
             tracing::error!(
@@ -508,6 +508,30 @@ async fn list_conversations(
 /// Get a conversation - validates user access or public share and fetches details via service/OpenAI
 /// Works with optional authentication - authenticated users get their access checked,
 /// unauthenticated users can only access publicly shared conversations
+///
+/// # Authentication
+/// This endpoint supports **optional authentication**:
+/// - **With authentication**: Returns conversation if user owns it or has been granted access via sharing
+/// - **Without authentication**: Returns conversation only if it has been publicly shared
+///
+/// This allows public sharing of conversations while maintaining access control for private conversations.
+#[utoipa::path(
+    get,
+    path = "/v1/conversations/{conversation_id}",
+    tag = "Conversations",
+    params(
+        ("conversation_id" = String, Path, description = "ID of the conversation to retrieve")
+    ),
+    responses(
+        (status = 200, description = "Conversation retrieved successfully", body = serde_json::Value),
+        (status = 403, description = "Access denied - conversation not accessible to this user or not publicly shared"),
+        (status = 404, description = "Conversation not found")
+    ),
+    security(
+        (), // Optional - no auth required for publicly shared conversations
+        ("session_token" = []) // Optional - session token for authenticated access
+    )
+)]
 async fn get_conversation(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<Option<AuthenticatedUser>>,
@@ -1091,6 +1115,30 @@ async fn create_conversation_items(
 
 /// List conversation items - works with optional authentication
 /// Authenticated users get their access checked, unauthenticated users can only access public conversations
+///
+/// # Authentication
+/// This endpoint supports **optional authentication**:
+/// - **With authentication**: Returns items if user owns the conversation or has been granted access via sharing
+/// - **Without authentication**: Returns items only if the conversation has been publicly shared
+///
+/// This allows public sharing of conversation content while maintaining access control for private conversations.
+#[utoipa::path(
+    get,
+    path = "/v1/conversations/{conversation_id}/items",
+    tag = "Conversations",
+    params(
+        ("conversation_id" = String, Path, description = "ID of the conversation to list items from")
+    ),
+    responses(
+        (status = 200, description = "Conversation items retrieved successfully"),
+        (status = 403, description = "Access denied - conversation not accessible to this user or not publicly shared"),
+        (status = 404, description = "Conversation not found")
+    ),
+    security(
+        (), // Optional - no auth required for publicly shared conversations
+        ("session_token" = []) // Optional - session token for authenticated access
+    )
+)]
 async fn list_conversation_items(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<Option<AuthenticatedUser>>,
@@ -2322,7 +2370,7 @@ async fn proxy_model_list(
 
     // Buffer body into bytes
     let proxy_body = Body::from_stream(proxy_response.body);
-    let body_bytes: Bytes = to_bytes(proxy_body, usize::MAX).await.map_err(|e| {
+    let body_bytes: Bytes = to_bytes(proxy_body, MAX_RESPONSE_BODY_SIZE).await.map_err(|e| {
         tracing::error!(
             "Failed to read model list response body for user_id={}: {}",
             user.user_id,
@@ -2507,7 +2555,7 @@ async fn handle_trackable_response(
 
     // Buffer the response to extract the resource ID
     let proxy_body = Body::from_stream(proxy_response.body);
-    let body_bytes: Bytes = to_bytes(proxy_body, usize::MAX).await.map_err(|e| {
+    let body_bytes: Bytes = to_bytes(proxy_body, MAX_RESPONSE_BODY_SIZE).await.map_err(|e| {
         (
             StatusCode::BAD_GATEWAY,
             Json(ErrorResponse {
@@ -2866,7 +2914,7 @@ async fn fetch_conversation_from_proxy(
     }
 
     let proxy_body = Body::from_stream(proxy_response.body);
-    let body_bytes: Bytes = to_bytes(proxy_body, usize::MAX)
+    let body_bytes: Bytes = to_bytes(proxy_body, MAX_RESPONSE_BODY_SIZE)
         .await
         .map_err(|e| bad_gateway(format!("Failed to read response: {e}")))?;
 
@@ -2901,7 +2949,7 @@ async fn validate_user_file(
 /// Extract body bytes from a request
 async fn extract_body_bytes(request: Request) -> Result<Bytes, Response> {
     tracing::debug!("Extracting body bytes from request");
-    let result = axum::body::to_bytes(request.into_body(), usize::MAX)
+    let result = axum::body::to_bytes(request.into_body(), MAX_REQUEST_BODY_SIZE)
         .await
         .map_err(|e| {
             tracing::error!("Failed to read request body: {}", e);
