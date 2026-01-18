@@ -3002,14 +3002,16 @@ use std::task::{Context, Poll};
 /// Try to extract response_id from SSE data text
 fn try_extract_response_id(text: &str) -> Option<String> {
     // Look for response_id in SSE data
-    // Format: data: {"id":"resp_xxx",...}
+    // Format: data: {"type":"response.created","response":{"id":"resp_xxx",...},...}
     for line in text.lines() {
         if let Some(data) = line.strip_prefix("data: ") {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                if let Some(id) = json.get("id").and_then(|v| v.as_str()) {
-                    if id.starts_with("resp_") {
-                        return Some(id.to_string());
-                    }
+                if let Some(response_id) = json
+                    .get("response")
+                    .and_then(|r| r.get("id"))
+                    .and_then(|v| v.as_str())
+                {
+                    return Some(response_id.to_string());
                 }
             }
         }
