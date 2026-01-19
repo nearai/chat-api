@@ -498,12 +498,7 @@ impl RateLimitConfig {
             ));
         }
 
-        if self.window_limits.is_empty() {
-            return Err(ApiError::bad_request(
-                "window_limits must contain at least one limit",
-            ));
-        }
-
+        // window_limits can be empty (to disable long-term window limiting)
         for (index, window_limit) in self.window_limits.iter().enumerate() {
             if window_limit.window_duration_seconds == 0 {
                 return Err(ApiError::bad_request(format!(

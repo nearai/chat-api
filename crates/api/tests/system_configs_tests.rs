@@ -487,36 +487,7 @@ async fn test_invalid_rate_limit_config_rejected() {
         "Should reject zero window_duration_seconds"
     );
 
-    // Test 3: empty window_limits
-    let invalid_body = json!({
-        "rate_limit": {
-            "max_concurrent": 2,
-            "max_requests_per_window": 10,
-            "window_duration_seconds": 60,
-            "window_limits": []
-        }
-    });
-
-    let response = server
-        .patch("/v1/admin/configs")
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
-        )
-        .add_header(
-            http::HeaderName::from_static("content-type"),
-            http::HeaderValue::from_static("application/json"),
-        )
-        .json(&invalid_body)
-        .await;
-
-    assert_eq!(
-        response.status_code(),
-        400,
-        "Should reject empty window_limits"
-    );
-
-    // Test 4: zero window_duration_seconds in window_limits
+    // Test 3: zero window_duration_seconds in window_limits
     let invalid_body = json!({
         "rate_limit": {
             "max_concurrent": 2,
@@ -548,6 +519,56 @@ async fn test_invalid_rate_limit_config_rejected() {
         response.status_code(),
         400,
         "Should reject zero window_duration_seconds in window_limits"
+    );
+}
+
+#[tokio::test]
+#[serial(write_system_configs)]
+async fn test_empty_window_limits_allowed() {
+    let server = create_test_server().await;
+
+    let admin_email = "test_admin_empty_window_limits@admin.org";
+    let admin_token = mock_login(&server, admin_email).await;
+
+    // Empty window_limits should be allowed (disables long-term window limiting)
+    let valid_body = json!({
+        "rate_limit": {
+            "max_concurrent": 2,
+            "max_requests_per_window": 10,
+            "window_duration_seconds": 60,
+            "window_limits": []
+        }
+    });
+
+    let response = server
+        .patch("/v1/admin/configs")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&valid_body)
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        200,
+        "Empty window_limits should be allowed"
+    );
+
+    let body: serde_json::Value = response.json();
+    let rate_limit = body.get("rate_limit").expect("Should have rate_limit");
+    let window_limits = rate_limit
+        .get("window_limits")
+        .and_then(|v| v.as_array())
+        .expect("Should have window_limits array");
+    assert_eq!(
+        window_limits.len(),
+        0,
+        "window_limits should be empty array"
     );
 }
 
