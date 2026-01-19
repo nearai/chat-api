@@ -442,7 +442,9 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
         Self::map_share_row(&row)
     }
 
-    /// Create multiple shares atomically (all succeed or all fail)
+    /// Create multiple shares atomically (all succeed or all fail).
+    /// If a share already exists (duplicate recipient for same conversation),
+    /// updates the permission instead of failing.
     async fn create_shares_batch(
         &self,
         shares: Vec<NewConversationShare>,
@@ -465,6 +467,10 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
         let mut results = Vec::with_capacity(shares.len());
 
         for share in shares {
+            // Use ON CONFLICT to handle duplicate shares gracefully.
+            // For direct shares, the unique constraint is on
+            // (conversation_id, recipient_type, recipient_value) WHERE share_type = 'direct'.
+            // When a duplicate is found, update the permission and return the updated row.
             let row = transaction
                 .query_one(
                     "INSERT INTO conversation_shares (
@@ -478,6 +484,11 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                          org_email_pattern
                      )
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                     ON CONFLICT (conversation_id, recipient_type, recipient_value)
+                         WHERE share_type = 'direct'
+                     DO UPDATE SET
+                         permission = EXCLUDED.permission,
+                         updated_at = NOW()
                      RETURNING id, conversation_id, owner_user_id, share_type, permission,
                                recipient_type, recipient_value, group_id, org_email_pattern,
                                created_at, updated_at",
