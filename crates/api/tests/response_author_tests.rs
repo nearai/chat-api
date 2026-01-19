@@ -79,10 +79,7 @@ async fn test_response_author_stored_on_create() {
         )
         .await;
 
-    assert!(
-        response.status_code().is_success(),
-        "Should list items"
-    );
+    assert!(response.status_code().is_success(), "Should list items");
 
     let items: serde_json::Value = response.json();
     let data = items.get("data").and_then(|d| d.as_array());
@@ -100,7 +97,9 @@ async fn test_response_author_stored_on_create() {
         if has_author {
             println!("   ✓ Author metadata found in items");
         } else {
-            println!("   Note: Author metadata may be in response_authors table but not yet injected");
+            println!(
+                "   Note: Author metadata may be in response_authors table but not yet injected"
+            );
         }
     }
 
@@ -463,10 +462,7 @@ async fn test_create_items_stores_author() {
         )
         .await;
 
-    assert!(
-        response.status_code().is_success(),
-        "Should list items"
-    );
+    assert!(response.status_code().is_success(), "Should list items");
 
     let items: serde_json::Value = response.json();
     println!("   Items response received");

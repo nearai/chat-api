@@ -6,10 +6,10 @@ pub mod oauth;
 pub mod users;
 
 use axum::{middleware::from_fn_with_state, routing::get, Json, Router};
+use http::header::{HeaderName, ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use http::HeaderValue;
-use serde::Serialize;
-use http::header::{HeaderName, AUTHORIZATION, CONTENT_TYPE, ACCEPT};
 use http::Method;
+use serde::Serialize;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use utoipa::ToSchema;
 
@@ -166,7 +166,14 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
                 is_origin_allowed(origin_str, &cors_config_clone)
             },
         ))
-        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::PATCH, Method::DELETE, Method::OPTIONS])
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
         .allow_headers([
             AUTHORIZATION,
             CONTENT_TYPE,

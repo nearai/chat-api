@@ -177,8 +177,7 @@ impl ConversationShareService for ConversationShareServiceImpl {
             .await?;
 
         // Combine and deduplicate (owned groups take precedence)
-        let owned_ids: std::collections::HashSet<_> =
-            owned_groups.iter().map(|g| g.id).collect();
+        let owned_ids: std::collections::HashSet<_> = owned_groups.iter().map(|g| g.id).collect();
 
         let mut all_groups = owned_groups;
         for group in member_groups {
@@ -1494,10 +1493,7 @@ mod tests {
             .iter()
             .find(|share| share.share_type == ShareType::Organization)
             .expect("org share missing");
-        assert_eq!(
-            org_share.org_email_pattern.as_deref(),
-            Some("%@acme.com")
-        );
+        assert_eq!(org_share.org_email_pattern.as_deref(), Some("%@acme.com"));
     }
 
     #[tokio::test]

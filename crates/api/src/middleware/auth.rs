@@ -257,11 +257,7 @@ pub async fn optional_auth_middleware(
             }
         },
         Err(_) => {
-            tracing::debug!(
-                "Optional auth: no token provided on {} {}",
-                method,
-                path
-            );
+            tracing::debug!("Optional auth: no token provided on {} {}", method, path);
             None
         }
     };
