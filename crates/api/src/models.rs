@@ -396,9 +396,6 @@ pub struct UserListResponse {
     pub total: u64,
 }
 
-// TimeWindow has been removed, use chrono::Duration directly in API models
-// For API serialization, we'll use seconds as i64
-
 /// Rate limit configuration (API model)
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct RateLimitConfig {
@@ -416,7 +413,7 @@ pub struct RateLimitConfig {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct WindowLimit {
     /// Duration of the time window for the limit (in seconds)
-    pub window_duration_seconds: i64,
+    pub window_duration_seconds: u64,
     /// Maximum number of requests allowed in this window
     pub limit: usize,
 }
@@ -436,7 +433,8 @@ impl From<services::system_configs::ports::RateLimitConfig> for RateLimitConfig 
 impl From<services::system_configs::ports::WindowLimit> for WindowLimit {
     fn from(limit: services::system_configs::ports::WindowLimit) -> Self {
         Self {
-            window_duration_seconds: limit.window_duration.num_seconds(),
+            window_duration_seconds: u64::try_from(limit.window_duration.num_seconds())
+                .unwrap_or(u64::MAX),
             limit: limit.limit,
         }
     }
@@ -464,7 +462,9 @@ impl From<WindowLimit> for services::system_configs::ports::WindowLimit {
     fn from(api_limit: WindowLimit) -> Self {
         use chrono::Duration;
         Self {
-            window_duration: Duration::seconds(api_limit.window_duration_seconds),
+            window_duration: Duration::seconds(
+                i64::try_from(api_limit.window_duration_seconds).unwrap_or(i64::MAX),
+            ),
             limit: api_limit.limit,
         }
     }
@@ -505,7 +505,7 @@ impl RateLimitConfig {
         }
 
         for (index, window_limit) in self.window_limits.iter().enumerate() {
-            if window_limit.window_duration_seconds <= 0 {
+            if window_limit.window_duration_seconds == 0 {
                 return Err(ApiError::bad_request(format!(
                     "window_limits[{}].window_duration_seconds must be greater than 0",
                     index
