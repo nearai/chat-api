@@ -89,6 +89,7 @@ pub fn validate_email(email: &str) -> Result<(), String> {
 /// assert!(validate_near_account("alice.near").is_ok());
 /// assert!(validate_near_account("bob.testnet").is_ok());
 /// assert!(validate_near_account("test@invalid").is_err()); // Contains invalid character
+/// assert!(validate_near_account("a").is_err()); // Too short (min 2 chars)
 /// ```
 pub fn validate_near_account(account_id: &str) -> Result<(), String> {
     let trimmed = account_id.trim();
