@@ -140,7 +140,10 @@ pub async fn list_domains(
     );
 
     // Check permission
-    if !tenant.permissions.contains(&"domains:read".to_string()) {
+    if !tenant
+        .permissions
+        .contains(&"settings:read:domains".to_string())
+    {
         return Err(ApiError::forbidden("Missing permission to view domains"));
     }
 
@@ -184,7 +187,10 @@ pub async fn add_domain(
     );
 
     // Check permission
-    if !tenant.permissions.contains(&"domains:manage".to_string()) {
+    if !tenant
+        .permissions
+        .contains(&"settings:update:domains".to_string())
+    {
         return Err(ApiError::forbidden("Missing permission to manage domains"));
     }
 
@@ -244,7 +250,10 @@ pub async fn get_domain(
     tracing::info!("Getting domain: domain_id={}", id);
 
     // Check permission
-    if !tenant.permissions.contains(&"domains:read".to_string()) {
+    if !tenant
+        .permissions
+        .contains(&"settings:read:domains".to_string())
+    {
         return Err(ApiError::forbidden("Missing permission to view domains"));
     }
 
@@ -303,7 +312,10 @@ pub async fn verify_domain(
     tracing::info!("Verifying domain: domain_id={}", id);
 
     // Check permission
-    if !tenant.permissions.contains(&"domains:manage".to_string()) {
+    if !tenant
+        .permissions
+        .contains(&"settings:update:domains".to_string())
+    {
         return Err(ApiError::forbidden("Missing permission to manage domains"));
     }
 
@@ -370,7 +382,10 @@ pub async fn remove_domain(
     tracing::warn!("Removing domain: domain_id={}", id);
 
     // Check permission
-    if !tenant.permissions.contains(&"domains:manage".to_string()) {
+    if !tenant
+        .permissions
+        .contains(&"settings:update:domains".to_string())
+    {
         return Err(ApiError::forbidden("Missing permission to manage domains"));
     }
 

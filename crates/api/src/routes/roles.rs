@@ -460,7 +460,10 @@ pub async fn assign_role_to_user(
     );
 
     // Check permission
-    if !tenant.permissions.contains(&"roles:assign".to_string()) {
+    if !tenant
+        .permissions
+        .contains(&"users:update:roles".to_string())
+    {
         return Err(ApiError::forbidden("Missing permission to assign roles"));
     }
 
@@ -469,6 +472,18 @@ pub async fn assign_role_to_user(
     // Verify user is in same organization
     if org_id != tenant.organization_id {
         return Err(ApiError::forbidden("Cannot assign roles in other organizations"));
+    }
+
+    // Verify role scope (system or tenant org)
+    let role = app_state.role_service.get_role(request.role_id).await.map_err(|e| {
+        tracing::error!("Failed to get role: {}", e);
+        ApiError::not_found("Role not found")
+    })?;
+
+    if let Some(role_org_id) = role.organization_id {
+        if role_org_id != tenant.organization_id {
+            return Err(ApiError::forbidden("Role belongs to another organization"));
+        }
     }
 
     app_state
@@ -515,8 +530,22 @@ pub async fn remove_role_from_user(
     );
 
     // Check permission
-    if !tenant.permissions.contains(&"roles:assign".to_string()) {
+    if !tenant
+        .permissions
+        .contains(&"users:update:roles".to_string())
+    {
         return Err(ApiError::forbidden("Missing permission to manage role assignments"));
+    }
+
+    let role = app_state.role_service.get_role(role_id).await.map_err(|e| {
+        tracing::error!("Failed to get role: {}", e);
+        ApiError::not_found("Role not found")
+    })?;
+
+    if let Some(role_org_id) = role.organization_id {
+        if role_org_id != tenant.organization_id {
+            return Err(ApiError::forbidden("Role belongs to another organization"));
+        }
     }
 
     app_state
@@ -555,7 +584,7 @@ pub async fn get_user_permissions(
 
     // Users can only view their own permissions unless they have the permission to view others
     if user_id != tenant.user_id
-        && !tenant.permissions.contains(&"users:read:all".to_string())
+        && !tenant.permissions.contains(&"users:read:org".to_string())
     {
         return Err(ApiError::forbidden("Cannot view other users' permissions"));
     }

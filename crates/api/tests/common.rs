@@ -58,6 +58,12 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
     let model_repo = db.model_repository();
     let system_configs_repo = db.system_configs_repository();
     let near_nonce_repo = db.near_nonce_repository();
+    let organization_repo = db.organization_repository();
+    let workspace_repo = db.workspace_repository();
+    let permission_repo = db.permission_repository();
+    let role_repo = db.role_repository();
+    let audit_repo = db.audit_repository();
+    let domain_repo = db.domain_repository();
 
     // Create services
     let oauth_service = Arc::new(services::auth::OAuthServiceImpl::new(
@@ -129,6 +135,35 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
             analytics_repo as Arc<dyn services::analytics::AnalyticsRepository>,
         ));
 
+    let organization_service = Arc::new(services::organization::service::OrganizationServiceImpl::new(
+        organization_repo.clone(),
+        workspace_repo.clone(),
+    ));
+
+    let workspace_service = Arc::new(services::workspace::service::WorkspaceServiceImpl::new(
+        workspace_repo.clone(),
+    ));
+
+    let permission_service = Arc::new(services::rbac::service::PermissionServiceImpl::new(
+        permission_repo.clone(),
+        role_repo.clone(),
+    ));
+
+    let role_service = Arc::new(services::rbac::service::RoleServiceImpl::new(
+        role_repo.clone(),
+        permission_repo.clone(),
+    ));
+
+    let audit_service = Arc::new(services::audit::service::AuditServiceImpl::new(
+        audit_repo.clone(),
+    ));
+
+    let domain_service = Arc::new(services::domain::service::DomainVerificationServiceImpl::new(
+        domain_repo.clone(),
+    ));
+
+    let saml_service: Option<Arc<dyn services::saml::ports::SamlService>> = None;
+
     // Create application state
     let app_state = AppState {
         oauth_service,
@@ -150,6 +185,16 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
         near_rpc_url: config.near.rpc_url.clone(),
         near_balance_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         model_settings_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        organization_service,
+        organization_repository: organization_repo,
+        workspace_service,
+        workspace_repository: workspace_repo,
+        permission_service,
+        role_service,
+        role_repository: role_repo,
+        audit_service,
+        saml_service,
+        domain_service,
     };
 
     // Create router

@@ -323,15 +323,27 @@ pub async fn update_organization(
         return Err(ApiError::forbidden("Not a member of this organization"));
     }
 
-    let settings = request.settings.map(|s| {
-        // Get current settings and merge with updates
-        OrganizationSettings {
-            personal: false, // Cannot change personal flag
-            default_model: s.default_model,
-            enforce_sso: s.enforce_sso.unwrap_or(false),
-            allowed_email_domains: s.allowed_email_domains.unwrap_or_default(),
-        }
-    });
+    let settings = if let Some(s) = request.settings {
+        let current = app_state
+            .organization_service
+            .get_organization(id)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to get organization: {}", e);
+                ApiError::internal_server_error("Failed to load organization settings")
+            })?;
+
+        Some(OrganizationSettings {
+            personal: current.settings.personal, // Cannot change personal flag
+            default_model: s.default_model.or(current.settings.default_model),
+            enforce_sso: s.enforce_sso.unwrap_or(current.settings.enforce_sso),
+            allowed_email_domains: s
+                .allowed_email_domains
+                .unwrap_or(current.settings.allowed_email_domains),
+        })
+    } else {
+        None
+    };
 
     let params = UpdateOrganizationParams {
         name: request.name,

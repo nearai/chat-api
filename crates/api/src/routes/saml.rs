@@ -135,7 +135,10 @@ pub async fn get_saml_config(
     );
 
     // Check permission
-    if !tenant.permissions.contains(&"saml:read".to_string()) {
+    if !tenant
+        .permissions
+        .contains(&"settings:read:saml".to_string())
+    {
         return Err(ApiError::forbidden("Missing permission to view SAML configuration"));
     }
 
@@ -181,7 +184,10 @@ pub async fn create_saml_config(
     );
 
     // Check permission
-    if !tenant.permissions.contains(&"saml:manage".to_string()) {
+    if !tenant
+        .permissions
+        .contains(&"settings:update:saml".to_string())
+    {
         return Err(ApiError::forbidden("Missing permission to manage SAML configuration"));
     }
 
@@ -255,7 +261,10 @@ pub async fn update_saml_config(
     );
 
     // Check permission
-    if !tenant.permissions.contains(&"saml:manage".to_string()) {
+    if !tenant
+        .permissions
+        .contains(&"settings:update:saml".to_string())
+    {
         return Err(ApiError::forbidden("Missing permission to manage SAML configuration"));
     }
 
@@ -323,7 +332,10 @@ pub async fn delete_saml_config(
     );
 
     // Check permission
-    if !tenant.permissions.contains(&"saml:manage".to_string()) {
+    if !tenant
+        .permissions
+        .contains(&"settings:update:saml".to_string())
+    {
         return Err(ApiError::forbidden("Missing permission to manage SAML configuration"));
     }
 

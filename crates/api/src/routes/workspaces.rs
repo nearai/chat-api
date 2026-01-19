@@ -264,7 +264,23 @@ pub async fn get_workspace(
         tenant.user_id
     );
 
-    // Verify user has access to this workspace
+    let workspace = app_state
+        .workspace_service
+        .get_workspace(id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get workspace: {}", e);
+            if e.to_string().contains("not found") {
+                ApiError::not_found("Workspace not found")
+            } else {
+                ApiError::internal_server_error("Failed to get workspace")
+            }
+        })?;
+
+    if workspace.organization_id != tenant.organization_id {
+        return Err(ApiError::forbidden("Workspace belongs to another organization"));
+    }
+
     let has_access = app_state
         .workspace_service
         .user_has_workspace_access(id, tenant.user_id)
@@ -336,7 +352,23 @@ pub async fn update_workspace(
         return Err(ApiError::forbidden("Missing permission to update workspace"));
     }
 
-    // Verify user has access to this workspace
+    let workspace = app_state
+        .workspace_service
+        .get_workspace(id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get workspace: {}", e);
+            if e.to_string().contains("not found") {
+                ApiError::not_found("Workspace not found")
+            } else {
+                ApiError::internal_server_error("Failed to get workspace")
+            }
+        })?;
+
+    if workspace.organization_id != tenant.organization_id {
+        return Err(ApiError::forbidden("Workspace belongs to another organization"));
+    }
+
     let has_access = app_state
         .workspace_service
         .user_has_workspace_access(id, tenant.user_id)
@@ -351,9 +383,11 @@ pub async fn update_workspace(
     }
 
     let settings = request.settings.map(|s| WorkspaceSettings {
-        default_model: s.default_model,
-        system_prompt: s.system_prompt,
-        web_search_enabled: s.web_search_enabled.unwrap_or(true),
+        default_model: s.default_model.or(workspace.settings.default_model),
+        system_prompt: s.system_prompt.or(workspace.settings.system_prompt),
+        web_search_enabled: s
+            .web_search_enabled
+            .unwrap_or(workspace.settings.web_search_enabled),
     });
 
     let params = UpdateWorkspaceParams {
@@ -412,6 +446,23 @@ pub async fn delete_workspace(
 
     if !has_permission {
         return Err(ApiError::forbidden("Missing permission to delete workspace"));
+    }
+
+    let workspace = app_state
+        .workspace_service
+        .get_workspace(id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get workspace: {}", e);
+            if e.to_string().contains("not found") {
+                ApiError::not_found("Workspace not found")
+            } else {
+                ApiError::internal_server_error("Failed to get workspace")
+            }
+        })?;
+
+    if workspace.organization_id != tenant.organization_id {
+        return Err(ApiError::forbidden("Workspace belongs to another organization"));
     }
 
     app_state
@@ -530,6 +581,23 @@ pub async fn add_workspace_member(
         return Err(ApiError::forbidden("Missing permission to manage workspace members"));
     }
 
+    let workspace = app_state
+        .workspace_service
+        .get_workspace(id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get workspace: {}", e);
+            if e.to_string().contains("not found") {
+                ApiError::not_found("Workspace not found")
+            } else {
+                ApiError::internal_server_error("Failed to get workspace")
+            }
+        })?;
+
+    if workspace.organization_id != tenant.organization_id {
+        return Err(ApiError::forbidden("Workspace belongs to another organization"));
+    }
+
     let role = WorkspaceRole::from_str(&request.role).ok_or_else(|| {
         ApiError::bad_request("Invalid role. Must be one of: admin, member, viewer")
     })?;
@@ -589,6 +657,23 @@ pub async fn update_workspace_member_role(
         return Err(ApiError::forbidden("Missing permission to manage workspace members"));
     }
 
+    let workspace = app_state
+        .workspace_service
+        .get_workspace(id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get workspace: {}", e);
+            if e.to_string().contains("not found") {
+                ApiError::not_found("Workspace not found")
+            } else {
+                ApiError::internal_server_error("Failed to get workspace")
+            }
+        })?;
+
+    if workspace.organization_id != tenant.organization_id {
+        return Err(ApiError::forbidden("Workspace belongs to another organization"));
+    }
+
     let role = WorkspaceRole::from_str(&request.role).ok_or_else(|| {
         ApiError::bad_request("Invalid role. Must be one of: admin, member, viewer")
     })?;
@@ -639,6 +724,23 @@ pub async fn remove_workspace_member(
         .contains(&"workspaces:manage:members".to_string())
     {
         return Err(ApiError::forbidden("Missing permission to manage workspace members"));
+    }
+
+    let workspace = app_state
+        .workspace_service
+        .get_workspace(id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get workspace: {}", e);
+            if e.to_string().contains("not found") {
+                ApiError::not_found("Workspace not found")
+            } else {
+                ApiError::internal_server_error("Failed to get workspace")
+            }
+        })?;
+
+    if workspace.organization_id != tenant.organization_id {
+        return Err(ApiError::forbidden("Workspace belongs to another organization"));
     }
 
     // Cannot remove yourself
