@@ -6,9 +6,11 @@ pub mod oauth;
 pub mod users;
 
 use axum::{middleware::from_fn_with_state, routing::get, Json, Router};
+use http::header::{HeaderName, ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use http::HeaderValue;
+use http::Method;
 use serde::Serialize;
-use tower_http::cors::{AllowOrigin, Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use utoipa::ToSchema;
 
 use crate::{
@@ -122,6 +124,14 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         crate::middleware::auth_middleware,
     ));
 
+    // Conversation read routes with optional authentication
+    // These routes work for both authenticated users and unauthenticated users
+    // (for accessing publicly shared conversations)
+    let optional_auth_routes = api::create_optional_auth_router().layer(from_fn_with_state(
+        auth_state.clone(),
+        crate::middleware::optional_auth_middleware,
+    ));
+
     // API proxy routes (requires authentication)
     let api_routes = api::create_api_router(rate_limit_state).layer(from_fn_with_state(
         auth_state,
@@ -129,6 +139,8 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
     ));
 
     // Build the base router
+    // Note: optional_auth_routes must come BEFORE api_routes since they share paths
+    // but have different HTTP methods (optional auth for GET, required auth for POST/DELETE)
     let router = Router::new()
         .route("/health", get(health_check))
         .merge(configs_routes) // Configs route (requires user auth)
@@ -136,7 +148,8 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         .nest("/v1/auth", logout_route) // Logout route with auth middleware
         .nest("/v1/users", user_routes)
         .nest("/v1/admin", admin_routes)
-        .merge(api_routes) // Merge instead of nest since api routes already have /v1 prefix
+        .merge(optional_auth_routes) // Conversation read routes (optional auth)
+        .merge(api_routes) // API routes (required auth)
         .merge(attestation_routes) // Merge attestation routes (already have /v1 prefix)
         .with_state(app_state)
         // Add static file serving as fallback (must be last)
@@ -153,9 +166,25 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
                 is_origin_allowed(origin_str, &cors_config_clone)
             },
         ))
-        .allow_methods(Any)
-        .allow_headers(Any)
-        .expose_headers(Any);
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([
+            AUTHORIZATION,
+            CONTENT_TYPE,
+            ACCEPT,
+            // Allow ngrok-skip-browser-warning header for development with ngrok tunnels
+            // When using ngrok for local development/testing, this header prevents the
+            // ngrok browser warning page from appearing on the first request
+            // This is safe for production as unknown headers are simply ignored
+            HeaderName::from_static("ngrok-skip-browser-warning"),
+        ])
+        .allow_credentials(true);
 
     // Add HTTP metrics middleware to track request counts and latencies
     router.layer(cors).layer(from_fn_with_state(

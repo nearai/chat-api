@@ -108,6 +108,27 @@ impl ConversationRepository for PostgresConversationRepository {
         }
     }
 
+    async fn get_conversation_owner(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Option<UserId>, ConversationError> {
+        let client = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
+
+        let row = client
+            .query_opt(
+                "SELECT user_id FROM conversations WHERE id = $1",
+                &[&conversation_id],
+            )
+            .await
+            .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
+
+        Ok(row.map(|r| UserId(r.get("user_id"))))
+    }
+
     async fn delete_conversation(
         &self,
         conversation_id: &str,

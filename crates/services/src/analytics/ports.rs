@@ -16,6 +16,7 @@ pub enum ActivityType {
     Response,
     Conversation,
     FileUpload,
+    Share,
     /// Activity type specifically for rate limiting purposes.
     /// This is used to track requests for quota/rate limit enforcement,
     /// separate from business analytics (which use Response, Conversation, etc.).
@@ -30,6 +31,7 @@ impl ActivityType {
             ActivityType::Response => "response",
             ActivityType::Conversation => "conversation",
             ActivityType::FileUpload => "file_upload",
+            ActivityType::Share => "share",
             ActivityType::RateLimitedRequest => "rate_limited_request",
         }
     }
