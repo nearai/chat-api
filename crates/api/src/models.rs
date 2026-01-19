@@ -478,7 +478,7 @@ impl RateLimitConfig {
     /// - `max_requests_per_window` must be greater than 0
     /// - `window_duration_seconds` must be greater than 0
     /// - `window_limits` must contain at least one limit
-    /// - Each `window_limits` entry must have `window.seconds > 0` and `limit > 0`
+    /// - Each `window_limits` entry must have `window_duration_seconds > 0` and `limit > 0`
     pub fn validate(&self) -> Result<(), ApiError> {
         if self.max_concurrent == 0 {
             return Err(ApiError::bad_request(

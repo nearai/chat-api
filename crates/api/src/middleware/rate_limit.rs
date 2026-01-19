@@ -4,6 +4,7 @@
 //! - Maximum 2 concurrent in-flight requests per user
 //! - Maximum 1 request per second per user (sliding window)
 
+use crate::consts::USER_STATE_IDLE_TIMEOUT;
 use crate::middleware::auth::AuthenticatedUser;
 use axum::{
     extract::{Extension, State},
@@ -90,7 +91,7 @@ impl RateLimitState {
         let timestamp = {
             let mut user_limits = self.user_limits.lock().await;
 
-            user_limits.retain(|_, state| !state.is_idle(Duration::hours(1)));
+            user_limits.retain(|_, state| !state.is_idle(USER_STATE_IDLE_TIMEOUT));
 
             let user_state = user_limits
                 .entry(user_id)
