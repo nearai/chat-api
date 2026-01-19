@@ -57,4 +57,6 @@ pub struct AppState {
     pub near_balance_cache: NearBalanceCache,
     /// In-memory cache for model settings needed by /v1/responses (public + system_prompt)
     pub model_settings_cache: ModelSettingsCache,
+    /// Rate limit state for hot-reloadable rate limit configuration
+    pub rate_limit_state: crate::middleware::RateLimitState,
 }

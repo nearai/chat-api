@@ -215,6 +215,18 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(MockMetricsService)
         };
 
+    // Load rate limit config from system configs
+    let rate_limit_config = system_configs_service
+        .get_configs()
+        .await?
+        .unwrap_or_default()
+        .rate_limit;
+
+    // Create rate limit state
+    use api::middleware::RateLimitState;
+    let rate_limit_state =
+        RateLimitState::with_config(rate_limit_config, analytics_service.clone());
+
     // Create application state
     let app_state = AppState {
         oauth_service,
@@ -236,17 +248,11 @@ async fn main() -> anyhow::Result<()> {
         near_rpc_url: config.near.rpc_url.clone(),
         near_balance_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         model_settings_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        rate_limit_state,
     };
 
-    // Load rate limit config from system configs
-    let rate_limit_config = system_configs_service
-        .get_configs()
-        .await?
-        .unwrap_or_default()
-        .rate_limit;
-
     // Create router with CORS support
-    let app = create_router_with_cors(app_state, config.cors.clone(), Some(rate_limit_config))
+    let app = create_router_with_cors(app_state, config.cors.clone())
         .merge(SwaggerUi::new("/docs").url("/api-docs/openapi.json", ApiDoc::openapi()));
 
     // Start server

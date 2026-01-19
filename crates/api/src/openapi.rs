@@ -61,7 +61,7 @@ use utoipa::OpenApi;
         crate::models::UpdateModelRequest,
         // System configs models
         crate::models::SystemConfigsResponse,
-        crate::models::UpdateSystemConfigsRequest,
+        crate::models::UpsertSystemConfigsRequest,
         // Attestation models
         crate::models::ApiGatewayAttestation,
         crate::models::ModelAttestation,

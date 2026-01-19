@@ -23,7 +23,7 @@ use std::{
     collections::{HashMap, VecDeque},
     sync::Arc,
 };
-use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, RwLock, Semaphore};
 
 struct UserRateLimitState {
     semaphore: Arc<Semaphore>,
@@ -53,7 +53,7 @@ impl UserRateLimitState {
 #[derive(Clone)]
 pub struct RateLimitState {
     user_limits: Arc<Mutex<HashMap<UserId, UserRateLimitState>>>,
-    config: Arc<RateLimitConfig>,
+    config: Arc<RwLock<RateLimitConfig>>,
     analytics_service: Arc<dyn AnalyticsServiceTrait>,
 }
 
@@ -68,12 +68,22 @@ impl RateLimitState {
     ) -> Self {
         Self {
             user_limits: Arc::new(Mutex::new(HashMap::new())),
-            config: Arc::new(config),
+            config: Arc::new(RwLock::new(config)),
             analytics_service,
         }
     }
 
+    /// Update the rate limit configuration (hot reload)
+    pub async fn update_config(&self, new_config: RateLimitConfig) {
+        let mut config = self.config.write().await;
+        *config = new_config;
+        tracing::info!("Rate limit configuration updated");
+    }
+
     async fn try_acquire(&self, user_id: UserId) -> Result<RateLimitGuard, RateLimitError> {
+        // Load config snapshot at the start (read lock is released immediately)
+        let config = self.config.read().await.clone();
+
         // Phase 1: Fast checks (short mutex hold time)
         // Check short-term rate limit and acquire permit
         // Store the timestamp so we can rollback the exact one we added
@@ -84,14 +94,14 @@ impl RateLimitState {
 
             let user_state = user_limits
                 .entry(user_id)
-                .or_insert_with(|| UserRateLimitState::new(self.config.max_concurrent));
+                .or_insert_with(|| UserRateLimitState::new(config.max_concurrent));
 
             let now = Utc::now();
             user_state.last_activity = now;
 
             // Clean up expired timestamps
             while let Some(front) = user_state.request_timestamps.front() {
-                if now.signed_duration_since(*front) > self.config.window_duration {
+                if now.signed_duration_since(*front) > config.window_duration {
                     user_state.request_timestamps.pop_front();
                 } else {
                     break;
@@ -99,10 +109,10 @@ impl RateLimitState {
             }
 
             // Check short-term rate limit
-            if user_state.request_timestamps.len() >= self.config.max_requests_per_window {
+            if user_state.request_timestamps.len() >= config.max_requests_per_window {
                 if let Some(oldest) = user_state.request_timestamps.front() {
                     let elapsed = now.signed_duration_since(*oldest);
-                    let wait_time = self.config.window_duration - elapsed;
+                    let wait_time = config.window_duration - elapsed;
                     let wait_time_ms =
                         u64::try_from(wait_time.num_milliseconds().max(0)).unwrap_or(0);
                     tracing::warn!(
@@ -164,7 +174,7 @@ impl RateLimitState {
         //
         // First, check all windows without inserting to avoid duplicate records
         // If all windows pass, insert a single record that all windows will count
-        for window_limit in &self.config.window_limits {
+        for window_limit in &config.window_limits {
             let limit_value = window_limit.limit.try_into().unwrap_or(i64::MAX);
 
             // Check count without inserting
@@ -240,9 +250,7 @@ impl RateLimitState {
         //   4. Full multi-window atomicity would require significant interface changes
         //
         // For strict enforcement of all windows, see alternatives documented in Phase 2 above.
-        if let Some(most_restrictive_window) =
-            self.config.window_limits.iter().min_by_key(|w| w.limit)
-        {
+        if let Some(most_restrictive_window) = config.window_limits.iter().min_by_key(|w| w.limit) {
             let limit_value = most_restrictive_window.limit as u64;
             let result = self
                 .analytics_service

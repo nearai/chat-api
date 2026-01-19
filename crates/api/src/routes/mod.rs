@@ -12,11 +12,10 @@ use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use utoipa::ToSchema;
 
 use crate::{
-    middleware::{AuthState, MetricsState, RateLimitState},
+    middleware::{AuthState, MetricsState},
     state::AppState,
     static_files,
 };
-use services::system_configs::ports::RateLimitConfig;
 
 #[derive(Serialize, ToSchema)]
 pub struct HealthResponse {
@@ -75,11 +74,7 @@ fn is_origin_allowed(origin_str: &str, cors_config: &config::CorsConfig) -> bool
 }
 
 /// Create the main API router with CORS configuration
-pub fn create_router_with_cors(
-    app_state: AppState,
-    cors_config: config::CorsConfig,
-    rate_limit_config: Option<RateLimitConfig>,
-) -> Router {
+pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsConfig) -> Router {
     // Create auth state for middleware
     let auth_state = AuthState {
         session_repository: app_state.session_repository.clone(),
@@ -118,10 +113,8 @@ pub fn create_router_with_cors(
         crate::middleware::auth_middleware,
     ));
 
-    // Create rate limit state with config from system configs or default
-    let rate_limit_config = rate_limit_config.unwrap_or_default();
-    let rate_limit_state =
-        RateLimitState::with_config(rate_limit_config, app_state.analytics_service.clone());
+    // Get rate limit state from app state
+    let rate_limit_state = app_state.rate_limit_state.clone();
 
     // Configs routes (requires user authentication, not admin)
     let configs_routes = configs::create_configs_router().layer(from_fn_with_state(

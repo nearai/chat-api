@@ -129,6 +129,10 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
             analytics_repo as Arc<dyn services::analytics::AnalyticsRepository>,
         ));
 
+    // Create rate limit state for testing
+    use api::middleware::RateLimitState;
+    let rate_limit_state = RateLimitState::new(analytics_service.clone());
+
     // Create application state
     let app_state = AppState {
         oauth_service,
@@ -150,10 +154,11 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
         near_rpc_url: config.near.rpc_url.clone(),
         near_balance_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         model_settings_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        rate_limit_state,
     };
 
     // Create router
-    let app = create_router_with_cors(app_state, config::CorsConfig::default(), None);
+    let app = create_router_with_cors(app_state, config::CorsConfig::default());
 
     // Create test server
     TestServer::new(app).expect("Failed to create test server")

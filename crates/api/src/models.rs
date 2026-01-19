@@ -543,36 +543,19 @@ impl From<services::system_configs::ports::SystemConfigs> for SystemConfigsRespo
     }
 }
 
-/// System configs upsert request (full replace)
+/// System configs upsert request
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UpsertSystemConfigsRequest {
     /// Default model identifier to use when not specified
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
-}
-
-impl From<UpsertSystemConfigsRequest> for services::system_configs::ports::SystemConfigs {
-    fn from(req: UpsertSystemConfigsRequest) -> Self {
-        services::system_configs::ports::SystemConfigs {
-            default_model: req.default_model,
-            rate_limit: services::system_configs::ports::RateLimitConfig::default(),
-        }
-    }
-}
-
-/// System configs update request (partial)
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct UpdateSystemConfigsRequest {
-    /// Default model identifier to use when not specified
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub default_model: Option<String>,
-    /// Rate limit configuration (full replace, not partial)
+    /// Rate limit configuration
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate_limit: Option<RateLimitConfig>,
 }
 
-impl From<UpdateSystemConfigsRequest> for services::system_configs::ports::PartialSystemConfigs {
-    fn from(req: UpdateSystemConfigsRequest) -> Self {
+impl From<UpsertSystemConfigsRequest> for services::system_configs::ports::PartialSystemConfigs {
+    fn from(req: UpsertSystemConfigsRequest) -> Self {
         services::system_configs::ports::PartialSystemConfigs {
             default_model: req.default_model,
             rate_limit: req.rate_limit.map(Into::into),

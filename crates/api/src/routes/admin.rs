@@ -624,7 +624,7 @@ pub async fn revoke_vpc_credentials(
     patch,
     path = "/v1/admin/configs",
     tag = "Admin",
-    request_body = UpdateSystemConfigsRequest,
+    request_body = UpsertSystemConfigsRequest,
     responses(
         (status = 200, description = "System configs created or updated", body = SystemConfigsResponse),
         (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
@@ -638,7 +638,7 @@ pub async fn revoke_vpc_credentials(
 )]
 pub async fn upsert_system_configs(
     State(app_state): State<AppState>,
-    Json(request): Json<UpdateSystemConfigsRequest>,
+    Json(request): Json<UpsertSystemConfigsRequest>,
 ) -> Result<Json<SystemConfigsResponse>, ApiError> {
     tracing::info!("Upserting system configs");
 
@@ -689,6 +689,12 @@ pub async fn upsert_system_configs(
                 ApiError::internal_server_error("Failed to create system configs")
             })?
     };
+
+    // Hot reload: Update rate limit state with new config
+    app_state
+        .rate_limit_state
+        .update_config(updated.rate_limit.clone())
+        .await;
 
     Ok(Json(updated.into()))
 }
