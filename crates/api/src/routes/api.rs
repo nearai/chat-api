@@ -2065,32 +2065,31 @@ async fn proxy_responses(
     }
 
     // Wrap the response stream to extract response_id and store author info
-    let response_body = if conversation_id_for_author.is_some()
-        && (200..300).contains(&proxy_response.status)
-    {
-        let repo = state.response_author_repository.clone();
-        let conv_id = conversation_id_for_author.unwrap();
-        let user_id = user.user_id;
-        let author = author_name_for_tracking;
+    let response_body =
+        if conversation_id_for_author.is_some() && (200..300).contains(&proxy_response.status) {
+            let repo = state.response_author_repository.clone();
+            let conv_id = conversation_id_for_author.unwrap();
+            let user_id = user.user_id;
+            let author = author_name_for_tracking;
 
-        tracing::info!(
+            tracing::info!(
             "create_response: Using AuthorTrackingStream for conv_id={}, user_id={}, author={:?}",
             conv_id,
             user_id,
             author
         );
 
-        let wrapped_stream =
-            AuthorTrackingStream::new(proxy_response.body, repo, conv_id, user_id, author);
-        Body::from_stream(wrapped_stream)
-    } else {
-        tracing::info!(
-            "create_response: NOT using AuthorTrackingStream - conv_id={:?}, status={}",
-            conversation_id_for_author,
-            proxy_response.status
-        );
-        Body::from_stream(proxy_response.body)
-    };
+            let wrapped_stream =
+                AuthorTrackingStream::new(proxy_response.body, repo, conv_id, user_id, author);
+            Body::from_stream(wrapped_stream)
+        } else {
+            tracing::info!(
+                "create_response: NOT using AuthorTrackingStream - conv_id={:?}, status={}",
+                conversation_id_for_author,
+                proxy_response.status
+            );
+            Body::from_stream(proxy_response.body)
+        };
 
     build_response(proxy_response.status, proxy_headers, response_body).await
 }
