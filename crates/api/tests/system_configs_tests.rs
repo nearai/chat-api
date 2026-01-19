@@ -130,7 +130,7 @@ async fn test_update_system_configs() {
         "Updated system configs should contain new default_model"
     );
 
-    // Verify via GET (requires user auth)
+    // Verify via public GET (only default_model is returned)
     let response = server
         .get("/v1/configs")
         .add_header(
@@ -142,14 +142,44 @@ async fn test_update_system_configs() {
     assert_eq!(
         response.status_code(),
         200,
-        "Admin should be able to get updated system configs"
+        "Admin should be able to get public system configs"
     );
 
     let body: serde_json::Value = response.json();
     assert_eq!(
         body.get("default_model"),
         Some(&json!("updated-model")),
-        "Fetched system configs should reflect updated default_model"
+        "Public config should have default_model"
+    );
+    assert!(
+        body.get("rate_limit").is_none(),
+        "Public config should NOT have rate_limit"
+    );
+
+    // Verify via admin GET (full config including rate_limit)
+    let response = server
+        .get("/v1/admin/configs")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        200,
+        "Admin should be able to get full system configs"
+    );
+
+    let body: serde_json::Value = response.json();
+    assert_eq!(
+        body.get("default_model"),
+        Some(&json!("updated-model")),
+        "Full config should have updated default_model"
+    );
+    assert!(
+        body.get("rate_limit").is_some(),
+        "Full config should have rate_limit"
     );
 }
 
@@ -174,7 +204,7 @@ async fn test_get_system_configs_allows_non_admin() {
     let non_admin_email = "test_user_configs@no-admin.org";
     let non_admin_token = mock_login(&server, non_admin_email).await;
 
-    // Non-admin user should be able to GET system configs (only write requires admin)
+    // Non-admin user should be able to GET public system configs
     let response = server
         .get("/v1/configs")
         .add_header(
@@ -185,7 +215,37 @@ async fn test_get_system_configs_allows_non_admin() {
 
     assert!(
         response.status_code().is_success() || response.status_code() == 200,
-        "Non-admin users should be able to GET system configs with authentication"
+        "Non-admin users should be able to GET public system configs"
+    );
+
+    let body: serde_json::Value = response.json();
+    // Public config should NOT have rate_limit
+    assert!(
+        body.get("rate_limit").is_none(),
+        "Non-admin should not see rate_limit in public config"
+    );
+}
+
+#[tokio::test]
+async fn test_get_full_configs_requires_admin() {
+    let server = create_test_server().await;
+
+    let non_admin_email = "test_user_full_configs@no-admin.org";
+    let non_admin_token = mock_login(&server, non_admin_email).await;
+
+    // Non-admin trying to GET full configs should receive 403
+    let response = server
+        .get("/v1/admin/configs")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {non_admin_token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        403,
+        "Non-admin should receive 403 when accessing full configs"
     );
 }
 
@@ -300,9 +360,9 @@ async fn test_upsert_rate_limit_config() {
     );
     assert_eq!(window_limits[0].get("limit"), Some(&json!(1000)));
 
-    // Verify via GET
+    // Verify via GET (admin endpoint to see full config including rate_limit)
     let response = server
-        .get("/v1/configs")
+        .get("/v1/admin/configs")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),

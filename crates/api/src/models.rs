@@ -524,7 +524,23 @@ impl RateLimitConfig {
     }
 }
 
-/// System configs response
+/// Public system configs response (limited fields for non-admin users)
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct PublicSystemConfigsResponse {
+    /// Default model identifier to use when not specified
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
+}
+
+impl From<services::system_configs::ports::SystemConfigs> for PublicSystemConfigsResponse {
+    fn from(config: services::system_configs::ports::SystemConfigs) -> Self {
+        Self {
+            default_model: config.default_model,
+        }
+    }
+}
+
+/// Full system configs response (all fields, for admin)
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct SystemConfigsResponse {
     /// Default model identifier to use when not specified

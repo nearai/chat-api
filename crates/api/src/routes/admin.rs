@@ -3,7 +3,7 @@ use axum::routing::post;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
-    routing::{delete, get, patch},
+    routing::{delete, get},
     Json, Router,
 };
 use chrono::{DateTime, Utc};
@@ -699,6 +699,38 @@ pub async fn upsert_system_configs(
     Ok(Json(updated.into()))
 }
 
+/// Get full system configs (admin only, returns all fields including rate_limit)
+#[utoipa::path(
+    get,
+    path = "/v1/admin/configs",
+    tag = "Admin",
+    responses(
+        (status = 200, description = "Full system configs retrieved", body = Option<SystemConfigsResponse>),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn get_system_configs_admin(
+    State(app_state): State<AppState>,
+) -> Result<Json<Option<SystemConfigsResponse>>, ApiError> {
+    tracing::info!("Getting full system configs (admin)");
+
+    let config = app_state
+        .system_configs_service
+        .get_configs()
+        .await
+        .map_err(|e| {
+            tracing::error!(error = ?e, "Failed to get system configs");
+            ApiError::internal_server_error("Failed to get system configs")
+        })?;
+
+    Ok(Json(config.map(Into::into)))
+}
+
 /// Create admin router with all admin routes (requires admin authentication)
 pub fn create_admin_router() -> Router<AppState> {
     Router::new()
@@ -707,7 +739,10 @@ pub fn create_admin_router() -> Router<AppState> {
         .route("/models", get(list_models).patch(batch_upsert_models))
         .route("/models/{model_id}", delete(delete_model))
         .route("/vpc/revoke", post(revoke_vpc_credentials))
-        .route("/configs", patch(upsert_system_configs))
+        .route(
+            "/configs",
+            get(get_system_configs_admin).patch(upsert_system_configs),
+        )
         .route("/analytics", get(get_analytics))
         .route("/analytics/top-users", get(get_top_users))
 }
