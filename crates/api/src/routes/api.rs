@@ -631,6 +631,28 @@ async fn create_conversation_share(
                     .into_response());
             }
 
+            // Validate all recipients before processing
+            for recipient in &recipients {
+                crate::validation::validate_share_recipient(&recipient.kind, &recipient.value)
+                    .map_err(|error| {
+                        (
+                            StatusCode::BAD_REQUEST,
+                            Json(ErrorResponse {
+                                error: format!(
+                                    "Invalid {} recipient '{}': {}",
+                                    match recipient.kind {
+                                        ShareRecipientKind::Email => "email",
+                                        ShareRecipientKind::NearAccount => "NEAR account",
+                                    },
+                                    recipient.value,
+                                    error
+                                ),
+                            }),
+                        )
+                            .into_response()
+                    })?;
+            }
+
             ShareTarget::Direct(
                 recipients
                     .into_iter()
@@ -783,6 +805,29 @@ async fn create_share_group(
             .into_response());
     }
 
+    // Validate all members before processing
+    for member in &request.members {
+        crate::validation::validate_share_recipient(&member.kind, &member.value).map_err(
+            |error| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: format!(
+                            "Invalid {} member '{}': {}",
+                            match member.kind {
+                                ShareRecipientKind::Email => "email",
+                                ShareRecipientKind::NearAccount => "NEAR account",
+                            },
+                            member.value,
+                            error
+                        ),
+                    }),
+                )
+                    .into_response()
+            },
+        )?;
+    }
+
     let members = request
         .members
         .into_iter()
@@ -871,6 +916,31 @@ async fn update_share_group(
             }),
         )
             .into_response());
+    }
+
+    // Validate all members before processing
+    if let Some(ref members) = request.members {
+        for member in members {
+            crate::validation::validate_share_recipient(&member.kind, &member.value).map_err(
+                |error| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse {
+                            error: format!(
+                                "Invalid {} member '{}': {}",
+                                match member.kind {
+                                    ShareRecipientKind::Email => "email",
+                                    ShareRecipientKind::NearAccount => "NEAR account",
+                                },
+                                member.value,
+                                error
+                            ),
+                        }),
+                    )
+                        .into_response()
+                },
+            )?;
+        }
     }
 
     let members = request.members.map(|members| {
