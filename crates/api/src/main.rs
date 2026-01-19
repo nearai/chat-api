@@ -1,3 +1,4 @@
+use api::middleware::RateLimitState;
 use api::{create_router_with_cors, ApiDoc, AppState};
 use config::LoggingConfig;
 use opentelemetry::global;
@@ -223,7 +224,6 @@ async fn main() -> anyhow::Result<()> {
         .rate_limit;
 
     // Create rate limit state
-    use api::middleware::RateLimitState;
     let rate_limit_state =
         RateLimitState::with_config(rate_limit_config, analytics_service.clone());
 

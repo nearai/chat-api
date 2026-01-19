@@ -231,5 +231,3 @@ pub enum AnalyticsError {
     #[error("Internal error: {0}")]
     InternalError(String),
 }
-
-// TimeWindow has been removed, use chrono::Duration directly

@@ -312,7 +312,53 @@ async fn test_upsert_rate_limit_config() {
     assert_eq!(response.status_code(), 200);
     let body: serde_json::Value = response.json();
     let rate_limit = body.get("rate_limit").expect("Should have rate_limit");
-    assert_eq!(rate_limit.get("max_concurrent"), Some(&json!(5)));
+
+    // Verify all fields are correctly persisted
+    assert_eq!(
+        rate_limit.get("max_concurrent"),
+        Some(&json!(5)),
+        "max_concurrent should be persisted"
+    );
+    assert_eq!(
+        rate_limit.get("max_requests_per_window"),
+        Some(&json!(10)),
+        "max_requests_per_window should be persisted"
+    );
+    assert_eq!(
+        rate_limit.get("window_duration_seconds"),
+        Some(&json!(60)),
+        "window_duration_seconds should be persisted"
+    );
+
+    let window_limits = rate_limit
+        .get("window_limits")
+        .and_then(|v| v.as_array())
+        .expect("Should have window_limits array");
+    assert_eq!(window_limits.len(), 2, "Should have 2 window limits");
+
+    // Verify first window limit (day)
+    assert_eq!(
+        window_limits[0].get("window_duration_seconds"),
+        Some(&json!(86400)),
+        "First window should be 1 day (86400 seconds)"
+    );
+    assert_eq!(
+        window_limits[0].get("limit"),
+        Some(&json!(1000)),
+        "First window limit should be 1000"
+    );
+
+    // Verify second window limit (week)
+    assert_eq!(
+        window_limits[1].get("window_duration_seconds"),
+        Some(&json!(604800)),
+        "Second window should be 1 week (604800 seconds)"
+    );
+    assert_eq!(
+        window_limits[1].get("limit"),
+        Some(&json!(5000)),
+        "Second window limit should be 5000"
+    );
 }
 
 #[tokio::test]
