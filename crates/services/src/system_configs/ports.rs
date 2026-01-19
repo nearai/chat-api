@@ -4,7 +4,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 
 /// Helper module for serializing/deserializing Duration as seconds
-mod duration_serde {
+mod serde_duration_seconds {
     use super::*;
 
     pub fn serialize<S>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error>
@@ -43,7 +43,7 @@ impl fmt::Display for SystemKey {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowLimit {
     /// Duration of the time window for the limit
-    #[serde(with = "duration_serde")]
+    #[serde(with = "serde_duration_seconds")]
     pub window_duration: Duration,
     /// Maximum number of requests allowed in this window
     pub limit: usize,
@@ -57,7 +57,7 @@ pub struct RateLimitConfig {
     /// Maximum number of requests per time window per user
     pub max_requests_per_window: usize,
     /// Duration of the short-term rate limit window
-    #[serde(with = "duration_serde")]
+    #[serde(with = "serde_duration_seconds")]
     pub window_duration: Duration,
     /// Sliding window limits based on activity logs
     /// Each limit applies independently
