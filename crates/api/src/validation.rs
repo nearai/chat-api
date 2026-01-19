@@ -33,10 +33,10 @@ pub fn validate_org_email_pattern(pattern: &str) -> Result<String, String> {
 
     // Validate email pattern format (must start with @ or %@ and have valid domain)
     // Accept both user-provided format (@company.com) and normalized format (%@company.com)
-    let domain_part = if trimmed.starts_with("%@") {
-        &trimmed[2..] // Skip the %@
-    } else if trimmed.starts_with('@') {
-        &trimmed[1..] // Skip the @
+    let domain_part = if let Some(stripped) = trimmed.strip_prefix("%@") {
+        stripped
+    } else if let Some(stripped) = trimmed.strip_prefix('@') {
+        stripped
     } else {
         return Err("Email pattern must start with @ (e.g., @company.com)".to_string());
     };

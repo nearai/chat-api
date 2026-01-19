@@ -607,6 +607,19 @@ mod tests {
             Ok(share)
         }
 
+        async fn create_shares_batch(
+            &self,
+            shares: Vec<NewConversationShare>,
+        ) -> Result<Vec<ConversationShare>, ConversationError> {
+            let created_shares: Vec<ConversationShare> = shares
+                .into_iter()
+                .map(|share| self.next_share(share))
+                .collect();
+            let mut shares_vec = self.shares.lock().expect("lock shares");
+            shares_vec.extend(created_shares.clone());
+            Ok(created_shares)
+        }
+
         async fn list_shares(
             &self,
             owner_user_id: UserId,
