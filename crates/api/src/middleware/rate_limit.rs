@@ -74,10 +74,27 @@ impl RateLimitState {
     }
 
     /// Update the rate limit configuration (hot reload)
+    ///
+    /// This will clear all existing user rate limit states to ensure
+    /// all users immediately use the new configuration (especially max_concurrent).
+    /// Any in-flight requests will complete with their already-acquired permits,
+    /// but new requests will use the new limits.
     pub async fn update_config(&self, new_config: RateLimitConfig) {
+        // Update config first
         let mut config = self.config.write().await;
         *config = new_config;
-        tracing::info!("Rate limit configuration updated");
+        drop(config); // Release write lock
+
+        // Clear all existing user states to ensure new config is used immediately
+        // This prevents inconsistency where some users have old semaphore permits
+        let mut user_limits = self.user_limits.lock().await;
+        let cleared_count = user_limits.len();
+        user_limits.clear();
+
+        tracing::info!(
+            cleared_users = cleared_count,
+            "Rate limit configuration updated and user states cleared"
+        );
     }
 
     async fn try_acquire(&self, user_id: UserId) -> Result<RateLimitGuard, RateLimitError> {
@@ -1839,6 +1856,70 @@ mod tests {
         assert!(
             matches!(result, Err(RateLimitError::WindowLimitExceeded { .. })),
             "Request should fail when at limit again"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_config_update_clears_user_states() {
+        use services::system_configs::ports::RateLimitConfig;
+
+        // Create initial config with max_concurrent = 1
+        let initial_config = RateLimitConfig {
+            max_concurrent: 1,
+            max_requests_per_window: 100,
+            window_duration: ChronoDuration::seconds(60),
+            window_limits: vec![],
+        };
+
+        let analytics_service = Arc::new(test_services::CounterAnalyticsService {
+            count: Arc::new(Mutex::new(0)),
+            increment: false,
+            was_recorded: true,
+        });
+        let state = RateLimitState::with_config(initial_config, analytics_service);
+
+        let user = UserId(Uuid::new_v4());
+
+        // Acquire first permit (should succeed)
+        let guard1 = state.try_acquire(user).await;
+        assert!(guard1.is_ok(), "First request should succeed");
+
+        // Try to acquire second permit (should fail because max_concurrent = 1)
+        let guard2_result = state.try_acquire(user).await;
+        assert!(
+            matches!(guard2_result, Err(RateLimitError::TooManyConcurrent)),
+            "Second concurrent request should fail with old config (max_concurrent=1)"
+        );
+
+        // Update config to max_concurrent = 5
+        let new_config = RateLimitConfig {
+            max_concurrent: 5,
+            max_requests_per_window: 100,
+            window_duration: ChronoDuration::seconds(60),
+            window_limits: vec![],
+        };
+        state.update_config(new_config).await;
+
+        // Drop the first guard to release the permit
+        drop(guard1);
+
+        // Now acquire new permits - should use new config (max_concurrent = 5)
+        let mut guards = Vec::new();
+        for i in 0..5 {
+            let result = state.try_acquire(user).await;
+            assert!(
+                result.is_ok(),
+                "Request {} should succeed with new config (max_concurrent=5)",
+                i + 1
+            );
+            guards.push(result.unwrap());
+        }
+
+        // 6th request should fail (exceeds new max_concurrent = 5)
+        let guard6_result = state.try_acquire(user).await;
+        assert!(
+            matches!(guard6_result, Err(RateLimitError::TooManyConcurrent)),
+            "6th concurrent request should fail (max_concurrent=5)"
         );
     }
 }
