@@ -1,3 +1,4 @@
+use api::middleware::RateLimitState;
 use api::{create_router_with_cors, ApiDoc, AppState};
 use config::LoggingConfig;
 use opentelemetry::global;
@@ -15,6 +16,7 @@ use services::{
     metrics::{MockMetricsService, OtlpMetricsService},
     model::service::ModelServiceImpl,
     response::service::OpenAIProxy,
+    system_configs::ports::SystemConfigsService,
     user::UserServiceImpl,
     user::UserSettingsServiceImpl,
     vpc::{initialize_vpc_credentials, VpcAuthConfig},
@@ -223,13 +225,24 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(MockMetricsService)
         };
 
+    // Load rate limit config from system configs
+    let rate_limit_config = system_configs_service
+        .get_configs()
+        .await?
+        .unwrap_or_default()
+        .rate_limit;
+
+    // Create rate limit state
+    let rate_limit_state =
+        RateLimitState::with_config(rate_limit_config, analytics_service.clone());
+
     // Create application state
     let app_state = AppState {
         oauth_service,
         user_service,
         user_settings_service,
         model_service,
-        system_configs_service,
+        system_configs_service: system_configs_service.clone(),
         session_repository: session_repo,
         proxy_service,
         conversation_service,
@@ -246,6 +259,7 @@ async fn main() -> anyhow::Result<()> {
         near_balance_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         model_settings_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         response_author_repository: response_author_repo,
+        rate_limit_state,
     };
 
     // Create router with CORS support

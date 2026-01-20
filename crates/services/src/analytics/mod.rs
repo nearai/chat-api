@@ -8,7 +8,7 @@ pub mod ports;
 pub use ports::*;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use std::sync::Arc;
 
 use crate::UserId;
@@ -36,7 +36,7 @@ pub trait AnalyticsServiceTrait: Send + Sync {
         &self,
         user_id: UserId,
         activity_type: ActivityType,
-        window: TimeWindow,
+        window_duration: Duration,
     ) -> Result<i64, AnalyticsError>;
 
     /// Get analytics summary for a time period
@@ -106,10 +106,10 @@ impl AnalyticsServiceTrait for AnalyticsServiceImpl {
         &self,
         user_id: UserId,
         activity_type: ActivityType,
-        window: TimeWindow,
+        window_duration: Duration,
     ) -> Result<i64, AnalyticsError> {
         self.repository
-            .check_activity_count(user_id, activity_type, window)
+            .check_activity_count(user_id, activity_type, window_duration)
             .await
             .map_err(|e| AnalyticsError::InternalError(e.to_string()))
     }

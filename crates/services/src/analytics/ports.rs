@@ -1,7 +1,7 @@
 //! Analytics repository traits and data structures.
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -86,8 +86,8 @@ pub struct CheckAndRecordActivityRequest {
     pub activity_type: ActivityType,
     /// Optional metadata for the activity
     pub metadata: Option<serde_json::Value>,
-    /// Time window for the sliding window rate limit
-    pub window: TimeWindow,
+    /// Duration of the time window for the sliding window rate limit
+    pub window_duration: Duration,
     /// Maximum number of activities allowed in the window
     pub limit: u64,
 }
@@ -191,7 +191,7 @@ pub trait AnalyticsRepository: Send + Sync {
         &self,
         user_id: UserId,
         activity_type: ActivityType,
-        window: TimeWindow,
+        window_duration: Duration,
     ) -> anyhow::Result<i64>;
 
     /// Get analytics summary for a time period
@@ -232,33 +232,4 @@ pub trait AnalyticsRepository: Send + Sync {
 pub enum AnalyticsError {
     #[error("Internal error: {0}")]
     InternalError(String),
-}
-
-/// Time window for sliding window rate limiting (in seconds)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct TimeWindow {
-    /// Number of seconds for the sliding window
-    pub seconds: u64,
-}
-
-impl TimeWindow {
-    /// Create a time window with specified number of seconds
-    pub fn new(seconds: u64) -> Self {
-        Self { seconds }
-    }
-
-    /// Day window (86400 seconds = 1 day)
-    pub fn day() -> Self {
-        Self { seconds: 86400 }
-    }
-
-    /// Week window (604800 seconds = 7 days)
-    pub fn week() -> Self {
-        Self { seconds: 604800 }
-    }
-
-    /// Month window (2592000 seconds = 30 days)
-    pub fn month() -> Self {
-        Self { seconds: 2592000 }
-    }
 }

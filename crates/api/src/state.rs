@@ -62,4 +62,6 @@ pub struct AppState {
     pub model_settings_cache: ModelSettingsCache,
     /// Repository for tracking response authors in shared conversations
     pub response_author_repository: Arc<ResponseAuthorRepository>,
+    /// Rate limit state for hot-reloadable rate limit configuration
+    pub rate_limit_state: crate::middleware::RateLimitState,
 }

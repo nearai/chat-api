@@ -11,3 +11,6 @@ pub const MAX_REQUEST_BODY_SIZE: usize = 50 * 1024 * 1024;
 /// Prevents DoS attacks from malicious upstream services
 /// Large enough for conversation lists and file downloads
 pub const MAX_RESPONSE_BODY_SIZE: usize = 50 * 1024 * 1024;
+
+/// Idle timeout for user rate limit state cleanup (1 hour)
+pub const USER_STATE_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3600);

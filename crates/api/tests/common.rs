@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use api::middleware::RateLimitState;
 use api::{create_router_with_cors, AppState};
 use axum_test::TestServer;
 use serde_json::json;
@@ -140,6 +141,9 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
     // Get response author repository
     let response_author_repository = db.response_author_repository();
 
+    // Create rate limit state for testing
+    let rate_limit_state = RateLimitState::new(analytics_service.clone());
+
     // Create application state
     let app_state = AppState {
         oauth_service,
@@ -163,6 +167,7 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
         near_balance_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         model_settings_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         response_author_repository,
+        rate_limit_state,
     };
 
     // Create router
