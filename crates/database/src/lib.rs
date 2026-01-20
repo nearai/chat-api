@@ -7,9 +7,10 @@ pub mod repositories;
 pub use pool::DbPool;
 pub use repositories::{
     PostgresAnalyticsRepository, PostgresAppConfigRepository, PostgresConversationRepository,
-    PostgresFileRepository, PostgresModelRepository, PostgresNearNonceRepository,
-    PostgresOAuthRepository, PostgresSessionRepository, PostgresSystemConfigsRepository,
-    PostgresUserRepository, PostgresUserSettingsRepository,
+    PostgresConversationShareRepository, PostgresFileRepository, PostgresModelRepository,
+    PostgresNearNonceRepository, PostgresOAuthRepository, PostgresSessionRepository,
+    PostgresSystemConfigsRepository, PostgresUserRepository, PostgresUserSettingsRepository,
+    ResponseAuthorRepository,
 };
 
 use crate::pool::create_pool_with_native_tls;
@@ -27,6 +28,7 @@ pub struct Database {
     session_repository: Arc<PostgresSessionRepository>,
     oauth_repository: Arc<PostgresOAuthRepository>,
     conversation_repository: Arc<PostgresConversationRepository>,
+    conversation_share_repository: Arc<PostgresConversationShareRepository>,
     file_repository: Arc<PostgresFileRepository>,
     user_settings_repository: Arc<PostgresUserSettingsRepository>,
     system_configs_repository: Arc<PostgresSystemConfigsRepository>,
@@ -34,6 +36,7 @@ pub struct Database {
     near_nonce_repository: Arc<PostgresNearNonceRepository>,
     analytics_repository: Arc<PostgresAnalyticsRepository>,
     model_repository: Arc<PostgresModelRepository>,
+    response_author_repository: Arc<ResponseAuthorRepository>,
     cluster_manager: Option<Arc<ClusterManager>>,
 }
 
@@ -44,6 +47,8 @@ impl Database {
         let session_repository = Arc::new(PostgresSessionRepository::new(pool.clone()));
         let oauth_repository = Arc::new(PostgresOAuthRepository::new(pool.clone()));
         let conversation_repository = Arc::new(PostgresConversationRepository::new(pool.clone()));
+        let conversation_share_repository =
+            Arc::new(PostgresConversationShareRepository::new(pool.clone()));
         let file_repository = Arc::new(PostgresFileRepository::new(pool.clone()));
         let user_settings_repository = Arc::new(PostgresUserSettingsRepository::new(pool.clone()));
         let system_configs_repository =
@@ -52,6 +57,7 @@ impl Database {
         let near_nonce_repository = Arc::new(PostgresNearNonceRepository::new(pool.clone()));
         let analytics_repository = Arc::new(PostgresAnalyticsRepository::new(pool.clone()));
         let model_repository = Arc::new(PostgresModelRepository::new(pool.clone()));
+        let response_author_repository = Arc::new(ResponseAuthorRepository::new(pool.clone()));
 
         Self {
             pool,
@@ -59,6 +65,7 @@ impl Database {
             session_repository,
             oauth_repository,
             conversation_repository,
+            conversation_share_repository,
             file_repository,
             user_settings_repository,
             system_configs_repository,
@@ -66,6 +73,7 @@ impl Database {
             near_nonce_repository,
             analytics_repository,
             model_repository,
+            response_author_repository,
             cluster_manager: None,
         }
     }
@@ -210,6 +218,11 @@ impl Database {
         self.conversation_repository.clone()
     }
 
+    /// Get the conversation share repository
+    pub fn conversation_share_repository(&self) -> Arc<PostgresConversationShareRepository> {
+        self.conversation_share_repository.clone()
+    }
+
     /// Get the file repository
     pub fn file_repository(&self) -> Arc<PostgresFileRepository> {
         self.file_repository.clone()
@@ -243,5 +256,10 @@ impl Database {
     /// Get the system configs repository
     pub fn system_configs_repository(&self) -> Arc<PostgresSystemConfigsRepository> {
         self.system_configs_repository.clone()
+    }
+
+    /// Get the response author repository
+    pub fn response_author_repository(&self) -> Arc<ResponseAuthorRepository> {
+        self.response_author_repository.clone()
     }
 }

@@ -400,8 +400,8 @@ pub async fn batch_upsert_models(
     let mut results = Vec::new();
 
     #[cfg(not(feature = "test"))]
-    for (model_id, _) in &request.models {
-        ensure_proxy_model_exists(app_state.proxy_service.clone(), &model_id).await?;
+    for model_id in request.models.keys() {
+        ensure_proxy_model_exists(app_state.proxy_service.clone(), model_id).await?;
     }
 
     for (model_id, partial_settings) in request.models {

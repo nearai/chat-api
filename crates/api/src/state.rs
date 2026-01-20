@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use database::repositories::ResponseAuthorRepository;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -41,6 +42,8 @@ pub struct AppState {
     pub user_repository: Arc<dyn services::user::ports::UserRepository>,
     pub proxy_service: Arc<dyn services::response::ports::OpenAIProxyService>,
     pub conversation_service: Arc<dyn services::conversation::ports::ConversationService>,
+    pub conversation_share_service:
+        Arc<dyn services::conversation::ports::ConversationShareService>,
     pub file_service: Arc<dyn services::file::ports::FileService>,
     pub redirect_uri: String,
     pub admin_domains: Arc<Vec<String>>,
@@ -57,6 +60,8 @@ pub struct AppState {
     pub near_balance_cache: NearBalanceCache,
     /// In-memory cache for model settings needed by /v1/responses (public + system_prompt)
     pub model_settings_cache: ModelSettingsCache,
+    /// Repository for tracking response authors in shared conversations
+    pub response_author_repository: Arc<ResponseAuthorRepository>,
     /// Rate limit state for hot-reloadable rate limit configuration
     pub rate_limit_state: crate::middleware::RateLimitState,
 }

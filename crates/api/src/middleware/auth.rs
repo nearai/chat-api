@@ -222,6 +222,52 @@ pub async fn auth_middleware(
     Ok(response)
 }
 
+/// Optional authentication middleware - doesn't fail if no token provided
+/// Use this for routes that can work with or without authentication (e.g., public shares)
+/// Inserts Option<AuthenticatedUser> into request extensions
+pub async fn optional_auth_middleware(
+    State(state): State<AuthState>,
+    mut request: Request,
+    next: Next,
+) -> Result<Response, Response> {
+    let path = request.uri().path().to_string();
+    let method = request.method().clone();
+
+    tracing::debug!("Optional auth middleware invoked for {} {}", method, path);
+
+    let user: Option<AuthenticatedUser> = match extract_token_from_request(&request) {
+        Ok(token) => match authenticate_token_string(token, &state).await {
+            Ok(user) => {
+                tracing::info!(
+                    "Optional auth: authenticated user_id={} on {} {}",
+                    user.user_id,
+                    method,
+                    path
+                );
+                Some(user)
+            }
+            Err(e) => {
+                tracing::debug!(
+                    "Optional auth: token validation failed on {} {}: {:?}",
+                    method,
+                    path,
+                    e
+                );
+                None
+            }
+        },
+        Err(_) => {
+            tracing::debug!("Optional auth: no token provided on {} {}", method, path);
+            None
+        }
+    };
+
+    // Add optional user to request extensions
+    request.extensions_mut().insert(user);
+    let response = next.run(request).await;
+    Ok(response)
+}
+
 /// Admin authentication middleware that validates session tokens and checks admin domain
 /// This middleware first authenticates the user, then checks if their email domain
 /// is in the allowed admin domains list.

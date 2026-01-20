@@ -11,6 +11,7 @@ use services::{
     analytics::AnalyticsServiceImpl,
     auth::OAuthServiceImpl,
     conversation::service::ConversationServiceImpl,
+    conversation::share_service::ConversationShareServiceImpl,
     file::service::FileServiceImpl,
     metrics::{MockMetricsService, OtlpMetricsService},
     model::service::ModelServiceImpl,
@@ -69,6 +70,7 @@ async fn main() -> anyhow::Result<()> {
     let session_repo = db.session_repository();
     let oauth_repo = db.oauth_repository();
     let conversation_repo = db.conversation_repository();
+    let conversation_share_repo = db.conversation_share_repository();
     let file_repo = db.file_repository();
     let user_settings_repo = db.user_settings_repository();
     let app_config_repo = db.app_config_repository();
@@ -76,6 +78,7 @@ async fn main() -> anyhow::Result<()> {
     let analytics_repo = db.analytics_repository();
     let system_configs_repo = db.system_configs_repository();
     let model_repo = db.model_repository();
+    let response_author_repo = db.response_author_repository();
 
     // Create services
     tracing::info!("Initializing services...");
@@ -144,6 +147,12 @@ async fn main() -> anyhow::Result<()> {
     let conversation_service = Arc::new(ConversationServiceImpl::new(
         conversation_repo,
         proxy_service.clone(),
+    ));
+
+    let conversation_share_service = Arc::new(ConversationShareServiceImpl::new(
+        db.conversation_repository(),
+        conversation_share_repo,
+        user_repo.clone(),
     ));
 
     // Initialize file service
@@ -237,6 +246,7 @@ async fn main() -> anyhow::Result<()> {
         session_repository: session_repo,
         proxy_service,
         conversation_service,
+        conversation_share_service,
         file_service,
         redirect_uri: config.oauth.redirect_uri,
         admin_domains: Arc::new(config.admin.admin_domains),
@@ -248,6 +258,7 @@ async fn main() -> anyhow::Result<()> {
         near_rpc_url: config.near.rpc_url.clone(),
         near_balance_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         model_settings_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        response_author_repository: response_author_repo,
         rate_limit_state,
     };
 

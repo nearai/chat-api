@@ -5,6 +5,7 @@ use api::{create_router_with_cors, AppState};
 use axum_test::TestServer;
 use serde_json::json;
 use services::analytics::AnalyticsServiceImpl;
+use services::conversation::share_service::ConversationShareServiceImpl;
 use services::file::service::FileServiceImpl;
 use services::metrics::MockMetricsService;
 use services::vpc::test_helpers::MockVpcCredentialsService;
@@ -54,6 +55,7 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
     let session_repo = db.session_repository();
     let oauth_repo = db.oauth_repository();
     let conversation_repo = db.conversation_repository();
+    let conversation_share_repo = db.conversation_share_repository();
     let file_repo = db.file_repository();
     let user_settings_repo = db.user_settings_repository();
     let model_repo = db.model_repository();
@@ -112,6 +114,12 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
         ),
     );
 
+    let conversation_share_service = Arc::new(ConversationShareServiceImpl::new(
+        db.conversation_repository(),
+        conversation_share_repo,
+        user_repo.clone(),
+    ));
+
     let mut admin_domains = config.admin.admin_domains;
 
     // Add `admin.org` as test admin domain
@@ -130,6 +138,9 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
             analytics_repo as Arc<dyn services::analytics::AnalyticsRepository>,
         ));
 
+    // Get response author repository
+    let response_author_repository = db.response_author_repository();
+
     // Create rate limit state for testing
     let rate_limit_state = RateLimitState::new(analytics_service.clone());
 
@@ -145,6 +156,7 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
         user_repository: user_repo,
         proxy_service,
         conversation_service,
+        conversation_share_service,
         file_service,
         redirect_uri: config.oauth.redirect_uri,
         admin_domains: Arc::new(admin_domains),
@@ -154,6 +166,7 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
         near_rpc_url: config.near.rpc_url.clone(),
         near_balance_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         model_settings_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        response_author_repository,
         rate_limit_state,
     };
 

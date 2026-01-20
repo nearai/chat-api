@@ -7,6 +7,7 @@ pub mod openapi;
 pub mod routes;
 pub mod state;
 pub mod static_files;
+pub mod validation;
 
 pub use error::{ApiError, ApiErrorResponse};
 pub use middleware::{auth_middleware, AuthState, AuthenticatedUser};

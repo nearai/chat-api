@@ -22,6 +22,9 @@ use utoipa::OpenApi;
         crate::routes::oauth::logout,
         // User endpoints
         crate::routes::users::get_current_user,
+        // Conversation endpoints (with optional authentication)
+        crate::routes::api::get_conversation,
+        crate::routes::api::list_conversation_items,
         // Admin endpoints
         crate::routes::admin::list_users,
         crate::routes::admin::list_models,
@@ -72,6 +75,7 @@ use utoipa::OpenApi;
         (name = "Health", description = "Health check and service status endpoints"),
         (name = "Auth", description = "OAuth authentication endpoints"),
         (name = "Users", description = "User profile management endpoints"),
+        (name = "Conversations", description = "Conversation management endpoints (supports optional authentication for public sharing)"),
         (name = "Admin", description = "Admin management endpoints"),
         (name = "Configs", description = "System configuration endpoints"),
         (name = "attestation", description = "Attestation reporting endpoints for TEE verification")
