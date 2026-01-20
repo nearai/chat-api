@@ -100,6 +100,7 @@ pub struct ConversationShare {
     pub recipient: Option<ShareRecipient>,
     pub group_id: Option<Uuid>,
     pub org_email_pattern: Option<String>,
+    pub public_token: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -113,6 +114,7 @@ pub struct NewConversationShare {
     pub recipient: Option<ShareRecipient>,
     pub group_id: Option<Uuid>,
     pub org_email_pattern: Option<String>,
+    pub public_token: Option<String>,
 }
 
 #[async_trait]
@@ -192,12 +194,6 @@ pub trait ConversationShareRepository: Send + Sync {
         &self,
         share: NewConversationShare,
     ) -> Result<ConversationShare, ConversationError>;
-
-    /// Create multiple shares atomically (all succeed or all fail)
-    async fn create_shares_batch(
-        &self,
-        shares: Vec<NewConversationShare>,
-    ) -> Result<Vec<ConversationShare>, ConversationError>;
 
     async fn list_shares(
         &self,

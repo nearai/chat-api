@@ -144,6 +144,9 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
     // Create rate limit state for testing
     let rate_limit_state = RateLimitState::new(analytics_service.clone());
 
+    // Create WebSocket connection manager
+    let connection_manager = Arc::new(api::ConnectionManager::new());
+
     // Create application state
     let app_state = AppState {
         oauth_service,
@@ -167,6 +170,7 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
         near_balance_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         model_settings_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         response_author_repository,
+        connection_manager,
         rate_limit_state,
     };
 

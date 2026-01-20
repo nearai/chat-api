@@ -69,6 +69,7 @@ impl PostgresConversationShareRepository {
             recipient,
             group_id: row.get("group_id"),
             org_email_pattern: row.get("org_email_pattern"),
+            public_token: row.get("public_token"),
             created_at: row.get("created_at"),
             updated_at: row.get("updated_at"),
         })
@@ -225,31 +226,41 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
-        // Use UNNEST to create pairs of (type, value) from arrays
-        // This is safer than dynamic SQL construction and maintains correct pair matching
-        // UNNEST with multiple arrays creates rows where elements at the same position are paired
-        let member_types: Vec<String> = member_identifiers
-            .iter()
-            .map(|m| m.kind.as_str().to_string())
-            .collect();
-        let member_values_lower: Vec<String> = member_identifiers
-            .iter()
-            .map(|m| m.value.to_lowercase())
-            .collect();
+        // Build a query to find groups where any of the member identifiers match
+        // We use a parameterized query with multiple (member_type, member_value) pairs
+        let mut conditions = Vec::new();
+        let mut param_idx = 1;
 
-        // Use parameterized query with UNNEST to safely match (type, value) pairs
-        // This avoids dynamic SQL construction while maintaining correct pairing semantics
+        for _ in member_identifiers {
+            conditions.push(format!(
+                "(m.member_type = ${} AND LOWER(m.member_value) = LOWER(${}))",
+                param_idx,
+                param_idx + 1
+            ));
+            param_idx += 2;
+        }
+
+        // Build the params vector with references to the actual values
+        let member_types: Vec<String> = member_identifiers.iter().map(|m| m.kind.as_str().to_string()).collect();
+        let member_values: Vec<String> = member_identifiers.iter().map(|m| m.value.clone()).collect();
+
+        let mut typed_params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = Vec::new();
+        for i in 0..member_identifiers.len() {
+            typed_params.push(&member_types[i]);
+            typed_params.push(&member_values[i]);
+        }
+
+        let query = format!(
+            "SELECT DISTINCT g.id, g.owner_user_id, g.name, g.created_at, g.updated_at
+             FROM conversation_share_groups g
+             JOIN conversation_share_group_members m ON g.id = m.group_id
+             WHERE {}
+             ORDER BY g.name",
+            conditions.join(" OR ")
+        );
+
         let rows = client
-            .query(
-                "SELECT DISTINCT g.id, g.owner_user_id, g.name, g.created_at, g.updated_at
-                 FROM conversation_share_groups g
-                 JOIN conversation_share_group_members m ON g.id = m.group_id
-                 JOIN UNNEST($1::text[], $2::text[]) AS search(member_type, member_value)
-                   ON m.member_type = search.member_type
-                   AND LOWER(m.member_value) = search.member_value
-                 ORDER BY g.name",
-                &[&member_types, &member_values_lower],
-            )
+            .query(&query, &typed_params)
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
@@ -413,12 +424,13 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                      recipient_type,
                      recipient_value,
                      group_id,
-                     org_email_pattern
+                     org_email_pattern,
+                     public_token
                  )
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                  RETURNING id, conversation_id, owner_user_id, share_type, permission,
                            recipient_type, recipient_value, group_id, org_email_pattern,
-                           created_at, updated_at",
+                           public_token, created_at, updated_at",
                 &[
                     &share.conversation_id,
                     &share.owner_user_id.0,
@@ -434,93 +446,13 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                         .map(|recipient| recipient.value.as_str()),
                     &share.group_id,
                     &share.org_email_pattern,
+                    &share.public_token,
                 ],
             )
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
         Self::map_share_row(&row)
-    }
-
-    /// Create multiple shares atomically (all succeed or all fail).
-    /// If a share already exists (duplicate recipient for same conversation),
-    /// updates the permission instead of failing.
-    async fn create_shares_batch(
-        &self,
-        shares: Vec<NewConversationShare>,
-    ) -> Result<Vec<ConversationShare>, ConversationError> {
-        if shares.is_empty() {
-            return Ok(vec![]);
-        }
-
-        let mut client = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
-
-        let transaction = client
-            .transaction()
-            .await
-            .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
-
-        let mut results = Vec::with_capacity(shares.len());
-
-        for share in shares {
-            // Use ON CONFLICT to handle duplicate shares gracefully.
-            // For direct shares, the unique constraint is on
-            // (conversation_id, recipient_type, recipient_value) WHERE share_type = 'direct'.
-            // When a duplicate is found, update the permission and return the updated row.
-            let row = transaction
-                .query_one(
-                    "INSERT INTO conversation_shares (
-                         conversation_id,
-                         owner_user_id,
-                         share_type,
-                         permission,
-                         recipient_type,
-                         recipient_value,
-                         group_id,
-                         org_email_pattern
-                     )
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                     ON CONFLICT (conversation_id, recipient_type, recipient_value)
-                         WHERE share_type = 'direct'
-                     DO UPDATE SET
-                         permission = EXCLUDED.permission,
-                         updated_at = NOW()
-                     RETURNING id, conversation_id, owner_user_id, share_type, permission,
-                               recipient_type, recipient_value, group_id, org_email_pattern,
-                               created_at, updated_at",
-                    &[
-                        &share.conversation_id,
-                        &share.owner_user_id.0,
-                        &share.share_type.as_str(),
-                        &share.permission.as_str(),
-                        &share
-                            .recipient
-                            .as_ref()
-                            .map(|recipient| recipient.kind.as_str()),
-                        &share
-                            .recipient
-                            .as_ref()
-                            .map(|recipient| recipient.value.as_str()),
-                        &share.group_id,
-                        &share.org_email_pattern,
-                    ],
-                )
-                .await
-                .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
-
-            results.push(Self::map_share_row(&row)?);
-        }
-
-        transaction
-            .commit()
-            .await
-            .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
-
-        Ok(results)
     }
 
     async fn list_shares(
@@ -538,7 +470,7 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
             .query(
                 "SELECT id, conversation_id, owner_user_id, share_type, permission,
                         recipient_type, recipient_value, group_id, org_email_pattern,
-                        created_at, updated_at
+                        public_token, created_at, updated_at
                  FROM conversation_shares
                  WHERE owner_user_id = $1 AND conversation_id = $2
                  ORDER BY created_at",
@@ -654,7 +586,7 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
             .query_opt(
                 "SELECT id, conversation_id, owner_user_id, share_type, permission,
                         recipient_type, recipient_value, group_id, org_email_pattern,
-                        created_at, updated_at
+                        public_token, created_at, updated_at
                  FROM conversation_shares
                  WHERE share_type = 'public' AND conversation_id = $1",
                 &[&conversation_id],

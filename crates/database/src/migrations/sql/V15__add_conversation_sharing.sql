@@ -40,21 +40,22 @@ CREATE TABLE conversation_shares (
     recipient_value VARCHAR(255),
     group_id UUID REFERENCES conversation_share_groups(id) ON DELETE CASCADE,
     org_email_pattern VARCHAR(255),
+    public_token VARCHAR(128),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CHECK (
         (share_type = 'direct' AND recipient_type IS NOT NULL AND recipient_value IS NOT NULL
-            AND group_id IS NULL AND org_email_pattern IS NULL)
+            AND group_id IS NULL AND org_email_pattern IS NULL AND public_token IS NULL)
         OR
         (share_type = 'group' AND group_id IS NOT NULL
             AND recipient_type IS NULL AND recipient_value IS NULL
-            AND org_email_pattern IS NULL)
+            AND org_email_pattern IS NULL AND public_token IS NULL)
         OR
         (share_type = 'organization' AND org_email_pattern IS NOT NULL
             AND recipient_type IS NULL AND recipient_value IS NULL
-            AND group_id IS NULL)
+            AND group_id IS NULL AND public_token IS NULL)
         OR
-        (share_type = 'public'
+        (share_type = 'public' AND public_token IS NOT NULL
             AND recipient_type IS NULL AND recipient_value IS NULL
             AND group_id IS NULL AND org_email_pattern IS NULL)
     )
@@ -62,6 +63,7 @@ CREATE TABLE conversation_shares (
 
 CREATE INDEX idx_conversation_shares_conversation ON conversation_shares(conversation_id);
 CREATE INDEX idx_conversation_shares_owner ON conversation_shares(owner_user_id);
+CREATE UNIQUE INDEX idx_conversation_shares_public_token ON conversation_shares(public_token);
 CREATE INDEX idx_conversation_shares_recipient
     ON conversation_shares(recipient_type, recipient_value);
 CREATE INDEX idx_conversation_shares_group ON conversation_shares(group_id);

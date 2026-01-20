@@ -1,5 +1,5 @@
 use api::middleware::RateLimitState;
-use api::{create_router_with_cors, ApiDoc, AppState};
+use api::{create_router_with_cors, ApiDoc, AppState, ConnectionManager};
 use config::LoggingConfig;
 use opentelemetry::global;
 use opentelemetry_otlp::WithExportConfig;
@@ -225,6 +225,10 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(MockMetricsService)
         };
 
+    // Initialize WebSocket connection manager
+    tracing::info!("Initializing WebSocket connection manager...");
+    let connection_manager = Arc::new(ConnectionManager::new());
+
     // Load rate limit config from system configs
     let rate_limit_config = system_configs_service
         .get_configs()
@@ -259,6 +263,7 @@ async fn main() -> anyhow::Result<()> {
         near_balance_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         model_settings_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         response_author_repository: response_author_repo,
+        connection_manager,
         rate_limit_state,
     };
 
