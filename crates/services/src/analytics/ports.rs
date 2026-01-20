@@ -1,7 +1,7 @@
 //! Analytics repository traits and data structures.
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -16,6 +16,11 @@ pub enum ActivityType {
     Response,
     Conversation,
     FileUpload,
+    Share,
+    /// Activity type specifically for rate limiting purposes.
+    /// This is used to track requests for quota/rate limit enforcement,
+    /// separate from business analytics (which use Response, Conversation, etc.).
+    RateLimitedRequest,
 }
 
 impl ActivityType {
@@ -26,6 +31,8 @@ impl ActivityType {
             ActivityType::Response => "response",
             ActivityType::Conversation => "conversation",
             ActivityType::FileUpload => "file_upload",
+            ActivityType::Share => "share",
+            ActivityType::RateLimitedRequest => "rate_limited_request",
         }
     }
 }
@@ -68,6 +75,30 @@ pub struct RecordActivityRequest {
     pub activity_type: ActivityType,
     pub auth_method: Option<AuthMethod>,
     pub metadata: Option<serde_json::Value>,
+}
+
+/// Request to check usage limit and record activity if allowed
+#[derive(Debug, Clone)]
+pub struct CheckAndRecordActivityRequest {
+    /// User ID for the activity
+    pub user_id: UserId,
+    /// Type of activity to check and record
+    pub activity_type: ActivityType,
+    /// Optional metadata for the activity
+    pub metadata: Option<serde_json::Value>,
+    /// Duration of the time window for the sliding window rate limit
+    pub window_duration: Duration,
+    /// Maximum number of activities allowed in the window
+    pub limit: u64,
+}
+
+/// Result of checking and recording activity
+#[derive(Debug, Clone)]
+pub struct CheckAndRecordActivityResult {
+    /// Current count of activities in the window after the check
+    pub current_count: u64,
+    /// Whether the activity was actually recorded (inserted into the database)
+    pub was_recorded: bool,
 }
 
 /// A single activity log entry
@@ -147,6 +178,21 @@ pub struct TopActiveUsersResponse {
 pub trait AnalyticsRepository: Send + Sync {
     /// Record a user activity
     async fn record_activity(&self, request: RecordActivityRequest) -> anyhow::Result<()>;
+
+    /// Check if usage is below limit and record activity if allowed.
+    async fn check_and_record_activity(
+        &self,
+        request: CheckAndRecordActivityRequest,
+    ) -> anyhow::Result<CheckAndRecordActivityResult>;
+
+    /// Check activity count in a window without recording.
+    /// Used when multiple windows need to be checked before inserting a single record.
+    async fn check_activity_count(
+        &self,
+        user_id: UserId,
+        activity_type: ActivityType,
+        window_duration: Duration,
+    ) -> anyhow::Result<i64>;
 
     /// Get analytics summary for a time period
     async fn get_analytics_summary(

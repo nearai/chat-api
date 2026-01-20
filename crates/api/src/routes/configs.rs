@@ -1,13 +1,13 @@
 use crate::{error::ApiError, models::*, state::AppState};
 use axum::{extract::State, routing::get, Json, Router};
 
-/// Get system configs (requires user authentication, not admin)
+/// Get public system configs (requires user authentication, returns limited fields)
 #[utoipa::path(
     get,
     path = "/v1/configs",
     tag = "Configs",
     responses(
-        (status = 200, description = "System configs retrieved", body = Option<SystemConfigsResponse>),
+        (status = 200, description = "Public system configs retrieved (default_model only)", body = Option<PublicSystemConfigsResponse>),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
     ),
@@ -17,8 +17,8 @@ use axum::{extract::State, routing::get, Json, Router};
 )]
 pub async fn get_system_configs(
     State(app_state): State<AppState>,
-) -> Result<Json<Option<SystemConfigsResponse>>, ApiError> {
-    tracing::info!("Getting system configs");
+) -> Result<Json<Option<PublicSystemConfigsResponse>>, ApiError> {
+    tracing::info!("Getting public system configs");
 
     let config = app_state
         .system_configs_service

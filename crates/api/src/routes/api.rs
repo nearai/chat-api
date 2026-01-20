@@ -1,4 +1,4 @@
-use crate::consts::LIST_FILES_LIMIT_MAX;
+use crate::consts::{LIST_FILES_LIMIT_MAX, MAX_REQUEST_BODY_SIZE, MAX_RESPONSE_BODY_SIZE};
 use crate::middleware::auth::AuthenticatedUser;
 use axum::{
     body::{to_bytes, Body},
@@ -64,7 +64,10 @@ pub fn create_api_router(
 ) -> Router<crate::state::AppState> {
     // Conversation routes that require authentication
     let conversations_router = Router::new()
-        .route("/v1/conversations", post(create_conversation).get(list_conversations))
+        .route(
+            "/v1/conversations",
+            post(create_conversation).get(list_conversations),
+        )
         .route(
             "/v1/conversations/{conversation_id}",
             post(update_conversation).delete(delete_conversation),
@@ -92,15 +95,17 @@ pub fn create_api_router(
         .route(
             "/v1/conversations/{conversation_id}/clone",
             post(clone_conversation),
-        )
-        .route(
-            "/v1/conversations/{conversation_id}/typing",
-            post(send_typing_indicator),
         );
 
     let share_groups_router = Router::new()
-        .route("/v1/share-groups", post(create_share_group).get(list_share_groups))
-        .route("/v1/share-groups/{group_id}", patch(update_share_group).delete(delete_share_group))
+        .route(
+            "/v1/share-groups",
+            post(create_share_group).get(list_share_groups),
+        )
+        .route(
+            "/v1/share-groups/{group_id}",
+            patch(update_share_group).delete(delete_share_group),
+        )
         .route("/v1/shared-with-me", get(list_shared_with_me));
 
     let files_router = Router::new()
@@ -126,7 +131,6 @@ pub fn create_api_router(
         .merge(responses_router)
         .merge(proxy_router)
 }
-
 
 /// Type of resource to track in the response
 enum TrackableResource {
@@ -178,7 +182,6 @@ pub struct ConversationShareResponse {
     pub recipient: Option<ShareRecipientPayload>,
     pub group_id: Option<Uuid>,
     pub org_email_pattern: Option<String>,
-    pub public_token: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -250,7 +253,6 @@ fn to_share_response(
         recipient: share.recipient.map(ShareRecipientPayload::from),
         group_id: share.group_id,
         org_email_pattern: share.org_email_pattern,
-        public_token: share.public_token,
         created_at: share.created_at,
         updated_at: share.updated_at,
     }
@@ -338,7 +340,7 @@ async fn create_conversation(
     );
 
     // Extract body
-    let body_bytes = axum::body::to_bytes(request.into_body(), usize::MAX)
+    let body_bytes = axum::body::to_bytes(request.into_body(), MAX_REQUEST_BODY_SIZE)
         .await
         .map_err(|e| {
             tracing::error!(
@@ -514,6 +516,30 @@ async fn list_conversations(
 /// Get a conversation - validates user access or public share and fetches details via service/OpenAI
 /// Works with optional authentication - authenticated users get their access checked,
 /// unauthenticated users can only access publicly shared conversations
+///
+/// # Authentication
+/// This endpoint supports **optional authentication**:
+/// - **With authentication**: Returns conversation if user owns it or has been granted access via sharing
+/// - **Without authentication**: Returns conversation only if it has been publicly shared
+///
+/// This allows public sharing of conversations while maintaining access control for private conversations.
+#[utoipa::path(
+    get,
+    path = "/v1/conversations/{conversation_id}",
+    tag = "Conversations",
+    params(
+        ("conversation_id" = String, Path, description = "ID of the conversation to retrieve")
+    ),
+    responses(
+        (status = 200, description = "Conversation retrieved successfully", body = serde_json::Value),
+        (status = 403, description = "Access denied - conversation not accessible to this user or not publicly shared"),
+        (status = 404, description = "Conversation not found")
+    ),
+    security(
+        (), // Optional - no auth required for publicly shared conversations
+        ("session_token" = []) // Optional - session token for authenticated access
+    )
+)]
 async fn get_conversation(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<Option<AuthenticatedUser>>,
@@ -605,6 +631,28 @@ async fn create_conversation_share(
                     .into_response());
             }
 
+            // Validate all recipients before processing
+            for recipient in &recipients {
+                crate::validation::validate_share_recipient(&recipient.kind, &recipient.value)
+                    .map_err(|error| {
+                        (
+                            StatusCode::BAD_REQUEST,
+                            Json(ErrorResponse {
+                                error: format!(
+                                    "Invalid {} recipient '{}': {}",
+                                    match recipient.kind {
+                                        ShareRecipientKind::Email => "email",
+                                        ShareRecipientKind::NearAccount => "NEAR account",
+                                    },
+                                    recipient.value,
+                                    error
+                                ),
+                            }),
+                        )
+                            .into_response()
+                    })?;
+            }
+
             ShareTarget::Direct(
                 recipients
                     .into_iter()
@@ -614,16 +662,12 @@ async fn create_conversation_share(
         }
         ShareTargetPayload::Group { group_id } => ShareTarget::Group(group_id),
         ShareTargetPayload::Organization { email_pattern } => {
-            if email_pattern.trim().is_empty() {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrorResponse {
-                        error: "Email pattern cannot be empty".to_string(),
-                    }),
-                )
-                    .into_response());
-            }
-            ShareTarget::Organization(email_pattern)
+            let validated_pattern = crate::validation::validate_org_email_pattern(&email_pattern)
+                .map_err(|error| {
+                (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })).into_response()
+            })?;
+
+            ShareTarget::Organization(validated_pattern)
         }
         ShareTargetPayload::Public => ShareTarget::Public,
     };
@@ -633,6 +677,24 @@ async fn create_conversation_share(
         .create_share(user.user_id, &conversation_id, request.permission, target)
         .await
         .map_err(map_share_error)?;
+
+    // Record share activity in analytics
+    if let Err(e) = state
+        .analytics_service
+        .record_activity(RecordActivityRequest {
+            user_id: user.user_id,
+            activity_type: ActivityType::Share,
+            auth_method: None,
+            metadata: Some(serde_json::json!({
+                "conversation_id": conversation_id,
+                "share_count": shares.len(),
+                "permission": request.permission.as_str(),
+            })),
+        })
+        .await
+    {
+        tracing::warn!("Failed to record analytics for share creation: {}", e);
+    }
 
     Ok(Json(
         shares
@@ -743,6 +805,29 @@ async fn create_share_group(
             .into_response());
     }
 
+    // Validate all members before processing
+    for member in &request.members {
+        crate::validation::validate_share_recipient(&member.kind, &member.value).map_err(
+            |error| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: format!(
+                            "Invalid {} member '{}': {}",
+                            match member.kind {
+                                ShareRecipientKind::Email => "email",
+                                ShareRecipientKind::NearAccount => "NEAR account",
+                            },
+                            member.value,
+                            error
+                        ),
+                    }),
+                )
+                    .into_response()
+            },
+        )?;
+    }
+
     let members = request
         .members
         .into_iter()
@@ -833,6 +918,31 @@ async fn update_share_group(
             .into_response());
     }
 
+    // Validate all members before processing
+    if let Some(ref members) = request.members {
+        for member in members {
+            crate::validation::validate_share_recipient(&member.kind, &member.value).map_err(
+                |error| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse {
+                            error: format!(
+                                "Invalid {} member '{}': {}",
+                                match member.kind {
+                                    ShareRecipientKind::Email => "email",
+                                    ShareRecipientKind::NearAccount => "NEAR account",
+                                },
+                                member.value,
+                                error
+                            ),
+                        }),
+                    )
+                        .into_response()
+                },
+            )?;
+        }
+    }
+
     let members = request.members.map(|members| {
         members
             .into_iter()
@@ -907,8 +1017,7 @@ async fn list_shared_with_me(
 
             async move {
                 let _permit = semaphore.acquire().await;
-                let result =
-                    fetch_conversation_from_proxy(&state, &conversation_id, headers).await;
+                let result = fetch_conversation_from_proxy(&state, &conversation_id, headers).await;
 
                 match result {
                     Ok(conversation) => {
@@ -917,9 +1026,7 @@ async fn list_shared_with_me(
                             .and_then(|m| m.get("title"))
                             .and_then(|t| t.as_str())
                             .map(|s| s.to_string());
-                        let created_at = conversation
-                            .get("created_at")
-                            .and_then(|c| c.as_i64());
+                        let created_at = conversation.get("created_at").and_then(|c| c.as_i64());
 
                         SharedConversationInfo {
                             conversation_id,
@@ -961,13 +1068,9 @@ async fn create_conversation_items(
 
     validate_user_conversation(&state, &user, &conversation_id, SharePermission::Write).await?;
 
-    // Get user profile for author tracking
-    let author_name = state
-        .user_service
-        .get_user_profile(user.user_id)
-        .await
-        .ok()
-        .and_then(|p| p.user.name);
+    // Fetch user profile for author metadata
+    let user_profile = state.user_service.get_user_profile(user.user_id).await.ok();
+    let author_name = user_profile.as_ref().and_then(|p| p.user.name.clone());
 
     // Extract body
     let body_bytes = extract_body_bytes(request).await?;
@@ -978,9 +1081,35 @@ async fn create_conversation_items(
         user.user_id
     );
 
-    if let Ok(body_str) = std::str::from_utf8(&body_bytes) {
-        tracing::debug!("Request body: {}", body_str);
-    }
+    // Parse and modify body to inject author metadata
+    // NOTE: We inject metadata into the request AND store it in the database (below).
+    // This dual approach ensures author info is available even if OpenAI doesn't preserve
+    // custom metadata fields. When listing items, we retrieve from DB via inject_author_metadata().
+    let modified_body =
+        if let Ok(mut body_json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
+            // Inject author metadata
+            let mut metadata = body_json
+                .get("metadata")
+                .and_then(|m| m.as_object())
+                .cloned()
+                .unwrap_or_default();
+
+            metadata.insert(
+                "author_id".to_string(),
+                serde_json::Value::String(user.user_id.to_string()),
+            );
+            if let Some(name) = author_name.as_ref() {
+                metadata.insert(
+                    "author_name".to_string(),
+                    serde_json::Value::String(name.clone()),
+                );
+            }
+            body_json["metadata"] = serde_json::Value::Object(metadata);
+
+            serde_json::to_vec(&body_json).unwrap_or_else(|_| body_bytes.to_vec())
+        } else {
+            body_bytes.to_vec()
+        };
 
     tracing::debug!(
         "Forwarding conversation items creation request to OpenAI for user_id={}",
@@ -994,7 +1123,7 @@ async fn create_conversation_items(
             Method::POST,
             &format!("conversations/{conversation_id}/items"),
             headers.clone(),
-            Some(body_bytes),
+            Some(Bytes::from(modified_body)),
         )
         .await
         .map_err(|e| {
@@ -1012,97 +1141,41 @@ async fn create_conversation_items(
                 .into_response()
         })?;
 
-    // If successful, buffer response to extract response_ids for author tracking and WebSocket broadcast
+    // For successful responses, collect the body to extract response_id and store author info
     if (200..300).contains(&proxy_response.status) {
-        use futures::StreamExt;
+        let response_bytes = collect_stream_to_bytes(proxy_response.body).await;
 
-        // Collect the response body
-        let mut response_bytes = Vec::new();
-        let mut body_stream = proxy_response.body;
-        while let Some(chunk) = body_stream.next().await {
-            if let Ok(bytes) = chunk {
-                response_bytes.extend_from_slice(&bytes);
+        // Try to extract response_id from the response and store author info
+        if let Ok(response_json) = serde_json::from_slice::<serde_json::Value>(&response_bytes) {
+            if let Some(response_id) = response_json
+                .get("response_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+            {
+                let repo = state.response_author_repository.clone();
+                let conv_id = conversation_id.clone();
+                let uid = user.user_id;
+                let author = author_name.clone();
+
+                // Store author info asynchronously
+                tokio::spawn(async move {
+                    if let Err(e) = repo
+                        .store_author(&conv_id, &response_id, uid.into(), author.as_deref())
+                        .await
+                    {
+                        tracing::warn!("Failed to store response author: {}", e);
+                    }
+                });
             }
         }
 
-        // Try to parse the response to extract response_ids and inject author info
-        if let Ok(mut response_json) = serde_json::from_slice::<serde_json::Value>(&response_bytes) {
-            // Inject author info into each item's metadata and store in DB
-            if let Some(items) = response_json.as_array_mut() {
-                for item in items.iter_mut() {
-                    if let Some(response_id) = item.get("response_id").and_then(|v| v.as_str()) {
-                        // Store author info for this response_id
-                        if let Err(e) = state
-                            .response_author_repository
-                            .store_author(
-                                &conversation_id,
-                                response_id,
-                                user.user_id.into(),
-                                author_name.as_deref(),
-                            )
-                            .await
-                        {
-                            tracing::warn!(
-                                "Failed to store author for response_id={}: {}",
-                                response_id,
-                                e
-                            );
-                        }
-                    }
-
-                    // Inject author_id and author_name into item metadata
-                    if let Some(item_obj) = item.as_object_mut() {
-                        let metadata = item_obj
-                            .entry("metadata")
-                            .or_insert_with(|| serde_json::json!({}));
-                        if let Some(metadata_obj) = metadata.as_object_mut() {
-                            metadata_obj.insert(
-                                "author_id".to_string(),
-                                serde_json::json!(user.user_id.to_string()),
-                            );
-                            if let Some(name) = &author_name {
-                                metadata_obj.insert(
-                                    "author_name".to_string(),
-                                    serde_json::json!(name),
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Broadcast response items with author info to WebSocket subscribers
-            let subscriber_count = state
-                .connection_manager
-                .broadcast_new_items(&conversation_id, response_json.clone())
-                .await;
-            if subscriber_count > 0 {
-                tracing::debug!(
-                    "Broadcast new items to {} WebSocket subscribers for conversation_id={}",
-                    subscriber_count,
-                    conversation_id
-                );
-            }
-
-            // Return the modified response with author info injected
-            let modified_response = serde_json::to_vec(&response_json).unwrap_or(response_bytes);
-            build_response(
-                proxy_response.status,
-                proxy_response.headers,
-                Body::from(modified_response),
-            )
-            .await
-        } else {
-            // If parsing failed, return original response
-            build_response(
-                proxy_response.status,
-                proxy_response.headers,
-                Body::from(response_bytes),
-            )
-            .await
-        }
+        build_response(
+            proxy_response.status,
+            proxy_response.headers,
+            Body::from(response_bytes),
+        )
+        .await
     } else {
-        // For non-success responses, just stream through
         build_response(
             proxy_response.status,
             proxy_response.headers,
@@ -1114,6 +1187,30 @@ async fn create_conversation_items(
 
 /// List conversation items - works with optional authentication
 /// Authenticated users get their access checked, unauthenticated users can only access public conversations
+///
+/// # Authentication
+/// This endpoint supports **optional authentication**:
+/// - **With authentication**: Returns items if user owns the conversation or has been granted access via sharing
+/// - **Without authentication**: Returns items only if the conversation has been publicly shared
+///
+/// This allows public sharing of conversation content while maintaining access control for private conversations.
+#[utoipa::path(
+    get,
+    path = "/v1/conversations/{conversation_id}/items",
+    tag = "Conversations",
+    params(
+        ("conversation_id" = String, Path, description = "ID of the conversation to list items from")
+    ),
+    responses(
+        (status = 200, description = "Conversation items retrieved successfully"),
+        (status = 403, description = "Access denied - conversation not accessible to this user or not publicly shared"),
+        (status = 404, description = "Conversation not found")
+    ),
+    security(
+        (), // Optional - no auth required for publicly shared conversations
+        ("session_token" = []) // Optional - session token for authenticated access
+    )
+)]
 async fn list_conversation_items(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<Option<AuthenticatedUser>>,
@@ -1151,10 +1248,7 @@ async fn list_conversation_items(
         )
         .await
         .map_err(|e| {
-            tracing::error!(
-                "OpenAI API error during conversation items list: {}",
-                e
-            );
+            tracing::error!("OpenAI API error during conversation items list: {}", e);
             (
                 StatusCode::BAD_GATEWAY,
                 Json(ErrorResponse {
@@ -1403,7 +1497,8 @@ async fn clone_conversation(
 
     // Validate user has access to the source conversation OR it's publicly shared
     // (read access is sufficient for cloning)
-    validate_user_or_public_conversation(&state, &user, &conversation_id, SharePermission::Read).await?;
+    validate_user_or_public_conversation(&state, &user, &conversation_id, SharePermission::Read)
+        .await?;
 
     tracing::debug!(
         "Forwarding conversation clone request to OpenAI for user_id={}",
@@ -1442,47 +1537,6 @@ async fn clone_conversation(
         TrackableResource::Conversation,
     )
     .await
-}
-
-/// Send a typing indicator to all WebSocket subscribers of a conversation
-///
-/// This endpoint broadcasts a typing event to all connected clients watching this conversation.
-/// Used for real-time "user is typing..." indicators in shared conversations.
-async fn send_typing_indicator(
-    State(state): State<crate::state::AppState>,
-    Extension(user): Extension<AuthenticatedUser>,
-    Path(conversation_id): Path<String>,
-) -> Result<StatusCode, Response> {
-    tracing::debug!(
-        "send_typing_indicator called for user_id={}, conversation_id={}",
-        user.user_id,
-        conversation_id
-    );
-
-    // Validate user has at least read access to the conversation
-    validate_user_conversation(&state, &user, &conversation_id, SharePermission::Read).await?;
-
-    // Get user profile for display name
-    let user_name = state
-        .user_service
-        .get_user_profile(user.user_id)
-        .await
-        .ok()
-        .and_then(|p| p.user.name);
-
-    // Broadcast typing event to WebSocket subscribers
-    let subscriber_count = state
-        .connection_manager
-        .broadcast_typing(&conversation_id, &user.user_id.to_string(), user_name)
-        .await;
-
-    tracing::debug!(
-        "Broadcast typing indicator to {} WebSocket subscribers for conversation_id={}",
-        subscriber_count,
-        conversation_id
-    );
-
-    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Upload a file - forwards to OpenAI and tracks in DB
@@ -1872,11 +1926,7 @@ async fn proxy_responses(
     }
 
     // Fetch user profile to inject author metadata into messages
-    let user_profile = state
-        .user_service
-        .get_user_profile(user.user_id)
-        .await
-        .ok();
+    let user_profile = state.user_service.get_user_profile(user.user_id).await.ok();
 
     // Save conversation_id and author_name for response author tracking
     // (before body_json and user_profile are consumed)
@@ -1886,6 +1936,13 @@ async fn proxy_responses(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
     let author_name_for_tracking = user_profile.as_ref().and_then(|p| p.user.name.clone());
+
+    tracing::info!(
+        "create_response: conversation_id_for_author={:?}, author_name={:?}, user_id={}",
+        conversation_id_for_author,
+        author_name_for_tracking,
+        user.user_id
+    );
 
     // Modify request body to inject system prompt and/or author metadata
     let modified_body_bytes = if let Some(mut body) = body_json {
@@ -1902,6 +1959,9 @@ async fn proxy_responses(
 
         // Inject author metadata with user info
         // This allows shared conversations to show who sent each message
+        // NOTE: We inject metadata into the request AND store it in the database (see response stream wrapper below).
+        // This dual approach ensures author info is available even if OpenAI doesn't preserve
+        // custom metadata fields. When listing items, we retrieve from DB via inject_author_metadata().
         if let Some(profile) = user_profile {
             let mut metadata = body
                 .get("metadata")
@@ -2075,26 +2135,43 @@ async fn proxy_responses(
     }
 
     // Wrap the response stream to extract response_id and store author info
-    let response_body =
-        if conversation_id_for_author.is_some() && (200..300).contains(&proxy_response.status) {
+    let response_body = if let Some(conv_id) = conversation_id_for_author.as_ref() {
+        if (200..300).contains(&proxy_response.status) {
             let repo = state.response_author_repository.clone();
-            let connection_manager = state.connection_manager.clone();
-            let conv_id = conversation_id_for_author.unwrap();
             let user_id = user.user_id;
             let author = author_name_for_tracking;
+
+            tracing::info!(
+                "create_response: Using AuthorTrackingStream for conv_id={}, user_id={}, author={:?}",
+                conv_id,
+                user_id,
+                author
+            );
 
             let wrapped_stream = AuthorTrackingStream::new(
                 proxy_response.body,
                 repo,
-                connection_manager,
-                conv_id,
+                conv_id.clone(),
                 user_id,
                 author,
             );
             Body::from_stream(wrapped_stream)
         } else {
+            tracing::info!(
+                "create_response: NOT using AuthorTrackingStream - conv_id={:?}, status={}",
+                conversation_id_for_author,
+                proxy_response.status
+            );
             Body::from_stream(proxy_response.body)
-        };
+        }
+    } else {
+        tracing::info!(
+            "create_response: NOT using AuthorTrackingStream - conv_id={:?}, status={}",
+            conversation_id_for_author,
+            proxy_response.status
+        );
+        Body::from_stream(proxy_response.body)
+    };
 
     build_response(proxy_response.status, proxy_headers, response_body).await
 }
@@ -2371,20 +2448,22 @@ async fn proxy_model_list(
 
     // Buffer body into bytes
     let proxy_body = Body::from_stream(proxy_response.body);
-    let body_bytes: Bytes = to_bytes(proxy_body, usize::MAX).await.map_err(|e| {
-        tracing::error!(
-            "Failed to read model list response body for user_id={}: {}",
-            user.user_id,
-            e
-        );
-        (
-            StatusCode::BAD_GATEWAY,
-            Json(ErrorResponse {
-                error: format!("Failed to read response body: {e}"),
-            }),
-        )
-            .into_response()
-    })?;
+    let body_bytes: Bytes = to_bytes(proxy_body, MAX_RESPONSE_BODY_SIZE)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to read model list response body for user_id={}: {}",
+                user.user_id,
+                e
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("Failed to read response body: {e}"),
+                }),
+            )
+                .into_response()
+        })?;
 
     // Try to parse JSON
     let mut body_json: serde_json::Value = match serde_json::from_slice(&body_bytes) {
@@ -2556,15 +2635,17 @@ async fn handle_trackable_response(
 
     // Buffer the response to extract the resource ID
     let proxy_body = Body::from_stream(proxy_response.body);
-    let body_bytes: Bytes = to_bytes(proxy_body, usize::MAX).await.map_err(|e| {
-        (
-            StatusCode::BAD_GATEWAY,
-            Json(ErrorResponse {
-                error: format!("Failed to read response: {e}"),
-            }),
-        )
-            .into_response()
-    })?;
+    let body_bytes: Bytes = to_bytes(proxy_body, MAX_RESPONSE_BODY_SIZE)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("Failed to read response: {e}"),
+                }),
+            )
+                .into_response()
+        })?;
 
     if !(200..300).contains(&status) {
         return build_response(status, response_headers, Body::from(body_bytes)).await;
@@ -2699,8 +2780,12 @@ async fn build_response(status: u16, headers: HeaderMap, body: Body) -> Result<R
     // Copy headers from OpenAI response
     if let Some(response_headers) = response.headers_mut() {
         for (key, value) in headers.iter() {
-            // Skip certain headers that shouldn't be forwarded
-            if key != "transfer-encoding" && key != "connection" {
+            // Skip certain headers that shouldn't be forwarded:
+            // - transfer-encoding: hyper handles this
+            // - connection: hop-by-hop header
+            // - content-length: may be incorrect if we modified the body (e.g., injecting author metadata)
+            //   hyper will calculate the correct content-length automatically
+            if key != "transfer-encoding" && key != "connection" && key != "content-length" {
                 response_headers.insert(key, value.clone());
             }
         }
@@ -2911,7 +2996,7 @@ async fn fetch_conversation_from_proxy(
     }
 
     let proxy_body = Body::from_stream(proxy_response.body);
-    let body_bytes: Bytes = to_bytes(proxy_body, usize::MAX)
+    let body_bytes: Bytes = to_bytes(proxy_body, MAX_RESPONSE_BODY_SIZE)
         .await
         .map_err(|e| bad_gateway(format!("Failed to read response: {e}")))?;
 
@@ -2946,7 +3031,7 @@ async fn validate_user_file(
 /// Extract body bytes from a request
 async fn extract_body_bytes(request: Request) -> Result<Bytes, Response> {
     tracing::debug!("Extracting body bytes from request");
-    let result = axum::body::to_bytes(request.into_body(), usize::MAX)
+    let result = axum::body::to_bytes(request.into_body(), MAX_REQUEST_BODY_SIZE)
         .await
         .map_err(|e| {
             tracing::error!("Failed to read request body: {}", e);
@@ -2999,14 +3084,16 @@ use std::task::{Context, Poll};
 /// Try to extract response_id from SSE data text
 fn try_extract_response_id(text: &str) -> Option<String> {
     // Look for response_id in SSE data
-    // Format: data: {"id":"resp_xxx",...}
+    // Format: data: {"type":"response.created","response":{"id":"resp_xxx",...},...}
     for line in text.lines() {
         if let Some(data) = line.strip_prefix("data: ") {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                if let Some(id) = json.get("id").and_then(|v| v.as_str()) {
-                    if id.starts_with("resp_") {
-                        return Some(id.to_string());
-                    }
+                if let Some(response_id) = json
+                    .get("response")
+                    .and_then(|r| r.get("id"))
+                    .and_then(|v| v.as_str())
+                {
+                    return Some(response_id.to_string());
                 }
             }
         }
@@ -3018,10 +3105,7 @@ struct AuthorTrackingStream<S> {
     inner: S,
     buffer: String,
     response_id_found: bool,
-    response_id: Option<String>,
-    stream_ended: bool,
     repo: std::sync::Arc<ResponseAuthorRepository>,
-    connection_manager: std::sync::Arc<crate::websocket::ConnectionManager>,
     conversation_id: String,
     user_id: UserId,
     author_name: Option<String>,
@@ -3031,7 +3115,6 @@ impl<S> AuthorTrackingStream<S> {
     fn new(
         inner: S,
         repo: std::sync::Arc<ResponseAuthorRepository>,
-        connection_manager: std::sync::Arc<crate::websocket::ConnectionManager>,
         conversation_id: String,
         user_id: UserId,
         author_name: Option<String>,
@@ -3040,10 +3123,7 @@ impl<S> AuthorTrackingStream<S> {
             inner,
             buffer: String::new(),
             response_id_found: false,
-            response_id: None,
-            stream_ended: false,
             repo,
-            connection_manager,
             conversation_id,
             user_id,
             author_name,
@@ -3060,15 +3140,13 @@ where
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match Pin::new(&mut self.inner).poll_next(cx) {
             Poll::Ready(Some(Ok(bytes))) => {
-                // Try to extract response_id if not found yet, and detect stream completion
-                if let Ok(text) = std::str::from_utf8(&bytes) {
-                    self.buffer.push_str(text);
+                // Try to extract response_id if not found yet
+                if !self.response_id_found {
+                    if let Ok(text) = std::str::from_utf8(&bytes) {
+                        self.buffer.push_str(text);
 
-                    // Check for response_id
-                    if !self.response_id_found {
                         if let Some(response_id) = try_extract_response_id(&self.buffer) {
                             self.response_id_found = true;
-                            self.response_id = Some(response_id.clone());
 
                             // Store author info asynchronously
                             let repo = self.repo.clone();
@@ -3077,8 +3155,17 @@ where
                             let author = self.author_name.clone();
 
                             tokio::spawn(async move {
+                                tracing::info!(
+                                    "Storing author for response_id={}, conversation_id={}, user_id={}, author_name={:?}",
+                                    response_id, conv_id, user_id, author
+                                );
                                 if let Err(e) = repo
-                                    .store_author(&conv_id, &response_id, user_id.into(), author.as_deref())
+                                    .store_author(
+                                        &conv_id,
+                                        &response_id,
+                                        user_id.into(),
+                                        author.as_deref(),
+                                    )
                                     .await
                                 {
                                     tracing::warn!("Failed to store response author: {}", e);
@@ -3086,84 +3173,9 @@ where
                             });
                         }
                     }
-
-                    // Check for SSE [DONE] marker which signals stream completion
-                    // OpenAI sends "data: [DONE]" at the end of the stream
-                    if !self.stream_ended && text.contains("[DONE]") {
-                        self.stream_ended = true;
-                        let connection_manager = self.connection_manager.clone();
-                        let conv_id = self.conversation_id.clone();
-                        let response_id = self.response_id.clone();
-
-                        tracing::info!(
-                            "AuthorTrackingStream: detected [DONE] marker for conversation_id={}, response_id={:?}",
-                            conv_id,
-                            response_id
-                        );
-
-                        tokio::spawn(async move {
-                            let subscriber_count = connection_manager
-                                .broadcast_response_created(&conv_id, response_id.as_deref())
-                                .await;
-                            tracing::info!(
-                                "Broadcast response_created to {} WebSocket subscribers for conversation_id={}",
-                                subscriber_count,
-                                conv_id
-                            );
-                        });
-                    }
                 }
 
                 Poll::Ready(Some(Ok(bytes)))
-            }
-            Poll::Ready(None) => {
-                // Stream ended - broadcast to WebSocket subscribers so they can refresh
-                if !self.stream_ended {
-                    self.stream_ended = true;
-                    let connection_manager = self.connection_manager.clone();
-                    let conv_id = self.conversation_id.clone();
-                    let response_id = self.response_id.clone();
-
-                    tracing::info!(
-                        "AuthorTrackingStream: stream ended for conversation_id={}, response_id={:?}",
-                        conv_id,
-                        response_id
-                    );
-
-                    tokio::spawn(async move {
-                        // Broadcast a "response_created" event so other users can refresh
-                        let subscriber_count = connection_manager
-                            .broadcast_response_created(&conv_id, response_id.as_deref())
-                            .await;
-                        tracing::info!(
-                            "Broadcast response_created to {} WebSocket subscribers for conversation_id={}",
-                            subscriber_count,
-                            conv_id
-                        );
-                    });
-                }
-                Poll::Ready(None)
-            }
-            Poll::Ready(Some(Err(e))) => {
-                // Stream error - still broadcast so other users can refresh
-                if !self.stream_ended {
-                    self.stream_ended = true;
-                    let connection_manager = self.connection_manager.clone();
-                    let conv_id = self.conversation_id.clone();
-                    let response_id = self.response_id.clone();
-
-                    tracing::warn!(
-                        "AuthorTrackingStream: stream error for conversation_id={}, broadcasting anyway",
-                        conv_id
-                    );
-
-                    tokio::spawn(async move {
-                        connection_manager
-                            .broadcast_response_created(&conv_id, response_id.as_deref())
-                            .await;
-                    });
-                }
-                Poll::Ready(Some(Err(e)))
             }
             other => other,
         }
@@ -3190,6 +3202,7 @@ async fn collect_stream_to_bytes(
 
 /// Inject author metadata into conversation items response
 /// Returns Ok(modified_bytes) on success, Err(original_bytes) on failure
+/// Only injects author info for messages that have explicit records in response_authors table
 async fn inject_author_metadata(
     state: &crate::state::AppState,
     conversation_id: &str,
@@ -3206,8 +3219,15 @@ async fn inject_author_metadata(
         .await
         .unwrap_or_default();
 
+    tracing::info!(
+        "inject_author_metadata: conversation_id={}, found {} stored authors: {:?}",
+        conversation_id,
+        authors.len(),
+        authors.keys().collect::<Vec<_>>()
+    );
+
     if authors.is_empty() {
-        // No authors to inject, return original
+        // No stored authors, return original response
         return Err(body_bytes);
     }
 
@@ -3220,10 +3240,20 @@ async fn inject_author_metadata(
     let mut modified = false;
 
     for item in items.iter_mut() {
-        // Get the response_id from each item (items can have a response_id field)
+        // Skip items that already have author_id in metadata
+        if item
+            .get("metadata")
+            .and_then(|m| m.get("author_id"))
+            .is_some()
+        {
+            continue;
+        }
+
+        // Get the response_id from each item
         let response_id = item.get("response_id").and_then(|v| v.as_str());
 
         if let Some(resp_id) = response_id {
+            // Only inject author info if we have an explicit record
             if let Some(author) = authors.get(resp_id) {
                 // Ensure metadata object exists
                 if item.get("metadata").is_none() {

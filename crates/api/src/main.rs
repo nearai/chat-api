@@ -1,3 +1,4 @@
+use api::middleware::RateLimitState;
 use api::{create_router_with_cors, ApiDoc, AppState, ConnectionManager};
 use config::LoggingConfig;
 use opentelemetry::global;
@@ -15,6 +16,7 @@ use services::{
     metrics::{MockMetricsService, OtlpMetricsService},
     model::service::ModelServiceImpl,
     response::service::OpenAIProxy,
+    system_configs::ports::SystemConfigsService,
     user::UserServiceImpl,
     user::UserSettingsServiceImpl,
     vpc::{initialize_vpc_credentials, VpcAuthConfig},
@@ -158,9 +160,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize analytics service
     tracing::info!("Initializing analytics service...");
-    let analytics_service = Arc::new(AnalyticsServiceImpl::new(
-        analytics_repo as Arc<dyn services::analytics::AnalyticsRepository>,
-    ));
+    let analytics_service = Arc::new(AnalyticsServiceImpl::new(analytics_repo));
 
     // Initialize system configs service
     tracing::info!("Initializing system configs service...");
@@ -229,13 +229,24 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Initializing WebSocket connection manager...");
     let connection_manager = Arc::new(ConnectionManager::new());
 
+    // Load rate limit config from system configs
+    let rate_limit_config = system_configs_service
+        .get_configs()
+        .await?
+        .unwrap_or_default()
+        .rate_limit;
+
+    // Create rate limit state
+    let rate_limit_state =
+        RateLimitState::with_config(rate_limit_config, analytics_service.clone());
+
     // Create application state
     let app_state = AppState {
         oauth_service,
         user_service,
         user_settings_service,
         model_service,
-        system_configs_service,
+        system_configs_service: system_configs_service.clone(),
         session_repository: session_repo,
         proxy_service,
         conversation_service,
@@ -253,6 +264,7 @@ async fn main() -> anyhow::Result<()> {
         model_settings_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         response_author_repository: response_author_repo,
         connection_manager,
+        rate_limit_state,
     };
 
     // Create router with CORS support
@@ -263,8 +275,8 @@ async fn main() -> anyhow::Result<()> {
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
 
-    tracing::info!("🚀 Server listening on http://{}", addr);
-    tracing::info!("📚 Swagger UI available at http://{}/docs", addr);
+    tracing::info!("Server listening on http://{}", addr);
+    tracing::info!("Swagger UI available at http://{}/docs", addr);
 
     axum::serve(listener, app).await?;
 

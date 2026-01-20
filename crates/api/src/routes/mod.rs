@@ -6,15 +6,15 @@ pub mod oauth;
 pub mod users;
 
 use axum::{middleware::from_fn_with_state, routing::get, Json, Router};
+use http::header::{HeaderName, ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use http::HeaderValue;
-use serde::Serialize;
-use http::header::{HeaderName, AUTHORIZATION, CONTENT_TYPE, ACCEPT};
 use http::Method;
+use serde::Serialize;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use utoipa::ToSchema;
 
 use crate::{
-    middleware::{AuthState, MetricsState, RateLimitState},
+    middleware::{AuthState, MetricsState},
     state::AppState,
     static_files,
 };
@@ -115,7 +115,8 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         crate::middleware::auth_middleware,
     ));
 
-    let rate_limit_state = RateLimitState::new();
+    // Get rate limit state from app state
+    let rate_limit_state = app_state.rate_limit_state.clone();
 
     // Configs routes (requires user authentication, not admin)
     let configs_routes = configs::create_configs_router().layer(from_fn_with_state(
@@ -157,7 +158,7 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         .nest("/v1/admin", admin_routes)
         .merge(optional_auth_routes) // Conversation read routes (optional auth)
         .merge(api_routes) // API routes (required auth)
-        .merge(websocket_routes) // WebSocket routes (required auth)
+        .merge(websocket_routes) // WebSocket routes
         .merge(attestation_routes) // Merge attestation routes (already have /v1 prefix)
         .with_state(app_state)
         // Add static file serving as fallback (must be last)
@@ -174,11 +175,22 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
                 is_origin_allowed(origin_str, &cors_config_clone)
             },
         ))
-        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::PATCH, Method::DELETE, Method::OPTIONS])
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
         .allow_headers([
             AUTHORIZATION,
             CONTENT_TYPE,
             ACCEPT,
+            // Allow ngrok-skip-browser-warning header for development with ngrok tunnels
+            // When using ngrok for local development/testing, this header prevents the
+            // ngrok browser warning page from appearing on the first request
+            // This is safe for production as unknown headers are simply ignored
             HeaderName::from_static("ngrok-skip-browser-warning"),
         ])
         .allow_credentials(true);

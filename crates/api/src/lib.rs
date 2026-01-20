@@ -7,6 +7,7 @@ pub mod openapi;
 pub mod routes;
 pub mod state;
 pub mod static_files;
+pub mod validation;
 pub mod websocket;
 
 pub use error::{ApiError, ApiErrorResponse};

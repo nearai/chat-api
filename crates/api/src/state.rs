@@ -1,3 +1,4 @@
+use crate::middleware::RateLimitState;
 use crate::websocket::ConnectionManager;
 use chrono::{DateTime, Utc};
 use database::repositories::ResponseAuthorRepository;
@@ -53,7 +54,7 @@ pub struct AppState {
     pub cloud_api_base_url: String,
     /// Metrics service for recording usage metrics
     pub metrics_service: Arc<dyn services::metrics::MetricsServiceTrait>,
-    /// Analytics service for database-backed analytics
+    /// Analytics service for database-backed analytics and rate limiting
     pub analytics_service: Arc<dyn services::analytics::AnalyticsServiceTrait>,
     /// NEAR RPC URL used for on-chain balance checks (if configured)
     pub near_rpc_url: Url,
@@ -65,4 +66,6 @@ pub struct AppState {
     pub response_author_repository: Arc<ResponseAuthorRepository>,
     /// WebSocket connection manager for real-time conversation updates
     pub connection_manager: Arc<ConnectionManager>,
+    /// Rate limit state for hot-reloadable rate limit configuration
+    pub rate_limit_state: RateLimitState,
 }

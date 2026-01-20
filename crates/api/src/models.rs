@@ -77,6 +77,26 @@ impl From<services::user::ports::UserProfile> for UserProfileResponse {
     }
 }
 
+/// VPC information in attestation
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct VpcInfo {
+    /// VPC server app ID
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vpc_server_app_id: Option<String>,
+    /// VPC hostname of this node
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vpc_hostname: Option<String>,
+}
+
+impl From<services::vpc::VpcInfo> for VpcInfo {
+    fn from(v: services::vpc::VpcInfo) -> Self {
+        Self {
+            vpc_server_app_id: v.vpc_server_app_id,
+            vpc_hostname: v.vpc_hostname,
+        }
+    }
+}
+
 /// Cloud-API gateway attestation (forwarded from dependency)
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ApiGatewayAttestation {
@@ -90,6 +110,9 @@ pub struct ApiGatewayAttestation {
     /// Attestation info
     #[serde(skip_serializing_if = "Option::is_none")]
     pub info: Option<serde_json::Value>,
+    /// VPC information (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vpc: Option<VpcInfo>,
 }
 
 /// Model attestation from VLLM inference providers
@@ -128,6 +151,7 @@ pub struct CombinedAttestationReport {
     pub cloud_api_gateway_attestation: ApiGatewayAttestation,
 
     /// Model provider attestations (can be multiple when routing to different models)
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub model_attestations: Option<Vec<ModelAttestation>>,
 }
 
@@ -372,15 +396,160 @@ pub struct UserListResponse {
     pub total: u64,
 }
 
-/// System configs response
+/// Rate limit configuration (API model)
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct SystemConfigsResponse {
+pub struct RateLimitConfig {
+    /// Maximum number of concurrent requests per user
+    pub max_concurrent: usize,
+    /// Maximum number of requests per time window per user
+    pub max_requests_per_window: usize,
+    /// Duration of the short-term rate limit window in seconds
+    pub window_duration_seconds: u64,
+    /// Sliding window limits based on activity_log
+    pub window_limits: Vec<WindowLimit>,
+}
+
+/// Configuration for a single time window limit (API model)
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct WindowLimit {
+    /// Duration of the time window for the limit (in seconds)
+    pub window_duration_seconds: u64,
+    /// Maximum number of requests allowed in this window
+    pub limit: usize,
+}
+
+impl From<services::system_configs::ports::RateLimitConfig> for RateLimitConfig {
+    fn from(config: services::system_configs::ports::RateLimitConfig) -> Self {
+        Self {
+            max_concurrent: config.max_concurrent,
+            max_requests_per_window: config.max_requests_per_window,
+            window_duration_seconds: u64::try_from(config.window_duration.num_seconds())
+                .unwrap_or(u64::MAX),
+            window_limits: config.window_limits.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<services::system_configs::ports::WindowLimit> for WindowLimit {
+    fn from(limit: services::system_configs::ports::WindowLimit) -> Self {
+        Self {
+            window_duration_seconds: u64::try_from(limit.window_duration.num_seconds())
+                .unwrap_or(u64::MAX),
+            limit: limit.limit,
+        }
+    }
+}
+
+impl TryFrom<RateLimitConfig> for services::system_configs::ports::RateLimitConfig {
+    type Error = String;
+
+    fn try_from(api_config: RateLimitConfig) -> Result<Self, Self::Error> {
+        use chrono::Duration;
+
+        let window_duration_seconds =
+            i64::try_from(api_config.window_duration_seconds).map_err(|_| {
+                format!(
+                    "window_duration_seconds {} is too large (max: {})",
+                    api_config.window_duration_seconds,
+                    i64::MAX
+                )
+            })?;
+
+        let window_limits: Result<Vec<_>, _> = api_config
+            .window_limits
+            .into_iter()
+            .map(|limit| limit.try_into())
+            .collect();
+
+        Ok(Self {
+            max_concurrent: api_config.max_concurrent,
+            max_requests_per_window: api_config.max_requests_per_window,
+            window_duration: Duration::seconds(window_duration_seconds),
+            window_limits: window_limits?,
+        })
+    }
+}
+
+impl TryFrom<WindowLimit> for services::system_configs::ports::WindowLimit {
+    type Error = String;
+
+    fn try_from(api_limit: WindowLimit) -> Result<Self, Self::Error> {
+        use chrono::Duration;
+
+        let window_duration_seconds =
+            i64::try_from(api_limit.window_duration_seconds).map_err(|_| {
+                format!(
+                    "window_duration_seconds {} is too large (max: {})",
+                    api_limit.window_duration_seconds,
+                    i64::MAX
+                )
+            })?;
+
+        Ok(Self {
+            window_duration: Duration::seconds(window_duration_seconds),
+            limit: api_limit.limit,
+        })
+    }
+}
+
+impl RateLimitConfig {
+    /// Validate the rate limit configuration
+    ///
+    /// Returns an error if any field is invalid:
+    /// - `max_concurrent` must be greater than 0
+    /// - `max_requests_per_window` must be greater than 0
+    /// - `window_duration_seconds` must be greater than 0
+    /// - `window_limits` may be empty (to disable long-term window limiting)
+    /// - Each `window_limits` entry must have `window_duration_seconds > 0` and `limit > 0`
+    pub fn validate(&self) -> Result<(), ApiError> {
+        if self.max_concurrent == 0 {
+            return Err(ApiError::bad_request(
+                "max_concurrent must be greater than 0",
+            ));
+        }
+
+        if self.max_requests_per_window == 0 {
+            return Err(ApiError::bad_request(
+                "max_requests_per_window must be greater than 0",
+            ));
+        }
+
+        if self.window_duration_seconds == 0 {
+            return Err(ApiError::bad_request(
+                "window_duration_seconds must be greater than 0",
+            ));
+        }
+
+        // window_limits can be empty (to disable long-term window limiting)
+        for (index, window_limit) in self.window_limits.iter().enumerate() {
+            if window_limit.window_duration_seconds == 0 {
+                return Err(ApiError::bad_request(format!(
+                    "window_limits[{}].window_duration_seconds must be greater than 0",
+                    index
+                )));
+            }
+
+            if window_limit.limit == 0 {
+                return Err(ApiError::bad_request(format!(
+                    "window_limits[{}].limit must be greater than 0",
+                    index
+                )));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Public system configs response (limited fields for non-admin users)
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct PublicSystemConfigsResponse {
     /// Default model identifier to use when not specified
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
 }
 
-impl From<services::system_configs::ports::SystemConfigs> for SystemConfigsResponse {
+impl From<services::system_configs::ports::SystemConfigs> for PublicSystemConfigsResponse {
     fn from(config: services::system_configs::ports::SystemConfigs) -> Self {
         Self {
             default_model: config.default_model,
@@ -388,35 +557,50 @@ impl From<services::system_configs::ports::SystemConfigs> for SystemConfigsRespo
     }
 }
 
-/// System configs upsert request (full replace)
+/// Full system configs response (all fields, for admin)
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct SystemConfigsResponse {
+    /// Default model identifier to use when not specified
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
+    /// Rate limit configuration (always present, uses defaults if not set)
+    pub rate_limit: RateLimitConfig,
+}
+
+impl From<services::system_configs::ports::SystemConfigs> for SystemConfigsResponse {
+    fn from(config: services::system_configs::ports::SystemConfigs) -> Self {
+        Self {
+            default_model: config.default_model,
+            rate_limit: config.rate_limit.into(),
+        }
+    }
+}
+
+/// System configs upsert request
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UpsertSystemConfigsRequest {
     /// Default model identifier to use when not specified
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
-}
-
-impl From<UpsertSystemConfigsRequest> for services::system_configs::ports::SystemConfigs {
-    fn from(req: UpsertSystemConfigsRequest) -> Self {
-        services::system_configs::ports::SystemConfigs {
-            default_model: req.default_model,
-        }
-    }
-}
-
-/// System configs update request (partial)
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct UpdateSystemConfigsRequest {
-    /// Default model identifier to use when not specified
+    /// Rate limit configuration
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub default_model: Option<String>,
+    pub rate_limit: Option<RateLimitConfig>,
 }
 
-impl From<UpdateSystemConfigsRequest> for services::system_configs::ports::PartialSystemConfigs {
-    fn from(req: UpdateSystemConfigsRequest) -> Self {
-        services::system_configs::ports::PartialSystemConfigs {
+impl TryFrom<UpsertSystemConfigsRequest> for services::system_configs::ports::PartialSystemConfigs {
+    type Error = String;
+
+    fn try_from(req: UpsertSystemConfigsRequest) -> Result<Self, Self::Error> {
+        let rate_limit = if let Some(rate_limit) = req.rate_limit {
+            Some(rate_limit.try_into()?)
+        } else {
+            None
+        };
+
+        Ok(services::system_configs::ports::PartialSystemConfigs {
             default_model: req.default_model,
-        }
+            rate_limit,
+        })
     }
 }
 
