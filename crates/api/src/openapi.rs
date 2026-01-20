@@ -25,6 +25,7 @@ use utoipa::OpenApi;
         // Conversation endpoints (with optional authentication)
         crate::routes::api::get_conversation,
         crate::routes::api::list_conversation_items,
+        crate::routes::api::typing_indicator,
         // Admin endpoints
         crate::routes::admin::list_users,
         crate::routes::admin::list_models,

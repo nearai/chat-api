@@ -231,4 +231,208 @@ mod tests {
             .await;
         assert_eq!(count, 0);
     }
+
+    #[tokio::test]
+    async fn test_unsubscribe_cleans_up_channel() {
+        let manager = ConnectionManager::new();
+        let conv_id = "test-conv-cleanup";
+
+        // Subscribe
+        let _receiver = manager.subscribe(conv_id).await;
+        assert_eq!(manager.active_channels_count().await, 1);
+
+        // Unsubscribe
+        manager.unsubscribe(conv_id).await;
+
+        // Channel should be removed
+        assert_eq!(manager.active_channels_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_returns_zero_when_all_unsubscribed() {
+        let manager = ConnectionManager::new();
+        let conv_id = "test-conv-unsub";
+
+        // Subscribe then unsubscribe
+        let _receiver = manager.subscribe(conv_id).await;
+        manager.unsubscribe(conv_id).await;
+
+        // Broadcast should return 0
+        let count = manager
+            .broadcast_new_items(conv_id, serde_json::json!([]))
+            .await;
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_message_serialization_new_items() {
+        let msg = WebSocketMessage::NewItems {
+            conversation_id: "conv-123".to_string(),
+            items: serde_json::json!([{"id": "item-1"}]),
+        };
+
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"event_type\":\"new_items\""));
+        assert!(json.contains("\"conversation_id\":\"conv-123\""));
+
+        // Deserialize back
+        let deserialized: WebSocketMessage = serde_json::from_str(&json).unwrap();
+        match deserialized {
+            WebSocketMessage::NewItems { conversation_id, .. } => {
+                assert_eq!(conversation_id, "conv-123");
+            }
+            _ => panic!("Expected NewItems"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_message_serialization_response_created() {
+        let msg = WebSocketMessage::ResponseCreated {
+            conversation_id: "conv-456".to_string(),
+            response_id: Some("resp-789".to_string()),
+        };
+
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"event_type\":\"response_created\""));
+        assert!(json.contains("\"response_id\":\"resp-789\""));
+
+        // Deserialize back
+        let deserialized: WebSocketMessage = serde_json::from_str(&json).unwrap();
+        match deserialized {
+            WebSocketMessage::ResponseCreated {
+                conversation_id,
+                response_id,
+            } => {
+                assert_eq!(conversation_id, "conv-456");
+                assert_eq!(response_id, Some("resp-789".to_string()));
+            }
+            _ => panic!("Expected ResponseCreated"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_message_serialization_typing() {
+        let msg = WebSocketMessage::Typing {
+            conversation_id: "conv-typing".to_string(),
+            user_id: "user-1".to_string(),
+            user_name: Some("Alice".to_string()),
+        };
+
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"event_type\":\"typing\""));
+        assert!(json.contains("\"user_name\":\"Alice\""));
+
+        // Deserialize back
+        let deserialized: WebSocketMessage = serde_json::from_str(&json).unwrap();
+        match deserialized {
+            WebSocketMessage::Typing {
+                user_id, user_name, ..
+            } => {
+                assert_eq!(user_id, "user-1");
+                assert_eq!(user_name, Some("Alice".to_string()));
+            }
+            _ => panic!("Expected Typing"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_message_serialization_ping_pong() {
+        // Ping
+        let ping = WebSocketMessage::Ping;
+        let ping_json = serde_json::to_string(&ping).unwrap();
+        assert!(ping_json.contains("\"event_type\":\"ping\""));
+
+        let deserialized_ping: WebSocketMessage = serde_json::from_str(&ping_json).unwrap();
+        assert!(matches!(deserialized_ping, WebSocketMessage::Ping));
+
+        // Pong
+        let pong = WebSocketMessage::Pong;
+        let pong_json = serde_json::to_string(&pong).unwrap();
+        assert!(pong_json.contains("\"event_type\":\"pong\""));
+
+        let deserialized_pong: WebSocketMessage = serde_json::from_str(&pong_json).unwrap();
+        assert!(matches!(deserialized_pong, WebSocketMessage::Pong));
+    }
+
+    #[tokio::test]
+    async fn test_active_channels_count() {
+        let manager = ConnectionManager::new();
+
+        // Initially no channels
+        assert_eq!(manager.active_channels_count().await, 0);
+
+        // Subscribe to multiple conversations
+        let _r1 = manager.subscribe("conv-1").await;
+        assert_eq!(manager.active_channels_count().await, 1);
+
+        let _r2 = manager.subscribe("conv-2").await;
+        assert_eq!(manager.active_channels_count().await, 2);
+
+        // Multiple subscribers to same conversation don't increase channel count
+        let _r3 = manager.subscribe("conv-1").await;
+        assert_eq!(manager.active_channels_count().await, 2);
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_response_created() {
+        let manager = ConnectionManager::new();
+        let conv_id = "test-conv-response";
+
+        // Subscribe
+        let mut receiver = manager.subscribe(conv_id).await;
+
+        // Broadcast response created
+        let count = manager
+            .broadcast_response_created(conv_id, Some("resp-123"))
+            .await;
+        assert_eq!(count, 1);
+
+        // Receive
+        let msg = receiver.try_recv().unwrap();
+        match msg {
+            WebSocketMessage::ResponseCreated {
+                conversation_id,
+                response_id,
+            } => {
+                assert_eq!(conversation_id, conv_id);
+                assert_eq!(response_id, Some("resp-123".to_string()));
+            }
+            _ => panic!("Expected ResponseCreated message"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_partial_unsubscribe() {
+        let manager = ConnectionManager::new();
+        let conv_id = "test-conv-partial";
+
+        // Subscribe two receivers
+        let mut receiver1 = manager.subscribe(conv_id).await;
+        let mut receiver2 = manager.subscribe(conv_id).await;
+
+        // Unsubscribe one (this decrements our tracking count but doesn't invalidate the receiver)
+        manager.unsubscribe(conv_id).await;
+
+        // Channel should still exist (tracking count says one subscriber left)
+        assert_eq!(manager.active_channels_count().await, 1);
+
+        // Broadcast still reaches all alive receivers (both are still alive)
+        // Note: subscriber_count is for channel cleanup tracking, not actual receiver validity
+        let count = manager
+            .broadcast_new_items(conv_id, serde_json::json!([]))
+            .await;
+        assert_eq!(count, 2); // Both receivers are still alive
+        assert!(receiver1.try_recv().is_ok());
+        assert!(receiver2.try_recv().is_ok());
+
+        // Drop receiver2 to simulate it going away
+        drop(receiver2);
+
+        // Now broadcast should only reach one receiver
+        let count = manager
+            .broadcast_new_items(conv_id, serde_json::json!([]))
+            .await;
+        assert_eq!(count, 1);
+        assert!(receiver1.try_recv().is_ok());
+    }
 }

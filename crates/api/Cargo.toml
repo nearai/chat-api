@@ -64,6 +64,8 @@ axum-test = "18"
 dotenvy = "0.15"
 wiremock = "0.6"
 serial_test = "3.0"
+tokio-tungstenite = "0.21"
+futures-util = "0.3"
 
 [features]
 default = []

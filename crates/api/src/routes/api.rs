@@ -95,6 +95,10 @@ pub fn create_api_router(
         .route(
             "/v1/conversations/{conversation_id}/clone",
             post(clone_conversation),
+        )
+        .route(
+            "/v1/conversations/{conversation_id}/typing",
+            post(typing_indicator),
         );
 
     let share_groups_router = Router::new()
@@ -1167,6 +1171,19 @@ async fn create_conversation_items(
                     }
                 });
             }
+
+            // Broadcast new items to WebSocket subscribers
+            let subscriber_count = state
+                .connection_manager
+                .broadcast_new_items(&conversation_id, response_json.clone())
+                .await;
+            if subscriber_count > 0 {
+                tracing::debug!(
+                    "Broadcast new items to {} subscribers for conversation_id={}",
+                    subscriber_count,
+                    conversation_id
+                );
+            }
         }
 
         build_response(
@@ -1183,6 +1200,65 @@ async fn create_conversation_items(
         )
         .await
     }
+}
+
+/// Send a typing indicator to all WebSocket subscribers of a conversation
+///
+/// This endpoint broadcasts a typing indicator to all clients connected via WebSocket
+/// to the specified conversation. Useful for showing when other users are typing.
+///
+/// # Authentication
+/// Requires authentication and at least read access to the conversation.
+#[utoipa::path(
+    post,
+    path = "/v1/conversations/{conversation_id}/typing",
+    tag = "Conversations",
+    params(
+        ("conversation_id" = String, Path, description = "ID of the conversation to send typing indicator to")
+    ),
+    responses(
+        (status = 204, description = "Typing indicator sent successfully"),
+        (status = 403, description = "Access denied to this conversation"),
+        (status = 404, description = "Conversation not found")
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+async fn typing_indicator(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(conversation_id): Path<String>,
+) -> Result<StatusCode, Response> {
+    tracing::debug!(
+        "typing_indicator called for user_id={}, conversation_id={}",
+        user.user_id,
+        conversation_id
+    );
+
+    // Verify user has at least read access to this conversation
+    validate_user_conversation(&state, &user, &conversation_id, SharePermission::Read).await?;
+
+    // Get user's name for the typing indicator
+    let user_profile = state.user_service.get_user_profile(user.user_id).await.ok();
+    let user_name = user_profile.as_ref().and_then(|p| p.user.name.clone());
+
+    // Broadcast typing indicator to WebSocket subscribers
+    let subscriber_count = state
+        .connection_manager
+        .broadcast_typing(&conversation_id, &user.user_id.to_string(), user_name)
+        .await;
+
+    if subscriber_count > 0 {
+        tracing::debug!(
+            "Broadcast typing indicator to {} subscribers for conversation_id={}, user_id={}",
+            subscriber_count,
+            conversation_id,
+            user.user_id
+        );
+    }
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// List conversation items - works with optional authentication
@@ -2138,6 +2214,7 @@ async fn proxy_responses(
     let response_body = if let Some(conv_id) = conversation_id_for_author.as_ref() {
         if (200..300).contains(&proxy_response.status) {
             let repo = state.response_author_repository.clone();
+            let connection_manager = state.connection_manager.clone();
             let user_id = user.user_id;
             let author = author_name_for_tracking;
 
@@ -2151,6 +2228,7 @@ async fn proxy_responses(
             let wrapped_stream = AuthorTrackingStream::new(
                 proxy_response.body,
                 repo,
+                connection_manager,
                 conv_id.clone(),
                 user_id,
                 author,
@@ -3105,7 +3183,10 @@ struct AuthorTrackingStream<S> {
     inner: S,
     buffer: String,
     response_id_found: bool,
+    response_id: Option<String>,
+    broadcast_sent: bool,
     repo: std::sync::Arc<ResponseAuthorRepository>,
+    connection_manager: std::sync::Arc<crate::websocket::ConnectionManager>,
     conversation_id: String,
     user_id: UserId,
     author_name: Option<String>,
@@ -3115,6 +3196,7 @@ impl<S> AuthorTrackingStream<S> {
     fn new(
         inner: S,
         repo: std::sync::Arc<ResponseAuthorRepository>,
+        connection_manager: std::sync::Arc<crate::websocket::ConnectionManager>,
         conversation_id: String,
         user_id: UserId,
         author_name: Option<String>,
@@ -3123,7 +3205,10 @@ impl<S> AuthorTrackingStream<S> {
             inner,
             buffer: String::new(),
             response_id_found: false,
+            response_id: None,
+            broadcast_sent: false,
             repo,
+            connection_manager,
             conversation_id,
             user_id,
             author_name,
@@ -3147,6 +3232,7 @@ where
 
                         if let Some(response_id) = try_extract_response_id(&self.buffer) {
                             self.response_id_found = true;
+                            self.response_id = Some(response_id.clone());
 
                             // Store author info asynchronously
                             let repo = self.repo.clone();
@@ -3176,6 +3262,32 @@ where
                 }
 
                 Poll::Ready(Some(Ok(bytes)))
+            }
+            Poll::Ready(None) => {
+                // Stream ended - broadcast response_created if we haven't already
+                if !self.broadcast_sent {
+                    self.broadcast_sent = true;
+
+                    let connection_manager = self.connection_manager.clone();
+                    let conv_id = self.conversation_id.clone();
+                    let response_id = self.response_id.clone();
+
+                    // Broadcast asynchronously to not block the stream completion
+                    tokio::spawn(async move {
+                        let subscriber_count = connection_manager
+                            .broadcast_response_created(&conv_id, response_id.as_deref())
+                            .await;
+                        if subscriber_count > 0 {
+                            tracing::debug!(
+                                "Broadcast response_created to {} subscribers for conversation_id={}, response_id={:?}",
+                                subscriber_count,
+                                conv_id,
+                                response_id
+                            );
+                        }
+                    });
+                }
+                Poll::Ready(None)
             }
             other => other,
         }
