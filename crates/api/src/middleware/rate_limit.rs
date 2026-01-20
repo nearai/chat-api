@@ -201,7 +201,14 @@ impl RateLimitState {
         // First, check all windows without inserting to avoid duplicate records
         // If all windows pass, insert a single record that all windows will count
         for window_limit in &config.window_limits {
-            let limit_value = window_limit.limit.try_into().unwrap_or(i64::MAX);
+            let limit_value = window_limit.limit.try_into().map_err(|e| {
+                tracing::error!(
+                    error = ?e,
+                    limit = window_limit.limit,
+                    "Failed to convert window limit to i64"
+                );
+                RateLimitError::InternalServerError
+            })?;
 
             // Check count without inserting
             let count = match self
@@ -1795,7 +1802,8 @@ mod tests {
                 window_duration: ChronoDuration::seconds(1),
                 window_limits: vec![WindowLimit {
                     window_duration: ChronoDuration::seconds(
-                        i64::try_from(window_seconds).unwrap_or(i64::MAX),
+                        i64::try_from(window_seconds)
+                            .expect("test window_seconds should fit in i64"),
                     ),
                     limit,
                 }],

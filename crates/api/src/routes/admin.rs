@@ -652,7 +652,11 @@ pub async fn upsert_system_configs(
         rate_limit.validate()?;
     }
 
-    let partial: services::system_configs::ports::PartialSystemConfigs = request.into();
+    let partial: services::system_configs::ports::PartialSystemConfigs =
+        request.try_into().map_err(|e: String| {
+            tracing::error!(error = %e, "Failed to convert rate limit config");
+            ApiError::bad_request(format!("Invalid rate limit configuration: {}", e))
+        })?;
 
     // Check if configs exist
     let existing_configs = app_state

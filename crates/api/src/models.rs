@@ -440,33 +440,55 @@ impl From<services::system_configs::ports::WindowLimit> for WindowLimit {
     }
 }
 
-impl From<RateLimitConfig> for services::system_configs::ports::RateLimitConfig {
-    fn from(api_config: RateLimitConfig) -> Self {
+impl TryFrom<RateLimitConfig> for services::system_configs::ports::RateLimitConfig {
+    type Error = String;
+
+    fn try_from(api_config: RateLimitConfig) -> Result<Self, Self::Error> {
         use chrono::Duration;
-        Self {
+
+        let window_duration_seconds =
+            i64::try_from(api_config.window_duration_seconds).map_err(|_| {
+                format!(
+                    "window_duration_seconds {} is too large (max: {})",
+                    api_config.window_duration_seconds,
+                    i64::MAX
+                )
+            })?;
+
+        let window_limits: Result<Vec<_>, _> = api_config
+            .window_limits
+            .into_iter()
+            .map(|limit| limit.try_into())
+            .collect();
+
+        Ok(Self {
             max_concurrent: api_config.max_concurrent,
             max_requests_per_window: api_config.max_requests_per_window,
-            window_duration: Duration::seconds(
-                i64::try_from(api_config.window_duration_seconds).unwrap_or(i64::MAX),
-            ),
-            window_limits: api_config
-                .window_limits
-                .into_iter()
-                .map(Into::into)
-                .collect(),
-        }
+            window_duration: Duration::seconds(window_duration_seconds),
+            window_limits: window_limits?,
+        })
     }
 }
 
-impl From<WindowLimit> for services::system_configs::ports::WindowLimit {
-    fn from(api_limit: WindowLimit) -> Self {
+impl TryFrom<WindowLimit> for services::system_configs::ports::WindowLimit {
+    type Error = String;
+
+    fn try_from(api_limit: WindowLimit) -> Result<Self, Self::Error> {
         use chrono::Duration;
-        Self {
-            window_duration: Duration::seconds(
-                i64::try_from(api_limit.window_duration_seconds).unwrap_or(i64::MAX),
-            ),
+
+        let window_duration_seconds =
+            i64::try_from(api_limit.window_duration_seconds).map_err(|_| {
+                format!(
+                    "window_duration_seconds {} is too large (max: {})",
+                    api_limit.window_duration_seconds,
+                    i64::MAX
+                )
+            })?;
+
+        Ok(Self {
+            window_duration: Duration::seconds(window_duration_seconds),
             limit: api_limit.limit,
-        }
+        })
     }
 }
 
@@ -565,12 +587,20 @@ pub struct UpsertSystemConfigsRequest {
     pub rate_limit: Option<RateLimitConfig>,
 }
 
-impl From<UpsertSystemConfigsRequest> for services::system_configs::ports::PartialSystemConfigs {
-    fn from(req: UpsertSystemConfigsRequest) -> Self {
-        services::system_configs::ports::PartialSystemConfigs {
+impl TryFrom<UpsertSystemConfigsRequest> for services::system_configs::ports::PartialSystemConfigs {
+    type Error = String;
+
+    fn try_from(req: UpsertSystemConfigsRequest) -> Result<Self, Self::Error> {
+        let rate_limit = if let Some(rate_limit) = req.rate_limit {
+            Some(rate_limit.try_into()?)
+        } else {
+            None
+        };
+
+        Ok(services::system_configs::ports::PartialSystemConfigs {
             default_model: req.default_model,
-            rate_limit: req.rate_limit.map(Into::into),
-        }
+            rate_limit,
+        })
     }
 }
 
