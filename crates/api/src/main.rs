@@ -275,8 +275,8 @@ async fn main() -> anyhow::Result<()> {
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
 
-    tracing::info!("Server listening on http://{}", addr);
-    tracing::info!("Swagger UI available at http://{}/docs", addr);
+    tracing::info!("🚀 Server listening on http://{}", addr);
+    tracing::info!("📚 Swagger UI available at http://{}/docs", addr);
 
     axum::serve(listener, app).await?;
 

@@ -4,12 +4,12 @@ A Rust backend service that proxies requests to **NEAR AI Cloud API** (using Ope
 
 ## Features
 
-- **TEE Execution**: Runs in a Trusted Execution Environment with cryptographic attestation
-- **OpenAI-Compatible API**: Drop-in replacement for OpenAI API endpoints (proxies to NEAR AI Cloud API)
-- **OAuth Authentication**: Google and GitHub OAuth support
-- **Conversation Tracking**: Persistent conversation management in PostgreSQL
-- **User Management**: Session management, user settings, and analytics
-- **Streaming**: Real-time SSE streaming for AI responses
+- 🔒 **TEE Execution**: Runs in a Trusted Execution Environment with cryptographic attestation
+- 🤖 **OpenAI-Compatible API**: Drop-in replacement for OpenAI API endpoints (proxies to NEAR AI Cloud API)
+- 🔐 **OAuth Authentication**: Google and GitHub OAuth support
+- 💬 **Conversation Tracking**: Persistent conversation management in PostgreSQL
+- 📊 **User Management**: Session management, user settings, and analytics
+- ⚡ **Streaming**: Real-time SSE streaming for AI responses
 
 ## Architecture
 
@@ -144,10 +144,10 @@ DIGEST2=$(skopeo inspect oci-archive:./oci.tar | jq -r .Digest)
 This API is designed to run in a **Trusted Execution Environment (TEE)** (Intel TDX CVM), providing hardware-level security and cryptographic attestation.
 
 **Benefits**:
-- Code integrity: Isolated, tamper-proof environment
-- Data privacy: User data and API keys protected from host access
-- Attestation: Cryptographic proofs verify execution environment
-- Confidentiality: Even cloud providers cannot access application memory
+- 🔒 Code integrity: Isolated, tamper-proof environment
+- 🛡️ Data privacy: User data and API keys protected from host access
+- ✅ Attestation: Cryptographic proofs verify execution environment
+- 🔐 Confidentiality: Even cloud providers cannot access application memory
 
 ### Attestation
 

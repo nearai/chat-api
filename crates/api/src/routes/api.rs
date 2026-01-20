@@ -1236,8 +1236,8 @@ async fn typing_indicator(
         conversation_id
     );
 
-    // Verify user has at least read access to this conversation
-    validate_user_conversation(&state, &user, &conversation_id, SharePermission::Read).await?;
+    // Verify user has write access to this conversation
+    validate_user_conversation(&state, &user, &conversation_id, SharePermission::Write).await?;
 
     // Get user's name for the typing indicator
     let user_profile = state.user_service.get_user_profile(user.user_id).await.ok();
