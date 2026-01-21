@@ -17,6 +17,16 @@ impl PostgresConversationShareRepository {
         Self { pool }
     }
 
+    /// Map PostgreSQL errors, converting unique constraint violations to ShareAlreadyExists
+    fn map_db_error(e: tokio_postgres::Error) -> ConversationError {
+        if let Some(db_error) = e.as_db_error() {
+            if db_error.code() == &tokio_postgres::error::SqlState::UNIQUE_VIOLATION {
+                return ConversationError::ShareAlreadyExists;
+            }
+        }
+        ConversationError::DatabaseError(e.to_string())
+    }
+
     fn map_permission(value: &str) -> Result<SharePermission, ConversationError> {
         match value {
             "read" => Ok(SharePermission::Read),
@@ -437,16 +447,7 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                 ],
             )
             .await
-            .map_err(|e| {
-                // Check if this is a unique constraint violation
-                if let Some(db_error) = e.as_db_error() {
-                    // PostgreSQL error code 23505 = unique_violation
-                    if db_error.code().code() == "23505" {
-                        return ConversationError::ShareAlreadyExists;
-                    }
-                }
-                ConversationError::DatabaseError(e.to_string())
-            })?;
+            .map_err(Self::map_db_error)?;
 
         Self::map_share_row(&row)
     }
@@ -509,16 +510,7 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                     ],
                 )
                 .await
-                .map_err(|e| {
-                    // Check if this is a unique constraint violation
-                    if let Some(db_error) = e.as_db_error() {
-                        // PostgreSQL error code 23505 = unique_violation
-                        if db_error.code().code() == "23505" {
-                            return ConversationError::ShareAlreadyExists;
-                        }
-                    }
-                    ConversationError::DatabaseError(e.to_string())
-                })?;
+                .map_err(Self::map_db_error)?;
 
             results.push(Self::map_share_row(&row)?);
         }
