@@ -16,6 +16,8 @@ pub enum ConversationError {
     AccessDenied,
     #[error("Internal error: {0}")]
     InternalError(String),
+    #[error("Share already exists. Please delete the existing share before creating a new one.")]
+    ShareAlreadyExists,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

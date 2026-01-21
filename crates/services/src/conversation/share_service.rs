@@ -602,21 +602,85 @@ mod tests {
             &self,
             share: NewConversationShare,
         ) -> Result<ConversationShare, ConversationError> {
-            let share = self.next_share(share);
-            self.shares.lock().expect("lock shares").push(share.clone());
-            Ok(share)
+            let shares = self.shares.lock().expect("lock shares");
+
+            // Check if a duplicate share already exists
+            let exists = shares.iter().any(|existing| {
+                if existing.conversation_id != share.conversation_id {
+                    return false;
+                }
+
+                match share.share_type {
+                    ShareType::Direct => {
+                        existing.share_type == ShareType::Direct
+                            && existing.recipient == share.recipient
+                    }
+                    ShareType::Group => {
+                        existing.share_type == ShareType::Group
+                            && existing.group_id == share.group_id
+                    }
+                    ShareType::Organization => {
+                        existing.share_type == ShareType::Organization
+                            && existing.org_email_pattern == share.org_email_pattern
+                    }
+                    ShareType::Public => existing.share_type == ShareType::Public,
+                }
+            });
+
+            if exists {
+                return Err(ConversationError::ShareAlreadyExists);
+            }
+
+            drop(shares);
+
+            let new_share = self.next_share(share);
+            self.shares
+                .lock()
+                .expect("lock shares")
+                .push(new_share.clone());
+            Ok(new_share)
         }
 
         async fn create_shares_batch(
             &self,
             shares: Vec<NewConversationShare>,
         ) -> Result<Vec<ConversationShare>, ConversationError> {
-            let created_shares: Vec<ConversationShare> = shares
-                .into_iter()
-                .map(|share| self.next_share(share))
-                .collect();
             let mut shares_vec = self.shares.lock().expect("lock shares");
-            shares_vec.extend(created_shares.clone());
+            let mut created_shares = Vec::with_capacity(shares.len());
+
+            for share in shares {
+                // Check if a duplicate share already exists
+                let exists = shares_vec.iter().any(|existing| {
+                    if existing.conversation_id != share.conversation_id {
+                        return false;
+                    }
+
+                    match share.share_type {
+                        ShareType::Direct => {
+                            existing.share_type == ShareType::Direct
+                                && existing.recipient == share.recipient
+                        }
+                        ShareType::Group => {
+                            existing.share_type == ShareType::Group
+                                && existing.group_id == share.group_id
+                        }
+                        ShareType::Organization => {
+                            existing.share_type == ShareType::Organization
+                                && existing.org_email_pattern == share.org_email_pattern
+                        }
+                        ShareType::Public => existing.share_type == ShareType::Public,
+                    }
+                });
+
+                if exists {
+                    return Err(ConversationError::ShareAlreadyExists);
+                }
+
+                let new_share = self.next_share(share);
+                shares_vec.push(new_share.clone());
+                created_shares.push(new_share);
+            }
+
             Ok(created_shares)
         }
 
@@ -1900,5 +1964,142 @@ mod tests {
             .expect_err("write access should be denied");
 
         assert!(matches!(err, ConversationError::AccessDenied));
+    }
+
+    #[tokio::test]
+    async fn duplicate_public_share_returns_error() {
+        let (service, _conversation_repo, _share_repo, _user_repo, owner) =
+            setup_service_with_owner("conv_dup_public", "owner@example.com");
+
+        // Create initial public share
+        service
+            .create_share(
+                owner.id,
+                "conv_dup_public",
+                SharePermission::Read,
+                ShareTarget::Public,
+            )
+            .await
+            .expect("create public share");
+
+        // Try to create duplicate public share - should fail
+        let err = service
+            .create_share(
+                owner.id,
+                "conv_dup_public",
+                SharePermission::Write,
+                ShareTarget::Public,
+            )
+            .await
+            .expect_err("duplicate public share should fail");
+
+        assert!(matches!(err, ConversationError::ShareAlreadyExists));
+    }
+
+    #[tokio::test]
+    async fn duplicate_direct_share_returns_error() {
+        let (service, _conversation_repo, _share_repo, _user_repo, owner) =
+            setup_service_with_owner("conv_dup_direct", "owner@example.com");
+
+        let recipient = vec![ShareRecipient {
+            kind: ShareRecipientKind::Email,
+            value: "user@example.com".to_string(),
+        }];
+
+        // Create initial direct share
+        service
+            .create_share(
+                owner.id,
+                "conv_dup_direct",
+                SharePermission::Read,
+                ShareTarget::Direct(recipient.clone()),
+            )
+            .await
+            .expect("create direct share");
+
+        // Try to create duplicate direct share - should fail
+        let err = service
+            .create_share(
+                owner.id,
+                "conv_dup_direct",
+                SharePermission::Write,
+                ShareTarget::Direct(recipient),
+            )
+            .await
+            .expect_err("duplicate direct share should fail");
+
+        assert!(matches!(err, ConversationError::ShareAlreadyExists));
+    }
+
+    #[tokio::test]
+    async fn duplicate_group_share_returns_error() {
+        let (service, _conversation_repo, _share_repo, _user_repo, owner) =
+            setup_service_with_owner("conv_dup_group", "owner@example.com");
+
+        let group = service
+            .create_group(
+                owner.id,
+                "Test Group",
+                vec![ShareRecipient {
+                    kind: ShareRecipientKind::Email,
+                    value: "member@example.com".to_string(),
+                }],
+            )
+            .await
+            .expect("create group");
+
+        // Create initial group share
+        service
+            .create_share(
+                owner.id,
+                "conv_dup_group",
+                SharePermission::Read,
+                ShareTarget::Group(group.id),
+            )
+            .await
+            .expect("create group share");
+
+        // Try to create duplicate group share - should fail
+        let err = service
+            .create_share(
+                owner.id,
+                "conv_dup_group",
+                SharePermission::Write,
+                ShareTarget::Group(group.id),
+            )
+            .await
+            .expect_err("duplicate group share should fail");
+
+        assert!(matches!(err, ConversationError::ShareAlreadyExists));
+    }
+
+    #[tokio::test]
+    async fn duplicate_organization_share_returns_error() {
+        let (service, _conversation_repo, _share_repo, _user_repo, owner) =
+            setup_service_with_owner("conv_dup_org", "owner@example.com");
+
+        // Create initial organization share
+        service
+            .create_share(
+                owner.id,
+                "conv_dup_org",
+                SharePermission::Read,
+                ShareTarget::Organization("@example.com".to_string()),
+            )
+            .await
+            .expect("create org share");
+
+        // Try to create duplicate organization share - should fail
+        let err = service
+            .create_share(
+                owner.id,
+                "conv_dup_org",
+                SharePermission::Write,
+                ShareTarget::Organization("@example.com".to_string()),
+            )
+            .await
+            .expect_err("duplicate org share should fail");
+
+        assert!(matches!(err, ConversationError::ShareAlreadyExists));
     }
 }
