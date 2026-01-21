@@ -479,6 +479,31 @@ mod tests {
                 updated_at: now,
             }
         }
+
+        fn is_duplicate_share(
+            existing: &ConversationShare,
+            new_share: &NewConversationShare,
+        ) -> bool {
+            if existing.conversation_id != new_share.conversation_id {
+                return false;
+            }
+
+            match new_share.share_type {
+                ShareType::Direct => {
+                    existing.share_type == ShareType::Direct
+                        && existing.recipient == new_share.recipient
+                }
+                ShareType::Group => {
+                    existing.share_type == ShareType::Group
+                        && existing.group_id == new_share.group_id
+                }
+                ShareType::Organization => {
+                    existing.share_type == ShareType::Organization
+                        && existing.org_email_pattern == new_share.org_email_pattern
+                }
+                ShareType::Public => existing.share_type == ShareType::Public,
+            }
+        }
     }
 
     #[async_trait]
@@ -605,27 +630,9 @@ mod tests {
             let shares = self.shares.lock().expect("lock shares");
 
             // Check if a duplicate share already exists
-            let exists = shares.iter().any(|existing| {
-                if existing.conversation_id != share.conversation_id {
-                    return false;
-                }
-
-                match share.share_type {
-                    ShareType::Direct => {
-                        existing.share_type == ShareType::Direct
-                            && existing.recipient == share.recipient
-                    }
-                    ShareType::Group => {
-                        existing.share_type == ShareType::Group
-                            && existing.group_id == share.group_id
-                    }
-                    ShareType::Organization => {
-                        existing.share_type == ShareType::Organization
-                            && existing.org_email_pattern == share.org_email_pattern
-                    }
-                    ShareType::Public => existing.share_type == ShareType::Public,
-                }
-            });
+            let exists = shares
+                .iter()
+                .any(|existing| Self::is_duplicate_share(existing, &share));
 
             if exists {
                 return Err(ConversationError::ShareAlreadyExists);
@@ -650,27 +657,9 @@ mod tests {
 
             for share in shares {
                 // Check if a duplicate share already exists
-                let exists = shares_vec.iter().any(|existing| {
-                    if existing.conversation_id != share.conversation_id {
-                        return false;
-                    }
-
-                    match share.share_type {
-                        ShareType::Direct => {
-                            existing.share_type == ShareType::Direct
-                                && existing.recipient == share.recipient
-                        }
-                        ShareType::Group => {
-                            existing.share_type == ShareType::Group
-                                && existing.group_id == share.group_id
-                        }
-                        ShareType::Organization => {
-                            existing.share_type == ShareType::Organization
-                                && existing.org_email_pattern == share.org_email_pattern
-                        }
-                        ShareType::Public => existing.share_type == ShareType::Public,
-                    }
-                });
+                let exists = shares_vec
+                    .iter()
+                    .any(|existing| Self::is_duplicate_share(existing, &share));
 
                 if exists {
                     return Err(ConversationError::ShareAlreadyExists);
