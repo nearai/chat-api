@@ -2946,11 +2946,6 @@ fn map_share_error(error: ConversationError) -> Response {
             (StatusCode::NOT_FOUND, "Conversation not found".to_string())
         }
         ConversationError::AccessDenied => (StatusCode::FORBIDDEN, "Access denied".to_string()),
-        ConversationError::ShareAlreadyExists => (
-            StatusCode::CONFLICT,
-            "Share already exists. Please delete the existing share before creating a new one."
-                .to_string(),
-        ),
         ConversationError::ApiError(msg) => (StatusCode::BAD_GATEWAY, msg),
         ConversationError::DatabaseError(msg) => (
             StatusCode::INTERNAL_SERVER_ERROR,

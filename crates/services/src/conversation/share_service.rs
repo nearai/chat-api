@@ -627,24 +627,23 @@ mod tests {
             &self,
             share: NewConversationShare,
         ) -> Result<ConversationShare, ConversationError> {
-            let shares = self.shares.lock().expect("lock shares");
+            let mut shares = self.shares.lock().expect("lock shares");
 
-            // Check if a duplicate share already exists
-            let exists = shares
+            // Check if a duplicate share already exists and update it
+            if let Some(existing_idx) = shares
                 .iter()
-                .any(|existing| Self::is_duplicate_share(existing, &share));
-
-            if exists {
-                return Err(ConversationError::ShareAlreadyExists);
+                .position(|existing| Self::is_duplicate_share(existing, &share))
+            {
+                // Update existing share
+                let existing = &mut shares[existing_idx];
+                existing.permission = share.permission;
+                existing.updated_at = Utc::now();
+                return Ok(existing.clone());
             }
 
-            drop(shares);
-
+            // Create new share
             let new_share = self.next_share(share);
-            self.shares
-                .lock()
-                .expect("lock shares")
-                .push(new_share.clone());
+            shares.push(new_share.clone());
             Ok(new_share)
         }
 
@@ -653,24 +652,28 @@ mod tests {
             shares: Vec<NewConversationShare>,
         ) -> Result<Vec<ConversationShare>, ConversationError> {
             let mut shares_vec = self.shares.lock().expect("lock shares");
-            let mut created_shares = Vec::with_capacity(shares.len());
+            let mut results = Vec::with_capacity(shares.len());
 
             for share in shares {
-                // Check if a duplicate share already exists
-                let exists = shares_vec
+                // Check if a duplicate share already exists and update it
+                if let Some(existing_idx) = shares_vec
                     .iter()
-                    .any(|existing| Self::is_duplicate_share(existing, &share));
-
-                if exists {
-                    return Err(ConversationError::ShareAlreadyExists);
+                    .position(|existing| Self::is_duplicate_share(existing, &share))
+                {
+                    // Update existing share
+                    let existing = &mut shares_vec[existing_idx];
+                    existing.permission = share.permission;
+                    existing.updated_at = Utc::now();
+                    results.push(existing.clone());
+                } else {
+                    // Create new share
+                    let new_share = self.next_share(share);
+                    shares_vec.push(new_share.clone());
+                    results.push(new_share);
                 }
-
-                let new_share = self.next_share(share);
-                shares_vec.push(new_share.clone());
-                created_shares.push(new_share);
             }
 
-            Ok(created_shares)
+            Ok(results)
         }
 
         async fn list_shares(
@@ -1956,12 +1959,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn duplicate_public_share_returns_error() {
+    async fn duplicate_public_share_updates_permission() {
         let (service, _conversation_repo, _share_repo, _user_repo, owner) =
             setup_service_with_owner("conv_dup_public", "owner@example.com");
 
-        // Create initial public share
-        service
+        // Create initial public share with read permission
+        let shares = service
             .create_share(
                 owner.id,
                 "conv_dup_public",
@@ -1971,8 +1974,12 @@ mod tests {
             .await
             .expect("create public share");
 
-        // Try to create duplicate public share - should fail
-        let err = service
+        assert_eq!(shares.len(), 1);
+        assert_eq!(shares[0].permission, SharePermission::Read);
+        let share_id = shares[0].id;
+
+        // Create duplicate public share with write permission - should update
+        let shares = service
             .create_share(
                 owner.id,
                 "conv_dup_public",
@@ -1980,13 +1987,23 @@ mod tests {
                 ShareTarget::Public,
             )
             .await
-            .expect_err("duplicate public share should fail");
+            .expect("duplicate public share should update");
 
-        assert!(matches!(err, ConversationError::ShareAlreadyExists));
+        assert_eq!(shares.len(), 1);
+        assert_eq!(shares[0].permission, SharePermission::Write);
+        assert_eq!(shares[0].id, share_id); // Same share ID
+
+        // Verify only one share exists
+        let all_shares = service
+            .list_shares(owner.id, "conv_dup_public")
+            .await
+            .expect("list shares");
+        assert_eq!(all_shares.len(), 1);
+        assert_eq!(all_shares[0].permission, SharePermission::Write);
     }
 
     #[tokio::test]
-    async fn duplicate_direct_share_returns_error() {
+    async fn duplicate_direct_share_updates_permission() {
         let (service, _conversation_repo, _share_repo, _user_repo, owner) =
             setup_service_with_owner("conv_dup_direct", "owner@example.com");
 
@@ -1995,8 +2012,8 @@ mod tests {
             value: "user@example.com".to_string(),
         }];
 
-        // Create initial direct share
-        service
+        // Create initial direct share with read permission
+        let shares = service
             .create_share(
                 owner.id,
                 "conv_dup_direct",
@@ -2006,8 +2023,12 @@ mod tests {
             .await
             .expect("create direct share");
 
-        // Try to create duplicate direct share - should fail
-        let err = service
+        assert_eq!(shares.len(), 1);
+        assert_eq!(shares[0].permission, SharePermission::Read);
+        let share_id = shares[0].id;
+
+        // Create duplicate direct share with write permission - should update
+        let shares = service
             .create_share(
                 owner.id,
                 "conv_dup_direct",
@@ -2015,13 +2036,23 @@ mod tests {
                 ShareTarget::Direct(recipient),
             )
             .await
-            .expect_err("duplicate direct share should fail");
+            .expect("duplicate direct share should update");
 
-        assert!(matches!(err, ConversationError::ShareAlreadyExists));
+        assert_eq!(shares.len(), 1);
+        assert_eq!(shares[0].permission, SharePermission::Write);
+        assert_eq!(shares[0].id, share_id); // Same share ID
+
+        // Verify only one share exists
+        let all_shares = service
+            .list_shares(owner.id, "conv_dup_direct")
+            .await
+            .expect("list shares");
+        assert_eq!(all_shares.len(), 1);
+        assert_eq!(all_shares[0].permission, SharePermission::Write);
     }
 
     #[tokio::test]
-    async fn duplicate_group_share_returns_error() {
+    async fn duplicate_group_share_updates_permission() {
         let (service, _conversation_repo, _share_repo, _user_repo, owner) =
             setup_service_with_owner("conv_dup_group", "owner@example.com");
 
@@ -2037,8 +2068,8 @@ mod tests {
             .await
             .expect("create group");
 
-        // Create initial group share
-        service
+        // Create initial group share with read permission
+        let shares = service
             .create_share(
                 owner.id,
                 "conv_dup_group",
@@ -2048,8 +2079,12 @@ mod tests {
             .await
             .expect("create group share");
 
-        // Try to create duplicate group share - should fail
-        let err = service
+        assert_eq!(shares.len(), 1);
+        assert_eq!(shares[0].permission, SharePermission::Read);
+        let share_id = shares[0].id;
+
+        // Create duplicate group share with write permission - should update
+        let shares = service
             .create_share(
                 owner.id,
                 "conv_dup_group",
@@ -2057,18 +2092,28 @@ mod tests {
                 ShareTarget::Group(group.id),
             )
             .await
-            .expect_err("duplicate group share should fail");
+            .expect("duplicate group share should update");
 
-        assert!(matches!(err, ConversationError::ShareAlreadyExists));
+        assert_eq!(shares.len(), 1);
+        assert_eq!(shares[0].permission, SharePermission::Write);
+        assert_eq!(shares[0].id, share_id); // Same share ID
+
+        // Verify only one share exists
+        let all_shares = service
+            .list_shares(owner.id, "conv_dup_group")
+            .await
+            .expect("list shares");
+        assert_eq!(all_shares.len(), 1);
+        assert_eq!(all_shares[0].permission, SharePermission::Write);
     }
 
     #[tokio::test]
-    async fn duplicate_organization_share_returns_error() {
+    async fn duplicate_organization_share_updates_permission() {
         let (service, _conversation_repo, _share_repo, _user_repo, owner) =
             setup_service_with_owner("conv_dup_org", "owner@example.com");
 
-        // Create initial organization share
-        service
+        // Create initial organization share with read permission
+        let shares = service
             .create_share(
                 owner.id,
                 "conv_dup_org",
@@ -2078,8 +2123,12 @@ mod tests {
             .await
             .expect("create org share");
 
-        // Try to create duplicate organization share - should fail
-        let err = service
+        assert_eq!(shares.len(), 1);
+        assert_eq!(shares[0].permission, SharePermission::Read);
+        let share_id = shares[0].id;
+
+        // Create duplicate organization share with write permission - should update
+        let shares = service
             .create_share(
                 owner.id,
                 "conv_dup_org",
@@ -2087,8 +2136,18 @@ mod tests {
                 ShareTarget::Organization("@example.com".to_string()),
             )
             .await
-            .expect_err("duplicate org share should fail");
+            .expect("duplicate org share should update");
 
-        assert!(matches!(err, ConversationError::ShareAlreadyExists));
+        assert_eq!(shares.len(), 1);
+        assert_eq!(shares[0].permission, SharePermission::Write);
+        assert_eq!(shares[0].id, share_id); // Same share ID
+
+        // Verify only one share exists
+        let all_shares = service
+            .list_shares(owner.id, "conv_dup_org")
+            .await
+            .expect("list shares");
+        assert_eq!(all_shares.len(), 1);
+        assert_eq!(all_shares[0].permission, SharePermission::Write);
     }
 }

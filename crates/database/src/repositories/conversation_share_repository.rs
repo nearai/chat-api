@@ -17,16 +17,6 @@ impl PostgresConversationShareRepository {
         Self { pool }
     }
 
-    /// Map PostgreSQL errors, converting unique constraint violations to ShareAlreadyExists
-    fn map_db_error(e: tokio_postgres::Error) -> ConversationError {
-        if let Some(db_error) = e.as_db_error() {
-            if db_error.code() == &tokio_postgres::error::SqlState::UNIQUE_VIOLATION {
-                return ConversationError::ShareAlreadyExists;
-            }
-        }
-        ConversationError::DatabaseError(e.to_string())
-    }
-
     fn map_permission(value: &str) -> Result<SharePermission, ConversationError> {
         match value {
             "read" => Ok(SharePermission::Read),
@@ -413,8 +403,9 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
-        let row = client
-            .query_one(
+        // Use ON CONFLICT to update existing shares based on share type
+        let query = match share.share_type {
+            ShareType::Direct => {
                 "INSERT INTO conversation_shares (
                      conversation_id,
                      owner_user_id,
@@ -426,9 +417,83 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                      org_email_pattern
                  )
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                 ON CONFLICT (conversation_id, recipient_type, recipient_value)
+                     WHERE share_type = 'direct'
+                 DO UPDATE SET
+                     permission = EXCLUDED.permission,
+                     updated_at = NOW()
                  RETURNING id, conversation_id, owner_user_id, share_type, permission,
                            recipient_type, recipient_value, group_id, org_email_pattern,
-                           created_at, updated_at",
+                           created_at, updated_at"
+            }
+            ShareType::Group => {
+                "INSERT INTO conversation_shares (
+                     conversation_id,
+                     owner_user_id,
+                     share_type,
+                     permission,
+                     recipient_type,
+                     recipient_value,
+                     group_id,
+                     org_email_pattern
+                 )
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                 ON CONFLICT (conversation_id, group_id)
+                     WHERE share_type = 'group'
+                 DO UPDATE SET
+                     permission = EXCLUDED.permission,
+                     updated_at = NOW()
+                 RETURNING id, conversation_id, owner_user_id, share_type, permission,
+                           recipient_type, recipient_value, group_id, org_email_pattern,
+                           created_at, updated_at"
+            }
+            ShareType::Organization => {
+                "INSERT INTO conversation_shares (
+                     conversation_id,
+                     owner_user_id,
+                     share_type,
+                     permission,
+                     recipient_type,
+                     recipient_value,
+                     group_id,
+                     org_email_pattern
+                 )
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                 ON CONFLICT (conversation_id, org_email_pattern)
+                     WHERE share_type = 'organization'
+                 DO UPDATE SET
+                     permission = EXCLUDED.permission,
+                     updated_at = NOW()
+                 RETURNING id, conversation_id, owner_user_id, share_type, permission,
+                           recipient_type, recipient_value, group_id, org_email_pattern,
+                           created_at, updated_at"
+            }
+            ShareType::Public => {
+                "INSERT INTO conversation_shares (
+                     conversation_id,
+                     owner_user_id,
+                     share_type,
+                     permission,
+                     recipient_type,
+                     recipient_value,
+                     group_id,
+                     org_email_pattern
+                 )
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                 ON CONFLICT (conversation_id)
+                     WHERE share_type = 'public'
+                 DO UPDATE SET
+                     permission = EXCLUDED.permission,
+                     updated_at = NOW()
+                 RETURNING id, conversation_id, owner_user_id, share_type, permission,
+                           recipient_type, recipient_value, group_id, org_email_pattern,
+                           created_at, updated_at"
+            }
+        };
+
+        let row = client
+            .query_one(
+                query,
                 &[
                     &share.conversation_id,
                     &share.owner_user_id.0,
@@ -447,13 +512,13 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                 ],
             )
             .await
-            .map_err(Self::map_db_error)?;
+            .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
         Self::map_share_row(&row)
     }
 
     /// Create multiple shares atomically (all succeed or all fail).
-    /// If any share already exists, returns ShareAlreadyExists error.
+    /// If a share already exists, updates the permission instead of failing.
     async fn create_shares_batch(
         &self,
         shares: Vec<NewConversationShare>,
@@ -476,8 +541,9 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
         let mut results = Vec::with_capacity(shares.len());
 
         for share in shares {
-            let row = transaction
-                .query_one(
+            // Use ON CONFLICT to update existing shares based on share type
+            let query = match share.share_type {
+                ShareType::Direct => {
                     "INSERT INTO conversation_shares (
                          conversation_id,
                          owner_user_id,
@@ -489,9 +555,83 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                          org_email_pattern
                      )
                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                     ON CONFLICT (conversation_id, recipient_type, recipient_value)
+                         WHERE share_type = 'direct'
+                     DO UPDATE SET
+                         permission = EXCLUDED.permission,
+                         updated_at = NOW()
                      RETURNING id, conversation_id, owner_user_id, share_type, permission,
                                recipient_type, recipient_value, group_id, org_email_pattern,
-                               created_at, updated_at",
+                               created_at, updated_at"
+                }
+                ShareType::Group => {
+                    "INSERT INTO conversation_shares (
+                         conversation_id,
+                         owner_user_id,
+                         share_type,
+                         permission,
+                         recipient_type,
+                         recipient_value,
+                         group_id,
+                         org_email_pattern
+                     )
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                     ON CONFLICT (conversation_id, group_id)
+                         WHERE share_type = 'group'
+                     DO UPDATE SET
+                         permission = EXCLUDED.permission,
+                         updated_at = NOW()
+                     RETURNING id, conversation_id, owner_user_id, share_type, permission,
+                               recipient_type, recipient_value, group_id, org_email_pattern,
+                               created_at, updated_at"
+                }
+                ShareType::Organization => {
+                    "INSERT INTO conversation_shares (
+                         conversation_id,
+                         owner_user_id,
+                         share_type,
+                         permission,
+                         recipient_type,
+                         recipient_value,
+                         group_id,
+                         org_email_pattern
+                     )
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                     ON CONFLICT (conversation_id, org_email_pattern)
+                         WHERE share_type = 'organization'
+                     DO UPDATE SET
+                         permission = EXCLUDED.permission,
+                         updated_at = NOW()
+                     RETURNING id, conversation_id, owner_user_id, share_type, permission,
+                               recipient_type, recipient_value, group_id, org_email_pattern,
+                               created_at, updated_at"
+                }
+                ShareType::Public => {
+                    "INSERT INTO conversation_shares (
+                         conversation_id,
+                         owner_user_id,
+                         share_type,
+                         permission,
+                         recipient_type,
+                         recipient_value,
+                         group_id,
+                         org_email_pattern
+                     )
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                     ON CONFLICT (conversation_id)
+                         WHERE share_type = 'public'
+                     DO UPDATE SET
+                         permission = EXCLUDED.permission,
+                         updated_at = NOW()
+                     RETURNING id, conversation_id, owner_user_id, share_type, permission,
+                               recipient_type, recipient_value, group_id, org_email_pattern,
+                               created_at, updated_at"
+                }
+            };
+
+            let row = transaction
+                .query_one(
+                    query,
                     &[
                         &share.conversation_id,
                         &share.owner_user_id.0,
@@ -510,7 +650,7 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
                     ],
                 )
                 .await
-                .map_err(Self::map_db_error)?;
+                .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
             results.push(Self::map_share_row(&row)?);
         }
