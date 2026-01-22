@@ -133,6 +133,36 @@ async fn test_revoke_vpc_credentials_with_non_admin_account() {
 
 #[tokio::test]
 #[serial(write_system_configs)]
+async fn test_get_system_configs_admin_when_no_configs_exist() {
+    let server = create_test_server().await;
+
+    let admin_email = "test_admin_get_configs_none@admin.org";
+    let admin_token = mock_login(&server, admin_email).await;
+
+    // GET configs without creating any first
+    let response = server
+        .get("/v1/admin/configs")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        200,
+        "Admin should be able to get system configs even when none exist"
+    );
+
+    let body: serde_json::Value = response.json();
+    assert!(
+        body.is_null(),
+        "Response should be null when no configs exist, got: {body:?}"
+    );
+}
+
+#[tokio::test]
+#[serial(write_system_configs)]
 async fn test_get_system_configs_admin_when_configs_exist() {
     let server = create_test_server().await;
 
@@ -196,35 +226,6 @@ async fn test_get_system_configs_admin_when_configs_exist() {
     assert!(
         body.get("rate_limit").is_some(),
         "Response should contain rate_limit (admin-only field)"
-    );
-}
-
-#[tokio::test]
-async fn test_get_system_configs_admin_when_no_configs_exist() {
-    let server = create_test_server().await;
-
-    let admin_email = "test_admin_get_configs_none@admin.org";
-    let admin_token = mock_login(&server, admin_email).await;
-
-    // GET configs without creating any first
-    let response = server
-        .get("/v1/admin/configs")
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
-        )
-        .await;
-
-    assert_eq!(
-        response.status_code(),
-        200,
-        "Admin should be able to get system configs even when none exist"
-    );
-
-    let body: serde_json::Value = response.json();
-    assert!(
-        body.is_null(),
-        "Response should be null when no configs exist, got: {body:?}"
     );
 }
 
