@@ -1057,7 +1057,7 @@ async fn create_conversation_items(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path(conversation_id): Path<String>,
-    headers: HeaderMap,
+    mut headers: HeaderMap,
     request: Request,
 ) -> Result<Response, Response> {
     tracing::info!(
@@ -1110,6 +1110,23 @@ async fn create_conversation_items(
         } else {
             body_bytes.to_vec()
         };
+
+    // Set content-length header to match modified body
+    match HeaderValue::from_str(&modified_body.len().to_string()) {
+        Ok(header_value) => {
+            headers.insert("content-length", header_value);
+        }
+        Err(e) => {
+            tracing::error!("Failed to create content-length header value: {}", e);
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Failed to set content-length header".to_string(),
+                }),
+            )
+                .into_response());
+        }
+    }
 
     tracing::debug!(
         "Forwarding conversation items creation request to OpenAI for user_id={}",
