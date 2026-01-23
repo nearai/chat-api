@@ -11,7 +11,7 @@ use axum::{
 use bytes::Bytes;
 use chrono::{Duration, Utc};
 use flate2::read::GzDecoder;
-use http::{HeaderName, HeaderValue};
+use http::{header::CONTENT_LENGTH, HeaderName, HeaderValue};
 use near_api::{Account, AccountId, NetworkConfig};
 use serde::{Deserialize, Serialize};
 use services::analytics::{ActivityType, RecordActivityRequest};
@@ -1057,7 +1057,7 @@ async fn create_conversation_items(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path(conversation_id): Path<String>,
-    headers: HeaderMap,
+    mut headers: HeaderMap,
     request: Request,
 ) -> Result<Response, Response> {
     tracing::info!(
@@ -1110,6 +1110,12 @@ async fn create_conversation_items(
         } else {
             body_bytes.to_vec()
         };
+
+    // Set content-length header to match modified body
+    // usize::to_string() only produces ASCII digits, which are always valid for HeaderValue
+    let content_length = HeaderValue::from_str(&modified_body.len().to_string())
+        .expect("usize to string conversion always produces valid HeaderValue");
+    headers.insert(CONTENT_LENGTH, content_length);
 
     tracing::debug!(
         "Forwarding conversation items creation request to OpenAI for user_id={}",
@@ -2000,21 +2006,10 @@ async fn proxy_responses(
     };
 
     // Set content-length header
-    match HeaderValue::from_str(&modified_body_bytes.len().to_string()) {
-        Ok(header_value) => {
-            headers.insert("content-length", header_value);
-        }
-        Err(e) => {
-            tracing::error!("Failed to create content-length header value: {}", e);
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Failed to set content-length header".to_string(),
-                }),
-            )
-                .into_response());
-        }
-    }
+    // usize::to_string() only produces ASCII digits, which are always valid for HeaderValue
+    let content_length = HeaderValue::from_str(&modified_body_bytes.len().to_string())
+        .expect("usize to string conversion always produces valid HeaderValue");
+    headers.insert(CONTENT_LENGTH, content_length);
 
     // Track conversation from the request
     tracing::debug!("POST to /responses detected, attempting to track conversation");
