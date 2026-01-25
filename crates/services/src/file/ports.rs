@@ -1,11 +1,11 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 
 use crate::UserId;
 
 /// File data structure for tracking files (internal and list response)
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct FileData {
     pub id: String,
     pub bytes: i64,
