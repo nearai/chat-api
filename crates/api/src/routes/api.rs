@@ -1987,6 +1987,9 @@ async fn proxy_responses(
             }
 
             body["metadata"] = serde_json::Value::Object(metadata);
+
+            // OpenAI requires `store: true` when `metadata` is present for some models.
+            body["store"] = serde_json::Value::Bool(true);
         }
 
         match serde_json::to_vec(&body) {
