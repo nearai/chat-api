@@ -6,6 +6,18 @@ use crate::types::{PasskeyChallengeId, PasskeyId, SessionId, UserId};
 // Re-export OAuthProvider from user module for convenience
 pub use crate::user::ports::OAuthProvider;
 
+// -----------------------------
+// Passkeys (WebAuthn) Types
+// -----------------------------
+
+pub type StoredPasskey = webauthn_rs::prelude::Passkey;
+pub type PasskeyRegistrationState = webauthn_rs::prelude::PasskeyRegistration;
+pub type PasskeyAuthenticationState = webauthn_rs::prelude::PasskeyAuthentication;
+pub type PasskeyRegistrationCredential = webauthn_rs::prelude::RegisterPublicKeyCredential;
+pub type PasskeyAuthenticationCredential = webauthn_rs::prelude::PublicKeyCredential;
+pub type PasskeyRegistrationOptions = webauthn_rs::prelude::CreationChallengeResponse;
+pub type PasskeyAuthenticationOptions = webauthn_rs::prelude::RequestChallengeResponse;
+
 /// Represents an OAuth session state
 #[derive(Debug, Clone)]
 pub struct OAuthState {
@@ -139,8 +151,8 @@ pub struct PasskeyRecord {
     pub user_id: UserId,
     /// Base64url credential ID (`PublicKeyCredential.id`)
     pub credential_id: String,
-    /// Serialized `webauthn_rs::prelude::Passkey` (JSON)
-    pub passkey: serde_json::Value,
+    /// `webauthn_rs::prelude::Passkey` (stored as JSONB in DB)
+    pub passkey: StoredPasskey,
     /// User-facing label for UI (e.g. "MacBook TouchID", "iPhone", "YubiKey")
     pub label: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -161,7 +173,6 @@ pub struct PasskeySummary {
 pub enum PasskeyChallengeKind {
     Registration,
     Authentication,
-    DiscoverableAuthentication,
 }
 
 impl PasskeyChallengeKind {
@@ -169,7 +180,21 @@ impl PasskeyChallengeKind {
         match self {
             PasskeyChallengeKind::Registration => "registration",
             PasskeyChallengeKind::Authentication => "authentication",
-            PasskeyChallengeKind::DiscoverableAuthentication => "discoverable_authentication",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum PasskeyChallengeState {
+    Registration(PasskeyRegistrationState),
+    Authentication(PasskeyAuthenticationState),
+}
+
+impl PasskeyChallengeState {
+    pub fn kind(&self) -> PasskeyChallengeKind {
+        match self {
+            PasskeyChallengeState::Registration(_) => PasskeyChallengeKind::Registration,
+            PasskeyChallengeState::Authentication(_) => PasskeyChallengeKind::Authentication,
         }
     }
 }
@@ -179,8 +204,8 @@ pub struct PasskeyChallenge {
     pub id: PasskeyChallengeId,
     pub kind: PasskeyChallengeKind,
     pub user_id: Option<UserId>,
-    /// Serialized server-side ceremony state (JSON)
-    pub state: serde_json::Value,
+    /// Server-side ceremony state (registration/authentication).
+    pub state: PasskeyChallengeState,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
 }
@@ -198,14 +223,14 @@ pub trait PasskeyRepository: Send + Sync {
         &self,
         user_id: UserId,
         credential_id: String,
-        passkey: serde_json::Value,
+        passkey: StoredPasskey,
         label: Option<String>,
     ) -> anyhow::Result<PasskeyId>;
 
     async fn update_passkey_and_last_used_at(
         &self,
         id: PasskeyId,
-        passkey: serde_json::Value,
+        passkey: StoredPasskey,
         last_used_at: DateTime<Utc>,
     ) -> anyhow::Result<()>;
 
@@ -216,9 +241,8 @@ pub trait PasskeyRepository: Send + Sync {
 pub trait PasskeyChallengeRepository: Send + Sync {
     async fn create_challenge(
         &self,
-        kind: PasskeyChallengeKind,
         user_id: Option<UserId>,
-        state: serde_json::Value,
+        state: PasskeyChallengeState,
         expires_at: DateTime<Utc>,
     ) -> anyhow::Result<PasskeyChallengeId>;
 
@@ -234,8 +258,13 @@ pub trait PasskeyChallengeRepository: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct PasskeyBeginResponse {
     pub challenge_id: PasskeyChallengeId,
-    /// JSON options to be passed directly into `navigator.credentials.*({ publicKey: ... })`
-    pub public_key: serde_json::Value,
+    pub public_key: PasskeyRegistrationOptions,
+}
+
+#[derive(Debug, Clone)]
+pub struct PasskeyBeginAuthenticationResponse {
+    pub challenge_id: PasskeyChallengeId,
+    pub public_key: PasskeyAuthenticationOptions,
 }
 
 #[async_trait]
@@ -248,22 +277,21 @@ pub trait PasskeyService: Send + Sync {
         &self,
         user_id: UserId,
         challenge_id: PasskeyChallengeId,
-        credential: serde_json::Value,
+        credential: PasskeyRegistrationCredential,
         label: Option<String>,
     ) -> anyhow::Result<PasskeyId>;
 
-    /// Begin authentication. If `email` is provided, options will restrict to that user’s passkeys.
-    /// If `email` is None, a discoverable authentication flow is started.
+    /// Begin authentication (email-required in this deployment).
     async fn begin_authentication(
         &self,
-        email: Option<String>,
-    ) -> anyhow::Result<PasskeyBeginResponse>;
+        email: String,
+    ) -> anyhow::Result<PasskeyBeginAuthenticationResponse>;
 
     /// Finish authentication: verify assertion and create a new session.
     async fn finish_authentication(
         &self,
         challenge_id: PasskeyChallengeId,
-        credential: serde_json::Value,
+        credential: PasskeyAuthenticationCredential,
     ) -> anyhow::Result<UserSession>;
 
     /// List passkeys for UI management.

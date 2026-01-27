@@ -11,23 +11,32 @@ use utoipa::ToSchema;
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct BeginAuthenticationRequest {
-    /// Optional email to restrict allowed credentials to a specific user.
-    /// If omitted, a discoverable authentication flow is started.
-    pub email: Option<String>,
+    /// Email to restrict allowed credentials to a specific user.
+    pub email: String,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-pub struct BeginPasskeyResponse {
+pub struct BeginRegistrationResponse {
     pub challenge_id: services::PasskeyChallengeId,
     /// JSON publicKey options for `navigator.credentials.*({ publicKey })`
-    pub public_key: serde_json::Value,
+    #[schema(value_type = serde_json::Value)]
+    pub public_key: services::auth::ports::PasskeyRegistrationOptions,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct BeginAuthenticationResponse {
+    pub challenge_id: services::PasskeyChallengeId,
+    /// JSON publicKey options for `navigator.credentials.get({ publicKey })`
+    #[schema(value_type = serde_json::Value)]
+    pub public_key: services::auth::ports::PasskeyAuthenticationOptions,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct FinishRegistrationRequest {
     pub challenge_id: services::PasskeyChallengeId,
     /// Browser `RegisterPublicKeyCredential` JSON.
-    pub credential: serde_json::Value,
+    #[schema(value_type = serde_json::Value)]
+    pub credential: services::auth::ports::PasskeyRegistrationCredential,
     /// Optional user-facing label for this passkey.
     pub label: Option<String>,
 }
@@ -41,7 +50,8 @@ pub struct FinishRegistrationResponse {
 pub struct FinishAuthenticationRequest {
     pub challenge_id: services::PasskeyChallengeId,
     /// Browser `PublicKeyCredential` JSON (assertion).
-    pub credential: serde_json::Value,
+    #[schema(value_type = serde_json::Value)]
+    pub credential: services::auth::ports::PasskeyAuthenticationCredential,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -66,7 +76,7 @@ fn passkey_service(
     path = "/v1/auth/passkey/registration/options",
     tag = "Auth",
     responses(
-        (status = 200, description = "Passkey registration options", body = BeginPasskeyResponse),
+        (status = 200, description = "Passkey registration options", body = BeginRegistrationResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 503, description = "Passkey not configured", body = crate::error::ApiErrorResponse),
         (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
@@ -78,14 +88,14 @@ fn passkey_service(
 pub async fn begin_registration(
     State(app_state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-) -> Result<Json<BeginPasskeyResponse>, ApiError> {
+) -> Result<Json<BeginRegistrationResponse>, ApiError> {
     let svc = passkey_service(&app_state)?;
     let res = svc
         .begin_registration(user.user_id)
         .await
         .map_err(|_| ApiError::internal_server_error("Failed to begin passkey registration"))?;
 
-    Ok(Json(BeginPasskeyResponse {
+    Ok(Json(BeginRegistrationResponse {
         challenge_id: res.challenge_id,
         public_key: res.public_key,
     }))
@@ -130,7 +140,7 @@ pub async fn finish_registration(
     tag = "Auth",
     request_body = BeginAuthenticationRequest,
     responses(
-        (status = 200, description = "Passkey authentication options", body = BeginPasskeyResponse),
+        (status = 200, description = "Passkey authentication options", body = BeginAuthenticationResponse),
         (status = 400, description = "Invalid request", body = crate::error::ApiErrorResponse),
         (status = 503, description = "Passkey not configured", body = crate::error::ApiErrorResponse),
         (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
@@ -139,14 +149,14 @@ pub async fn finish_registration(
 pub async fn begin_authentication(
     State(app_state): State<AppState>,
     Json(req): Json<BeginAuthenticationRequest>,
-) -> Result<Json<BeginPasskeyResponse>, ApiError> {
+) -> Result<Json<BeginAuthenticationResponse>, ApiError> {
     let svc = passkey_service(&app_state)?;
     let res = svc
         .begin_authentication(req.email)
         .await
         .map_err(|_| ApiError::bad_request("Failed to begin passkey authentication"))?;
 
-    Ok(Json(BeginPasskeyResponse {
+    Ok(Json(BeginAuthenticationResponse {
         challenge_id: res.challenge_id,
         public_key: res.public_key,
     }))

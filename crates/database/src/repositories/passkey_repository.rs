@@ -1,9 +1,11 @@
 use crate::pool::DbPool;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use postgres_types::Json;
 use services::auth::ports::{
-    PasskeyChallenge, PasskeyChallengeKind, PasskeyChallengeRepository, PasskeyRecord,
-    PasskeyRepository,
+    PasskeyAuthenticationState, PasskeyChallenge, PasskeyChallengeKind, PasskeyChallengeRepository,
+    PasskeyChallengeState, PasskeyRecord, PasskeyRegistrationState, PasskeyRepository,
+    StoredPasskey,
 };
 use services::{PasskeyChallengeId, PasskeyId, UserId};
 
@@ -35,14 +37,17 @@ impl PasskeyRepository for PostgresPasskeyRepository {
 
         Ok(rows
             .into_iter()
-            .map(|r| PasskeyRecord {
-                id: r.get(0),
-                user_id: r.get(1),
-                credential_id: r.get(2),
-                passkey: r.get(3),
-                label: r.get(4),
-                created_at: r.get(5),
-                last_used_at: r.get(6),
+            .map(|r| {
+                let Json(passkey): Json<StoredPasskey> = r.get(3);
+                PasskeyRecord {
+                    id: r.get(0),
+                    user_id: r.get(1),
+                    credential_id: r.get(2),
+                    passkey,
+                    label: r.get(4),
+                    created_at: r.get(5),
+                    last_used_at: r.get(6),
+                }
             })
             .collect())
     }
@@ -60,14 +65,17 @@ impl PasskeyRepository for PostgresPasskeyRepository {
             )
             .await?;
 
-        Ok(row.map(|r| PasskeyRecord {
-            id: r.get(0),
-            user_id: r.get(1),
-            credential_id: r.get(2),
-            passkey: r.get(3),
-            label: r.get(4),
-            created_at: r.get(5),
-            last_used_at: r.get(6),
+        Ok(row.map(|r| {
+            let Json(passkey): Json<StoredPasskey> = r.get(3);
+            PasskeyRecord {
+                id: r.get(0),
+                user_id: r.get(1),
+                credential_id: r.get(2),
+                passkey,
+                label: r.get(4),
+                created_at: r.get(5),
+                last_used_at: r.get(6),
+            }
         }))
     }
 
@@ -87,14 +95,17 @@ impl PasskeyRepository for PostgresPasskeyRepository {
             )
             .await?;
 
-        Ok(row.map(|r| PasskeyRecord {
-            id: r.get(0),
-            user_id: r.get(1),
-            credential_id: r.get(2),
-            passkey: r.get(3),
-            label: r.get(4),
-            created_at: r.get(5),
-            last_used_at: r.get(6),
+        Ok(row.map(|r| {
+            let Json(passkey): Json<StoredPasskey> = r.get(3);
+            PasskeyRecord {
+                id: r.get(0),
+                user_id: r.get(1),
+                credential_id: r.get(2),
+                passkey,
+                label: r.get(4),
+                created_at: r.get(5),
+                last_used_at: r.get(6),
+            }
         }))
     }
 
@@ -102,10 +113,11 @@ impl PasskeyRepository for PostgresPasskeyRepository {
         &self,
         user_id: UserId,
         credential_id: String,
-        passkey: serde_json::Value,
+        passkey: StoredPasskey,
         label: Option<String>,
     ) -> anyhow::Result<PasskeyId> {
         let client = self.pool.get().await?;
+        let passkey_json = Json(&passkey);
         let row = client
             .query_one(
                 r#"
@@ -113,7 +125,7 @@ impl PasskeyRepository for PostgresPasskeyRepository {
                 VALUES ($1, $2, $3, $4)
                 RETURNING id
                 "#,
-                &[&user_id, &credential_id, &passkey, &label],
+                &[&user_id, &credential_id, &passkey_json, &label],
             )
             .await?;
 
@@ -123,10 +135,11 @@ impl PasskeyRepository for PostgresPasskeyRepository {
     async fn update_passkey_and_last_used_at(
         &self,
         id: PasskeyId,
-        passkey: serde_json::Value,
+        passkey: StoredPasskey,
         last_used_at: DateTime<Utc>,
     ) -> anyhow::Result<()> {
         let client = self.pool.get().await?;
+        let passkey_json = Json(&passkey);
         client
             .execute(
                 r#"
@@ -134,7 +147,7 @@ impl PasskeyRepository for PostgresPasskeyRepository {
                 SET passkey = $2, last_used_at = $3
                 WHERE id = $1
                 "#,
-                &[&id, &passkey, &last_used_at],
+                &[&id, &passkey_json, &last_used_at],
             )
             .await?;
         Ok(())
@@ -168,7 +181,6 @@ impl PostgresPasskeyChallengeRepository {
         match kind {
             "registration" => Ok(PasskeyChallengeKind::Registration),
             "authentication" => Ok(PasskeyChallengeKind::Authentication),
-            "discoverable_authentication" => Ok(PasskeyChallengeKind::DiscoverableAuthentication),
             _ => Err(anyhow::anyhow!("Unknown passkey challenge kind")),
         }
     }
@@ -178,23 +190,52 @@ impl PostgresPasskeyChallengeRepository {
 impl PasskeyChallengeRepository for PostgresPasskeyChallengeRepository {
     async fn create_challenge(
         &self,
-        kind: PasskeyChallengeKind,
         user_id: Option<UserId>,
-        state: serde_json::Value,
+        state: PasskeyChallengeState,
         expires_at: DateTime<Utc>,
     ) -> anyhow::Result<PasskeyChallengeId> {
         let client = self.pool.get().await?;
-        let row = client
-            .query_one(
-                r#"
-                INSERT INTO passkey_challenges (kind, user_id, state, expires_at)
-                VALUES ($1, $2, $3, $4)
-                RETURNING id
-                "#,
-                &[&kind.as_str(), &user_id, &state, &expires_at],
-            )
-            .await?;
-        Ok(row.get(0))
+
+        match state {
+            PasskeyChallengeState::Registration(s) => {
+                let state_json = Json(&s);
+                let row = client
+                    .query_one(
+                        r#"
+                        INSERT INTO passkey_challenges (kind, user_id, state, expires_at)
+                        VALUES ($1, $2, $3, $4)
+                        RETURNING id
+                        "#,
+                        &[
+                            &PasskeyChallengeKind::Registration.as_str(),
+                            &user_id,
+                            &state_json,
+                            &expires_at,
+                        ],
+                    )
+                    .await?;
+                Ok(row.get(0))
+            }
+            PasskeyChallengeState::Authentication(s) => {
+                let state_json = Json(&s);
+                let row = client
+                    .query_one(
+                        r#"
+                        INSERT INTO passkey_challenges (kind, user_id, state, expires_at)
+                        VALUES ($1, $2, $3, $4)
+                        RETURNING id
+                        "#,
+                        &[
+                            &PasskeyChallengeKind::Authentication.as_str(),
+                            &user_id,
+                            &state_json,
+                            &expires_at,
+                        ],
+                    )
+                    .await?;
+                Ok(row.get(0))
+            }
+        }
     }
 
     async fn consume_challenge(
@@ -220,11 +261,22 @@ impl PasskeyChallengeRepository for PostgresPasskeyChallengeRepository {
         let kind_str: String = r.get(1);
         let kind = Self::parse_kind(&kind_str)?;
 
+        let state = match kind {
+            PasskeyChallengeKind::Registration => {
+                let Json(state): Json<PasskeyRegistrationState> = r.get(3);
+                PasskeyChallengeState::Registration(state)
+            }
+            PasskeyChallengeKind::Authentication => {
+                let Json(state): Json<PasskeyAuthenticationState> = r.get(3);
+                PasskeyChallengeState::Authentication(state)
+            }
+        };
+
         Ok(Some(PasskeyChallenge {
             id: r.get(0),
             kind,
             user_id: r.get(2),
-            state: r.get(3),
+            state,
             created_at: r.get(4),
             expires_at: r.get(5),
         }))

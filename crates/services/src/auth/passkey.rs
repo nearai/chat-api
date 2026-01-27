@@ -1,17 +1,15 @@
 use super::ports::{
-    PasskeyBeginResponse, PasskeyChallengeKind, PasskeyChallengeRepository, PasskeyRepository,
-    PasskeyService, PasskeySummary, SessionRepository, UserSession,
+    PasskeyAuthenticationCredential, PasskeyBeginAuthenticationResponse, PasskeyBeginResponse,
+    PasskeyChallengeKind, PasskeyChallengeRepository, PasskeyChallengeState,
+    PasskeyRegistrationCredential, PasskeyRepository, PasskeyService, PasskeySummary,
+    SessionRepository, StoredPasskey, UserSession,
 };
 use crate::types::{PasskeyChallengeId, PasskeyId, UserId};
 use crate::user::ports::UserRepository;
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
-use serde::{de::DeserializeOwned, Serialize};
 use std::sync::Arc;
-use webauthn_rs::prelude::{
-    Passkey, PasskeyAuthentication, PasskeyRegistration, PublicKeyCredential,
-    RegisterPublicKeyCredential, Webauthn,
-};
+use webauthn_rs::prelude::Webauthn;
 
 pub struct PasskeyServiceImpl {
     webauthn: Webauthn,
@@ -42,14 +40,6 @@ impl PasskeyServiceImpl {
         }
     }
 
-    fn to_json<T: Serialize>(value: &T) -> anyhow::Result<serde_json::Value> {
-        Ok(serde_json::to_value(value)?)
-    }
-
-    fn from_json<T: DeserializeOwned>(value: serde_json::Value) -> anyhow::Result<T> {
-        Ok(serde_json::from_value(value)?)
-    }
-
     async fn cleanup_expired_challenges_best_effort(&self) {
         // Best-effort cleanup; failures should never block auth flows.
         let _ = self
@@ -75,8 +65,7 @@ impl PasskeyService for PasskeyServiceImpl {
         let existing = self.passkey_repository.list_by_user(user_id).await?;
         let mut exclude: Vec<_> = Vec::with_capacity(existing.len());
         for rec in existing {
-            let passkey: Passkey = Self::from_json(rec.passkey)?;
-            exclude.push(passkey.cred_id().clone());
+            exclude.push(rec.passkey.cred_id().clone());
         }
         let exclude = if exclude.is_empty() {
             None
@@ -95,16 +84,15 @@ impl PasskeyService for PasskeyServiceImpl {
         let challenge_id = self
             .passkey_challenge_repository
             .create_challenge(
-                PasskeyChallengeKind::Registration,
                 Some(user_id),
-                Self::to_json(&reg_state)?,
+                PasskeyChallengeState::Registration(reg_state),
                 expires_at,
             )
             .await?;
 
         Ok(PasskeyBeginResponse {
             challenge_id,
-            public_key: Self::to_json(&ccr)?,
+            public_key: ccr,
         })
     }
 
@@ -112,7 +100,7 @@ impl PasskeyService for PasskeyServiceImpl {
         &self,
         user_id: UserId,
         challenge_id: PasskeyChallengeId,
-        credential: serde_json::Value,
+        credential: PasskeyRegistrationCredential,
         label: Option<String>,
     ) -> anyhow::Result<PasskeyId> {
         let challenge = self
@@ -131,20 +119,20 @@ impl PasskeyService for PasskeyServiceImpl {
             return Err(anyhow::anyhow!("Registration challenge expired"));
         }
 
-        let reg_state: PasskeyRegistration = Self::from_json(challenge.state)?;
-        let reg_cred: RegisterPublicKeyCredential = Self::from_json(credential)?;
+        let PasskeyChallengeState::Registration(reg_state) = challenge.state else {
+            return Err(anyhow::anyhow!("Invalid challenge kind"));
+        };
 
         let passkey = self
             .webauthn
-            .finish_passkey_registration(&reg_cred, &reg_state)?;
+            .finish_passkey_registration(&credential, &reg_state)?;
 
         // Browser-provided credential id string is base64url; use it as our lookup key.
-        let credential_id = reg_cred.id.clone();
-        let passkey_json = Self::to_json(&passkey)?;
+        let credential_id = credential.id.clone();
 
         let id = self
             .passkey_repository
-            .insert_passkey(user_id, credential_id, passkey_json, label)
+            .insert_passkey(user_id, credential_id, passkey, label)
             .await?;
 
         Ok(id)
@@ -152,57 +140,46 @@ impl PasskeyService for PasskeyServiceImpl {
 
     async fn begin_authentication(
         &self,
-        email: Option<String>,
-    ) -> anyhow::Result<PasskeyBeginResponse> {
+        email: String,
+    ) -> anyhow::Result<PasskeyBeginAuthenticationResponse> {
         self.cleanup_expired_challenges_best_effort().await;
 
         let expires_at = Utc::now() + self.challenge_ttl;
 
-        match email {
-            Some(email) => {
-                let user = self
-                    .user_repository
-                    .get_user_by_email(&email)
-                    .await?
-                    .ok_or_else(|| anyhow::anyhow!("User not found"))?;
+        let user = self
+            .user_repository
+            .get_user_by_email(&email)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("User not found"))?;
 
-                let records = self.passkey_repository.list_by_user(user.id).await?;
-                if records.is_empty() {
-                    return Err(anyhow::anyhow!("No passkeys registered for user"));
-                }
-
-                let mut passkeys: Vec<Passkey> = Vec::with_capacity(records.len());
-                for rec in records {
-                    passkeys.push(Self::from_json(rec.passkey)?);
-                }
-
-                let (rcr, auth_state) = self.webauthn.start_passkey_authentication(&passkeys)?;
-
-                let challenge_id = self
-                    .passkey_challenge_repository
-                    .create_challenge(
-                        PasskeyChallengeKind::Authentication,
-                        Some(user.id),
-                        Self::to_json(&auth_state)?,
-                        expires_at,
-                    )
-                    .await?;
-
-                Ok(PasskeyBeginResponse {
-                    challenge_id,
-                    public_key: Self::to_json(&rcr)?,
-                })
-            }
-            None => Err(anyhow::anyhow!(
-                "Email is required for passkey authentication in this deployment"
-            )),
+        let records = self.passkey_repository.list_by_user(user.id).await?;
+        if records.is_empty() {
+            return Err(anyhow::anyhow!("No passkeys registered for user"));
         }
+
+        let passkeys: Vec<StoredPasskey> = records.into_iter().map(|r| r.passkey).collect();
+
+        let (rcr, auth_state) = self.webauthn.start_passkey_authentication(&passkeys)?;
+
+        let challenge_id = self
+            .passkey_challenge_repository
+            .create_challenge(
+                Some(user.id),
+                PasskeyChallengeState::Authentication(auth_state),
+                expires_at,
+            )
+            .await?;
+
+        Ok(PasskeyBeginAuthenticationResponse {
+            challenge_id,
+            public_key: rcr,
+        })
     }
 
     async fn finish_authentication(
         &self,
         challenge_id: PasskeyChallengeId,
-        credential: serde_json::Value,
+        credential: PasskeyAuthenticationCredential,
     ) -> anyhow::Result<UserSession> {
         let challenge = self
             .passkey_challenge_repository
@@ -214,35 +191,20 @@ impl PasskeyService for PasskeyServiceImpl {
             return Err(anyhow::anyhow!("Authentication challenge expired"));
         }
 
-        let pkc: PublicKeyCredential = Self::from_json(credential)?;
-
         let (user_id, auth_result) = match challenge.kind {
             PasskeyChallengeKind::Authentication => {
                 let user_id = challenge
                     .user_id
                     .ok_or_else(|| anyhow::anyhow!("Missing user_id"))?;
-                let auth_state: PasskeyAuthentication = Self::from_json(challenge.state)?;
-
-                let records = self.passkey_repository.list_by_user(user_id).await?;
-                if records.is_empty() {
-                    return Err(anyhow::anyhow!("No passkeys registered for user"));
-                }
-
-                let mut passkeys: Vec<Passkey> = Vec::with_capacity(records.len());
-                for rec in records {
-                    passkeys.push(Self::from_json(rec.passkey)?);
-                }
+                let PasskeyChallengeState::Authentication(auth_state) = challenge.state else {
+                    return Err(anyhow::anyhow!("Invalid challenge kind"));
+                };
 
                 let auth_result = self
                     .webauthn
-                    .finish_passkey_authentication(&pkc, &auth_state)?;
+                    .finish_passkey_authentication(&credential, &auth_state)?;
 
                 (user_id, auth_result)
-            }
-            PasskeyChallengeKind::DiscoverableAuthentication => {
-                return Err(anyhow::anyhow!(
-                    "Discoverable passkey authentication is not enabled"
-                ));
             }
             PasskeyChallengeKind::Registration => {
                 return Err(anyhow::anyhow!("Invalid challenge kind"));
@@ -252,20 +214,20 @@ impl PasskeyService for PasskeyServiceImpl {
         // Update credential properties if needed (e.g., counter/backup flags).
         if let Some(rec) = self
             .passkey_repository
-            .get_by_credential_id(&pkc.id)
+            .get_by_credential_id(&credential.id)
             .await?
         {
             if rec.user_id != user_id {
                 return Err(anyhow::anyhow!("Credential does not belong to user"));
             }
 
-            let mut passkey: Passkey = Self::from_json(rec.passkey.clone())?;
+            let mut passkey: StoredPasskey = rec.passkey;
             // This may or may not update based on authenticator type.
             let _ = passkey.update_credential(&auth_result);
 
             let now = Utc::now();
             self.passkey_repository
-                .update_passkey_and_last_used_at(rec.id, Self::to_json(&passkey)?, now)
+                .update_passkey_and_last_used_at(rec.id, passkey, now)
                 .await?;
         }
 
