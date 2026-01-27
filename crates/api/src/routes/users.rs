@@ -12,7 +12,7 @@ use utoipa::ToSchema;
 pub struct PasskeySummaryResponse {
     pub id: services::PasskeyId,
     pub credential_id: String,
-    pub nickname: Option<String>,
+    pub label: Option<String>,
     pub created_at: String,
     pub last_used_at: Option<String>,
 }
@@ -229,7 +229,7 @@ pub async fn list_my_passkeys(
             .map(|p| PasskeySummaryResponse {
                 id: p.id,
                 credential_id: p.credential_id,
-                nickname: p.nickname,
+                label: p.label,
                 created_at: p.created_at.to_rfc3339(),
                 last_used_at: p.last_used_at.map(|t| t.to_rfc3339()),
             })

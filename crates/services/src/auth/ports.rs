@@ -141,7 +141,8 @@ pub struct PasskeyRecord {
     pub credential_id: String,
     /// Serialized `webauthn_rs::prelude::Passkey` (JSON)
     pub passkey: serde_json::Value,
-    pub nickname: Option<String>,
+    /// User-facing label for UI (e.g. "MacBook TouchID", "iPhone", "YubiKey")
+    pub label: Option<String>,
     pub created_at: DateTime<Utc>,
     pub last_used_at: Option<DateTime<Utc>>,
 }
@@ -151,7 +152,7 @@ pub struct PasskeyRecord {
 pub struct PasskeySummary {
     pub id: PasskeyId,
     pub credential_id: String,
-    pub nickname: Option<String>,
+    pub label: Option<String>,
     pub created_at: DateTime<Utc>,
     pub last_used_at: Option<DateTime<Utc>>,
 }
@@ -198,7 +199,7 @@ pub trait PasskeyRepository: Send + Sync {
         user_id: UserId,
         credential_id: String,
         passkey: serde_json::Value,
-        nickname: Option<String>,
+        label: Option<String>,
     ) -> anyhow::Result<PasskeyId>;
 
     async fn update_passkey_and_last_used_at(
@@ -248,7 +249,7 @@ pub trait PasskeyService: Send + Sync {
         user_id: UserId,
         challenge_id: PasskeyChallengeId,
         credential: serde_json::Value,
-        nickname: Option<String>,
+        label: Option<String>,
     ) -> anyhow::Result<PasskeyId>;
 
     /// Begin authentication. If `email` is provided, options will restrict to that user’s passkeys.

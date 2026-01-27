@@ -24,7 +24,7 @@ impl PasskeyRepository for PostgresPasskeyRepository {
         let rows = client
             .query(
                 r#"
-                SELECT id, user_id, credential_id, passkey, nickname, created_at, last_used_at
+                SELECT id, user_id, credential_id, passkey, label, created_at, last_used_at
                 FROM passkeys
                 WHERE user_id = $1
                 ORDER BY created_at DESC
@@ -40,7 +40,7 @@ impl PasskeyRepository for PostgresPasskeyRepository {
                 user_id: r.get(1),
                 credential_id: r.get(2),
                 passkey: r.get(3),
-                nickname: r.get(4),
+                label: r.get(4),
                 created_at: r.get(5),
                 last_used_at: r.get(6),
             })
@@ -52,7 +52,7 @@ impl PasskeyRepository for PostgresPasskeyRepository {
         let row = client
             .query_opt(
                 r#"
-                SELECT id, user_id, credential_id, passkey, nickname, created_at, last_used_at
+                SELECT id, user_id, credential_id, passkey, label, created_at, last_used_at
                 FROM passkeys
                 WHERE id = $1
                 "#,
@@ -65,7 +65,7 @@ impl PasskeyRepository for PostgresPasskeyRepository {
             user_id: r.get(1),
             credential_id: r.get(2),
             passkey: r.get(3),
-            nickname: r.get(4),
+            label: r.get(4),
             created_at: r.get(5),
             last_used_at: r.get(6),
         }))
@@ -79,7 +79,7 @@ impl PasskeyRepository for PostgresPasskeyRepository {
         let row = client
             .query_opt(
                 r#"
-                SELECT id, user_id, credential_id, passkey, nickname, created_at, last_used_at
+                SELECT id, user_id, credential_id, passkey, label, created_at, last_used_at
                 FROM passkeys
                 WHERE credential_id = $1
                 "#,
@@ -92,7 +92,7 @@ impl PasskeyRepository for PostgresPasskeyRepository {
             user_id: r.get(1),
             credential_id: r.get(2),
             passkey: r.get(3),
-            nickname: r.get(4),
+            label: r.get(4),
             created_at: r.get(5),
             last_used_at: r.get(6),
         }))
@@ -103,17 +103,17 @@ impl PasskeyRepository for PostgresPasskeyRepository {
         user_id: UserId,
         credential_id: String,
         passkey: serde_json::Value,
-        nickname: Option<String>,
+        label: Option<String>,
     ) -> anyhow::Result<PasskeyId> {
         let client = self.pool.get().await?;
         let row = client
             .query_one(
                 r#"
-                INSERT INTO passkeys (user_id, credential_id, passkey, nickname)
+                INSERT INTO passkeys (user_id, credential_id, passkey, label)
                 VALUES ($1, $2, $3, $4)
                 RETURNING id
                 "#,
-                &[&user_id, &credential_id, &passkey, &nickname],
+                &[&user_id, &credential_id, &passkey, &label],
             )
             .await?;
 

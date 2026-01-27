@@ -14,8 +14,8 @@ CREATE TABLE passkeys (
     credential_id TEXT NOT NULL UNIQUE,
     -- Serialized `webauthn_rs::prelude::Passkey` as JSON
     passkey JSONB NOT NULL,
-    -- Optional user-facing name for UI
-    nickname VARCHAR(255),
+    -- Optional user-facing label for UI
+    label VARCHAR(255),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_used_at TIMESTAMPTZ
 );

@@ -28,8 +28,8 @@ pub struct FinishRegistrationRequest {
     pub challenge_id: services::PasskeyChallengeId,
     /// Browser `RegisterPublicKeyCredential` JSON.
     pub credential: serde_json::Value,
-    /// Optional user-facing nickname.
-    pub nickname: Option<String>,
+    /// Optional user-facing label for this passkey.
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -116,7 +116,7 @@ pub async fn finish_registration(
     let svc = passkey_service(&app_state)?;
 
     let passkey_id = svc
-        .finish_registration(user.user_id, req.challenge_id, req.credential, req.nickname)
+        .finish_registration(user.user_id, req.challenge_id, req.credential, req.label)
         .await
         .map_err(|_| ApiError::bad_request("Passkey registration verification failed"))?;
 

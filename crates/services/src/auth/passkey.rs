@@ -113,7 +113,7 @@ impl PasskeyService for PasskeyServiceImpl {
         user_id: UserId,
         challenge_id: PasskeyChallengeId,
         credential: serde_json::Value,
-        nickname: Option<String>,
+        label: Option<String>,
     ) -> anyhow::Result<PasskeyId> {
         let challenge = self
             .passkey_challenge_repository
@@ -144,7 +144,7 @@ impl PasskeyService for PasskeyServiceImpl {
 
         let id = self
             .passkey_repository
-            .insert_passkey(user_id, credential_id, passkey_json, nickname)
+            .insert_passkey(user_id, credential_id, passkey_json, label)
             .await?;
 
         Ok(id)
@@ -281,7 +281,7 @@ impl PasskeyService for PasskeyServiceImpl {
             .map(|r| PasskeySummary {
                 id: r.id,
                 credential_id: r.credential_id,
-                nickname: r.nickname,
+                label: r.label,
                 created_at: r.created_at,
                 last_used_at: r.last_used_at,
             })
