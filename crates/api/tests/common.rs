@@ -3,6 +3,7 @@
 use api::middleware::RateLimitState;
 use api::{create_router_with_cors, AppState};
 use axum_test::TestServer;
+use chrono::Duration;
 use serde_json::json;
 use services::analytics::AnalyticsServiceImpl;
 use services::conversation::share_service::ConversationShareServiceImpl;
@@ -142,11 +143,22 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
     let response_author_repository = db.response_author_repository();
 
     // Create rate limit state for testing
-    let rate_limit_state = RateLimitState::new(analytics_service.clone());
+    // Use a long window to avoid timing-related flakiness (requests may take > 1s).
+    // Also disable DB-backed window limits for tests to keep them fast/deterministic.
+    let rate_limit_state = RateLimitState::with_config(
+        services::system_configs::ports::RateLimitConfig {
+            max_concurrent: 2,
+            max_requests_per_window: 1,
+            window_duration: Duration::seconds(60),
+            window_limits: vec![],
+        },
+        analytics_service.clone(),
+    );
 
     // Create application state
     let app_state = AppState {
         oauth_service,
+        passkey_service: None,
         user_service,
         user_settings_service,
         model_service,

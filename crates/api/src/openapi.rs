@@ -19,9 +19,15 @@ use utoipa::OpenApi;
         crate::routes::oauth::github_login,
         crate::routes::oauth::oauth_callback,
         crate::routes::oauth::near_auth,
+        crate::routes::passkey::begin_registration,
+        crate::routes::passkey::finish_registration,
+        crate::routes::passkey::begin_authentication,
+        crate::routes::passkey::finish_authentication,
         crate::routes::oauth::logout,
         // User endpoints
         crate::routes::users::get_current_user,
+        crate::routes::users::list_my_passkeys,
+        crate::routes::users::delete_my_passkey,
         // Conversation endpoints (with optional authentication)
         crate::routes::api::get_conversation,
         crate::routes::api::list_conversation_items,
@@ -54,10 +60,19 @@ use utoipa::OpenApi;
         crate::routes::oauth::LogoutRequest,
         crate::routes::oauth::NearAuthRequest,
         crate::routes::oauth::NearAuthResponse,
+        crate::routes::passkey::BeginAuthenticationRequest,
+        crate::routes::passkey::BeginPasskeyResponse,
+        crate::routes::passkey::FinishRegistrationRequest,
+        crate::routes::passkey::FinishRegistrationResponse,
+        crate::routes::passkey::FinishAuthenticationRequest,
+        crate::routes::passkey::PasskeyAuthResponse,
         // User settings models
         crate::models::UserSettingsResponse,
         crate::models::UpdateUserSettingsPartiallyRequest,
         crate::models::UpdateUserSettingsRequest,
+        // Passkey management models
+        crate::routes::users::PasskeySummaryResponse,
+        crate::routes::users::PasskeyListResponse,
         // Model settings / model admin models
         crate::models::ModelResponse,
         crate::models::ModelListResponse,

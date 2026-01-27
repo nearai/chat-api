@@ -46,10 +46,8 @@ fn extract_token_from_request(request: &Request) -> Result<String, ApiError> {
     })?;
 
     let token = auth_value.strip_prefix("Bearer ").ok_or_else(|| {
-        tracing::warn!(
-            "Authorization header does not start with 'Bearer ', header: {}",
-            auth_value
-        );
+        // Never log the header value, since it may contain secrets.
+        tracing::warn!("Authorization header does not start with 'Bearer '");
         ApiError::invalid_auth_header()
     })?;
 
@@ -75,18 +73,8 @@ async fn authenticate_token_string(
     token: String,
     auth_state: &AuthState,
 ) -> Result<AuthenticatedUser, ApiError> {
-    tracing::debug!(
-        "Authenticating token, length: {}, prefix: {}...",
-        token.len(),
-        &token.chars().take(8).collect::<String>()
-    );
-
     // Hash the token and look it up
     let token_hash = hash_session_token(&token);
-    tracing::debug!(
-        "Token hashed, hash prefix: {}...",
-        &token_hash.chars().take(16).collect::<String>()
-    );
 
     authenticate_session_by_token(auth_state, token_hash).await
 }
@@ -96,29 +84,17 @@ async fn authenticate_session_by_token(
     state: &AuthState,
     token_hash: String,
 ) -> Result<AuthenticatedUser, ApiError> {
-    tracing::debug!(
-        "Authenticating session by token hash: {}...",
-        &token_hash.chars().take(16).collect::<String>()
-    );
-
     // Look up the session by token hash
     let session = state
         .session_repository
         .get_session_by_token_hash(token_hash.clone())
         .await
         .map_err(|e| {
-            tracing::error!(
-                "Failed to get session from repository for token_hash {}...: {}",
-                &token_hash.chars().take(16).collect::<String>(),
-                e
-            );
+            tracing::error!("Failed to get session from repository: {}", e);
             ApiError::internal_server_error("Failed to authenticate session")
         })?
         .ok_or_else(|| {
-            tracing::warn!(
-                "Session not found for token_hash: {}...",
-                &token_hash.chars().take(16).collect::<String>()
-            );
+            tracing::warn!("Session not found for provided token");
             ApiError::session_not_found()
         })?;
 
