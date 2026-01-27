@@ -166,7 +166,7 @@ pub async fn begin_authentication(
     tag = "Auth",
     request_body = FinishAuthenticationRequest,
     responses(
-        (status = 200, description = "Authenticated", body = FinishAuthenticationRequest),
+        (status = 200, description = "Authenticated", body = FinishAuthenticationResponse),
         (status = 401, description = "Authentication failed", body = crate::error::ApiErrorResponse),
         (status = 503, description = "Passkey not configured", body = crate::error::ApiErrorResponse),
         (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
