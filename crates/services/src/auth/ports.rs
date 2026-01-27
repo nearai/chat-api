@@ -10,13 +10,15 @@ pub use crate::user::ports::OAuthProvider;
 // Passkeys (WebAuthn) Types
 // -----------------------------
 
-pub type StoredPasskey = webauthn_rs::prelude::Passkey;
-pub type PasskeyRegistrationState = webauthn_rs::prelude::PasskeyRegistration;
-pub type PasskeyAuthenticationState = webauthn_rs::prelude::PasskeyAuthentication;
-pub type PasskeyRegistrationCredential = webauthn_rs::prelude::RegisterPublicKeyCredential;
-pub type PasskeyAuthenticationCredential = webauthn_rs::prelude::PublicKeyCredential;
-pub type PasskeyRegistrationOptions = webauthn_rs::prelude::CreationChallengeResponse;
-pub type PasskeyAuthenticationOptions = webauthn_rs::prelude::RequestChallengeResponse;
+pub type Passkey = webauthn_rs::prelude::Passkey;
+
+pub type PasskeyRegistration = webauthn_rs::prelude::PasskeyRegistration;
+pub type PasskeyRegisterPublicKeyCredential = webauthn_rs::prelude::RegisterPublicKeyCredential;
+pub type PasskeyRegisterChallengeResponse = webauthn_rs::prelude::CreationChallengeResponse;
+
+pub type PasskeyAuthentication = webauthn_rs::prelude::PasskeyAuthentication;
+pub type PasskeyAuthenticatePublicKeyCredential = webauthn_rs::prelude::PublicKeyCredential;
+pub type PasskeyAuthenticateChallengeResponse = webauthn_rs::prelude::RequestChallengeResponse;
 
 /// Represents an OAuth session state
 #[derive(Debug, Clone)]
@@ -152,7 +154,7 @@ pub struct PasskeyRecord {
     /// Base64url credential ID (`PublicKeyCredential.id`)
     pub credential_id: String,
     /// `webauthn_rs::prelude::Passkey` (stored as JSONB in DB)
-    pub passkey: StoredPasskey,
+    pub passkey: Passkey,
     /// User-facing label for UI (e.g. "MacBook TouchID", "iPhone", "YubiKey")
     pub label: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -186,8 +188,8 @@ impl PasskeyChallengeKind {
 
 #[derive(Debug, Clone)]
 pub enum PasskeyChallengeState {
-    Registration(PasskeyRegistrationState),
-    Authentication(PasskeyAuthenticationState),
+    Registration(PasskeyRegistration),
+    Authentication(PasskeyAuthentication),
 }
 
 impl PasskeyChallengeState {
@@ -223,14 +225,14 @@ pub trait PasskeyRepository: Send + Sync {
         &self,
         user_id: UserId,
         credential_id: String,
-        passkey: StoredPasskey,
+        passkey: Passkey,
         label: Option<String>,
     ) -> anyhow::Result<PasskeyId>;
 
     async fn update_passkey_and_last_used_at(
         &self,
         id: PasskeyId,
-        passkey: StoredPasskey,
+        passkey: Passkey,
         last_used_at: DateTime<Utc>,
     ) -> anyhow::Result<()>;
 
@@ -258,13 +260,13 @@ pub trait PasskeyChallengeRepository: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct PasskeyBeginResponse {
     pub challenge_id: PasskeyChallengeId,
-    pub public_key: PasskeyRegistrationOptions,
+    pub public_key: PasskeyRegisterChallengeResponse,
 }
 
 #[derive(Debug, Clone)]
 pub struct PasskeyBeginAuthenticationResponse {
     pub challenge_id: PasskeyChallengeId,
-    pub public_key: PasskeyAuthenticationOptions,
+    pub public_key: PasskeyAuthenticateChallengeResponse,
 }
 
 #[async_trait]
@@ -277,7 +279,7 @@ pub trait PasskeyService: Send + Sync {
         &self,
         user_id: UserId,
         challenge_id: PasskeyChallengeId,
-        credential: PasskeyRegistrationCredential,
+        credential: PasskeyRegisterPublicKeyCredential,
         label: Option<String>,
     ) -> anyhow::Result<PasskeyId>;
 
@@ -291,7 +293,7 @@ pub trait PasskeyService: Send + Sync {
     async fn finish_authentication(
         &self,
         challenge_id: PasskeyChallengeId,
-        credential: PasskeyAuthenticationCredential,
+        credential: PasskeyAuthenticatePublicKeyCredential,
     ) -> anyhow::Result<UserSession>;
 
     /// List passkeys for UI management.

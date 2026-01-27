@@ -3,9 +3,9 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use postgres_types::Json;
 use services::auth::ports::{
-    PasskeyAuthenticationState, PasskeyChallenge, PasskeyChallengeKind, PasskeyChallengeRepository,
-    PasskeyChallengeState, PasskeyRecord, PasskeyRegistrationState, PasskeyRepository,
-    StoredPasskey,
+    Passkey, PasskeyAuthentication, PasskeyChallenge, PasskeyChallengeKind,
+    PasskeyChallengeRepository, PasskeyChallengeState, PasskeyRecord, PasskeyRegistration,
+    PasskeyRepository,
 };
 use services::{PasskeyChallengeId, PasskeyId, UserId};
 
@@ -38,7 +38,7 @@ impl PasskeyRepository for PostgresPasskeyRepository {
         Ok(rows
             .into_iter()
             .map(|r| {
-                let Json(passkey): Json<StoredPasskey> = r.get(3);
+                let Json(passkey): Json<Passkey> = r.get(3);
                 PasskeyRecord {
                     id: r.get(0),
                     user_id: r.get(1),
@@ -66,7 +66,7 @@ impl PasskeyRepository for PostgresPasskeyRepository {
             .await?;
 
         Ok(row.map(|r| {
-            let Json(passkey): Json<StoredPasskey> = r.get(3);
+            let Json(passkey): Json<Passkey> = r.get(3);
             PasskeyRecord {
                 id: r.get(0),
                 user_id: r.get(1),
@@ -96,7 +96,7 @@ impl PasskeyRepository for PostgresPasskeyRepository {
             .await?;
 
         Ok(row.map(|r| {
-            let Json(passkey): Json<StoredPasskey> = r.get(3);
+            let Json(passkey): Json<Passkey> = r.get(3);
             PasskeyRecord {
                 id: r.get(0),
                 user_id: r.get(1),
@@ -113,7 +113,7 @@ impl PasskeyRepository for PostgresPasskeyRepository {
         &self,
         user_id: UserId,
         credential_id: String,
-        passkey: StoredPasskey,
+        passkey: Passkey,
         label: Option<String>,
     ) -> anyhow::Result<PasskeyId> {
         let client = self.pool.get().await?;
@@ -135,7 +135,7 @@ impl PasskeyRepository for PostgresPasskeyRepository {
     async fn update_passkey_and_last_used_at(
         &self,
         id: PasskeyId,
-        passkey: StoredPasskey,
+        passkey: Passkey,
         last_used_at: DateTime<Utc>,
     ) -> anyhow::Result<()> {
         let client = self.pool.get().await?;
@@ -263,11 +263,11 @@ impl PasskeyChallengeRepository for PostgresPasskeyChallengeRepository {
 
         let state = match kind {
             PasskeyChallengeKind::Registration => {
-                let Json(state): Json<PasskeyRegistrationState> = r.get(3);
+                let Json(state): Json<PasskeyRegistration> = r.get(3);
                 PasskeyChallengeState::Registration(state)
             }
             PasskeyChallengeKind::Authentication => {
-                let Json(state): Json<PasskeyAuthenticationState> = r.get(3);
+                let Json(state): Json<PasskeyAuthentication> = r.get(3);
                 PasskeyChallengeState::Authentication(state)
             }
         };

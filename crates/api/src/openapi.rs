@@ -66,7 +66,7 @@ use utoipa::OpenApi;
         crate::routes::passkey::FinishRegistrationRequest,
         crate::routes::passkey::FinishRegistrationResponse,
         crate::routes::passkey::FinishAuthenticationRequest,
-        crate::routes::passkey::PasskeyAuthResponse,
+        crate::routes::passkey::FinishAuthenticationResponse,
         // User settings models
         crate::models::UserSettingsResponse,
         crate::models::UpdateUserSettingsPartiallyRequest,

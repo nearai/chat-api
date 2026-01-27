@@ -105,10 +105,10 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
     let attestation_routes = attestation::create_attestation_router();
 
     // Passkey routes
-    let passkey_public_routes = passkey::create_passkey_public_router();
     let passkey_registration_routes = passkey::create_passkey_registration_router().layer(
         from_fn_with_state(auth_state.clone(), crate::middleware::auth_middleware),
     );
+    let passkey_authentication_routes = passkey::create_passkey_authentication_router();
 
     // Admin routes (requires admin authentication)
     let admin_routes = admin::create_admin_router().layer(from_fn_with_state(
@@ -152,9 +152,9 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         .route("/health", get(health_check))
         .merge(configs_routes) // Configs route (requires user auth)
         .nest("/v1/auth", auth_routes)
-        .nest("/v1/auth", logout_route) // Logout route with auth middleware
-        .nest("/v1/auth/passkey", passkey_public_routes)
-        .nest("/v1/auth/passkey", passkey_registration_routes)
+        .nest("/v1/auth", logout_route)
+        .nest("/v1/auth/passkey", passkey_registration_routes) // Logout route with auth middleware
+        .nest("/v1/auth/passkey", passkey_authentication_routes)
         .nest("/v1/users", user_routes)
         .nest("/v1/admin", admin_routes)
         .merge(optional_auth_routes) // Conversation read routes (optional auth)

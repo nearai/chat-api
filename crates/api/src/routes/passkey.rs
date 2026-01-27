@@ -9,34 +9,18 @@ use services::analytics::{ActivityType, AuthMethod, RecordActivityRequest};
 use services::metrics::consts::{METRIC_USER_LOGIN, TAG_AUTH_METHOD, TAG_IS_NEW_USER};
 use utoipa::ToSchema;
 
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct BeginAuthenticationRequest {
-    /// Email to restrict allowed credentials to a specific user.
-    pub email: String,
-}
-
 #[derive(Debug, Serialize, ToSchema)]
 pub struct BeginRegistrationResponse {
     pub challenge_id: services::PasskeyChallengeId,
-    /// JSON publicKey options for `navigator.credentials.*({ publicKey })`
     #[schema(value_type = serde_json::Value)]
-    pub public_key: services::auth::ports::PasskeyRegistrationOptions,
-}
-
-#[derive(Debug, Serialize, ToSchema)]
-pub struct BeginAuthenticationResponse {
-    pub challenge_id: services::PasskeyChallengeId,
-    /// JSON publicKey options for `navigator.credentials.get({ publicKey })`
-    #[schema(value_type = serde_json::Value)]
-    pub public_key: services::auth::ports::PasskeyAuthenticationOptions,
+    pub response: services::auth::ports::PasskeyRegisterChallengeResponse,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct FinishRegistrationRequest {
     pub challenge_id: services::PasskeyChallengeId,
-    /// Browser `RegisterPublicKeyCredential` JSON.
     #[schema(value_type = serde_json::Value)]
-    pub credential: services::auth::ports::PasskeyRegistrationCredential,
+    pub credential: services::auth::ports::PasskeyRegisterPublicKeyCredential,
     /// Optional user-facing label for this passkey.
     pub label: Option<String>,
 }
@@ -47,15 +31,28 @@ pub struct FinishRegistrationResponse {
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
+pub struct BeginAuthenticationRequest {
+    /// Email to restrict allowed credentials to a specific user.
+    pub email: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct BeginAuthenticationResponse {
+    pub challenge_id: services::PasskeyChallengeId,
+    #[schema(value_type = serde_json::Value)]
+    pub response: services::auth::ports::PasskeyAuthenticateChallengeResponse,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct FinishAuthenticationRequest {
     pub challenge_id: services::PasskeyChallengeId,
     /// Browser `PublicKeyCredential` JSON (assertion).
     #[schema(value_type = serde_json::Value)]
-    pub credential: services::auth::ports::PasskeyAuthenticationCredential,
+    pub credential: services::auth::ports::PasskeyAuthenticatePublicKeyCredential,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-pub struct PasskeyAuthResponse {
+pub struct FinishAuthenticationResponse {
     pub token: String,
     pub session_id: String,
     pub expires_at: String,
@@ -97,7 +94,7 @@ pub async fn begin_registration(
 
     Ok(Json(BeginRegistrationResponse {
         challenge_id: res.challenge_id,
-        public_key: res.public_key,
+        response: res.public_key,
     }))
 }
 
@@ -158,7 +155,7 @@ pub async fn begin_authentication(
 
     Ok(Json(BeginAuthenticationResponse {
         challenge_id: res.challenge_id,
-        public_key: res.public_key,
+        response: res.public_key,
     }))
 }
 
@@ -169,7 +166,7 @@ pub async fn begin_authentication(
     tag = "Auth",
     request_body = FinishAuthenticationRequest,
     responses(
-        (status = 200, description = "Authenticated", body = PasskeyAuthResponse),
+        (status = 200, description = "Authenticated", body = FinishAuthenticationRequest),
         (status = 401, description = "Authentication failed", body = crate::error::ApiErrorResponse),
         (status = 503, description = "Passkey not configured", body = crate::error::ApiErrorResponse),
         (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
@@ -178,7 +175,7 @@ pub async fn begin_authentication(
 pub async fn finish_authentication(
     State(app_state): State<AppState>,
     Json(req): Json<FinishAuthenticationRequest>,
-) -> Result<Json<PasskeyAuthResponse>, ApiError> {
+) -> Result<Json<FinishAuthenticationResponse>, ApiError> {
     let svc = passkey_service(&app_state)?;
     let session = svc
         .finish_authentication(req.challenge_id, req.credential)
@@ -217,21 +214,21 @@ pub async fn finish_authentication(
         .token
         .ok_or_else(|| ApiError::internal_server_error("Failed to create session"))?;
 
-    Ok(Json(PasskeyAuthResponse {
+    Ok(Json(FinishAuthenticationResponse {
         token,
         session_id: session.session_id.to_string(),
         expires_at: session.expires_at.to_rfc3339(),
     }))
 }
 
-pub fn create_passkey_public_router() -> Router<AppState> {
-    Router::new()
-        .route("/authentication/options", post(begin_authentication))
-        .route("/authentication/verify", post(finish_authentication))
-}
-
 pub fn create_passkey_registration_router() -> Router<AppState> {
     Router::new()
         .route("/registration/options", post(begin_registration))
         .route("/registration/verify", post(finish_registration))
+}
+
+pub fn create_passkey_authentication_router() -> Router<AppState> {
+    Router::new()
+        .route("/authentication/options", post(begin_authentication))
+        .route("/authentication/verify", post(finish_authentication))
 }

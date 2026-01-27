@@ -1,8 +1,8 @@
 use super::ports::{
-    PasskeyAuthenticationCredential, PasskeyBeginAuthenticationResponse, PasskeyBeginResponse,
-    PasskeyChallengeKind, PasskeyChallengeRepository, PasskeyChallengeState,
-    PasskeyRegistrationCredential, PasskeyRepository, PasskeyService, PasskeySummary,
-    SessionRepository, StoredPasskey, UserSession,
+    Passkey, PasskeyAuthenticatePublicKeyCredential, PasskeyBeginAuthenticationResponse,
+    PasskeyBeginResponse, PasskeyChallengeKind, PasskeyChallengeRepository, PasskeyChallengeState,
+    PasskeyRegisterPublicKeyCredential, PasskeyRepository, PasskeyService, PasskeySummary,
+    SessionRepository, UserSession,
 };
 use crate::types::{PasskeyChallengeId, PasskeyId, UserId};
 use crate::user::ports::UserRepository;
@@ -100,7 +100,7 @@ impl PasskeyService for PasskeyServiceImpl {
         &self,
         user_id: UserId,
         challenge_id: PasskeyChallengeId,
-        credential: PasskeyRegistrationCredential,
+        credential: PasskeyRegisterPublicKeyCredential,
         label: Option<String>,
     ) -> anyhow::Result<PasskeyId> {
         let challenge = self
@@ -157,7 +157,7 @@ impl PasskeyService for PasskeyServiceImpl {
             return Err(anyhow::anyhow!("No passkeys registered for user"));
         }
 
-        let passkeys: Vec<StoredPasskey> = records.into_iter().map(|r| r.passkey).collect();
+        let passkeys: Vec<Passkey> = records.into_iter().map(|r| r.passkey).collect();
 
         let (rcr, auth_state) = self.webauthn.start_passkey_authentication(&passkeys)?;
 
@@ -179,7 +179,7 @@ impl PasskeyService for PasskeyServiceImpl {
     async fn finish_authentication(
         &self,
         challenge_id: PasskeyChallengeId,
-        credential: PasskeyAuthenticationCredential,
+        credential: PasskeyAuthenticatePublicKeyCredential,
     ) -> anyhow::Result<UserSession> {
         let challenge = self
             .passkey_challenge_repository
@@ -221,7 +221,7 @@ impl PasskeyService for PasskeyServiceImpl {
                 return Err(anyhow::anyhow!("Credential does not belong to user"));
             }
 
-            let mut passkey: StoredPasskey = rec.passkey;
+            let mut passkey: Passkey = rec.passkey;
             // This may or may not update based on authenticator type.
             let _ = passkey.update_credential(&auth_result);
 
