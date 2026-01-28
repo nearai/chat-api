@@ -1961,8 +1961,14 @@ mod tests {
             .await
             .expect("list shares");
         assert!(
-            remaining.is_empty(),
-            "share should be removed after deletion"
+            remaining.iter().all(|s| s.id != share.id),
+            "deleted share should not be present in shares list"
+        );
+        assert!(
+            remaining
+                .iter()
+                .all(|s| { s.recipient.as_ref().is_none_or(|r| r.value != sharee.email) }),
+            "deleted sharee recipient should not be present in shares list"
         );
 
         let err = service
