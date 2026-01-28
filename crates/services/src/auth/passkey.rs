@@ -28,6 +28,7 @@ impl PasskeyServiceImpl {
         passkey_challenge_repository: Arc<dyn PasskeyChallengeRepository>,
         user_repository: Arc<dyn UserRepository>,
         session_repository: Arc<dyn SessionRepository>,
+        challenge_ttl: Duration,
     ) -> Self {
         Self {
             webauthn,
@@ -35,8 +36,7 @@ impl PasskeyServiceImpl {
             passkey_challenge_repository,
             user_repository,
             session_repository,
-            // Keep this short to reduce replay window, but long enough for UX.
-            challenge_ttl: Duration::minutes(5),
+            challenge_ttl,
         }
     }
 

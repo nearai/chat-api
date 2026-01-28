@@ -18,6 +18,11 @@ pub struct WebAuthnConfig {
     pub rp_name: String,
     /// Timeout (seconds) embedded in WebAuthn options (client UX).
     pub timeout_seconds: u64,
+    /// Server-side challenge lifetime (seconds) for passkey ceremonies.
+    ///
+    /// This controls how long a `passkey_challenges` row is valid before it is treated as expired.
+    /// Default: 300 seconds.
+    pub challenge_ttl_seconds: u64,
 }
 
 impl Default for WebAuthnConfig {
@@ -59,6 +64,11 @@ impl Default for WebAuthnConfig {
             .and_then(|v| v.parse().ok())
             .unwrap_or(300);
 
+        let challenge_ttl_seconds = std::env::var("WEBAUTHN_CHALLENGE_TTL_SECONDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(300);
+
         Self {
             rp_id,
             rp_origin,
@@ -67,6 +77,7 @@ impl Default for WebAuthnConfig {
             allow_any_port,
             rp_name,
             timeout_seconds,
+            challenge_ttl_seconds,
         }
     }
 }

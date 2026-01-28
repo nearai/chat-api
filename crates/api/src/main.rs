@@ -126,6 +126,7 @@ async fn main() -> anyhow::Result<()> {
             passkey_challenge_repo,
             user_repo.clone(),
             session_repo.clone(),
+            chrono::Duration::seconds(config.webauthn.challenge_ttl_seconds as i64),
         )) as Arc<dyn services::auth::ports::PasskeyService>)
     } else {
         None
