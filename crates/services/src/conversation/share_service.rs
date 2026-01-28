@@ -28,6 +28,24 @@ impl ConversationShareServiceImpl {
         }
     }
 
+    async fn get_conversation_owner_and_ensure_write_access(
+        &self,
+        conversation_id: &str,
+        actor_user_id: UserId,
+    ) -> Result<UserId, ConversationError> {
+        let conversation_owner_user_id = self
+            .conversation_repository
+            .get_conversation_owner(conversation_id)
+            .await?
+            .ok_or(ConversationError::NotFound)?;
+
+        // Allow owners OR users with write permission to manage shares
+        self.ensure_access(conversation_id, actor_user_id, SharePermission::Write)
+            .await?;
+
+        Ok(conversation_owner_user_id)
+    }
+
     fn normalize_recipient(recipient: ShareRecipient) -> ShareRecipient {
         match recipient.kind {
             ShareRecipientKind::Email => ShareRecipient {
@@ -223,22 +241,14 @@ impl ConversationShareService for ConversationShareServiceImpl {
 
     async fn create_share(
         &self,
-        owner_user_id: UserId,
+        actor_user_id: UserId,
         conversation_id: &str,
         permission: SharePermission,
         target: ShareTarget,
     ) -> Result<Vec<ConversationShare>, ConversationError> {
-        // First verify the conversation exists
-        let owner = self
-            .conversation_repository
-            .get_conversation_owner(conversation_id)
-            .await?;
-        if owner.is_none() {
-            return Err(ConversationError::NotFound);
-        }
-
-        // Allow owners OR users with write permission to create shares
-        self.ensure_access(conversation_id, owner_user_id, SharePermission::Write)
+        // Verify conversation exists, resolve owner, and enforce write access for actor
+        let conversation_owner_user_id = self
+            .get_conversation_owner_and_ensure_write_access(conversation_id, actor_user_id)
             .await?;
 
         let mut shares = Vec::new();
@@ -251,7 +261,7 @@ impl ConversationShareService for ConversationShareServiceImpl {
                     .map(Self::normalize_recipient)
                     .map(|recipient| NewConversationShare {
                         conversation_id: conversation_id.to_string(),
-                        owner_user_id,
+                        owner_user_id: conversation_owner_user_id,
                         share_type: ShareType::Direct,
                         permission,
                         recipient: Some(recipient),
@@ -268,7 +278,7 @@ impl ConversationShareService for ConversationShareServiceImpl {
             ShareTarget::Group(group_id) => {
                 let group = self
                     .share_repository
-                    .get_group(owner_user_id, group_id)
+                    .get_group(actor_user_id, group_id)
                     .await?;
 
                 if group.is_none() {
@@ -279,7 +289,7 @@ impl ConversationShareService for ConversationShareServiceImpl {
                     .share_repository
                     .create_share(NewConversationShare {
                         conversation_id: conversation_id.to_string(),
-                        owner_user_id,
+                        owner_user_id: conversation_owner_user_id,
                         share_type: ShareType::Group,
                         permission,
                         recipient: None,
@@ -296,7 +306,7 @@ impl ConversationShareService for ConversationShareServiceImpl {
                     .share_repository
                     .create_share(NewConversationShare {
                         conversation_id: conversation_id.to_string(),
-                        owner_user_id,
+                        owner_user_id: conversation_owner_user_id,
                         share_type: ShareType::Organization,
                         permission,
                         recipient: None,
@@ -312,7 +322,7 @@ impl ConversationShareService for ConversationShareServiceImpl {
                     .share_repository
                     .create_share(NewConversationShare {
                         conversation_id: conversation_id.to_string(),
-                        owner_user_id,
+                        owner_user_id: conversation_owner_user_id,
                         share_type: ShareType::Public,
                         permission,
                         recipient: None,
@@ -340,12 +350,17 @@ impl ConversationShareService for ConversationShareServiceImpl {
 
     async fn delete_share(
         &self,
-        owner_user_id: UserId,
+        actor_user_id: UserId,
         conversation_id: &str,
         share_id: uuid::Uuid,
     ) -> Result<(), ConversationError> {
+        // Verify conversation exists, resolve owner, and enforce write access for actor
+        let conversation_owner_user_id = self
+            .get_conversation_owner_and_ensure_write_access(conversation_id, actor_user_id)
+            .await?;
+
         self.share_repository
-            .delete_share(owner_user_id, conversation_id, share_id)
+            .delete_share(conversation_owner_user_id, conversation_id, share_id)
             .await
     }
 
@@ -1735,7 +1750,7 @@ mod tests {
             .delete_share(other_user.id, "conv_protected", share.id)
             .await
             .expect_err("should fail for non-owner");
-        assert!(matches!(err, ConversationError::NotFound));
+        assert!(matches!(err, ConversationError::AccessDenied));
 
         // Avoid warnings about unused repos
         drop((share_repo, user_repo));
@@ -1815,6 +1830,153 @@ mod tests {
             .ensure_access("conv_revoke_access", sharee.id, SharePermission::Read)
             .await
             .expect_err("access should be revoked");
+        assert!(matches!(err, ConversationError::AccessDenied));
+    }
+
+    #[tokio::test]
+    async fn editor_can_share_and_owner_lists_it() {
+        let conversation_id = "conv_editor_share";
+        let (service, _conversation_repo, share_repo, user_repo, owner) =
+            setup_service_with_owner(conversation_id, "owner@example.com");
+
+        // Create an editor user and grant them write access via a direct share.
+        let editor = build_user("editor@example.com");
+        user_repo.insert_user(editor.clone());
+
+        share_repo
+            .create_share(NewConversationShare {
+                conversation_id: conversation_id.to_string(),
+                owner_user_id: owner.id,
+                share_type: ShareType::Direct,
+                permission: SharePermission::Write,
+                recipient: Some(ShareRecipient {
+                    kind: ShareRecipientKind::Email,
+                    value: editor.email.clone(),
+                }),
+                group_id: None,
+                org_email_pattern: None,
+            })
+            .await
+            .expect("grant editor write access");
+
+        // Editor shares the conversation with a new recipient.
+        let sharee = build_user("newsharee@example.com");
+        user_repo.insert_user(sharee.clone());
+
+        let created = service
+            .create_share(
+                editor.id,
+                conversation_id,
+                SharePermission::Read,
+                ShareTarget::Direct(vec![ShareRecipient {
+                    kind: ShareRecipientKind::Email,
+                    value: sharee.email.clone(),
+                }]),
+            )
+            .await
+            .expect("editor should be able to create share");
+
+        assert_eq!(created.len(), 1);
+        assert_eq!(
+            created[0].owner_user_id, owner.id,
+            "shares should be stored under the conversation owner"
+        );
+
+        // Owner's shares list should include the newly shared recipient.
+        let listed = service
+            .list_shares(owner.id, conversation_id)
+            .await
+            .expect("list shares");
+        assert!(
+            listed
+                .iter()
+                .any(|share| share.recipient.as_ref().is_some_and(|r| r.kind
+                    == ShareRecipientKind::Email
+                    && r.value == sharee.email)),
+            "owner shares list should include the new sharee"
+        );
+
+        // And the sharee should have access.
+        service
+            .ensure_access(conversation_id, sharee.id, SharePermission::Read)
+            .await
+            .expect("sharee should have read access");
+    }
+
+    #[tokio::test]
+    async fn editor_with_write_can_delete_shares() {
+        let conversation_id = "conv_editor_delete";
+        let (service, _conversation_repo, share_repo, user_repo, owner) =
+            setup_service_with_owner(conversation_id, "owner@example.com");
+
+        // Grant editor write access
+        let editor = build_user("editor2@example.com");
+        user_repo.insert_user(editor.clone());
+        share_repo
+            .create_share(NewConversationShare {
+                conversation_id: conversation_id.to_string(),
+                owner_user_id: owner.id,
+                share_type: ShareType::Direct,
+                permission: SharePermission::Write,
+                recipient: Some(ShareRecipient {
+                    kind: ShareRecipientKind::Email,
+                    value: editor.email.clone(),
+                }),
+                group_id: None,
+                org_email_pattern: None,
+            })
+            .await
+            .expect("grant editor write access");
+
+        // Owner shares with a sharee
+        let sharee = build_user("todelete@example.com");
+        user_repo.insert_user(sharee.clone());
+        let share = service
+            .create_share(
+                owner.id,
+                conversation_id,
+                SharePermission::Read,
+                ShareTarget::Direct(vec![ShareRecipient {
+                    kind: ShareRecipientKind::Email,
+                    value: sharee.email.clone(),
+                }]),
+            )
+            .await
+            .expect("create share")
+            .into_iter()
+            .next()
+            .expect("share");
+
+        service
+            .ensure_access(conversation_id, sharee.id, SharePermission::Read)
+            .await
+            .expect("sharee should initially have access");
+
+        // Editor deletes the share
+        service
+            .delete_share(editor.id, conversation_id, share.id)
+            .await
+            .expect("editor should delete share with write access");
+
+        let remaining = service
+            .list_shares(owner.id, conversation_id)
+            .await
+            .expect("list shares");
+        assert!(
+            remaining.iter().all(|s| s.id != share.id),
+            "deleted share should not be present in shares list"
+        );
+        assert!(
+            remaining
+                .iter()
+                .all(|s| { s.recipient.as_ref().is_none_or(|r| r.value != sharee.email) }),
+            "deleted sharee recipient should not be present in shares list"
+        );
+
+        let err = service
+            .ensure_access(conversation_id, sharee.id, SharePermission::Read)
+            .await
+            .expect_err("access should be revoked after deletion");
         assert!(matches!(err, ConversationError::AccessDenied));
     }
 

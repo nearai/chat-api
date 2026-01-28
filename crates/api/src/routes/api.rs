@@ -1829,6 +1829,19 @@ async fn proxy_responses(
         }
     }
 
+    // If a conversation ID is provided, this is a write operation on an existing conversation.
+    // Enforce that the caller has write access (owner OR shared with write permission).
+    if let Some(ref body) = body_json {
+        if let Some(conversation_id) = body
+            .get("conversation")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            validate_user_conversation(&state, &user, conversation_id, SharePermission::Write)
+                .await?;
+        }
+    }
+
     // Enforce model-level visibility based on settings if a model is specified
     if let Some(ref body) = body_json {
         if let Some(model_id) = body.get("model").and_then(|v| v.as_str()) {
