@@ -336,7 +336,7 @@ pub trait ConversationShareService: Send + Sync {
 
     async fn create_share(
         &self,
-        owner_user_id: UserId,
+        actor_user_id: UserId,
         conversation_id: &str,
         permission: SharePermission,
         target: ShareTarget,
@@ -350,7 +350,7 @@ pub trait ConversationShareService: Send + Sync {
 
     async fn delete_share(
         &self,
-        owner_user_id: UserId,
+        actor_user_id: UserId,
         conversation_id: &str,
         share_id: Uuid,
     ) -> Result<(), ConversationError>;

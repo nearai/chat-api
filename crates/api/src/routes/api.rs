@@ -1835,7 +1835,6 @@ async fn proxy_responses(
         if let Some(conversation_id) = body
             .get("conversation")
             .and_then(|v| v.as_str())
-            .map(|s| s.trim())
             .filter(|s| !s.is_empty())
         {
             validate_user_conversation(&state, &user, conversation_id, SharePermission::Write)
