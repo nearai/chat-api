@@ -9,6 +9,7 @@ use services::analytics::AnalyticsServiceImpl;
 use services::conversation::share_service::ConversationShareServiceImpl;
 use services::file::service::FileServiceImpl;
 use services::metrics::MockMetricsService;
+use services::system_configs::ports::RateLimitConfig;
 use services::vpc::test_helpers::MockVpcCredentialsService;
 use services::vpc::VpcCredentials;
 use std::sync::Arc;
@@ -22,6 +23,10 @@ static MIGRATIONS_INITIALIZED: OnceCell<()> = OnceCell::const_new();
 pub struct TestServerConfig {
     pub vpc_credentials: Option<VpcCredentials>,
     pub cloud_api_base_url: String,
+    /// Optional override for `/v1/responses` rate limiting in tests.
+    ///
+    /// If not set, tests use a permissive default to avoid unrelated flakiness.
+    pub rate_limit_config: Option<RateLimitConfig>,
 }
 
 /// Create a test server with all services initialized (VPC not configured)
@@ -143,15 +148,18 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
     let response_author_repository = db.response_author_repository();
 
     // Create rate limit state for testing
-    // Use a long window to avoid timing-related flakiness (requests may take > 1s).
-    // Also disable DB-backed window limits for tests to keep them fast/deterministic.
+    // Use a permissive default to avoid unrelated rate-limit interference.
+    // Individual rate limit tests can override via `TestServerConfig.rate_limit_config`.
+    let default_rate_limit_config = RateLimitConfig {
+        max_concurrent: 2,
+        max_requests_per_window: 100,
+        window_duration: Duration::seconds(60),
+        window_limits: vec![],
+    };
     let rate_limit_state = RateLimitState::with_config(
-        services::system_configs::ports::RateLimitConfig {
-            max_concurrent: 2,
-            max_requests_per_window: 1,
-            window_duration: Duration::seconds(60),
-            window_limits: vec![],
-        },
+        test_config
+            .rate_limit_config
+            .unwrap_or(default_rate_limit_config),
         analytics_service.clone(),
     );
 
