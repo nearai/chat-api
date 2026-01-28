@@ -100,6 +100,12 @@ impl From<services::vpc::VpcInfo> for VpcInfo {
 /// Cloud-API gateway attestation (forwarded from dependency)
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ApiGatewayAttestation {
+    /// Signing address
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signing_address: Option<String>,
+    /// Signing algorithm
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signing_algo: Option<String>,
     /// Intel TDX quote in hex format
     pub intel_quote: String,
     /// Event log

@@ -127,6 +127,8 @@ pub async fn get_attestation_report(
 
     let chat_api_gateway_attestation = if is_dev() {
         ApiGatewayAttestation {
+            signing_address: None,
+            signing_algo: None,
             intel_quote: "0x1234567890abcdef".to_string(),
             event_log: None,
             request_nonce,
@@ -153,6 +155,8 @@ pub async fn get_attestation_report(
         })?;
 
         ApiGatewayAttestation {
+            signing_address: None,
+            signing_algo: None,
             intel_quote: cpu_quote.quote,
             event_log: serde_json::from_str(&cpu_quote.event_log)
                 .map_err(|_| ApiError::internal_server_error("Failed to deserialize event_log"))?,
