@@ -1,4 +1,4 @@
-fronte# Build configuration for private-chat Docker image that includes both backend and frontend
+# Build configuration for private-chat Docker image that includes both backend and frontend
 # This file contains version information for dependencies used during the build process
 
 [frontend]
