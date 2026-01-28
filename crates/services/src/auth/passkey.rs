@@ -207,24 +207,28 @@ impl PasskeyService for PasskeyServiceImpl {
         };
 
         // Update credential properties if needed (e.g., counter/backup flags).
-        if let Some(rec) = self
+        // Even though the assertion is bound to a one-time server-side challenge, we still
+        // persist any post-authenticator updates (counter/backup flags) and `last_used_at`.
+        //
+        // If the passkey record is missing here, something is inconsistent (e.g. deleted
+        // concurrently), so we fail the auth rather than issuing a session.
+        let rec = self
             .passkey_repository
             .get_by_credential_id(&credential.id)
             .await?
-        {
-            if rec.user_id != user_id {
-                return Err(anyhow::anyhow!("Credential does not belong to user"));
-            }
+            .ok_or_else(|| anyhow::anyhow!("Passkey not found after authentication"))?;
 
-            let mut passkey: Passkey = rec.passkey;
-            // This may or may not update based on authenticator type.
-            let _ = passkey.update_credential(&auth_result);
-
-            let now = Utc::now();
-            self.passkey_repository
-                .update_passkey_and_last_used_at(rec.id, passkey, now)
-                .await?;
+        if rec.user_id != user_id {
+            return Err(anyhow::anyhow!("Credential does not belong to user"));
         }
+
+        let mut passkey: Passkey = rec.passkey;
+        // This may or may not update based on authenticator type.
+        let _ = passkey.update_credential(&auth_result);
+
+        self.passkey_repository
+            .update_passkey_and_last_used_at(rec.id, passkey, now)
+            .await?;
 
         // Create a normal session token (same as OAuth/NEAR).
         let session = self.session_repository.create_session(user_id).await?;
