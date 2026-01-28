@@ -241,16 +241,17 @@ impl PasskeyChallengeRepository for PostgresPasskeyChallengeRepository {
     async fn consume_challenge(
         &self,
         id: PasskeyChallengeId,
+        now: DateTime<Utc>,
     ) -> anyhow::Result<Option<PasskeyChallenge>> {
         let client = self.pool.get().await?;
         let row = client
             .query_opt(
                 r#"
                 DELETE FROM passkey_challenges
-                WHERE id = $1
+                WHERE id = $1 AND expires_at >= $2
                 RETURNING id, kind, user_id, state, created_at, expires_at
                 "#,
-                &[&id],
+                &[&id, &now],
             )
             .await?;
 

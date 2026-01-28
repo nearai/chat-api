@@ -252,6 +252,7 @@ pub trait PasskeyChallengeRepository: Send + Sync {
     async fn consume_challenge(
         &self,
         id: PasskeyChallengeId,
+        now: DateTime<Utc>,
     ) -> anyhow::Result<Option<PasskeyChallenge>>;
 
     async fn delete_expired(&self, now: DateTime<Utc>) -> anyhow::Result<u64>;

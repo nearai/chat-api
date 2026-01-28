@@ -103,20 +103,18 @@ impl PasskeyService for PasskeyServiceImpl {
         credential: PasskeyRegisterPublicKeyCredential,
         label: Option<String>,
     ) -> anyhow::Result<PasskeyId> {
+        let now = Utc::now();
         let challenge = self
             .passkey_challenge_repository
-            .consume_challenge(challenge_id)
+            .consume_challenge(challenge_id, now)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("Registration challenge not found"))?;
+            .ok_or_else(|| anyhow::anyhow!("Registration challenge not found or expired"))?;
 
         if challenge.kind != PasskeyChallengeKind::Registration {
             return Err(anyhow::anyhow!("Invalid challenge kind"));
         }
         if challenge.user_id != Some(user_id) {
             return Err(anyhow::anyhow!("Challenge does not belong to user"));
-        }
-        if challenge.expires_at < Utc::now() {
-            return Err(anyhow::anyhow!("Registration challenge expired"));
         }
 
         let PasskeyChallengeState::Registration(reg_state) = challenge.state else {
@@ -181,15 +179,12 @@ impl PasskeyService for PasskeyServiceImpl {
         challenge_id: PasskeyChallengeId,
         credential: PasskeyAuthenticatePublicKeyCredential,
     ) -> anyhow::Result<UserSession> {
+        let now = Utc::now();
         let challenge = self
             .passkey_challenge_repository
-            .consume_challenge(challenge_id)
+            .consume_challenge(challenge_id, now)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("Authentication challenge not found"))?;
-
-        if challenge.expires_at < Utc::now() {
-            return Err(anyhow::anyhow!("Authentication challenge expired"));
-        }
+            .ok_or_else(|| anyhow::anyhow!("Authentication challenge not found or expired"))?;
 
         let (user_id, auth_result) = match challenge.kind {
             PasskeyChallengeKind::Authentication => {
