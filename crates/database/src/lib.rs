@@ -8,9 +8,9 @@ pub use pool::DbPool;
 pub use repositories::{
     PostgresAnalyticsRepository, PostgresAppConfigRepository, PostgresConversationRepository,
     PostgresConversationShareRepository, PostgresFileRepository, PostgresModelRepository,
-    PostgresNearNonceRepository, PostgresOAuthRepository, PostgresSessionRepository,
-    PostgresSystemConfigsRepository, PostgresUserRepository, PostgresUserSettingsRepository,
-    ResponseAuthorRepository,
+    PostgresNearNonceRepository, PostgresOAuthRepository, PostgresPasskeyChallengeRepository,
+    PostgresPasskeyRepository, PostgresSessionRepository, PostgresSystemConfigsRepository,
+    PostgresUserRepository, PostgresUserSettingsRepository, ResponseAuthorRepository,
 };
 
 use crate::pool::create_pool_with_native_tls;
@@ -27,6 +27,8 @@ pub struct Database {
     user_repository: Arc<PostgresUserRepository>,
     session_repository: Arc<PostgresSessionRepository>,
     oauth_repository: Arc<PostgresOAuthRepository>,
+    passkey_repository: Arc<PostgresPasskeyRepository>,
+    passkey_challenge_repository: Arc<PostgresPasskeyChallengeRepository>,
     conversation_repository: Arc<PostgresConversationRepository>,
     conversation_share_repository: Arc<PostgresConversationShareRepository>,
     file_repository: Arc<PostgresFileRepository>,
@@ -46,6 +48,9 @@ impl Database {
         let user_repository = Arc::new(PostgresUserRepository::new(pool.clone()));
         let session_repository = Arc::new(PostgresSessionRepository::new(pool.clone()));
         let oauth_repository = Arc::new(PostgresOAuthRepository::new(pool.clone()));
+        let passkey_repository = Arc::new(PostgresPasskeyRepository::new(pool.clone()));
+        let passkey_challenge_repository =
+            Arc::new(PostgresPasskeyChallengeRepository::new(pool.clone()));
         let conversation_repository = Arc::new(PostgresConversationRepository::new(pool.clone()));
         let conversation_share_repository =
             Arc::new(PostgresConversationShareRepository::new(pool.clone()));
@@ -64,6 +69,8 @@ impl Database {
             user_repository,
             session_repository,
             oauth_repository,
+            passkey_repository,
+            passkey_challenge_repository,
             conversation_repository,
             conversation_share_repository,
             file_repository,
@@ -211,6 +218,16 @@ impl Database {
     /// Get the OAuth repository
     pub fn oauth_repository(&self) -> Arc<PostgresOAuthRepository> {
         self.oauth_repository.clone()
+    }
+
+    /// Get the passkey repository
+    pub fn passkey_repository(&self) -> Arc<PostgresPasskeyRepository> {
+        self.passkey_repository.clone()
+    }
+
+    /// Get the passkey challenge repository
+    pub fn passkey_challenge_repository(&self) -> Arc<PostgresPasskeyChallengeRepository> {
+        self.passkey_challenge_repository.clone()
     }
 
     /// Get the conversation repository

@@ -45,6 +45,7 @@ database = { path = "../database" }
 config = { path = "../config" }
 hex = "0.4.3"
 near-api = "0.8.0"
+webauthn-rs = { version = "0.5.4", features = ["danger-allow-state-serialisation"] }
 
 # VPC authentication
 reqwest = { version = "0.12", features = ["json"] }

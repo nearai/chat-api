@@ -9,7 +9,7 @@ use opentelemetry_sdk::{
 };
 use services::{
     analytics::AnalyticsServiceImpl,
-    auth::OAuthServiceImpl,
+    auth::{OAuthServiceImpl, PasskeyServiceImpl},
     conversation::service::ConversationServiceImpl,
     conversation::share_service::ConversationShareServiceImpl,
     file::service::FileServiceImpl,
@@ -25,6 +25,7 @@ use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
+use webauthn_rs::prelude::WebauthnBuilder;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -69,6 +70,8 @@ async fn main() -> anyhow::Result<()> {
     let user_repo = db.user_repository();
     let session_repo = db.session_repository();
     let oauth_repo = db.oauth_repository();
+    let passkey_repo = db.passkey_repository();
+    let passkey_challenge_repo = db.passkey_challenge_repository();
     let conversation_repo = db.conversation_repository();
     let conversation_share_repo = db.conversation_share_repository();
     let file_repo = db.file_repository();
@@ -94,6 +97,40 @@ async fn main() -> anyhow::Result<()> {
         config.oauth.redirect_uri.clone(),
         config.near.rpc_url.clone(),
     ));
+
+    // Initialize passkey (WebAuthn) service if configured
+    let passkey_service = if !config.webauthn.rp_id.is_empty() {
+        let rp_origin = config.webauthn.rp_origin.clone().ok_or_else(|| {
+            anyhow::anyhow!("WEBAUTHN_RP_ORIGIN is required when WEBAUTHN_RP_ID is set")
+        })?;
+
+        let builder = WebauthnBuilder::new(&config.webauthn.rp_id, &rp_origin)?
+            .rp_name(&config.webauthn.rp_name)
+            .allow_subdomains(config.webauthn.allow_subdomains)
+            .allow_any_port(config.webauthn.allow_any_port)
+            .timeout(std::time::Duration::from_secs(
+                config.webauthn.timeout_seconds,
+            ));
+
+        let builder = config
+            .webauthn
+            .allowed_origins
+            .iter()
+            .fold(builder, |b, origin| b.append_allowed_origin(origin));
+
+        let webauthn = builder.build()?;
+
+        Some(Arc::new(PasskeyServiceImpl::new(
+            webauthn,
+            passkey_repo,
+            passkey_challenge_repo,
+            user_repo.clone(),
+            session_repo.clone(),
+            chrono::Duration::seconds(config.webauthn.challenge_ttl_seconds as i64),
+        )) as Arc<dyn services::auth::ports::PasskeyService>)
+    } else {
+        None
+    };
 
     let user_service = Arc::new(UserServiceImpl::new(user_repo.clone()));
 
@@ -239,6 +276,7 @@ async fn main() -> anyhow::Result<()> {
     // Create application state
     let app_state = AppState {
         oauth_service,
+        passkey_service,
         user_service,
         user_settings_service,
         model_service,

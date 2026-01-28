@@ -11,4 +11,4 @@ pub mod types;
 pub mod user;
 pub mod vpc;
 
-pub use types::{SessionId, UserId};
+pub use types::{PasskeyChallengeId, PasskeyId, SessionId, UserId};

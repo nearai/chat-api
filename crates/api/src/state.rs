@@ -34,6 +34,7 @@ pub type ModelSettingsCache = Arc<RwLock<HashMap<String, ModelSettingsCacheEntry
 #[derive(Clone)]
 pub struct AppState {
     pub oauth_service: Arc<dyn services::auth::ports::OAuthService>,
+    pub passkey_service: Option<Arc<dyn services::auth::ports::PasskeyService>>,
     pub user_service: Arc<dyn services::user::ports::UserService>,
     pub user_settings_service: Arc<dyn services::user::ports::UserSettingsService>,
     pub model_service: Arc<dyn services::model::ports::ModelService>,

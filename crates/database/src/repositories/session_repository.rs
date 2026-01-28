@@ -80,11 +80,6 @@ impl SessionRepository for PostgresSessionRepository {
         &self,
         token_hash: String,
     ) -> anyhow::Result<Option<UserSession>> {
-        tracing::debug!(
-            "Looking up session by token_hash: {}...",
-            &token_hash.chars().take(16).collect::<String>()
-        );
-
         let client = self.pool.get().await?;
 
         let row = client

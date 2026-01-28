@@ -1,10 +1,24 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
-use crate::types::{SessionId, UserId};
+use crate::types::{PasskeyChallengeId, PasskeyId, SessionId, UserId};
 
 // Re-export OAuthProvider from user module for convenience
 pub use crate::user::ports::OAuthProvider;
+
+// -----------------------------
+// Passkeys (WebAuthn) Types
+// -----------------------------
+
+pub type Passkey = webauthn_rs::prelude::Passkey;
+
+pub type PasskeyRegistration = webauthn_rs::prelude::PasskeyRegistration;
+pub type PasskeyRegisterPublicKeyCredential = webauthn_rs::prelude::RegisterPublicKeyCredential;
+pub type PasskeyRegisterChallengeResponse = webauthn_rs::prelude::CreationChallengeResponse;
+
+pub type PasskeyAuthentication = webauthn_rs::prelude::PasskeyAuthentication;
+pub type PasskeyAuthenticatePublicKeyCredential = webauthn_rs::prelude::PublicKeyCredential;
+pub type PasskeyAuthenticateChallengeResponse = webauthn_rs::prelude::RequestChallengeResponse;
 
 /// Represents an OAuth session state
 #[derive(Debug, Clone)]
@@ -126,4 +140,166 @@ pub trait OAuthService: Send + Sync {
         signed_message: super::near::SignedMessage,
         payload: near_api::signer::NEP413Payload,
     ) -> anyhow::Result<(UserSession, bool)>;
+}
+
+// -----------------------------
+// Passkeys (WebAuthn)
+// -----------------------------
+
+/// Passkey (WebAuthn) registered to a user.
+#[derive(Debug, Clone)]
+pub struct PasskeyRecord {
+    pub id: PasskeyId,
+    pub user_id: UserId,
+    /// Base64url credential ID (`PublicKeyCredential.id`)
+    pub credential_id: String,
+    /// `webauthn_rs::prelude::Passkey` (stored as JSONB in DB)
+    pub passkey: Passkey,
+    /// User-facing label for UI (e.g. "MacBook TouchID", "iPhone", "YubiKey")
+    pub label: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
+/// Summary used for UI listing (never includes key material).
+#[derive(Debug, Clone)]
+pub struct PasskeySummary {
+    pub id: PasskeyId,
+    pub credential_id: String,
+    pub label: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PasskeyChallengeKind {
+    Registration,
+    Authentication,
+}
+
+impl PasskeyChallengeKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PasskeyChallengeKind::Registration => "registration",
+            PasskeyChallengeKind::Authentication => "authentication",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum PasskeyChallengeState {
+    Registration(PasskeyRegistration),
+    Authentication(PasskeyAuthentication),
+}
+
+impl PasskeyChallengeState {
+    pub fn kind(&self) -> PasskeyChallengeKind {
+        match self {
+            PasskeyChallengeState::Registration(_) => PasskeyChallengeKind::Registration,
+            PasskeyChallengeState::Authentication(_) => PasskeyChallengeKind::Authentication,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PasskeyChallenge {
+    pub id: PasskeyChallengeId,
+    pub kind: PasskeyChallengeKind,
+    pub user_id: Option<UserId>,
+    /// Server-side ceremony state (registration/authentication).
+    pub state: PasskeyChallengeState,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[async_trait]
+pub trait PasskeyRepository: Send + Sync {
+    async fn list_by_user(&self, user_id: UserId) -> anyhow::Result<Vec<PasskeyRecord>>;
+    async fn get_by_id(&self, id: PasskeyId) -> anyhow::Result<Option<PasskeyRecord>>;
+    async fn get_by_credential_id(
+        &self,
+        credential_id: &str,
+    ) -> anyhow::Result<Option<PasskeyRecord>>;
+
+    async fn insert_passkey(
+        &self,
+        user_id: UserId,
+        credential_id: String,
+        passkey: Passkey,
+        label: Option<String>,
+    ) -> anyhow::Result<PasskeyId>;
+
+    async fn update_passkey_and_last_used_at(
+        &self,
+        id: PasskeyId,
+        passkey: Passkey,
+        last_used_at: DateTime<Utc>,
+    ) -> anyhow::Result<()>;
+
+    async fn delete_passkey(&self, user_id: UserId, id: PasskeyId) -> anyhow::Result<bool>;
+}
+
+#[async_trait]
+pub trait PasskeyChallengeRepository: Send + Sync {
+    async fn create_challenge(
+        &self,
+        user_id: Option<UserId>,
+        state: PasskeyChallengeState,
+        expires_at: DateTime<Utc>,
+    ) -> anyhow::Result<PasskeyChallengeId>;
+
+    /// Consume (retrieve and delete) a challenge. Returns None if missing.
+    async fn consume_challenge(
+        &self,
+        id: PasskeyChallengeId,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<Option<PasskeyChallenge>>;
+
+    async fn delete_expired(&self, now: DateTime<Utc>) -> anyhow::Result<u64>;
+}
+
+#[derive(Debug, Clone)]
+pub struct PasskeyBeginResponse {
+    pub challenge_id: PasskeyChallengeId,
+    pub public_key: PasskeyRegisterChallengeResponse,
+}
+
+#[derive(Debug, Clone)]
+pub struct PasskeyBeginAuthenticationResponse {
+    pub challenge_id: PasskeyChallengeId,
+    pub public_key: PasskeyAuthenticateChallengeResponse,
+}
+
+#[async_trait]
+pub trait PasskeyService: Send + Sync {
+    /// Begin binding a passkey for an already-authenticated user.
+    async fn begin_registration(&self, user_id: UserId) -> anyhow::Result<PasskeyBeginResponse>;
+
+    /// Finish binding: verify and store the passkey.
+    async fn finish_registration(
+        &self,
+        user_id: UserId,
+        challenge_id: PasskeyChallengeId,
+        credential: PasskeyRegisterPublicKeyCredential,
+        label: Option<String>,
+    ) -> anyhow::Result<PasskeyId>;
+
+    /// Begin authentication (email-required in this deployment).
+    async fn begin_authentication(
+        &self,
+        email: String,
+    ) -> anyhow::Result<PasskeyBeginAuthenticationResponse>;
+
+    /// Finish authentication: verify assertion and create a new session.
+    async fn finish_authentication(
+        &self,
+        challenge_id: PasskeyChallengeId,
+        credential: PasskeyAuthenticatePublicKeyCredential,
+    ) -> anyhow::Result<UserSession>;
+
+    /// List passkeys for UI management.
+    async fn list_passkeys(&self, user_id: UserId) -> anyhow::Result<Vec<PasskeySummary>>;
+
+    /// Delete a passkey (must belong to user).
+    async fn delete_passkey(&self, user_id: UserId, passkey_id: PasskeyId) -> anyhow::Result<bool>;
 }

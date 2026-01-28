@@ -96,6 +96,8 @@ macro_rules! impl_id_type {
 // Define all our ID types
 impl_id_type!(UserId);
 impl_id_type!(SessionId);
+impl_id_type!(PasskeyId);
+impl_id_type!(PasskeyChallengeId);
 
 #[cfg(test)]
 mod tests {
