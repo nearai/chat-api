@@ -28,6 +28,24 @@ impl ConversationShareServiceImpl {
         }
     }
 
+    async fn get_conversation_owner_and_ensure_write_access(
+        &self,
+        conversation_id: &str,
+        actor_user_id: UserId,
+    ) -> Result<UserId, ConversationError> {
+        let conversation_owner_user_id = self
+            .conversation_repository
+            .get_conversation_owner(conversation_id)
+            .await?
+            .ok_or(ConversationError::NotFound)?;
+
+        // Allow owners OR users with write permission to manage shares
+        self.ensure_access(conversation_id, actor_user_id, SharePermission::Write)
+            .await?;
+
+        Ok(conversation_owner_user_id)
+    }
+
     fn normalize_recipient(recipient: ShareRecipient) -> ShareRecipient {
         match recipient.kind {
             ShareRecipientKind::Email => ShareRecipient {
@@ -228,17 +246,9 @@ impl ConversationShareService for ConversationShareServiceImpl {
         permission: SharePermission,
         target: ShareTarget,
     ) -> Result<Vec<ConversationShare>, ConversationError> {
-        // First verify the conversation exists and get its actual owner.
+        // Verify conversation exists, resolve owner, and enforce write access for actor
         let conversation_owner_user_id = self
-            .conversation_repository
-            .get_conversation_owner(conversation_id)
-            .await?;
-        let Some(conversation_owner_user_id) = conversation_owner_user_id else {
-            return Err(ConversationError::NotFound);
-        };
-
-        // Allow owners OR users with write permission to create shares
-        self.ensure_access(conversation_id, actor_user_id, SharePermission::Write)
+            .get_conversation_owner_and_ensure_write_access(conversation_id, actor_user_id)
             .await?;
 
         let mut shares = Vec::new();
@@ -344,17 +354,9 @@ impl ConversationShareService for ConversationShareServiceImpl {
         conversation_id: &str,
         share_id: uuid::Uuid,
     ) -> Result<(), ConversationError> {
-        // Verify conversation exists and get its actual owner.
+        // Verify conversation exists, resolve owner, and enforce write access for actor
         let conversation_owner_user_id = self
-            .conversation_repository
-            .get_conversation_owner(conversation_id)
-            .await?;
-        let Some(conversation_owner_user_id) = conversation_owner_user_id else {
-            return Err(ConversationError::NotFound);
-        };
-
-        // Allow owners OR users with write permission to delete shares
-        self.ensure_access(conversation_id, actor_user_id, SharePermission::Write)
+            .get_conversation_owner_and_ensure_write_access(conversation_id, actor_user_id)
             .await?;
 
         self.share_repository
