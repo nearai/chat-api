@@ -1,9 +1,26 @@
 use crate::{error::ApiError, middleware::AuthenticatedUser, models::*, state::AppState};
+use axum::extract::Path;
 use axum::{
     extract::{Extension, State},
     routing::{get, patch, post},
     Json, Router,
 };
+use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct PasskeySummaryResponse {
+    pub id: services::PasskeyId,
+    pub credential_id: String,
+    pub label: Option<String>,
+    pub created_at: String,
+    pub last_used_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct PasskeyListResponse {
+    pub passkeys: Vec<PasskeySummaryResponse>,
+}
 
 /// Get current user
 ///
@@ -176,6 +193,96 @@ pub async fn update_user_settings_partially(
     }))
 }
 
+/// List passkeys for the current user
+#[utoipa::path(
+    get,
+    path = "/v1/users/me/passkeys",
+    tag = "Users",
+    responses(
+        (status = 200, description = "Passkeys", body = PasskeyListResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 503, description = "Passkey not configured", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn list_my_passkeys(
+    State(app_state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+) -> Result<Json<PasskeyListResponse>, ApiError> {
+    let Some(svc) = app_state.passkey_service.as_ref() else {
+        return Err(ApiError::service_unavailable(
+            "Passkey authentication is not configured",
+        ));
+    };
+
+    let list = svc
+        .list_passkeys(user.user_id)
+        .await
+        .map_err(|_| ApiError::internal_server_error("Failed to list passkeys"))?;
+
+    Ok(Json(PasskeyListResponse {
+        passkeys: list
+            .into_iter()
+            .map(|p| PasskeySummaryResponse {
+                id: p.id,
+                credential_id: p.credential_id,
+                label: p.label,
+                created_at: p.created_at.to_rfc3339(),
+                last_used_at: p.last_used_at.map(|t| t.to_rfc3339()),
+            })
+            .collect(),
+    }))
+}
+
+/// Delete a passkey for the current user
+#[utoipa::path(
+    post,
+    path = "/v1/users/me/passkeys/{passkey_id}/delete",
+    tag = "Users",
+    params(
+        ("passkey_id" = String, Path, description = "Passkey id")
+    ),
+    responses(
+        (status = 204, description = "Deleted"),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "Not found", body = crate::error::ApiErrorResponse),
+        (status = 503, description = "Passkey not configured", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn delete_my_passkey(
+    State(app_state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(passkey_id): Path<String>,
+) -> Result<axum::http::StatusCode, ApiError> {
+    let Some(svc) = app_state.passkey_service.as_ref() else {
+        return Err(ApiError::service_unavailable(
+            "Passkey authentication is not configured",
+        ));
+    };
+
+    let passkey_id: services::PasskeyId = passkey_id
+        .parse()
+        .map_err(|_| ApiError::bad_request("Invalid passkey_id"))?;
+
+    let deleted = svc
+        .delete_passkey(user.user_id, passkey_id)
+        .await
+        .map_err(|_| ApiError::internal_server_error("Failed to delete passkey"))?;
+
+    if !deleted {
+        return Err(ApiError::not_found("Passkey not found"));
+    }
+
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
 /// Create user router with all routes (requires authentication)
 pub fn create_user_router() -> Router<AppState> {
     Router::new()
@@ -183,4 +290,6 @@ pub fn create_user_router() -> Router<AppState> {
         .route("/me/settings", get(get_user_settings))
         .route("/me/settings", post(update_user_settings))
         .route("/me/settings", patch(update_user_settings_partially))
+        .route("/me/passkeys", get(list_my_passkeys))
+        .route("/me/passkeys/{passkey_id}/delete", post(delete_my_passkey))
 }

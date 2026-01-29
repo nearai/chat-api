@@ -3,6 +3,86 @@ use std::collections::HashMap;
 use url::Url;
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct WebAuthnConfig {
+    /// Relying Party ID (domain). Example: "chat.near.ai" or "near.ai"
+    pub rp_id: String,
+    /// Primary Relying Party origin. Example: "https://chat.near.ai"
+    pub rp_origin: Option<Url>,
+    /// Additional allowed origins (comma-separated) for multi-env support.
+    pub allowed_origins: Vec<Url>,
+    /// Allow subdomains of rp_origin when validating origin.
+    pub allow_subdomains: bool,
+    /// Allow any port for origin matches (useful for localhost dev).
+    pub allow_any_port: bool,
+    /// Relying Party display name shown to users.
+    pub rp_name: String,
+    /// Timeout (seconds) embedded in WebAuthn options (client UX).
+    pub timeout_seconds: u64,
+    /// Server-side challenge lifetime (seconds) for passkey ceremonies.
+    ///
+    /// This controls how long a `passkey_challenges` row is valid before it is treated as expired.
+    /// Default: 300 seconds.
+    pub challenge_ttl_seconds: u64,
+}
+
+impl Default for WebAuthnConfig {
+    fn default() -> Self {
+        let rp_id = std::env::var("WEBAUTHN_RP_ID").unwrap_or_default();
+
+        let rp_origin = std::env::var("WEBAUTHN_RP_ORIGIN")
+            .ok()
+            .and_then(|s| Url::parse(&s).ok());
+
+        let allowed_origins = std::env::var("WEBAUTHN_ALLOWED_ORIGINS")
+            .unwrap_or_default()
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| Url::parse(s).expect("WEBAUTHN_ALLOWED_ORIGINS must contain valid URLs"))
+            .collect::<Vec<_>>();
+
+        let allow_subdomains = std::env::var("WEBAUTHN_ALLOW_SUBDOMAINS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(false);
+
+        let allow_any_port = std::env::var("WEBAUTHN_ALLOW_ANY_PORT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(false);
+
+        let rp_name = std::env::var("WEBAUTHN_RP_NAME").unwrap_or_else(|_| {
+            if rp_id.is_empty() {
+                "chat-api".to_string()
+            } else {
+                rp_id.clone()
+            }
+        });
+
+        let timeout_seconds = std::env::var("WEBAUTHN_TIMEOUT_SECONDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(300);
+
+        let challenge_ttl_seconds = std::env::var("WEBAUTHN_CHALLENGE_TTL_SECONDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(300);
+
+        Self {
+            rp_id,
+            rp_origin,
+            allowed_origins,
+            allow_subdomains,
+            allow_any_port,
+            rp_name,
+            timeout_seconds,
+            challenge_ttl_seconds,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct DatabaseConfig {
     pub host: Option<String>,
     pub port: u16,
@@ -312,6 +392,8 @@ pub struct Config {
     pub vpc_auth: VpcAuthConfig,
     pub telemetry: TelemetryConfig,
     pub logging: LoggingConfig,
+    /// WebAuthn / passkey configuration
+    pub webauthn: WebAuthnConfig,
 }
 
 impl Config {
@@ -327,6 +409,7 @@ impl Config {
             vpc_auth: VpcAuthConfig::default(),
             telemetry: TelemetryConfig::default(),
             logging: LoggingConfig::default(),
+            webauthn: WebAuthnConfig::default(),
         }
     }
 }
