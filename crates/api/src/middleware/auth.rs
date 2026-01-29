@@ -33,41 +33,34 @@ fn hash_session_token(token: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-/// Extract and validate token from Authorization header
+/// Extract and validate token from Authorization header or Cookie
 fn extract_token_from_request(request: &Request) -> Result<String, ApiError> {
-    let auth_header = request
-        .headers()
-        .get("authorization")
-        .and_then(|h| h.to_str().ok());
-
-    let auth_value = auth_header.ok_or_else(|| {
-        tracing::warn!("No authorization header found");
-        ApiError::missing_auth_header()
-    })?;
-
-    let token = auth_value.strip_prefix("Bearer ").ok_or_else(|| {
-        tracing::warn!(
-            "Authorization header does not start with 'Bearer ', header: {}",
-            auth_value
-        );
-        ApiError::invalid_auth_header()
-    })?;
-
-    // Validate token format (should start with sess_ and be the right length)
-    if !token.starts_with("sess_") {
-        tracing::warn!("Invalid session token format: token does not start with 'sess_'");
-        return Err(ApiError::invalid_token());
+    // First, try Authorization header
+    if let Some(auth_header) = request.headers().get("authorization").and_then(|h| h.to_str().ok()) {
+        if let Some(token) = auth_header.strip_prefix("Bearer ") {
+            // Validate token format
+            if token.starts_with("sess_") && token.len() == 37 {
+                return Ok(token.to_string());
+            }
+        }
     }
 
-    if token.len() != 37 {
-        tracing::warn!(
-            "Invalid session token format: expected length 37, got {}",
-            token.len()
-        );
-        return Err(ApiError::invalid_token());
+    // Fall back to session cookie
+    if let Some(cookie_header) = request.headers().get("cookie").and_then(|h| h.to_str().ok()) {
+        for cookie in cookie_header.split(';') {
+            let cookie = cookie.trim();
+            if let Some(value) = cookie.strip_prefix("session=") {
+                // Validate token format
+                if value.starts_with("sess_") && value.len() == 37 {
+                    tracing::debug!("Found session token in cookie");
+                    return Ok(value.to_string());
+                }
+            }
+        }
     }
 
-    Ok(token.to_string())
+    tracing::warn!("No valid authorization header or session cookie found");
+    Err(ApiError::missing_auth_header())
 }
 
 /// Authenticate a token string (without needing Request object)

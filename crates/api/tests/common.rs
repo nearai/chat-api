@@ -78,6 +78,17 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
 
     let user_service = Arc::new(services::user::UserServiceImpl::new(user_repo.clone()));
 
+    // Create OAuth server service
+    let oauth_server_service = Arc::new(services::auth::OAuthServerServiceImpl::new(
+        db.oauth_client_repository(),
+        db.authorization_code_repository(),
+        db.access_token_repository(),
+        db.refresh_token_repository(),
+        db.access_grant_repository(),
+        db.pending_authorization_repository(),
+        db.project_repository(),
+    ));
+
     let user_settings_service = Arc::new(services::user::UserSettingsServiceImpl::new(
         user_settings_repo,
     ));
@@ -147,6 +158,7 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
     // Create application state
     let app_state = AppState {
         oauth_service,
+        oauth_server_service,
         user_service,
         user_settings_service,
         model_service,

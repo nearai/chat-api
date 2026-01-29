@@ -2,8 +2,8 @@ use crate::{error::ApiError, middleware::AuthenticatedUser, state::AppState};
 use axum::extract::Query;
 use axum::{
     extract::{Extension, State},
-    http::StatusCode,
-    response::Redirect,
+    http::{header, StatusCode},
+    response::{IntoResponse, Redirect, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -209,7 +209,7 @@ pub async fn google_login(
 pub async fn oauth_callback(
     State(app_state): State<AppState>,
     Query(params): Query<OAuthCallbackQuery>,
-) -> Result<Redirect, ApiError> {
+) -> Result<Response, ApiError> {
     tracing::info!(
         "OAuth callback received - code length: {}, state: {}",
         params.code.len(),
@@ -300,7 +300,7 @@ pub async fn oauth_callback(
     tracing::info!("Redirecting to frontend: {}", frontend_url);
 
     let mut callback_url = format!(
-        "{}/auth/callback?token={}&session_id={}&expires_at={}",
+        "{}/auth/callback.html?token={}&session_id={}&expires_at={}",
         frontend_url,
         urlencoding::encode(&token),
         urlencoding::encode(&session.session_id.to_string()),
@@ -312,7 +312,18 @@ pub async fn oauth_callback(
 
     tracing::debug!("Final callback URL: {}", callback_url);
 
-    Ok(Redirect::temporary(&callback_url))
+    // Set session cookie for browser-based OAuth flows
+    let cookie = format!(
+        "session={}; HttpOnly; SameSite=Lax; Path=/; Max-Age={}",
+        token,
+        30 * 24 * 60 * 60 // 30 days
+    );
+
+    Ok((
+        [(header::SET_COOKIE, cookie)],
+        Redirect::temporary(&callback_url),
+    )
+        .into_response())
 }
 
 /// Handler for initiating Github OAuth flow

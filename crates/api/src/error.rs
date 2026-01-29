@@ -4,6 +4,7 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
+use services::auth::OAuthServerError;
 use utoipa::ToSchema;
 
 /// Structured error response returned to API consumers
@@ -180,6 +181,125 @@ impl From<anyhow::Error> for ApiError {
     fn from(err: anyhow::Error) -> Self {
         tracing::error!("Internal error: {:#}", err);
         Self::internal_server_error("An internal error occurred")
+    }
+}
+
+// =============================================================================
+// OAuth 2.0 Error Response (RFC 6749)
+// =============================================================================
+
+/// OAuth 2.0 error response per RFC 6749 Section 5.2
+#[derive(Debug, Serialize, Deserialize, ToSchema, Clone)]
+pub struct OAuthErrorResponse {
+    /// Error code (e.g., "invalid_request", "invalid_client", "invalid_grant")
+    pub error: String,
+    /// Human-readable error description
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_description: Option<String>,
+}
+
+/// OAuth error wrapper for consistent HTTP responses
+#[derive(Debug)]
+pub struct OAuthError {
+    pub status: StatusCode,
+    pub response: OAuthErrorResponse,
+}
+
+impl OAuthError {
+    pub fn new(status: StatusCode, error: impl Into<String>, description: Option<String>) -> Self {
+        Self {
+            status,
+            response: OAuthErrorResponse {
+                error: error.into(),
+                error_description: description,
+            },
+        }
+    }
+
+    /// Invalid request (400)
+    pub fn invalid_request(description: impl Into<String>) -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            Some(description.into()),
+        )
+    }
+
+    /// Invalid client (401)
+    pub fn invalid_client(description: impl Into<String>) -> Self {
+        Self::new(
+            StatusCode::UNAUTHORIZED,
+            "invalid_client",
+            Some(description.into()),
+        )
+    }
+
+    /// Invalid grant (400)
+    pub fn invalid_grant(description: impl Into<String>) -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_grant",
+            Some(description.into()),
+        )
+    }
+
+    /// Invalid scope (400)
+    pub fn invalid_scope(description: impl Into<String>) -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_scope",
+            Some(description.into()),
+        )
+    }
+
+    /// Access denied (400 for token endpoint, redirect with error for authorize)
+    pub fn access_denied(description: impl Into<String>) -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            "access_denied",
+            Some(description.into()),
+        )
+    }
+
+    /// Server error (500)
+    pub fn server_error(description: impl Into<String>) -> Self {
+        Self::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "server_error",
+            Some(description.into()),
+        )
+    }
+
+    /// Unsupported grant type (400)
+    pub fn unsupported_grant_type(description: impl Into<String>) -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            "unsupported_grant_type",
+            Some(description.into()),
+        )
+    }
+}
+
+impl IntoResponse for OAuthError {
+    fn into_response(self) -> Response {
+        (self.status, Json(self.response)).into_response()
+    }
+}
+
+impl From<OAuthServerError> for OAuthError {
+    fn from(err: OAuthServerError) -> Self {
+        let description = err.to_string();
+        match err {
+            OAuthServerError::InvalidRequest(_) => Self::invalid_request(description),
+            OAuthServerError::InvalidClient(_) => Self::invalid_client(description),
+            OAuthServerError::InvalidGrant(_) => Self::invalid_grant(description),
+            OAuthServerError::InvalidScope(_) => Self::invalid_scope(description),
+            OAuthServerError::AccessDenied(_) => Self::access_denied(description),
+            OAuthServerError::ServerError(_) => Self::server_error(description),
+            OAuthServerError::UnsupportedGrantType(_) => Self::unsupported_grant_type(description),
+            OAuthServerError::Pkce(_) => Self::invalid_grant(description),
+            OAuthServerError::Scope(_) => Self::invalid_scope(description),
+        }
     }
 }
 

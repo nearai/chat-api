@@ -34,6 +34,7 @@ pub type ModelSettingsCache = Arc<RwLock<HashMap<String, ModelSettingsCacheEntry
 #[derive(Clone)]
 pub struct AppState {
     pub oauth_service: Arc<dyn services::auth::ports::OAuthService>,
+    pub oauth_server_service: Arc<dyn services::auth::OAuthServerService>,
     pub user_service: Arc<dyn services::user::ports::UserService>,
     pub user_settings_service: Arc<dyn services::user::ports::UserSettingsService>,
     pub model_service: Arc<dyn services::model::ports::ModelService>,
@@ -64,4 +65,10 @@ pub struct AppState {
     pub response_author_repository: Arc<ResponseAuthorRepository>,
     /// Rate limit state for hot-reloadable rate limit configuration
     pub rate_limit_state: crate::middleware::RateLimitState,
+    /// Project repository for managing OAuth projects
+    pub project_repository: Arc<dyn services::auth::oauth_ports::ProjectRepository>,
+    /// OAuth client repository for managing OAuth clients
+    pub oauth_client_repository: Arc<dyn services::auth::oauth_ports::OAuthClientRepository>,
+    /// Access grant repository for tracking user authorizations
+    pub access_grant_repository: Arc<dyn services::auth::oauth_ports::AccessGrantRepository>,
 }

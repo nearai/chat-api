@@ -6,11 +6,13 @@ pub mod repositories;
 
 pub use pool::DbPool;
 pub use repositories::{
-    PostgresAnalyticsRepository, PostgresAppConfigRepository, PostgresConversationRepository,
-    PostgresConversationShareRepository, PostgresFileRepository, PostgresModelRepository,
-    PostgresNearNonceRepository, PostgresOAuthRepository, PostgresSessionRepository,
-    PostgresSystemConfigsRepository, PostgresUserRepository, PostgresUserSettingsRepository,
-    ResponseAuthorRepository,
+    PostgresAccessGrantRepository, PostgresAccessTokenRepository, PostgresAnalyticsRepository,
+    PostgresAppConfigRepository, PostgresAuthorizationCodeRepository,
+    PostgresConversationRepository, PostgresConversationShareRepository, PostgresFileRepository,
+    PostgresModelRepository, PostgresNearNonceRepository, PostgresOAuthClientRepository,
+    PostgresOAuthRepository, PostgresPendingAuthorizationRepository, PostgresProjectRepository,
+    PostgresRefreshTokenRepository, PostgresSessionRepository, PostgresSystemConfigsRepository,
+    PostgresUserRepository, PostgresUserSettingsRepository, ResponseAuthorRepository,
 };
 
 use crate::pool::create_pool_with_native_tls;
@@ -37,6 +39,14 @@ pub struct Database {
     analytics_repository: Arc<PostgresAnalyticsRepository>,
     model_repository: Arc<PostgresModelRepository>,
     response_author_repository: Arc<ResponseAuthorRepository>,
+    // OAuth server repositories
+    project_repository: Arc<PostgresProjectRepository>,
+    oauth_client_repository: Arc<PostgresOAuthClientRepository>,
+    authorization_code_repository: Arc<PostgresAuthorizationCodeRepository>,
+    access_token_repository: Arc<PostgresAccessTokenRepository>,
+    refresh_token_repository: Arc<PostgresRefreshTokenRepository>,
+    access_grant_repository: Arc<PostgresAccessGrantRepository>,
+    pending_authorization_repository: Arc<PostgresPendingAuthorizationRepository>,
     cluster_manager: Option<Arc<ClusterManager>>,
 }
 
@@ -58,6 +68,16 @@ impl Database {
         let analytics_repository = Arc::new(PostgresAnalyticsRepository::new(pool.clone()));
         let model_repository = Arc::new(PostgresModelRepository::new(pool.clone()));
         let response_author_repository = Arc::new(ResponseAuthorRepository::new(pool.clone()));
+        // OAuth server repositories
+        let project_repository = Arc::new(PostgresProjectRepository::new(pool.clone()));
+        let oauth_client_repository = Arc::new(PostgresOAuthClientRepository::new(pool.clone()));
+        let authorization_code_repository =
+            Arc::new(PostgresAuthorizationCodeRepository::new(pool.clone()));
+        let access_token_repository = Arc::new(PostgresAccessTokenRepository::new(pool.clone()));
+        let refresh_token_repository = Arc::new(PostgresRefreshTokenRepository::new(pool.clone()));
+        let access_grant_repository = Arc::new(PostgresAccessGrantRepository::new(pool.clone()));
+        let pending_authorization_repository =
+            Arc::new(PostgresPendingAuthorizationRepository::new(pool.clone()));
 
         Self {
             pool,
@@ -74,6 +94,13 @@ impl Database {
             analytics_repository,
             model_repository,
             response_author_repository,
+            project_repository,
+            oauth_client_repository,
+            authorization_code_repository,
+            access_token_repository,
+            refresh_token_repository,
+            access_grant_repository,
+            pending_authorization_repository,
             cluster_manager: None,
         }
     }
@@ -261,5 +288,40 @@ impl Database {
     /// Get the response author repository
     pub fn response_author_repository(&self) -> Arc<ResponseAuthorRepository> {
         self.response_author_repository.clone()
+    }
+
+    /// Get the project repository
+    pub fn project_repository(&self) -> Arc<PostgresProjectRepository> {
+        self.project_repository.clone()
+    }
+
+    /// Get the OAuth client repository
+    pub fn oauth_client_repository(&self) -> Arc<PostgresOAuthClientRepository> {
+        self.oauth_client_repository.clone()
+    }
+
+    /// Get the authorization code repository
+    pub fn authorization_code_repository(&self) -> Arc<PostgresAuthorizationCodeRepository> {
+        self.authorization_code_repository.clone()
+    }
+
+    /// Get the access token repository
+    pub fn access_token_repository(&self) -> Arc<PostgresAccessTokenRepository> {
+        self.access_token_repository.clone()
+    }
+
+    /// Get the refresh token repository
+    pub fn refresh_token_repository(&self) -> Arc<PostgresRefreshTokenRepository> {
+        self.refresh_token_repository.clone()
+    }
+
+    /// Get the access grant repository
+    pub fn access_grant_repository(&self) -> Arc<PostgresAccessGrantRepository> {
+        self.access_grant_repository.clone()
+    }
+
+    /// Get the pending authorization repository
+    pub fn pending_authorization_repository(&self) -> Arc<PostgresPendingAuthorizationRepository> {
+        self.pending_authorization_repository.clone()
     }
 }

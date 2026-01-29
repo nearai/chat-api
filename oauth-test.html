@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OAuth 2.0 Test Client</title>
+    <style>
+        * { box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; background: #f5f5f5; }
+        h1 { color: #333; }
+        .card { background: white; border-radius: 8px; padding: 20px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .card h2 { margin-top: 0; color: #555; font-size: 1.1em; }
+        label { display: block; margin-bottom: 5px; font-weight: 500; color: #444; }
+        input, select { width: 100%; padding: 8px 12px; margin-bottom: 15px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; }
+        button { background: #0066cc; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; font-size: 14px; margin-right: 10px; }
+        button:hover { background: #0052a3; }
+        button.secondary { background: #666; }
+        button.secondary:hover { background: #555; }
+        pre { background: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 4px; overflow-x: auto; font-size: 13px; white-space: pre-wrap; word-break: break-all; }
+        .success { color: #2e7d32; }
+        .error { color: #c62828; }
+        .info { background: #e3f2fd; padding: 10px; border-radius: 4px; margin-bottom: 15px; font-size: 13px; }
+        .step { display: inline-block; background: #0066cc; color: white; width: 24px; height: 24px; border-radius: 50%; text-align: center; line-height: 24px; margin-right: 8px; font-size: 12px; }
+    </style>
+</head>
+<body>
+    <h1>OAuth 2.0 Test Client</h1>
+
+    <div class="card">
+        <h2><span class="step">1</span> Configuration</h2>
+        <label>API Base URL</label>
+        <input type="text" id="baseUrl" value="http://localhost:3001">
+
+        <label>Client ID</label>
+        <input type="text" id="clientId" placeholder="Your OAuth client ID">
+
+        <label>Client Secret (for confidential clients)</label>
+        <input type="password" id="clientSecret" placeholder="Leave empty for public clients">
+
+        <label>Redirect URI</label>
+        <input type="text" id="redirectUri" value="http://localhost:3001/oauth-test.html">
+
+        <label>Scopes (space-separated)</label>
+        <input type="text" id="scopes" value="memory.read memory.write">
+    </div>
+
+    <div class="card">
+        <h2><span class="step">2</span> Start Authorization</h2>
+        <div class="info">
+            This will generate a PKCE code verifier/challenge and redirect you to the authorization endpoint.
+            You must be logged in to the API first.
+        </div>
+        <button onclick="startAuth()">Start OAuth Flow</button>
+        <button class="secondary" onclick="startAuthPopup()">Open in Popup</button>
+    </div>
+
+    <div class="card" id="callbackSection" style="display:none;">
+        <h2><span class="step">3</span> Authorization Callback</h2>
+        <div id="callbackResult"></div>
+    </div>
+
+    <div class="card" id="tokenSection" style="display:none;">
+        <h2><span class="step">4</span> Token Exchange</h2>
+        <div id="tokenResult"></div>
+    </div>
+
+    <div class="card" id="refreshSection" style="display:none;">
+        <h2><span class="step">5</span> Refresh Token</h2>
+        <button onclick="refreshToken()">Refresh Access Token</button>
+        <div id="refreshResult"></div>
+    </div>
+
+    <div class="card">
+        <h2>Debug Log</h2>
+        <button class="secondary" onclick="clearLog()">Clear</button>
+        <pre id="log"></pre>
+    </div>
+
+    <script>
+        // PKCE helpers
+        function generateRandomString(length) {
+            const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
+            let result = '';
+            const randomValues = crypto.getRandomValues(new Uint8Array(length));
+            for (let i = 0; i < length; i++) {
+                result += chars[randomValues[i] % chars.length];
+            }
+            return result;
+        }
+
+        async function sha256(plain) {
+            const encoder = new TextEncoder();
+            const data = encoder.encode(plain);
+            return await crypto.subtle.digest('SHA-256', data);
+        }
+
+        function base64urlencode(arrayBuffer) {
+            let str = '';
+            const bytes = new Uint8Array(arrayBuffer);
+            for (let i = 0; i < bytes.byteLength; i++) {
+                str += String.fromCharCode(bytes[i]);
+            }
+            return btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+        }
+
+        async function generatePKCE() {
+            const verifier = generateRandomString(64);
+            const hashed = await sha256(verifier);
+            const challenge = base64urlencode(hashed);
+            return { verifier, challenge };
+        }
+
+        // Logging
+        function log(message, type = 'info') {
+            const logEl = document.getElementById('log');
+            const timestamp = new Date().toLocaleTimeString();
+            const prefix = type === 'error' ? '❌' : type === 'success' ? '✅' : 'ℹ️';
+            logEl.textContent = `[${timestamp}] ${prefix} ${message}\n` + logEl.textContent;
+        }
+
+        function clearLog() {
+            document.getElementById('log').textContent = '';
+        }
+
+        // Storage helpers
+        function saveToSession(key, value) {
+            sessionStorage.setItem(`oauth_test_${key}`, JSON.stringify(value));
+        }
+
+        function getFromSession(key) {
+            const value = sessionStorage.getItem(`oauth_test_${key}`);
+            return value ? JSON.parse(value) : null;
+        }
+
+        // Start OAuth flow
+        async function startAuth(popup = false) {
+            const baseUrl = document.getElementById('baseUrl').value;
+            const clientId = document.getElementById('clientId').value;
+            const redirectUri = document.getElementById('redirectUri').value;
+            const scopes = document.getElementById('scopes').value;
+
+            if (!clientId) {
+                log('Client ID is required', 'error');
+                return;
+            }
+
+            // Generate PKCE
+            const pkce = await generatePKCE();
+            const state = generateRandomString(32);
+
+            // Save for later
+            saveToSession('pkce_verifier', pkce.verifier);
+            saveToSession('state', state);
+            saveToSession('config', {
+                baseUrl,
+                clientId,
+                clientSecret: document.getElementById('clientSecret').value,
+                redirectUri
+            });
+
+            // Build authorization URL
+            const params = new URLSearchParams({
+                response_type: 'code',
+                client_id: clientId,
+                redirect_uri: redirectUri,
+                scope: scopes,
+                state: state,
+                code_challenge: pkce.challenge,
+                code_challenge_method: 'S256'
+            });
+
+            const authUrl = `${baseUrl}/v1/oauth/authorize?${params}`;
+
+            log(`Starting OAuth flow...`);
+            log(`PKCE Verifier: ${pkce.verifier.substring(0, 20)}...`);
+            log(`PKCE Challenge: ${pkce.challenge}`);
+            log(`State: ${state}`);
+            log(`Auth URL: ${authUrl}`);
+
+            if (popup) {
+                window.open(authUrl, 'oauth', 'width=600,height=700');
+            } else {
+                window.location.href = authUrl;
+            }
+        }
+
+        function startAuthPopup() {
+            startAuth(true);
+        }
+
+        // Handle callback
+        async function handleCallback() {
+            const params = new URLSearchParams(window.location.search);
+            const code = params.get('code');
+            const state = params.get('state');
+            const error = params.get('error');
+            const errorDesc = params.get('error_description');
+
+            if (!code && !error) {
+                return; // Not a callback
+            }
+
+            document.getElementById('callbackSection').style.display = 'block';
+            const resultEl = document.getElementById('callbackResult');
+
+            if (error) {
+                resultEl.innerHTML = `<p class="error">Error: ${error}</p><p>${errorDesc || ''}</p>`;
+                log(`Authorization failed: ${error} - ${errorDesc}`, 'error');
+                return;
+            }
+
+            // Verify state
+            const savedState = getFromSession('state');
+            if (state !== savedState) {
+                resultEl.innerHTML = `<p class="error">State mismatch! Possible CSRF attack.</p>`;
+                log(`State mismatch: expected ${savedState}, got ${state}`, 'error');
+                return;
+            }
+
+            resultEl.innerHTML = `<p class="success">Authorization code received!</p><pre>${code}</pre>`;
+            log(`Received authorization code: ${code.substring(0, 20)}...`, 'success');
+
+            // Clean URL
+            window.history.replaceState({}, document.title, window.location.pathname);
+
+            // Exchange code for token
+            await exchangeCode(code);
+        }
+
+        // Exchange code for token
+        async function exchangeCode(code) {
+            const config = getFromSession('config');
+            const verifier = getFromSession('pkce_verifier');
+
+            if (!config || !verifier) {
+                log('Missing config or PKCE verifier', 'error');
+                return;
+            }
+
+            document.getElementById('tokenSection').style.display = 'block';
+            const resultEl = document.getElementById('tokenResult');
+            resultEl.innerHTML = '<p>Exchanging code for tokens...</p>';
+
+            const body = new URLSearchParams({
+                grant_type: 'authorization_code',
+                code: code,
+                redirect_uri: config.redirectUri,
+                client_id: config.clientId,
+                code_verifier: verifier
+            });
+
+            const headers = {
+                'Content-Type': 'application/x-www-form-urlencoded'
+            };
+
+            // Add Basic auth if client secret provided
+            if (config.clientSecret) {
+                headers['Authorization'] = 'Basic ' + btoa(`${config.clientId}:${config.clientSecret}`);
+            }
+
+            log(`Exchanging code at ${config.baseUrl}/v1/oauth/token`);
+            log(`Code verifier: ${verifier.substring(0, 20)}...`);
+
+            try {
+                const response = await fetch(`${config.baseUrl}/v1/oauth/token`, {
+                    method: 'POST',
+                    headers,
+                    body
+                });
+
+                const data = await response.json();
+
+                if (!response.ok) {
+                    resultEl.innerHTML = `<p class="error">Token exchange failed</p><pre>${JSON.stringify(data, null, 2)}</pre>`;
+                    log(`Token exchange failed: ${data.error} - ${data.error_description}`, 'error');
+                    return;
+                }
+
+                resultEl.innerHTML = `<p class="success">Tokens received!</p><pre>${JSON.stringify(data, null, 2)}</pre>`;
+                log('Token exchange successful!', 'success');
+
+                // Save tokens
+                saveToSession('tokens', data);
+
+                // Show refresh section if we have a refresh token
+                if (data.refresh_token) {
+                    document.getElementById('refreshSection').style.display = 'block';
+                }
+            } catch (err) {
+                resultEl.innerHTML = `<p class="error">Network error: ${err.message}</p>`;
+                log(`Network error: ${err.message}`, 'error');
+            }
+        }
+
+        // Refresh token
+        async function refreshToken() {
+            const config = getFromSession('config');
+            const tokens = getFromSession('tokens');
+
+            if (!config || !tokens?.refresh_token) {
+                log('No refresh token available', 'error');
+                return;
+            }
+
+            const resultEl = document.getElementById('refreshResult');
+            resultEl.innerHTML = '<p>Refreshing token...</p>';
+
+            const body = new URLSearchParams({
+                grant_type: 'refresh_token',
+                refresh_token: tokens.refresh_token,
+                client_id: config.clientId
+            });
+
+            const headers = {
+                'Content-Type': 'application/x-www-form-urlencoded'
+            };
+
+            if (config.clientSecret) {
+                headers['Authorization'] = 'Basic ' + btoa(`${config.clientId}:${config.clientSecret}`);
+            }
+
+            log(`Refreshing token at ${config.baseUrl}/v1/oauth/token`);
+
+            try {
+                const response = await fetch(`${config.baseUrl}/v1/oauth/token`, {
+                    method: 'POST',
+                    headers,
+                    body
+                });
+
+                const data = await response.json();
+
+                if (!response.ok) {
+                    resultEl.innerHTML = `<p class="error">Token refresh failed</p><pre>${JSON.stringify(data, null, 2)}</pre>`;
+                    log(`Token refresh failed: ${data.error} - ${data.error_description}`, 'error');
+                    return;
+                }
+
+                resultEl.innerHTML = `<p class="success">New tokens received!</p><pre>${JSON.stringify(data, null, 2)}</pre>`;
+                log('Token refresh successful!', 'success');
+
+                // Update saved tokens
+                saveToSession('tokens', data);
+            } catch (err) {
+                resultEl.innerHTML = `<p class="error">Network error: ${err.message}</p>`;
+                log(`Network error: ${err.message}`, 'error');
+            }
+        }
+
+        // Initialize
+        window.onload = function() {
+            // Restore config if available
+            const config = getFromSession('config');
+            if (config) {
+                document.getElementById('baseUrl').value = config.baseUrl || 'http://localhost:3001';
+                document.getElementById('clientId').value = config.clientId || '';
+                document.getElementById('clientSecret').value = config.clientSecret || '';
+                document.getElementById('redirectUri').value = config.redirectUri || '';
+            }
+
+            // Handle callback
+            handleCallback();
+
+            log('OAuth test client ready');
+        };
+    </script>
+</body>
+</html>

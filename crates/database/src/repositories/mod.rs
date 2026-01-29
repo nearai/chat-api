@@ -5,6 +5,7 @@ pub mod conversation_share_repository;
 pub mod file_repository;
 pub mod model_repository;
 pub mod near_nonce_repository;
+pub mod oauth_client_repository;
 pub mod oauth_repository;
 pub mod response_author_repository;
 pub mod session_repository;
@@ -19,6 +20,12 @@ pub use conversation_share_repository::PostgresConversationShareRepository;
 pub use file_repository::PostgresFileRepository;
 pub use model_repository::PostgresModelRepository;
 pub use near_nonce_repository::PostgresNearNonceRepository;
+pub use oauth_client_repository::{
+    PostgresAccessGrantRepository, PostgresAccessTokenRepository,
+    PostgresAuthorizationCodeRepository, PostgresOAuthClientRepository,
+    PostgresPendingAuthorizationRepository, PostgresProjectRepository,
+    PostgresRefreshTokenRepository,
+};
 pub use oauth_repository::PostgresOAuthRepository;
 pub use response_author_repository::ResponseAuthorRepository;
 pub use session_repository::PostgresSessionRepository;

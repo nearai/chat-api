@@ -37,6 +37,7 @@ rmcp = { version = "0.6", features = [
 hex = "0.4"
 hmac = "0.12"
 sha2 = "0.10"
+base64 = "0.22"
 dstack-sdk = "0.1"
 # OpenTelemetry for metrics
 opentelemetry = { version = "0.31", features = ["metrics"] }

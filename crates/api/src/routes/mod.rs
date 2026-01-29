@@ -3,6 +3,8 @@ pub mod api;
 pub mod attestation;
 pub mod configs;
 pub mod oauth;
+pub mod oauth_server;
+pub mod projects;
 pub mod users;
 
 use axum::{middleware::from_fn_with_state, routing::get, Json, Router};
@@ -103,6 +105,16 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
     // Attestation routes (public, no auth required)
     let attestation_routes = attestation::create_attestation_router();
 
+    // OAuth server routes (token endpoint - no user auth, uses client credentials)
+    let oauth_server_routes = oauth_server::create_oauth_server_router();
+
+    // OAuth server routes that require user authentication (authorize, consent)
+    let oauth_server_auth_routes =
+        oauth_server::create_oauth_server_auth_router().layer(from_fn_with_state(
+            auth_state.clone(),
+            crate::middleware::auth_middleware,
+        ));
+
     // Admin routes (requires admin authentication)
     let admin_routes = admin::create_admin_router().layer(from_fn_with_state(
         auth_state.clone(),
@@ -111,6 +123,12 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
 
     // User routes (requires authentication)
     let user_routes = users::create_user_router().layer(from_fn_with_state(
+        auth_state.clone(),
+        crate::middleware::auth_middleware,
+    ));
+
+    // Project routes (requires authentication)
+    let project_routes = projects::create_project_router().layer(from_fn_with_state(
         auth_state.clone(),
         crate::middleware::auth_middleware,
     ));
@@ -146,8 +164,11 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         .merge(configs_routes) // Configs route (requires user auth)
         .nest("/v1/auth", auth_routes)
         .nest("/v1/auth", logout_route) // Logout route with auth middleware
+        .nest("/v1/oauth", oauth_server_routes) // OAuth server routes (no user auth)
+        .nest("/v1/oauth", oauth_server_auth_routes) // OAuth server routes (with user auth)
         .nest("/v1/users", user_routes)
         .nest("/v1/admin", admin_routes)
+        .nest("/v1", project_routes) // Project routes (requires user auth)
         .merge(optional_auth_routes) // Conversation read routes (optional auth)
         .merge(api_routes) // API routes (required auth)
         .merge(attestation_routes) // Merge attestation routes (already have /v1 prefix)

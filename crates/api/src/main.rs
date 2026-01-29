@@ -9,7 +9,7 @@ use opentelemetry_sdk::{
 };
 use services::{
     analytics::AnalyticsServiceImpl,
-    auth::OAuthServiceImpl,
+    auth::{OAuthServerServiceImpl, OAuthServiceImpl},
     conversation::service::ConversationServiceImpl,
     conversation::share_service::ConversationShareServiceImpl,
     file::service::FileServiceImpl,
@@ -100,6 +100,18 @@ async fn main() -> anyhow::Result<()> {
     let user_settings_service = Arc::new(UserSettingsServiceImpl::new(user_settings_repo));
 
     let model_service = Arc::new(ModelServiceImpl::new(model_repo));
+
+    // Initialize OAuth server service
+    tracing::info!("Initializing OAuth server service...");
+    let oauth_server_service = Arc::new(OAuthServerServiceImpl::new(
+        db.oauth_client_repository(),
+        db.authorization_code_repository(),
+        db.access_token_repository(),
+        db.refresh_token_repository(),
+        db.access_grant_repository(),
+        db.pending_authorization_repository(),
+        db.project_repository(),
+    ));
 
     // Initialize VPC credentials service and get API key
     let vpc_auth_config = if config.vpc_auth.is_configured() {
@@ -239,6 +251,7 @@ async fn main() -> anyhow::Result<()> {
     // Create application state
     let app_state = AppState {
         oauth_service,
+        oauth_server_service,
         user_service,
         user_settings_service,
         model_service,
@@ -260,6 +273,9 @@ async fn main() -> anyhow::Result<()> {
         model_settings_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         response_author_repository: response_author_repo,
         rate_limit_state,
+        project_repository: db.project_repository(),
+        oauth_client_repository: db.oauth_client_repository(),
+        access_grant_repository: db.access_grant_repository(),
     };
 
     // Create router with CORS support
