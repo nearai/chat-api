@@ -3094,7 +3094,7 @@ fn is_streaming_response(headers: &HeaderMap) -> bool {
 }
 
 /// Parsed usage from a response JSON (OpenAI-style: usage.total_tokens, usage.input_tokens, usage.output_tokens, model).
-/// Returns (total_tokens, input_tokens, output_tokens, model_name).
+/// Returns (input_tokens, output_tokens, total_tokens, model_name).
 fn parse_usage_from_json(bytes: &[u8]) -> Option<(u64, u64, u64, Option<String>)> {
     let root = serde_json::from_slice::<serde_json::Value>(bytes).ok()?;
     let usage = root.get("usage")?.as_object()?;
