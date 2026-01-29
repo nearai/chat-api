@@ -63,9 +63,11 @@ pub struct RateLimitConfig {
     /// Each limit applies independently
     pub window_limits: Vec<WindowLimit>,
     /// Token usage limits per window (limit = max tokens in window)
+    /// Use `#[serde(default)]` for old config data compatibility
     #[serde(default)]
     pub token_window_limits: Vec<WindowLimit>,
     /// Cost usage limits per window (limit = max nano-dollars in window)
+    /// Use `#[serde(default)]` for old config data compatibility
     #[serde(default)]
     pub cost_window_limits: Vec<WindowLimit>,
 }
