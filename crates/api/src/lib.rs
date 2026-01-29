@@ -2,6 +2,7 @@ pub mod common;
 pub mod consts;
 pub mod error;
 pub mod middleware;
+pub mod model_pricing;
 pub mod models;
 pub mod openapi;
 pub mod routes;

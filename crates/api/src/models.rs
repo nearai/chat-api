@@ -413,6 +413,12 @@ pub struct RateLimitConfig {
     pub window_duration_seconds: u64,
     /// Sliding window limits based on activity_log
     pub window_limits: Vec<WindowLimit>,
+    /// Token usage limits per window (limit = max tokens in window)
+    #[serde(default)]
+    pub token_window_limits: Vec<WindowLimit>,
+    /// Cost usage limits per window (limit = max nano-dollars in window)
+    #[serde(default)]
+    pub cost_window_limits: Vec<WindowLimit>,
 }
 
 /// Configuration for a single time window limit (API model)
@@ -432,6 +438,16 @@ impl From<services::system_configs::ports::RateLimitConfig> for RateLimitConfig 
             window_duration_seconds: u64::try_from(config.window_duration.num_seconds())
                 .unwrap_or(u64::MAX),
             window_limits: config.window_limits.into_iter().map(Into::into).collect(),
+            token_window_limits: config
+                .token_window_limits
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            cost_window_limits: config
+                .cost_window_limits
+                .into_iter()
+                .map(Into::into)
+                .collect(),
         }
     }
 }
@@ -467,11 +483,24 @@ impl TryFrom<RateLimitConfig> for services::system_configs::ports::RateLimitConf
             .map(|limit| limit.try_into())
             .collect();
 
+        let token_window_limits: Result<Vec<_>, _> = api_config
+            .token_window_limits
+            .into_iter()
+            .map(|limit| limit.try_into())
+            .collect();
+        let cost_window_limits: Result<Vec<_>, _> = api_config
+            .cost_window_limits
+            .into_iter()
+            .map(|limit| limit.try_into())
+            .collect();
+
         Ok(Self {
             max_concurrent: api_config.max_concurrent,
             max_requests_per_window: api_config.max_requests_per_window,
             window_duration: Duration::seconds(window_duration_seconds),
             window_limits: window_limits?,
+            token_window_limits: token_window_limits?,
+            cost_window_limits: cost_window_limits?,
         })
     }
 }
@@ -538,6 +567,36 @@ impl RateLimitConfig {
             if window_limit.limit == 0 {
                 return Err(ApiError::bad_request(format!(
                     "window_limits[{}].limit must be greater than 0",
+                    index
+                )));
+            }
+        }
+
+        for (index, window_limit) in self.token_window_limits.iter().enumerate() {
+            if window_limit.window_duration_seconds == 0 {
+                return Err(ApiError::bad_request(format!(
+                    "token_window_limits[{}].window_duration_seconds must be greater than 0",
+                    index
+                )));
+            }
+            if window_limit.limit == 0 {
+                return Err(ApiError::bad_request(format!(
+                    "token_window_limits[{}].limit must be greater than 0",
+                    index
+                )));
+            }
+        }
+
+        for (index, window_limit) in self.cost_window_limits.iter().enumerate() {
+            if window_limit.window_duration_seconds == 0 {
+                return Err(ApiError::bad_request(format!(
+                    "cost_window_limits[{}].window_duration_seconds must be greater than 0",
+                    index
+                )));
+            }
+            if window_limit.limit == 0 {
+                return Err(ApiError::bad_request(format!(
+                    "cost_window_limits[{}].limit must be greater than 0 (nano-dollars)",
                     index
                 )));
             }

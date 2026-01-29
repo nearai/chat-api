@@ -166,6 +166,9 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
         near_rpc_url: config.near.rpc_url.clone(),
         near_balance_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         model_settings_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        model_pricing_cache: api::model_pricing::ModelPricingCache::new(
+            test_config.cloud_api_base_url.clone(),
+        ),
         response_author_repository,
         rate_limit_state,
     };

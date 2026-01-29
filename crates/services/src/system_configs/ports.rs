@@ -62,6 +62,12 @@ pub struct RateLimitConfig {
     /// Sliding window limits based on activity logs
     /// Each limit applies independently
     pub window_limits: Vec<WindowLimit>,
+    /// Token usage limits per window (limit = max tokens in window)
+    #[serde(default)]
+    pub token_window_limits: Vec<WindowLimit>,
+    /// Cost usage limits per window (limit = max nano-dollars in window)
+    #[serde(default)]
+    pub cost_window_limits: Vec<WindowLimit>,
 }
 
 impl Default for RateLimitConfig {
@@ -74,6 +80,8 @@ impl Default for RateLimitConfig {
                 window_duration: Duration::days(1),
                 limit: 1500,
             }],
+            token_window_limits: vec![],
+            cost_window_limits: vec![],
         }
     }
 }
