@@ -42,6 +42,9 @@ const NEAR_BALANCE_CACHE_TTL_SECS: i64 = 5 * 60;
 /// Duration to cache model settings needed by /v1/responses in memory (in seconds)
 const MODEL_SETTINGS_CACHE_TTL_SECS: i64 = 60;
 
+/// Maximum image file size for edits (512 MB, matching cloud-api)
+const MAX_IMAGE_SIZE: usize = 512 * 1024 * 1024;
+
 /// Error message when a user is banned
 pub const USER_BANNED_ERROR_MESSAGE: &str =
     "Access temporarily restricted. Please try again later.";
@@ -113,6 +116,10 @@ pub fn create_api_router(
         .route("/v1/files/{file_id}", get(get_file).delete(delete_file))
         .route("/v1/files/{file_id}/content", get(get_file_content));
 
+    let images_router = Router::new()
+        .route("/v1/images/generations", post(image_generations))
+        .route("/v1/images/edits", post(image_edits));
+
     let responses_router = Router::new()
         .route("/v1/responses", post(proxy_responses))
         .layer(axum::middleware::from_fn_with_state(
@@ -128,6 +135,7 @@ pub fn create_api_router(
         .merge(conversations_router)
         .merge(share_groups_router)
         .merge(files_router)
+        .merge(images_router)
         .merge(responses_router)
         .merge(proxy_router)
 }
@@ -1593,6 +1601,323 @@ async fn upload_file(
         })?;
 
     handle_trackable_response(&state, &user, proxy_response, TrackableResource::File).await
+}
+
+/// Generate images from text prompts using OpenAI's DALL-E models
+#[utoipa::path(
+    post,
+    path = "/v1/images/generations",
+    tag = "Images",
+    request_body = crate::models::ImageGenerationRequest,
+    responses(
+        (status = 200, description = "Images generated successfully", body = crate::models::ImageGenerationResponse),
+        (status = 400, description = "Invalid request parameters"),
+        (status = 502, description = "OpenAI API error")
+    ),
+    security(("session_token" = []))
+)]
+pub async fn image_generations(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    request: Request,
+) -> Result<Response, Response> {
+    tracing::info!(
+        "image_generations called for user_id={}, session_id={}",
+        user.user_id,
+        user.session_id
+    );
+
+    // Extract body
+    let body_bytes = extract_body_bytes(request).await?;
+
+    tracing::debug!(
+        "image_generations request body size: {} bytes for user_id={}",
+        body_bytes.len(),
+        user.user_id
+    );
+
+    // Forward to OpenAI
+    let proxy_response = state
+        .proxy_service
+        .forward_request(
+            Method::POST,
+            "images/generations",
+            headers.clone(),
+            Some(body_bytes),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "OpenAI API error during image generation for user_id={}: {}",
+                user.user_id,
+                e
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("OpenAI API error: {e}"),
+                }),
+            )
+                .into_response()
+        })?;
+
+    tracing::info!(
+        "image_generations completed for user_id={}, status={}",
+        user.user_id,
+        proxy_response.status
+    );
+
+    build_response(
+        proxy_response.status,
+        proxy_response.headers,
+        Body::from_stream(proxy_response.body),
+    )
+    .await
+}
+
+/// Edit images using OpenAI's DALL-E models
+///
+/// Accepts multipart/form-data with image file and editing parameters.
+#[utoipa::path(
+    post,
+    path = "/v1/images/edits",
+    tag = "Images",
+    request_body(content_type = "multipart/form-data"),
+    responses(
+        (status = 200, description = "Image edited successfully", body = crate::models::ImageGenerationResponse),
+        (status = 400, description = "Invalid request or image"),
+        (status = 413, description = "Image file too large (max 512MB)"),
+        (status = 502, description = "OpenAI API error")
+    ),
+    security(("session_token" = []))
+)]
+pub async fn image_edits(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    _headers: HeaderMap,
+    mut multipart: axum::extract::Multipart,
+) -> Result<Response, Response> {
+    tracing::info!(
+        "image_edits called for user_id={}, session_id={}",
+        user.user_id,
+        user.session_id
+    );
+
+    let mut form_fields: std::collections::HashMap<String, Vec<u8>> =
+        std::collections::HashMap::new();
+    let mut image_bytes: Option<Vec<u8>> = None;
+    let mut image_filename: Option<String> = None;
+
+    // Parse multipart form with streaming validation
+    loop {
+        match multipart.next_field().await {
+            Ok(Some(field)) => {
+                let field_name = field.name().unwrap_or("").to_string();
+
+                if field_name == "image" {
+                    image_filename = field.file_name().map(|s| s.to_string());
+
+                    // Stream with size limit
+                    let mut bytes = Vec::new();
+                    let mut size = 0usize;
+
+                    let mut field_stream = field;
+                    loop {
+                        match field_stream.chunk().await {
+                            Ok(Some(chunk)) => {
+                                size += chunk.len();
+                                if size > MAX_IMAGE_SIZE {
+                                    tracing::warn!(
+                                        "Image size exceeds limit for user_id={}: {} bytes",
+                                        user.user_id,
+                                        size
+                                    );
+                                    return Err((
+                                        StatusCode::PAYLOAD_TOO_LARGE,
+                                        Json(ErrorResponse {
+                                            error: format!(
+                                                "Image size exceeds maximum of {} MB",
+                                                MAX_IMAGE_SIZE / 1024 / 1024
+                                            ),
+                                        }),
+                                    )
+                                        .into_response());
+                                }
+                                bytes.extend_from_slice(&chunk);
+                            }
+                            Ok(None) => break,
+                            Err(e) => {
+                                tracing::error!(
+                                    "Failed to read image chunk for user_id={}: {}",
+                                    user.user_id,
+                                    e
+                                );
+                                return Err((
+                                    StatusCode::BAD_REQUEST,
+                                    Json(ErrorResponse {
+                                        error: format!("Failed to read image: {}", e),
+                                    }),
+                                )
+                                    .into_response());
+                            }
+                        }
+                    }
+
+                    image_bytes = Some(bytes);
+                } else {
+                    // Read other form fields as text
+                    match field.text().await {
+                        Ok(text) => {
+                            form_fields.insert(field_name, text.into_bytes());
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "Failed to read form field for user_id={}: {}",
+                                user.user_id,
+                                e
+                            );
+                            return Err((
+                                StatusCode::BAD_REQUEST,
+                                Json(ErrorResponse {
+                                    error: format!("Failed to read form field: {}", e),
+                                }),
+                            )
+                                .into_response());
+                        }
+                    }
+                }
+            }
+            Ok(None) => break,
+            Err(e) => {
+                tracing::error!(
+                    "Multipart parsing error for user_id={}: {}",
+                    user.user_id,
+                    e
+                );
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: format!("Invalid multipart request: {}", e),
+                    }),
+                )
+                    .into_response());
+            }
+        }
+    }
+
+    // Validate required image field
+    let image_data = image_bytes.ok_or_else(|| {
+        tracing::warn!("Missing image field for user_id={}", user.user_id);
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Missing required field: image".to_string(),
+            }),
+        )
+            .into_response()
+    })?;
+
+    tracing::debug!(
+        "image_edits parsed form: image_size={} bytes, fields={} for user_id={}",
+        image_data.len(),
+        form_fields.len(),
+        user.user_id
+    );
+
+    // Build multipart request for OpenAI using reqwest
+    let mut form = reqwest::multipart::Form::new();
+
+    // Add image part
+    let image_part = reqwest::multipart::Part::bytes(image_data)
+        .file_name(image_filename.unwrap_or_else(|| "image.png".to_string()))
+        .mime_str("image/png")
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to create image part for user_id={}: {}",
+                user.user_id,
+                e
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Failed to process image".to_string(),
+                }),
+            )
+                .into_response()
+        })?;
+    form = form.part("image", image_part);
+
+    // Add other form fields
+    for (field_name, field_value) in form_fields {
+        let text = String::from_utf8_lossy(&field_value).to_string();
+        form = form.text(field_name, text);
+    }
+
+    // Get API key
+    let api_key = state
+        .vpc_credentials_service
+        .get_api_key()
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get API key for user_id={}: {}", user.user_id, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Failed to authenticate with OpenAI".to_string(),
+                }),
+            )
+                .into_response()
+        })?;
+
+    // Make request to OpenAI
+    let url = format!("{}/images/edits", state.cloud_api_base_url);
+    let client = reqwest::Client::new();
+    let response = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "OpenAI API request failed for user_id={}: {}",
+                user.user_id,
+                e
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("OpenAI API error: {}", e),
+                }),
+            )
+                .into_response()
+        })?;
+
+    let status = response.status();
+    let response_headers = response.headers().clone();
+    let body_bytes = response.bytes().await.map_err(|e| {
+        tracing::error!(
+            "Failed to read OpenAI response for user_id={}: {}",
+            user.user_id,
+            e
+        );
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(ErrorResponse {
+                error: "Failed to read response from OpenAI".to_string(),
+            }),
+        )
+            .into_response()
+    })?;
+
+    tracing::info!(
+        "image_edits completed for user_id={}, status={}",
+        user.user_id,
+        status.as_u16()
+    );
+
+    build_response(status.as_u16(), response_headers, Body::from(body_bytes)).await
 }
 
 /// List all files for the authenticated user (fetches details from OpenAI)

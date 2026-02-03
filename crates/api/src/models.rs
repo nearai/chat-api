@@ -644,3 +644,44 @@ impl From<FileData> for FileGetResponse {
         }
     }
 }
+
+// === Image Generation Models ===
+
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+pub struct ImageGenerationRequest {
+    /// Model to use (e.g., "dall-e-3", "dall-e-2")
+    pub model: String,
+    /// Text prompt describing the image
+    pub prompt: String,
+    /// Number of images (1-10 for dall-e-2, only 1 for dall-e-3)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub n: Option<i32>,
+    /// Size (e.g., "1024x1024", "1792x1024" for dall-e-3)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<String>,
+    /// Response format: "url" or "b64_json"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<String>,
+    /// Quality: "standard" or "hd" (dall-e-3 only)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quality: Option<String>,
+    /// Style: "vivid" or "natural" (dall-e-3 only)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub style: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ImageGenerationResponse {
+    pub created: i64,
+    pub data: Vec<ImageData>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ImageData {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub b64_json: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revised_prompt: Option<String>,
+}

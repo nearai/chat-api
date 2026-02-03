@@ -40,6 +40,9 @@ use utoipa::OpenApi;
         crate::routes::users::update_user_settings,
         // Attestation endpoints
         crate::routes::attestation::get_attestation_report,
+        // Image endpoints
+        crate::routes::api::image_generations,
+        crate::routes::api::image_edits,
     ),
     components(schemas(
         // Request/Response models
@@ -66,6 +69,10 @@ use utoipa::OpenApi;
         // System configs models
         crate::models::SystemConfigsResponse,
         crate::models::UpsertSystemConfigsRequest,
+        // Image generation models
+        crate::models::ImageGenerationRequest,
+        crate::models::ImageGenerationResponse,
+        crate::models::ImageData,
         // Attestation models
         crate::models::ApiGatewayAttestation,
         crate::models::ModelAttestation,
@@ -79,6 +86,7 @@ use utoipa::OpenApi;
         (name = "Conversations", description = "Conversation management endpoints (supports optional authentication for public sharing)"),
         (name = "Admin", description = "Admin management endpoints"),
         (name = "Configs", description = "System configuration endpoints"),
+        (name = "Images", description = "Image generation and editing endpoints"),
         (name = "attestation", description = "Attestation reporting endpoints for TEE verification")
     )
 )]
