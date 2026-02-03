@@ -51,6 +51,9 @@ reqwest = { version = "0.12", features = ["json", "multipart"] }
 hmac = "0.12"
 base64 = "0.22.1"
 
+# MIME type detection
+mime_guess = "2.0"
+
 # OpenTelemetry OTLP export
 opentelemetry = { version = "0.31", features = ["metrics"] }
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "metrics"] }

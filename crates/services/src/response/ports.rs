@@ -36,4 +36,24 @@ pub trait OpenAIProxyService: Send + Sync {
         headers: HeaderMap,
         body: Option<Bytes>,
     ) -> Result<ProxyResponse, ProxyError>;
+
+    /// Forward a multipart form request to OpenAI's API (e.g., for image uploads).
+    /// This method handles multipart/form-data requests and returns the raw response.
+    ///
+    /// # Arguments
+    /// * `path` - The path after /v1 (e.g., "images/edits")
+    /// * `headers` - Additional headers to forward (excluding Authorization and Content-Type)
+    /// * `form` - The multipart form data to send
+    async fn forward_multipart_request(
+        &self,
+        path: &str,
+        headers: HeaderMap,
+        form: reqwest::multipart::Form,
+    ) -> Result<ProxyResponse, ProxyError> {
+        // Default implementation returns an error - implementers should override for multipart support
+        let _ = (path, headers, form);
+        Err(ProxyError::InvalidRequest(
+            "This proxy service does not support multipart requests".to_string(),
+        ))
+    }
 }

@@ -463,6 +463,7 @@ dependencies = [
  "hex",
  "hmac 0.12.1",
  "http",
+ "mime_guess",
  "near-api",
  "opentelemetry",
  "opentelemetry-otlp",

@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use http::{HeaderMap, Method};
 use std::sync::Arc;
+use std::time::Duration;
 
 use super::ports::{OpenAIProxyService, ProxyError, ProxyResponse};
 
@@ -18,7 +19,10 @@ impl OpenAIProxy {
         Self {
             vpc_service,
             base_url: "https://api.openai.com/v1".to_string(),
-            http_client: reqwest::Client::new(),
+            http_client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(120))
+                .build()
+                .expect("Failed to create HTTP client with timeout"),
         }
     }
 
@@ -94,6 +98,77 @@ impl OpenAIProxyService for OpenAIProxy {
         tracing::info!(
             "OpenAI Proxy: Received response from {} {} - status: {}",
             method,
+            url,
+            status
+        );
+
+        tracing::debug!("Response has {} header(s)", response_headers.len());
+
+        // Get the body as a stream (don't buffer it)
+        let body_stream = response.bytes_stream();
+
+        Ok(ProxyResponse {
+            status,
+            headers: response_headers,
+            body: Box::pin(body_stream),
+        })
+    }
+
+    async fn forward_multipart_request(
+        &self,
+        path: &str,
+        mut headers: HeaderMap,
+        form: reqwest::multipart::Form,
+    ) -> Result<ProxyResponse, ProxyError> {
+        // Get API key
+        let api_key = self.vpc_service.get_api_key().await.map_err(|_e| {
+            // Don't log error details to avoid exposing sensitive credentials
+            tracing::error!("Failed to get API key for multipart request");
+            ProxyError::ApiError("Failed to get API key".to_string())
+        })?;
+
+        // Ensure path doesn't start with a slash
+        let clean_path = path.trim_start_matches('/');
+        let url = format!("{}/{}", self.base_url, clean_path);
+
+        tracing::info!("OpenAI Proxy: Forwarding multipart request to {}", url);
+
+        // Build the request with multipart form
+        let mut request_builder = self
+            .http_client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", api_key));
+
+        // Forward headers (except Authorization and Content-Type which multipart handles)
+        headers.remove("authorization");
+        headers.remove("content-type"); // multipart will set this
+        headers.remove("host"); // Don't forward host header
+
+        tracing::debug!("Forwarding {} header(s) to OpenAI", headers.len());
+        for (key, value) in headers.iter() {
+            request_builder = request_builder.header(key, value);
+        }
+
+        // Add multipart form
+        request_builder = request_builder.multipart(form);
+
+        // Send the request
+        tracing::debug!("Sending multipart request to OpenAI: POST {}", url);
+        let response = request_builder.send().await.map_err(|e| {
+            tracing::error!(
+                "OpenAI API multipart request failed for POST {}: {}",
+                url,
+                e
+            );
+            ProxyError::ApiError(e.to_string())
+        })?;
+
+        // Extract status and headers
+        let status = response.status().as_u16();
+        let response_headers = response.headers().clone();
+
+        tracing::info!(
+            "OpenAI Proxy: Received response from POST {} - status: {}",
             url,
             status
         );
