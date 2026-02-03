@@ -16,7 +16,7 @@ use axum::{
 use serde::Serialize;
 use services::{
     analytics::{ActivityType, AnalyticsServiceTrait, CheckAndRecordActivityRequest},
-    system_configs::ports::RateLimitConfig,
+    system_configs::ports::{RateLimitConfig, WindowLimit},
     UserId,
 };
 use std::{
@@ -25,6 +25,12 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::{Mutex, OwnedSemaphorePermit, RwLock, Semaphore};
+
+/// Distinguishes token vs cost usage when checking window limits.
+enum UsageLimitType {
+    Token,
+    Cost,
+}
 
 struct UserRateLimitState {
     semaphore: Arc<Semaphore>,
@@ -261,80 +267,22 @@ impl RateLimitState {
         }
 
         // Phase 2a: Check token usage limits (user_usage_log)
-        for window_limit in &config.token_window_limits {
-            let limit_value = window_limit.limit as i64;
-            let sum = match self
-                .analytics_service
-                .get_token_usage_sum(user_id, window_limit.window_duration)
-                .await
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!(
-                        user_id = %user_id.0,
-                        "Failed to check token usage sum: {}",
-                        e
-                    );
-                    self.rollback_acquire(user_id, added_timestamp).await;
-                    return Err(RateLimitError::InternalServerError);
-                }
-            };
-            if sum >= limit_value {
-                self.rollback_acquire(user_id, added_timestamp).await;
-                let window_seconds = window_limit.window_duration.num_seconds();
-                let retry_after_ms = u64::try_from(window_seconds * 1000).unwrap_or(u64::MAX);
-                tracing::warn!(
-                    user_id = %user_id.0,
-                    window_seconds = window_seconds,
-                    limit = window_limit.limit,
-                    current_sum = sum,
-                    "Token usage limit exceeded"
-                );
-                return Err(RateLimitError::TokenLimitExceeded {
-                    window_seconds: u64::try_from(window_seconds).unwrap_or(u64::MAX),
-                    limit: window_limit.limit,
-                    retry_after_ms,
-                });
-            }
-        }
+        self.check_usage_limits(
+            user_id,
+            added_timestamp,
+            &config.token_window_limits,
+            UsageLimitType::Token,
+        )
+        .await?;
 
         // Phase 2b: Check cost usage limits (user_usage_log, nano-dollars)
-        for window_limit in &config.cost_window_limits {
-            let limit_value = window_limit.limit as i64;
-            let sum = match self
-                .analytics_service
-                .get_cost_usage_sum(user_id, window_limit.window_duration)
-                .await
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!(
-                        user_id = %user_id.0,
-                        "Failed to check cost usage sum: {}",
-                        e
-                    );
-                    self.rollback_acquire(user_id, added_timestamp).await;
-                    return Err(RateLimitError::InternalServerError);
-                }
-            };
-            if sum >= limit_value {
-                self.rollback_acquire(user_id, added_timestamp).await;
-                let window_seconds = window_limit.window_duration.num_seconds();
-                let retry_after_ms = u64::try_from(window_seconds * 1000).unwrap_or(u64::MAX);
-                tracing::warn!(
-                    user_id = %user_id.0,
-                    window_seconds = window_seconds,
-                    limit = window_limit.limit,
-                    current_sum = sum,
-                    "Cost usage limit exceeded"
-                );
-                return Err(RateLimitError::CostLimitExceeded {
-                    window_seconds: u64::try_from(window_seconds).unwrap_or(u64::MAX),
-                    limit: window_limit.limit,
-                    retry_after_ms,
-                });
-            }
-        }
+        self.check_usage_limits(
+            user_id,
+            added_timestamp,
+            &config.cost_window_limits,
+            UsageLimitType::Cost,
+        )
+        .await?;
 
         // All windows passed the non-atomic checks, now insert a single record that all windows will count
         //
@@ -413,6 +361,84 @@ impl RateLimitState {
         }
 
         Ok(RateLimitGuard { _permit: permit })
+    }
+
+    /// Checks usage limits for a list of windows (token or cost).
+    /// Returns `Ok(())` if all windows are under limit, or `Err(RateLimitError)` on failure or limit exceeded.
+    async fn check_usage_limits(
+        &self,
+        user_id: UserId,
+        added_timestamp: Instant,
+        window_limits: &[WindowLimit],
+        usage_type: UsageLimitType,
+    ) -> Result<(), RateLimitError> {
+        for window_limit in window_limits {
+            let limit_value = window_limit.limit as i64;
+
+            let sum = match usage_type {
+                UsageLimitType::Token => {
+                    self.analytics_service
+                        .get_token_usage_sum(user_id, window_limit.window_duration)
+                        .await
+                }
+                UsageLimitType::Cost => {
+                    self.analytics_service
+                        .get_cost_usage_sum(user_id, window_limit.window_duration)
+                        .await
+                }
+            };
+
+            let sum = match sum {
+                Ok(s) => s,
+                Err(e) => {
+                    let error_msg = match usage_type {
+                        UsageLimitType::Token => "Failed to check token usage sum",
+                        UsageLimitType::Cost => "Failed to check cost usage sum",
+                    };
+                    tracing::warn!(user_id = %user_id.0, "{}: {}", error_msg, e);
+                    self.rollback_acquire(user_id, added_timestamp).await;
+                    return Err(RateLimitError::InternalServerError);
+                }
+            };
+
+            if sum >= limit_value {
+                self.rollback_acquire(user_id, added_timestamp).await;
+                let window_seconds = window_limit.window_duration.num_seconds();
+                let retry_after_ms = u64::try_from(window_seconds * 1000).unwrap_or(u64::MAX);
+
+                match usage_type {
+                    UsageLimitType::Token => {
+                        tracing::warn!(
+                            user_id = %user_id.0,
+                            window_seconds = window_seconds,
+                            limit = window_limit.limit,
+                            current_sum = sum,
+                            "Token usage limit exceeded"
+                        );
+                        return Err(RateLimitError::TokenLimitExceeded {
+                            window_seconds: u64::try_from(window_seconds).unwrap_or(u64::MAX),
+                            limit: window_limit.limit,
+                            retry_after_ms,
+                        });
+                    }
+                    UsageLimitType::Cost => {
+                        tracing::warn!(
+                            user_id = %user_id.0,
+                            window_seconds = window_seconds,
+                            limit = window_limit.limit,
+                            current_sum = sum,
+                            "Cost usage limit exceeded"
+                        );
+                        return Err(RateLimitError::CostLimitExceeded {
+                            window_seconds: u64::try_from(window_seconds).unwrap_or(u64::MAX),
+                            limit: window_limit.limit,
+                            retry_after_ms,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Rollback acquire: remove the specific timestamp that was added during try_acquire.
