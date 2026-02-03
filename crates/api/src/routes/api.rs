@@ -3093,10 +3093,17 @@ fn is_streaming_response(headers: &HeaderMap) -> bool {
         .unwrap_or(false)
 }
 
-/// Parsed usage from a response JSON (OpenAI-style: usage.total_tokens, usage.input_tokens, usage.output_tokens, model).
-/// Returns (input_tokens, output_tokens, total_tokens, model_name).
-fn parse_usage_from_json(bytes: &[u8]) -> Option<(u64, u64, u64, Option<String>)> {
-    let root = serde_json::from_slice::<serde_json::Value>(bytes).ok()?;
+/// Parsed usage from an OpenAI-style response (usage.total_tokens, usage.input_tokens, usage.output_tokens, model).
+#[derive(Debug, Clone)]
+struct ParsedUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub model_name: Option<String>,
+}
+
+/// Parses usage from an already-parsed JSON value (OpenAI-style).
+fn parse_usage_from_value(root: &serde_json::Value) -> Option<ParsedUsage> {
     let usage = root.get("usage")?.as_object()?;
     let total = usage
         .get("total_tokens")
@@ -3120,8 +3127,19 @@ fn parse_usage_from_json(bytes: &[u8]) -> Option<(u64, u64, u64, Option<String>)
         .get("output_tokens")
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
-    let model = root.get("model").and_then(|v| v.as_str()).map(String::from);
-    Some((input_tokens, output_tokens, total, model))
+    let model_name = root.get("model").and_then(|v| v.as_str()).map(String::from);
+    Some(ParsedUsage {
+        input_tokens,
+        output_tokens,
+        total_tokens: total,
+        model_name,
+    })
+}
+
+/// Parses usage from a response JSON body (OpenAI-style).
+fn parse_usage_from_json(bytes: &[u8]) -> Option<ParsedUsage> {
+    let root = serde_json::from_slice::<serde_json::Value>(bytes).ok()?;
+    parse_usage_from_value(&root)
 }
 
 /// Record token and cost usage from parsed response body. Calls analytics_service.record_user_usage.
@@ -3131,25 +3149,24 @@ async fn record_usage_from_body(
     user_id: UserId,
     body: &[u8],
 ) -> bool {
-    let Some((input_tokens, output_tokens, total_tokens, model_name)) = parse_usage_from_json(body)
-    else {
+    let Some(usage) = parse_usage_from_json(body) else {
         return false;
     };
-    if total_tokens == 0 {
+    if usage.total_tokens == 0 {
         return false;
     }
-    let cost_nano_usd = if let Some(ref model) = model_name {
+    let cost_nano_usd = if let Some(ref model) = usage.model_name {
         state
             .model_pricing_cache
             .get_pricing(model)
             .await
-            .map(|p| p.cost_nano_usd(input_tokens, output_tokens))
+            .map(|p| p.cost_nano_usd(usage.input_tokens, usage.output_tokens))
     } else {
         None
     };
     if let Err(e) = state
         .analytics_service
-        .record_user_usage(user_id, total_tokens, cost_nano_usd)
+        .record_user_usage(user_id, usage.total_tokens, cost_nano_usd)
         .await
     {
         tracing::warn!("Failed to record usage for user_id={}: {}", user_id, e);
@@ -3160,37 +3177,13 @@ async fn record_usage_from_body(
 
 /// Try to extract usage and model from SSE data line (data: {...}).
 /// Expects OpenAI/cloud-api style: object with "usage" and optionally "model".
-fn try_extract_usage_from_sse_line(line: &str) -> Option<(u64, u64, u64, Option<String>)> {
+fn try_extract_usage_from_sse_line(line: &str) -> Option<ParsedUsage> {
     let data = line.strip_prefix("data: ")?;
     if data == "[DONE]" || data.is_empty() {
         return None;
     }
     let root = serde_json::from_str::<serde_json::Value>(data).ok()?;
-    let usage = root.get("usage")?.as_object()?;
-    let total = usage
-        .get("total_tokens")
-        .and_then(|v| v.as_u64())
-        .or_else(|| {
-            let input = usage
-                .get("input_tokens")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let output = usage
-                .get("output_tokens")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            Some(input + output)
-        })?;
-    let input_tokens = usage
-        .get("input_tokens")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    let output_tokens = usage
-        .get("output_tokens")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    let model = root.get("model").and_then(|v| v.as_str()).map(String::from);
-    Some((input_tokens, output_tokens, total, model))
+    parse_usage_from_value(&root)
 }
 
 /// Stream wrapper that parses SSE for usage (e.g. event: response.completed) and records usage on stream end.
@@ -3198,7 +3191,7 @@ fn try_extract_usage_from_sse_line(line: &str) -> Option<(u64, u64, u64, Option<
 struct UsageTrackingStreamFull<S> {
     inner: S,
     buffer: String,
-    usage: Option<(u64, u64, u64, Option<String>)>,
+    usage: Option<ParsedUsage>,
     analytics: Arc<dyn AnalyticsServiceTrait>,
     pricing_cache: crate::model_pricing::ModelPricingCache,
     user_id: UserId,
@@ -3254,19 +3247,18 @@ where
                 let analytics = this.analytics.clone();
                 let pricing_cache = this.pricing_cache.clone();
                 let user_id = this.user_id;
-                if let Some((input_tokens, output_tokens, total_tokens, model_name)) = usage {
-                    if total_tokens > 0 {
+                if let Some(usage) = usage {
+                    if usage.total_tokens > 0 {
                         tokio::spawn(async move {
-                            let cost_nano_usd = if let Some(ref model) = model_name {
-                                pricing_cache
-                                    .get_pricing(model)
-                                    .await
-                                    .map(|p| p.cost_nano_usd(input_tokens, output_tokens))
+                            let cost_nano_usd = if let Some(ref model) = usage.model_name {
+                                pricing_cache.get_pricing(model).await.map(|p| {
+                                    p.cost_nano_usd(usage.input_tokens, usage.output_tokens)
+                                })
                             } else {
                                 None
                             };
                             if let Err(e) = analytics
-                                .record_user_usage(user_id, total_tokens, cost_nano_usd)
+                                .record_user_usage(user_id, usage.total_tokens, cost_nano_usd)
                                 .await
                             {
                                 tracing::warn!(
@@ -3498,24 +3490,24 @@ mod usage_parsing_tests {
     fn test_parse_usage_from_json_total_tokens() {
         let body = br#"{"model":"gpt-test","usage":{"total_tokens":12,"input_tokens":5,"output_tokens":7}}"#;
         let parsed = parse_usage_from_json(body).expect("should parse usage");
-        assert_eq!(parsed.0, 5);
-        assert_eq!(parsed.1, 7);
-        assert_eq!(parsed.2, 12);
-        assert_eq!(parsed.3.as_deref(), Some("gpt-test"));
+        assert_eq!(parsed.input_tokens, 5);
+        assert_eq!(parsed.output_tokens, 7);
+        assert_eq!(parsed.total_tokens, 12);
+        assert_eq!(parsed.model_name.as_deref(), Some("gpt-test"));
     }
 
     #[test]
     fn test_parse_usage_from_json_fallback_sum() {
         let body = br#"{"model":"gpt-test","usage":{"input_tokens":2,"output_tokens":3}}"#;
         let parsed = parse_usage_from_json(body).expect("should parse usage");
-        assert_eq!(parsed.2, 5);
+        assert_eq!(parsed.total_tokens, 5);
     }
 
     #[test]
     fn test_try_extract_usage_from_sse_line() {
         let line = r#"data: {"model":"gpt-test","usage":{"total_tokens":10,"input_tokens":4,"output_tokens":6}}"#;
         let parsed = try_extract_usage_from_sse_line(line).expect("should parse sse usage");
-        assert_eq!(parsed.2, 10);
-        assert_eq!(parsed.3.as_deref(), Some("gpt-test"));
+        assert_eq!(parsed.total_tokens, 10);
+        assert_eq!(parsed.model_name.as_deref(), Some("gpt-test"));
     }
 }
