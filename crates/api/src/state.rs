@@ -1,3 +1,4 @@
+use crate::websocket::ConnectionManager;
 use chrono::{DateTime, Utc};
 use database::repositories::ResponseAuthorRepository;
 use std::collections::HashMap;
@@ -62,6 +63,8 @@ pub struct AppState {
     pub model_settings_cache: ModelSettingsCache,
     /// Repository for tracking response authors in shared conversations
     pub response_author_repository: Arc<ResponseAuthorRepository>,
+    /// WebSocket connection manager for real-time conversation updates
+    pub connection_manager: Arc<ConnectionManager>,
     /// Rate limit state for hot-reloadable rate limit configuration
     pub rate_limit_state: crate::middleware::RateLimitState,
 }

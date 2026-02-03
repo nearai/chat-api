@@ -134,9 +134,15 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
 
     // API proxy routes (requires authentication)
     let api_routes = api::create_api_router(rate_limit_state).layer(from_fn_with_state(
-        auth_state,
+        auth_state.clone(),
         crate::middleware::auth_middleware,
     ));
+
+    // WebSocket routes (auth is handled via query param in the handler)
+    let websocket_routes = Router::new().route(
+        "/v1/ws/conversations/{conversation_id}",
+        get(crate::websocket::websocket_handler),
+    );
 
     // Build the base router
     // Note: optional_auth_routes must come BEFORE api_routes since they share paths
@@ -150,6 +156,7 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         .nest("/v1/admin", admin_routes)
         .merge(optional_auth_routes) // Conversation read routes (optional auth)
         .merge(api_routes) // API routes (required auth)
+        .merge(websocket_routes) // WebSocket routes
         .merge(attestation_routes) // Merge attestation routes (already have /v1 prefix)
         .with_state(app_state)
         // Add static file serving as fallback (must be last)

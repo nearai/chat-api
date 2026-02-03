@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use api::middleware::RateLimitState;
-use api::{create_router_with_cors, AppState};
+use api::{create_router_with_cors, AppState, ConnectionManager};
 use axum_test::TestServer;
 use serde_json::json;
 use services::analytics::AnalyticsServiceImpl;
@@ -144,6 +144,9 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
     // Create rate limit state for testing
     let rate_limit_state = RateLimitState::new(analytics_service.clone());
 
+    // Initialize WebSocket connection manager for tests
+    let connection_manager = Arc::new(ConnectionManager::new());
+
     // Create application state
     let app_state = AppState {
         oauth_service,
@@ -167,6 +170,7 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
         near_balance_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         model_settings_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         response_author_repository,
+        connection_manager,
         rate_limit_state,
     };
 
