@@ -526,14 +526,33 @@ impl TryFrom<WindowLimit> for services::system_configs::ports::WindowLimit {
 }
 
 impl RateLimitConfig {
+    /// Validates a slice of window limits. `field_name` is used in error messages (e.g. "window_limits").
+    fn validate_window_limits(limits: &[WindowLimit], field_name: &str) -> Result<(), ApiError> {
+        for (index, window_limit) in limits.iter().enumerate() {
+            if window_limit.window_duration_seconds == 0 {
+                return Err(ApiError::bad_request(format!(
+                    "{}[{}].window_duration_seconds must be greater than 0",
+                    field_name, index
+                )));
+            }
+            if window_limit.limit == 0 {
+                return Err(ApiError::bad_request(format!(
+                    "{}[{}].limit must be greater than 0",
+                    field_name, index
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Validate the rate limit configuration
     ///
     /// Returns an error if any field is invalid:
     /// - `max_concurrent` must be greater than 0
     /// - `max_requests_per_window` must be greater than 0
     /// - `window_duration_seconds` must be greater than 0
-    /// - `window_limits` may be empty (to disable long-term window limiting)
-    /// - Each `window_limits` entry must have `window_duration_seconds > 0` and `limit > 0`
+    /// - `window_limits`, `token_window_limits`, and `cost_window_limits` may be empty
+    /// - Each entry in those arrays must have `window_duration_seconds > 0` and `limit > 0`
     pub fn validate(&self) -> Result<(), ApiError> {
         if self.max_concurrent == 0 {
             return Err(ApiError::bad_request(
@@ -553,52 +572,10 @@ impl RateLimitConfig {
             ));
         }
 
-        // window_limits can be empty (to disable long-term window limiting)
-        for (index, window_limit) in self.window_limits.iter().enumerate() {
-            if window_limit.window_duration_seconds == 0 {
-                return Err(ApiError::bad_request(format!(
-                    "window_limits[{}].window_duration_seconds must be greater than 0",
-                    index
-                )));
-            }
-
-            if window_limit.limit == 0 {
-                return Err(ApiError::bad_request(format!(
-                    "window_limits[{}].limit must be greater than 0",
-                    index
-                )));
-            }
-        }
-
-        for (index, window_limit) in self.token_window_limits.iter().enumerate() {
-            if window_limit.window_duration_seconds == 0 {
-                return Err(ApiError::bad_request(format!(
-                    "token_window_limits[{}].window_duration_seconds must be greater than 0",
-                    index
-                )));
-            }
-            if window_limit.limit == 0 {
-                return Err(ApiError::bad_request(format!(
-                    "token_window_limits[{}].limit must be greater than 0",
-                    index
-                )));
-            }
-        }
-
-        for (index, window_limit) in self.cost_window_limits.iter().enumerate() {
-            if window_limit.window_duration_seconds == 0 {
-                return Err(ApiError::bad_request(format!(
-                    "cost_window_limits[{}].window_duration_seconds must be greater than 0",
-                    index
-                )));
-            }
-            if window_limit.limit == 0 {
-                return Err(ApiError::bad_request(format!(
-                    "cost_window_limits[{}].limit must be greater than 0 (nano-dollars)",
-                    index
-                )));
-            }
-        }
+        // window_limits / token_window_limits / cost_window_limits can be empty
+        Self::validate_window_limits(&self.window_limits, "window_limits")?;
+        Self::validate_window_limits(&self.token_window_limits, "token_window_limits")?;
+        Self::validate_window_limits(&self.cost_window_limits, "cost_window_limits")?;
 
         Ok(())
     }
