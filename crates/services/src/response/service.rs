@@ -51,7 +51,7 @@ impl OpenAIProxyService for OpenAIProxy {
         let clean_path = path.trim_start_matches('/');
         let url = format!("{}/{}", self.base_url, clean_path);
 
-        tracing::info!("OpenAI Proxy: Forwarding request {} to {}", method, url);
+        tracing::info!("OpenAI Proxy: Forwarding request {}", method);
 
         let body_size = body.as_ref().map(|b| b.len()).unwrap_or(0);
         tracing::debug!("Request body size: {} bytes", body_size);
@@ -85,9 +85,9 @@ impl OpenAIProxyService for OpenAIProxy {
         }
 
         // Send the request
-        tracing::debug!("Sending request to OpenAI: {} {}", method, url);
+        tracing::debug!("Sending request to OpenAI: {}", method);
         let response = request_builder.send().await.map_err(|e| {
-            tracing::error!("OpenAI API request failed for {} {}: {}", method, url, e);
+            tracing::error!("OpenAI API request failed for {}: {}", method, e);
             ProxyError::ApiError(e.to_string())
         })?;
 
@@ -96,9 +96,8 @@ impl OpenAIProxyService for OpenAIProxy {
         let response_headers = response.headers().clone();
 
         tracing::info!(
-            "OpenAI Proxy: Received response from {} {} - status: {}",
+            "OpenAI Proxy: Received response from {} - status: {}",
             method,
-            url,
             status
         );
 
@@ -121,9 +120,9 @@ impl OpenAIProxyService for OpenAIProxy {
         form: reqwest::multipart::Form,
     ) -> Result<ProxyResponse, ProxyError> {
         // Get API key
-        let api_key = self.vpc_service.get_api_key().await.map_err(|_e| {
-            // Don't log error details to avoid exposing sensitive credentials
-            tracing::error!("Failed to get API key for multipart request");
+        let api_key = self.vpc_service.get_api_key().await.map_err(|e| {
+            // API key errors are system/config errors (not customer data), safe to log
+            tracing::error!("Failed to get API key for multipart request: {}", e);
             ProxyError::ApiError("Failed to get API key".to_string())
         })?;
 
@@ -131,7 +130,7 @@ impl OpenAIProxyService for OpenAIProxy {
         let clean_path = path.trim_start_matches('/');
         let url = format!("{}/{}", self.base_url, clean_path);
 
-        tracing::info!("OpenAI Proxy: Forwarding multipart request to {}", url);
+        tracing::info!("OpenAI Proxy: Forwarding multipart request");
 
         // Build the request with multipart form
         let mut request_builder = self
@@ -153,13 +152,9 @@ impl OpenAIProxyService for OpenAIProxy {
         request_builder = request_builder.multipart(form);
 
         // Send the request
-        tracing::debug!("Sending multipart request to OpenAI: POST {}", url);
+        tracing::debug!("Sending multipart request to OpenAI");
         let response = request_builder.send().await.map_err(|e| {
-            tracing::error!(
-                "OpenAI API multipart request failed for POST {}: {}",
-                url,
-                e
-            );
+            tracing::error!("OpenAI API multipart request failed: {}", e);
             ProxyError::ApiError(e.to_string())
         })?;
 
@@ -168,8 +163,7 @@ impl OpenAIProxyService for OpenAIProxy {
         let response_headers = response.headers().clone();
 
         tracing::info!(
-            "OpenAI Proxy: Received response from POST {} - status: {}",
-            url,
+            "OpenAI Proxy: Received response from multipart request - status: {}",
             status
         );
 

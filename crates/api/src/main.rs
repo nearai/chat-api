@@ -236,12 +236,6 @@ async fn main() -> anyhow::Result<()> {
     let rate_limit_state =
         RateLimitState::with_config(rate_limit_config, analytics_service.clone());
 
-    // Create shared HTTP client with timeout for multipart requests
-    let http_client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .expect("Failed to create HTTP client with timeout");
-
     // Create application state
     let app_state = AppState {
         oauth_service,
@@ -266,7 +260,6 @@ async fn main() -> anyhow::Result<()> {
         model_settings_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         response_author_repository: response_author_repo,
         rate_limit_state,
-        http_client,
     };
 
     // Create router with CORS support

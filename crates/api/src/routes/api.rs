@@ -2,7 +2,7 @@ use crate::consts::{LIST_FILES_LIMIT_MAX, MAX_REQUEST_BODY_SIZE, MAX_RESPONSE_BO
 use crate::middleware::auth::AuthenticatedUser;
 use axum::{
     body::{to_bytes, Body},
-    extract::{Extension, Path, Request, State},
+    extract::{DefaultBodyLimit, Extension, Path, Request, State},
     http::{HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post},
@@ -44,6 +44,11 @@ const MODEL_SETTINGS_CACHE_TTL_SECS: i64 = 60;
 
 /// Maximum image file size for edits (512 MB, matching cloud-api)
 const MAX_IMAGE_SIZE: usize = 512 * 1024 * 1024;
+
+/// Maximum multipart request body size for image operations
+/// Set to 520 MB to allow 512 MB image + overhead for multipart headers and form fields
+/// This prevents DoS attacks where attackers send extremely large multipart payloads
+const MAX_MULTIPART_BODY_SIZE: usize = 520 * 1024 * 1024;
 
 /// Maximum size for multipart form text fields (model, prompt, size, response_format, etc.)
 /// Prevents DoS attacks via oversized form fields. 64KB is more than enough for:
@@ -191,7 +196,8 @@ pub fn create_api_router(
 
     let images_router = Router::new()
         .route("/v1/images/generations", post(image_generations))
-        .route("/v1/images/edits", post(image_edits));
+        .route("/v1/images/edits", post(image_edits))
+        .layer(DefaultBodyLimit::max(MAX_MULTIPART_BODY_SIZE));
 
     let responses_router = Router::new()
         .route("/v1/responses", post(proxy_responses))

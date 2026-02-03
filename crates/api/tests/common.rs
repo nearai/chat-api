@@ -144,12 +144,6 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
     // Create rate limit state for testing
     let rate_limit_state = RateLimitState::new(analytics_service.clone());
 
-    // Create shared HTTP client with timeout for testing
-    let http_client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .expect("Failed to create HTTP client for tests");
-
     // Create application state
     let app_state = AppState {
         oauth_service,
@@ -174,7 +168,6 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
         model_settings_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         response_author_repository,
         rate_limit_state,
-        http_client,
     };
 
     // Create router

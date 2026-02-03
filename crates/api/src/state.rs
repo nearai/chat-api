@@ -64,7 +64,4 @@ pub struct AppState {
     pub response_author_repository: Arc<ResponseAuthorRepository>,
     /// Rate limit state for hot-reloadable rate limit configuration
     pub rate_limit_state: crate::middleware::RateLimitState,
-    /// Shared HTTP client with timeout configuration for multipart requests (e.g., image uploads)
-    /// Reusing a single client improves connection pooling and resource efficiency
-    pub http_client: reqwest::Client,
 }
