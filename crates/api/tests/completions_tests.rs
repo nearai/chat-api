@@ -521,3 +521,306 @@ async fn test_image_edits_near_balance_skipped_when_no_near_linked_account() {
         "Request without NEAR-linked account should not be blocked by NEAR balance check"
     );
 }
+
+/// Requests with a model whose settings are non-public should be blocked with 403 for /v1/chat/completions.
+#[tokio::test]
+async fn test_chat_completions_block_non_public_model() {
+    let server = create_test_server().await;
+
+    // Use an admin account to configure model settings
+    let admin_email = "chat-completions-visibility-non-public-admin@admin.org";
+    let admin_token = mock_login(&server, admin_email).await;
+
+    // Explicitly create a non-public model via admin API
+    let batch_body = json!({
+        "test-chat-completions-non-public-model": {
+            "public": false
+        }
+    });
+
+    let response = server
+        .patch("/v1/admin/models")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&batch_body)
+        .await;
+
+    assert!(
+        response.status_code().is_success(),
+        "Admin should be able to set model as non-public"
+    );
+
+    // Now send a chat completions request using the non-public model
+    let body = json!({
+        "model": "test-chat-completions-non-public-model",
+        "messages": [{"role": "user", "content": "Hello"}]
+    });
+
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&body)
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        403,
+        "Requests with non-public model should be blocked with 403"
+    );
+
+    let body: serde_json::Value = response.json();
+    assert_eq!(
+        body.get("error").and_then(|v| v.as_str()),
+        Some("This model is not available"),
+        "Error message should indicate model is not available"
+    );
+}
+
+/// Requests with a model whose settings are public should be allowed (not blocked by 403) for /v1/chat/completions.
+#[tokio::test]
+async fn test_chat_completions_allow_public_model() {
+    let server = create_test_server().await;
+
+    // Use an admin account to configure model settings
+    let admin_email = "chat-completions-visibility-public-admin@admin.org";
+    let admin_token = mock_login(&server, admin_email).await;
+
+    // Mark the model as public via admin API
+    let batch_body = json!({
+        "test-chat-completions-public-model": {
+            "public": true
+        }
+    });
+
+    let response = server
+        .patch("/v1/admin/models")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&batch_body)
+        .await;
+
+    assert!(
+        response.status_code().is_success(),
+        "Admin should be able to set model as public"
+    );
+
+    // Now send a chat completions request using the public model
+    let body = json!({
+        "model": "test-chat-completions-public-model",
+        "messages": [{"role": "user", "content": "Hello"}]
+    });
+
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&body)
+        .await;
+
+    // We only assert that our visibility check did not block the request with 403.
+    assert_ne!(
+        response.status_code(),
+        403,
+        "Requests with public model should not be blocked by visibility check (status was {})",
+        response.status_code()
+    );
+}
+
+/// When a public model has a system_prompt and the client does NOT send a system message,
+/// the proxy should inject a system message with the model system_prompt.
+#[tokio::test]
+async fn test_chat_completions_injects_system_prompt_when_system_message_missing() {
+    let server = create_test_server().await;
+
+    // Use an admin account to configure model settings (public + system_prompt)
+    let admin_email = "chat-completions-system-prompt-no-system-admin@admin.org";
+    let admin_token = mock_login(&server, admin_email).await;
+
+    let system_prompt = "You are a helpful assistant (model-level for chat completions).";
+
+    let batch_body = json!({
+        "test-chat-completions-system-prompt-model-1": {
+            "public": true,
+            "system_prompt": system_prompt
+        }
+    });
+
+    let response = server
+        .patch("/v1/admin/models")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&batch_body)
+        .await;
+
+    assert!(
+        response.status_code().is_success(),
+        "Admin should be able to set model with system_prompt"
+    );
+
+    // Now send a chat completions request WITHOUT system message
+    let user_email = "chat-completions-system-prompt-no-system-user@example.com";
+    let user_token = mock_login(&server, user_email).await;
+
+    let body = json!({
+        "model": "test-chat-completions-system-prompt-model-1",
+        "messages": [{"role": "user", "content": "Hello"}]
+    });
+
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&body)
+        .await;
+
+    // We cannot directly inspect the upstream request in this test,
+    // but at minimum the proxy should not block, since the model is public.
+    assert_ne!(
+        response.status_code(),
+        403,
+        "Requests with public model and system_prompt should not be blocked (status was {})",
+        response.status_code()
+    );
+}
+
+/// When a public model has a system_prompt and the client already sends a system message,
+/// the proxy should prepend the model system_prompt to the existing system message content.
+#[tokio::test]
+async fn test_chat_completions_prepends_system_prompt_when_system_message_present() {
+    let server = create_test_server().await;
+
+    // Use an admin account to configure model settings (public + system_prompt)
+    let admin_email = "chat-completions-system-prompt-with-system-admin@admin.org";
+    let admin_token = mock_login(&server, admin_email).await;
+
+    let system_prompt = "You are a helpful assistant (model-level, prepend for chat completions).";
+
+    let batch_body = json!({
+        "test-chat-completions-system-prompt-model-2": {
+            "public": true,
+            "system_prompt": system_prompt
+        }
+    });
+
+    let response = server
+        .patch("/v1/admin/models")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&batch_body)
+        .await;
+
+    assert!(
+        response.status_code().is_success(),
+        "Admin should be able to set model with system_prompt"
+    );
+
+    // Now send a chat completions request WITH client system message
+    let user_email = "chat-completions-system-prompt-with-system-user@example.com";
+    let user_token = mock_login(&server, user_email).await;
+
+    let body = json!({
+        "model": "test-chat-completions-system-prompt-model-2",
+        "messages": [
+            {"role": "system", "content": "User provided system message."},
+            {"role": "user", "content": "Hello"}
+        ]
+    });
+
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&body)
+        .await;
+
+    // Similarly, we cannot directly assert the final contents of the system message here,
+    // but we can at least ensure that the request is not blocked by the visibility logic.
+    assert_ne!(
+        response.status_code(),
+        403,
+        "Requests with public model and custom system message should not be blocked (status was {})",
+        response.status_code()
+    );
+}
+
+/// Requests without a `model` field should be allowed (no 403 from visibility logic) for /v1/chat/completions.
+#[tokio::test]
+async fn test_chat_completions_allow_without_model_field() {
+    let server = create_test_server().await;
+
+    let token = mock_login(&server, "chat-completions-visibility-no-model@example.com").await;
+
+    // No `model` field in body
+    let body = json!({
+        "messages": [{"role": "user", "content": "Hello"}]
+    });
+
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&body)
+        .await;
+
+    assert_ne!(
+        response.status_code(),
+        403,
+        "Requests without model field should not be blocked by visibility check (status was {})",
+        response.status_code()
+    );
+}

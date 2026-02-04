@@ -2668,13 +2668,25 @@ async fn get_model_settings_with_cache(
     Ok((model_system_prompt, model_settings_cache_hit))
 }
 
+/// Configuration for proxying POST requests to cloud-api endpoints.
+struct ProxyEndpointConfig {
+    /// Path for the proxy service (e.g., "chat/completions")
+    endpoint_path: &'static str,
+    /// Full path for logging (e.g., "/v1/chat/completions")
+    endpoint_full_path: &'static str,
+    /// Whether to set the content-length header (false for multipart/form-data)
+    set_content_length: bool,
+    /// Whether to enable model system prompt injection
+    enable_model_prompt: bool,
+}
+
 /// Shared helper function for proxying POST requests to cloud-api endpoints.
 ///
 /// This function handles common logic including:
 /// - User ban checks
 /// - NEAR balance checks (async)
 /// - Body extraction
-/// - Model settings lookup and system prompt injection (if enable_model_prompt is true)
+/// - Model settings lookup and system prompt injection (if config.enable_model_prompt is true)
 /// - Request forwarding
 /// - Error handling
 /// - Response building
@@ -2683,14 +2695,11 @@ async fn proxy_post_to_cloud_api(
     user: &AuthenticatedUser,
     mut headers: HeaderMap,
     request: Request,
-    endpoint_path: &str,
-    endpoint_full_path: &str,
-    set_content_length: bool,
-    enable_model_prompt: bool,
+    config: ProxyEndpointConfig,
 ) -> Result<Response, Response> {
     tracing::info!(
         "proxy_post_to_cloud_api: POST {} for user_id={}, session_id={}",
-        endpoint_full_path,
+        config.endpoint_full_path,
         user.user_id,
         user.session_id
     );
@@ -2707,7 +2716,7 @@ async fn proxy_post_to_cloud_api(
     tracing::debug!(
         "Extracted request body: {} bytes for POST {}",
         body_bytes.len(),
-        endpoint_full_path
+        config.endpoint_full_path
     );
 
     // Parse JSON body and handle model settings if enabled
@@ -2716,7 +2725,7 @@ async fn proxy_post_to_cloud_api(
     let mut model_settings_cache_hit: Option<bool> = None;
     let mut model_system_prompt: Option<String> = None;
 
-    if enable_model_prompt && !body_bytes.is_empty() {
+    if config.enable_model_prompt && !body_bytes.is_empty() {
         // Try to parse JSON body for model settings lookup
         match serde_json::from_slice::<serde_json::Value>(&body_bytes) {
             Ok(v) => {
@@ -2742,7 +2751,7 @@ async fn proxy_post_to_cloud_api(
             Err(e) => {
                 tracing::debug!(
                     "Failed to parse request body as JSON for POST {} (user_id={}): {}",
-                    endpoint_full_path,
+                    config.endpoint_full_path,
                     user.user_id,
                     e
                 );
@@ -2837,7 +2846,7 @@ async fn proxy_post_to_cloud_api(
     };
 
     // Set content-length header if requested (skip for multipart/form-data)
-    if set_content_length {
+    if config.set_content_length {
         let content_length = HeaderValue::from_str(&modified_body_bytes.len().to_string())
             .expect("usize to string conversion always produces valid HeaderValue");
         headers.insert(CONTENT_LENGTH, content_length);
@@ -2848,7 +2857,7 @@ async fn proxy_post_to_cloud_api(
         .proxy_service
         .forward_request(
             Method::POST,
-            endpoint_path,
+            config.endpoint_path,
             headers.clone(),
             Some(modified_body_bytes),
         )
@@ -2856,7 +2865,7 @@ async fn proxy_post_to_cloud_api(
         .map_err(|e| {
             tracing::error!(
                 "Cloud API error for POST {} (user_id={}): {}",
-                endpoint_full_path,
+                config.endpoint_full_path,
                 user.user_id,
                 e
             );
@@ -2872,7 +2881,7 @@ async fn proxy_post_to_cloud_api(
     tracing::info!(
         "Received response from cloud-api: status={} for POST {} (user_id={})",
         proxy_response.status,
-        endpoint_full_path,
+        config.endpoint_full_path,
         user.user_id
     );
 
@@ -2929,10 +2938,12 @@ async fn proxy_chat_completions(
         &user,
         headers,
         request,
-        "chat/completions",
-        "/v1/chat/completions",
-        true, // Set content-length header
-        true, // Enable model system prompt injection
+        ProxyEndpointConfig {
+            endpoint_path: "chat/completions",
+            endpoint_full_path: "/v1/chat/completions",
+            set_content_length: true,
+            enable_model_prompt: true,
+        },
     )
     .await
 }
@@ -2949,10 +2960,12 @@ async fn proxy_image_generations(
         &user,
         headers,
         request,
-        "images/generations",
-        "/v1/images/generations",
-        true,  // Set content-length header
-        false, // No model system prompt for image generation
+        ProxyEndpointConfig {
+            endpoint_path: "images/generations",
+            endpoint_full_path: "/v1/images/generations",
+            set_content_length: true,
+            enable_model_prompt: false,
+        },
     )
     .await
 }
@@ -2970,10 +2983,12 @@ async fn proxy_image_edits(
         &user,
         headers,
         request,
-        "images/edits",
-        "/v1/images/edits",
-        false, // Don't set content-length header (preserve original headers for multipart/form-data)
-        false, // No model system prompt for image edits
+        ProxyEndpointConfig {
+            endpoint_path: "images/edits",
+            endpoint_full_path: "/v1/images/edits",
+            set_content_length: false, // Don't set content-length header (preserve original headers for multipart/form-data)
+            enable_model_prompt: false, // No model system prompt for image edits
+        },
     )
     .await
 }
