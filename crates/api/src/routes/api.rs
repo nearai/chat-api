@@ -2645,50 +2645,67 @@ async fn proxy_signature(
 }
 
 /// Proxy chat completions to cloud-api (OpenAI-compatible endpoint)
-async fn proxy_chat_completions(
-    State(state): State<crate::state::AppState>,
-    Extension(user): Extension<AuthenticatedUser>,
+/// Shared helper function for proxying POST requests to cloud-api endpoints.
+///
+/// This function handles common logic including:
+/// - User ban checks
+/// - NEAR balance checks (async)
+/// - Body extraction
+/// - Request forwarding
+/// - Error handling
+/// - Response building
+async fn proxy_post_to_cloud_api(
+    state: &crate::state::AppState,
+    user: &AuthenticatedUser,
     mut headers: HeaderMap,
     request: Request,
+    endpoint_path: &str,
+    endpoint_full_path: &str,
+    set_content_length: bool,
 ) -> Result<Response, Response> {
     tracing::info!(
-        "proxy_chat_completions: POST /v1/chat/completions for user_id={}, session_id={}",
+        "proxy_post_to_cloud_api: POST {} for user_id={}, session_id={}",
+        endpoint_full_path,
         user.user_id,
         user.session_id
     );
 
     // Check if user is currently banned before proceeding
-    ensure_user_not_banned(&state, &user).await?;
+    ensure_user_not_banned(state, user).await?;
 
     // Trigger an asynchronous NEAR balance check
-    spawn_near_balance_check(&state, &user);
+    spawn_near_balance_check(state, user);
 
     // Extract body bytes
     let body_bytes = extract_body_bytes(request).await?;
 
     tracing::debug!(
-        "Extracted request body: {} bytes for POST /v1/chat/completions",
-        body_bytes.len()
+        "Extracted request body: {} bytes for POST {}",
+        body_bytes.len(),
+        endpoint_full_path
     );
 
-    // Set content-length header
-    let content_length = HeaderValue::from_str(&body_bytes.len().to_string())
-        .expect("usize to string conversion always produces valid HeaderValue");
-    headers.insert(CONTENT_LENGTH, content_length);
+    // Set content-length header if requested (skip for multipart/form-data)
+    if set_content_length {
+        let content_length = HeaderValue::from_str(&body_bytes.len().to_string())
+            .expect("usize to string conversion always produces valid HeaderValue");
+        headers.insert(CONTENT_LENGTH, content_length);
+    }
 
     // Forward the request to cloud-api
     let proxy_response = state
         .proxy_service
         .forward_request(
             Method::POST,
-            "chat/completions",
+            endpoint_path,
             headers.clone(),
             Some(body_bytes),
         )
         .await
         .map_err(|e| {
             tracing::error!(
-                "Cloud API error for POST /v1/chat/completions (user_id={}): {}",
+                "Cloud API error for POST {} (user_id={}): {}",
+                endpoint_full_path,
                 user.user_id,
                 e
             );
@@ -2702,8 +2719,9 @@ async fn proxy_chat_completions(
         })?;
 
     tracing::info!(
-        "Received response from cloud-api: status={} for POST /v1/chat/completions (user_id={})",
+        "Received response from cloud-api: status={} for POST {} (user_id={})",
         proxy_response.status,
+        endpoint_full_path,
         user.user_id
     );
 
@@ -2715,73 +2733,39 @@ async fn proxy_chat_completions(
     .await
 }
 
+async fn proxy_chat_completions(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    request: Request,
+) -> Result<Response, Response> {
+    proxy_post_to_cloud_api(
+        &state,
+        &user,
+        headers,
+        request,
+        "chat/completions",
+        "/v1/chat/completions",
+        true, // Set content-length header
+    )
+    .await
+}
+
 /// Proxy image generation to cloud-api (OpenAI-compatible endpoint)
 async fn proxy_image_generations(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    mut headers: HeaderMap,
+    headers: HeaderMap,
     request: Request,
 ) -> Result<Response, Response> {
-    tracing::info!(
-        "proxy_image_generations: POST /v1/images/generations for user_id={}, session_id={}",
-        user.user_id,
-        user.session_id
-    );
-
-    // Check if user is currently banned before proceeding
-    ensure_user_not_banned(&state, &user).await?;
-
-    // Trigger an asynchronous NEAR balance check
-    spawn_near_balance_check(&state, &user);
-
-    // Extract body bytes
-    let body_bytes = extract_body_bytes(request).await?;
-
-    tracing::debug!(
-        "Extracted request body: {} bytes for POST /v1/images/generations",
-        body_bytes.len()
-    );
-
-    // Set content-length header
-    let content_length = HeaderValue::from_str(&body_bytes.len().to_string())
-        .expect("usize to string conversion always produces valid HeaderValue");
-    headers.insert(CONTENT_LENGTH, content_length);
-
-    // Forward the request to cloud-api
-    let proxy_response = state
-        .proxy_service
-        .forward_request(
-            Method::POST,
-            "images/generations",
-            headers.clone(),
-            Some(body_bytes),
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                "Cloud API error for POST /v1/images/generations (user_id={}): {}",
-                user.user_id,
-                e
-            );
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(ErrorResponse {
-                    error: format!("Cloud API error: {e}"),
-                }),
-            )
-                .into_response()
-        })?;
-
-    tracing::info!(
-        "Received response from cloud-api: status={} for POST /v1/images/generations (user_id={})",
-        proxy_response.status,
-        user.user_id
-    );
-
-    build_response(
-        proxy_response.status,
-        proxy_response.headers,
-        Body::from_stream(proxy_response.body),
+    proxy_post_to_cloud_api(
+        &state,
+        &user,
+        headers,
+        request,
+        "images/generations",
+        "/v1/images/generations",
+        true, // Set content-length header
     )
     .await
 }
@@ -2794,61 +2778,14 @@ async fn proxy_image_edits(
     headers: HeaderMap,
     request: Request,
 ) -> Result<Response, Response> {
-    tracing::info!(
-        "proxy_image_edits: POST /v1/images/edits for user_id={}, session_id={}",
-        user.user_id,
-        user.session_id
-    );
-
-    // Check if user is currently banned before proceeding
-    ensure_user_not_banned(&state, &user).await?;
-
-    // Trigger an asynchronous NEAR balance check
-    spawn_near_balance_check(&state, &user);
-
-    // Extract body bytes (multipart data)
-    let body_bytes = extract_body_bytes(request).await?;
-
-    tracing::debug!(
-        "Extracted request body: {} bytes for POST /v1/images/edits",
-        body_bytes.len()
-    );
-
-    // Forward the request to cloud-api preserving original headers (including content-type with boundary)
-    let proxy_response = state
-        .proxy_service
-        .forward_request(
-            Method::POST,
-            "images/edits",
-            headers.clone(),
-            Some(body_bytes),
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                "Cloud API error for POST /v1/images/edits (user_id={}): {}",
-                user.user_id,
-                e
-            );
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(ErrorResponse {
-                    error: format!("Cloud API error: {e}"),
-                }),
-            )
-                .into_response()
-        })?;
-
-    tracing::info!(
-        "Received response from cloud-api: status={} for POST /v1/images/edits (user_id={})",
-        proxy_response.status,
-        user.user_id
-    );
-
-    build_response(
-        proxy_response.status,
-        proxy_response.headers,
-        Body::from_stream(proxy_response.body),
+    proxy_post_to_cloud_api(
+        &state,
+        &user,
+        headers,
+        request,
+        "images/edits",
+        "/v1/images/edits",
+        false, // Don't set content-length header (preserve original headers for multipart/form-data)
     )
     .await
 }
