@@ -246,8 +246,9 @@ async fn test_chat_completions_near_balance_allows_rich_account() {
 async fn test_chat_completions_near_balance_blocks_poor_account() {
     let server = create_test_server().await;
 
-    // Real account in mainnet
-    let poor_account = "zero-balance.near";
+    // Use a different account than near_balance_tests to avoid conflicts
+    // Real account in mainnet with zero balance
+    let poor_account = "zero-balance-2.near";
 
     let login_request = json!({
         "email": format!("{}@near", poor_account),
