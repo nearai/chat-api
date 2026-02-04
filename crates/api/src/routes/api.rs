@@ -11,7 +11,7 @@ use axum::{
 use bytes::Bytes;
 use chrono::{Duration, Utc};
 use flate2::read::GzDecoder;
-use http::{header::CONTENT_LENGTH, HeaderName, HeaderValue};
+use http::{header::CONTENT_LENGTH, HeaderValue};
 use near_api::{Account, AccountId, NetworkConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -27,7 +27,6 @@ use services::metrics::consts::{
 use services::response::ports::ProxyResponse;
 use services::user::ports::{BanType, OAuthProvider};
 use services::UserId;
-use sha2::{Digest, Sha256};
 use std::io::Read;
 use uuid::Uuid;
 
@@ -2003,31 +2002,6 @@ async fn proxy_responses(
         user.user_id
     );
 
-    // Access model system prompt cache during proxy response handling (for observability/debugging).
-    // We DO NOT expose the prompt itself; we only attach a stable hash.
-    // Cache hit/miss is tracked via analytics (see below), not HTTP headers.
-    let mut proxy_headers = proxy_response.headers.clone();
-    if let Some(ref model_id) = model_id_from_body {
-        let cached_hash_opt = {
-            let cache = state.model_settings_cache.read().await;
-            cache.get(model_id).and_then(|e| {
-                if e.exists {
-                    e.system_prompt_hash.clone()
-                } else {
-                    None
-                }
-            })
-        };
-
-        if let Some(prompt_hash) = cached_hash_opt {
-            let _ = proxy_headers.insert(
-                HeaderName::from_static("x-nearai-model-system-prompt-sha256"),
-                HeaderValue::from_str(&prompt_hash)
-                    .unwrap_or_else(|_| HeaderValue::from_static("")),
-            );
-        }
-    }
-
     // Record metrics for successful responses
     if (200..300).contains(&proxy_response.status) {
         state
@@ -2101,7 +2075,12 @@ async fn proxy_responses(
         Body::from_stream(proxy_response.body)
     };
 
-    build_response(proxy_response.status, proxy_headers, response_body).await
+    build_response(
+        proxy_response.status,
+        proxy_response.headers.clone(),
+        response_body,
+    )
+    .await
 }
 
 /// Ensure that if the authenticated user logged in with NEAR (has a NEAR-linked account),
@@ -2593,13 +2572,6 @@ async fn get_model_settings_with_cache(
         model_settings_cache_hit = Some(false);
         match state.model_service.get_model(model_id).await {
             Ok(Some(model)) => {
-                // Compute hash once when creating cache entry
-                let system_prompt_hash = model.settings.system_prompt.as_ref().map(|prompt| {
-                    let mut hasher = Sha256::new();
-                    hasher.update(prompt.as_bytes());
-                    format!("{:x}", hasher.finalize())
-                });
-
                 // Populate cache
                 {
                     let mut cache = state.model_settings_cache.write().await;
@@ -2610,7 +2582,6 @@ async fn get_model_settings_with_cache(
                             exists: true,
                             public: model.settings.public,
                             system_prompt: model.settings.system_prompt.clone(),
-                            system_prompt_hash,
                         },
                     );
                 }
@@ -2644,7 +2615,6 @@ async fn get_model_settings_with_cache(
                             exists: false, // Not in DB but allowed with defaults
                             public: MODEL_PUBLIC_DEFAULT, // true by default
                             system_prompt: None,
-                            system_prompt_hash: None,
                         },
                     );
                 }
@@ -2720,7 +2690,6 @@ async fn proxy_post_to_cloud_api(
 
     // Parse JSON body and handle model settings if enabled
     let mut body_json: Option<serde_json::Value> = None;
-    let mut model_id_from_body: Option<String> = None;
     let mut model_system_prompt: Option<String> = None;
 
     if config.enable_model_prompt && !body_bytes.is_empty() {
@@ -2735,8 +2704,6 @@ async fn proxy_post_to_cloud_api(
                     .and_then(|b| b.get("model"))
                     .and_then(|v| v.as_str())
                 {
-                    model_id_from_body = Some(model_id.to_string());
-
                     match get_model_settings_with_cache(state, model_id, user.user_id).await {
                         Ok((prompt, _cache_hit)) => {
                             model_system_prompt = prompt;
@@ -2886,33 +2853,9 @@ async fn proxy_post_to_cloud_api(
         user.user_id
     );
 
-    // Add model settings cache headers for observability (same as Responses API)
-    // Cache hit/miss is tracked via analytics, not HTTP headers.
-    let mut proxy_headers = proxy_response.headers.clone();
-    if let Some(ref model_id) = model_id_from_body {
-        let cached_hash_opt = {
-            let cache = state.model_settings_cache.read().await;
-            cache.get(model_id).and_then(|e| {
-                if e.exists {
-                    e.system_prompt_hash.clone()
-                } else {
-                    None
-                }
-            })
-        };
-
-        if let Some(prompt_hash) = cached_hash_opt {
-            let _ = proxy_headers.insert(
-                HeaderName::from_static("x-nearai-model-system-prompt-sha256"),
-                HeaderValue::from_str(&prompt_hash)
-                    .unwrap_or_else(|_| HeaderValue::from_static("")),
-            );
-        }
-    }
-
     build_response(
         proxy_response.status,
-        proxy_headers,
+        proxy_response.headers.clone(),
         Body::from_stream(proxy_response.body),
     )
     .await
