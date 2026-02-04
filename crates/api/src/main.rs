@@ -258,6 +258,9 @@ async fn main() -> anyhow::Result<()> {
         near_rpc_url: config.near.rpc_url.clone(),
         near_balance_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         model_settings_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        model_pricing_cache: api::model_pricing::ModelPricingCache::new(
+            config.openai.base_url.clone().unwrap_or_default(),
+        ),
         response_author_repository: response_author_repo,
         rate_limit_state,
     };

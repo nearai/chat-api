@@ -1,13 +1,30 @@
 mod common;
 
-use common::{create_test_server, mock_login};
+use chrono::Duration;
+use common::{create_test_server_with_config, mock_login, TestServerConfig};
 use futures::future::join_all;
 use serde_json::json;
+use services::system_configs::ports::RateLimitConfig;
 use std::sync::Arc;
+
+async fn create_rate_limited_test_server() -> axum_test::TestServer {
+    create_test_server_with_config(TestServerConfig {
+        rate_limit_config: Some(RateLimitConfig {
+            max_concurrent: 2,
+            max_requests_per_window: 1,
+            window_duration: Duration::seconds(1),
+            window_limits: vec![],
+            token_window_limits: vec![],
+            cost_window_limits: vec![],
+        }),
+        ..Default::default()
+    })
+    .await
+}
 
 #[tokio::test]
 async fn test_rate_limit_first_request_succeeds() {
-    let server = create_test_server().await;
+    let server = create_rate_limited_test_server().await;
     let token = mock_login(&server, "rate-limit-test-1@example.com").await;
 
     let response = server
@@ -32,7 +49,7 @@ async fn test_rate_limit_first_request_succeeds() {
 
 #[tokio::test]
 async fn test_rate_limit_blocks_rapid_requests() {
-    let server = create_test_server().await;
+    let server = create_rate_limited_test_server().await;
     let token = mock_login(&server, "rate-limit-test-2@example.com").await;
 
     let request_body = json!({
@@ -75,7 +92,7 @@ async fn test_rate_limit_blocks_rapid_requests() {
 
 #[tokio::test]
 async fn test_rate_limit_per_user_isolation() {
-    let server = create_test_server().await;
+    let server = create_rate_limited_test_server().await;
     let token1 = mock_login(&server, "rate-limit-user-a@example.com").await;
     let token2 = mock_login(&server, "rate-limit-user-b@example.com").await;
 
@@ -113,7 +130,7 @@ async fn test_rate_limit_per_user_isolation() {
 
 #[tokio::test]
 async fn test_non_rate_limited_endpoints_unaffected() {
-    let server = create_test_server().await;
+    let server = create_rate_limited_test_server().await;
     let token = mock_login(&server, "rate-limit-test-3@example.com").await;
 
     // Make multiple rapid requests to model/list (not rate limited)
@@ -137,7 +154,7 @@ async fn test_non_rate_limited_endpoints_unaffected() {
 
 #[tokio::test]
 async fn test_concurrent_requests_rate_limited() {
-    let server = Arc::new(create_test_server().await);
+    let server = Arc::new(create_rate_limited_test_server().await);
     let token = Arc::new(mock_login(&server, "rate-limit-concurrent@example.com").await);
 
     let request_body = json!({

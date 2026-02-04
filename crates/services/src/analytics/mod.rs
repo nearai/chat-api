@@ -70,6 +70,28 @@ pub trait AnalyticsServiceTrait: Send + Sync {
         end: DateTime<Utc>,
         limit: i64,
     ) -> Result<Vec<TopActiveUser>, AnalyticsError>;
+
+    /// Record token and optional cost usage for a user (for rate limiting).
+    async fn record_user_usage(
+        &self,
+        user_id: UserId,
+        tokens_used: u64,
+        cost_nano_usd: Option<i64>,
+    ) -> Result<(), AnalyticsError>;
+
+    /// Sum of tokens_used for the user in the sliding window.
+    async fn get_token_usage_sum(
+        &self,
+        user_id: UserId,
+        window_duration: Duration,
+    ) -> Result<i64, AnalyticsError>;
+
+    /// Sum of cost_nano_usd for the user in the sliding window (NULL treated as 0).
+    async fn get_cost_usage_sum(
+        &self,
+        user_id: UserId,
+        window_duration: Duration,
+    ) -> Result<i64, AnalyticsError>;
 }
 
 /// Analytics service implementation
@@ -166,6 +188,40 @@ impl AnalyticsServiceTrait for AnalyticsServiceImpl {
     ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
         self.repository
             .get_top_active_users(start, end, limit)
+            .await
+            .map_err(|e| AnalyticsError::InternalError(e.to_string()))
+    }
+
+    async fn record_user_usage(
+        &self,
+        user_id: UserId,
+        tokens_used: u64,
+        cost_nano_usd: Option<i64>,
+    ) -> Result<(), AnalyticsError> {
+        self.repository
+            .record_user_usage(user_id, tokens_used, cost_nano_usd)
+            .await
+            .map_err(|e| AnalyticsError::InternalError(e.to_string()))
+    }
+
+    async fn get_token_usage_sum(
+        &self,
+        user_id: UserId,
+        window_duration: Duration,
+    ) -> Result<i64, AnalyticsError> {
+        self.repository
+            .get_token_usage_sum(user_id, window_duration)
+            .await
+            .map_err(|e| AnalyticsError::InternalError(e.to_string()))
+    }
+
+    async fn get_cost_usage_sum(
+        &self,
+        user_id: UserId,
+        window_duration: Duration,
+    ) -> Result<i64, AnalyticsError> {
+        self.repository
+            .get_cost_usage_sum(user_id, window_duration)
             .await
             .map_err(|e| AnalyticsError::InternalError(e.to_string()))
     }

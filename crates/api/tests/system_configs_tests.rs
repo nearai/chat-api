@@ -309,7 +309,9 @@ async fn test_upsert_rate_limit_config() {
                     "window_duration_seconds": 604800,
                     "limit": 5000
                 }
-            ]
+            ],
+            "token_window_limits": [],
+            "cost_window_limits": []
         }
     });
 
@@ -435,7 +437,9 @@ async fn test_invalid_rate_limit_config_rejected() {
             "max_concurrent": 0,
             "max_requests_per_window": 10,
             "window_duration_seconds": 60,
-            "window_limits": []
+            "window_limits": [],
+            "token_window_limits": [],
+            "cost_window_limits": []
         }
     });
 
@@ -464,7 +468,9 @@ async fn test_invalid_rate_limit_config_rejected() {
             "max_concurrent": 2,
             "max_requests_per_window": 10,
             "window_duration_seconds": 0,
-            "window_limits": []
+            "window_limits": [],
+            "token_window_limits": [],
+            "cost_window_limits": []
         }
     });
 
@@ -498,7 +504,9 @@ async fn test_invalid_rate_limit_config_rejected() {
                     "window_duration_seconds": 0,
                     "limit": 100
                 }
-            ]
+            ],
+            "token_window_limits": [],
+            "cost_window_limits": []
         }
     });
 
@@ -536,7 +544,9 @@ async fn test_empty_window_limits_allowed() {
             "max_concurrent": 2,
             "max_requests_per_window": 10,
             "window_duration_seconds": 60,
-            "window_limits": []
+            "window_limits": [],
+            "token_window_limits": [],
+            "cost_window_limits": []
         }
     });
 
@@ -591,7 +601,9 @@ async fn test_rate_limit_config_hot_reload() {
                     "window_duration_seconds": 60,
                     "limit": 2
                 }
-            ]
+            ],
+            "token_window_limits": [],
+            "cost_window_limits": []
         }
     });
 
@@ -664,7 +676,9 @@ async fn test_rate_limit_config_hot_reload() {
                     "window_duration_seconds": 86400,
                     "limit": 10000
                 }
-            ]
+            ],
+            "token_window_limits": [],
+            "cost_window_limits": []
         }
     });
 

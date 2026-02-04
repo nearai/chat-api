@@ -225,6 +225,28 @@ pub trait AnalyticsRepository: Send + Sync {
         end: DateTime<Utc>,
         limit: i64,
     ) -> anyhow::Result<Vec<TopActiveUser>>;
+
+    /// Record token and optional cost usage for a user (for rate limiting).
+    async fn record_user_usage(
+        &self,
+        user_id: UserId,
+        tokens_used: u64,
+        cost_nano_usd: Option<i64>,
+    ) -> anyhow::Result<()>;
+
+    /// Sum of tokens_used for the user in the sliding window.
+    async fn get_token_usage_sum(
+        &self,
+        user_id: UserId,
+        window_duration: Duration,
+    ) -> anyhow::Result<i64>;
+
+    /// Sum of cost_nano_usd for the user in the sliding window (NULL treated as 0).
+    async fn get_cost_usage_sum(
+        &self,
+        user_id: UserId,
+        window_duration: Duration,
+    ) -> anyhow::Result<i64>;
 }
 
 /// Error types for analytics operations

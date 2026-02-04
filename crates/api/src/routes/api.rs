@@ -2062,43 +2062,33 @@ async fn proxy_responses(
         }
     }
 
-    // Wrap the response stream to extract response_id and store author info
-    let response_body = if let Some(conv_id) = conversation_id_for_author.as_ref() {
-        if (200..300).contains(&proxy_response.status) {
-            let repo = state.response_author_repository.clone();
-            let user_id = user.user_id;
-            let author = author_name_for_tracking;
-
-            tracing::info!(
-                "create_response: Using AuthorTrackingStream for conv_id={}, user_id={}, author={:?}",
-                conv_id,
-                user_id,
-                author
-            );
-
-            let wrapped_stream = AuthorTrackingStream::new(
-                proxy_response.body,
-                repo,
-                conv_id.clone(),
-                user_id,
-                author,
-            );
-            Body::from_stream(wrapped_stream)
-        } else {
-            tracing::info!(
-                "create_response: NOT using AuthorTrackingStream - conv_id={:?}, status={}",
-                conversation_id_for_author,
-                proxy_response.status
-            );
-            Body::from_stream(proxy_response.body)
-        }
-    } else {
-        tracing::info!(
-            "create_response: NOT using AuthorTrackingStream - conv_id={:?}, status={}",
-            conversation_id_for_author,
-            proxy_response.status
-        );
+    // Wrap the response stream: record usage (token/cost) and optionally extract response_id for author tracking
+    let response_body = if !(200..300).contains(&proxy_response.status) {
         Body::from_stream(proxy_response.body)
+    } else if is_streaming_response(&proxy_response.headers) {
+        let usage_stream = UsageTrackingStreamFull::new(
+            proxy_response.body,
+            state.analytics_service.clone(),
+            state.model_pricing_cache.clone(),
+            user.user_id,
+        );
+        let stream: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>> =
+            if let Some(conv_id) = conversation_id_for_author.as_ref() {
+                Box::pin(AuthorTrackingStream::new(
+                    usage_stream,
+                    state.response_author_repository.clone(),
+                    conv_id.clone(),
+                    user.user_id,
+                    author_name_for_tracking,
+                ))
+            } else {
+                Box::pin(usage_stream)
+            };
+        Body::from_stream(stream)
+    } else {
+        let bytes = collect_stream_to_bytes(proxy_response.body).await;
+        record_usage_from_body(&state, user.user_id, &bytes).await;
+        Body::from(bytes)
     };
 
     build_response(proxy_response.status, proxy_headers, response_body).await
@@ -3487,8 +3477,203 @@ fn decompress_if_gzipped(bytes: &[u8], headers: &HeaderMap) -> Result<Vec<u8>, s
 /// Stream wrapper that extracts response_id from SSE events and stores author info
 use database::repositories::ResponseAuthorRepository;
 use futures::Stream;
+use services::analytics::AnalyticsServiceTrait;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
+
+/// Returns true if response headers indicate a streaming (SSE) response.
+fn is_streaming_response(headers: &HeaderMap) -> bool {
+    headers
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.contains("text/event-stream"))
+        .unwrap_or(false)
+}
+
+/// Parsed usage from an OpenAI-style response (usage.total_tokens, usage.input_tokens, usage.output_tokens, model).
+#[derive(Debug, Clone)]
+struct ParsedUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub model_name: Option<String>,
+}
+
+/// Parses usage from an already-parsed JSON value (OpenAI-style).
+fn parse_usage_from_value(root: &serde_json::Value) -> Option<ParsedUsage> {
+    let usage = root.get("usage")?.as_object()?;
+    let total = usage
+        .get("total_tokens")
+        .and_then(|v| v.as_u64())
+        .or_else(|| {
+            let input = usage
+                .get("input_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let output = usage
+                .get("output_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            Some(input + output)
+        })?;
+    let input_tokens = usage
+        .get("input_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let output_tokens = usage
+        .get("output_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let model_name = root.get("model").and_then(|v| v.as_str()).map(String::from);
+    Some(ParsedUsage {
+        input_tokens,
+        output_tokens,
+        total_tokens: total,
+        model_name,
+    })
+}
+
+/// Parses usage from a response JSON body (OpenAI-style).
+fn parse_usage_from_json(bytes: &[u8]) -> Option<ParsedUsage> {
+    let root = serde_json::from_slice::<serde_json::Value>(bytes).ok()?;
+    parse_usage_from_value(&root)
+}
+
+/// Record token and cost usage from parsed response body. Calls analytics_service.record_user_usage.
+/// Returns true if usage was recorded.
+async fn record_usage_from_body(
+    state: &crate::state::AppState,
+    user_id: UserId,
+    body: &[u8],
+) -> bool {
+    let Some(usage) = parse_usage_from_json(body) else {
+        return false;
+    };
+    if usage.total_tokens == 0 {
+        return false;
+    }
+    let cost_nano_usd = if let Some(ref model) = usage.model_name {
+        state
+            .model_pricing_cache
+            .get_pricing(model)
+            .await
+            .map(|p| p.cost_nano_usd(usage.input_tokens, usage.output_tokens))
+    } else {
+        None
+    };
+    if let Err(e) = state
+        .analytics_service
+        .record_user_usage(user_id, usage.total_tokens, cost_nano_usd)
+        .await
+    {
+        tracing::warn!("Failed to record usage for user_id={}: {}", user_id, e);
+        return false;
+    }
+    true
+}
+
+/// Try to extract usage and model from SSE data line (data: {...}).
+/// Expects OpenAI/cloud-api style: object with "usage" and optionally "model".
+fn try_extract_usage_from_sse_line(line: &str) -> Option<ParsedUsage> {
+    let data = line.strip_prefix("data: ")?;
+    if data == "[DONE]" || data.is_empty() {
+        return None;
+    }
+    let root = serde_json::from_str::<serde_json::Value>(data).ok()?;
+    parse_usage_from_value(&root)
+}
+
+/// Stream wrapper that parses SSE for usage (e.g. event: response.completed) and records usage on stream end.
+/// Stream wrapper that parses SSE for usage and records usage on stream end.
+struct UsageTrackingStreamFull<S> {
+    inner: S,
+    buffer: String,
+    usage: Option<ParsedUsage>,
+    analytics: Arc<dyn AnalyticsServiceTrait>,
+    pricing_cache: crate::model_pricing::ModelPricingCache,
+    user_id: UserId,
+}
+
+impl<S> UsageTrackingStreamFull<S>
+where
+    S: Stream<Item = Result<Bytes, reqwest::Error>> + Unpin + Send,
+{
+    fn new(
+        inner: S,
+        analytics: Arc<dyn AnalyticsServiceTrait>,
+        pricing_cache: crate::model_pricing::ModelPricingCache,
+        user_id: UserId,
+    ) -> Self {
+        Self {
+            inner,
+            buffer: String::new(),
+            usage: None,
+            analytics,
+            pricing_cache,
+            user_id,
+        }
+    }
+}
+
+impl<S> Stream for UsageTrackingStreamFull<S>
+where
+    S: Stream<Item = Result<Bytes, reqwest::Error>> + Unpin + Send,
+{
+    type Item = Result<Bytes, reqwest::Error>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        match Pin::new(&mut this.inner).poll_next(cx) {
+            Poll::Ready(Some(Ok(bytes))) => {
+                if let Ok(text) = std::str::from_utf8(&bytes) {
+                    this.buffer.push_str(text);
+                    for line in this.buffer.lines() {
+                        if let Some(usage) = try_extract_usage_from_sse_line(line) {
+                            this.usage = Some(usage);
+                        }
+                    }
+                    // Keep only the last incomplete line in buffer for next chunk
+                    if let Some(last_newline) = this.buffer.rfind('\n') {
+                        this.buffer = this.buffer[last_newline + 1..].to_string();
+                    }
+                }
+                Poll::Ready(Some(Ok(bytes)))
+            }
+            Poll::Ready(None) => {
+                let usage = this.usage.take();
+                let analytics = this.analytics.clone();
+                let pricing_cache = this.pricing_cache.clone();
+                let user_id = this.user_id;
+                if let Some(usage) = usage {
+                    if usage.total_tokens > 0 {
+                        tokio::spawn(async move {
+                            let cost_nano_usd = if let Some(ref model) = usage.model_name {
+                                pricing_cache.get_pricing(model).await.map(|p| {
+                                    p.cost_nano_usd(usage.input_tokens, usage.output_tokens)
+                                })
+                            } else {
+                                None
+                            };
+                            if let Err(e) = analytics
+                                .record_user_usage(user_id, usage.total_tokens, cost_nano_usd)
+                                .await
+                            {
+                                tracing::warn!(
+                                    "Failed to record usage from stream for user_id={}: {}",
+                                    user_id,
+                                    e
+                                );
+                            }
+                        });
+                    }
+                }
+                Poll::Ready(None)
+            }
+            other => other,
+        }
+    }
+}
 
 /// Try to extract response_id from SSE data text
 fn try_extract_response_id(text: &str) -> Option<String> {
@@ -3692,5 +3877,35 @@ async fn inject_author_metadata(
             .map_err(|_| body_bytes)
     } else {
         Err(body_bytes)
+    }
+}
+
+#[cfg(test)]
+mod usage_parsing_tests {
+    use super::{parse_usage_from_json, try_extract_usage_from_sse_line};
+
+    #[test]
+    fn test_parse_usage_from_json_total_tokens() {
+        let body = br#"{"model":"gpt-test","usage":{"total_tokens":12,"input_tokens":5,"output_tokens":7}}"#;
+        let parsed = parse_usage_from_json(body).expect("should parse usage");
+        assert_eq!(parsed.input_tokens, 5);
+        assert_eq!(parsed.output_tokens, 7);
+        assert_eq!(parsed.total_tokens, 12);
+        assert_eq!(parsed.model_name.as_deref(), Some("gpt-test"));
+    }
+
+    #[test]
+    fn test_parse_usage_from_json_fallback_sum() {
+        let body = br#"{"model":"gpt-test","usage":{"input_tokens":2,"output_tokens":3}}"#;
+        let parsed = parse_usage_from_json(body).expect("should parse usage");
+        assert_eq!(parsed.total_tokens, 5);
+    }
+
+    #[test]
+    fn test_try_extract_usage_from_sse_line() {
+        let line = r#"data: {"model":"gpt-test","usage":{"total_tokens":10,"input_tokens":4,"output_tokens":6}}"#;
+        let parsed = try_extract_usage_from_sse_line(line).expect("should parse sse usage");
+        assert_eq!(parsed.total_tokens, 10);
+        assert_eq!(parsed.model_name.as_deref(), Some("gpt-test"));
     }
 }

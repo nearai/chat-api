@@ -16,7 +16,7 @@ use axum::{
 use serde::Serialize;
 use services::{
     analytics::{ActivityType, AnalyticsServiceTrait, CheckAndRecordActivityRequest},
-    system_configs::ports::RateLimitConfig,
+    system_configs::ports::{RateLimitConfig, WindowLimit},
     UserId,
 };
 use std::{
@@ -25,6 +25,12 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::{Mutex, OwnedSemaphorePermit, RwLock, Semaphore};
+
+/// Distinguishes token vs cost usage when checking window limits.
+enum UsageLimitType {
+    Token,
+    Cost,
+}
 
 struct UserRateLimitState {
     semaphore: Arc<Semaphore>,
@@ -260,6 +266,24 @@ impl RateLimitState {
             }
         }
 
+        // Phase 2a: Check token usage limits (user_usage_log)
+        self.check_usage_limits(
+            user_id,
+            added_timestamp,
+            &config.token_window_limits,
+            UsageLimitType::Token,
+        )
+        .await?;
+
+        // Phase 2b: Check cost usage limits (user_usage_log, nano-dollars)
+        self.check_usage_limits(
+            user_id,
+            added_timestamp,
+            &config.cost_window_limits,
+            UsageLimitType::Cost,
+        )
+        .await?;
+
         // All windows passed the non-atomic checks, now insert a single record that all windows will count
         //
         // Atomic Insert with Most Restrictive Window
@@ -339,6 +363,84 @@ impl RateLimitState {
         Ok(RateLimitGuard { _permit: permit })
     }
 
+    /// Checks usage limits for a list of windows (token or cost).
+    /// Returns `Ok(())` if all windows are under limit, or `Err(RateLimitError)` on failure or limit exceeded.
+    async fn check_usage_limits(
+        &self,
+        user_id: UserId,
+        added_timestamp: Instant,
+        window_limits: &[WindowLimit],
+        usage_type: UsageLimitType,
+    ) -> Result<(), RateLimitError> {
+        for window_limit in window_limits {
+            let limit_value = window_limit.limit as i64;
+
+            let sum = match usage_type {
+                UsageLimitType::Token => {
+                    self.analytics_service
+                        .get_token_usage_sum(user_id, window_limit.window_duration)
+                        .await
+                }
+                UsageLimitType::Cost => {
+                    self.analytics_service
+                        .get_cost_usage_sum(user_id, window_limit.window_duration)
+                        .await
+                }
+            };
+
+            let sum = match sum {
+                Ok(s) => s,
+                Err(e) => {
+                    let error_msg = match usage_type {
+                        UsageLimitType::Token => "Failed to check token usage sum",
+                        UsageLimitType::Cost => "Failed to check cost usage sum",
+                    };
+                    tracing::warn!(user_id = %user_id.0, "{}: {}", error_msg, e);
+                    self.rollback_acquire(user_id, added_timestamp).await;
+                    return Err(RateLimitError::InternalServerError);
+                }
+            };
+
+            if sum >= limit_value {
+                self.rollback_acquire(user_id, added_timestamp).await;
+                let window_seconds = window_limit.window_duration.num_seconds();
+                let retry_after_ms = u64::try_from(window_seconds * 1000).unwrap_or(u64::MAX);
+
+                match usage_type {
+                    UsageLimitType::Token => {
+                        tracing::warn!(
+                            user_id = %user_id.0,
+                            window_seconds = window_seconds,
+                            limit = window_limit.limit,
+                            current_sum = sum,
+                            "Token usage limit exceeded"
+                        );
+                        return Err(RateLimitError::TokenLimitExceeded {
+                            window_seconds: u64::try_from(window_seconds).unwrap_or(u64::MAX),
+                            limit: window_limit.limit,
+                            retry_after_ms,
+                        });
+                    }
+                    UsageLimitType::Cost => {
+                        tracing::warn!(
+                            user_id = %user_id.0,
+                            window_seconds = window_seconds,
+                            limit = window_limit.limit,
+                            current_sum = sum,
+                            "Cost usage limit exceeded"
+                        );
+                        return Err(RateLimitError::CostLimitExceeded {
+                            window_seconds: u64::try_from(window_seconds).unwrap_or(u64::MAX),
+                            limit: window_limit.limit,
+                            retry_after_ms,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Rollback acquire: remove the specific timestamp that was added during try_acquire.
     ///
     /// This function removes the exact timestamp that was added, not just the last one.
@@ -387,6 +489,16 @@ enum RateLimitError {
         limit: usize,
         retry_after_ms: u64,
     },
+    TokenLimitExceeded {
+        window_seconds: u64,
+        limit: usize,
+        retry_after_ms: u64,
+    },
+    CostLimitExceeded {
+        window_seconds: u64,
+        limit: usize,
+        retry_after_ms: u64,
+    },
     InternalServerError,
 }
 
@@ -421,6 +533,30 @@ impl IntoResponse for RateLimitError {
                 StatusCode::TOO_MANY_REQUESTS,
                 format!(
                     "Request limit of {} reached for {} second(s) window. Please retry later.",
+                    limit, window_seconds
+                ),
+                Some(retry_after_ms),
+            ),
+            RateLimitError::TokenLimitExceeded {
+                window_seconds,
+                limit,
+                retry_after_ms,
+            } => (
+                StatusCode::TOO_MANY_REQUESTS,
+                format!(
+                    "Token usage limit of {} reached for {} second(s) window. Please retry later.",
+                    limit, window_seconds
+                ),
+                Some(retry_after_ms),
+            ),
+            RateLimitError::CostLimitExceeded {
+                window_seconds,
+                limit,
+                retry_after_ms,
+            } => (
+                StatusCode::TOO_MANY_REQUESTS,
+                format!(
+                    "Cost limit of {} nano-USD reached for {} second(s) window. Please retry later.",
                     limit, window_seconds
                 ),
                 Some(retry_after_ms),
@@ -552,6 +688,31 @@ mod tests {
             ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
                 unreachable!()
             }
+
+            async fn record_user_usage(
+                &self,
+                _user_id: UserId,
+                _tokens_used: u64,
+                _cost_nano_usd: Option<i64>,
+            ) -> Result<(), AnalyticsError> {
+                Ok(())
+            }
+
+            async fn get_token_usage_sum(
+                &self,
+                _user_id: UserId,
+                _window_duration: ChronoDuration,
+            ) -> Result<i64, AnalyticsError> {
+                Ok(0)
+            }
+
+            async fn get_cost_usage_sum(
+                &self,
+                _user_id: UserId,
+                _window_duration: ChronoDuration,
+            ) -> Result<i64, AnalyticsError> {
+                Ok(0)
+            }
         }
 
         /// Always rejects requests (returns 100 count, was_recorded: false)
@@ -632,6 +793,31 @@ mod tests {
                 _limit: i64,
             ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
                 unreachable!()
+            }
+
+            async fn record_user_usage(
+                &self,
+                _user_id: UserId,
+                _tokens_used: u64,
+                _cost_nano_usd: Option<i64>,
+            ) -> Result<(), AnalyticsError> {
+                Ok(())
+            }
+
+            async fn get_token_usage_sum(
+                &self,
+                _user_id: UserId,
+                _window_duration: ChronoDuration,
+            ) -> Result<i64, AnalyticsError> {
+                Ok(0)
+            }
+
+            async fn get_cost_usage_sum(
+                &self,
+                _user_id: UserId,
+                _window_duration: ChronoDuration,
+            ) -> Result<i64, AnalyticsError> {
+                Ok(0)
             }
         }
 
@@ -725,6 +911,31 @@ mod tests {
             ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
                 unreachable!()
             }
+
+            async fn record_user_usage(
+                &self,
+                _user_id: UserId,
+                _tokens_used: u64,
+                _cost_nano_usd: Option<i64>,
+            ) -> Result<(), AnalyticsError> {
+                Ok(())
+            }
+
+            async fn get_token_usage_sum(
+                &self,
+                _user_id: UserId,
+                _window_duration: ChronoDuration,
+            ) -> Result<i64, AnalyticsError> {
+                Ok(0)
+            }
+
+            async fn get_cost_usage_sum(
+                &self,
+                _user_id: UserId,
+                _window_duration: ChronoDuration,
+            ) -> Result<i64, AnalyticsError> {
+                Ok(0)
+            }
         }
 
         /// Helper to create a counting service (increments on each call)
@@ -742,6 +953,113 @@ mod tests {
                 count: Arc::new(Mutex::new(count)),
                 increment: false,
                 was_recorded: false,
+            }
+        }
+
+        /// Returns fixed token/cost usage sums (for token/cost window limit tests).
+        pub struct FixedUsageSumAnalyticsService {
+            pub token_sum: i64,
+            pub cost_sum: i64,
+        }
+
+        #[async_trait]
+        impl AnalyticsServiceTrait for FixedUsageSumAnalyticsService {
+            async fn record_activity(
+                &self,
+                _request: RecordActivityRequest,
+            ) -> Result<(), AnalyticsError> {
+                Ok(())
+            }
+
+            async fn check_and_record_activity(
+                &self,
+                _request: CheckAndRecordActivityRequest,
+            ) -> Result<CheckAndRecordActivityResult, AnalyticsError> {
+                Ok(CheckAndRecordActivityResult {
+                    current_count: 0,
+                    was_recorded: true,
+                })
+            }
+
+            async fn check_activity_count(
+                &self,
+                _user_id: UserId,
+                _activity_type: ActivityType,
+                _window_duration: ChronoDuration,
+            ) -> Result<i64, AnalyticsError> {
+                Ok(0)
+            }
+
+            async fn get_analytics_summary(
+                &self,
+                _start: chrono::DateTime<Utc>,
+                _end: chrono::DateTime<Utc>,
+            ) -> Result<AnalyticsSummary, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_daily_active_users(
+                &self,
+                _date: chrono::DateTime<Utc>,
+            ) -> Result<i64, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_weekly_active_users(
+                &self,
+                _date: chrono::DateTime<Utc>,
+            ) -> Result<i64, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_monthly_active_users(
+                &self,
+                _date: chrono::DateTime<Utc>,
+            ) -> Result<i64, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_user_activity(
+                &self,
+                _user_id: UserId,
+                _limit: Option<i64>,
+                _offset: Option<i64>,
+            ) -> Result<Vec<ActivityLogEntry>, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn get_top_active_users(
+                &self,
+                _start: chrono::DateTime<Utc>,
+                _end: chrono::DateTime<Utc>,
+                _limit: i64,
+            ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
+                unreachable!()
+            }
+
+            async fn record_user_usage(
+                &self,
+                _user_id: UserId,
+                _tokens_used: u64,
+                _cost_nano_usd: Option<i64>,
+            ) -> Result<(), AnalyticsError> {
+                Ok(())
+            }
+
+            async fn get_token_usage_sum(
+                &self,
+                _user_id: UserId,
+                _window_duration: ChronoDuration,
+            ) -> Result<i64, AnalyticsError> {
+                Ok(self.token_sum)
+            }
+
+            async fn get_cost_usage_sum(
+                &self,
+                _user_id: UserId,
+                _window_duration: ChronoDuration,
+            ) -> Result<i64, AnalyticsError> {
+                Ok(self.cost_sum)
             }
         }
 
@@ -835,6 +1153,31 @@ mod tests {
             ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
                 unreachable!()
             }
+
+            async fn record_user_usage(
+                &self,
+                _user_id: UserId,
+                _tokens_used: u64,
+                _cost_nano_usd: Option<i64>,
+            ) -> Result<(), AnalyticsError> {
+                Ok(())
+            }
+
+            async fn get_token_usage_sum(
+                &self,
+                _user_id: UserId,
+                _window_duration: ChronoDuration,
+            ) -> Result<i64, AnalyticsError> {
+                Ok(0)
+            }
+
+            async fn get_cost_usage_sum(
+                &self,
+                _user_id: UserId,
+                _window_duration: ChronoDuration,
+            ) -> Result<i64, AnalyticsError> {
+                Ok(0)
+            }
         }
 
         /// Simulates atomic insert failure (check passes but insert fails)
@@ -915,6 +1258,31 @@ mod tests {
                 _limit: i64,
             ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
                 unreachable!()
+            }
+
+            async fn record_user_usage(
+                &self,
+                _user_id: UserId,
+                _tokens_used: u64,
+                _cost_nano_usd: Option<i64>,
+            ) -> Result<(), AnalyticsError> {
+                Ok(())
+            }
+
+            async fn get_token_usage_sum(
+                &self,
+                _user_id: UserId,
+                _window_duration: ChronoDuration,
+            ) -> Result<i64, AnalyticsError> {
+                Ok(0)
+            }
+
+            async fn get_cost_usage_sum(
+                &self,
+                _user_id: UserId,
+                _window_duration: ChronoDuration,
+            ) -> Result<i64, AnalyticsError> {
+                Ok(0)
             }
         }
 
@@ -997,6 +1365,31 @@ mod tests {
                 _limit: i64,
             ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
                 unreachable!()
+            }
+
+            async fn record_user_usage(
+                &self,
+                _user_id: UserId,
+                _tokens_used: u64,
+                _cost_nano_usd: Option<i64>,
+            ) -> Result<(), AnalyticsError> {
+                Ok(())
+            }
+
+            async fn get_token_usage_sum(
+                &self,
+                _user_id: UserId,
+                _window_duration: ChronoDuration,
+            ) -> Result<i64, AnalyticsError> {
+                Ok(0)
+            }
+
+            async fn get_cost_usage_sum(
+                &self,
+                _user_id: UserId,
+                _window_duration: ChronoDuration,
+            ) -> Result<i64, AnalyticsError> {
+                Ok(0)
             }
         }
 
@@ -1110,6 +1503,31 @@ mod tests {
             ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
                 unreachable!()
             }
+
+            async fn record_user_usage(
+                &self,
+                _user_id: UserId,
+                _tokens_used: u64,
+                _cost_nano_usd: Option<i64>,
+            ) -> Result<(), AnalyticsError> {
+                Ok(())
+            }
+
+            async fn get_token_usage_sum(
+                &self,
+                _user_id: UserId,
+                _window_duration: ChronoDuration,
+            ) -> Result<i64, AnalyticsError> {
+                Ok(0)
+            }
+
+            async fn get_cost_usage_sum(
+                &self,
+                _user_id: UserId,
+                _window_duration: ChronoDuration,
+            ) -> Result<i64, AnalyticsError> {
+                Ok(0)
+            }
         }
 
         /// Always returns an error
@@ -1186,6 +1604,31 @@ mod tests {
             ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
                 unreachable!()
             }
+
+            async fn record_user_usage(
+                &self,
+                _user_id: UserId,
+                _tokens_used: u64,
+                _cost_nano_usd: Option<i64>,
+            ) -> Result<(), AnalyticsError> {
+                Ok(())
+            }
+
+            async fn get_token_usage_sum(
+                &self,
+                _user_id: UserId,
+                _window_duration: ChronoDuration,
+            ) -> Result<i64, AnalyticsError> {
+                Err(AnalyticsError::InternalError("Database error".to_string()))
+            }
+
+            async fn get_cost_usage_sum(
+                &self,
+                _user_id: UserId,
+                _window_duration: ChronoDuration,
+            ) -> Result<i64, AnalyticsError> {
+                Err(AnalyticsError::InternalError("Database error".to_string()))
+            }
         }
     }
 
@@ -1231,6 +1674,8 @@ mod tests {
             max_requests_per_window: 100, // High limit to avoid rate limiting
             window_duration: ChronoDuration::seconds(1),
             window_limits: vec![], // No window limits for this test
+            token_window_limits: vec![],
+            cost_window_limits: vec![],
         });
 
         let user = test_user_id(1);
@@ -1251,6 +1696,8 @@ mod tests {
             max_requests_per_window: 100, // High to test concurrency, not rate
             window_duration: ChronoDuration::seconds(1),
             window_limits: vec![], // No window limits for this test
+            token_window_limits: vec![],
+            cost_window_limits: vec![],
         });
 
         let user1 = test_user_id(1);
@@ -1278,6 +1725,8 @@ mod tests {
             max_requests_per_window: 100,
             window_duration: ChronoDuration::seconds(1),
             window_limits: vec![], // No window limits for this test
+            token_window_limits: vec![],
+            cost_window_limits: vec![],
         });
 
         let user = test_user_id(1);
@@ -1304,6 +1753,8 @@ mod tests {
             max_requests_per_window: 1,
             window_duration: ChronoDuration::milliseconds(50),
             window_limits: vec![], // No window limits for this test
+            token_window_limits: vec![],
+            cost_window_limits: vec![],
         });
 
         let user = test_user_id(1);
@@ -1353,6 +1804,8 @@ mod tests {
             max_requests_per_window: 10,
             window_duration: ChronoDuration::milliseconds(10),
             window_limits: vec![], // No window limits for this test
+            token_window_limits: vec![],
+            cost_window_limits: vec![],
         });
 
         let user1 = test_user_id(1);
@@ -1380,6 +1833,8 @@ mod tests {
                     window_duration: ChronoDuration::days(1),
                     limit: 100,
                 }],
+                token_window_limits: vec![],
+                cost_window_limits: vec![],
             },
             Arc::new(test_services::RejectingAnalyticsService),
         );
@@ -1438,6 +1893,8 @@ mod tests {
                     window_duration: ChronoDuration::days(1),
                     limit: 10,
                 }],
+                token_window_limits: vec![],
+                cost_window_limits: vec![],
             },
             analytics_service.clone(),
         );
@@ -1473,6 +1930,8 @@ mod tests {
                     window_duration: ChronoDuration::days(1),
                     limit,
                 }],
+                token_window_limits: vec![],
+                cost_window_limits: vec![],
             },
             Arc::new(test_services::fixed_count_service(limit as i64)),
         );
@@ -1512,6 +1971,8 @@ mod tests {
                     window_duration: ChronoDuration::days(1),
                     limit,
                 }],
+                token_window_limits: vec![],
+                cost_window_limits: vec![],
             },
             Arc::new(test_services::fixed_count_service(limit as i64 + 5)), // Above limit
         );
@@ -1547,6 +2008,8 @@ mod tests {
                         limit: week_limit,
                     },
                 ],
+                token_window_limits: vec![],
+                cost_window_limits: vec![],
             },
             Arc::new(test_services::MultiWindowAnalyticsService {
                 day_count: 5,
@@ -1577,6 +2040,8 @@ mod tests {
                         limit: week_limit,
                     },
                 ],
+                token_window_limits: vec![],
+                cost_window_limits: vec![],
             },
             Arc::new(test_services::MultiWindowAnalyticsService {
                 day_count: day_limit as i64,
@@ -1612,6 +2077,8 @@ mod tests {
                         limit: week_limit,
                     },
                 ],
+                token_window_limits: vec![],
+                cost_window_limits: vec![],
             },
             Arc::new(test_services::MultiWindowAnalyticsService {
                 day_count: 5,
@@ -1643,6 +2110,8 @@ mod tests {
                     window_duration: ChronoDuration::days(1),
                     limit: 10,
                 }],
+                token_window_limits: vec![],
+                cost_window_limits: vec![],
             },
             Arc::new(test_services::AtomicInsertFailureService),
         );
@@ -1671,6 +2140,8 @@ mod tests {
                     window_duration: ChronoDuration::days(1),
                     limit: 10,
                 }],
+                token_window_limits: vec![],
+                cost_window_limits: vec![],
             },
             Arc::new(test_services::WindowSizeTestService { count: 10 }),
         );
@@ -1698,6 +2169,8 @@ mod tests {
                     window_duration: ChronoDuration::weeks(1),
                     limit: 10,
                 }],
+                token_window_limits: vec![],
+                cost_window_limits: vec![],
             },
             Arc::new(test_services::WindowSizeTestService { count: 10 }),
         );
@@ -1725,6 +2198,8 @@ mod tests {
                     window_duration: ChronoDuration::days(30),
                     limit: 10,
                 }],
+                token_window_limits: vec![],
+                cost_window_limits: vec![],
             },
             Arc::new(test_services::WindowSizeTestService { count: 10 }),
         );
@@ -1754,6 +2229,8 @@ mod tests {
                     window_duration: ChronoDuration::days(1),
                     limit: 10,
                 }],
+                token_window_limits: vec![],
+                cost_window_limits: vec![],
             },
             Arc::new(test_services::ErrorAnalyticsService),
         );
@@ -1774,6 +2251,8 @@ mod tests {
                 max_requests_per_window: 100,
                 window_duration: ChronoDuration::seconds(1),
                 window_limits: vec![], // No window limits
+                token_window_limits: vec![],
+                cost_window_limits: vec![],
             },
             Arc::new(test_services::AlwaysAllowAnalyticsService),
         );
@@ -1783,6 +2262,65 @@ mod tests {
         // Should succeed (only checked against short-term rate limit and concurrency)
         let result = state.try_acquire(user).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_token_window_limit_exceeded() {
+        let state = RateLimitState::with_config(
+            RateLimitConfig {
+                max_concurrent: 10,
+                max_requests_per_window: 100, // avoid request-count limiting
+                window_duration: ChronoDuration::seconds(1),
+                window_limits: vec![],
+                token_window_limits: vec![WindowLimit {
+                    window_duration: ChronoDuration::seconds(60),
+                    limit: 100,
+                }],
+                cost_window_limits: vec![],
+            },
+            Arc::new(test_services::FixedUsageSumAnalyticsService {
+                token_sum: 150,
+                cost_sum: 0,
+            }),
+        );
+
+        let user = test_user_id(1);
+        let result = state.try_acquire(user).await;
+        assert!(
+            matches!(result, Err(RateLimitError::TokenLimitExceeded { .. })),
+            "Expected TokenLimitExceeded, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cost_window_limit_exceeded() {
+        let state = RateLimitState::with_config(
+            RateLimitConfig {
+                max_concurrent: 10,
+                max_requests_per_window: 100, // avoid request-count limiting
+                window_duration: ChronoDuration::seconds(1),
+                window_limits: vec![],
+                token_window_limits: vec![],
+                cost_window_limits: vec![WindowLimit {
+                    window_duration: ChronoDuration::seconds(60),
+                    // nano-USD (same unit stored in user_usage_log)
+                    limit: 1_000,
+                }],
+            },
+            Arc::new(test_services::FixedUsageSumAnalyticsService {
+                token_sum: 0,
+                cost_sum: 5_000,
+            }),
+        );
+
+        let user = test_user_id(1);
+        let result = state.try_acquire(user).await;
+        assert!(
+            matches!(result, Err(RateLimitError::CostLimitExceeded { .. })),
+            "Expected CostLimitExceeded, got: {:?}",
+            result.err()
+        );
     }
 
     #[tokio::test]
@@ -1807,6 +2345,8 @@ mod tests {
                     ),
                     limit,
                 }],
+                token_window_limits: vec![],
+                cost_window_limits: vec![],
             },
             analytics_service.clone(),
         );
@@ -1877,6 +2417,8 @@ mod tests {
             max_requests_per_window: 100,
             window_duration: ChronoDuration::seconds(60),
             window_limits: vec![],
+            token_window_limits: vec![],
+            cost_window_limits: vec![],
         };
 
         let analytics_service = Arc::new(test_services::CounterAnalyticsService {
@@ -1905,6 +2447,8 @@ mod tests {
             max_requests_per_window: 100,
             window_duration: ChronoDuration::seconds(60),
             window_limits: vec![],
+            token_window_limits: vec![],
+            cost_window_limits: vec![],
         };
         state.update_config(new_config).await;
 
