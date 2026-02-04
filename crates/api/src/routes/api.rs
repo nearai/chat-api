@@ -1893,12 +1893,12 @@ async fn proxy_responses(
     // Modify request body to inject system prompt and/or author metadata
     let modified_body_bytes = if let Some(mut body) = body_json {
         // Inject model-level system prompt if present
-        if let Some(system_prompt) = model_system_prompt.clone() {
+        if let Some(system_prompt) = model_system_prompt.as_ref() {
             let new_instructions = match body.get("instructions").and_then(|v| v.as_str()) {
                 Some(existing) if !existing.is_empty() => {
                     format!("{system_prompt}\n\n{existing}")
                 }
-                _ => system_prompt,
+                _ => system_prompt.clone(),
             };
             body["instructions"] = serde_json::Value::String(new_instructions);
         }
@@ -2004,36 +2004,26 @@ async fn proxy_responses(
     );
 
     // Access model system prompt cache during proxy response handling (for observability/debugging).
-    // We DO NOT expose the prompt itself; we only attach a stable hash + cache hit indicator.
+    // We DO NOT expose the prompt itself; we only attach a stable hash.
+    // Cache hit/miss is tracked via analytics (see below), not HTTP headers.
     let mut proxy_headers = proxy_response.headers.clone();
     if let Some(ref model_id) = model_id_from_body {
-        let cached_prompt_opt = {
+        let cached_hash_opt = {
             let cache = state.model_settings_cache.read().await;
             cache.get(model_id).and_then(|e| {
                 if e.exists {
-                    e.system_prompt.clone()
+                    e.system_prompt_hash.clone()
                 } else {
                     None
                 }
             })
         };
 
-        if let Some(prompt) = cached_prompt_opt {
-            let mut hasher = Sha256::new();
-            hasher.update(prompt.as_bytes());
-            let prompt_hash = format!("{:x}", hasher.finalize());
-
+        if let Some(prompt_hash) = cached_hash_opt {
             let _ = proxy_headers.insert(
                 HeaderName::from_static("x-nearai-model-system-prompt-sha256"),
                 HeaderValue::from_str(&prompt_hash)
                     .unwrap_or_else(|_| HeaderValue::from_static("")),
-            );
-        }
-
-        if let Some(hit) = model_settings_cache_hit {
-            let _ = proxy_headers.insert(
-                HeaderName::from_static("x-nearai-model-settings-cache"),
-                HeaderValue::from_static(if hit { "hit" } else { "miss" }),
             );
         }
     }
@@ -2559,9 +2549,9 @@ async fn proxy_signature(
     .await
 }
 
-/// Proxy chat completions to cloud-api (OpenAI-compatible endpoint)
 /// Helper function to get model settings with caching support.
-/// Returns (model_id, system_prompt, cache_hit) if model is found and public.
+/// Returns (system_prompt, cache_hit) if model is found and public.
+/// Validates model visibility and populates cache if needed.
 async fn get_model_settings_with_cache(
     state: &crate::state::AppState,
     model_id: &str,
@@ -2603,6 +2593,13 @@ async fn get_model_settings_with_cache(
         model_settings_cache_hit = Some(false);
         match state.model_service.get_model(model_id).await {
             Ok(Some(model)) => {
+                // Compute hash once when creating cache entry
+                let system_prompt_hash = model.settings.system_prompt.as_ref().map(|prompt| {
+                    let mut hasher = Sha256::new();
+                    hasher.update(prompt.as_bytes());
+                    format!("{:x}", hasher.finalize())
+                });
+
                 // Populate cache
                 {
                     let mut cache = state.model_settings_cache.write().await;
@@ -2613,6 +2610,7 @@ async fn get_model_settings_with_cache(
                             exists: true,
                             public: model.settings.public,
                             system_prompt: model.settings.system_prompt.clone(),
+                            system_prompt_hash,
                         },
                     );
                 }
@@ -2646,6 +2644,7 @@ async fn get_model_settings_with_cache(
                             exists: false, // Not in DB but allowed with defaults
                             public: MODEL_PUBLIC_DEFAULT, // true by default
                             system_prompt: None,
+                            system_prompt_hash: None,
                         },
                     );
                 }
@@ -2722,7 +2721,6 @@ async fn proxy_post_to_cloud_api(
     // Parse JSON body and handle model settings if enabled
     let mut body_json: Option<serde_json::Value> = None;
     let mut model_id_from_body: Option<String> = None;
-    let mut model_settings_cache_hit: Option<bool> = None;
     let mut model_system_prompt: Option<String> = None;
 
     if config.enable_model_prompt && !body_bytes.is_empty() {
@@ -2740,9 +2738,9 @@ async fn proxy_post_to_cloud_api(
                     model_id_from_body = Some(model_id.to_string());
 
                     match get_model_settings_with_cache(state, model_id, user.user_id).await {
-                        Ok((prompt, cache_hit)) => {
+                        Ok((prompt, _cache_hit)) => {
                             model_system_prompt = prompt;
-                            model_settings_cache_hit = cache_hit;
+                            // Cache hit/miss is tracked via analytics in proxy_responses, not needed here
                         }
                         Err(e) => return Err(e),
                     }
@@ -2764,7 +2762,7 @@ async fn proxy_post_to_cloud_api(
         let mut modified = false;
 
         // For chat completions, inject system prompt as a system message
-        if let Some(system_prompt) = model_system_prompt.clone() {
+        if let Some(system_prompt) = model_system_prompt.as_ref() {
             if let Some(messages) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
                 // Check if there's already a system message
                 let has_system_message = messages
@@ -2796,21 +2794,24 @@ async fn proxy_post_to_cloud_api(
                             modified = true;
                         }
                         // Handle array content format (for multimodal)
-                        else if let Some(content_arr) =
-                            first_system.get("content").and_then(|c| c.as_array())
+                        else if let Some(content_arr) = first_system
+                            .get_mut("content")
+                            .and_then(|c| c.as_array_mut())
                         {
-                            // Prepend text content to the array
-                            let mut new_content = vec![json!({
-                                "type": "text",
-                                "text": system_prompt
-                            })];
-                            new_content.extend(content_arr.clone());
-                            first_system["content"] = serde_json::Value::Array(new_content);
+                            // Prepend text content to the array efficiently
+                            content_arr.insert(
+                                0,
+                                json!({
+                                    "type": "text",
+                                    "text": system_prompt
+                                }),
+                            );
                             modified = true;
                         }
                         // If content is missing or in unexpected format, replace with system prompt
                         else {
-                            first_system["content"] = serde_json::Value::String(system_prompt);
+                            first_system["content"] =
+                                serde_json::Value::String(system_prompt.to_string());
                             modified = true;
                         }
                     }
@@ -2886,35 +2887,25 @@ async fn proxy_post_to_cloud_api(
     );
 
     // Add model settings cache headers for observability (same as Responses API)
+    // Cache hit/miss is tracked via analytics, not HTTP headers.
     let mut proxy_headers = proxy_response.headers.clone();
     if let Some(ref model_id) = model_id_from_body {
-        let cached_prompt_opt = {
+        let cached_hash_opt = {
             let cache = state.model_settings_cache.read().await;
             cache.get(model_id).and_then(|e| {
                 if e.exists {
-                    e.system_prompt.clone()
+                    e.system_prompt_hash.clone()
                 } else {
                     None
                 }
             })
         };
 
-        if let Some(prompt) = cached_prompt_opt {
-            let mut hasher = Sha256::new();
-            hasher.update(prompt.as_bytes());
-            let prompt_hash = format!("{:x}", hasher.finalize());
-
+        if let Some(prompt_hash) = cached_hash_opt {
             let _ = proxy_headers.insert(
                 HeaderName::from_static("x-nearai-model-system-prompt-sha256"),
                 HeaderValue::from_str(&prompt_hash)
                     .unwrap_or_else(|_| HeaderValue::from_static("")),
-            );
-        }
-
-        if let Some(hit) = model_settings_cache_hit {
-            let _ = proxy_headers.insert(
-                HeaderName::from_static("x-nearai-model-settings-cache"),
-                HeaderValue::from_static(if hit { "hit" } else { "miss" }),
             );
         }
     }
