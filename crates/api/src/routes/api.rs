@@ -116,12 +116,23 @@ pub fn create_api_router(
     let responses_router = Router::new()
         .route("/v1/responses", post(proxy_responses))
         .layer(axum::middleware::from_fn_with_state(
+            rate_limit_state.clone(),
+            crate::middleware::rate_limit_middleware,
+        ));
+
+    // Completion routes (chat completions, image generation) with rate limiting
+    let completions_router = Router::new()
+        .route("/v1/chat/completions", post(proxy_chat_completions))
+        .route("/v1/images/generations", post(proxy_image_generations))
+        .route("/v1/images/edits", post(proxy_image_edits))
+        .layer(axum::middleware::from_fn_with_state(
             rate_limit_state,
             crate::middleware::rate_limit_middleware,
         ));
 
     let proxy_router = Router::new()
         .route("/v1/model/list", get(proxy_model_list))
+        .route("/v1/models", get(proxy_models))
         .route("/v1/signature/{chat_id}", get(proxy_signature));
 
     Router::new()
@@ -129,6 +140,7 @@ pub fn create_api_router(
         .merge(share_groups_router)
         .merge(files_router)
         .merge(responses_router)
+        .merge(completions_router)
         .merge(proxy_router)
 }
 
@@ -2621,6 +2633,261 @@ async fn proxy_signature(
         "Received response from OpenAI: status={} for GET /v1/signature/{} (user_id={})",
         proxy_response.status,
         chat_id,
+        user.user_id
+    );
+
+    build_response(
+        proxy_response.status,
+        proxy_response.headers,
+        Body::from_stream(proxy_response.body),
+    )
+    .await
+}
+
+/// Proxy chat completions to cloud-api (OpenAI-compatible endpoint)
+async fn proxy_chat_completions(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    mut headers: HeaderMap,
+    request: Request,
+) -> Result<Response, Response> {
+    tracing::info!(
+        "proxy_chat_completions: POST /v1/chat/completions for user_id={}, session_id={}",
+        user.user_id,
+        user.session_id
+    );
+
+    // Check if user is currently banned before proceeding
+    ensure_user_not_banned(&state, &user).await?;
+
+    // Trigger an asynchronous NEAR balance check
+    spawn_near_balance_check(&state, &user);
+
+    // Extract body bytes
+    let body_bytes = extract_body_bytes(request).await?;
+
+    tracing::debug!(
+        "Extracted request body: {} bytes for POST /v1/chat/completions",
+        body_bytes.len()
+    );
+
+    // Set content-length header
+    let content_length = HeaderValue::from_str(&body_bytes.len().to_string())
+        .expect("usize to string conversion always produces valid HeaderValue");
+    headers.insert(CONTENT_LENGTH, content_length);
+
+    // Forward the request to cloud-api
+    let proxy_response = state
+        .proxy_service
+        .forward_request(
+            Method::POST,
+            "chat/completions",
+            headers.clone(),
+            Some(body_bytes),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Cloud API error for POST /v1/chat/completions (user_id={}): {}",
+                user.user_id,
+                e
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("Cloud API error: {e}"),
+                }),
+            )
+                .into_response()
+        })?;
+
+    tracing::info!(
+        "Received response from cloud-api: status={} for POST /v1/chat/completions (user_id={})",
+        proxy_response.status,
+        user.user_id
+    );
+
+    build_response(
+        proxy_response.status,
+        proxy_response.headers,
+        Body::from_stream(proxy_response.body),
+    )
+    .await
+}
+
+/// Proxy image generation to cloud-api (OpenAI-compatible endpoint)
+async fn proxy_image_generations(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    mut headers: HeaderMap,
+    request: Request,
+) -> Result<Response, Response> {
+    tracing::info!(
+        "proxy_image_generations: POST /v1/images/generations for user_id={}, session_id={}",
+        user.user_id,
+        user.session_id
+    );
+
+    // Check if user is currently banned before proceeding
+    ensure_user_not_banned(&state, &user).await?;
+
+    // Trigger an asynchronous NEAR balance check
+    spawn_near_balance_check(&state, &user);
+
+    // Extract body bytes
+    let body_bytes = extract_body_bytes(request).await?;
+
+    tracing::debug!(
+        "Extracted request body: {} bytes for POST /v1/images/generations",
+        body_bytes.len()
+    );
+
+    // Set content-length header
+    let content_length = HeaderValue::from_str(&body_bytes.len().to_string())
+        .expect("usize to string conversion always produces valid HeaderValue");
+    headers.insert(CONTENT_LENGTH, content_length);
+
+    // Forward the request to cloud-api
+    let proxy_response = state
+        .proxy_service
+        .forward_request(
+            Method::POST,
+            "images/generations",
+            headers.clone(),
+            Some(body_bytes),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Cloud API error for POST /v1/images/generations (user_id={}): {}",
+                user.user_id,
+                e
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("Cloud API error: {e}"),
+                }),
+            )
+                .into_response()
+        })?;
+
+    tracing::info!(
+        "Received response from cloud-api: status={} for POST /v1/images/generations (user_id={})",
+        proxy_response.status,
+        user.user_id
+    );
+
+    build_response(
+        proxy_response.status,
+        proxy_response.headers,
+        Body::from_stream(proxy_response.body),
+    )
+    .await
+}
+
+/// Proxy image edits to cloud-api (OpenAI-compatible endpoint)
+/// Note: This endpoint accepts multipart/form-data
+async fn proxy_image_edits(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    request: Request,
+) -> Result<Response, Response> {
+    tracing::info!(
+        "proxy_image_edits: POST /v1/images/edits for user_id={}, session_id={}",
+        user.user_id,
+        user.session_id
+    );
+
+    // Check if user is currently banned before proceeding
+    ensure_user_not_banned(&state, &user).await?;
+
+    // Trigger an asynchronous NEAR balance check
+    spawn_near_balance_check(&state, &user);
+
+    // Extract body bytes (multipart data)
+    let body_bytes = extract_body_bytes(request).await?;
+
+    tracing::debug!(
+        "Extracted request body: {} bytes for POST /v1/images/edits",
+        body_bytes.len()
+    );
+
+    // Forward the request to cloud-api preserving original headers (including content-type with boundary)
+    let proxy_response = state
+        .proxy_service
+        .forward_request(
+            Method::POST,
+            "images/edits",
+            headers.clone(),
+            Some(body_bytes),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Cloud API error for POST /v1/images/edits (user_id={}): {}",
+                user.user_id,
+                e
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("Cloud API error: {e}"),
+                }),
+            )
+                .into_response()
+        })?;
+
+    tracing::info!(
+        "Received response from cloud-api: status={} for POST /v1/images/edits (user_id={})",
+        proxy_response.status,
+        user.user_id
+    );
+
+    build_response(
+        proxy_response.status,
+        proxy_response.headers,
+        Body::from_stream(proxy_response.body),
+    )
+    .await
+}
+
+/// Proxy models list to cloud-api (OpenAI-compatible endpoint: GET /v1/models)
+async fn proxy_models(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+) -> Result<Response, Response> {
+    tracing::info!(
+        "proxy_models: GET /v1/models for user_id={}, session_id={}",
+        user.user_id,
+        user.session_id
+    );
+
+    // Forward the request to cloud-api
+    let proxy_response = state
+        .proxy_service
+        .forward_request(Method::GET, "models", headers.clone(), None)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Cloud API error for GET /v1/models (user_id={}): {}",
+                user.user_id,
+                e
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("Cloud API error: {e}"),
+                }),
+            )
+                .into_response()
+        })?;
+
+    tracing::info!(
+        "Received response from cloud-api: status={} for GET /v1/models (user_id={})",
+        proxy_response.status,
         user.user_id
     );
 
