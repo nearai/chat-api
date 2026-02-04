@@ -14,6 +14,7 @@ use flate2::read::GzDecoder;
 use http::{header::CONTENT_LENGTH, HeaderName, HeaderValue};
 use near_api::{Account, AccountId, NetworkConfig};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use services::analytics::{ActivityType, RecordActivityRequest};
 use services::consts::MODEL_PUBLIC_DEFAULT;
 use services::conversation::ports::{
@@ -116,12 +117,23 @@ pub fn create_api_router(
     let responses_router = Router::new()
         .route("/v1/responses", post(proxy_responses))
         .layer(axum::middleware::from_fn_with_state(
+            rate_limit_state.clone(),
+            crate::middleware::rate_limit_middleware,
+        ));
+
+    // Completion routes (chat completions, image generation) with rate limiting
+    let completions_router = Router::new()
+        .route("/v1/chat/completions", post(proxy_chat_completions))
+        .route("/v1/images/generations", post(proxy_image_generations))
+        .route("/v1/images/edits", post(proxy_image_edits))
+        .layer(axum::middleware::from_fn_with_state(
             rate_limit_state,
             crate::middleware::rate_limit_middleware,
         ));
 
     let proxy_router = Router::new()
         .route("/v1/model/list", get(proxy_model_list))
+        .route("/v1/models", get(proxy_models))
         .route("/v1/signature/{chat_id}", get(proxy_signature));
 
     Router::new()
@@ -129,6 +141,7 @@ pub fn create_api_router(
         .merge(share_groups_router)
         .merge(files_router)
         .merge(responses_router)
+        .merge(completions_router)
         .merge(proxy_router)
 }
 
@@ -1847,99 +1860,13 @@ async fn proxy_responses(
         if let Some(model_id) = body.get("model").and_then(|v| v.as_str()) {
             model_id_from_body = Some(model_id.to_string());
 
-            // 1) Try cache first
-            {
-                let cache = state.model_settings_cache.read().await;
-                if let Some(entry) = cache.get(model_id) {
-                    let age = Utc::now().signed_duration_since(entry.last_checked_at);
-                    if age.num_seconds() >= 0 && age.num_seconds() < MODEL_SETTINGS_CACHE_TTL_SECS {
-                        model_settings_cache_hit = Some(true);
-
-                        if !entry.public {
-                            tracing::warn!(
-                                "Blocking response request for non-public model '{}' from user {} (cache)",
-                                model_id,
-                                user.user_id
-                            );
-                            return Err((
-                                StatusCode::FORBIDDEN,
-                                Json(ErrorResponse {
-                                    error: "This model is not available".to_string(),
-                                }),
-                            )
-                                .into_response());
-                        }
-
-                        model_system_prompt = entry.system_prompt.clone();
-                    }
+            // Use shared helper function to get model settings with caching
+            match get_model_settings_with_cache(&state, model_id, user.user_id).await {
+                Ok((prompt, cache_hit)) => {
+                    model_system_prompt = prompt;
+                    model_settings_cache_hit = cache_hit;
                 }
-            }
-
-            // 2) Cache miss or expired: fetch from DB/service and populate cache
-            if model_settings_cache_hit.is_none() {
-                model_settings_cache_hit = Some(false);
-                match state.model_service.get_model(model_id).await {
-                    Ok(Some(model)) => {
-                        // Populate cache
-                        {
-                            let mut cache = state.model_settings_cache.write().await;
-                            cache.insert(
-                                model_id.to_string(),
-                                crate::state::ModelSettingsCacheEntry {
-                                    last_checked_at: Utc::now(),
-                                    exists: true,
-                                    public: model.settings.public,
-                                    system_prompt: model.settings.system_prompt.clone(),
-                                },
-                            );
-                        }
-
-                        if !model.settings.public {
-                            tracing::warn!(
-                                "Blocking response request for non-public model '{}' from user {}",
-                                model_id,
-                                user.user_id
-                            );
-                            return Err((
-                                StatusCode::FORBIDDEN,
-                                Json(ErrorResponse {
-                                    error: "This model is not available".to_string(),
-                                }),
-                            )
-                                .into_response());
-                        }
-
-                        model_system_prompt = model.settings.system_prompt.clone();
-                    }
-                    Ok(None) => {
-                        // Model not in admin DB - allow by default per MODEL_PUBLIC_DEFAULT
-                        // Cache with defaults to avoid repeated DB hits, let OpenAI validate model existence
-                        {
-                            let mut cache = state.model_settings_cache.write().await;
-                            cache.insert(
-                                model_id.to_string(),
-                                crate::state::ModelSettingsCacheEntry {
-                                    last_checked_at: Utc::now(),
-                                    exists: false, // Not in DB but allowed with defaults
-                                    public: MODEL_PUBLIC_DEFAULT, // true by default
-                                    system_prompt: None,
-                                },
-                            );
-                        }
-
-                        // Continue with defaults - let OpenAI validate model existence
-                        model_system_prompt = None;
-                    }
-                    Err(_) => {
-                        return Err((
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(ErrorResponse {
-                                error: "Failed to get model".to_string(),
-                            }),
-                        )
-                            .into_response())
-                    }
-                }
+                Err(e) => return Err(e),
             }
         }
     }
@@ -1966,12 +1893,12 @@ async fn proxy_responses(
     // Modify request body to inject system prompt and/or author metadata
     let modified_body_bytes = if let Some(mut body) = body_json {
         // Inject model-level system prompt if present
-        if let Some(system_prompt) = model_system_prompt.clone() {
+        if let Some(system_prompt) = model_system_prompt.as_ref() {
             let new_instructions = match body.get("instructions").and_then(|v| v.as_str()) {
                 Some(existing) if !existing.is_empty() => {
                     format!("{system_prompt}\n\n{existing}")
                 }
-                _ => system_prompt,
+                _ => system_prompt.clone(),
             };
             body["instructions"] = serde_json::Value::String(new_instructions);
         }
@@ -2077,36 +2004,26 @@ async fn proxy_responses(
     );
 
     // Access model system prompt cache during proxy response handling (for observability/debugging).
-    // We DO NOT expose the prompt itself; we only attach a stable hash + cache hit indicator.
+    // We DO NOT expose the prompt itself; we only attach a stable hash.
+    // Cache hit/miss is tracked via analytics (see below), not HTTP headers.
     let mut proxy_headers = proxy_response.headers.clone();
     if let Some(ref model_id) = model_id_from_body {
-        let cached_prompt_opt = {
+        let cached_hash_opt = {
             let cache = state.model_settings_cache.read().await;
             cache.get(model_id).and_then(|e| {
                 if e.exists {
-                    e.system_prompt.clone()
+                    e.system_prompt_hash.clone()
                 } else {
                     None
                 }
             })
         };
 
-        if let Some(prompt) = cached_prompt_opt {
-            let mut hasher = Sha256::new();
-            hasher.update(prompt.as_bytes());
-            let prompt_hash = format!("{:x}", hasher.finalize());
-
+        if let Some(prompt_hash) = cached_hash_opt {
             let _ = proxy_headers.insert(
                 HeaderName::from_static("x-nearai-model-system-prompt-sha256"),
                 HeaderValue::from_str(&prompt_hash)
                     .unwrap_or_else(|_| HeaderValue::from_static("")),
-            );
-        }
-
-        if let Some(hit) = model_settings_cache_hit {
-            let _ = proxy_headers.insert(
-                HeaderName::from_static("x-nearai-model-settings-cache"),
-                HeaderValue::from_static(if hit { "hit" } else { "miss" }),
             );
         }
     }
@@ -2621,6 +2538,487 @@ async fn proxy_signature(
         "Received response from OpenAI: status={} for GET /v1/signature/{} (user_id={})",
         proxy_response.status,
         chat_id,
+        user.user_id
+    );
+
+    build_response(
+        proxy_response.status,
+        proxy_response.headers,
+        Body::from_stream(proxy_response.body),
+    )
+    .await
+}
+
+/// Helper function to get model settings with caching support.
+/// Returns (system_prompt, cache_hit) if model is found and public.
+/// Validates model visibility and populates cache if needed.
+async fn get_model_settings_with_cache(
+    state: &crate::state::AppState,
+    model_id: &str,
+    user_id: services::UserId,
+) -> Result<(Option<String>, Option<bool>), Response> {
+    let mut model_system_prompt: Option<String> = None;
+    let mut model_settings_cache_hit: Option<bool> = None;
+
+    // 1) Try cache first
+    {
+        let cache = state.model_settings_cache.read().await;
+        if let Some(entry) = cache.get(model_id) {
+            let age = Utc::now().signed_duration_since(entry.last_checked_at);
+            if age.num_seconds() >= 0 && age.num_seconds() < MODEL_SETTINGS_CACHE_TTL_SECS {
+                model_settings_cache_hit = Some(true);
+
+                if !entry.public {
+                    tracing::warn!(
+                        "Blocking request for non-public model '{}' from user {} (cache)",
+                        model_id,
+                        user_id
+                    );
+                    return Err((
+                        StatusCode::FORBIDDEN,
+                        Json(ErrorResponse {
+                            error: "This model is not available".to_string(),
+                        }),
+                    )
+                        .into_response());
+                }
+
+                model_system_prompt = entry.system_prompt.clone();
+            }
+        }
+    }
+
+    // 2) Cache miss or expired: fetch from DB/service and populate cache
+    if model_settings_cache_hit.is_none() {
+        model_settings_cache_hit = Some(false);
+        match state.model_service.get_model(model_id).await {
+            Ok(Some(model)) => {
+                // Compute hash once when creating cache entry
+                let system_prompt_hash = model.settings.system_prompt.as_ref().map(|prompt| {
+                    let mut hasher = Sha256::new();
+                    hasher.update(prompt.as_bytes());
+                    format!("{:x}", hasher.finalize())
+                });
+
+                // Populate cache
+                {
+                    let mut cache = state.model_settings_cache.write().await;
+                    cache.insert(
+                        model_id.to_string(),
+                        crate::state::ModelSettingsCacheEntry {
+                            last_checked_at: Utc::now(),
+                            exists: true,
+                            public: model.settings.public,
+                            system_prompt: model.settings.system_prompt.clone(),
+                            system_prompt_hash,
+                        },
+                    );
+                }
+
+                if !model.settings.public {
+                    tracing::warn!(
+                        "Blocking request for non-public model '{}' from user {}",
+                        model_id,
+                        user_id
+                    );
+                    return Err((
+                        StatusCode::FORBIDDEN,
+                        Json(ErrorResponse {
+                            error: "This model is not available".to_string(),
+                        }),
+                    )
+                        .into_response());
+                }
+
+                model_system_prompt = model.settings.system_prompt.clone();
+            }
+            Ok(None) => {
+                // Model not in admin DB - allow by default per MODEL_PUBLIC_DEFAULT
+                // Cache with defaults to avoid repeated DB hits
+                {
+                    let mut cache = state.model_settings_cache.write().await;
+                    cache.insert(
+                        model_id.to_string(),
+                        crate::state::ModelSettingsCacheEntry {
+                            last_checked_at: Utc::now(),
+                            exists: false, // Not in DB but allowed with defaults
+                            public: MODEL_PUBLIC_DEFAULT, // true by default
+                            system_prompt: None,
+                            system_prompt_hash: None,
+                        },
+                    );
+                }
+
+                // Continue with defaults
+                model_system_prompt = None;
+            }
+            Err(_) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "Failed to get model".to_string(),
+                    }),
+                )
+                    .into_response())
+            }
+        }
+    }
+
+    Ok((model_system_prompt, model_settings_cache_hit))
+}
+
+/// Configuration for proxying POST requests to cloud-api endpoints.
+struct ProxyEndpointConfig {
+    /// Path for the proxy service (e.g., "chat/completions")
+    endpoint_path: &'static str,
+    /// Full path for logging (e.g., "/v1/chat/completions")
+    endpoint_full_path: &'static str,
+    /// Whether to set the content-length header (false for multipart/form-data)
+    set_content_length: bool,
+    /// Whether to enable model system prompt injection
+    enable_model_prompt: bool,
+}
+
+/// Shared helper function for proxying POST requests to cloud-api endpoints.
+///
+/// This function handles common logic including:
+/// - User ban checks
+/// - NEAR balance checks (async)
+/// - Body extraction
+/// - Model settings lookup and system prompt injection (if config.enable_model_prompt is true)
+/// - Request forwarding
+/// - Error handling
+/// - Response building
+async fn proxy_post_to_cloud_api(
+    state: &crate::state::AppState,
+    user: &AuthenticatedUser,
+    mut headers: HeaderMap,
+    request: Request,
+    config: ProxyEndpointConfig,
+) -> Result<Response, Response> {
+    tracing::info!(
+        "proxy_post_to_cloud_api: POST {} for user_id={}, session_id={}",
+        config.endpoint_full_path,
+        user.user_id,
+        user.session_id
+    );
+
+    // Check if user is currently banned before proceeding
+    ensure_user_not_banned(state, user).await?;
+
+    // Trigger an asynchronous NEAR balance check
+    spawn_near_balance_check(state, user);
+
+    // Extract body bytes
+    let body_bytes = extract_body_bytes(request).await?;
+
+    tracing::debug!(
+        "Extracted request body: {} bytes for POST {}",
+        body_bytes.len(),
+        config.endpoint_full_path
+    );
+
+    // Parse JSON body and handle model settings if enabled
+    let mut body_json: Option<serde_json::Value> = None;
+    let mut model_id_from_body: Option<String> = None;
+    let mut model_system_prompt: Option<String> = None;
+
+    if config.enable_model_prompt && !body_bytes.is_empty() {
+        // Try to parse JSON body for model settings lookup
+        match serde_json::from_slice::<serde_json::Value>(&body_bytes) {
+            Ok(v) => {
+                body_json = Some(v);
+
+                // Extract model ID and get model settings
+                if let Some(model_id) = body_json
+                    .as_ref()
+                    .and_then(|b| b.get("model"))
+                    .and_then(|v| v.as_str())
+                {
+                    model_id_from_body = Some(model_id.to_string());
+
+                    match get_model_settings_with_cache(state, model_id, user.user_id).await {
+                        Ok((prompt, _cache_hit)) => {
+                            model_system_prompt = prompt;
+                            // Cache hit/miss is tracked via analytics in proxy_responses, not needed here
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::debug!(
+                    "Failed to parse request body as JSON for POST {} (user_id={}): {}",
+                    config.endpoint_full_path,
+                    user.user_id,
+                    e
+                );
+            }
+        }
+    }
+
+    // Inject system prompt into request body if present
+    let modified_body_bytes = if let Some(mut body) = body_json {
+        let mut modified = false;
+
+        // For chat completions, inject system prompt as a system message
+        if let Some(system_prompt) = model_system_prompt.as_ref() {
+            if let Some(messages) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
+                // Check if there's already a system message
+                let has_system_message = messages
+                    .iter()
+                    .any(|msg| msg.get("role").and_then(|r| r.as_str()) == Some("system"));
+
+                if !has_system_message {
+                    // Prepend system message at the beginning
+                    let system_msg = json!({
+                        "role": "system",
+                        "content": system_prompt
+                    });
+                    messages.insert(0, system_msg);
+                    modified = true;
+                } else {
+                    // If system message exists, prepend to the first system message's content
+                    if let Some(first_system_idx) = messages
+                        .iter()
+                        .position(|msg| msg.get("role").and_then(|r| r.as_str()) == Some("system"))
+                    {
+                        let first_system = &mut messages[first_system_idx];
+
+                        // Handle string content
+                        if let Some(content_str) =
+                            first_system.get("content").and_then(|c| c.as_str())
+                        {
+                            let new_content = format!("{system_prompt}\n\n{content_str}");
+                            first_system["content"] = serde_json::Value::String(new_content);
+                            modified = true;
+                        }
+                        // Handle array content format (for multimodal)
+                        else if let Some(content_arr) = first_system
+                            .get_mut("content")
+                            .and_then(|c| c.as_array_mut())
+                        {
+                            // Prepend text content to the array efficiently
+                            content_arr.insert(
+                                0,
+                                json!({
+                                    "type": "text",
+                                    "text": system_prompt
+                                }),
+                            );
+                            modified = true;
+                        }
+                        // If content is missing or in unexpected format, replace with system prompt
+                        else {
+                            first_system["content"] =
+                                serde_json::Value::String(system_prompt.to_string());
+                            modified = true;
+                        }
+                    }
+                }
+            } else {
+                // No messages array - create one with system message
+                body["messages"] = json!([{
+                    "role": "system",
+                    "content": system_prompt
+                }]);
+                modified = true;
+            }
+        }
+
+        if modified {
+            match serde_json::to_vec(&body) {
+                Ok(serialized) => Bytes::from(serialized),
+                Err(_) => {
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error: "Failed to modify request body".to_string(),
+                        }),
+                    )
+                        .into_response())
+                }
+            }
+        } else {
+            body_bytes
+        }
+    } else {
+        body_bytes
+    };
+
+    // Set content-length header if requested (skip for multipart/form-data)
+    if config.set_content_length {
+        let content_length = HeaderValue::from_str(&modified_body_bytes.len().to_string())
+            .expect("usize to string conversion always produces valid HeaderValue");
+        headers.insert(CONTENT_LENGTH, content_length);
+    }
+
+    // Forward the request to cloud-api
+    let proxy_response = state
+        .proxy_service
+        .forward_request(
+            Method::POST,
+            config.endpoint_path,
+            headers.clone(),
+            Some(modified_body_bytes),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Cloud API error for POST {} (user_id={}): {}",
+                config.endpoint_full_path,
+                user.user_id,
+                e
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("Cloud API error: {e}"),
+                }),
+            )
+                .into_response()
+        })?;
+
+    tracing::info!(
+        "Received response from cloud-api: status={} for POST {} (user_id={})",
+        proxy_response.status,
+        config.endpoint_full_path,
+        user.user_id
+    );
+
+    // Add model settings cache headers for observability (same as Responses API)
+    // Cache hit/miss is tracked via analytics, not HTTP headers.
+    let mut proxy_headers = proxy_response.headers.clone();
+    if let Some(ref model_id) = model_id_from_body {
+        let cached_hash_opt = {
+            let cache = state.model_settings_cache.read().await;
+            cache.get(model_id).and_then(|e| {
+                if e.exists {
+                    e.system_prompt_hash.clone()
+                } else {
+                    None
+                }
+            })
+        };
+
+        if let Some(prompt_hash) = cached_hash_opt {
+            let _ = proxy_headers.insert(
+                HeaderName::from_static("x-nearai-model-system-prompt-sha256"),
+                HeaderValue::from_str(&prompt_hash)
+                    .unwrap_or_else(|_| HeaderValue::from_static("")),
+            );
+        }
+    }
+
+    build_response(
+        proxy_response.status,
+        proxy_headers,
+        Body::from_stream(proxy_response.body),
+    )
+    .await
+}
+
+async fn proxy_chat_completions(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    request: Request,
+) -> Result<Response, Response> {
+    proxy_post_to_cloud_api(
+        &state,
+        &user,
+        headers,
+        request,
+        ProxyEndpointConfig {
+            endpoint_path: "chat/completions",
+            endpoint_full_path: "/v1/chat/completions",
+            set_content_length: true,
+            enable_model_prompt: true,
+        },
+    )
+    .await
+}
+
+/// Proxy image generation to cloud-api (OpenAI-compatible endpoint)
+async fn proxy_image_generations(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    request: Request,
+) -> Result<Response, Response> {
+    proxy_post_to_cloud_api(
+        &state,
+        &user,
+        headers,
+        request,
+        ProxyEndpointConfig {
+            endpoint_path: "images/generations",
+            endpoint_full_path: "/v1/images/generations",
+            set_content_length: true,
+            enable_model_prompt: false,
+        },
+    )
+    .await
+}
+
+/// Proxy image edits to cloud-api (OpenAI-compatible endpoint)
+/// Note: This endpoint accepts multipart/form-data
+async fn proxy_image_edits(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    request: Request,
+) -> Result<Response, Response> {
+    proxy_post_to_cloud_api(
+        &state,
+        &user,
+        headers,
+        request,
+        ProxyEndpointConfig {
+            endpoint_path: "images/edits",
+            endpoint_full_path: "/v1/images/edits",
+            set_content_length: false, // Don't set content-length header (preserve original headers for multipart/form-data)
+            enable_model_prompt: false, // No model system prompt for image edits
+        },
+    )
+    .await
+}
+
+/// Proxy models list to cloud-api (OpenAI-compatible endpoint: GET /v1/models)
+async fn proxy_models(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+) -> Result<Response, Response> {
+    tracing::info!(
+        "proxy_models: GET /v1/models for user_id={}, session_id={}",
+        user.user_id,
+        user.session_id
+    );
+
+    // Forward the request to cloud-api
+    let proxy_response = state
+        .proxy_service
+        .forward_request(Method::GET, "models", headers.clone(), None)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Cloud API error for GET /v1/models (user_id={}): {}",
+                user.user_id,
+                e
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("Cloud API error: {e}"),
+                }),
+            )
+                .into_response()
+        })?;
+
+    tracing::info!(
+        "Received response from cloud-api: status={} for GET /v1/models (user_id={})",
+        proxy_response.status,
         user.user_id
     );
 

@@ -25,6 +25,8 @@ pub struct ModelSettingsCacheEntry {
     pub public: bool,
     /// Optional system-level system prompt for this model
     pub system_prompt: Option<String>,
+    /// Cached SHA256 hash of the system prompt (computed once when cache entry is created)
+    pub system_prompt_hash: Option<String>,
 }
 
 /// Type alias for model settings cache (per-model)
