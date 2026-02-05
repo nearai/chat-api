@@ -1158,24 +1158,12 @@ async fn create_conversation_items(
                 .into_response()
         })?;
 
-    // For successful responses, collect the body
-    if (200..300).contains(&proxy_response.status) {
-        let response_bytes = collect_stream_to_bytes(proxy_response.body).await;
-
-        build_response(
-            proxy_response.status,
-            proxy_response.headers,
-            Body::from(response_bytes),
-        )
-        .await
-    } else {
-        build_response(
-            proxy_response.status,
-            proxy_response.headers,
-            Body::from_stream(proxy_response.body),
-        )
-        .await
-    }
+    build_response(
+        proxy_response.status,
+        proxy_response.headers,
+        Body::from_stream(proxy_response.body),
+    )
+    .await
 }
 
 /// List conversation items - works with optional authentication
@@ -1843,22 +1831,6 @@ async fn proxy_responses(
 
     // Fetch user profile to inject author metadata into messages
     let user_profile = state.user_service.get_user_profile(user.user_id).await.ok();
-
-    // Save conversation_id and author_name for response author tracking
-    // (before body_json and user_profile are consumed)
-    let conversation_id_for_author = body_json
-        .as_ref()
-        .and_then(|b| b.get("conversation"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let author_name_for_tracking = user_profile.as_ref().and_then(|p| p.user.name.clone());
-
-    tracing::info!(
-        "create_response: conversation_id_for_author={:?}, author_name={:?}, user_id={}",
-        conversation_id_for_author,
-        author_name_for_tracking,
-        user.user_id
-    );
 
     // Modify request body to inject system prompt and/or author metadata
     let modified_body_bytes = if let Some(mut body) = body_json {
@@ -3357,22 +3329,4 @@ fn decompress_if_gzipped(bytes: &[u8], headers: &HeaderMap) -> Result<Vec<u8>, s
 
     // Not gzipped, return as-is
     Ok(bytes.to_vec())
-}
-
-/// Collect a stream into bytes
-async fn collect_stream_to_bytes(
-    stream: impl futures::Stream<Item = Result<Bytes, reqwest::Error>>,
-) -> Bytes {
-    use futures::StreamExt;
-
-    let mut collected = Vec::new();
-    tokio::pin!(stream);
-
-    while let Some(result) = stream.next().await {
-        if let Ok(bytes) = result {
-            collected.extend_from_slice(&bytes);
-        }
-    }
-
-    Bytes::from(collected)
 }
