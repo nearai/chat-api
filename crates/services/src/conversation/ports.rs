@@ -2,6 +2,9 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
+#[cfg(feature = "utoipa")]
+use utoipa::ToSchema;
+
 use crate::UserId;
 
 #[derive(Debug, thiserror::Error)]
@@ -19,6 +22,7 @@ pub enum ConversationError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum SharePermission {
     Read,
@@ -39,6 +43,7 @@ impl SharePermission {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ShareRecipientKind {
     Email,
@@ -55,12 +60,14 @@ impl ShareRecipientKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct ShareRecipient {
     pub kind: ShareRecipientKind,
     pub value: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ShareType {
     Direct,

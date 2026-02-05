@@ -29,6 +29,7 @@ use services::user::ports::{BanType, OAuthProvider};
 use services::UserId;
 use sha2::{Digest, Sha256};
 use std::io::Read;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 /// Minimum required NEAR balance (1 NEAR in yoctoNEAR: 10^24)
@@ -154,18 +155,18 @@ enum TrackableResource {
     File,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, ToSchema)]
 pub struct ErrorResponse {
     pub error: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ShareRecipientPayload {
     pub kind: ShareRecipientKind,
     pub value: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum ShareTargetPayload {
     Direct {
@@ -180,13 +181,13 @@ pub enum ShareTargetPayload {
     Public,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct CreateConversationShareRequest {
     pub permission: SharePermission,
     pub target: ShareTargetPayload,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ConversationShareResponse {
     pub id: Uuid,
     pub conversation_id: String,
@@ -199,13 +200,13 @@ pub struct ConversationShareResponse {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct OwnerInfo {
     pub user_id: String,
     pub name: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ConversationSharesListResponse {
     pub is_owner: bool,
     pub can_share: bool,
@@ -216,19 +217,19 @@ pub struct ConversationSharesListResponse {
     pub owner: Option<OwnerInfo>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct CreateShareGroupRequest {
     pub name: String,
     pub members: Vec<ShareRecipientPayload>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UpdateShareGroupRequest {
     pub name: Option<String>,
     pub members: Option<Vec<ShareRecipientPayload>>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ShareGroupResponse {
     pub id: Uuid,
     pub name: String,
@@ -286,7 +287,7 @@ fn to_share_group_response(group: services::conversation::ports::ShareGroup) -> 
 }
 
 /// Raw query parameters for listing files
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, ToSchema)]
 pub struct ListFilesParams {
     pub after: Option<String>,
     pub limit: Option<i64>,
@@ -340,6 +341,21 @@ impl ListFilesParams {
 }
 
 /// Create a conversation - forwards to OpenAI and tracks in DB
+#[utoipa::path(
+    post,
+    path = "/v1/conversations",
+    tag = "Conversations",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Conversation created successfully", body = serde_json::Value),
+        (status = 400, description = "Bad request", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 502, description = "OpenAI API error", body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn create_conversation(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -420,6 +436,26 @@ async fn create_conversation(
 }
 
 /// Update a conversation - validates user access then forwards to OpenAI and updates tracking
+#[utoipa::path(
+    post,
+    path = "/v1/conversations/{conversation_id}",
+    tag = "Conversations",
+    params(
+        ("conversation_id" = String, Path, description = "ID of the conversation to update")
+    ),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Conversation updated successfully", body = serde_json::Value),
+        (status = 400, description = "Bad request", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Access denied", body = ErrorResponse),
+        (status = 404, description = "Conversation not found", body = ErrorResponse),
+        (status = 502, description = "OpenAI API error", body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn update_conversation(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -492,6 +528,19 @@ async fn update_conversation(
 }
 
 /// List all conversations for the authenticated user (fetches details from OpenAI client)
+#[utoipa::path(
+    get,
+    path = "/v1/conversations",
+    tag = "Conversations",
+    responses(
+        (status = 200, description = "List of conversations retrieved successfully", body = Vec<serde_json::Value>),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn list_conversations(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -581,6 +630,24 @@ async fn get_conversation(
 }
 
 /// Delete a conversation for the authenticated user
+#[utoipa::path(
+    delete,
+    path = "/v1/conversations/{conversation_id}",
+    tag = "Conversations",
+    params(
+        ("conversation_id" = String, Path, description = "ID of the conversation to delete")
+    ),
+    responses(
+        (status = 200, description = "Conversation deleted successfully", body = serde_json::Value),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Access denied", body = ErrorResponse),
+        (status = 404, description = "Conversation not found", body = ErrorResponse),
+        (status = 502, description = "OpenAI API error", body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn delete_conversation(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -626,6 +693,26 @@ async fn delete_conversation(
     Ok(Json(deleted).into_response())
 }
 
+/// Create a share for a conversation
+#[utoipa::path(
+    post,
+    path = "/v1/conversations/{conversation_id}/shares",
+    tag = "Conversations",
+    params(
+        ("conversation_id" = String, Path, description = "ID of the conversation to share")
+    ),
+    request_body = CreateConversationShareRequest,
+    responses(
+        (status = 200, description = "Share(s) created successfully", body = Vec<ConversationShareResponse>),
+        (status = 400, description = "Bad request - invalid recipients or empty list", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Access denied", body = ErrorResponse),
+        (status = 404, description = "Conversation not found", body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn create_conversation_share(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -717,6 +804,24 @@ async fn create_conversation_share(
     ))
 }
 
+/// List all shares for a conversation
+#[utoipa::path(
+    get,
+    path = "/v1/conversations/{conversation_id}/shares",
+    tag = "Conversations",
+    params(
+        ("conversation_id" = String, Path, description = "ID of the conversation to list shares for")
+    ),
+    responses(
+        (status = 200, description = "List of shares retrieved successfully", body = ConversationSharesListResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Access denied", body = ErrorResponse),
+        (status = 404, description = "Conversation not found", body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn list_conversation_shares(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -779,6 +884,25 @@ async fn list_conversation_shares(
     }))
 }
 
+/// Delete a share for a conversation
+#[utoipa::path(
+    delete,
+    path = "/v1/conversations/{conversation_id}/shares/{share_id}",
+    tag = "Conversations",
+    params(
+        ("conversation_id" = String, Path, description = "ID of the conversation"),
+        ("share_id" = Uuid, Path, description = "ID of the share to delete")
+    ),
+    responses(
+        (status = 204, description = "Share deleted successfully"),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Access denied", body = ErrorResponse),
+        (status = 404, description = "Conversation or share not found", body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn delete_conversation_share(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -793,6 +917,21 @@ async fn delete_conversation_share(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+/// Create a share group
+#[utoipa::path(
+    post,
+    path = "/v1/share-groups",
+    tag = "Share Groups",
+    request_body = CreateShareGroupRequest,
+    responses(
+        (status = 200, description = "Share group created successfully", body = ShareGroupResponse),
+        (status = 400, description = "Bad request - empty name or members", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn create_share_group(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -856,6 +995,20 @@ async fn create_share_group(
     Ok(Json(to_share_group_response(group)))
 }
 
+/// List all share groups for the authenticated user
+#[utoipa::path(
+    get,
+    path = "/v1/share-groups",
+    tag = "Share Groups",
+    responses(
+        (status = 200, description = "List of share groups retrieved successfully", body = Vec<ShareGroupResponse>),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn list_share_groups(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -905,6 +1058,26 @@ async fn list_share_groups(
     ))
 }
 
+/// Update a share group
+#[utoipa::path(
+    patch,
+    path = "/v1/share-groups/{group_id}",
+    tag = "Share Groups",
+    params(
+        ("group_id" = Uuid, Path, description = "ID of the share group to update")
+    ),
+    request_body = UpdateShareGroupRequest,
+    responses(
+        (status = 200, description = "Share group updated successfully", body = ShareGroupResponse),
+        (status = 400, description = "Bad request - empty name or members", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Access denied", body = ErrorResponse),
+        (status = 404, description = "Share group not found", body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn update_share_group(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -972,6 +1145,24 @@ async fn update_share_group(
     Ok(Json(to_share_group_response(group)))
 }
 
+/// Delete a share group
+#[utoipa::path(
+    delete,
+    path = "/v1/share-groups/{group_id}",
+    tag = "Share Groups",
+    params(
+        ("group_id" = Uuid, Path, description = "ID of the share group to delete")
+    ),
+    responses(
+        (status = 204, description = "Share group deleted successfully"),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Access denied", body = ErrorResponse),
+        (status = 404, description = "Share group not found", body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn delete_share_group(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -986,8 +1177,8 @@ async fn delete_share_group(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-#[derive(Serialize)]
-struct SharedConversationInfo {
+#[derive(Serialize, ToSchema)]
+pub struct SharedConversationInfo {
     conversation_id: String,
     permission: SharePermission,
     /// Conversation title (None if fetch failed)
@@ -1001,6 +1192,20 @@ struct SharedConversationInfo {
 /// Maximum concurrent requests when fetching conversation details
 const SHARED_CONVERSATIONS_FETCH_CONCURRENCY: usize = 10;
 
+/// List conversations shared with the authenticated user
+#[utoipa::path(
+    get,
+    path = "/v1/shared-with-me",
+    tag = "Share Groups",
+    responses(
+        (status = 200, description = "List of shared conversations retrieved successfully", body = Vec<SharedConversationInfo>),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 502, description = "OpenAI API error", body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn list_shared_with_me(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1066,6 +1271,27 @@ async fn list_shared_with_me(
     Ok(Json(results))
 }
 
+/// Create items in a conversation
+#[utoipa::path(
+    post,
+    path = "/v1/conversations/{conversation_id}/items",
+    tag = "Conversations",
+    params(
+        ("conversation_id" = String, Path, description = "ID of the conversation to add items to")
+    ),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Items created successfully"),
+        (status = 400, description = "Bad request", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Access denied", body = ErrorResponse),
+        (status = 404, description = "Conversation not found", body = ErrorResponse),
+        (status = 502, description = "OpenAI API error", body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn create_conversation_items(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1289,6 +1515,25 @@ async fn list_conversation_items(
     build_response(proxy_response.status, proxy_response.headers, final_body).await
 }
 
+/// Pin a conversation
+#[utoipa::path(
+    post,
+    path = "/v1/conversations/{conversation_id}/pin",
+    tag = "Conversations",
+    params(
+        ("conversation_id" = String, Path, description = "ID of the conversation to pin")
+    ),
+    responses(
+        (status = 200, description = "Conversation pinned successfully"),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Access denied", body = ErrorResponse),
+        (status = 404, description = "Conversation not found", body = ErrorResponse),
+        (status = 502, description = "OpenAI API error", body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn pin_conversation(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1342,6 +1587,25 @@ async fn pin_conversation(
     .await
 }
 
+/// Unpin a conversation
+#[utoipa::path(
+    delete,
+    path = "/v1/conversations/{conversation_id}/pin",
+    tag = "Conversations",
+    params(
+        ("conversation_id" = String, Path, description = "ID of the conversation to unpin")
+    ),
+    responses(
+        (status = 200, description = "Conversation unpinned successfully"),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Access denied", body = ErrorResponse),
+        (status = 404, description = "Conversation not found", body = ErrorResponse),
+        (status = 502, description = "OpenAI API error", body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn unpin_conversation(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1395,6 +1659,25 @@ async fn unpin_conversation(
     .await
 }
 
+/// Archive a conversation
+#[utoipa::path(
+    post,
+    path = "/v1/conversations/{conversation_id}/archive",
+    tag = "Conversations",
+    params(
+        ("conversation_id" = String, Path, description = "ID of the conversation to archive")
+    ),
+    responses(
+        (status = 200, description = "Conversation archived successfully"),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Access denied", body = ErrorResponse),
+        (status = 404, description = "Conversation not found", body = ErrorResponse),
+        (status = 502, description = "OpenAI API error", body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn archive_conversation(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1448,6 +1731,25 @@ async fn archive_conversation(
     .await
 }
 
+/// Unarchive a conversation
+#[utoipa::path(
+    delete,
+    path = "/v1/conversations/{conversation_id}/archive",
+    tag = "Conversations",
+    params(
+        ("conversation_id" = String, Path, description = "ID of the conversation to unarchive")
+    ),
+    responses(
+        (status = 200, description = "Conversation unarchived successfully"),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Access denied", body = ErrorResponse),
+        (status = 404, description = "Conversation not found", body = ErrorResponse),
+        (status = 502, description = "OpenAI API error", body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn unarchive_conversation(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1501,6 +1803,25 @@ async fn unarchive_conversation(
     .await
 }
 
+/// Clone a conversation
+#[utoipa::path(
+    post,
+    path = "/v1/conversations/{conversation_id}/clone",
+    tag = "Conversations",
+    params(
+        ("conversation_id" = String, Path, description = "ID of the conversation to clone")
+    ),
+    responses(
+        (status = 200, description = "Conversation cloned successfully", body = serde_json::Value),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Access denied", body = ErrorResponse),
+        (status = 404, description = "Conversation not found", body = ErrorResponse),
+        (status = 502, description = "OpenAI API error", body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn clone_conversation(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1559,6 +1880,21 @@ async fn clone_conversation(
 }
 
 /// Upload a file - forwards to OpenAI and tracks in DB
+#[utoipa::path(
+    post,
+    path = "/v1/files",
+    tag = "Files",
+    request_body(content = Vec<u8>, content_type = "multipart/form-data"),
+    responses(
+        (status = 200, description = "File uploaded successfully", body = crate::models::FileGetResponse),
+        (status = 400, description = "Bad request", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 502, description = "OpenAI API error", body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn upload_file(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1609,6 +1945,27 @@ async fn upload_file(
 }
 
 /// List all files for the authenticated user (fetches details from OpenAI)
+#[utoipa::path(
+    get,
+    path = "/v1/files",
+    tag = "Files",
+    params(
+        ("after" = Option<String>, Query, description = "File ID to start listing after"),
+        ("limit" = Option<i64>, Query, description = "Maximum number of files to return"),
+        ("order" = Option<String>, Query, description = "Sort order: 'asc' or 'desc'"),
+        ("purpose" = Option<String>, Query, description = "Filter by file purpose")
+    ),
+    responses(
+        (status = 200, description = "List of files retrieved successfully", body = crate::models::FileListResponse),
+        (status = 400, description = "Bad request - invalid query parameters", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 404, description = "File not found", body = ErrorResponse),
+        (status = 502, description = "OpenAI API error", body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn list_files(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1660,6 +2017,23 @@ async fn list_files(
 }
 
 /// Get a file - validates user access and fetches from OpenAI
+#[utoipa::path(
+    get,
+    path = "/v1/files/{file_id}",
+    tag = "Files",
+    params(
+        ("file_id" = String, Path, description = "ID of the file to retrieve")
+    ),
+    responses(
+        (status = 200, description = "File retrieved successfully", body = crate::models::FileGetResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 404, description = "File not found", body = ErrorResponse),
+        (status = 502, description = "OpenAI API error", body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn get_file(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1694,6 +2068,23 @@ async fn get_file(
 }
 
 /// Delete a file - validates user access, deletes from OpenAI and DB
+#[utoipa::path(
+    delete,
+    path = "/v1/files/{file_id}",
+    tag = "Files",
+    params(
+        ("file_id" = String, Path, description = "ID of the file to delete")
+    ),
+    responses(
+        (status = 200, description = "File deleted successfully", body = serde_json::Value),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 404, description = "File not found", body = ErrorResponse),
+        (status = 502, description = "OpenAI API error", body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn delete_file(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1734,6 +2125,24 @@ async fn delete_file(
 }
 
 /// Get file content - validates user access and fetches content from OpenAI
+#[utoipa::path(
+    get,
+    path = "/v1/files/{file_id}/content",
+    tag = "Files",
+    params(
+        ("file_id" = String, Path, description = "ID of the file to get content for")
+    ),
+    responses(
+        (status = 200, description = "File content retrieved successfully"),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Access denied", body = ErrorResponse),
+        (status = 404, description = "File not found", body = ErrorResponse),
+        (status = 502, description = "OpenAI API error", body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn get_file_content(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1786,6 +2195,23 @@ async fn get_file_content(
     .await
 }
 
+/// Proxy responses endpoint - forwards to OpenAI with model settings and author metadata injection
+#[utoipa::path(
+    post,
+    path = "/v1/responses",
+    tag = "Proxy",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Response created successfully"),
+        (status = 400, description = "Bad request", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden - user banned or model not available", body = ErrorResponse),
+        (status = 502, description = "OpenAI API error", body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn proxy_responses(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -2327,6 +2753,20 @@ fn spawn_near_balance_check(state: &crate::state::AppState, user: &Authenticated
     });
 }
 
+/// Proxy model list endpoint - returns list of available models with public flags
+#[utoipa::path(
+    get,
+    path = "/v1/model/list",
+    tag = "Proxy",
+    responses(
+        (status = 200, description = "Model list retrieved successfully"),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 502, description = "OpenAI API error", body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn proxy_model_list(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -2498,6 +2938,23 @@ async fn proxy_model_list(
         })
 }
 
+/// Proxy signature endpoint - forwards signature requests to OpenAI
+#[utoipa::path(
+    get,
+    path = "/v1/signature/{chat_id}",
+    tag = "Proxy",
+    params(
+        ("chat_id" = String, Path, description = "Chat ID to get signature for")
+    ),
+    responses(
+        (status = 200, description = "Signature retrieved successfully"),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 502, description = "OpenAI API error", body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn proxy_signature(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -2918,6 +3375,23 @@ async fn proxy_post_to_cloud_api(
     .await
 }
 
+/// Proxy chat completions endpoint - OpenAI-compatible chat completions with model system prompt injection
+#[utoipa::path(
+    post,
+    path = "/v1/chat/completions",
+    tag = "Proxy",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Chat completion created successfully"),
+        (status = 400, description = "Bad request", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden - user banned or model not available", body = ErrorResponse),
+        (status = 502, description = "Cloud API error", body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn proxy_chat_completions(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -2940,6 +3414,22 @@ async fn proxy_chat_completions(
 }
 
 /// Proxy image generation to cloud-api (OpenAI-compatible endpoint)
+#[utoipa::path(
+    post,
+    path = "/v1/images/generations",
+    tag = "Proxy",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Image generation request processed successfully"),
+        (status = 400, description = "Bad request", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden - user banned", body = ErrorResponse),
+        (status = 502, description = "Cloud API error", body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn proxy_image_generations(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -2963,6 +3453,22 @@ async fn proxy_image_generations(
 
 /// Proxy image edits to cloud-api (OpenAI-compatible endpoint)
 /// Note: This endpoint accepts multipart/form-data
+#[utoipa::path(
+    post,
+    path = "/v1/images/edits",
+    tag = "Proxy",
+    request_body(content = Vec<u8>, content_type = "multipart/form-data"),
+    responses(
+        (status = 200, description = "Image edit request processed successfully"),
+        (status = 400, description = "Bad request", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden - user banned", body = ErrorResponse),
+        (status = 502, description = "Cloud API error", body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn proxy_image_edits(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -2985,6 +3491,19 @@ async fn proxy_image_edits(
 }
 
 /// Proxy models list to cloud-api (OpenAI-compatible endpoint: GET /v1/models)
+#[utoipa::path(
+    get,
+    path = "/v1/models",
+    tag = "Proxy",
+    responses(
+        (status = 200, description = "Models list retrieved successfully"),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 502, description = "Cloud API error", body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn proxy_models(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,

@@ -22,9 +22,42 @@ use utoipa::OpenApi;
         crate::routes::oauth::logout,
         // User endpoints
         crate::routes::users::get_current_user,
-        // Conversation endpoints (with optional authentication)
+        // Conversation endpoints
+        crate::routes::api::create_conversation,
+        crate::routes::api::list_conversations,
         crate::routes::api::get_conversation,
+        crate::routes::api::update_conversation,
+        crate::routes::api::delete_conversation,
+        crate::routes::api::create_conversation_share,
+        crate::routes::api::list_conversation_shares,
+        crate::routes::api::delete_conversation_share,
+        crate::routes::api::create_conversation_items,
         crate::routes::api::list_conversation_items,
+        crate::routes::api::pin_conversation,
+        crate::routes::api::unpin_conversation,
+        crate::routes::api::archive_conversation,
+        crate::routes::api::unarchive_conversation,
+        crate::routes::api::clone_conversation,
+        // Share group endpoints
+        crate::routes::api::create_share_group,
+        crate::routes::api::list_share_groups,
+        crate::routes::api::update_share_group,
+        crate::routes::api::delete_share_group,
+        crate::routes::api::list_shared_with_me,
+        // File endpoints
+        crate::routes::api::upload_file,
+        crate::routes::api::list_files,
+        crate::routes::api::get_file,
+        crate::routes::api::delete_file,
+        crate::routes::api::get_file_content,
+        // Proxy endpoints
+        crate::routes::api::proxy_responses,
+        crate::routes::api::proxy_chat_completions,
+        crate::routes::api::proxy_image_generations,
+        crate::routes::api::proxy_image_edits,
+        crate::routes::api::proxy_models,
+        crate::routes::api::proxy_model_list,
+        crate::routes::api::proxy_signature,
         // Admin endpoints
         crate::routes::admin::list_users,
         crate::routes::admin::list_models,
@@ -66,6 +99,23 @@ use utoipa::OpenApi;
         // System configs models
         crate::models::SystemConfigsResponse,
         crate::models::UpsertSystemConfigsRequest,
+        // Conversation share models
+        crate::routes::api::ErrorResponse,
+        crate::routes::api::ShareRecipientPayload,
+        crate::routes::api::ShareTargetPayload,
+        crate::routes::api::CreateConversationShareRequest,
+        crate::routes::api::ConversationShareResponse,
+        crate::routes::api::OwnerInfo,
+        crate::routes::api::ConversationSharesListResponse,
+        // Share group models
+        crate::routes::api::CreateShareGroupRequest,
+        crate::routes::api::UpdateShareGroupRequest,
+        crate::routes::api::ShareGroupResponse,
+        crate::routes::api::SharedConversationInfo,
+        // File models
+        crate::models::FileListResponse,
+        crate::models::FileGetResponse,
+        crate::routes::api::ListFilesParams,
         // Attestation models
         crate::models::ApiGatewayAttestation,
         crate::models::ModelAttestation,
@@ -77,6 +127,9 @@ use utoipa::OpenApi;
         (name = "Auth", description = "OAuth authentication endpoints"),
         (name = "Users", description = "User profile management endpoints"),
         (name = "Conversations", description = "Conversation management endpoints (supports optional authentication for public sharing)"),
+        (name = "Share Groups", description = "Share group management endpoints"),
+        (name = "Files", description = "File management endpoints"),
+        (name = "Proxy", description = "Proxy endpoints for OpenAI-compatible APIs"),
         (name = "Admin", description = "Admin management endpoints"),
         (name = "Configs", description = "System configuration endpoints"),
         (name = "attestation", description = "Attestation reporting endpoints for TEE verification")
