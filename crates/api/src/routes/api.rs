@@ -56,6 +56,18 @@ mod openapi_tags {
     pub const PROXY: &str = "Proxy";
 }
 
+/// OpenAPI error description constants for API documentation
+mod openapi_errors {
+    pub const BAD_REQUEST: &str = "Bad request";
+    pub const UNAUTHORIZED: &str = "Unauthorized";
+    pub const ACCESS_DENIED: &str = "Access denied";
+    pub const CONVERSATION_NOT_FOUND: &str = "Conversation not found";
+    pub const SHARE_GROUP_NOT_FOUND: &str = "Share group not found";
+    pub const CONVERSATION_OR_SHARE_NOT_FOUND: &str = "Conversation or share not found";
+    pub const OPENAI_API_ERROR: &str = "OpenAI API error";
+}
+
+use openapi_errors::*;
 use openapi_tags::*;
 
 /// Create router for conversation read routes that work with optional authentication
@@ -358,9 +370,9 @@ impl ListFilesParams {
     request_body = serde_json::Value,
     responses(
         (status = 200, description = "Conversation created successfully", body = serde_json::Value),
-        (status = 400, description = "Bad request", body = ErrorResponse),
-        (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 502, description = "OpenAI API error", body = ErrorResponse)
+        (status = 400, description = BAD_REQUEST, body = ErrorResponse),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 502, description = OPENAI_API_ERROR, body = ErrorResponse)
     ),
     security(
         ("session_token" = [])
@@ -456,11 +468,11 @@ async fn create_conversation(
     request_body = serde_json::Value,
     responses(
         (status = 200, description = "Conversation updated successfully", body = serde_json::Value),
-        (status = 400, description = "Bad request", body = ErrorResponse),
-        (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 403, description = "Access denied", body = ErrorResponse),
-        (status = 404, description = "Conversation not found", body = ErrorResponse),
-        (status = 502, description = "OpenAI API error", body = ErrorResponse)
+        (status = 400, description = BAD_REQUEST, body = ErrorResponse),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 403, description = ACCESS_DENIED, body = ErrorResponse),
+        (status = 404, description = CONVERSATION_NOT_FOUND, body = ErrorResponse),
+        (status = 502, description = OPENAI_API_ERROR, body = ErrorResponse)
     ),
     security(
         ("session_token" = [])
@@ -544,7 +556,7 @@ async fn update_conversation(
     tag = CONVERSATIONS,
     responses(
         (status = 200, description = "List of conversations retrieved successfully", body = Vec<serde_json::Value>),
-        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     ),
     security(
@@ -605,7 +617,7 @@ async fn list_conversations(
     responses(
         (status = 200, description = "Conversation retrieved successfully", body = serde_json::Value),
         (status = 403, description = "Access denied - conversation not accessible to this user or not publicly shared"),
-        (status = 404, description = "Conversation not found")
+        (status = 404, description = CONVERSATION_NOT_FOUND)
     ),
     security(
         (), // Optional - no auth required for publicly shared conversations
@@ -649,10 +661,10 @@ async fn get_conversation(
     ),
     responses(
         (status = 200, description = "Conversation deleted successfully", body = serde_json::Value),
-        (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 403, description = "Access denied", body = ErrorResponse),
-        (status = 404, description = "Conversation not found", body = ErrorResponse),
-        (status = 502, description = "OpenAI API error", body = ErrorResponse)
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 403, description = ACCESS_DENIED, body = ErrorResponse),
+        (status = 404, description = CONVERSATION_NOT_FOUND, body = ErrorResponse),
+        (status = 502, description = OPENAI_API_ERROR, body = ErrorResponse)
     ),
     security(
         ("session_token" = [])
@@ -715,9 +727,9 @@ async fn delete_conversation(
     responses(
         (status = 200, description = "Share(s) created successfully", body = Vec<ConversationShareResponse>),
         (status = 400, description = "Bad request - invalid recipients or empty list", body = ErrorResponse),
-        (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 403, description = "Access denied", body = ErrorResponse),
-        (status = 404, description = "Conversation not found", body = ErrorResponse)
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 403, description = ACCESS_DENIED, body = ErrorResponse),
+        (status = 404, description = CONVERSATION_NOT_FOUND, body = ErrorResponse)
     ),
     security(
         ("session_token" = [])
@@ -824,9 +836,9 @@ async fn create_conversation_share(
     ),
     responses(
         (status = 200, description = "List of shares retrieved successfully", body = ConversationSharesListResponse),
-        (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 403, description = "Access denied", body = ErrorResponse),
-        (status = 404, description = "Conversation not found", body = ErrorResponse)
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 403, description = ACCESS_DENIED, body = ErrorResponse),
+        (status = 404, description = CONVERSATION_NOT_FOUND, body = ErrorResponse)
     ),
     security(
         ("session_token" = [])
@@ -905,9 +917,9 @@ async fn list_conversation_shares(
     ),
     responses(
         (status = 204, description = "Share deleted successfully"),
-        (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 403, description = "Access denied", body = ErrorResponse),
-        (status = 404, description = "Conversation or share not found", body = ErrorResponse)
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 403, description = ACCESS_DENIED, body = ErrorResponse),
+        (status = 404, description = CONVERSATION_OR_SHARE_NOT_FOUND, body = ErrorResponse)
     ),
     security(
         ("session_token" = [])
@@ -936,7 +948,7 @@ async fn delete_conversation_share(
     responses(
         (status = 200, description = "Share group created successfully", body = ShareGroupResponse),
         (status = 400, description = "Bad request - empty name or members", body = ErrorResponse),
-        (status = 401, description = "Unauthorized", body = ErrorResponse)
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse)
     ),
     security(
         ("session_token" = [])
@@ -1012,7 +1024,7 @@ async fn create_share_group(
     tag = SHARE_GROUPS,
     responses(
         (status = 200, description = "List of share groups retrieved successfully", body = Vec<ShareGroupResponse>),
-        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     ),
     security(
@@ -1080,9 +1092,9 @@ async fn list_share_groups(
     responses(
         (status = 200, description = "Share group updated successfully", body = ShareGroupResponse),
         (status = 400, description = "Bad request - empty name or members", body = ErrorResponse),
-        (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 403, description = "Access denied", body = ErrorResponse),
-        (status = 404, description = "Share group not found", body = ErrorResponse)
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 403, description = ACCESS_DENIED, body = ErrorResponse),
+        (status = 404, description = SHARE_GROUP_NOT_FOUND, body = ErrorResponse)
     ),
     security(
         ("session_token" = [])
@@ -1165,9 +1177,9 @@ async fn update_share_group(
     ),
     responses(
         (status = 204, description = "Share group deleted successfully"),
-        (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 403, description = "Access denied", body = ErrorResponse),
-        (status = 404, description = "Share group not found", body = ErrorResponse)
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 403, description = ACCESS_DENIED, body = ErrorResponse),
+        (status = 404, description = SHARE_GROUP_NOT_FOUND, body = ErrorResponse)
     ),
     security(
         ("session_token" = [])
@@ -1209,8 +1221,8 @@ const SHARED_CONVERSATIONS_FETCH_CONCURRENCY: usize = 10;
     tag = SHARE_GROUPS,
     responses(
         (status = 200, description = "List of shared conversations retrieved successfully", body = Vec<SharedConversationInfo>),
-        (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 502, description = "OpenAI API error", body = ErrorResponse)
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 502, description = OPENAI_API_ERROR, body = ErrorResponse)
     ),
     security(
         ("session_token" = [])
@@ -1292,11 +1304,11 @@ async fn list_shared_with_me(
     request_body = serde_json::Value,
     responses(
         (status = 200, description = "Items created successfully"),
-        (status = 400, description = "Bad request", body = ErrorResponse),
-        (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 403, description = "Access denied", body = ErrorResponse),
-        (status = 404, description = "Conversation not found", body = ErrorResponse),
-        (status = 502, description = "OpenAI API error", body = ErrorResponse)
+        (status = 400, description = BAD_REQUEST, body = ErrorResponse),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 403, description = ACCESS_DENIED, body = ErrorResponse),
+        (status = 404, description = CONVERSATION_NOT_FOUND, body = ErrorResponse),
+        (status = 502, description = OPENAI_API_ERROR, body = ErrorResponse)
     ),
     security(
         ("session_token" = [])
@@ -1459,7 +1471,7 @@ async fn create_conversation_items(
     responses(
         (status = 200, description = "Conversation items retrieved successfully"),
         (status = 403, description = "Access denied - conversation not accessible to this user or not publicly shared"),
-        (status = 404, description = "Conversation not found")
+        (status = 404, description = CONVERSATION_NOT_FOUND)
     ),
     security(
         (), // Optional - no auth required for publicly shared conversations
@@ -1535,10 +1547,10 @@ async fn list_conversation_items(
     ),
     responses(
         (status = 200, description = "Conversation pinned successfully"),
-        (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 403, description = "Access denied", body = ErrorResponse),
-        (status = 404, description = "Conversation not found", body = ErrorResponse),
-        (status = 502, description = "OpenAI API error", body = ErrorResponse)
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 403, description = ACCESS_DENIED, body = ErrorResponse),
+        (status = 404, description = CONVERSATION_NOT_FOUND, body = ErrorResponse),
+        (status = 502, description = OPENAI_API_ERROR, body = ErrorResponse)
     ),
     security(
         ("session_token" = [])
@@ -1607,10 +1619,10 @@ async fn pin_conversation(
     ),
     responses(
         (status = 200, description = "Conversation unpinned successfully"),
-        (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 403, description = "Access denied", body = ErrorResponse),
-        (status = 404, description = "Conversation not found", body = ErrorResponse),
-        (status = 502, description = "OpenAI API error", body = ErrorResponse)
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 403, description = ACCESS_DENIED, body = ErrorResponse),
+        (status = 404, description = CONVERSATION_NOT_FOUND, body = ErrorResponse),
+        (status = 502, description = OPENAI_API_ERROR, body = ErrorResponse)
     ),
     security(
         ("session_token" = [])
@@ -1679,10 +1691,10 @@ async fn unpin_conversation(
     ),
     responses(
         (status = 200, description = "Conversation archived successfully"),
-        (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 403, description = "Access denied", body = ErrorResponse),
-        (status = 404, description = "Conversation not found", body = ErrorResponse),
-        (status = 502, description = "OpenAI API error", body = ErrorResponse)
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 403, description = ACCESS_DENIED, body = ErrorResponse),
+        (status = 404, description = CONVERSATION_NOT_FOUND, body = ErrorResponse),
+        (status = 502, description = OPENAI_API_ERROR, body = ErrorResponse)
     ),
     security(
         ("session_token" = [])
@@ -1751,10 +1763,10 @@ async fn archive_conversation(
     ),
     responses(
         (status = 200, description = "Conversation unarchived successfully"),
-        (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 403, description = "Access denied", body = ErrorResponse),
-        (status = 404, description = "Conversation not found", body = ErrorResponse),
-        (status = 502, description = "OpenAI API error", body = ErrorResponse)
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 403, description = ACCESS_DENIED, body = ErrorResponse),
+        (status = 404, description = CONVERSATION_NOT_FOUND, body = ErrorResponse),
+        (status = 502, description = OPENAI_API_ERROR, body = ErrorResponse)
     ),
     security(
         ("session_token" = [])
@@ -1823,10 +1835,10 @@ async fn unarchive_conversation(
     ),
     responses(
         (status = 200, description = "Conversation cloned successfully", body = serde_json::Value),
-        (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 403, description = "Access denied", body = ErrorResponse),
-        (status = 404, description = "Conversation not found", body = ErrorResponse),
-        (status = 502, description = "OpenAI API error", body = ErrorResponse)
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 403, description = ACCESS_DENIED, body = ErrorResponse),
+        (status = 404, description = CONVERSATION_NOT_FOUND, body = ErrorResponse),
+        (status = 502, description = OPENAI_API_ERROR, body = ErrorResponse)
     ),
     security(
         ("session_token" = [])
@@ -1897,9 +1909,9 @@ async fn clone_conversation(
     request_body(content = Vec<u8>, content_type = "multipart/form-data"),
     responses(
         (status = 200, description = "File uploaded successfully", body = crate::models::FileGetResponse),
-        (status = 400, description = "Bad request", body = ErrorResponse),
-        (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 502, description = "OpenAI API error", body = ErrorResponse)
+        (status = 400, description = BAD_REQUEST, body = ErrorResponse),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 502, description = OPENAI_API_ERROR, body = ErrorResponse)
     ),
     security(
         ("session_token" = [])
@@ -1968,9 +1980,9 @@ async fn upload_file(
     responses(
         (status = 200, description = "List of files retrieved successfully", body = crate::models::FileListResponse),
         (status = 400, description = "Bad request - invalid query parameters", body = ErrorResponse),
-        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
         (status = 404, description = "File not found", body = ErrorResponse),
-        (status = 502, description = "OpenAI API error", body = ErrorResponse)
+        (status = 502, description = OPENAI_API_ERROR, body = ErrorResponse)
     ),
     security(
         ("session_token" = [])
@@ -2036,9 +2048,9 @@ async fn list_files(
     ),
     responses(
         (status = 200, description = "File retrieved successfully", body = crate::models::FileGetResponse),
-        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
         (status = 404, description = "File not found", body = ErrorResponse),
-        (status = 502, description = "OpenAI API error", body = ErrorResponse)
+        (status = 502, description = OPENAI_API_ERROR, body = ErrorResponse)
     ),
     security(
         ("session_token" = [])
@@ -2087,9 +2099,9 @@ async fn get_file(
     ),
     responses(
         (status = 200, description = "File deleted successfully", body = serde_json::Value),
-        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
         (status = 404, description = "File not found", body = ErrorResponse),
-        (status = 502, description = "OpenAI API error", body = ErrorResponse)
+        (status = 502, description = OPENAI_API_ERROR, body = ErrorResponse)
     ),
     security(
         ("session_token" = [])
@@ -2144,10 +2156,10 @@ async fn delete_file(
     ),
     responses(
         (status = 200, description = "File content retrieved successfully"),
-        (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 403, description = "Access denied", body = ErrorResponse),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 403, description = ACCESS_DENIED, body = ErrorResponse),
         (status = 404, description = "File not found", body = ErrorResponse),
-        (status = 502, description = "OpenAI API error", body = ErrorResponse)
+        (status = 502, description = OPENAI_API_ERROR, body = ErrorResponse)
     ),
     security(
         ("session_token" = [])
@@ -2213,10 +2225,10 @@ async fn get_file_content(
     request_body = serde_json::Value,
     responses(
         (status = 200, description = "Response created successfully"),
-        (status = 400, description = "Bad request", body = ErrorResponse),
-        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 400, description = BAD_REQUEST, body = ErrorResponse),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
         (status = 403, description = "Forbidden - user banned or model not available", body = ErrorResponse),
-        (status = 502, description = "OpenAI API error", body = ErrorResponse)
+        (status = 502, description = OPENAI_API_ERROR, body = ErrorResponse)
     ),
     security(
         ("session_token" = [])
@@ -2770,8 +2782,8 @@ fn spawn_near_balance_check(state: &crate::state::AppState, user: &Authenticated
     tag = PROXY,
     responses(
         (status = 200, description = "Model list retrieved successfully"),
-        (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 502, description = "OpenAI API error", body = ErrorResponse)
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 502, description = OPENAI_API_ERROR, body = ErrorResponse)
     ),
     security(
         ("session_token" = [])
@@ -2958,8 +2970,8 @@ async fn proxy_model_list(
     ),
     responses(
         (status = 200, description = "Signature retrieved successfully"),
-        (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 502, description = "OpenAI API error", body = ErrorResponse)
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 502, description = OPENAI_API_ERROR, body = ErrorResponse)
     ),
     security(
         ("session_token" = [])
@@ -3393,8 +3405,8 @@ async fn proxy_post_to_cloud_api(
     request_body = serde_json::Value,
     responses(
         (status = 200, description = "Chat completion created successfully"),
-        (status = 400, description = "Bad request", body = ErrorResponse),
-        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 400, description = BAD_REQUEST, body = ErrorResponse),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
         (status = 403, description = "Forbidden - user banned or model not available", body = ErrorResponse),
         (status = 502, description = "Cloud API error", body = ErrorResponse)
     ),
@@ -3431,8 +3443,8 @@ async fn proxy_chat_completions(
     request_body = serde_json::Value,
     responses(
         (status = 200, description = "Image generation request processed successfully"),
-        (status = 400, description = "Bad request", body = ErrorResponse),
-        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 400, description = BAD_REQUEST, body = ErrorResponse),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
         (status = 403, description = "Forbidden - user banned", body = ErrorResponse),
         (status = 502, description = "Cloud API error", body = ErrorResponse)
     ),
@@ -3470,8 +3482,8 @@ async fn proxy_image_generations(
     request_body(content = Vec<u8>, content_type = "multipart/form-data"),
     responses(
         (status = 200, description = "Image edit request processed successfully"),
-        (status = 400, description = "Bad request", body = ErrorResponse),
-        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 400, description = BAD_REQUEST, body = ErrorResponse),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
         (status = 403, description = "Forbidden - user banned", body = ErrorResponse),
         (status = 502, description = "Cloud API error", body = ErrorResponse)
     ),
@@ -3507,7 +3519,7 @@ async fn proxy_image_edits(
     tag = PROXY,
     responses(
         (status = 200, description = "Models list retrieved successfully"),
-        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
         (status = 502, description = "Cloud API error", body = ErrorResponse)
     ),
     security(
