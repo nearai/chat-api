@@ -48,6 +48,16 @@ const MODEL_SETTINGS_CACHE_TTL_SECS: i64 = 60;
 pub const USER_BANNED_ERROR_MESSAGE: &str =
     "Access temporarily restricted. Please try again later.";
 
+/// OpenAPI tag constants for API documentation
+mod openapi_tags {
+    pub const CONVERSATIONS: &str = "Conversations";
+    pub const SHARE_GROUPS: &str = "Share Groups";
+    pub const FILES: &str = "Files";
+    pub const PROXY: &str = "Proxy";
+}
+
+use openapi_tags::*;
+
 /// Create router for conversation read routes that work with optional authentication
 /// These routes can be accessed by both authenticated users and unauthenticated users
 /// (for publicly shared conversations)
@@ -344,7 +354,7 @@ impl ListFilesParams {
 #[utoipa::path(
     post,
     path = "/v1/conversations",
-    tag = "Conversations",
+    tag = CONVERSATIONS,
     request_body = serde_json::Value,
     responses(
         (status = 200, description = "Conversation created successfully", body = serde_json::Value),
@@ -439,7 +449,7 @@ async fn create_conversation(
 #[utoipa::path(
     post,
     path = "/v1/conversations/{conversation_id}",
-    tag = "Conversations",
+    tag = CONVERSATIONS,
     params(
         ("conversation_id" = String, Path, description = "ID of the conversation to update")
     ),
@@ -531,7 +541,7 @@ async fn update_conversation(
 #[utoipa::path(
     get,
     path = "/v1/conversations",
-    tag = "Conversations",
+    tag = CONVERSATIONS,
     responses(
         (status = 200, description = "List of conversations retrieved successfully", body = Vec<serde_json::Value>),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
@@ -588,7 +598,7 @@ async fn list_conversations(
 #[utoipa::path(
     get,
     path = "/v1/conversations/{conversation_id}",
-    tag = "Conversations",
+    tag = CONVERSATIONS,
     params(
         ("conversation_id" = String, Path, description = "ID of the conversation to retrieve")
     ),
@@ -633,7 +643,7 @@ async fn get_conversation(
 #[utoipa::path(
     delete,
     path = "/v1/conversations/{conversation_id}",
-    tag = "Conversations",
+    tag = CONVERSATIONS,
     params(
         ("conversation_id" = String, Path, description = "ID of the conversation to delete")
     ),
@@ -697,7 +707,7 @@ async fn delete_conversation(
 #[utoipa::path(
     post,
     path = "/v1/conversations/{conversation_id}/shares",
-    tag = "Conversations",
+    tag = CONVERSATIONS,
     params(
         ("conversation_id" = String, Path, description = "ID of the conversation to share")
     ),
@@ -808,7 +818,7 @@ async fn create_conversation_share(
 #[utoipa::path(
     get,
     path = "/v1/conversations/{conversation_id}/shares",
-    tag = "Conversations",
+    tag = CONVERSATIONS,
     params(
         ("conversation_id" = String, Path, description = "ID of the conversation to list shares for")
     ),
@@ -888,7 +898,7 @@ async fn list_conversation_shares(
 #[utoipa::path(
     delete,
     path = "/v1/conversations/{conversation_id}/shares/{share_id}",
-    tag = "Conversations",
+    tag = CONVERSATIONS,
     params(
         ("conversation_id" = String, Path, description = "ID of the conversation"),
         ("share_id" = Uuid, Path, description = "ID of the share to delete")
@@ -921,7 +931,7 @@ async fn delete_conversation_share(
 #[utoipa::path(
     post,
     path = "/v1/share-groups",
-    tag = "Share Groups",
+    tag = SHARE_GROUPS,
     request_body = CreateShareGroupRequest,
     responses(
         (status = 200, description = "Share group created successfully", body = ShareGroupResponse),
@@ -999,7 +1009,7 @@ async fn create_share_group(
 #[utoipa::path(
     get,
     path = "/v1/share-groups",
-    tag = "Share Groups",
+    tag = SHARE_GROUPS,
     responses(
         (status = 200, description = "List of share groups retrieved successfully", body = Vec<ShareGroupResponse>),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
@@ -1062,7 +1072,7 @@ async fn list_share_groups(
 #[utoipa::path(
     patch,
     path = "/v1/share-groups/{group_id}",
-    tag = "Share Groups",
+    tag = SHARE_GROUPS,
     params(
         ("group_id" = Uuid, Path, description = "ID of the share group to update")
     ),
@@ -1149,7 +1159,7 @@ async fn update_share_group(
 #[utoipa::path(
     delete,
     path = "/v1/share-groups/{group_id}",
-    tag = "Share Groups",
+    tag = SHARE_GROUPS,
     params(
         ("group_id" = Uuid, Path, description = "ID of the share group to delete")
     ),
@@ -1196,7 +1206,7 @@ const SHARED_CONVERSATIONS_FETCH_CONCURRENCY: usize = 10;
 #[utoipa::path(
     get,
     path = "/v1/shared-with-me",
-    tag = "Share Groups",
+    tag = SHARE_GROUPS,
     responses(
         (status = 200, description = "List of shared conversations retrieved successfully", body = Vec<SharedConversationInfo>),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
@@ -1275,7 +1285,7 @@ async fn list_shared_with_me(
 #[utoipa::path(
     post,
     path = "/v1/conversations/{conversation_id}/items",
-    tag = "Conversations",
+    tag = CONVERSATIONS,
     params(
         ("conversation_id" = String, Path, description = "ID of the conversation to add items to")
     ),
@@ -1442,7 +1452,7 @@ async fn create_conversation_items(
 #[utoipa::path(
     get,
     path = "/v1/conversations/{conversation_id}/items",
-    tag = "Conversations",
+    tag = CONVERSATIONS,
     params(
         ("conversation_id" = String, Path, description = "ID of the conversation to list items from")
     ),
@@ -1519,7 +1529,7 @@ async fn list_conversation_items(
 #[utoipa::path(
     post,
     path = "/v1/conversations/{conversation_id}/pin",
-    tag = "Conversations",
+    tag = CONVERSATIONS,
     params(
         ("conversation_id" = String, Path, description = "ID of the conversation to pin")
     ),
@@ -1591,7 +1601,7 @@ async fn pin_conversation(
 #[utoipa::path(
     delete,
     path = "/v1/conversations/{conversation_id}/pin",
-    tag = "Conversations",
+    tag = CONVERSATIONS,
     params(
         ("conversation_id" = String, Path, description = "ID of the conversation to unpin")
     ),
@@ -1663,7 +1673,7 @@ async fn unpin_conversation(
 #[utoipa::path(
     post,
     path = "/v1/conversations/{conversation_id}/archive",
-    tag = "Conversations",
+    tag = CONVERSATIONS,
     params(
         ("conversation_id" = String, Path, description = "ID of the conversation to archive")
     ),
@@ -1735,7 +1745,7 @@ async fn archive_conversation(
 #[utoipa::path(
     delete,
     path = "/v1/conversations/{conversation_id}/archive",
-    tag = "Conversations",
+    tag = CONVERSATIONS,
     params(
         ("conversation_id" = String, Path, description = "ID of the conversation to unarchive")
     ),
@@ -1807,7 +1817,7 @@ async fn unarchive_conversation(
 #[utoipa::path(
     post,
     path = "/v1/conversations/{conversation_id}/clone",
-    tag = "Conversations",
+    tag = CONVERSATIONS,
     params(
         ("conversation_id" = String, Path, description = "ID of the conversation to clone")
     ),
@@ -1883,7 +1893,7 @@ async fn clone_conversation(
 #[utoipa::path(
     post,
     path = "/v1/files",
-    tag = "Files",
+    tag = FILES,
     request_body(content = Vec<u8>, content_type = "multipart/form-data"),
     responses(
         (status = 200, description = "File uploaded successfully", body = crate::models::FileGetResponse),
@@ -1948,7 +1958,7 @@ async fn upload_file(
 #[utoipa::path(
     get,
     path = "/v1/files",
-    tag = "Files",
+    tag = FILES,
     params(
         ("after" = Option<String>, Query, description = "File ID to start listing after"),
         ("limit" = Option<i64>, Query, description = "Maximum number of files to return"),
@@ -2020,7 +2030,7 @@ async fn list_files(
 #[utoipa::path(
     get,
     path = "/v1/files/{file_id}",
-    tag = "Files",
+    tag = FILES,
     params(
         ("file_id" = String, Path, description = "ID of the file to retrieve")
     ),
@@ -2071,7 +2081,7 @@ async fn get_file(
 #[utoipa::path(
     delete,
     path = "/v1/files/{file_id}",
-    tag = "Files",
+    tag = FILES,
     params(
         ("file_id" = String, Path, description = "ID of the file to delete")
     ),
@@ -2128,7 +2138,7 @@ async fn delete_file(
 #[utoipa::path(
     get,
     path = "/v1/files/{file_id}/content",
-    tag = "Files",
+    tag = FILES,
     params(
         ("file_id" = String, Path, description = "ID of the file to get content for")
     ),
@@ -2199,7 +2209,7 @@ async fn get_file_content(
 #[utoipa::path(
     post,
     path = "/v1/responses",
-    tag = "Proxy",
+    tag = PROXY,
     request_body = serde_json::Value,
     responses(
         (status = 200, description = "Response created successfully"),
@@ -2757,7 +2767,7 @@ fn spawn_near_balance_check(state: &crate::state::AppState, user: &Authenticated
 #[utoipa::path(
     get,
     path = "/v1/model/list",
-    tag = "Proxy",
+    tag = PROXY,
     responses(
         (status = 200, description = "Model list retrieved successfully"),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
@@ -2942,7 +2952,7 @@ async fn proxy_model_list(
 #[utoipa::path(
     get,
     path = "/v1/signature/{chat_id}",
-    tag = "Proxy",
+    tag = PROXY,
     params(
         ("chat_id" = String, Path, description = "Chat ID to get signature for")
     ),
@@ -3379,7 +3389,7 @@ async fn proxy_post_to_cloud_api(
 #[utoipa::path(
     post,
     path = "/v1/chat/completions",
-    tag = "Proxy",
+    tag = PROXY,
     request_body = serde_json::Value,
     responses(
         (status = 200, description = "Chat completion created successfully"),
@@ -3417,7 +3427,7 @@ async fn proxy_chat_completions(
 #[utoipa::path(
     post,
     path = "/v1/images/generations",
-    tag = "Proxy",
+    tag = PROXY,
     request_body = serde_json::Value,
     responses(
         (status = 200, description = "Image generation request processed successfully"),
@@ -3456,7 +3466,7 @@ async fn proxy_image_generations(
 #[utoipa::path(
     post,
     path = "/v1/images/edits",
-    tag = "Proxy",
+    tag = PROXY,
     request_body(content = Vec<u8>, content_type = "multipart/form-data"),
     responses(
         (status = 200, description = "Image edit request processed successfully"),
@@ -3494,7 +3504,7 @@ async fn proxy_image_edits(
 #[utoipa::path(
     get,
     path = "/v1/models",
-    tag = "Proxy",
+    tag = PROXY,
     responses(
         (status = 200, description = "Models list retrieved successfully"),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
