@@ -10,7 +10,6 @@ pub use repositories::{
     PostgresConversationShareRepository, PostgresFileRepository, PostgresModelRepository,
     PostgresNearNonceRepository, PostgresOAuthRepository, PostgresSessionRepository,
     PostgresSystemConfigsRepository, PostgresUserRepository, PostgresUserSettingsRepository,
-    ResponseAuthorRepository,
 };
 
 use crate::pool::create_pool_with_native_tls;
@@ -36,7 +35,6 @@ pub struct Database {
     near_nonce_repository: Arc<PostgresNearNonceRepository>,
     analytics_repository: Arc<PostgresAnalyticsRepository>,
     model_repository: Arc<PostgresModelRepository>,
-    response_author_repository: Arc<ResponseAuthorRepository>,
     cluster_manager: Option<Arc<ClusterManager>>,
 }
 
@@ -57,7 +55,6 @@ impl Database {
         let near_nonce_repository = Arc::new(PostgresNearNonceRepository::new(pool.clone()));
         let analytics_repository = Arc::new(PostgresAnalyticsRepository::new(pool.clone()));
         let model_repository = Arc::new(PostgresModelRepository::new(pool.clone()));
-        let response_author_repository = Arc::new(ResponseAuthorRepository::new(pool.clone()));
 
         Self {
             pool,
@@ -73,7 +70,6 @@ impl Database {
             near_nonce_repository,
             analytics_repository,
             model_repository,
-            response_author_repository,
             cluster_manager: None,
         }
     }
@@ -256,10 +252,5 @@ impl Database {
     /// Get the system configs repository
     pub fn system_configs_repository(&self) -> Arc<PostgresSystemConfigsRepository> {
         self.system_configs_repository.clone()
-    }
-
-    /// Get the response author repository
-    pub fn response_author_repository(&self) -> Arc<ResponseAuthorRepository> {
-        self.response_author_repository.clone()
     }
 }
