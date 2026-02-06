@@ -8,7 +8,7 @@
 #   - "main" (branch)
 #   - "v1.2.3" (tag)
 #   - "abc123def456" (commit hash)
-private_chat_frontend_version = "941aedfccc73a43abfe7796e71dbe60febccad66" # v0.1.12-pre-release
+private_chat_frontend_version = "9d50f03d677063f605bdaad785de995e16aa5a14" # v0.1.12
 
 # PostHog key and host for the private-chat frontend
 posthog_key = "phc_glaMeuuO1gLFSB2U9y27MchidXEmSnFOQLB8cceyVSb"
