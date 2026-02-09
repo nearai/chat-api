@@ -187,7 +187,6 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
         model_pricing_cache: api::model_pricing::ModelPricingCache::new(
             test_config.cloud_api_base_url.clone(),
         ),
-        response_author_repository,
         rate_limit_state,
     };
 

@@ -61,8 +61,6 @@ pub struct AppState {
     pub model_settings_cache: ModelSettingsCache,
     /// In-memory cache for model pricing (input/output nano per token) from cloud-api for cost calculation
     pub model_pricing_cache: crate::model_pricing::ModelPricingCache,
-    /// Repository for tracking response authors in shared conversations
-    pub response_author_repository: Arc<ResponseAuthorRepository>,
     /// Rate limit state for hot-reloadable rate limit configuration
     pub rate_limit_state: crate::middleware::RateLimitState,
 }

@@ -260,7 +260,6 @@ async fn main() -> anyhow::Result<()> {
         model_pricing_cache: api::model_pricing::ModelPricingCache::new(
             config.openai.base_url.clone().unwrap_or_default(),
         ),
-        response_author_repository: response_author_repo,
         rate_limit_state,
     };
 
