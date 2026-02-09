@@ -33,14 +33,34 @@ impl ModelPricing {
     }
 }
 
-/// Raw response from cloud-api GET /v1/model/{model_name}.
-/// Supports common field names; add #[serde(alias = "...")] if the API uses different names.
+/// Cost-per-token object from cloud-api (amount at given scale, e.g. scale 9 = nano-USD).
+#[derive(Debug, serde::Deserialize)]
+struct CostPerToken {
+    amount: i64,
+    scale: i32,
+    #[allow(dead_code)]
+    currency: Option<String>,
+}
+
+/// Raw response from cloud-api GET /model/{model_name}.
+/// Matches the current cloud-api schema (camelCase).
+///
+/// Example:
+/// {
+///   "modelId": "...",
+///   "inputCostPerToken": { "amount": 150, "scale": 9, "currency": "USD" },
+///   "outputCostPerToken": { "amount": 550, "scale": 9, "currency": "USD" },
+///   ...
+/// }
 #[derive(Debug, serde::Deserialize)]
 struct ModelPricingResponse {
-    #[serde(alias = "input_cost_nano_per_token", alias = "input_nano_per_token")]
-    pub input_nano_per_token: i64,
-    #[serde(alias = "output_cost_nano_per_token", alias = "output_nano_per_token")]
-    pub output_nano_per_token: i64,
+    #[serde(rename = "modelId")]
+    #[allow(dead_code)]
+    model_id: String,
+    #[serde(rename = "inputCostPerToken")]
+    input_cost_per_token: CostPerToken,
+    #[serde(rename = "outputCostPerToken")]
+    output_cost_per_token: CostPerToken,
 }
 
 /// Cache entry with fetched-at time for TTL.
@@ -100,7 +120,7 @@ impl ModelPricingCache {
         }
 
         let url = format!(
-            "{}/v1/model/{}",
+            "{}/model/{}",
             self.base_url,
             urlencoding::encode(model_name)
         );
@@ -113,7 +133,7 @@ impl ModelPricingCache {
         };
 
         if !resp.status().is_success() {
-            tracing::debug!(
+            tracing::warn!(
                 "Model pricing API returned {} for model_name={}",
                 resp.status(),
                 if model_name.len() > 32 {
@@ -141,9 +161,25 @@ impl ModelPricingCache {
             }
         };
 
+        // Current cloud-api returns cost with scale=9 (nano-USD). We intentionally keep
+        // the logic simple: only accept scale=9 and treat `amount` as nano-dollars.
+        if body.input_cost_per_token.scale != 9 || body.output_cost_per_token.scale != 9 {
+            tracing::warn!(
+                "Unsupported pricing scale for model_name={}: input_scale={}, output_scale={}",
+                if model_name.len() > 32 {
+                    format!("{}...", &model_name[..32])
+                } else {
+                    model_name.to_string()
+                },
+                body.input_cost_per_token.scale,
+                body.output_cost_per_token.scale,
+            );
+            return None;
+        }
+
         let pricing = ModelPricing {
-            input_nano_per_token: body.input_nano_per_token,
-            output_nano_per_token: body.output_nano_per_token,
+            input_nano_per_token: body.input_cost_per_token.amount,
+            output_nano_per_token: body.output_cost_per_token.amount,
         };
 
         {
