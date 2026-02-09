@@ -2438,11 +2438,21 @@ async fn proxy_responses(
         Body::from_stream(usage_stream)
     } else {
         let bytes = collect_stream_to_bytes(proxy_response.body).await;
-        record_usage_from_body(&state, user.user_id, &bytes).await;
+        // For non-streaming responses, decompress (if gzipped) before parsing usage.
+        let usage_bytes =
+            decompress_if_gzipped(&bytes, &proxy_response.headers).unwrap_or_else(|e| {
+                tracing::error!(
+                    "Failed to decompress non-stream response for user_id={}: {}",
+                    user.user_id,
+                    e
+                );
+                bytes.to_vec()
+            });
+        record_usage_from_body(&state, user.user_id, &usage_bytes).await;
         Body::from(bytes)
     };
 
-    build_response(proxy_response.status, headers, response_body).await
+    build_response(proxy_response.status, proxy_response.headers, response_body).await
 }
 
 /// Ensure that if the authenticated user logged in with NEAR (has a NEAR-linked account),
@@ -3983,6 +3993,8 @@ async fn record_usage_from_body(
 /// Expects OpenAI/cloud-api style: object with "usage" and optionally "model".
 fn try_extract_usage_from_sse_line(line: &str) -> Option<ParsedUsage> {
     let data = line.strip_prefix("data: ")?;
+    // SSE lines may be terminated with \r\n; trim trailing \r and whitespace
+    let data = data.trim_end_matches('\r').trim();
     if data == "[DONE]" || data.is_empty() {
         return None;
     }
@@ -3991,7 +4003,6 @@ fn try_extract_usage_from_sse_line(line: &str) -> Option<ParsedUsage> {
 }
 
 /// Stream wrapper that parses SSE for usage (e.g. event: response.completed) and records usage on stream end.
-/// Stream wrapper that parses SSE for usage and records usage on stream end.
 struct UsageTrackingStreamFull<S> {
     inner: S,
     buffer: String,

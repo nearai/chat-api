@@ -9,7 +9,6 @@ CREATE TABLE user_usage_log (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_user_usage_user_id ON user_usage_log(user_id);
 CREATE INDEX idx_user_usage_created ON user_usage_log(created_at);
 CREATE INDEX idx_user_usage_user_created ON user_usage_log(user_id, created_at);
 
