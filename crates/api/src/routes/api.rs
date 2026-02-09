@@ -2426,6 +2426,16 @@ async fn proxy_responses(
     }
 
     // Wrap the response stream: record usage (token/cost)
+    tracing::debug!(
+        "proxy_responses: upstream status={}, content_type={:?}, is_streaming={}",
+        proxy_response.status,
+        proxy_response
+            .headers
+            .get(http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        is_streaming_response(&proxy_response.headers),
+    );
+
     let response_body = if !(200..300).contains(&proxy_response.status) {
         Body::from_stream(proxy_response.body)
     } else if is_streaming_response(&proxy_response.headers) {
@@ -3928,9 +3938,27 @@ struct ParsedUsage {
     pub model_name: Option<String>,
 }
 
-/// Parses usage from an already-parsed JSON value (OpenAI-style).
+/// Parses usage from an already-parsed JSON value (OpenAI-style / cloud-api style).
+/// Supports both:
+/// - Non-streaming responses where the top-level object has "usage" and "model"
+/// - Streaming SSE envelopes where the top-level has a "response" object that contains "usage" and "model"
 fn parse_usage_from_value(root: &serde_json::Value) -> Option<ParsedUsage> {
-    let usage = root.get("usage")?.as_object()?;
+    // Find the object that directly contains the "usage" field:
+    // - Prefer top-level "usage"
+    // - Fallback to "response.usage" (SSE envelope)
+    let container = if root.get("usage").is_some() {
+        root
+    } else if let Some(response_obj) = root.get("response") {
+        if response_obj.get("usage").is_some() {
+            response_obj
+        } else {
+            return None;
+        }
+    } else {
+        return None;
+    };
+
+    let usage = container.get("usage")?.as_object()?;
     let total = usage
         .get("total_tokens")
         .and_then(|v| v.as_u64())
@@ -3953,7 +3981,13 @@ fn parse_usage_from_value(root: &serde_json::Value) -> Option<ParsedUsage> {
         .get("output_tokens")
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
-    let model_name = root.get("model").and_then(|v| v.as_str()).map(String::from);
+
+    // Model name is normally on the same object as "usage". Fall back to top-level "model" if needed.
+    let model_name = container
+        .get("model")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .or_else(|| root.get("model").and_then(|v| v.as_str()).map(String::from));
     Some(ParsedUsage {
         input_tokens,
         output_tokens,
@@ -4075,6 +4109,12 @@ where
                 let pricing_cache = this.pricing_cache.clone();
                 let user_id = this.user_id;
                 if let Some(usage) = usage {
+                    tracing::debug!(
+                        "UsageTrackingStreamFull: parsed streaming usage for user_id={}, total_tokens={}, model={:?}",
+                        user_id,
+                        usage.total_tokens,
+                        usage.model_name
+                    );
                     if usage.total_tokens > 0 {
                         tokio::spawn(async move {
                             let cost_nano_usd = if let Some(ref model) = usage.model_name {
@@ -4096,6 +4136,11 @@ where
                             }
                         });
                     }
+                } else {
+                    tracing::debug!(
+                        "UsageTrackingStreamFull: no usage parsed from streaming response for user_id={}",
+                        user_id
+                    );
                 }
                 Poll::Ready(None)
             }
