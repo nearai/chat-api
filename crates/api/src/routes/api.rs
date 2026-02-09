@@ -11,9 +11,10 @@ use axum::{
 use bytes::Bytes;
 use chrono::{Duration, Utc};
 use flate2::read::GzDecoder;
-use http::{header::CONTENT_LENGTH, HeaderName, HeaderValue};
+use http::{header::CONTENT_LENGTH, HeaderValue};
 use near_api::{Account, AccountId, NetworkConfig};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use services::analytics::{ActivityType, RecordActivityRequest};
 use services::consts::MODEL_PUBLIC_DEFAULT;
 use services::conversation::ports::{
@@ -26,8 +27,8 @@ use services::metrics::consts::{
 use services::response::ports::ProxyResponse;
 use services::user::ports::{BanType, OAuthProvider};
 use services::UserId;
-use sha2::{Digest, Sha256};
 use std::io::Read;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 /// Minimum required NEAR balance (1 NEAR in yoctoNEAR: 10^24)
@@ -45,6 +46,28 @@ const MODEL_SETTINGS_CACHE_TTL_SECS: i64 = 60;
 /// Error message when a user is banned
 pub const USER_BANNED_ERROR_MESSAGE: &str =
     "Access temporarily restricted. Please try again later.";
+
+/// OpenAPI tag constants for API documentation
+mod openapi_tags {
+    pub const CONVERSATIONS: &str = "Conversations";
+    pub const SHARE_GROUPS: &str = "Share Groups";
+    pub const FILES: &str = "Files";
+    pub const PROXY: &str = "Proxy";
+}
+
+/// OpenAPI error description constants for API documentation
+mod openapi_errors {
+    pub const BAD_REQUEST: &str = "Bad request";
+    pub const UNAUTHORIZED: &str = "Unauthorized";
+    pub const ACCESS_DENIED: &str = "Access denied";
+    pub const CONVERSATION_NOT_FOUND: &str = "Conversation not found";
+    pub const SHARE_GROUP_NOT_FOUND: &str = "Share group not found";
+    pub const CONVERSATION_OR_SHARE_NOT_FOUND: &str = "Conversation or share not found";
+    pub const OPENAI_API_ERROR: &str = "OpenAI API error";
+}
+
+use openapi_errors::*;
+use openapi_tags::*;
 
 /// Create router for conversation read routes that work with optional authentication
 /// These routes can be accessed by both authenticated users and unauthenticated users
@@ -116,12 +139,23 @@ pub fn create_api_router(
     let responses_router = Router::new()
         .route("/v1/responses", post(proxy_responses))
         .layer(axum::middleware::from_fn_with_state(
+            rate_limit_state.clone(),
+            crate::middleware::rate_limit_middleware,
+        ));
+
+    // Completion routes (chat completions, image generation) with rate limiting
+    let completions_router = Router::new()
+        .route("/v1/chat/completions", post(proxy_chat_completions))
+        .route("/v1/images/generations", post(proxy_image_generations))
+        .route("/v1/images/edits", post(proxy_image_edits))
+        .layer(axum::middleware::from_fn_with_state(
             rate_limit_state,
             crate::middleware::rate_limit_middleware,
         ));
 
     let proxy_router = Router::new()
         .route("/v1/model/list", get(proxy_model_list))
+        .route("/v1/models", get(proxy_models))
         .route("/v1/signature/{chat_id}", get(proxy_signature));
 
     Router::new()
@@ -129,6 +163,7 @@ pub fn create_api_router(
         .merge(share_groups_router)
         .merge(files_router)
         .merge(responses_router)
+        .merge(completions_router)
         .merge(proxy_router)
 }
 
@@ -141,18 +176,18 @@ enum TrackableResource {
     File,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, ToSchema)]
 pub struct ErrorResponse {
     pub error: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ShareRecipientPayload {
     pub kind: ShareRecipientKind,
     pub value: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum ShareTargetPayload {
     Direct {
@@ -167,13 +202,13 @@ pub enum ShareTargetPayload {
     Public,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct CreateConversationShareRequest {
     pub permission: SharePermission,
     pub target: ShareTargetPayload,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ConversationShareResponse {
     pub id: Uuid,
     pub conversation_id: String,
@@ -186,13 +221,13 @@ pub struct ConversationShareResponse {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct OwnerInfo {
     pub user_id: String,
     pub name: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ConversationSharesListResponse {
     pub is_owner: bool,
     pub can_share: bool,
@@ -203,19 +238,19 @@ pub struct ConversationSharesListResponse {
     pub owner: Option<OwnerInfo>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct CreateShareGroupRequest {
     pub name: String,
     pub members: Vec<ShareRecipientPayload>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UpdateShareGroupRequest {
     pub name: Option<String>,
     pub members: Option<Vec<ShareRecipientPayload>>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ShareGroupResponse {
     pub id: Uuid,
     pub name: String,
@@ -273,7 +308,7 @@ fn to_share_group_response(group: services::conversation::ports::ShareGroup) -> 
 }
 
 /// Raw query parameters for listing files
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, ToSchema)]
 pub struct ListFilesParams {
     pub after: Option<String>,
     pub limit: Option<i64>,
@@ -327,6 +362,21 @@ impl ListFilesParams {
 }
 
 /// Create a conversation - forwards to OpenAI and tracks in DB
+#[utoipa::path(
+    post,
+    path = "/v1/conversations",
+    tag = CONVERSATIONS,
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Conversation created successfully", body = serde_json::Value),
+        (status = 400, description = BAD_REQUEST, body = ErrorResponse),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 502, description = OPENAI_API_ERROR, body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn create_conversation(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -407,6 +457,26 @@ async fn create_conversation(
 }
 
 /// Update a conversation - validates user access then forwards to OpenAI and updates tracking
+#[utoipa::path(
+    post,
+    path = "/v1/conversations/{conversation_id}",
+    tag = CONVERSATIONS,
+    params(
+        ("conversation_id" = String, Path, description = "ID of the conversation to update")
+    ),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Conversation updated successfully", body = serde_json::Value),
+        (status = 400, description = BAD_REQUEST, body = ErrorResponse),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 403, description = ACCESS_DENIED, body = ErrorResponse),
+        (status = 404, description = CONVERSATION_NOT_FOUND, body = ErrorResponse),
+        (status = 502, description = OPENAI_API_ERROR, body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn update_conversation(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -479,6 +549,19 @@ async fn update_conversation(
 }
 
 /// List all conversations for the authenticated user (fetches details from OpenAI client)
+#[utoipa::path(
+    get,
+    path = "/v1/conversations",
+    tag = CONVERSATIONS,
+    responses(
+        (status = 200, description = "List of conversations retrieved successfully", body = Vec<serde_json::Value>),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn list_conversations(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -526,14 +609,14 @@ async fn list_conversations(
 #[utoipa::path(
     get,
     path = "/v1/conversations/{conversation_id}",
-    tag = "Conversations",
+    tag = CONVERSATIONS,
     params(
         ("conversation_id" = String, Path, description = "ID of the conversation to retrieve")
     ),
     responses(
         (status = 200, description = "Conversation retrieved successfully", body = serde_json::Value),
         (status = 403, description = "Access denied - conversation not accessible to this user or not publicly shared"),
-        (status = 404, description = "Conversation not found")
+        (status = 404, description = CONVERSATION_NOT_FOUND)
     ),
     security(
         (), // Optional - no auth required for publicly shared conversations
@@ -568,6 +651,24 @@ async fn get_conversation(
 }
 
 /// Delete a conversation for the authenticated user
+#[utoipa::path(
+    delete,
+    path = "/v1/conversations/{conversation_id}",
+    tag = CONVERSATIONS,
+    params(
+        ("conversation_id" = String, Path, description = "ID of the conversation to delete")
+    ),
+    responses(
+        (status = 200, description = "Conversation deleted successfully", body = serde_json::Value),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 403, description = ACCESS_DENIED, body = ErrorResponse),
+        (status = 404, description = CONVERSATION_NOT_FOUND, body = ErrorResponse),
+        (status = 502, description = OPENAI_API_ERROR, body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn delete_conversation(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -613,6 +714,26 @@ async fn delete_conversation(
     Ok(Json(deleted).into_response())
 }
 
+/// Create a share for a conversation
+#[utoipa::path(
+    post,
+    path = "/v1/conversations/{conversation_id}/shares",
+    tag = CONVERSATIONS,
+    params(
+        ("conversation_id" = String, Path, description = "ID of the conversation to share")
+    ),
+    request_body = CreateConversationShareRequest,
+    responses(
+        (status = 200, description = "Share(s) created successfully", body = Vec<ConversationShareResponse>),
+        (status = 400, description = "Bad request - invalid recipients or empty list", body = ErrorResponse),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 403, description = ACCESS_DENIED, body = ErrorResponse),
+        (status = 404, description = CONVERSATION_NOT_FOUND, body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn create_conversation_share(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -704,6 +825,24 @@ async fn create_conversation_share(
     ))
 }
 
+/// List all shares for a conversation
+#[utoipa::path(
+    get,
+    path = "/v1/conversations/{conversation_id}/shares",
+    tag = CONVERSATIONS,
+    params(
+        ("conversation_id" = String, Path, description = "ID of the conversation to list shares for")
+    ),
+    responses(
+        (status = 200, description = "List of shares retrieved successfully", body = ConversationSharesListResponse),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 403, description = ACCESS_DENIED, body = ErrorResponse),
+        (status = 404, description = CONVERSATION_NOT_FOUND, body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn list_conversation_shares(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -766,6 +905,25 @@ async fn list_conversation_shares(
     }))
 }
 
+/// Delete a share for a conversation
+#[utoipa::path(
+    delete,
+    path = "/v1/conversations/{conversation_id}/shares/{share_id}",
+    tag = CONVERSATIONS,
+    params(
+        ("conversation_id" = String, Path, description = "ID of the conversation"),
+        ("share_id" = Uuid, Path, description = "ID of the share to delete")
+    ),
+    responses(
+        (status = 204, description = "Share deleted successfully"),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 403, description = ACCESS_DENIED, body = ErrorResponse),
+        (status = 404, description = CONVERSATION_OR_SHARE_NOT_FOUND, body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn delete_conversation_share(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -780,6 +938,21 @@ async fn delete_conversation_share(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+/// Create a share group
+#[utoipa::path(
+    post,
+    path = "/v1/share-groups",
+    tag = SHARE_GROUPS,
+    request_body = CreateShareGroupRequest,
+    responses(
+        (status = 200, description = "Share group created successfully", body = ShareGroupResponse),
+        (status = 400, description = "Bad request - empty name or members", body = ErrorResponse),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn create_share_group(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -843,6 +1016,20 @@ async fn create_share_group(
     Ok(Json(to_share_group_response(group)))
 }
 
+/// List all share groups for the authenticated user
+#[utoipa::path(
+    get,
+    path = "/v1/share-groups",
+    tag = SHARE_GROUPS,
+    responses(
+        (status = 200, description = "List of share groups retrieved successfully", body = Vec<ShareGroupResponse>),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn list_share_groups(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -892,6 +1079,26 @@ async fn list_share_groups(
     ))
 }
 
+/// Update a share group
+#[utoipa::path(
+    patch,
+    path = "/v1/share-groups/{group_id}",
+    tag = SHARE_GROUPS,
+    params(
+        ("group_id" = Uuid, Path, description = "ID of the share group to update")
+    ),
+    request_body = UpdateShareGroupRequest,
+    responses(
+        (status = 200, description = "Share group updated successfully", body = ShareGroupResponse),
+        (status = 400, description = "Bad request - empty name or members", body = ErrorResponse),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 403, description = ACCESS_DENIED, body = ErrorResponse),
+        (status = 404, description = SHARE_GROUP_NOT_FOUND, body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn update_share_group(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -959,6 +1166,24 @@ async fn update_share_group(
     Ok(Json(to_share_group_response(group)))
 }
 
+/// Delete a share group
+#[utoipa::path(
+    delete,
+    path = "/v1/share-groups/{group_id}",
+    tag = SHARE_GROUPS,
+    params(
+        ("group_id" = Uuid, Path, description = "ID of the share group to delete")
+    ),
+    responses(
+        (status = 204, description = "Share group deleted successfully"),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 403, description = ACCESS_DENIED, body = ErrorResponse),
+        (status = 404, description = SHARE_GROUP_NOT_FOUND, body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn delete_share_group(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -973,8 +1198,8 @@ async fn delete_share_group(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-#[derive(Serialize)]
-struct SharedConversationInfo {
+#[derive(Serialize, ToSchema)]
+pub struct SharedConversationInfo {
     conversation_id: String,
     permission: SharePermission,
     /// Conversation title (None if fetch failed)
@@ -988,6 +1213,20 @@ struct SharedConversationInfo {
 /// Maximum concurrent requests when fetching conversation details
 const SHARED_CONVERSATIONS_FETCH_CONCURRENCY: usize = 10;
 
+/// List conversations shared with the authenticated user
+#[utoipa::path(
+    get,
+    path = "/v1/shared-with-me",
+    tag = SHARE_GROUPS,
+    responses(
+        (status = 200, description = "List of shared conversations retrieved successfully", body = Vec<SharedConversationInfo>),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 502, description = OPENAI_API_ERROR, body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn list_shared_with_me(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1053,6 +1292,27 @@ async fn list_shared_with_me(
     Ok(Json(results))
 }
 
+/// Create items in a conversation
+#[utoipa::path(
+    post,
+    path = "/v1/conversations/{conversation_id}/items",
+    tag = CONVERSATIONS,
+    params(
+        ("conversation_id" = String, Path, description = "ID of the conversation to add items to")
+    ),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Items created successfully"),
+        (status = 400, description = BAD_REQUEST, body = ErrorResponse),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 403, description = ACCESS_DENIED, body = ErrorResponse),
+        (status = 404, description = CONVERSATION_NOT_FOUND, body = ErrorResponse),
+        (status = 502, description = OPENAI_API_ERROR, body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn create_conversation_items(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1082,9 +1342,8 @@ async fn create_conversation_items(
     );
 
     // Parse and modify body to inject author metadata
-    // NOTE: We inject metadata into the request AND store it in the database (below).
-    // This dual approach ensures author info is available even if OpenAI doesn't preserve
-    // custom metadata fields. When listing items, we retrieve from DB via inject_author_metadata().
+    // This allows shared conversations to show who sent each message.
+    // Author tracking is handled by cloud-api.
     let modified_body =
         if let Ok(mut body_json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
             // Inject author metadata
@@ -1147,48 +1406,12 @@ async fn create_conversation_items(
                 .into_response()
         })?;
 
-    // For successful responses, collect the body to extract response_id and store author info
-    if (200..300).contains(&proxy_response.status) {
-        let response_bytes = collect_stream_to_bytes(proxy_response.body).await;
-
-        // Try to extract response_id from the response and store author info
-        if let Ok(response_json) = serde_json::from_slice::<serde_json::Value>(&response_bytes) {
-            if let Some(response_id) = response_json
-                .get("response_id")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-            {
-                let repo = state.response_author_repository.clone();
-                let conv_id = conversation_id.clone();
-                let uid = user.user_id;
-                let author = author_name.clone();
-
-                // Store author info asynchronously
-                tokio::spawn(async move {
-                    if let Err(e) = repo
-                        .store_author(&conv_id, &response_id, uid.into(), author.as_deref())
-                        .await
-                    {
-                        tracing::warn!("Failed to store response author: {}", e);
-                    }
-                });
-            }
-        }
-
-        build_response(
-            proxy_response.status,
-            proxy_response.headers,
-            Body::from(response_bytes),
-        )
-        .await
-    } else {
-        build_response(
-            proxy_response.status,
-            proxy_response.headers,
-            Body::from_stream(proxy_response.body),
-        )
-        .await
-    }
+    build_response(
+        proxy_response.status,
+        proxy_response.headers,
+        Body::from_stream(proxy_response.body),
+    )
+    .await
 }
 
 /// List conversation items - works with optional authentication
@@ -1203,14 +1426,14 @@ async fn create_conversation_items(
 #[utoipa::path(
     get,
     path = "/v1/conversations/{conversation_id}/items",
-    tag = "Conversations",
+    tag = CONVERSATIONS,
     params(
         ("conversation_id" = String, Path, description = "ID of the conversation to list items from")
     ),
     responses(
         (status = 200, description = "Conversation items retrieved successfully"),
         (status = 403, description = "Access denied - conversation not accessible to this user or not publicly shared"),
-        (status = 404, description = "Conversation not found")
+        (status = 404, description = CONVERSATION_NOT_FOUND)
     ),
     security(
         (), // Optional - no auth required for publicly shared conversations
@@ -1264,18 +1487,33 @@ async fn list_conversation_items(
                 .into_response()
         })?;
 
-    // Collect response body to inject author metadata
-    let body_bytes = collect_stream_to_bytes(proxy_response.body).await;
-
-    // Try to inject author metadata into the response
-    let final_body = match inject_author_metadata(&state, &conversation_id, body_bytes).await {
-        Ok(modified_bytes) => Body::from(modified_bytes),
-        Err(original_bytes) => Body::from(original_bytes),
-    };
-
-    build_response(proxy_response.status, proxy_response.headers, final_body).await
+    build_response(
+        proxy_response.status,
+        proxy_response.headers,
+        Body::from_stream(proxy_response.body),
+    )
+    .await
 }
 
+/// Pin a conversation
+#[utoipa::path(
+    post,
+    path = "/v1/conversations/{conversation_id}/pin",
+    tag = CONVERSATIONS,
+    params(
+        ("conversation_id" = String, Path, description = "ID of the conversation to pin")
+    ),
+    responses(
+        (status = 200, description = "Conversation pinned successfully"),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 403, description = ACCESS_DENIED, body = ErrorResponse),
+        (status = 404, description = CONVERSATION_NOT_FOUND, body = ErrorResponse),
+        (status = 502, description = OPENAI_API_ERROR, body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn pin_conversation(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1329,6 +1567,25 @@ async fn pin_conversation(
     .await
 }
 
+/// Unpin a conversation
+#[utoipa::path(
+    delete,
+    path = "/v1/conversations/{conversation_id}/pin",
+    tag = CONVERSATIONS,
+    params(
+        ("conversation_id" = String, Path, description = "ID of the conversation to unpin")
+    ),
+    responses(
+        (status = 200, description = "Conversation unpinned successfully"),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 403, description = ACCESS_DENIED, body = ErrorResponse),
+        (status = 404, description = CONVERSATION_NOT_FOUND, body = ErrorResponse),
+        (status = 502, description = OPENAI_API_ERROR, body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn unpin_conversation(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1382,6 +1639,25 @@ async fn unpin_conversation(
     .await
 }
 
+/// Archive a conversation
+#[utoipa::path(
+    post,
+    path = "/v1/conversations/{conversation_id}/archive",
+    tag = CONVERSATIONS,
+    params(
+        ("conversation_id" = String, Path, description = "ID of the conversation to archive")
+    ),
+    responses(
+        (status = 200, description = "Conversation archived successfully"),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 403, description = ACCESS_DENIED, body = ErrorResponse),
+        (status = 404, description = CONVERSATION_NOT_FOUND, body = ErrorResponse),
+        (status = 502, description = OPENAI_API_ERROR, body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn archive_conversation(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1435,6 +1711,25 @@ async fn archive_conversation(
     .await
 }
 
+/// Unarchive a conversation
+#[utoipa::path(
+    delete,
+    path = "/v1/conversations/{conversation_id}/archive",
+    tag = CONVERSATIONS,
+    params(
+        ("conversation_id" = String, Path, description = "ID of the conversation to unarchive")
+    ),
+    responses(
+        (status = 200, description = "Conversation unarchived successfully"),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 403, description = ACCESS_DENIED, body = ErrorResponse),
+        (status = 404, description = CONVERSATION_NOT_FOUND, body = ErrorResponse),
+        (status = 502, description = OPENAI_API_ERROR, body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn unarchive_conversation(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1488,6 +1783,25 @@ async fn unarchive_conversation(
     .await
 }
 
+/// Clone a conversation
+#[utoipa::path(
+    post,
+    path = "/v1/conversations/{conversation_id}/clone",
+    tag = CONVERSATIONS,
+    params(
+        ("conversation_id" = String, Path, description = "ID of the conversation to clone")
+    ),
+    responses(
+        (status = 200, description = "Conversation cloned successfully", body = serde_json::Value),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 403, description = ACCESS_DENIED, body = ErrorResponse),
+        (status = 404, description = CONVERSATION_NOT_FOUND, body = ErrorResponse),
+        (status = 502, description = OPENAI_API_ERROR, body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn clone_conversation(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1546,6 +1860,21 @@ async fn clone_conversation(
 }
 
 /// Upload a file - forwards to OpenAI and tracks in DB
+#[utoipa::path(
+    post,
+    path = "/v1/files",
+    tag = FILES,
+    request_body(content = Vec<u8>, content_type = "multipart/form-data"),
+    responses(
+        (status = 200, description = "File uploaded successfully", body = crate::models::FileGetResponse),
+        (status = 400, description = BAD_REQUEST, body = ErrorResponse),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 502, description = OPENAI_API_ERROR, body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn upload_file(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1596,6 +1925,27 @@ async fn upload_file(
 }
 
 /// List all files for the authenticated user (fetches details from OpenAI)
+#[utoipa::path(
+    get,
+    path = "/v1/files",
+    tag = FILES,
+    params(
+        ("after" = Option<String>, Query, description = "File ID to start listing after"),
+        ("limit" = Option<i64>, Query, description = "Maximum number of files to return"),
+        ("order" = Option<String>, Query, description = "Sort order: 'asc' or 'desc'"),
+        ("purpose" = Option<String>, Query, description = "Filter by file purpose")
+    ),
+    responses(
+        (status = 200, description = "List of files retrieved successfully", body = crate::models::FileListResponse),
+        (status = 400, description = "Bad request - invalid query parameters", body = ErrorResponse),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 404, description = "File not found", body = ErrorResponse),
+        (status = 502, description = OPENAI_API_ERROR, body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn list_files(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1647,6 +1997,23 @@ async fn list_files(
 }
 
 /// Get a file - validates user access and fetches from OpenAI
+#[utoipa::path(
+    get,
+    path = "/v1/files/{file_id}",
+    tag = FILES,
+    params(
+        ("file_id" = String, Path, description = "ID of the file to retrieve")
+    ),
+    responses(
+        (status = 200, description = "File retrieved successfully", body = crate::models::FileGetResponse),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 404, description = "File not found", body = ErrorResponse),
+        (status = 502, description = OPENAI_API_ERROR, body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn get_file(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1681,6 +2048,23 @@ async fn get_file(
 }
 
 /// Delete a file - validates user access, deletes from OpenAI and DB
+#[utoipa::path(
+    delete,
+    path = "/v1/files/{file_id}",
+    tag = FILES,
+    params(
+        ("file_id" = String, Path, description = "ID of the file to delete")
+    ),
+    responses(
+        (status = 200, description = "File deleted successfully", body = serde_json::Value),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 404, description = "File not found", body = ErrorResponse),
+        (status = 502, description = OPENAI_API_ERROR, body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn delete_file(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1721,6 +2105,24 @@ async fn delete_file(
 }
 
 /// Get file content - validates user access and fetches content from OpenAI
+#[utoipa::path(
+    get,
+    path = "/v1/files/{file_id}/content",
+    tag = FILES,
+    params(
+        ("file_id" = String, Path, description = "ID of the file to get content for")
+    ),
+    responses(
+        (status = 200, description = "File content retrieved successfully"),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 403, description = ACCESS_DENIED, body = ErrorResponse),
+        (status = 404, description = "File not found", body = ErrorResponse),
+        (status = 502, description = OPENAI_API_ERROR, body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn get_file_content(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1773,6 +2175,23 @@ async fn get_file_content(
     .await
 }
 
+/// Proxy responses endpoint - forwards to OpenAI with model settings and author metadata injection
+#[utoipa::path(
+    post,
+    path = "/v1/responses",
+    tag = PROXY,
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Response created successfully"),
+        (status = 400, description = BAD_REQUEST, body = ErrorResponse),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 403, description = "Forbidden - user banned or model not available", body = ErrorResponse),
+        (status = 502, description = OPENAI_API_ERROR, body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn proxy_responses(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1847,99 +2266,13 @@ async fn proxy_responses(
         if let Some(model_id) = body.get("model").and_then(|v| v.as_str()) {
             model_id_from_body = Some(model_id.to_string());
 
-            // 1) Try cache first
-            {
-                let cache = state.model_settings_cache.read().await;
-                if let Some(entry) = cache.get(model_id) {
-                    let age = Utc::now().signed_duration_since(entry.last_checked_at);
-                    if age.num_seconds() >= 0 && age.num_seconds() < MODEL_SETTINGS_CACHE_TTL_SECS {
-                        model_settings_cache_hit = Some(true);
-
-                        if !entry.public {
-                            tracing::warn!(
-                                "Blocking response request for non-public model '{}' from user {} (cache)",
-                                model_id,
-                                user.user_id
-                            );
-                            return Err((
-                                StatusCode::FORBIDDEN,
-                                Json(ErrorResponse {
-                                    error: "This model is not available".to_string(),
-                                }),
-                            )
-                                .into_response());
-                        }
-
-                        model_system_prompt = entry.system_prompt.clone();
-                    }
+            // Use shared helper function to get model settings with caching
+            match get_model_settings_with_cache(&state, model_id, user.user_id).await {
+                Ok((prompt, cache_hit)) => {
+                    model_system_prompt = prompt;
+                    model_settings_cache_hit = cache_hit;
                 }
-            }
-
-            // 2) Cache miss or expired: fetch from DB/service and populate cache
-            if model_settings_cache_hit.is_none() {
-                model_settings_cache_hit = Some(false);
-                match state.model_service.get_model(model_id).await {
-                    Ok(Some(model)) => {
-                        // Populate cache
-                        {
-                            let mut cache = state.model_settings_cache.write().await;
-                            cache.insert(
-                                model_id.to_string(),
-                                crate::state::ModelSettingsCacheEntry {
-                                    last_checked_at: Utc::now(),
-                                    exists: true,
-                                    public: model.settings.public,
-                                    system_prompt: model.settings.system_prompt.clone(),
-                                },
-                            );
-                        }
-
-                        if !model.settings.public {
-                            tracing::warn!(
-                                "Blocking response request for non-public model '{}' from user {}",
-                                model_id,
-                                user.user_id
-                            );
-                            return Err((
-                                StatusCode::FORBIDDEN,
-                                Json(ErrorResponse {
-                                    error: "This model is not available".to_string(),
-                                }),
-                            )
-                                .into_response());
-                        }
-
-                        model_system_prompt = model.settings.system_prompt.clone();
-                    }
-                    Ok(None) => {
-                        // Model not in admin DB - allow by default per MODEL_PUBLIC_DEFAULT
-                        // Cache with defaults to avoid repeated DB hits, let OpenAI validate model existence
-                        {
-                            let mut cache = state.model_settings_cache.write().await;
-                            cache.insert(
-                                model_id.to_string(),
-                                crate::state::ModelSettingsCacheEntry {
-                                    last_checked_at: Utc::now(),
-                                    exists: false, // Not in DB but allowed with defaults
-                                    public: MODEL_PUBLIC_DEFAULT, // true by default
-                                    system_prompt: None,
-                                },
-                            );
-                        }
-
-                        // Continue with defaults - let OpenAI validate model existence
-                        model_system_prompt = None;
-                    }
-                    Err(_) => {
-                        return Err((
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(ErrorResponse {
-                                error: "Failed to get model".to_string(),
-                            }),
-                        )
-                            .into_response())
-                    }
-                }
+                Err(e) => return Err(e),
             }
         }
     }
@@ -1947,40 +2280,22 @@ async fn proxy_responses(
     // Fetch user profile to inject author metadata into messages
     let user_profile = state.user_service.get_user_profile(user.user_id).await.ok();
 
-    // Save conversation_id and author_name for response author tracking
-    // (before body_json and user_profile are consumed)
-    let conversation_id_for_author = body_json
-        .as_ref()
-        .and_then(|b| b.get("conversation"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let author_name_for_tracking = user_profile.as_ref().and_then(|p| p.user.name.clone());
-
-    tracing::info!(
-        "create_response: conversation_id_for_author={:?}, author_name={:?}, user_id={}",
-        conversation_id_for_author,
-        author_name_for_tracking,
-        user.user_id
-    );
-
     // Modify request body to inject system prompt and/or author metadata
     let modified_body_bytes = if let Some(mut body) = body_json {
         // Inject model-level system prompt if present
-        if let Some(system_prompt) = model_system_prompt.clone() {
+        if let Some(system_prompt) = model_system_prompt.as_ref() {
             let new_instructions = match body.get("instructions").and_then(|v| v.as_str()) {
                 Some(existing) if !existing.is_empty() => {
                     format!("{system_prompt}\n\n{existing}")
                 }
-                _ => system_prompt,
+                _ => system_prompt.clone(),
             };
             body["instructions"] = serde_json::Value::String(new_instructions);
         }
 
         // Inject author metadata with user info
-        // This allows shared conversations to show who sent each message
-        // NOTE: We inject metadata into the request AND store it in the database (see response stream wrapper below).
-        // This dual approach ensures author info is available even if OpenAI doesn't preserve
-        // custom metadata fields. When listing items, we retrieve from DB via inject_author_metadata().
+        // This allows shared conversations to show who sent each message.
+        // Author tracking is handled by cloud-api.
         if let Some(profile) = user_profile {
             let mut metadata = body
                 .get("metadata")
@@ -2075,41 +2390,6 @@ async fn proxy_responses(
         proxy_response.status,
         user.user_id
     );
-
-    // Access model system prompt cache during proxy response handling (for observability/debugging).
-    // We DO NOT expose the prompt itself; we only attach a stable hash + cache hit indicator.
-    let mut proxy_headers = proxy_response.headers.clone();
-    if let Some(ref model_id) = model_id_from_body {
-        let cached_prompt_opt = {
-            let cache = state.model_settings_cache.read().await;
-            cache.get(model_id).and_then(|e| {
-                if e.exists {
-                    e.system_prompt.clone()
-                } else {
-                    None
-                }
-            })
-        };
-
-        if let Some(prompt) = cached_prompt_opt {
-            let mut hasher = Sha256::new();
-            hasher.update(prompt.as_bytes());
-            let prompt_hash = format!("{:x}", hasher.finalize());
-
-            let _ = proxy_headers.insert(
-                HeaderName::from_static("x-nearai-model-system-prompt-sha256"),
-                HeaderValue::from_str(&prompt_hash)
-                    .unwrap_or_else(|_| HeaderValue::from_static("")),
-            );
-        }
-
-        if let Some(hit) = model_settings_cache_hit {
-            let _ = proxy_headers.insert(
-                HeaderName::from_static("x-nearai-model-settings-cache"),
-                HeaderValue::from_static(if hit { "hit" } else { "miss" }),
-            );
-        }
-    }
 
     // Record metrics for successful responses
     if (200..300).contains(&proxy_response.status) {
@@ -2400,6 +2680,20 @@ fn spawn_near_balance_check(state: &crate::state::AppState, user: &Authenticated
     });
 }
 
+/// Proxy model list endpoint - returns list of available models with public flags
+#[utoipa::path(
+    get,
+    path = "/v1/model/list",
+    tag = PROXY,
+    responses(
+        (status = 200, description = "Model list retrieved successfully"),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 502, description = OPENAI_API_ERROR, body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn proxy_model_list(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -2571,6 +2865,23 @@ async fn proxy_model_list(
         })
 }
 
+/// Proxy signature endpoint - forwards signature requests to OpenAI
+#[utoipa::path(
+    get,
+    path = "/v1/signature/{chat_id}",
+    tag = PROXY,
+    params(
+        ("chat_id" = String, Path, description = "Chat ID to get signature for")
+    ),
+    responses(
+        (status = 200, description = "Signature retrieved successfully"),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 502, description = OPENAI_API_ERROR, body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 async fn proxy_signature(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -2611,6 +2922,513 @@ async fn proxy_signature(
         "Received response from OpenAI: status={} for GET /v1/signature/{} (user_id={})",
         proxy_response.status,
         chat_id,
+        user.user_id
+    );
+
+    build_response(
+        proxy_response.status,
+        proxy_response.headers,
+        Body::from_stream(proxy_response.body),
+    )
+    .await
+}
+
+/// Helper function to get model settings with caching support.
+/// Returns (system_prompt, cache_hit) if model is found and public.
+/// Validates model visibility and populates cache if needed.
+async fn get_model_settings_with_cache(
+    state: &crate::state::AppState,
+    model_id: &str,
+    user_id: services::UserId,
+) -> Result<(Option<String>, Option<bool>), Response> {
+    let mut model_system_prompt: Option<String> = None;
+    let mut model_settings_cache_hit: Option<bool> = None;
+
+    // 1) Try cache first
+    {
+        let cache = state.model_settings_cache.read().await;
+        if let Some(entry) = cache.get(model_id) {
+            let age = Utc::now().signed_duration_since(entry.last_checked_at);
+            if age.num_seconds() >= 0 && age.num_seconds() < MODEL_SETTINGS_CACHE_TTL_SECS {
+                model_settings_cache_hit = Some(true);
+
+                if !entry.public {
+                    tracing::warn!(
+                        "Blocking request for non-public model '{}' from user {} (cache)",
+                        model_id,
+                        user_id
+                    );
+                    return Err((
+                        StatusCode::FORBIDDEN,
+                        Json(ErrorResponse {
+                            error: "This model is not available".to_string(),
+                        }),
+                    )
+                        .into_response());
+                }
+
+                model_system_prompt = entry.system_prompt.clone();
+            }
+        }
+    }
+
+    // 2) Cache miss or expired: fetch from DB/service and populate cache
+    if model_settings_cache_hit.is_none() {
+        model_settings_cache_hit = Some(false);
+        match state.model_service.get_model(model_id).await {
+            Ok(Some(model)) => {
+                // Populate cache
+                {
+                    let mut cache = state.model_settings_cache.write().await;
+                    cache.insert(
+                        model_id.to_string(),
+                        crate::state::ModelSettingsCacheEntry {
+                            last_checked_at: Utc::now(),
+                            exists: true,
+                            public: model.settings.public,
+                            system_prompt: model.settings.system_prompt.clone(),
+                        },
+                    );
+                }
+
+                if !model.settings.public {
+                    tracing::warn!(
+                        "Blocking request for non-public model '{}' from user {}",
+                        model_id,
+                        user_id
+                    );
+                    return Err((
+                        StatusCode::FORBIDDEN,
+                        Json(ErrorResponse {
+                            error: "This model is not available".to_string(),
+                        }),
+                    )
+                        .into_response());
+                }
+
+                model_system_prompt = model.settings.system_prompt.clone();
+            }
+            Ok(None) => {
+                // Model not in admin DB - allow by default per MODEL_PUBLIC_DEFAULT
+                // Cache with defaults to avoid repeated DB hits
+                {
+                    let mut cache = state.model_settings_cache.write().await;
+                    cache.insert(
+                        model_id.to_string(),
+                        crate::state::ModelSettingsCacheEntry {
+                            last_checked_at: Utc::now(),
+                            exists: false, // Not in DB but allowed with defaults
+                            public: MODEL_PUBLIC_DEFAULT, // true by default
+                            system_prompt: None,
+                        },
+                    );
+                }
+
+                // Continue with defaults
+                model_system_prompt = None;
+            }
+            Err(_) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "Failed to get model".to_string(),
+                    }),
+                )
+                    .into_response())
+            }
+        }
+    }
+
+    Ok((model_system_prompt, model_settings_cache_hit))
+}
+
+/// Configuration for proxying POST requests to cloud-api endpoints.
+struct ProxyEndpointConfig {
+    /// Path for the proxy service (e.g., "chat/completions")
+    endpoint_path: &'static str,
+    /// Full path for logging (e.g., "/v1/chat/completions")
+    endpoint_full_path: &'static str,
+    /// Whether to set the content-length header (false for multipart/form-data)
+    set_content_length: bool,
+    /// Whether to enable model system prompt injection
+    enable_model_prompt: bool,
+}
+
+/// Shared helper function for proxying POST requests to cloud-api endpoints.
+///
+/// This function handles common logic including:
+/// - User ban checks
+/// - NEAR balance checks (async)
+/// - Body extraction
+/// - Model settings lookup and system prompt injection (if config.enable_model_prompt is true)
+/// - Request forwarding
+/// - Error handling
+/// - Response building
+async fn proxy_post_to_cloud_api(
+    state: &crate::state::AppState,
+    user: &AuthenticatedUser,
+    mut headers: HeaderMap,
+    request: Request,
+    config: ProxyEndpointConfig,
+) -> Result<Response, Response> {
+    tracing::info!(
+        "proxy_post_to_cloud_api: POST {} for user_id={}, session_id={}",
+        config.endpoint_full_path,
+        user.user_id,
+        user.session_id
+    );
+
+    // Check if user is currently banned before proceeding
+    ensure_user_not_banned(state, user).await?;
+
+    // Trigger an asynchronous NEAR balance check
+    spawn_near_balance_check(state, user);
+
+    // Extract body bytes
+    let body_bytes = extract_body_bytes(request).await?;
+
+    tracing::debug!(
+        "Extracted request body: {} bytes for POST {}",
+        body_bytes.len(),
+        config.endpoint_full_path
+    );
+
+    // Parse JSON body and handle model settings if enabled
+    let mut body_json: Option<serde_json::Value> = None;
+    let mut model_system_prompt: Option<String> = None;
+
+    if config.enable_model_prompt && !body_bytes.is_empty() {
+        // Try to parse JSON body for model settings lookup
+        match serde_json::from_slice::<serde_json::Value>(&body_bytes) {
+            Ok(v) => {
+                body_json = Some(v);
+
+                // Extract model ID and get model settings
+                if let Some(model_id) = body_json
+                    .as_ref()
+                    .and_then(|b| b.get("model"))
+                    .and_then(|v| v.as_str())
+                {
+                    match get_model_settings_with_cache(state, model_id, user.user_id).await {
+                        Ok((prompt, _cache_hit)) => {
+                            model_system_prompt = prompt;
+                            // Cache hit/miss is tracked via analytics in proxy_responses, not needed here
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::debug!(
+                    "Failed to parse request body as JSON for POST {} (user_id={}): {}",
+                    config.endpoint_full_path,
+                    user.user_id,
+                    e
+                );
+            }
+        }
+    }
+
+    // Inject system prompt into request body if present
+    let modified_body_bytes = if let Some(mut body) = body_json {
+        let mut modified = false;
+
+        // For chat completions, inject system prompt as a system message
+        if let Some(system_prompt) = model_system_prompt.as_ref() {
+            if let Some(messages) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
+                // Check if there's already a system message
+                let has_system_message = messages
+                    .iter()
+                    .any(|msg| msg.get("role").and_then(|r| r.as_str()) == Some("system"));
+
+                if !has_system_message {
+                    // Prepend system message at the beginning
+                    let system_msg = json!({
+                        "role": "system",
+                        "content": system_prompt
+                    });
+                    messages.insert(0, system_msg);
+                    modified = true;
+                } else {
+                    // If system message exists, prepend to the first system message's content
+                    if let Some(first_system_idx) = messages
+                        .iter()
+                        .position(|msg| msg.get("role").and_then(|r| r.as_str()) == Some("system"))
+                    {
+                        let first_system = &mut messages[first_system_idx];
+
+                        // Handle string content
+                        if let Some(content_str) =
+                            first_system.get("content").and_then(|c| c.as_str())
+                        {
+                            let new_content = format!("{system_prompt}\n\n{content_str}");
+                            first_system["content"] = serde_json::Value::String(new_content);
+                            modified = true;
+                        }
+                        // Handle array content format (for multimodal)
+                        else if let Some(content_arr) = first_system
+                            .get_mut("content")
+                            .and_then(|c| c.as_array_mut())
+                        {
+                            // Prepend text content to the array efficiently
+                            content_arr.insert(
+                                0,
+                                json!({
+                                    "type": "text",
+                                    "text": system_prompt
+                                }),
+                            );
+                            modified = true;
+                        }
+                        // If content is missing or in unexpected format, replace with system prompt
+                        else {
+                            first_system["content"] =
+                                serde_json::Value::String(system_prompt.to_string());
+                            modified = true;
+                        }
+                    }
+                }
+            } else {
+                // No messages array - create one with system message
+                body["messages"] = json!([{
+                    "role": "system",
+                    "content": system_prompt
+                }]);
+                modified = true;
+            }
+        }
+
+        if modified {
+            match serde_json::to_vec(&body) {
+                Ok(serialized) => Bytes::from(serialized),
+                Err(_) => {
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error: "Failed to modify request body".to_string(),
+                        }),
+                    )
+                        .into_response())
+                }
+            }
+        } else {
+            body_bytes
+        }
+    } else {
+        body_bytes
+    };
+
+    // Set content-length header if requested (skip for multipart/form-data)
+    if config.set_content_length {
+        let content_length = HeaderValue::from_str(&modified_body_bytes.len().to_string())
+            .expect("usize to string conversion always produces valid HeaderValue");
+        headers.insert(CONTENT_LENGTH, content_length);
+    }
+
+    // Forward the request to cloud-api
+    let proxy_response = state
+        .proxy_service
+        .forward_request(
+            Method::POST,
+            config.endpoint_path,
+            headers.clone(),
+            Some(modified_body_bytes),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Cloud API error for POST {} (user_id={}): {}",
+                config.endpoint_full_path,
+                user.user_id,
+                e
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("Cloud API error: {e}"),
+                }),
+            )
+                .into_response()
+        })?;
+
+    tracing::info!(
+        "Received response from cloud-api: status={} for POST {} (user_id={})",
+        proxy_response.status,
+        config.endpoint_full_path,
+        user.user_id
+    );
+
+    build_response(
+        proxy_response.status,
+        proxy_response.headers.clone(),
+        Body::from_stream(proxy_response.body),
+    )
+    .await
+}
+
+/// Proxy chat completions endpoint - OpenAI-compatible chat completions with model system prompt injection
+#[utoipa::path(
+    post,
+    path = "/v1/chat/completions",
+    tag = PROXY,
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Chat completion created successfully"),
+        (status = 400, description = BAD_REQUEST, body = ErrorResponse),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 403, description = "Forbidden - user banned or model not available", body = ErrorResponse),
+        (status = 502, description = "Cloud API error", body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+async fn proxy_chat_completions(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    request: Request,
+) -> Result<Response, Response> {
+    proxy_post_to_cloud_api(
+        &state,
+        &user,
+        headers,
+        request,
+        ProxyEndpointConfig {
+            endpoint_path: "chat/completions",
+            endpoint_full_path: "/v1/chat/completions",
+            set_content_length: true,
+            enable_model_prompt: true,
+        },
+    )
+    .await
+}
+
+/// Proxy image generation to cloud-api (OpenAI-compatible endpoint)
+#[utoipa::path(
+    post,
+    path = "/v1/images/generations",
+    tag = PROXY,
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Image generation request processed successfully"),
+        (status = 400, description = BAD_REQUEST, body = ErrorResponse),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 403, description = "Forbidden - user banned", body = ErrorResponse),
+        (status = 502, description = "Cloud API error", body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+async fn proxy_image_generations(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    request: Request,
+) -> Result<Response, Response> {
+    proxy_post_to_cloud_api(
+        &state,
+        &user,
+        headers,
+        request,
+        ProxyEndpointConfig {
+            endpoint_path: "images/generations",
+            endpoint_full_path: "/v1/images/generations",
+            set_content_length: true,
+            enable_model_prompt: false,
+        },
+    )
+    .await
+}
+
+/// Proxy image edits to cloud-api (OpenAI-compatible endpoint)
+/// Note: This endpoint accepts multipart/form-data
+#[utoipa::path(
+    post,
+    path = "/v1/images/edits",
+    tag = PROXY,
+    request_body(content = Vec<u8>, content_type = "multipart/form-data"),
+    responses(
+        (status = 200, description = "Image edit request processed successfully"),
+        (status = 400, description = BAD_REQUEST, body = ErrorResponse),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 403, description = "Forbidden - user banned", body = ErrorResponse),
+        (status = 502, description = "Cloud API error", body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+async fn proxy_image_edits(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    request: Request,
+) -> Result<Response, Response> {
+    proxy_post_to_cloud_api(
+        &state,
+        &user,
+        headers,
+        request,
+        ProxyEndpointConfig {
+            endpoint_path: "images/edits",
+            endpoint_full_path: "/v1/images/edits",
+            set_content_length: false, // Don't set content-length header (preserve original headers for multipart/form-data)
+            enable_model_prompt: false, // No model system prompt for image edits
+        },
+    )
+    .await
+}
+
+/// Proxy models list to cloud-api (OpenAI-compatible endpoint: GET /v1/models)
+#[utoipa::path(
+    get,
+    path = "/v1/models",
+    tag = PROXY,
+    responses(
+        (status = 200, description = "Models list retrieved successfully"),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 502, description = "Cloud API error", body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+async fn proxy_models(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+) -> Result<Response, Response> {
+    tracing::info!(
+        "proxy_models: GET /v1/models for user_id={}, session_id={}",
+        user.user_id,
+        user.session_id
+    );
+
+    // Forward the request to cloud-api
+    let proxy_response = state
+        .proxy_service
+        .forward_request(Method::GET, "models", headers.clone(), None)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Cloud API error for GET /v1/models (user_id={}): {}",
+                user.user_id,
+                e
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("Cloud API error: {e}"),
+                }),
+            )
+                .into_response()
+        })?;
+
+    tracing::info!(
+        "Received response from cloud-api: status={} for GET /v1/models (user_id={})",
+        proxy_response.status,
         user.user_id
     );
 

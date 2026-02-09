@@ -278,11 +278,16 @@ async fn test_shared_conversation_author_attribution() {
     // Step 3: Owner shares with shared user
     println!("\n3. Owner sharing conversation with shared user...");
     let share_body = json!({
-        "recipient": {
-            "kind": "email",
-            "value": "shared@test.com"
-        },
-        "permission": "write"
+        "permission": "write",
+        "target": {
+            "mode": "direct",
+            "recipients": [
+                {
+                    "kind": "email",
+                    "value": "shared@test.com"
+                }
+            ]
+        }
     });
 
     let response = server

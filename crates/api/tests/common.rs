@@ -144,9 +144,6 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
             analytics_repo as Arc<dyn services::analytics::AnalyticsRepository>,
         ));
 
-    // Get response author repository
-    let response_author_repository = db.response_author_repository();
-
     // Create rate limit state for testing
     // Use a permissive default to avoid unrelated rate-limit interference.
     // Individual rate limit tests can override via `TestServerConfig.rate_limit_config`.
