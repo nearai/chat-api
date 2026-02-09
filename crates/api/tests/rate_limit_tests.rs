@@ -9,6 +9,7 @@ use serde_json::json;
 use services::analytics::AnalyticsRepository;
 use services::system_configs::ports::{RateLimitConfig, WindowLimit};
 use services::user::ports::UserRepository;
+use std::future::IntoFuture;
 use std::sync::Arc;
 
 async fn create_rate_limited_test_server() -> axum_test::TestServer {
@@ -62,14 +63,18 @@ async fn test_rate_limit_blocks_rapid_requests() {
     });
 
     // First request
-    let _response1 = server
-        .post("/v1/responses")
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
-        )
-        .json(&request_body)
-        .await;
+    let response1 = tokio::spawn(
+        server
+            .post("/v1/responses")
+            .add_header(
+                http::HeaderName::from_static("authorization"),
+                http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
+            )
+            .json(&request_body)
+            .into_future(),
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     // Second request immediately after should be rate limited
     let response2 = server
@@ -92,6 +97,8 @@ async fn test_rate_limit_blocks_rapid_requests() {
         body.get("error").is_some(),
         "Rate limit response should have error field"
     );
+
+    response1.await.unwrap();
 }
 
 #[tokio::test]
