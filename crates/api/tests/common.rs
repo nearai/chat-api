@@ -36,6 +36,14 @@ pub async fn create_test_server() -> TestServer {
 
 /// Create a test server with custom configuration
 pub async fn create_test_server_with_config(test_config: TestServerConfig) -> TestServer {
+    let (server, _) = create_test_server_and_db(test_config).await;
+    server
+}
+
+/// Create a test server and database for tests that need to pre-populate DB (e.g. token/cost rate limit).
+pub async fn create_test_server_and_db(
+    test_config: TestServerConfig,
+) -> (TestServer, database::Database) {
     // Load .env file
     dotenvy::dotenv().ok();
 
@@ -194,7 +202,8 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
     let app = create_router_with_cors(app_state, config::CorsConfig::default());
 
     // Create test server
-    TestServer::new(app).expect("Failed to create test server")
+    let server = TestServer::new(app).expect("Failed to create test server");
+    (server, db)
 }
 
 /// Helper function to get/create a user and get a session token via mock login.

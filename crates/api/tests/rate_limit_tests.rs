@@ -1,10 +1,14 @@
 mod common;
 
 use chrono::Duration;
-use common::{create_test_server_with_config, mock_login, TestServerConfig};
+use common::{
+    create_test_server_and_db, create_test_server_with_config, mock_login, TestServerConfig,
+};
 use futures::future::join_all;
 use serde_json::json;
-use services::system_configs::ports::RateLimitConfig;
+use services::analytics::AnalyticsRepository;
+use services::system_configs::ports::{RateLimitConfig, WindowLimit};
+use services::user::ports::UserRepository;
 use std::sync::Arc;
 
 async fn create_rate_limited_test_server() -> axum_test::TestServer {
@@ -196,5 +200,125 @@ async fn test_concurrent_requests_rate_limited() {
         "Expected at least 2 rate-limited responses, got {} (results: {:?})",
         rate_limited_count,
         results
+    );
+}
+
+/// Token window limit: when user's token usage in the window exceeds the limit, next request returns 429.
+#[tokio::test]
+async fn test_token_limit_blocks_request_when_usage_exceeds_limit() {
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        rate_limit_config: Some(RateLimitConfig {
+            max_concurrent: 10,
+            max_requests_per_window: 100,
+            window_duration: Duration::seconds(1),
+            window_limits: vec![],
+            token_window_limits: vec![WindowLimit {
+                window_duration: Duration::seconds(60),
+                limit: 100,
+            }],
+            cost_window_limits: vec![],
+        }),
+        ..Default::default()
+    })
+    .await;
+
+    let email = "token-limit@example.com";
+    let token = mock_login(&server, email).await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(email)
+        .await
+        .expect("db")
+        .expect("user created by mock_login");
+    db.analytics_repository()
+        .record_user_usage(user.id, 150, None)
+        .await
+        .expect("record usage");
+    // 150 tokens in window > limit 100 => next request should be rate limited
+
+    let response = server
+        .post("/v1/responses")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
+        )
+        .json(&json!({
+            "model": "test-model",
+            "input": "Hello"
+        }))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        429,
+        "Request should be rate limited when token usage exceeds window limit"
+    );
+    let body: serde_json::Value = response.json();
+    let error = body.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        error.to_lowercase().contains("token"),
+        "Error message should mention token limit, got: {}",
+        error
+    );
+}
+
+/// Cost window limit: when user's cost usage in the window exceeds the limit, next request returns 429.
+#[tokio::test]
+async fn test_cost_limit_blocks_request_when_usage_exceeds_limit() {
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        rate_limit_config: Some(RateLimitConfig {
+            max_concurrent: 10,
+            max_requests_per_window: 100,
+            window_duration: Duration::seconds(1),
+            window_limits: vec![],
+            token_window_limits: vec![],
+            cost_window_limits: vec![WindowLimit {
+                window_duration: Duration::seconds(60),
+                limit: 1_000, // nano-USD
+            }],
+        }),
+        ..Default::default()
+    })
+    .await;
+
+    let email = "cost-limit@example.com";
+    let token = mock_login(&server, email).await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(email)
+        .await
+        .expect("db")
+        .expect("user created by mock_login");
+    db.analytics_repository()
+        .record_user_usage(user.id, 0, Some(2_000))
+        .await
+        .expect("record usage");
+    // 2000 nano-USD in window > limit 1000 => next request should be rate limited
+
+    let response = server
+        .post("/v1/responses")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
+        )
+        .json(&json!({
+            "model": "test-model",
+            "input": "Hello"
+        }))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        429,
+        "Request should be rate limited when cost usage exceeds window limit"
+    );
+    let body: serde_json::Value = response.json();
+    let error = body.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        error.to_lowercase().contains("cost") || error.to_lowercase().contains("nano"),
+        "Error message should mention cost limit, got: {}",
+        error
     );
 }
