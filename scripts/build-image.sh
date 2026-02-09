@@ -50,9 +50,12 @@ if [ -z "$POSTHOG_HOST" ]; then
     echo "Warning: PostHog host not found in build-config.toml"
 fi
 
+GIT_COMMIT_TIMESTAMP=$(git log -1 --format=%ct)
+echo "Using git commit timestamp: ${GIT_COMMIT_TIMESTAMP}"
+
 TEMP_TAG="private-chat-temp:$(date +%s)"
 docker buildx build --builder buildkit_20 --no-cache --platform linux/amd64 \
-    --build-arg SOURCE_DATE_EPOCH="0" \
+    --build-arg SOURCE_DATE_EPOCH="${GIT_COMMIT_TIMESTAMP}" \
     --build-arg PRIVATE_CHAT_FRONTEND_VERSION="${PRIVATE_CHAT_FRONTEND_VERSION}" \
     --build-arg POSTHOG_KEY="${POSTHOG_KEY}" \
     --build-arg POSTHOG_HOST="${POSTHOG_HOST}" \
