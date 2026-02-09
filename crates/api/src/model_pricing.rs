@@ -22,10 +22,14 @@ pub struct ModelPricing {
 
 impl ModelPricing {
     /// Compute total cost in nano-dollars from input and output token counts.
+    /// Uses i128 for intermediate math to avoid overflow; panics if result exceeds i64 range.
     pub fn cost_nano_usd(&self, input_tokens: u64, output_tokens: u64) -> i64 {
-        let input_cost = (input_tokens as i64).saturating_mul(self.input_nano_per_token);
-        let output_cost = (output_tokens as i64).saturating_mul(self.output_nano_per_token);
-        input_cost.saturating_add(output_cost)
+        let input_cost = (input_tokens as i128) * (self.input_nano_per_token as i128);
+        let output_cost = (output_tokens as i128) * (self.output_nano_per_token as i128);
+        let total = input_cost + output_cost;
+        total
+            .try_into()
+            .expect("cost_nano_usd overflow: result exceeds i64 range")
     }
 }
 

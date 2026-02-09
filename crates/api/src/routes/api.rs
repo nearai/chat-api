@@ -2437,7 +2437,19 @@ async fn proxy_responses(
         );
         Body::from_stream(usage_stream)
     } else {
-        let bytes = collect_stream_to_bytes(proxy_response.body).await;
+        let bytes = match collect_stream_to_bytes(proxy_response.body).await {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::error!("Upstream stream error for user_id={}: {}", user.user_id, e);
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    Json(ErrorResponse {
+                        error: "Failed to read response body".to_string(),
+                    }),
+                )
+                    .into_response());
+            }
+        };
         // For non-streaming responses, decompress (if gzipped) before parsing usage.
         let usage_bytes =
             decompress_if_gzipped(&bytes, &proxy_response.headers).unwrap_or_else(|e| {
@@ -4092,22 +4104,23 @@ where
     }
 }
 
-/// Collect a stream into bytes
+/// Collect a stream into bytes. Returns the first stream error instead of silently truncating.
 async fn collect_stream_to_bytes(
     stream: impl futures::Stream<Item = Result<Bytes, reqwest::Error>>,
-) -> Bytes {
+) -> Result<Bytes, reqwest::Error> {
     use futures::StreamExt;
 
     let mut collected = Vec::new();
     tokio::pin!(stream);
 
     while let Some(result) = stream.next().await {
-        if let Ok(bytes) = result {
-            collected.extend_from_slice(&bytes);
+        match result {
+            Ok(bytes) => collected.extend_from_slice(&bytes),
+            Err(e) => return Err(e),
         }
     }
 
-    Bytes::from(collected)
+    Ok(Bytes::from(collected))
 }
 
 #[cfg(test)]
