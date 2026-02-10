@@ -30,18 +30,18 @@ fi
 touch scripts/pinned-packages-frontend-builder.txt scripts/pinned-packages-backend-builder.txt scripts/pinned-packages-runtime.txt
 git rev-parse HEAD > .GIT_REV
 
-# Read private-chat frontend version and PostHog configuration from build-config.toml
+# Read private-chat frontend commit hash and PostHog configuration from build-config.toml
 if [ -f "build-config.toml" ]; then
-    PRIVATE_CHAT_FRONTEND_VERSION=$(grep -E '^\s*private_chat_frontend_version\s*=' build-config.toml | awk -F'"' '{print $2}' | head -n1)
+    PRIVATE_CHAT_FRONTEND_VERSION=$(grep -E '^\s*private_chat_frontend_commit_hash\s*=' build-config.toml | awk -F'"' '{print $2}' | head -n1)
     POSTHOG_KEY=$(grep -E '^\s*posthog_key\s*=' build-config.toml | awk -F'"' '{print $2}' | head -n1)
     POSTHOG_HOST=$(grep -E '^\s*posthog_host\s*=' build-config.toml | awk -F'"' '{print $2}' | head -n1)
 fi
 
 if [ -z "$PRIVATE_CHAT_FRONTEND_VERSION" ]; then
-    echo "Error: private-chat frontend version not found in build-config.toml"
+    echo "Error: private-chat frontend commit hash not found in build-config.toml"
     exit 1
 fi
-echo "Using private-chat frontend version: ${PRIVATE_CHAT_FRONTEND_VERSION}"
+echo "Using private-chat frontend commit hash: ${PRIVATE_CHAT_FRONTEND_VERSION}"
 
 if [ -z "$POSTHOG_KEY" ]; then
     echo "Warning: PostHog key not found in build-config.toml"
