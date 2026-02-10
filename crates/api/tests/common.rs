@@ -91,6 +91,21 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
         ),
     );
 
+    // Initialize subscription service for testing
+    let subscription_service = Arc::new(services::subscription::SubscriptionServiceImpl::new(
+        db.pool().clone(),
+        db.stripe_customer_repository()
+            as Arc<dyn services::subscription::ports::StripeCustomerRepository>,
+        db.subscription_repository()
+            as Arc<dyn services::subscription::ports::SubscriptionRepository>,
+        db.payment_webhook_repository()
+            as Arc<dyn services::subscription::ports::PaymentWebhookRepository>,
+        system_configs_service.clone()
+            as Arc<dyn services::system_configs::ports::SystemConfigsService>,
+        config.stripe.secret_key.clone(),
+        config.stripe.webhook_secret.clone(),
+    ));
+
     // Create VPC credentials service based on provided credentials
     let vpc_credentials_service: Arc<dyn services::vpc::VpcCredentialsService> =
         match test_config.vpc_credentials {
@@ -148,6 +163,7 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
         user_settings_service,
         model_service,
         system_configs_service,
+        subscription_service,
         session_repository: session_repo,
         vpc_credentials_service,
         user_repository: user_repo,

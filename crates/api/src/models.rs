@@ -3,6 +3,7 @@ use crate::ApiError;
 use serde::{Deserialize, Serialize};
 use services::file::ports::FileData;
 use services::UserId;
+use std::collections::HashMap;
 use utoipa::ToSchema;
 
 /// User response DTO
@@ -571,6 +572,9 @@ pub struct SystemConfigsResponse {
     pub default_model: Option<String>,
     /// Rate limit configuration (always present, uses defaults if not set)
     pub rate_limit: RateLimitConfig,
+    /// Stripe plan configurations mapping plan names to Stripe price IDs
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stripe_plans: Option<HashMap<String, String>>,
 }
 
 impl From<services::system_configs::ports::SystemConfigs> for SystemConfigsResponse {
@@ -578,6 +582,7 @@ impl From<services::system_configs::ports::SystemConfigs> for SystemConfigsRespo
         Self {
             default_model: config.default_model,
             rate_limit: config.rate_limit.into(),
+            stripe_plans: config.stripe_plans,
         }
     }
 }
@@ -591,6 +596,9 @@ pub struct UpsertSystemConfigsRequest {
     /// Rate limit configuration
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate_limit: Option<RateLimitConfig>,
+    /// Stripe plan configurations mapping plan names to Stripe price IDs
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stripe_plans: Option<HashMap<String, String>>,
 }
 
 impl TryFrom<UpsertSystemConfigsRequest> for services::system_configs::ports::PartialSystemConfigs {
@@ -606,6 +614,7 @@ impl TryFrom<UpsertSystemConfigsRequest> for services::system_configs::ports::Pa
         Ok(services::system_configs::ports::PartialSystemConfigs {
             default_model: req.default_model,
             rate_limit,
+            stripe_plans: req.stripe_plans,
         })
     }
 }

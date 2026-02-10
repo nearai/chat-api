@@ -243,6 +243,43 @@ impl TelemetryConfig {
     }
 }
 
+/// Stripe payment configuration
+#[derive(Debug, Clone, Deserialize)]
+pub struct StripeConfig {
+    /// Stripe secret key for API authentication
+    pub secret_key: String,
+    /// Stripe webhook secret for verifying webhook signatures
+    pub webhook_secret: String,
+}
+
+impl Default for StripeConfig {
+    fn default() -> Self {
+        Self {
+            secret_key: if let Ok(path) = std::env::var("STRIPE_SECRET_KEY_FILE") {
+                std::fs::read_to_string(&path)
+                    .map(|p| p.trim().to_string())
+                    .unwrap_or_else(|e| {
+                        panic!("Failed to read STRIPE_SECRET_KEY_FILE at {}: {}", path, e)
+                    })
+            } else {
+                std::env::var("STRIPE_SECRET_KEY").unwrap_or_default()
+            },
+            webhook_secret: if let Ok(path) = std::env::var("STRIPE_WEBHOOK_SECRET_FILE") {
+                std::fs::read_to_string(&path)
+                    .map(|p| p.trim().to_string())
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "Failed to read STRIPE_WEBHOOK_SECRET_FILE at {}: {}",
+                            path, e
+                        )
+                    })
+            } else {
+                std::env::var("STRIPE_WEBHOOK_SECRET").unwrap_or_default()
+            },
+        }
+    }
+}
+
 /// NEAR-related configuration (shared between services)
 #[derive(Debug, Clone, Deserialize)]
 pub struct NearConfig {
@@ -307,6 +344,8 @@ pub struct Config {
     pub openai: OpenAIConfig,
     /// NEAR-related configuration
     pub near: NearConfig,
+    /// Stripe payment configuration
+    pub stripe: StripeConfig,
     pub cors: CorsConfig,
     pub admin: AdminConfig,
     pub vpc_auth: VpcAuthConfig,
@@ -322,6 +361,7 @@ impl Config {
             server: ServerConfig::default(),
             openai: OpenAIConfig::default(),
             near: NearConfig::default(),
+            stripe: StripeConfig::default(),
             cors: CorsConfig::default(),
             admin: AdminConfig::default(),
             vpc_auth: VpcAuthConfig::default(),

@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use chrono::Duration;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::HashMap;
 use std::fmt;
 
 /// Helper module for serializing/deserializing Duration as seconds
@@ -86,12 +87,16 @@ pub struct SystemConfigs {
     pub default_model: Option<String>,
     /// Rate limit configuration
     pub rate_limit: RateLimitConfig,
+    /// Stripe plan configurations mapping plan names to Stripe price IDs
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stripe_plans: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PartialSystemConfigs {
     pub default_model: Option<String>,
     pub rate_limit: Option<RateLimitConfig>,
+    pub stripe_plans: Option<HashMap<String, String>>,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -100,6 +105,7 @@ impl Default for SystemConfigs {
         Self {
             default_model: None,
             rate_limit: RateLimitConfig::default(),
+            stripe_plans: None,
         }
     }
 }
@@ -109,6 +115,7 @@ impl SystemConfigs {
         Self {
             default_model: partial.default_model.or(self.default_model),
             rate_limit: partial.rate_limit.unwrap_or(self.rate_limit),
+            stripe_plans: partial.stripe_plans.or(self.stripe_plans),
         }
     }
 }
