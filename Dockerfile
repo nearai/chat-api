@@ -36,7 +36,7 @@ RUN --mount=type=bind,source=scripts/pinned-packages-frontend-builder.txt,target
 # Fetch the latest pinned package list
 RUN dpkg -l | grep '^ii' | awk '{print $2"="$3}' | sort > ./pinned-packages-frontend-builder.txt
 
-# Download the private-chat frontend repository archive for the specific commit hash
+# Download the private-chat frontend repository archive for the specific version
 ARG PRIVATE_CHAT_FRONTEND_VERSION
 RUN curl -L -o /tmp/private-chat.tar.gz "https://github.com/nearai/private-chat/archive/${PRIVATE_CHAT_FRONTEND_VERSION}.tar.gz" && \
     tar -xzf /tmp/private-chat.tar.gz --strip-components=1 && \
@@ -54,7 +54,7 @@ ARG POSTHOG_HOST
 ENV VITE_PUBLIC_POSTHOG_KEY=${POSTHOG_KEY}
 ENV VITE_PUBLIC_POSTHOG_HOST=${POSTHOG_HOST}
 
-# Set git commit hash
+# Set git commit hash from version
 ENV VITE_GIT_COMMIT_HASH=${PRIVATE_CHAT_FRONTEND_VERSION}
 
 # Build the frontend

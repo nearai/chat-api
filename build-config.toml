@@ -2,11 +2,13 @@
 # This file contains version information for dependencies used during the build process
 
 [frontend]
-# Git commit hash (full SHA) for the private-chat frontend repository:
+# Git commit hash, tag, or branch name for the private-chat frontend repository:
 #   - https://github.com/nearai/private-chat
-# Must be a full commit hash (40 characters), not a tag or branch name.
-# Example: "94a2be9dccd13b2ff4317b4538968f2ef354a47f"
-private_chat_frontend_commit_hash = "5353664990bfa21712c15884cd06e523ac047eba" # v0.1.13-dev
+# Examples:
+#   - "main" (branch)
+#   - "v1.2.3" (tag)
+#   - "abc123def456" (commit hash)
+private_chat_frontend_version = "94a2be9dccd13b2ff4317b4538968f2ef354a47f" # v0.1.13-dev
 
 # PostHog key and host for the private-chat frontend
 posthog_key = "phc_glaMeuuO1gLFSB2U9y27MchidXEmSnFOQLB8cceyVSb"
