@@ -150,9 +150,20 @@ pub trait PaymentWebhookRepository: Send + Sync {
     ) -> anyhow::Result<PaymentWebhook>;
 }
 
+/// Subscription plan with price ID
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscriptionPlan {
+    pub name: String,
+    pub price_id: String,
+}
+
 /// Service trait for subscription management
 #[async_trait]
 pub trait SubscriptionService: Send + Sync {
+    /// Get available subscription plans
+    async fn get_available_plans(&self) -> Result<Vec<SubscriptionPlan>, SubscriptionError>;
+
     /// Create a subscription checkout session for a user
     /// Returns the checkout URL
     async fn create_subscription(

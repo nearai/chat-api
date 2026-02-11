@@ -7,7 +7,7 @@ use axum::{
     Extension, Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use services::subscription::ports::{SubscriptionError, SubscriptionWithPlan};
+use services::subscription::ports::{SubscriptionError, SubscriptionPlan, SubscriptionWithPlan};
 use utoipa::ToSchema;
 
 /// Request to create a new subscription
@@ -36,6 +36,13 @@ pub struct CancelSubscriptionResponse {
 pub struct ListSubscriptionsResponse {
     /// List of subscriptions
     pub subscriptions: Vec<SubscriptionWithPlan>,
+}
+
+/// Response containing available subscription plans
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ListPlansResponse {
+    /// List of available subscription plans
+    pub plans: Vec<SubscriptionPlan>,
 }
 
 /// Create a subscription checkout session
@@ -154,6 +161,39 @@ pub async fn cancel_subscription(
     }))
 }
 
+/// Get available subscription plans
+#[utoipa::path(
+    get,
+    path = "/v1/subscriptions/plans",
+    tag = "Subscriptions",
+    responses(
+        (status = 200, description = "Plans retrieved successfully", body = ListPlansResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse),
+        (status = 503, description = "Stripe not configured", body = crate::error::ApiErrorResponse)
+    )
+)]
+pub async fn list_plans(
+    State(app_state): State<AppState>,
+) -> Result<Json<ListPlansResponse>, ApiError> {
+    tracing::debug!("Listing available subscription plans");
+
+    let plans = app_state
+        .subscription_service
+        .get_available_plans()
+        .await
+        .map_err(|e| match e {
+            SubscriptionError::NotConfigured => {
+                ApiError::service_unavailable("Stripe is not configured")
+            }
+            _ => {
+                tracing::error!(error = ?e, "Failed to list plans");
+                ApiError::internal_server_error("Failed to list plans")
+            }
+        })?;
+
+    Ok(Json(ListPlansResponse { plans }))
+}
+
 /// Get user's subscriptions
 #[utoipa::path(
     get,
@@ -241,7 +281,9 @@ pub fn create_subscriptions_router() -> Router<AppState> {
         .route("/v1/subscriptions/cancel", post(cancel_subscription))
 }
 
-/// Create public subscription router (for webhooks - no auth)
+/// Create public subscription router (for webhooks and plans - no auth)
 pub fn create_public_subscriptions_router() -> Router<AppState> {
-    Router::new().route("/v1/subscriptions/webhook", post(handle_webhook))
+    Router::new()
+        .route("/v1/subscriptions/webhook", post(handle_webhook))
+        .route("/v1/subscriptions/plans", get(list_plans))
 }

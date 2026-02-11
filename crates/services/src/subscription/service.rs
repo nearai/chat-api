@@ -1,6 +1,6 @@
 use super::ports::{
     PaymentWebhookRepository, StripeCustomerRepository, Subscription, SubscriptionError,
-    SubscriptionRepository, SubscriptionService, SubscriptionWithPlan,
+    SubscriptionPlan, SubscriptionRepository, SubscriptionService, SubscriptionWithPlan,
 };
 use crate::system_configs::ports::SystemConfigsService;
 use crate::UserId;
@@ -194,6 +194,19 @@ impl SubscriptionServiceImpl {
 
 #[async_trait]
 impl SubscriptionService for SubscriptionServiceImpl {
+    async fn get_available_plans(&self) -> Result<Vec<SubscriptionPlan>, SubscriptionError> {
+        tracing::debug!("Getting available subscription plans");
+
+        let stripe_plans = self.get_stripe_plans().await?;
+
+        let plans: Vec<SubscriptionPlan> = stripe_plans
+            .into_iter()
+            .map(|(name, price_id)| SubscriptionPlan { name, price_id })
+            .collect();
+
+        Ok(plans)
+    }
+
     async fn create_subscription(
         &self,
         user_id: UserId,
