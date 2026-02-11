@@ -555,10 +555,14 @@ impl IntoResponse for RateLimitError {
                 retry_after_ms,
             } => (
                 StatusCode::TOO_MANY_REQUESTS,
-                format!(
-                    "Cost limit of {} nano-USD reached for {} second(s) window. Please retry later.",
-                    limit, window_seconds
-                ),
+                {
+                    // `limit` is stored in nano-USD; present a human-friendly USD amount to end users.
+                    let usd = (limit as f64) / 1_000_000_000.0;
+                    format!(
+                        "Cost limit of ${:.6} reached for {} second(s) window. Please retry later.",
+                        usd, window_seconds
+                    )
+                },
                 Some(retry_after_ms),
             ),
             RateLimitError::InternalServerError => (
