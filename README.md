@@ -123,7 +123,7 @@ This project implements **reproducible builds** to ensure bit-for-bit identical 
 **Features**:
 - Pinned Debian package versions (via APT preferences)
 - Debian snapshot archives (date: `20250411T024939Z`)
-- Deterministic timestamps (`SOURCE_DATE_EPOCH=0`)
+- Deterministic timestamps (`SOURCE_DATE_EPOCH` set to git commit timestamp)
 - Pinned base images (SHA256 digests, not tags)
 - Locked dependencies (`Cargo.lock`, `pnpm-lock.yaml`, `build-config.toml`)
 
