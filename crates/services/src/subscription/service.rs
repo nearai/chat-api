@@ -10,6 +10,7 @@ use std::sync::Arc;
 use stripe::{
     CheckoutSession, CheckoutSessionMode, Client, CreateCheckoutSession,
     CreateCheckoutSessionLineItems, Customer, Subscription as StripeSubscription, Webhook,
+    WebhookError,
 };
 
 pub struct SubscriptionServiceImpl {
@@ -20,6 +21,8 @@ pub struct SubscriptionServiceImpl {
     system_configs_service: Arc<dyn SystemConfigsService>,
     stripe_secret_key: String,
     stripe_webhook_secret: String,
+    checkout_success_url: String,
+    checkout_cancel_url: String,
 }
 
 impl SubscriptionServiceImpl {
@@ -31,6 +34,8 @@ impl SubscriptionServiceImpl {
         system_configs_service: Arc<dyn SystemConfigsService>,
         stripe_secret_key: String,
         stripe_webhook_secret: String,
+        checkout_success_url: String,
+        checkout_cancel_url: String,
     ) -> Self {
         Self {
             db_pool,
@@ -40,6 +45,8 @@ impl SubscriptionServiceImpl {
             system_configs_service,
             stripe_secret_key,
             stripe_webhook_secret,
+            checkout_success_url,
+            checkout_cancel_url,
         }
     }
 
@@ -230,8 +237,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 .parse()
                 .map_err(|_| SubscriptionError::StripeError("Invalid customer ID".to_string()))?,
         );
-        params.success_url = Some("https://near.ai/subscription/success");
-        params.cancel_url = Some("https://near.ai/subscription/cancel");
+        params.success_url = Some(&self.checkout_success_url);
+        params.cancel_url = Some(&self.checkout_cancel_url);
         params.line_items = Some(vec![CreateCheckoutSessionLineItems {
             price: Some(price_id.clone()),
             quantity: Some(1),
@@ -384,23 +391,29 @@ impl SubscriptionService for SubscriptionServiceImpl {
         if let Err(e) =
             Webhook::construct_event(payload_str, signature, &self.stripe_webhook_secret)
         {
-            let err_str = e.to_string();
-            // Check if this is a signature/timestamp verification failure (real security issue)
-            if err_str.contains("signature") || err_str.contains("timestamp") {
-                tracing::error!(
-                    "Webhook signature verification failed: event_id={}, error={}",
-                    event_id,
-                    err_str
-                );
-                return Err(SubscriptionError::WebhookVerificationFailed(err_str));
+            match e {
+                // Security-critical errors - reject the webhook
+                WebhookError::BadKey
+                | WebhookError::BadSignature
+                | WebhookError::BadTimestamp(_)
+                | WebhookError::BadHeader(_) => {
+                    tracing::error!(
+                        "Webhook signature verification failed: event_id={}, error={}",
+                        event_id,
+                        e
+                    );
+                    return Err(SubscriptionError::WebhookVerificationFailed(e.to_string()));
+                }
+                // Parsing error - signature is OK, we can continue
+                WebhookError::BadParse(_) => {
+                    tracing::debug!(
+                        "Webhook event parsing failed (signature OK): event_id={}, type={}, error={}",
+                        event_id,
+                        event_type,
+                        e
+                    );
+                }
             }
-            // Otherwise it's just a parsing error - signature is OK, we can continue
-            tracing::debug!(
-                "Webhook event parsing failed (signature OK): event_id={}, type={}, error={}",
-                event_id,
-                event_type,
-                err_str
-            );
         } else {
             tracing::debug!(
                 "Webhook signature verified and parsed: event_id={}, type={}",
@@ -409,30 +422,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
             );
         }
 
-        // Get database connection and start transaction
-        let mut client = self
-            .db_pool
-            .get()
-            .await
-            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-        let txn = client
-            .transaction()
-            .await
-            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-
-        // Store webhook (inside transaction)
-        self.webhook_repo
-            .store_webhook(
-                &txn,
-                "stripe".to_string(),
-                event_id.to_string(),
-                payload_json.clone(),
-            )
-            .await
-            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-
-        // Handle subscription events by manually extracting subscription_id from JSON
-        if is_subscription_event {
+        // For subscription events, fetch data from Stripe API BEFORE starting transaction
+        // This avoids holding DB connection during network calls
+        let subscription_data = if is_subscription_event {
             // Extract subscription_id from JSON: data.object.id
             let subscription_id = payload_json
                 .get("data")
@@ -453,7 +445,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 subscription_id
             );
 
-            // Fetch latest subscription state from Stripe API (outside transaction to avoid long lock)
+            // Fetch latest subscription state from Stripe API (BEFORE transaction)
             let stripe_client = self.get_stripe_client();
             let stripe_sub = StripeSubscription::retrieve(
                 &stripe_client,
@@ -489,8 +481,38 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 SubscriptionError::InternalError(format!("Invalid user_id: {}", e))
             })?);
 
-            // Convert and upsert subscription (inside transaction)
+            // Convert to our model (before transaction)
             let subscription = self.stripe_subscription_to_model(&stripe_sub, user_id)?;
+            Some((subscription_id.to_string(), subscription))
+        } else {
+            None
+        };
+
+        // Now start transaction for all database operations (atomic)
+        let mut client = self
+            .db_pool
+            .get()
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+        let txn = client
+            .transaction()
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        // Store webhook
+        self.webhook_repo
+            .store_webhook(
+                &txn,
+                "stripe".to_string(),
+                event_id.to_string(),
+                payload_json.clone(),
+            )
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        // Upsert subscription if we have data
+        if let Some((subscription_id, subscription)) = subscription_data {
+            let user_id = subscription.user_id;
             self.subscription_repo
                 .upsert_subscription(&txn, subscription)
                 .await

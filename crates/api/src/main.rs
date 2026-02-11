@@ -184,6 +184,8 @@ async fn main() -> anyhow::Result<()> {
             as Arc<dyn services::system_configs::ports::SystemConfigsService>,
         config.stripe.secret_key.clone(),
         config.stripe.webhook_secret.clone(),
+        config.stripe.checkout_success_url.clone(),
+        config.stripe.checkout_cancel_url.clone(),
     ));
 
     // Initialize metrics service
