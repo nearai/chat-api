@@ -3278,12 +3278,73 @@ async fn proxy_post_to_cloud_api(
         user.user_id
     );
 
-    build_response(
-        proxy_response.status,
-        proxy_response.headers.clone(),
-        Body::from_stream(proxy_response.body),
-    )
-    .await
+    // For chat completions, also perform usage tracking (tokens + cost),
+    // similar to /v1/responses.
+    if config.endpoint_path == "chat/completions" {
+        let is_stream = is_streaming_response(&proxy_response.headers);
+
+        let response_body = if !(200..300).contains(&proxy_response.status) {
+            Body::from_stream(proxy_response.body)
+        } else if is_stream {
+            // Streaming chat completions (SSE) - wrap stream to parse usage events.
+            let usage_stream = UsageTrackingStreamFull::new(
+                proxy_response.body,
+                state.user_usage_service.clone(),
+                state.model_pricing_cache.clone(),
+                user.user_id,
+            );
+            Body::from_stream(usage_stream)
+        } else {
+            // Non-streaming chat completions - buffer body and record usage.
+            let bytes = match collect_stream_to_bytes(proxy_response.body).await {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::error!(
+                        "Upstream stream error for user_id={} on {}: {}",
+                        user.user_id,
+                        config.endpoint_full_path,
+                        e
+                    );
+                    return Err((
+                        StatusCode::BAD_GATEWAY,
+                        Json(ErrorResponse {
+                            error: "Failed to read response body".to_string(),
+                        }),
+                    )
+                        .into_response());
+                }
+            };
+
+            // Decompress (if gzipped) before parsing usage.
+            let usage_bytes = decompress_if_gzipped(&bytes, &proxy_response.headers)
+                .unwrap_or_else(|e| {
+                    tracing::error!(
+                        "Failed to decompress non-stream response for user_id={} on {}: {}",
+                        user.user_id,
+                        config.endpoint_full_path,
+                        e
+                    );
+                    bytes.to_vec()
+                });
+            record_usage_from_body(state, user.user_id, &usage_bytes).await;
+            Body::from(bytes)
+        };
+
+        build_response(
+            proxy_response.status,
+            proxy_response.headers.clone(),
+            response_body,
+        )
+        .await
+    } else {
+        // Default: no usage tracking for this endpoint.
+        build_response(
+            proxy_response.status,
+            proxy_response.headers.clone(),
+            Body::from_stream(proxy_response.body),
+        )
+        .await
+    }
 }
 
 /// Proxy chat completions endpoint - OpenAI-compatible chat completions with model system prompt injection
