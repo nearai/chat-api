@@ -4,6 +4,7 @@ use crate::pool::DbPool;
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use services::analytics::CheckAndRecordActivityRequest;
+use services::user_usage::UserUsageRepository;
 use services::{
     analytics::{
         ActivityLogEntry, ActivityMetricsSummary, ActivityType, AnalyticsRepository,
@@ -407,6 +408,74 @@ impl AnalyticsRepository for PostgresAnalyticsRepository {
             .collect())
     }
 
+    async fn record_user_usage(
+        &self,
+        user_id: UserId,
+        tokens_used: u64,
+        cost_nano_usd: Option<i64>,
+    ) -> anyhow::Result<()> {
+        let client = self.pool.get().await?;
+        let tokens_i64 = i64::try_from(tokens_used)
+            .map_err(|e| anyhow::anyhow!("tokens_used overflow: {}", e))?;
+        client
+            .execute(
+                r#"
+                INSERT INTO user_usage_log (user_id, tokens_used, cost_nano_usd)
+                VALUES ($1, $2, $3)
+                "#,
+                &[&user_id, &tokens_i64, &cost_nano_usd],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn get_token_usage_sum(
+        &self,
+        user_id: UserId,
+        window_duration: Duration,
+    ) -> anyhow::Result<i64> {
+        let client = self.pool.get().await?;
+        let row = client
+            .query_one(
+                r#"
+                WITH window_start AS (
+                    SELECT NOW() - make_interval(secs => $2::bigint) as start_time
+                )
+                SELECT COALESCE(SUM(tokens_used), 0)::bigint as total
+                FROM user_usage_log, window_start
+                WHERE user_id = $1 AND created_at >= window_start.start_time
+                "#,
+                &[&user_id, &window_duration.num_seconds()],
+            )
+            .await?;
+        Ok(row.get(0))
+    }
+
+    async fn get_cost_usage_sum(
+        &self,
+        user_id: UserId,
+        window_duration: Duration,
+    ) -> anyhow::Result<i64> {
+        let client = self.pool.get().await?;
+        let row = client
+            .query_one(
+                r#"
+                WITH window_start AS (
+                    SELECT NOW() - make_interval(secs => $2::bigint) as start_time
+                )
+                SELECT COALESCE(SUM(COALESCE(cost_nano_usd, 0)), 0)::bigint as total
+                FROM user_usage_log, window_start
+                WHERE user_id = $1 AND created_at >= window_start.start_time
+                "#,
+                &[&user_id, &window_duration.num_seconds()],
+            )
+            .await?;
+        Ok(row.get(0))
+    }
+}
+
+#[async_trait]
+impl UserUsageRepository for PostgresAnalyticsRepository {
     async fn record_user_usage(
         &self,
         user_id: UserId,

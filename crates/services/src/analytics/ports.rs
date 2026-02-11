@@ -225,7 +225,6 @@ pub trait AnalyticsRepository: Send + Sync {
         end: DateTime<Utc>,
         limit: i64,
     ) -> anyhow::Result<Vec<TopActiveUser>>;
-
     /// Record token and optional cost usage for a user (for rate limiting).
     async fn record_user_usage(
         &self,

@@ -149,8 +149,14 @@ pub async fn create_test_server_and_db(
     let analytics_repo = db.analytics_repository();
     let analytics_service: Arc<dyn services::analytics::AnalyticsServiceTrait> =
         Arc::new(AnalyticsServiceImpl::new(
-            analytics_repo as Arc<dyn services::analytics::AnalyticsRepository>,
+            analytics_repo.clone() as Arc<dyn services::analytics::AnalyticsRepository>
         ));
+
+    // Create user usage service backed by the same analytics repo
+    let user_usage_repo = analytics_repo as Arc<dyn services::user_usage::UserUsageRepository>;
+    let user_usage_service: Arc<dyn services::user_usage::UserUsageService> = Arc::new(
+        services::user_usage::UserUsageServiceImpl::new(user_usage_repo),
+    );
 
     // Create rate limit state for testing
     // Use a permissive default to avoid unrelated rate-limit interference.
@@ -189,6 +195,7 @@ pub async fn create_test_server_and_db(
         cloud_api_base_url: test_config.cloud_api_base_url.clone(),
         metrics_service,
         analytics_service,
+        user_usage_service,
         near_rpc_url: config.near.rpc_url.clone(),
         near_balance_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         model_settings_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),

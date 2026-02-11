@@ -2441,7 +2441,7 @@ async fn proxy_responses(
     } else if is_streaming_response(&proxy_response.headers) {
         let usage_stream = UsageTrackingStreamFull::new(
             proxy_response.body,
-            state.analytics_service.clone(),
+            state.user_usage_service.clone(),
             state.model_pricing_cache.clone(),
             user.user_id,
         );
@@ -3915,7 +3915,6 @@ fn decompress_if_gzipped(bytes: &[u8], headers: &HeaderMap) -> Result<Vec<u8>, s
 }
 
 use futures::Stream;
-use services::analytics::AnalyticsServiceTrait;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -4002,7 +4001,7 @@ fn parse_usage_from_json(bytes: &[u8]) -> Option<ParsedUsage> {
     parse_usage_from_value(&root)
 }
 
-/// Record token and cost usage from parsed response body. Calls analytics_service.record_user_usage.
+/// Record token and cost usage from parsed response body. Calls user_usage_service.record_user_usage.
 /// Returns true if usage was recorded.
 async fn record_usage_from_body(
     state: &crate::state::AppState,
@@ -4025,7 +4024,7 @@ async fn record_usage_from_body(
         None
     };
     if let Err(e) = state
-        .analytics_service
+        .user_usage_service
         .record_user_usage(user_id, usage.total_tokens, cost_nano_usd)
         .await
     {
@@ -4053,7 +4052,7 @@ struct UsageTrackingStreamFull<S> {
     inner: S,
     buffer: String,
     usage: Option<ParsedUsage>,
-    analytics: Arc<dyn AnalyticsServiceTrait>,
+    user_usage: Arc<dyn services::user_usage::UserUsageService>,
     pricing_cache: crate::model_pricing::ModelPricingCache,
     user_id: UserId,
 }
@@ -4064,7 +4063,7 @@ where
 {
     fn new(
         inner: S,
-        analytics: Arc<dyn AnalyticsServiceTrait>,
+        user_usage: Arc<dyn services::user_usage::UserUsageService>,
         pricing_cache: crate::model_pricing::ModelPricingCache,
         user_id: UserId,
     ) -> Self {
@@ -4072,7 +4071,7 @@ where
             inner,
             buffer: String::new(),
             usage: None,
-            analytics,
+            user_usage,
             pricing_cache,
             user_id,
         }
@@ -4105,7 +4104,7 @@ where
             }
             Poll::Ready(None) => {
                 let usage = this.usage.take();
-                let analytics = this.analytics.clone();
+                let user_usage = this.user_usage.clone();
                 let pricing_cache = this.pricing_cache.clone();
                 let user_id = this.user_id;
                 if let Some(usage) = usage {
@@ -4124,7 +4123,7 @@ where
                             } else {
                                 None
                             };
-                            if let Err(e) = analytics
+                            if let Err(e) = user_usage
                                 .record_user_usage(user_id, usage.total_tokens, cost_nano_usd)
                                 .await
                             {
