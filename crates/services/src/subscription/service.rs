@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use stripe::{
     CheckoutSession, CheckoutSessionMode, Client, CreateCheckoutSession,
-    CreateCheckoutSessionLineItems, Customer, Subscription as StripeSubscription, Webhook,
-    WebhookError,
+    CreateCheckoutSessionLineItems, Customer, RequestStrategy, Subscription as StripeSubscription,
+    Webhook, WebhookError,
 };
 
 /// Configuration for SubscriptionServiceImpl
@@ -200,6 +200,20 @@ impl SubscriptionServiceImpl {
     }
 }
 
+/// Generate idempotency key for checkout session creation
+/// Format: SHA-256(user_id:price_id:time_window)
+/// Time window: current timestamp / 3600 (1 hour window)
+fn generate_checkout_idempotency_key(user_id: &UserId, price_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    // Use 1-hour time window: same key within 1 hour, new key after
+    let time_window = chrono::Utc::now().timestamp() / 3600;
+
+    let mut hasher = Sha256::new();
+    hasher.update(format!("{}:{}:{}", user_id.0, price_id, time_window).as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
 #[async_trait]
 impl SubscriptionService for SubscriptionServiceImpl {
     async fn get_available_plans(&self) -> Result<Vec<SubscriptionPlan>, SubscriptionError> {
@@ -251,7 +265,15 @@ impl SubscriptionService for SubscriptionServiceImpl {
         let customer_id = self.get_or_create_stripe_customer(user_id).await?;
 
         // Create Stripe checkout session
-        let client = self.get_stripe_client();
+        let base_client = self.get_stripe_client();
+
+        // Generate idempotency key with 1-hour time window
+        let idempotency_key = generate_checkout_idempotency_key(&user_id, price_id);
+
+        // Clone client and set request strategy with idempotency key
+        let client = base_client
+            .clone()
+            .with_strategy(RequestStrategy::Idempotent(idempotency_key.clone()));
 
         let mut params = CreateCheckoutSession::new();
         params.mode = Some(CheckoutSessionMode::Subscription);
@@ -277,9 +299,10 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .ok_or_else(|| SubscriptionError::StripeError("No checkout URL returned".into()))?;
 
         tracing::info!(
-            "Checkout session created: user_id={}, session_id={}",
+            "Checkout session created: user_id={}, session_id={}, idempotency_key={}...",
             user_id,
-            session.id
+            session.id,
+            &idempotency_key.chars().take(16).collect::<String>()
         );
 
         Ok(checkout_url)
