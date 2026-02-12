@@ -15,7 +15,9 @@ use axum::{
 use bytes::Bytes;
 use chrono::{Duration, Utc};
 use flate2::read::GzDecoder;
+use futures::stream;
 use http::{header::CONTENT_LENGTH, HeaderValue};
+use multer::Multipart;
 use near_api::{Account, AccountId, NetworkConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -3553,9 +3555,58 @@ async fn proxy_image_generations(
     spawn_near_balance_check(&state, &user);
 
     let body_bytes = extract_body_bytes(request).await?;
-    let image_request_model = serde_json::from_slice::<serde_json::Value>(&body_bytes)
-        .ok()
-        .and_then(|j| j.get("model").and_then(|v| v.as_str()).map(String::from));
+    // Parse request JSON: model and n are required for image generations.
+    let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).map_err(|e| {
+        tracing::error!(
+            "Failed to parse image generations request body as JSON for user_id={}: {}",
+            user.user_id,
+            e
+        );
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Invalid JSON body for image generations request".to_string(),
+            }),
+        )
+            .into_response()
+    })?;
+
+    let image_request_model = body_json
+        .get("model")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            tracing::error!(
+                "Missing or invalid `model` in image generations request for user_id={}",
+                user.user_id
+            );
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "`model` is required for image generations".to_string(),
+                }),
+            )
+                .into_response()
+        })?
+        .to_string();
+
+    let image_count: u32 = body_json
+        .get("n")
+        .and_then(|v| v.as_u64())
+        .filter(|&n| n > 0)
+        .and_then(|n| u32::try_from(n).ok())
+        .ok_or_else(|| {
+            tracing::error!(
+                "Missing or invalid `n` in image generations request for user_id={}",
+                user.user_id
+            );
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "`n` (positive integer) is required for image generations".to_string(),
+                }),
+            )
+                .into_response()
+        })?;
 
     let content_length = HeaderValue::from_str(&body_bytes.len().to_string())
         .expect("usize to string conversion always produces valid HeaderValue");
@@ -3607,22 +3658,12 @@ async fn proxy_image_generations(
                     .into_response());
             }
         };
-        let usage_bytes =
-            decompress_if_gzipped(&bytes, &proxy_response.headers).unwrap_or_else(|e| {
-                tracing::error!(
-                    "Failed to decompress image response for user_id={} on {}: {}",
-                    user.user_id,
-                    ENDPOINT_FULL_PATH,
-                    e
-                );
-                bytes.to_vec()
-            });
-        let image_count = parse_image_response_data_count(&usage_bytes).unwrap_or(0);
+        // Use image_count and model from the request to compute cost; we don't depend on response body shape.
         let state_clone = state.clone();
         let user_id = user.user_id;
         let model = image_request_model.clone();
         tokio::spawn(async move {
-            record_image_usage(&state_clone, user_id, model.as_deref(), image_count).await;
+            record_image_usage(&state_clone, user_id, Some(model.as_str()), image_count).await;
         });
         Body::from(bytes)
     };
@@ -3672,7 +3713,110 @@ async fn proxy_image_edits(
     ensure_user_not_banned(&state, &user).await?;
     spawn_near_balance_check(&state, &user);
 
+    // Read full multipart body as bytes (to keep original formdata for forwarding).
     let body_bytes = extract_body_bytes(request).await?;
+
+    // Parse Content-Type to extract boundary.
+    let content_type = headers
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| {
+            tracing::error!(
+                "Missing or invalid Content-Type for image edits request (user_id={})",
+                user.user_id
+            );
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Content-Type header with multipart boundary is required".to_string(),
+                }),
+            )
+                .into_response()
+        })?;
+
+    let boundary = content_type
+        .split(';')
+        .find_map(|part| {
+            let part = part.trim();
+            part.strip_prefix("boundary=")
+                .map(|b| b.trim_matches('"').to_string())
+        })
+        .ok_or_else(|| {
+            tracing::error!(
+                "Missing boundary in Content-Type for image edits request (user_id={})",
+                user.user_id
+            );
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "multipart/form-data boundary is required".to_string(),
+                }),
+            )
+                .into_response()
+        })?;
+
+    // Use multer to parse multipart fields from the raw bytes, without modifying them.
+    let body_for_multipart = body_bytes.clone();
+    let stream = stream::once(async move { Ok::<Bytes, std::io::Error>(body_for_multipart) });
+    let mut multipart = Multipart::new(stream, boundary);
+
+    let mut request_model: Option<String> = None;
+
+    while let Some(field) = multipart.next_field().await.map_err(|e| {
+        tracing::error!(
+            "Failed to parse multipart field for image edits (user_id={}): {}",
+            user.user_id,
+            e
+        );
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Invalid multipart/form-data body for image edits".to_string(),
+            }),
+        )
+            .into_response()
+    })? {
+        let name = field.name().map(|s| s.to_string());
+        match name.as_deref() {
+            Some("model") => {
+                let text = field.text().await.map_err(|e| {
+                    tracing::error!(
+                        "Failed to read `model` field in image edits request (user_id={}): {}",
+                        user.user_id,
+                        e
+                    );
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse {
+                            error: "Invalid `model` field in image edits request".to_string(),
+                        }),
+                    )
+                        .into_response()
+                })?;
+                request_model = Some(text);
+            }
+            _ => {
+                // Other fields: we don't need to inspect, but they remain in body_bytes for forwarding.
+            }
+        }
+    }
+
+    let request_model = request_model.ok_or_else(|| {
+        tracing::error!(
+            "Missing `model` field in image edits request for user_id={}",
+            user.user_id
+        );
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "`model` is required for image edits".to_string(),
+            }),
+        )
+            .into_response()
+    })?;
+
+    // For image edits, we always consider exactly 1 output image.
+    let image_count: u32 = 1;
 
     let proxy_response = state
         .proxy_service
@@ -3720,21 +3864,12 @@ async fn proxy_image_edits(
                     .into_response());
             }
         };
-        let usage_bytes =
-            decompress_if_gzipped(&bytes, &proxy_response.headers).unwrap_or_else(|e| {
-                tracing::error!(
-                    "Failed to decompress image response for user_id={} on {}: {}",
-                    user.user_id,
-                    ENDPOINT_FULL_PATH,
-                    e
-                );
-                bytes.to_vec()
-            });
-        let image_count = parse_image_response_data_count(&usage_bytes).unwrap_or(0);
+        // Use model and n from the request to compute cost; we don't depend on response body shape.
         let state_clone = state.clone();
         let user_id = user.user_id;
+        let model = request_model.clone();
         tokio::spawn(async move {
-            record_image_usage(&state_clone, user_id, None, image_count).await;
+            record_image_usage(&state_clone, user_id, Some(model.as_str()), image_count).await;
         });
         Body::from(bytes)
     };
@@ -4267,13 +4402,6 @@ fn is_streaming_response(headers: &HeaderMap) -> bool {
         .and_then(|v| v.to_str().ok())
         .map(|s| s.contains("text/event-stream"))
         .unwrap_or(false)
-}
-
-/// Parse OpenAI/cloud-api image response (generations or edits) to get number of images (data array length).
-fn parse_image_response_data_count(bytes: &[u8]) -> Option<u32> {
-    let root = serde_json::from_slice::<serde_json::Value>(bytes).ok()?;
-    let arr = root.get("data")?.as_array()?;
-    u32::try_from(arr.len()).ok()
 }
 
 /// Record image usage (0 tokens, cost from model pricing × image_count). Used for /v1/images/generations and /v1/images/edits.

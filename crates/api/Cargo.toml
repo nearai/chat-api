@@ -21,6 +21,7 @@ tokio = { version = "1", features = ["full"] }
 anyhow = "1.0"
 dotenvy = "0.15"
 dstack-sdk = "0.1.2"
+multer = "3"
 
 # Authentication dependencies
 tower = { version = "0.5", features = ["util"] }
