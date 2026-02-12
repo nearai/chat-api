@@ -20,4 +20,6 @@ CREATE INDEX idx_user_usage_event_created ON user_usage_event(created_at);
 CREATE INDEX idx_user_usage_event_user_created ON user_usage_event(user_id, created_at);
 
 COMMENT ON TABLE user_usage_event IS 'Per-event usage for rate limiting (tokens, images, cost in nano-dollars)';
+COMMENT ON COLUMN user_usage_event.metric_key IS 'Metric type. Unit of quantity: llm.tokens=token count, image.generate=image count (n), image.edit=mage count (n)';
+COMMENT ON COLUMN user_usage_event.quantity IS 'Amount in metric_key unit (tokens for llm.tokens, image count for image.*)';
 COMMENT ON COLUMN user_usage_event.cost_nano_usd IS 'Cost in nano-dollars (10^-9 USD), nullable';
