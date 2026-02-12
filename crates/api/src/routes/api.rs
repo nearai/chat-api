@@ -2476,7 +2476,13 @@ async fn proxy_responses(
                 );
                 bytes.to_vec()
             });
-        record_response_usage_from_body(&state, user.user_id, &usage_bytes).await;
+        // Fire-and-forget: record usage in background to avoid blocking on pricing fetch + DB write
+        let state_clone = state.clone();
+        let user_id = user.user_id;
+        let usage_bytes_clone = usage_bytes.clone();
+        tokio::spawn(async move {
+            record_response_usage_from_body(&state_clone, user_id, &usage_bytes_clone).await;
+        });
         Body::from(bytes)
     };
 
@@ -3501,13 +3507,14 @@ async fn proxy_chat_completions(
                 );
                 bytes.to_vec()
             });
+        // Return the original upstream bytes so they remain consistent with any forwarded content-encoding headers.
         let state_clone = state.clone();
         let user_id = user.user_id;
         let body = usage_bytes.clone();
         tokio::spawn(async move {
             record_chat_usage_from_body(&state_clone, user_id, &body).await;
         });
-        Body::from(usage_bytes)
+        Body::from(bytes)
     };
 
     build_response(
