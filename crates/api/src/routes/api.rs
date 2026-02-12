@@ -3113,6 +3113,15 @@ async fn proxy_post_to_cloud_api(
         config.endpoint_full_path
     );
 
+    // For image generations, extract model from request body before body_bytes may be moved.
+    let image_request_model: Option<String> = if config.endpoint_path == "images/generations" {
+        serde_json::from_slice::<serde_json::Value>(&body_bytes)
+            .ok()
+            .and_then(|j| j.get("model").and_then(|v| v.as_str()).map(String::from))
+    } else {
+        None
+    };
+
     // Parse JSON body and handle model settings if enabled
     let mut body_json: Option<serde_json::Value> = None;
     let mut model_system_prompt: Option<String> = None;
@@ -3326,10 +3335,64 @@ async fn proxy_post_to_cloud_api(
                     );
                     bytes.to_vec()
                 });
-            record_usage_from_body(state, user.user_id, &usage_bytes).await;
+            let state = state.clone();
+            let user_id = user.user_id;
+            let body = usage_bytes.clone();
+            tokio::spawn(async move {
+                record_usage_from_body(&state, user_id, &body).await;
+            });
             Body::from(bytes)
         };
 
+        build_response(
+            proxy_response.status,
+            proxy_response.headers.clone(),
+            response_body,
+        )
+        .await
+    } else if config.endpoint_path == "images/generations" || config.endpoint_path == "images/edits"
+    {
+        // Image endpoints: collect response, parse data.len() as image count, record usage (cost from model for generations).
+        let response_body = if !(200..300).contains(&proxy_response.status) {
+            Body::from_stream(proxy_response.body)
+        } else {
+            let bytes = match collect_stream_to_bytes(proxy_response.body).await {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::error!(
+                        "Upstream stream error for user_id={} on {}: {}",
+                        user.user_id,
+                        config.endpoint_full_path,
+                        e
+                    );
+                    return Err((
+                        StatusCode::BAD_GATEWAY,
+                        Json(ErrorResponse {
+                            error: "Failed to read response body".to_string(),
+                        }),
+                    )
+                        .into_response());
+                }
+            };
+            let usage_bytes = decompress_if_gzipped(&bytes, &proxy_response.headers)
+                .unwrap_or_else(|e| {
+                    tracing::error!(
+                        "Failed to decompress image response for user_id={} on {}: {}",
+                        user.user_id,
+                        config.endpoint_full_path,
+                        e
+                    );
+                    bytes.to_vec()
+                });
+            let image_count = parse_image_response_data_count(&usage_bytes).unwrap_or(0);
+            let state = state.clone();
+            let user_id = user.user_id;
+            let model = image_request_model.clone();
+            tokio::spawn(async move {
+                record_image_usage(&state, user_id, model.as_deref(), image_count).await;
+            });
+            Body::from(bytes)
+        };
         build_response(
             proxy_response.status,
             proxy_response.headers.clone(),
@@ -4060,6 +4123,47 @@ fn parse_usage_from_value(root: &serde_json::Value) -> Option<ParsedUsage> {
 fn parse_usage_from_json(bytes: &[u8]) -> Option<ParsedUsage> {
     let root = serde_json::from_slice::<serde_json::Value>(bytes).ok()?;
     parse_usage_from_value(&root)
+}
+
+/// Parse OpenAI/cloud-api image response (generations or edits) to get number of images (data array length).
+fn parse_image_response_data_count(bytes: &[u8]) -> Option<u32> {
+    let root = serde_json::from_slice::<serde_json::Value>(bytes).ok()?;
+    let arr = root.get("data")?.as_array()?;
+    u32::try_from(arr.len()).ok()
+}
+
+/// Record image usage (0 tokens, cost from model pricing × image_count). Used for /v1/images/generations and /v1/images/edits.
+/// Cost is always present; uses 0 when model or pricing is unavailable.
+async fn record_image_usage(
+    state: &crate::state::AppState,
+    user_id: UserId,
+    model_name: Option<&str>,
+    image_count: u32,
+) {
+    if image_count == 0 {
+        return;
+    }
+    let cost_nano_usd = if let Some(model) = model_name {
+        state
+            .model_pricing_cache
+            .get_pricing(model)
+            .await
+            .map(|p| p.cost_nano_usd_for_images(image_count))
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    if let Err(e) = state
+        .user_usage_service
+        .record_user_usage(user_id, 0, Some(cost_nano_usd))
+        .await
+    {
+        tracing::warn!(
+            "Failed to record image usage for user_id={}: {}",
+            user_id,
+            e
+        );
+    }
 }
 
 /// Record token and cost usage from parsed response body. Calls user_usage_service.record_user_usage.

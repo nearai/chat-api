@@ -11,13 +11,15 @@ use tracing::debug;
 /// TTL for cached model pricing (5 minutes).
 pub const MODEL_PRICING_CACHE_TTL_SECS: i64 = 300;
 
-/// Pricing for a model: cost per token in nano-dollars (1e-9 USD).
+/// Pricing for a model: cost per token and per image in nano-dollars (1e-9 USD).
 #[derive(Debug, Clone)]
 pub struct ModelPricing {
     /// Input tokens: nano-dollars per token.
     pub input_nano_per_token: i64,
     /// Output tokens: nano-dollars per token.
     pub output_nano_per_token: i64,
+    /// Image (generation/edit): nano-dollars per image.
+    pub nano_per_image: i64,
 }
 
 impl ModelPricing {
@@ -31,11 +33,20 @@ impl ModelPricing {
             .try_into()
             .expect("cost_nano_usd overflow: result exceeds i64 range")
     }
+
+    /// Compute cost in nano-dollars for image operations (generation/edit).
+    /// Uses i128 for intermediate math to avoid overflow; panics if result exceeds i64 range.
+    pub fn cost_nano_usd_for_images(&self, image_count: u32) -> i64 {
+        let total = (image_count as i128) * (self.nano_per_image as i128);
+        total
+            .try_into()
+            .expect("cost_nano_usd_for_images overflow: result exceeds i64 range")
+    }
 }
 
-/// Cost-per-token object from cloud-api (amount at given scale, e.g. scale 9 = nano-USD).
+/// Price with amount/scale/currency from cloud-api (e.g. scale 9 = nano-USD).
 #[derive(Debug, serde::Deserialize)]
-struct CostPerToken {
+struct DecimalPrice {
     amount: i64,
     scale: i32,
     currency: String,
@@ -49,14 +60,17 @@ struct CostPerToken {
 ///   "modelId": "...",
 ///   "inputCostPerToken": { "amount": 150, "scale": 9, "currency": "USD" },
 ///   "outputCostPerToken": { "amount": 550, "scale": 9, "currency": "USD" },
+///   "costPerImage": { "amount": 40000000, "scale": 9, "currency": "USD" },
 ///   ...
 /// }
 #[derive(Debug, serde::Deserialize)]
 struct ModelPricingResponse {
     #[serde(rename = "inputCostPerToken")]
-    input_cost_per_token: CostPerToken,
+    input_cost_per_token: DecimalPrice,
     #[serde(rename = "outputCostPerToken")]
-    output_cost_per_token: CostPerToken,
+    output_cost_per_token: DecimalPrice,
+    #[serde(rename = "costPerImage")]
+    cost_per_image: DecimalPrice,
 }
 
 /// Cache entry with fetched-at time for TTL.
@@ -161,14 +175,17 @@ impl ModelPricingCache {
         // the logic simple: only accept scale=9 and treat `amount` as nano-dollars.
         if body.input_cost_per_token.currency != "USD"
             || body.output_cost_per_token.currency != "USD"
+            || body.cost_per_image.currency != "USD"
             || body.input_cost_per_token.scale != 9
             || body.output_cost_per_token.scale != 9
+            || body.cost_per_image.scale != 9
         {
             tracing::warn!(
-                "Unsupported pricing scale for model_name={}: input_scale={}, output_scale={}",
+                "Unsupported pricing scale for model_name={}: input_scale={}, output_scale={}, cost_per_image_scale={}",
                 model_name,
                 body.input_cost_per_token.scale,
                 body.output_cost_per_token.scale,
+                body.cost_per_image.scale,
             );
             return None;
         }
@@ -176,6 +193,7 @@ impl ModelPricingCache {
         let pricing = ModelPricing {
             input_nano_per_token: body.input_cost_per_token.amount,
             output_nano_per_token: body.output_cost_per_token.amount,
+            nano_per_image: body.cost_per_image.amount,
         };
 
         {
