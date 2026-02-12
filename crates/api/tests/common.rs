@@ -152,8 +152,9 @@ pub async fn create_test_server_and_db(
             analytics_repo.clone() as Arc<dyn services::analytics::AnalyticsRepository>
         ));
 
-    // Create user usage service backed by the same analytics repo
-    let user_usage_repo = analytics_repo as Arc<dyn services::user_usage::UserUsageRepository>;
+    // Create user usage service
+    let user_usage_repo =
+        db.user_usage_repository() as Arc<dyn services::user_usage::UserUsageRepository>;
     let user_usage_service: Arc<dyn services::user_usage::UserUsageService> = Arc::new(
         services::user_usage::UserUsageServiceImpl::new(user_usage_repo),
     );

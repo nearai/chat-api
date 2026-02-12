@@ -162,8 +162,7 @@ async fn main() -> anyhow::Result<()> {
     let analytics_service = Arc::new(AnalyticsServiceImpl::new(analytics_repo.clone()));
 
     tracing::info!("Initializing user usage service...");
-    let user_usage_repo =
-        analytics_repo.clone() as Arc<dyn services::user_usage::UserUsageRepository>;
+    let user_usage_repo = db.user_usage_repository();
     let user_usage_service: Arc<dyn services::user_usage::UserUsageService> =
         Arc::new(services::user_usage::UserUsageServiceImpl::new(
             user_usage_repo as Arc<dyn services::user_usage::UserUsageRepository>,

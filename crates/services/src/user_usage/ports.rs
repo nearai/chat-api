@@ -3,18 +3,25 @@ use chrono::Duration;
 
 use crate::UserId;
 
-/// Repository interface for per-user token and cost usage.
+/// Metric keys for user_usage_event (matches DB constraint).
+pub const METRIC_KEY_LLM_TOKENS: &str = "llm.tokens";
+pub const METRIC_KEY_IMAGE_GENERATE: &str = "image.generate";
+pub const METRIC_KEY_IMAGE_EDIT: &str = "image.edit";
+
+/// Repository interface for per-user usage events (tokens, images, cost).
 #[async_trait]
 pub trait UserUsageRepository: Send + Sync {
-    /// Record token and optional cost usage for a user (for rate limiting / billing).
-    async fn record_user_usage(
+    /// Record a usage event for rate limiting / billing.
+    async fn record_usage_event(
         &self,
         user_id: UserId,
-        tokens_used: u64,
+        metric_key: &str,
+        quantity: i64,
         cost_nano_usd: Option<i64>,
+        model_id: Option<&str>,
     ) -> anyhow::Result<()>;
 
-    /// Sum of tokens_used for the user in the sliding window.
+    /// Sum of quantity for llm.tokens in the sliding window.
     async fn get_token_usage_sum(
         &self,
         user_id: UserId,
@@ -29,14 +36,16 @@ pub trait UserUsageRepository: Send + Sync {
     ) -> anyhow::Result<i64>;
 }
 
-/// Service interface for per-user token and cost usage.
+/// Service interface for per-user usage events.
 #[async_trait]
 pub trait UserUsageService: Send + Sync {
-    async fn record_user_usage(
+    async fn record_usage_event(
         &self,
         user_id: UserId,
-        tokens_used: u64,
+        metric_key: &str,
+        quantity: i64,
         cost_nano_usd: Option<i64>,
+        model_id: Option<&str>,
     ) -> anyhow::Result<()>;
 
     async fn get_token_usage_sum(

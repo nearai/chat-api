@@ -3662,8 +3662,10 @@ async fn proxy_image_generations(
         let state_clone = state.clone();
         let user_id = user.user_id;
         let model = image_request_model.clone();
+        let qty = image_count as i64;
+        let mk = services::user_usage::METRIC_KEY_IMAGE_GENERATE;
         tokio::spawn(async move {
-            record_image_usage(&state_clone, user_id, Some(model.as_str()), image_count).await;
+            record_image_usage(&state_clone, user_id, mk, qty, Some(model.as_str())).await;
         });
         Body::from(bytes)
     };
@@ -3815,9 +3817,6 @@ async fn proxy_image_edits(
             .into_response()
     })?;
 
-    // For image edits, we always consider exactly 1 output image.
-    let image_count: u32 = 1;
-
     let proxy_response = state
         .proxy_service
         .forward_request(
@@ -3864,12 +3863,13 @@ async fn proxy_image_edits(
                     .into_response());
             }
         };
-        // Use model and n from the request to compute cost; we don't depend on response body shape.
+        // Use model from request; edits always produce 1 image.
         let state_clone = state.clone();
         let user_id = user.user_id;
         let model = request_model.clone();
+        let mk = services::user_usage::METRIC_KEY_IMAGE_EDIT;
         tokio::spawn(async move {
-            record_image_usage(&state_clone, user_id, Some(model.as_str()), image_count).await;
+            record_image_usage(&state_clone, user_id, mk, 1, Some(model.as_str())).await;
         });
         Body::from(bytes)
     };
@@ -4404,15 +4404,16 @@ fn is_streaming_response(headers: &HeaderMap) -> bool {
         .unwrap_or(false)
 }
 
-/// Record image usage (0 tokens, cost from model pricing × image_count). Used for /v1/images/generations and /v1/images/edits.
-/// Cost is always present; uses 0 when model or pricing is unavailable.
+/// Record image usage (metric_key + quantity; cost from model pricing × quantity).
+/// Used for /v1/images/generations (image.generate, quantity=n) and /v1/images/edits (image.edit, quantity=1).
 async fn record_image_usage(
     state: &crate::state::AppState,
     user_id: UserId,
+    metric_key: &str,
+    quantity: i64,
     model_name: Option<&str>,
-    image_count: u32,
 ) {
-    if image_count == 0 {
+    if quantity <= 0 {
         return;
     }
     let cost_nano_usd = if let Some(model) = model_name {
@@ -4420,14 +4421,20 @@ async fn record_image_usage(
             .model_pricing_cache
             .get_pricing(model)
             .await
-            .map(|p| p.cost_nano_usd_for_images(image_count))
+            .map(|p| p.cost_nano_usd_for_images(quantity as u32))
             .unwrap_or(0)
     } else {
         0
     };
     if let Err(e) = state
         .user_usage_service
-        .record_user_usage(user_id, 0, Some(cost_nano_usd))
+        .record_usage_event(
+            user_id,
+            metric_key,
+            quantity,
+            Some(cost_nano_usd),
+            model_name,
+        )
         .await
     {
         tracing::warn!(
@@ -4458,7 +4465,13 @@ async fn record_chat_usage_from_body(
         .map(|p| p.cost_nano_usd(usage.input_tokens, usage.output_tokens));
     if let Err(e) = state
         .user_usage_service
-        .record_user_usage(user_id, usage.total_tokens, cost_nano_usd)
+        .record_usage_event(
+            user_id,
+            services::user_usage::METRIC_KEY_LLM_TOKENS,
+            usage.total_tokens as i64,
+            cost_nano_usd,
+            Some(usage.model.as_str()),
+        )
         .await
     {
         tracing::warn!("Failed to record usage for user_id={}: {}", user_id, e);
@@ -4487,7 +4500,13 @@ async fn record_response_usage_from_body(
         .map(|p| p.cost_nano_usd(usage.input_tokens, usage.output_tokens));
     if let Err(e) = state
         .user_usage_service
-        .record_user_usage(user_id, usage.total_tokens, cost_nano_usd)
+        .record_usage_event(
+            user_id,
+            services::user_usage::METRIC_KEY_LLM_TOKENS,
+            usage.total_tokens as i64,
+            cost_nano_usd,
+            Some(usage.model.as_str()),
+        )
         .await
     {
         tracing::warn!("Failed to record usage for user_id={}: {}", user_id, e);

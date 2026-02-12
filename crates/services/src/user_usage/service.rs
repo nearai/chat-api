@@ -23,14 +23,16 @@ impl UserUsageServiceImpl {
 
 #[async_trait]
 impl UserUsageService for UserUsageServiceImpl {
-    async fn record_user_usage(
+    async fn record_usage_event(
         &self,
         user_id: UserId,
-        tokens_used: u64,
+        metric_key: &str,
+        quantity: i64,
         cost_nano_usd: Option<i64>,
+        model_id: Option<&str>,
     ) -> anyhow::Result<()> {
         self.repo
-            .record_user_usage(user_id, tokens_used, cost_nano_usd)
+            .record_usage_event(user_id, metric_key, quantity, cost_nano_usd, model_id)
             .await
     }
 

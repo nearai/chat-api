@@ -288,7 +288,13 @@ fn record_usage_on_stream_end(
                     .await
                     .map(|p| p.cost_nano_usd(usage.input_tokens, usage.output_tokens));
                 if let Err(e) = user_usage
-                    .record_user_usage(user_id, usage.total_tokens, cost_nano_usd)
+                    .record_usage_event(
+                        user_id,
+                        services::user_usage::METRIC_KEY_LLM_TOKENS,
+                        usage.total_tokens as i64,
+                        cost_nano_usd,
+                        Some(usage.model.as_str()),
+                    )
                     .await
                 {
                     tracing::warn!(

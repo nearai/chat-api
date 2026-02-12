@@ -277,7 +277,7 @@ impl RateLimitState {
             }
         }
 
-        // Phase 2a: Check token usage limits (user_usage_log)
+        // Phase 2a: Check token usage limits (user_usage_event, metric_key='llm.tokens')
         self.check_usage_limits(
             user_id,
             added_timestamp,
@@ -286,7 +286,7 @@ impl RateLimitState {
         )
         .await?;
 
-        // Phase 2b: Check cost usage limits (user_usage_log, nano-dollars)
+        // Phase 2b: Check cost usage limits (user_usage_event, nano-dollars)
         self.check_usage_limits(
             user_id,
             added_timestamp,
@@ -630,11 +630,13 @@ mod tests {
 
         #[async_trait]
         impl UserUsageService for AlwaysAllowUserUsageService {
-            async fn record_user_usage(
+            async fn record_usage_event(
                 &self,
                 _user_id: UserId,
-                _tokens_used: u64,
+                _metric_key: &str,
+                _quantity: i64,
                 _cost_nano_usd: Option<i64>,
+                _model_id: Option<&str>,
             ) -> anyhow::Result<()> {
                 Ok(())
             }
@@ -664,11 +666,13 @@ mod tests {
 
         #[async_trait]
         impl UserUsageService for FixedUsageSumUserUsageService {
-            async fn record_user_usage(
+            async fn record_usage_event(
                 &self,
                 _user_id: UserId,
-                _tokens_used: u64,
+                _metric_key: &str,
+                _quantity: i64,
                 _cost_nano_usd: Option<i64>,
+                _model_id: Option<&str>,
             ) -> anyhow::Result<()> {
                 Ok(())
             }
@@ -2178,7 +2182,7 @@ mod tests {
                 token_window_limits: vec![],
                 cost_window_limits: vec![WindowLimit {
                     window_duration: ChronoDuration::seconds(60),
-                    // nano-USD (same unit stored in user_usage_log)
+                    // nano-USD (same unit stored in user_usage_event)
                     limit: 1_000,
                 }],
             },

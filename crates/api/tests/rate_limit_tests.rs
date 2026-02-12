@@ -8,7 +8,7 @@ use futures::future::join_all;
 use serde_json::json;
 use services::system_configs::ports::{RateLimitConfig, WindowLimit};
 use services::user::ports::UserRepository;
-use services::user_usage::UserUsageRepository;
+use services::user_usage::{UserUsageRepository, METRIC_KEY_LLM_TOKENS};
 use std::future::IntoFuture;
 use std::sync::Arc;
 
@@ -238,8 +238,8 @@ async fn test_token_limit_blocks_request_when_usage_exceeds_limit() {
         .await
         .expect("db")
         .expect("user created by mock_login");
-    db.analytics_repository()
-        .record_user_usage(user.id, 150, None)
+    db.user_usage_repository()
+        .record_usage_event(user.id, METRIC_KEY_LLM_TOKENS, 150, None, None)
         .await
         .expect("record usage");
     // 150 tokens in window > limit 100 => next request should be rate limited
@@ -298,8 +298,8 @@ async fn test_cost_limit_blocks_request_when_usage_exceeds_limit() {
         .await
         .expect("db")
         .expect("user created by mock_login");
-    db.analytics_repository()
-        .record_user_usage(user.id, 0, Some(2_000))
+    db.user_usage_repository()
+        .record_usage_event(user.id, METRIC_KEY_LLM_TOKENS, 0, Some(2_000), None)
         .await
         .expect("record usage");
     // 2000 nano-USD in window > limit 1000 => next request should be rate limited
