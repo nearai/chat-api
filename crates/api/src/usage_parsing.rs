@@ -311,14 +311,14 @@ fn record_usage_on_stream_end(
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_chat_completion_usage_from_bytes, parse_usage_from_chat_completion_sse_line,
-        parse_usage_from_response_completed_sse_line,
+        parse_chat_completion_usage_from_bytes, parse_response_usage_from_bytes,
+        parse_usage_from_chat_completion_sse_line, parse_usage_from_response_completed_sse_line,
     };
 
     #[test]
-    fn non_stream_full_fields() {
+    fn response_non_stream_full_fields() {
         let body = br#"{"model":"gpt-test","usage":{"total_tokens":12,"input_tokens":5,"output_tokens":7}}"#;
-        let parsed = parse_chat_completion_usage_from_bytes(body).expect("should parse");
+        let parsed = parse_response_usage_from_bytes(body).expect("should parse");
         assert_eq!(parsed.input_tokens, 5);
         assert_eq!(parsed.output_tokens, 7);
         assert_eq!(parsed.total_tokens, 12);
