@@ -22,8 +22,6 @@ pub struct SubscriptionServiceConfig {
     pub system_configs_service: Arc<dyn SystemConfigsService>,
     pub stripe_secret_key: String,
     pub stripe_webhook_secret: String,
-    pub checkout_success_url: String,
-    pub checkout_cancel_url: String,
 }
 
 pub struct SubscriptionServiceImpl {
@@ -34,8 +32,6 @@ pub struct SubscriptionServiceImpl {
     system_configs_service: Arc<dyn SystemConfigsService>,
     stripe_secret_key: String,
     stripe_webhook_secret: String,
-    checkout_success_url: String,
-    checkout_cancel_url: String,
 }
 
 impl SubscriptionServiceImpl {
@@ -48,8 +44,6 @@ impl SubscriptionServiceImpl {
             system_configs_service: config.system_configs_service,
             stripe_secret_key: config.stripe_secret_key,
             stripe_webhook_secret: config.stripe_webhook_secret,
-            checkout_success_url: config.checkout_success_url,
-            checkout_cancel_url: config.checkout_cancel_url,
         }
     }
 
@@ -225,6 +219,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
         &self,
         user_id: UserId,
         plan: String,
+        success_url: String,
+        cancel_url: String,
     ) -> Result<String, SubscriptionError> {
         tracing::info!(
             "Creating subscription checkout for user_id={}, plan={}",
@@ -264,8 +260,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 .parse()
                 .map_err(|_| SubscriptionError::StripeError("Invalid customer ID".to_string()))?,
         );
-        params.success_url = Some(&self.checkout_success_url);
-        params.cancel_url = Some(&self.checkout_cancel_url);
+        params.success_url = Some(&success_url);
+        params.cancel_url = Some(&cancel_url);
         params.line_items = Some(vec![CreateCheckoutSessionLineItems {
             price: Some(price_id.clone()),
             quantity: Some(1),

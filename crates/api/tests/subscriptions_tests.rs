@@ -118,7 +118,9 @@ async fn test_create_subscription_not_configured() {
     let user_token = mock_login(&server, user_email).await;
 
     let request_body = json!({
-        "plan": "any_plan"
+        "plan": "any_plan",
+        "success_url": "https://example.com/success",
+        "cancel_url": "https://example.com/cancel"
     });
 
     let response = server
@@ -161,7 +163,9 @@ async fn test_create_subscription_invalid_plan() {
     let user_token = mock_login(&server, user_email).await;
 
     let request_body = json!({
-        "plan": "nonexistent_plan"
+        "plan": "nonexistent_plan",
+        "success_url": "https://example.com/success",
+        "cancel_url": "https://example.com/cancel"
     });
 
     let response = server

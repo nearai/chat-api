@@ -185,8 +185,6 @@ async fn main() -> anyhow::Result<()> {
                 as Arc<dyn services::system_configs::ports::SystemConfigsService>,
             stripe_secret_key: config.stripe.secret_key.clone(),
             stripe_webhook_secret: config.stripe.webhook_secret.clone(),
-            checkout_success_url: config.stripe.checkout_success_url.clone(),
-            checkout_cancel_url: config.stripe.checkout_cancel_url.clone(),
         },
     ));
 

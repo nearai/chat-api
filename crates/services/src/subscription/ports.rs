@@ -173,6 +173,8 @@ pub trait SubscriptionService: Send + Sync {
         &self,
         user_id: UserId,
         plan: String,
+        success_url: String,
+        cancel_url: String,
     ) -> Result<String, SubscriptionError>;
 
     /// Cancel a user's active subscription (at period end)

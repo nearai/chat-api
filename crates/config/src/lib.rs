@@ -250,10 +250,6 @@ pub struct StripeConfig {
     pub secret_key: String,
     /// Stripe webhook secret for verifying webhook signatures
     pub webhook_secret: String,
-    /// URL to redirect after successful checkout
-    pub checkout_success_url: String,
-    /// URL to redirect after cancelled checkout
-    pub checkout_cancel_url: String,
 }
 
 impl Default for StripeConfig {
@@ -280,10 +276,6 @@ impl Default for StripeConfig {
             } else {
                 std::env::var("STRIPE_WEBHOOK_SECRET").unwrap_or_default()
             },
-            checkout_success_url: std::env::var("STRIPE_CHECKOUT_SUCCESS_URL")
-                .unwrap_or_else(|_| "https://near.ai/subscription/success".to_string()),
-            checkout_cancel_url: std::env::var("STRIPE_CHECKOUT_CANCEL_URL")
-                .unwrap_or_else(|_| "https://near.ai/subscription/cancel".to_string()),
         }
     }
 }

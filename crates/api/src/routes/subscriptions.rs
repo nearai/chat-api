@@ -16,6 +16,10 @@ use utoipa::ToSchema;
 pub struct CreateSubscriptionRequest {
     /// Plan name (e.g., "basic", "pro")
     pub plan: String,
+    /// URL to redirect after successful checkout
+    pub success_url: String,
+    /// URL to redirect after cancelled checkout
+    pub cancel_url: String,
 }
 
 /// Response containing checkout URL
@@ -89,7 +93,7 @@ pub async fn create_subscription(
 
     let checkout_url = app_state
         .subscription_service
-        .create_subscription(user.user_id, req.plan)
+        .create_subscription(user.user_id, req.plan, req.success_url, req.cancel_url)
         .await
         .map_err(|e| match e {
             SubscriptionError::ActiveSubscriptionExists => {
