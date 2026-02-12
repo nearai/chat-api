@@ -142,6 +142,44 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
         }))
     }
 
+    async fn get_active_subscriptions(&self, user_id: UserId) -> anyhow::Result<Vec<Subscription>> {
+        tracing::debug!(
+            "Repository: Fetching active subscriptions for user_id={}",
+            user_id
+        );
+
+        let client = self.pool.get().await?;
+
+        let rows = client
+            .query(
+                "SELECT subscription_id, user_id, customer_id, price_id, status,
+                        current_period_end, cancel_at_period_end, created_at, updated_at
+                 FROM subscriptions
+                 WHERE user_id = $1 AND status IN ('active', 'trialing')
+                   AND current_period_end > NOW()
+                 ORDER BY current_period_end DESC",
+                &[&user_id],
+            )
+            .await?;
+
+        let subscriptions = rows
+            .into_iter()
+            .map(|row| Subscription {
+                subscription_id: row.get("subscription_id"),
+                user_id: row.get("user_id"),
+                customer_id: row.get("customer_id"),
+                price_id: row.get("price_id"),
+                status: row.get("status"),
+                current_period_end: row.get("current_period_end"),
+                cancel_at_period_end: row.get("cancel_at_period_end"),
+                created_at: row.get("created_at"),
+                updated_at: row.get("updated_at"),
+            })
+            .collect();
+
+        Ok(subscriptions)
+    }
+
     async fn delete_subscription(&self, subscription_id: &str) -> anyhow::Result<()> {
         tracing::info!(
             "Repository: Deleting subscription - subscription_id={}",

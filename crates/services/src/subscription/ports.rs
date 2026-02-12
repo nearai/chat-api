@@ -127,6 +127,9 @@ pub trait SubscriptionRepository: Send + Sync {
     /// Get all subscriptions for a user
     async fn get_user_subscriptions(&self, user_id: UserId) -> anyhow::Result<Vec<Subscription>>;
 
+    /// Get active subscriptions for a user (status IN ('active', 'trialing') AND period not ended)
+    async fn get_active_subscriptions(&self, user_id: UserId) -> anyhow::Result<Vec<Subscription>>;
+
     /// Get active subscription for a user (status IN ('active', 'trialing'))
     async fn get_active_subscription(
         &self,
@@ -175,10 +178,12 @@ pub trait SubscriptionService: Send + Sync {
     /// Cancel a user's active subscription (at period end)
     async fn cancel_subscription(&self, user_id: UserId) -> Result<(), SubscriptionError>;
 
-    /// Get all subscriptions for a user with plan names resolved
+    /// Get subscriptions for a user with plan names resolved
+    /// If active_only is true, returns only active (not expired) subscriptions
     async fn get_user_subscriptions(
         &self,
         user_id: UserId,
+        active_only: bool,
     ) -> Result<Vec<SubscriptionWithPlan>, SubscriptionError>;
 
     /// Handle incoming webhook from payment provider

@@ -350,18 +350,29 @@ impl SubscriptionService for SubscriptionServiceImpl {
     async fn get_user_subscriptions(
         &self,
         user_id: UserId,
+        active_only: bool,
     ) -> Result<Vec<SubscriptionWithPlan>, SubscriptionError> {
-        tracing::debug!("Fetching subscriptions for user_id={}", user_id);
+        tracing::debug!(
+            "Fetching subscriptions for user_id={}, active_only={}",
+            user_id,
+            active_only
+        );
 
         // Get stripe plans from system configs
         let stripe_plans = self.get_stripe_plans().await?;
 
         // Get subscriptions from database
-        let subscriptions = self
-            .subscription_repo
-            .get_user_subscriptions(user_id)
-            .await
-            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+        let subscriptions = if active_only {
+            self.subscription_repo
+                .get_active_subscriptions(user_id)
+                .await
+                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
+        } else {
+            self.subscription_repo
+                .get_user_subscriptions(user_id)
+                .await
+                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
+        };
 
         // Map to API response model with plan names resolved
         let result: Vec<SubscriptionWithPlan> = subscriptions

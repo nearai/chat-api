@@ -1,6 +1,7 @@
 use crate::{error::ApiError, middleware::AuthenticatedUser, state::AppState};
 use axum::{
     body::Bytes,
+    extract::Query,
     extract::State,
     http::HeaderMap,
     routing::{get, post},
@@ -36,6 +37,18 @@ pub struct CancelSubscriptionResponse {
 pub struct ListSubscriptionsResponse {
     /// List of subscriptions
     pub subscriptions: Vec<SubscriptionWithPlan>,
+}
+
+/// Query parameters for listing subscriptions
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct ListSubscriptionsParams {
+    /// Include inactive (expired/canceled) subscriptions
+    #[serde(default = "default_false")]
+    pub include_inactive: bool,
+}
+
+fn default_false() -> bool {
+    false
 }
 
 /// Response containing available subscription plans
@@ -199,6 +212,9 @@ pub async fn list_plans(
     get,
     path = "/v1/subscriptions",
     tag = "Subscriptions",
+    params(
+        ListSubscriptionsParams
+    ),
     responses(
         (status = 200, description = "Subscriptions retrieved successfully", body = ListSubscriptionsResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
@@ -212,12 +228,17 @@ pub async fn list_plans(
 pub async fn list_subscriptions(
     State(app_state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    Query(params): Query<ListSubscriptionsParams>,
 ) -> Result<Json<ListSubscriptionsResponse>, ApiError> {
-    tracing::debug!("Listing subscriptions for user_id={}", user.user_id);
+    tracing::debug!(
+        "Listing subscriptions for user_id={}, include_inactive={}",
+        user.user_id,
+        params.include_inactive
+    );
 
     let subscriptions = app_state
         .subscription_service
-        .get_user_subscriptions(user.user_id)
+        .get_user_subscriptions(user.user_id, !params.include_inactive)
         .await
         .map_err(|e| match e {
             SubscriptionError::NotConfigured => {
