@@ -173,19 +173,21 @@ async fn main() -> anyhow::Result<()> {
     // Initialize subscription service
     tracing::info!("Initializing subscription service...");
     let subscription_service = Arc::new(services::subscription::SubscriptionServiceImpl::new(
-        db.pool().clone(),
-        db.stripe_customer_repository()
-            as Arc<dyn services::subscription::ports::StripeCustomerRepository>,
-        db.subscription_repository()
-            as Arc<dyn services::subscription::ports::SubscriptionRepository>,
-        db.payment_webhook_repository()
-            as Arc<dyn services::subscription::ports::PaymentWebhookRepository>,
-        system_configs_service.clone()
-            as Arc<dyn services::system_configs::ports::SystemConfigsService>,
-        config.stripe.secret_key.clone(),
-        config.stripe.webhook_secret.clone(),
-        config.stripe.checkout_success_url.clone(),
-        config.stripe.checkout_cancel_url.clone(),
+        services::subscription::SubscriptionServiceConfig {
+            db_pool: db.pool().clone(),
+            stripe_customer_repo: db.stripe_customer_repository()
+                as Arc<dyn services::subscription::ports::StripeCustomerRepository>,
+            subscription_repo: db.subscription_repository()
+                as Arc<dyn services::subscription::ports::SubscriptionRepository>,
+            webhook_repo: db.payment_webhook_repository()
+                as Arc<dyn services::subscription::ports::PaymentWebhookRepository>,
+            system_configs_service: system_configs_service.clone()
+                as Arc<dyn services::system_configs::ports::SystemConfigsService>,
+            stripe_secret_key: config.stripe.secret_key.clone(),
+            stripe_webhook_secret: config.stripe.webhook_secret.clone(),
+            checkout_success_url: config.stripe.checkout_success_url.clone(),
+            checkout_cancel_url: config.stripe.checkout_cancel_url.clone(),
+        },
     ));
 
     // Initialize metrics service

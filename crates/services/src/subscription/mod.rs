@@ -7,4 +7,4 @@ pub use ports::{
     Subscription, SubscriptionError, SubscriptionRepository, SubscriptionService,
     SubscriptionWithPlan,
 };
-pub use service::SubscriptionServiceImpl;
+pub use service::{SubscriptionServiceConfig, SubscriptionServiceImpl};

@@ -1,6 +1,6 @@
 mod common;
 
-use common::{create_test_server, mock_login};
+use common::{clear_stripe_plans, create_test_server, mock_login, set_stripe_plans};
 use serde_json::json;
 use serial_test::serial;
 
@@ -21,16 +21,15 @@ async fn test_list_subscriptions_requires_auth() {
 
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn test_list_subscriptions_returns_empty_for_new_user() {
+async fn test_list_subscriptions_not_configured() {
     let server = create_test_server().await;
 
-    let user_email = "test_subscription_list_empty@example.com";
+    // Ensure stripe is not configured
+    clear_stripe_plans(&server).await;
+
+    let user_email = "test_subscription_not_configured@example.com";
     let user_token = mock_login(&server, user_email).await;
 
-    // List subscriptions for a user with no subscriptions
-    // Note: This may succeed or fail depending on whether stripe_plans is configured
-    // If configured by previous tests, it returns 200 with empty list
-    // If not configured, it returns 503
     let response = server
         .get("/v1/subscriptions")
         .add_header(
@@ -39,21 +38,53 @@ async fn test_list_subscriptions_returns_empty_for_new_user() {
         )
         .await;
 
-    // Either 200 (empty list) or 503 (not configured) are acceptable
-    let status = response.status_code();
-    assert!(
-        status == 200 || status == 503,
-        "Should return 200 or 503, got {}",
-        status
+    // Should return 503 when not configured
+    assert_eq!(
+        response.status_code(),
+        503,
+        "Should return 503 when Stripe is not configured"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_list_subscriptions_configured_returns_empty() {
+    let server = create_test_server().await;
+
+    // Configure stripe with some plans
+    set_stripe_plans(
+        &server,
+        json!({
+            "basic": "price_test_basic",
+            "pro": "price_test_pro"
+        }),
+    )
+    .await;
+
+    let user_email = "test_subscription_configured_empty@example.com";
+    let user_token = mock_login(&server, user_email).await;
+
+    let response = server
+        .get("/v1/subscriptions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .await;
+
+    // Should return 200 with empty array
+    assert_eq!(
+        response.status_code(),
+        200,
+        "Should return 200 when Stripe is configured"
     );
 
-    if status.is_success() {
-        let body: serde_json::Value = response.json();
-        let subscriptions = body
-            .get("subscriptions")
-            .expect("Should have subscriptions field");
-        assert!(subscriptions.is_array(), "subscriptions should be an array");
-    }
+    let body: serde_json::Value = response.json();
+    let subscriptions = body
+        .get("subscriptions")
+        .expect("Should have subscriptions field");
+    assert!(subscriptions.is_array());
+    assert_eq!(subscriptions.as_array().unwrap().len(), 0);
 }
 
 #[tokio::test]
@@ -77,17 +108,19 @@ async fn test_create_subscription_requires_auth() {
 
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn test_create_subscription_with_invalid_plan() {
+async fn test_create_subscription_not_configured() {
     let server = create_test_server().await;
 
-    let user_email = "test_create_invalid_plan@example.com";
+    // Ensure stripe is not configured
+    clear_stripe_plans(&server).await;
+
+    let user_email = "test_create_not_configured@example.com";
     let user_token = mock_login(&server, user_email).await;
 
     let request_body = json!({
-        "plan": "nonexistent_plan"
+        "plan": "any_plan"
     });
 
-    // Attempt to create subscription with invalid plan
     let response = server
         .post("/v1/subscriptions")
         .add_header(
@@ -101,13 +134,54 @@ async fn test_create_subscription_with_invalid_plan() {
         .json(&request_body)
         .await;
 
-    // Should return 400 (invalid plan), 500 (Stripe API error), or 503 (not configured)
-    // depending on whether stripe_plans is configured in database from previous tests
-    let status = response.status_code();
-    assert!(
-        status == 400 || status == 500 || status == 503,
-        "Should return 400, 500, or 503, got {}",
-        status
+    // Should return 503 when not configured
+    assert_eq!(
+        response.status_code(),
+        503,
+        "Should return 503 when Stripe is not configured"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_create_subscription_invalid_plan() {
+    let server = create_test_server().await;
+
+    // Configure stripe with some plans
+    set_stripe_plans(
+        &server,
+        json!({
+            "basic": "price_test_basic",
+            "pro": "price_test_pro"
+        }),
+    )
+    .await;
+
+    let user_email = "test_create_invalid_plan@example.com";
+    let user_token = mock_login(&server, user_email).await;
+
+    let request_body = json!({
+        "plan": "nonexistent_plan"
+    });
+
+    let response = server
+        .post("/v1/subscriptions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&request_body)
+        .await;
+
+    // Should return 400 for invalid plan
+    assert_eq!(
+        response.status_code(),
+        400,
+        "Should return 400 for invalid plan"
     );
 }
 

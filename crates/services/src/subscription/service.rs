@@ -13,6 +13,19 @@ use stripe::{
     WebhookError,
 };
 
+/// Configuration for SubscriptionServiceImpl
+pub struct SubscriptionServiceConfig {
+    pub db_pool: deadpool_postgres::Pool,
+    pub stripe_customer_repo: Arc<dyn StripeCustomerRepository>,
+    pub subscription_repo: Arc<dyn SubscriptionRepository>,
+    pub webhook_repo: Arc<dyn PaymentWebhookRepository>,
+    pub system_configs_service: Arc<dyn SystemConfigsService>,
+    pub stripe_secret_key: String,
+    pub stripe_webhook_secret: String,
+    pub checkout_success_url: String,
+    pub checkout_cancel_url: String,
+}
+
 pub struct SubscriptionServiceImpl {
     db_pool: deadpool_postgres::Pool,
     stripe_customer_repo: Arc<dyn StripeCustomerRepository>,
@@ -26,33 +39,34 @@ pub struct SubscriptionServiceImpl {
 }
 
 impl SubscriptionServiceImpl {
-    pub fn new(
-        db_pool: deadpool_postgres::Pool,
-        stripe_customer_repo: Arc<dyn StripeCustomerRepository>,
-        subscription_repo: Arc<dyn SubscriptionRepository>,
-        webhook_repo: Arc<dyn PaymentWebhookRepository>,
-        system_configs_service: Arc<dyn SystemConfigsService>,
-        stripe_secret_key: String,
-        stripe_webhook_secret: String,
-        checkout_success_url: String,
-        checkout_cancel_url: String,
-    ) -> Self {
+    pub fn new(config: SubscriptionServiceConfig) -> Self {
         Self {
-            db_pool,
-            stripe_customer_repo,
-            subscription_repo,
-            webhook_repo,
-            system_configs_service,
-            stripe_secret_key,
-            stripe_webhook_secret,
-            checkout_success_url,
-            checkout_cancel_url,
+            db_pool: config.db_pool,
+            stripe_customer_repo: config.stripe_customer_repo,
+            subscription_repo: config.subscription_repo,
+            webhook_repo: config.webhook_repo,
+            system_configs_service: config.system_configs_service,
+            stripe_secret_key: config.stripe_secret_key,
+            stripe_webhook_secret: config.stripe_webhook_secret,
+            checkout_success_url: config.checkout_success_url,
+            checkout_cancel_url: config.checkout_cancel_url,
         }
     }
 
     /// Get stripe plans configuration from system configs (lazy loading)
     async fn get_stripe_plans(&self) -> Result<HashMap<String, String>, SubscriptionError> {
         tracing::debug!("Getting stripe plans from system configs");
+
+        // Treat missing/empty Stripe secrets as "not configured" to avoid runtime Stripe errors.
+        if self.stripe_secret_key.is_empty() || self.stripe_webhook_secret.is_empty() {
+            tracing::debug!(
+                "Stripe secrets are not set (secret_key_empty={}, webhook_secret_empty={}), Stripe not configured",
+                self.stripe_secret_key.is_empty(),
+                self.stripe_webhook_secret.is_empty(),
+            );
+            return Err(SubscriptionError::NotConfigured);
+        }
+
         let configs = self
             .system_configs_service
             .get_configs()
@@ -382,7 +396,32 @@ impl SubscriptionService for SubscriptionServiceImpl {
             SubscriptionError::WebhookVerificationFailed(format!("Invalid UTF-8: {}", e))
         })?;
 
-        // Parse JSON to get event metadata
+        // Verify webhook signature FIRST (CRITICAL - use library, never hand-write)
+        // This prevents unauthenticated requests from consuming server resources
+        // Note: construct_event does BOTH signature verification AND event parsing
+        // We only care about signature verification at this stage
+        if let Err(e) =
+            Webhook::construct_event(payload_str, signature, &self.stripe_webhook_secret)
+        {
+            match e {
+                // Security-critical errors - reject the webhook immediately
+                WebhookError::BadKey
+                | WebhookError::BadSignature
+                | WebhookError::BadTimestamp(_)
+                | WebhookError::BadHeader(_) => {
+                    tracing::error!("Webhook signature verification failed: error={}", e);
+                    return Err(SubscriptionError::WebhookVerificationFailed(e.to_string()));
+                }
+                // Parsing error - signature is OK, we can continue
+                WebhookError::BadParse(_) => {
+                    tracing::debug!("Webhook event parsing failed (signature OK): error={}", e);
+                }
+            }
+        } else {
+            tracing::debug!("Webhook signature verified and parsed successfully");
+        }
+
+        // Only parse JSON after signature verification succeeds
         let payload_json: serde_json::Value = serde_json::from_slice(payload)
             .map_err(|e| SubscriptionError::InternalError(format!("Invalid JSON: {}", e)))?;
 
@@ -395,48 +434,64 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
 
+        tracing::info!(
+            "Processing verified webhook: event_id={}, type={}",
+            event_id,
+            event_type
+        );
+
         // Check if this is a subscription event
         let is_subscription_event = event_type.starts_with("customer.subscription.");
 
-        // Verify webhook signature (CRITICAL - use library, never hand-write)
-        // Note: construct_event does BOTH signature verification AND event parsing
-        // We only care about signature verification, not parsing success
-        if let Err(e) =
-            Webhook::construct_event(payload_str, signature, &self.stripe_webhook_secret)
-        {
-            match e {
-                // Security-critical errors - reject the webhook
-                WebhookError::BadKey
-                | WebhookError::BadSignature
-                | WebhookError::BadTimestamp(_)
-                | WebhookError::BadHeader(_) => {
-                    tracing::error!(
-                        "Webhook signature verification failed: event_id={}, error={}",
-                        event_id,
-                        e
-                    );
-                    return Err(SubscriptionError::WebhookVerificationFailed(e.to_string()));
-                }
-                // Parsing error - signature is OK, we can continue
-                WebhookError::BadParse(_) => {
-                    tracing::debug!(
-                        "Webhook event parsing failed (signature OK): event_id={}, type={}, error={}",
-                        event_id,
-                        event_type,
-                        e
-                    );
-                }
-            }
-        } else {
-            tracing::debug!(
-                "Webhook signature verified and parsed: event_id={}, type={}",
+        // Start transaction early to check webhook idempotency BEFORE calling Stripe API
+        // This prevents duplicate Stripe API calls on webhook retries
+        let mut client = self
+            .db_pool
+            .get()
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+        let txn = client
+            .transaction()
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        // Store webhook (idempotent via UNIQUE constraint)
+        let stored_webhook = self
+            .webhook_repo
+            .store_webhook(
+                &txn,
+                "stripe".to_string(),
+                event_id.to_string(),
+                payload_json.clone(),
+            )
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        // Check if this webhook was already processed (already existed in DB)
+        // If the webhook was just created, created_at will be very recent (< 1 second ago)
+        // If it already existed, created_at will be older
+        let is_duplicate = {
+            let age = chrono::Utc::now()
+                .signed_duration_since(stored_webhook.created_at)
+                .num_milliseconds();
+            age > 1000 // If older than 1 second, it's a duplicate/retry
+        };
+
+        if is_duplicate {
+            tracing::info!(
+                "Webhook already processed (duplicate): event_id={}, type={}, original_created_at={}",
                 event_id,
-                event_type
+                event_type,
+                stored_webhook.created_at
             );
+            // Commit transaction and return success without calling Stripe API
+            txn.commit()
+                .await
+                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+            return Ok(());
         }
 
-        // For subscription events, fetch data from Stripe API BEFORE starting transaction
-        // This avoids holding DB connection during network calls
+        // For subscription events, fetch data from Stripe API (after idempotency check)
         let subscription_data = if is_subscription_event {
             // Extract subscription_id from JSON: data.object.id
             let subscription_id = payload_json
@@ -458,7 +513,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 subscription_id
             );
 
-            // Fetch latest subscription state from Stripe API (BEFORE transaction)
+            // Fetch latest subscription state from Stripe API
+            // (only called for new webhooks after idempotency check)
             let stripe_client = self.get_stripe_client();
             let stripe_sub = StripeSubscription::retrieve(
                 &stripe_client,
@@ -494,34 +550,12 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 SubscriptionError::InternalError(format!("Invalid user_id: {}", e))
             })?);
 
-            // Convert to our model (before transaction)
+            // Convert to our model
             let subscription = self.stripe_subscription_to_model(&stripe_sub, user_id)?;
             Some((subscription_id.to_string(), subscription))
         } else {
             None
         };
-
-        // Now start transaction for all database operations (atomic)
-        let mut client = self
-            .db_pool
-            .get()
-            .await
-            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-        let txn = client
-            .transaction()
-            .await
-            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-
-        // Store webhook
-        self.webhook_repo
-            .store_webhook(
-                &txn,
-                "stripe".to_string(),
-                event_id.to_string(),
-                payload_json.clone(),
-            )
-            .await
-            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
         // Upsert subscription if we have data
         if let Some((subscription_id, subscription)) = subscription_data {

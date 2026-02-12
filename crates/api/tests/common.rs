@@ -93,19 +93,21 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
 
     // Initialize subscription service for testing
     let subscription_service = Arc::new(services::subscription::SubscriptionServiceImpl::new(
-        db.pool().clone(),
-        db.stripe_customer_repository()
-            as Arc<dyn services::subscription::ports::StripeCustomerRepository>,
-        db.subscription_repository()
-            as Arc<dyn services::subscription::ports::SubscriptionRepository>,
-        db.payment_webhook_repository()
-            as Arc<dyn services::subscription::ports::PaymentWebhookRepository>,
-        system_configs_service.clone()
-            as Arc<dyn services::system_configs::ports::SystemConfigsService>,
-        config.stripe.secret_key.clone(),
-        config.stripe.webhook_secret.clone(),
-        config.stripe.checkout_success_url.clone(),
-        config.stripe.checkout_cancel_url.clone(),
+        services::subscription::SubscriptionServiceConfig {
+            db_pool: db.pool().clone(),
+            stripe_customer_repo: db.stripe_customer_repository()
+                as Arc<dyn services::subscription::ports::StripeCustomerRepository>,
+            subscription_repo: db.subscription_repository()
+                as Arc<dyn services::subscription::ports::SubscriptionRepository>,
+            webhook_repo: db.payment_webhook_repository()
+                as Arc<dyn services::subscription::ports::PaymentWebhookRepository>,
+            system_configs_service: system_configs_service.clone()
+                as Arc<dyn services::system_configs::ports::SystemConfigsService>,
+            stripe_secret_key: config.stripe.secret_key.clone(),
+            stripe_webhook_secret: config.stripe.webhook_secret.clone(),
+            checkout_success_url: config.stripe.checkout_success_url.clone(),
+            checkout_cancel_url: config.stripe.checkout_cancel_url.clone(),
+        },
     ));
 
     // Create VPC credentials service based on provided credentials
@@ -212,4 +214,65 @@ pub async fn mock_login(server: &TestServer, email: &str) -> String {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .expect("Response should contain token")
+}
+
+/// Clear stripe_plans configuration from system_configs
+/// Sets stripe_plans to an empty map, which is treated as "not configured"
+pub async fn clear_stripe_plans(server: &TestServer) {
+    let admin_email = "test_cleanup_admin@admin.org";
+    let admin_token = mock_login(server, admin_email).await;
+
+    // Set stripe_plans to empty object {} (empty HashMap)
+    // This is treated as "not configured" by get_stripe_plans()
+    let config_body = json!({
+        "stripe_plans": {}
+    });
+
+    let response = server
+        .patch("/v1/admin/configs")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&config_body)
+        .await;
+
+    assert!(
+        response.status_code().is_success(),
+        "Failed to clear stripe_plans: {}",
+        response.status_code()
+    );
+}
+
+/// Set stripe_plans configuration
+pub async fn set_stripe_plans(server: &TestServer, plans: serde_json::Value) {
+    let admin_email = "test_setup_admin@admin.org";
+    let admin_token = mock_login(server, admin_email).await;
+
+    let config_body = json!({
+        "stripe_plans": plans
+    });
+
+    let response = server
+        .patch("/v1/admin/configs")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&config_body)
+        .await;
+
+    assert!(
+        response.status_code().is_success(),
+        "Failed to set stripe_plans: {}",
+        response.status_code()
+    );
 }
