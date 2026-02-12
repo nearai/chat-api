@@ -174,6 +174,7 @@ pub async fn create_test_server_and_db(
             .rate_limit_config
             .unwrap_or(default_rate_limit_config),
         analytics_service.clone(),
+        user_usage_service.clone(),
     );
 
     // Create application state

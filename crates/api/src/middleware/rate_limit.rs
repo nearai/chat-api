@@ -17,6 +17,7 @@ use serde::Serialize;
 use services::{
     analytics::{ActivityType, AnalyticsServiceTrait, CheckAndRecordActivityRequest},
     system_configs::ports::{RateLimitConfig, WindowLimit},
+    user_usage::UserUsageService,
     UserId,
 };
 use std::{
@@ -61,21 +62,31 @@ pub struct RateLimitState {
     user_limits: Arc<Mutex<HashMap<UserId, UserRateLimitState>>>,
     config: Arc<RwLock<RateLimitConfig>>,
     analytics_service: Arc<dyn AnalyticsServiceTrait>,
+    user_usage_service: Arc<dyn UserUsageService>,
 }
 
 impl RateLimitState {
-    pub fn new(analytics_service: Arc<dyn AnalyticsServiceTrait>) -> Self {
-        Self::with_config(RateLimitConfig::default(), analytics_service)
+    pub fn new(
+        analytics_service: Arc<dyn AnalyticsServiceTrait>,
+        user_usage_service: Arc<dyn UserUsageService>,
+    ) -> Self {
+        Self::with_config(
+            RateLimitConfig::default(),
+            analytics_service,
+            user_usage_service,
+        )
     }
 
     pub fn with_config(
         config: RateLimitConfig,
         analytics_service: Arc<dyn AnalyticsServiceTrait>,
+        user_usage_service: Arc<dyn UserUsageService>,
     ) -> Self {
         Self {
             user_limits: Arc::new(Mutex::new(HashMap::new())),
             config: Arc::new(RwLock::new(config)),
             analytics_service,
+            user_usage_service,
         }
     }
 
@@ -377,12 +388,12 @@ impl RateLimitState {
 
             let sum = match usage_type {
                 UsageLimitType::Token => {
-                    self.analytics_service
+                    self.user_usage_service
                         .get_token_usage_sum(user_id, window_limit.window_duration)
                         .await
                 }
                 UsageLimitType::Cost => {
-                    self.analytics_service
+                    self.user_usage_service
                         .get_cost_usage_sum(user_id, window_limit.window_duration)
                         .await
                 }
@@ -611,7 +622,73 @@ mod tests {
             AnalyticsSummary, CheckAndRecordActivityRequest, CheckAndRecordActivityResult,
             RecordActivityRequest, TopActiveUser,
         };
+        use services::user_usage::UserUsageService;
         use tokio::sync::Mutex;
+
+        /// User usage mock that returns zero usage (always under limit).
+        pub struct AlwaysAllowUserUsageService;
+
+        #[async_trait]
+        impl UserUsageService for AlwaysAllowUserUsageService {
+            async fn record_user_usage(
+                &self,
+                _user_id: UserId,
+                _tokens_used: u64,
+                _cost_nano_usd: Option<i64>,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+
+            async fn get_token_usage_sum(
+                &self,
+                _user_id: UserId,
+                _window_duration: ChronoDuration,
+            ) -> anyhow::Result<i64> {
+                Ok(0)
+            }
+
+            async fn get_cost_usage_sum(
+                &self,
+                _user_id: UserId,
+                _window_duration: ChronoDuration,
+            ) -> anyhow::Result<i64> {
+                Ok(0)
+            }
+        }
+
+        /// User usage mock that returns fixed token/cost sums (for token/cost limit tests).
+        pub struct FixedUsageSumUserUsageService {
+            pub token_sum: i64,
+            pub cost_sum: i64,
+        }
+
+        #[async_trait]
+        impl UserUsageService for FixedUsageSumUserUsageService {
+            async fn record_user_usage(
+                &self,
+                _user_id: UserId,
+                _tokens_used: u64,
+                _cost_nano_usd: Option<i64>,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+
+            async fn get_token_usage_sum(
+                &self,
+                _user_id: UserId,
+                _window_duration: ChronoDuration,
+            ) -> anyhow::Result<i64> {
+                Ok(self.token_sum)
+            }
+
+            async fn get_cost_usage_sum(
+                &self,
+                _user_id: UserId,
+                _window_duration: ChronoDuration,
+            ) -> anyhow::Result<i64> {
+                Ok(self.cost_sum)
+            }
+        }
 
         /// Always allows requests (returns 0 count)
         pub struct AlwaysAllowAnalyticsService;
@@ -691,31 +768,6 @@ mod tests {
                 _limit: i64,
             ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
                 unreachable!()
-            }
-
-            async fn record_user_usage(
-                &self,
-                _user_id: UserId,
-                _tokens_used: u64,
-                _cost_nano_usd: Option<i64>,
-            ) -> Result<(), AnalyticsError> {
-                Ok(())
-            }
-
-            async fn get_token_usage_sum(
-                &self,
-                _user_id: UserId,
-                _window_duration: ChronoDuration,
-            ) -> Result<i64, AnalyticsError> {
-                Ok(0)
-            }
-
-            async fn get_cost_usage_sum(
-                &self,
-                _user_id: UserId,
-                _window_duration: ChronoDuration,
-            ) -> Result<i64, AnalyticsError> {
-                Ok(0)
             }
         }
 
@@ -797,31 +849,6 @@ mod tests {
                 _limit: i64,
             ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
                 unreachable!()
-            }
-
-            async fn record_user_usage(
-                &self,
-                _user_id: UserId,
-                _tokens_used: u64,
-                _cost_nano_usd: Option<i64>,
-            ) -> Result<(), AnalyticsError> {
-                Ok(())
-            }
-
-            async fn get_token_usage_sum(
-                &self,
-                _user_id: UserId,
-                _window_duration: ChronoDuration,
-            ) -> Result<i64, AnalyticsError> {
-                Ok(0)
-            }
-
-            async fn get_cost_usage_sum(
-                &self,
-                _user_id: UserId,
-                _window_duration: ChronoDuration,
-            ) -> Result<i64, AnalyticsError> {
-                Ok(0)
             }
         }
 
@@ -915,31 +942,6 @@ mod tests {
             ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
                 unreachable!()
             }
-
-            async fn record_user_usage(
-                &self,
-                _user_id: UserId,
-                _tokens_used: u64,
-                _cost_nano_usd: Option<i64>,
-            ) -> Result<(), AnalyticsError> {
-                Ok(())
-            }
-
-            async fn get_token_usage_sum(
-                &self,
-                _user_id: UserId,
-                _window_duration: ChronoDuration,
-            ) -> Result<i64, AnalyticsError> {
-                Ok(0)
-            }
-
-            async fn get_cost_usage_sum(
-                &self,
-                _user_id: UserId,
-                _window_duration: ChronoDuration,
-            ) -> Result<i64, AnalyticsError> {
-                Ok(0)
-            }
         }
 
         /// Helper to create a counting service (increments on each call)
@@ -960,11 +962,8 @@ mod tests {
             }
         }
 
-        /// Returns fixed token/cost usage sums (for token/cost window limit tests).
-        pub struct FixedUsageSumAnalyticsService {
-            pub token_sum: i64,
-            pub cost_sum: i64,
-        }
+        /// Analytics mock for token/cost limit tests (allows activity; token/cost sums come from FixedUsageSumUserUsageService).
+        pub struct FixedUsageSumAnalyticsService;
 
         #[async_trait]
         impl AnalyticsServiceTrait for FixedUsageSumAnalyticsService {
@@ -1039,31 +1038,6 @@ mod tests {
                 _limit: i64,
             ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
                 unreachable!()
-            }
-
-            async fn record_user_usage(
-                &self,
-                _user_id: UserId,
-                _tokens_used: u64,
-                _cost_nano_usd: Option<i64>,
-            ) -> Result<(), AnalyticsError> {
-                Ok(())
-            }
-
-            async fn get_token_usage_sum(
-                &self,
-                _user_id: UserId,
-                _window_duration: ChronoDuration,
-            ) -> Result<i64, AnalyticsError> {
-                Ok(self.token_sum)
-            }
-
-            async fn get_cost_usage_sum(
-                &self,
-                _user_id: UserId,
-                _window_duration: ChronoDuration,
-            ) -> Result<i64, AnalyticsError> {
-                Ok(self.cost_sum)
             }
         }
 
@@ -1157,31 +1131,6 @@ mod tests {
             ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
                 unreachable!()
             }
-
-            async fn record_user_usage(
-                &self,
-                _user_id: UserId,
-                _tokens_used: u64,
-                _cost_nano_usd: Option<i64>,
-            ) -> Result<(), AnalyticsError> {
-                Ok(())
-            }
-
-            async fn get_token_usage_sum(
-                &self,
-                _user_id: UserId,
-                _window_duration: ChronoDuration,
-            ) -> Result<i64, AnalyticsError> {
-                Ok(0)
-            }
-
-            async fn get_cost_usage_sum(
-                &self,
-                _user_id: UserId,
-                _window_duration: ChronoDuration,
-            ) -> Result<i64, AnalyticsError> {
-                Ok(0)
-            }
         }
 
         /// Simulates atomic insert failure (check passes but insert fails)
@@ -1262,31 +1211,6 @@ mod tests {
                 _limit: i64,
             ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
                 unreachable!()
-            }
-
-            async fn record_user_usage(
-                &self,
-                _user_id: UserId,
-                _tokens_used: u64,
-                _cost_nano_usd: Option<i64>,
-            ) -> Result<(), AnalyticsError> {
-                Ok(())
-            }
-
-            async fn get_token_usage_sum(
-                &self,
-                _user_id: UserId,
-                _window_duration: ChronoDuration,
-            ) -> Result<i64, AnalyticsError> {
-                Ok(0)
-            }
-
-            async fn get_cost_usage_sum(
-                &self,
-                _user_id: UserId,
-                _window_duration: ChronoDuration,
-            ) -> Result<i64, AnalyticsError> {
-                Ok(0)
             }
         }
 
@@ -1369,31 +1293,6 @@ mod tests {
                 _limit: i64,
             ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
                 unreachable!()
-            }
-
-            async fn record_user_usage(
-                &self,
-                _user_id: UserId,
-                _tokens_used: u64,
-                _cost_nano_usd: Option<i64>,
-            ) -> Result<(), AnalyticsError> {
-                Ok(())
-            }
-
-            async fn get_token_usage_sum(
-                &self,
-                _user_id: UserId,
-                _window_duration: ChronoDuration,
-            ) -> Result<i64, AnalyticsError> {
-                Ok(0)
-            }
-
-            async fn get_cost_usage_sum(
-                &self,
-                _user_id: UserId,
-                _window_duration: ChronoDuration,
-            ) -> Result<i64, AnalyticsError> {
-                Ok(0)
             }
         }
 
@@ -1507,31 +1406,6 @@ mod tests {
             ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
                 unreachable!()
             }
-
-            async fn record_user_usage(
-                &self,
-                _user_id: UserId,
-                _tokens_used: u64,
-                _cost_nano_usd: Option<i64>,
-            ) -> Result<(), AnalyticsError> {
-                Ok(())
-            }
-
-            async fn get_token_usage_sum(
-                &self,
-                _user_id: UserId,
-                _window_duration: ChronoDuration,
-            ) -> Result<i64, AnalyticsError> {
-                Ok(0)
-            }
-
-            async fn get_cost_usage_sum(
-                &self,
-                _user_id: UserId,
-                _window_duration: ChronoDuration,
-            ) -> Result<i64, AnalyticsError> {
-                Ok(0)
-            }
         }
 
         /// Always returns an error
@@ -1608,31 +1482,6 @@ mod tests {
             ) -> Result<Vec<TopActiveUser>, AnalyticsError> {
                 unreachable!()
             }
-
-            async fn record_user_usage(
-                &self,
-                _user_id: UserId,
-                _tokens_used: u64,
-                _cost_nano_usd: Option<i64>,
-            ) -> Result<(), AnalyticsError> {
-                Ok(())
-            }
-
-            async fn get_token_usage_sum(
-                &self,
-                _user_id: UserId,
-                _window_duration: ChronoDuration,
-            ) -> Result<i64, AnalyticsError> {
-                Err(AnalyticsError::InternalError("Database error".to_string()))
-            }
-
-            async fn get_cost_usage_sum(
-                &self,
-                _user_id: UserId,
-                _window_duration: ChronoDuration,
-            ) -> Result<i64, AnalyticsError> {
-                Err(AnalyticsError::InternalError("Database error".to_string()))
-            }
         }
     }
 
@@ -1641,11 +1490,18 @@ mod tests {
     }
 
     fn default_state() -> RateLimitState {
-        RateLimitState::new(Arc::new(test_services::AlwaysAllowAnalyticsService))
+        RateLimitState::new(
+            Arc::new(test_services::AlwaysAllowAnalyticsService),
+            Arc::new(test_services::AlwaysAllowUserUsageService),
+        )
     }
 
     fn configured_state(config: RateLimitConfig) -> RateLimitState {
-        RateLimitState::with_config(config, Arc::new(test_services::AlwaysAllowAnalyticsService))
+        RateLimitState::with_config(
+            config,
+            Arc::new(test_services::AlwaysAllowAnalyticsService),
+            Arc::new(test_services::AlwaysAllowUserUsageService),
+        )
     }
 
     #[tokio::test]
@@ -1841,6 +1697,7 @@ mod tests {
                 cost_window_limits: vec![],
             },
             Arc::new(test_services::RejectingAnalyticsService),
+            Arc::new(test_services::AlwaysAllowUserUsageService),
         );
 
         let user = test_user_id(1);
@@ -1901,6 +1758,7 @@ mod tests {
                 cost_window_limits: vec![],
             },
             analytics_service.clone(),
+            Arc::new(test_services::AlwaysAllowUserUsageService),
         );
 
         let user = test_user_id(1);
@@ -1938,6 +1796,7 @@ mod tests {
                 cost_window_limits: vec![],
             },
             Arc::new(test_services::fixed_count_service(limit as i64)),
+            Arc::new(test_services::AlwaysAllowUserUsageService),
         );
 
         let user = test_user_id(1);
@@ -1979,6 +1838,7 @@ mod tests {
                 cost_window_limits: vec![],
             },
             Arc::new(test_services::fixed_count_service(limit as i64 + 5)), // Above limit
+            Arc::new(test_services::AlwaysAllowUserUsageService),
         );
 
         let user = test_user_id(1);
@@ -2019,6 +1879,7 @@ mod tests {
                 day_count: 5,
                 week_count: 20,
             }),
+            Arc::new(test_services::AlwaysAllowUserUsageService),
         );
 
         let user = test_user_id(1);
@@ -2051,6 +1912,7 @@ mod tests {
                 day_count: day_limit as i64,
                 week_count: 20,
             }),
+            Arc::new(test_services::AlwaysAllowUserUsageService),
         );
 
         let result = state2.try_acquire(user).await;
@@ -2088,6 +1950,7 @@ mod tests {
                 day_count: 5,
                 week_count: week_limit as i64,
             }),
+            Arc::new(test_services::AlwaysAllowUserUsageService),
         );
 
         let result = state3.try_acquire(user).await;
@@ -2118,6 +1981,7 @@ mod tests {
                 cost_window_limits: vec![],
             },
             Arc::new(test_services::AtomicInsertFailureService),
+            Arc::new(test_services::AlwaysAllowUserUsageService),
         );
 
         let user = test_user_id(1);
@@ -2148,6 +2012,7 @@ mod tests {
                 cost_window_limits: vec![],
             },
             Arc::new(test_services::WindowSizeTestService { count: 10 }),
+            Arc::new(test_services::AlwaysAllowUserUsageService),
         );
 
         let result = state_day.try_acquire(user).await;
@@ -2177,6 +2042,7 @@ mod tests {
                 cost_window_limits: vec![],
             },
             Arc::new(test_services::WindowSizeTestService { count: 10 }),
+            Arc::new(test_services::AlwaysAllowUserUsageService),
         );
 
         let result = state_week.try_acquire(user).await;
@@ -2206,6 +2072,7 @@ mod tests {
                 cost_window_limits: vec![],
             },
             Arc::new(test_services::WindowSizeTestService { count: 10 }),
+            Arc::new(test_services::AlwaysAllowUserUsageService),
         );
 
         let result = state_month.try_acquire(user).await;
@@ -2237,6 +2104,7 @@ mod tests {
                 cost_window_limits: vec![],
             },
             Arc::new(test_services::ErrorAnalyticsService),
+            Arc::new(test_services::AlwaysAllowUserUsageService),
         );
 
         let user = test_user_id(1);
@@ -2259,6 +2127,7 @@ mod tests {
                 cost_window_limits: vec![],
             },
             Arc::new(test_services::AlwaysAllowAnalyticsService),
+            Arc::new(test_services::AlwaysAllowUserUsageService),
         );
 
         let user = test_user_id(1);
@@ -2282,7 +2151,8 @@ mod tests {
                 }],
                 cost_window_limits: vec![],
             },
-            Arc::new(test_services::FixedUsageSumAnalyticsService {
+            Arc::new(test_services::FixedUsageSumAnalyticsService),
+            Arc::new(test_services::FixedUsageSumUserUsageService {
                 token_sum: 150,
                 cost_sum: 0,
             }),
@@ -2312,7 +2182,8 @@ mod tests {
                     limit: 1_000,
                 }],
             },
-            Arc::new(test_services::FixedUsageSumAnalyticsService {
+            Arc::new(test_services::FixedUsageSumAnalyticsService),
+            Arc::new(test_services::FixedUsageSumUserUsageService {
                 token_sum: 0,
                 cost_sum: 5_000,
             }),
@@ -2353,6 +2224,7 @@ mod tests {
                 cost_window_limits: vec![],
             },
             analytics_service.clone(),
+            Arc::new(test_services::AlwaysAllowUserUsageService),
         );
 
         let user = test_user_id(1);
@@ -2430,7 +2302,11 @@ mod tests {
             increment: false,
             was_recorded: true,
         });
-        let state = RateLimitState::with_config(initial_config, analytics_service);
+        let state = RateLimitState::with_config(
+            initial_config,
+            analytics_service.clone(),
+            Arc::new(test_services::AlwaysAllowUserUsageService),
+        );
 
         let user = UserId(Uuid::new_v4());
 

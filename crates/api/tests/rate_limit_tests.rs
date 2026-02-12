@@ -6,9 +6,9 @@ use common::{
 };
 use futures::future::join_all;
 use serde_json::json;
-use services::analytics::AnalyticsRepository;
 use services::system_configs::ports::{RateLimitConfig, WindowLimit};
 use services::user::ports::UserRepository;
+use services::user_usage::UserUsageRepository;
 use std::future::IntoFuture;
 use std::sync::Arc;
 

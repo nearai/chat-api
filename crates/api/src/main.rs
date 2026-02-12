@@ -240,8 +240,11 @@ async fn main() -> anyhow::Result<()> {
         .rate_limit;
 
     // Create rate limit state
-    let rate_limit_state =
-        RateLimitState::with_config(rate_limit_config, analytics_service.clone());
+    let rate_limit_state = RateLimitState::with_config(
+        rate_limit_config,
+        analytics_service.clone(),
+        user_usage_service.clone(),
+    );
 
     // Create application state
     let app_state = AppState {
