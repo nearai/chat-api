@@ -1,6 +1,9 @@
 use crate::consts::{LIST_FILES_LIMIT_MAX, MAX_REQUEST_BODY_SIZE, MAX_RESPONSE_BODY_SIZE};
 use crate::middleware::auth::AuthenticatedUser;
-use crate::usage_parsing::{parse_usage_from_bytes, parse_usage_from_sse_line, ParsedUsage};
+use crate::usage_parsing::{
+    parse_chat_completion_usage_from_bytes, parse_response_usage_from_bytes,
+    UsageTrackingStreamChatCompletions, UsageTrackingStreamResponseCompleted,
+};
 use axum::{
     body::{to_bytes, Body},
     extract::{Extension, Path, Request, State},
@@ -2440,7 +2443,7 @@ async fn proxy_responses(
     let response_body = if !(200..300).contains(&proxy_response.status) {
         Body::from_stream(proxy_response.body)
     } else if is_streaming_response(&proxy_response.headers) {
-        let usage_stream = UsageTrackingStreamFull::new(
+        let usage_stream = UsageTrackingStreamResponseCompleted::new(
             proxy_response.body,
             state.user_usage_service.clone(),
             state.model_pricing_cache.clone(),
@@ -2471,7 +2474,7 @@ async fn proxy_responses(
                 );
                 bytes.to_vec()
             });
-        record_usage_from_body(&state, user.user_id, &usage_bytes).await;
+        record_response_usage_from_body(&state, user.user_id, &usage_bytes).await;
         Body::from(bytes)
     };
 
@@ -3460,7 +3463,7 @@ async fn proxy_chat_completions(
     let response_body = if !(200..300).contains(&proxy_response.status) {
         Body::from_stream(proxy_response.body)
     } else if is_streaming_response(&proxy_response.headers) {
-        let usage_stream = UsageTrackingStreamFull::new(
+        let usage_stream = UsageTrackingStreamChatCompletions::new(
             proxy_response.body,
             state.user_usage_service.clone(),
             state.model_pricing_cache.clone(),
@@ -3500,7 +3503,7 @@ async fn proxy_chat_completions(
         let user_id = user.user_id;
         let body = usage_bytes.clone();
         tokio::spawn(async move {
-            record_usage_from_body(&state_clone, user_id, &body).await;
+            record_chat_usage_from_body(&state_clone, user_id, &body).await;
         });
         Body::from(usage_bytes)
     };
@@ -4257,11 +4260,6 @@ fn decompress_if_gzipped(bytes: &[u8], headers: &HeaderMap) -> Result<Vec<u8>, s
     Ok(bytes.to_vec())
 }
 
-use futures::Stream;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll};
-
 /// Returns true if response headers indicate a streaming (SSE) response.
 fn is_streaming_response(headers: &HeaderMap) -> bool {
     headers
@@ -4312,14 +4310,14 @@ async fn record_image_usage(
     }
 }
 
-/// Record token and cost usage from parsed response body. Calls user_usage_service.record_user_usage.
+/// Record token and cost usage from parsed **chat completions** response body.
 /// Returns true if usage was recorded.
-async fn record_usage_from_body(
+async fn record_chat_usage_from_body(
     state: &crate::state::AppState,
     user_id: UserId,
     body: &[u8],
 ) -> bool {
-    let Some(usage) = parse_usage_from_bytes(body) else {
+    let Some(usage) = parse_chat_completion_usage_from_bytes(body) else {
         return false;
     };
     if usage.total_tokens == 0 {
@@ -4341,102 +4339,33 @@ async fn record_usage_from_body(
     true
 }
 
-/// Stream wrapper that parses SSE for usage (e.g. event: response.completed) and records usage on stream end.
-struct UsageTrackingStreamFull<S> {
-    inner: S,
-    buffer: String,
-    usage: Option<ParsedUsage>,
-    user_usage: Arc<dyn services::user_usage::UserUsageService>,
-    pricing_cache: crate::model_pricing::ModelPricingCache,
+/// Record token and cost usage from parsed **/v1/responses** body.
+/// Returns true if usage was recorded.
+async fn record_response_usage_from_body(
+    state: &crate::state::AppState,
     user_id: UserId,
-}
-
-impl<S> UsageTrackingStreamFull<S>
-where
-    S: Stream<Item = Result<Bytes, reqwest::Error>> + Unpin + Send,
-{
-    fn new(
-        inner: S,
-        user_usage: Arc<dyn services::user_usage::UserUsageService>,
-        pricing_cache: crate::model_pricing::ModelPricingCache,
-        user_id: UserId,
-    ) -> Self {
-        Self {
-            inner,
-            buffer: String::new(),
-            usage: None,
-            user_usage,
-            pricing_cache,
-            user_id,
-        }
+    body: &[u8],
+) -> bool {
+    let Some(usage) = parse_response_usage_from_bytes(body) else {
+        return false;
+    };
+    if usage.total_tokens == 0 {
+        return false;
     }
-}
-
-impl<S> Stream for UsageTrackingStreamFull<S>
-where
-    S: Stream<Item = Result<Bytes, reqwest::Error>> + Unpin + Send,
-{
-    type Item = Result<Bytes, reqwest::Error>;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.get_mut();
-        match Pin::new(&mut this.inner).poll_next(cx) {
-            Poll::Ready(Some(Ok(bytes))) => {
-                if let Ok(text) = std::str::from_utf8(&bytes) {
-                    this.buffer.push_str(text);
-                    for line in this.buffer.lines() {
-                        if let Some(usage) = parse_usage_from_sse_line(line) {
-                            this.usage = Some(usage);
-                        }
-                    }
-                    // Keep only the last incomplete line in buffer for next chunk
-                    if let Some(last_newline) = this.buffer.rfind('\n') {
-                        this.buffer = this.buffer[last_newline + 1..].to_string();
-                    }
-                }
-                Poll::Ready(Some(Ok(bytes)))
-            }
-            Poll::Ready(None) => {
-                let usage = this.usage.take();
-                let user_usage = this.user_usage.clone();
-                let pricing_cache = this.pricing_cache.clone();
-                let user_id = this.user_id;
-                if let Some(usage) = usage {
-                    tracing::debug!(
-                        "UsageTrackingStreamFull: parsed streaming usage for user_id={}, total_tokens={}, model={}",
-                        user_id,
-                        usage.total_tokens,
-                        usage.model
-                    );
-                    if usage.total_tokens > 0 {
-                        tokio::spawn(async move {
-                            let cost_nano_usd = pricing_cache
-                                .get_pricing(&usage.model)
-                                .await
-                                .map(|p| p.cost_nano_usd(usage.input_tokens, usage.output_tokens));
-                            if let Err(e) = user_usage
-                                .record_user_usage(user_id, usage.total_tokens, cost_nano_usd)
-                                .await
-                            {
-                                tracing::warn!(
-                                    "Failed to record usage from stream for user_id={}: {}",
-                                    user_id,
-                                    e
-                                );
-                            }
-                        });
-                    }
-                } else {
-                    tracing::debug!(
-                        "UsageTrackingStreamFull: no usage parsed from streaming response for user_id={}",
-                        user_id
-                    );
-                }
-                Poll::Ready(None)
-            }
-            other => other,
-        }
+    let cost_nano_usd = state
+        .model_pricing_cache
+        .get_pricing(&usage.model)
+        .await
+        .map(|p| p.cost_nano_usd(usage.input_tokens, usage.output_tokens));
+    if let Err(e) = state
+        .user_usage_service
+        .record_user_usage(user_id, usage.total_tokens, cost_nano_usd)
+        .await
+    {
+        tracing::warn!("Failed to record usage for user_id={}: {}", user_id, e);
+        return false;
     }
+    true
 }
 
 /// Collect a stream into bytes. Returns the first stream error instead of silently truncating.
