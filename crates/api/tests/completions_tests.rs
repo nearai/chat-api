@@ -2,10 +2,15 @@ mod common;
 
 use api::routes::api::USER_BANNED_ERROR_MESSAGE;
 use chrono::Duration;
-use common::{create_test_server, create_test_server_with_config, mock_login, TestServerConfig};
+use common::{
+    create_test_server, create_test_server_and_db, create_test_server_with_config, mock_login,
+    TestServerConfig,
+};
 use futures::future::join_all;
 use serde_json::json;
-use services::system_configs::ports::RateLimitConfig;
+use services::system_configs::ports::{RateLimitConfig, WindowLimit};
+use services::user::ports::UserRepository;
+use services::user_usage::UserUsageRepository;
 use std::future::IntoFuture;
 use std::sync::Arc;
 use tokio::time::sleep;
@@ -185,6 +190,124 @@ async fn test_chat_completions_concurrent_requests_rate_limited() {
         "Expected at least 2 rate-limited responses, got {} (results: {:?})",
         rate_limited_count,
         results
+    );
+}
+
+/// Token window limit: when user's token usage exceeds limit, next /v1/chat/completions request returns 429.
+#[tokio::test]
+async fn test_chat_completions_token_limit_blocks_request_when_usage_exceeds_limit() {
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        rate_limit_config: Some(RateLimitConfig {
+            max_concurrent: 10,
+            max_requests_per_window: 100,
+            window_duration: Duration::seconds(1),
+            window_limits: vec![],
+            token_window_limits: vec![WindowLimit {
+                window_duration: Duration::seconds(60),
+                limit: 100,
+            }],
+            cost_window_limits: vec![],
+        }),
+        ..Default::default()
+    })
+    .await;
+
+    let email = "chat-completions-token-limit@example.com";
+    let token = mock_login(&server, email).await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(email)
+        .await
+        .expect("db")
+        .expect("user created by mock_login");
+    db.analytics_repository()
+        .record_user_usage(user.id, 150, None)
+        .await
+        .expect("record usage");
+
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}]
+        }))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        429,
+        "Request should be rate limited when token usage exceeds window limit"
+    );
+    let body: serde_json::Value = response.json();
+    let error = body.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        error.to_lowercase().contains("token"),
+        "Error message should mention token limit, got: {}",
+        error
+    );
+}
+
+/// Cost window limit: when user's cost usage exceeds limit, next /v1/chat/completions request returns 429.
+#[tokio::test]
+async fn test_chat_completions_cost_limit_blocks_request_when_usage_exceeds_limit() {
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        rate_limit_config: Some(RateLimitConfig {
+            max_concurrent: 10,
+            max_requests_per_window: 100,
+            window_duration: Duration::seconds(1),
+            window_limits: vec![],
+            token_window_limits: vec![],
+            cost_window_limits: vec![WindowLimit {
+                window_duration: Duration::seconds(60),
+                limit: 1_000,
+            }],
+        }),
+        ..Default::default()
+    })
+    .await;
+
+    let email = "chat-completions-cost-limit@example.com";
+    let token = mock_login(&server, email).await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(email)
+        .await
+        .expect("db")
+        .expect("user created by mock_login");
+    db.analytics_repository()
+        .record_user_usage(user.id, 0, Some(2_000))
+        .await
+        .expect("record usage");
+
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}]
+        }))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        429,
+        "Request should be rate limited when cost usage exceeds window limit"
+    );
+    let body: serde_json::Value = response.json();
+    let error = body.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        error.to_lowercase().contains("cost") || error.to_lowercase().contains("nano"),
+        "Error message should mention cost limit, got: {}",
+        error
     );
 }
 
@@ -425,6 +548,126 @@ async fn test_image_generations_rate_limit_blocks_rapid_requests() {
     response1.await.unwrap();
 }
 
+/// Token window limit: when user's token usage exceeds limit, next /v1/images/generations request returns 429.
+#[tokio::test]
+async fn test_image_generations_token_limit_blocks_request_when_usage_exceeds_limit() {
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        rate_limit_config: Some(RateLimitConfig {
+            max_concurrent: 10,
+            max_requests_per_window: 100,
+            window_duration: Duration::seconds(1),
+            window_limits: vec![],
+            token_window_limits: vec![WindowLimit {
+                window_duration: Duration::seconds(60),
+                limit: 100,
+            }],
+            cost_window_limits: vec![],
+        }),
+        ..Default::default()
+    })
+    .await;
+
+    let email = "image-generations-token-limit@example.com";
+    let token = mock_login(&server, email).await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(email)
+        .await
+        .expect("db")
+        .expect("user created by mock_login");
+    db.analytics_repository()
+        .record_user_usage(user.id, 150, None)
+        .await
+        .expect("record usage");
+
+    let response = server
+        .post("/v1/images/generations")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
+        )
+        .json(&json!({
+            "prompt": "A beautiful sunset",
+            "n": 1,
+            "size": "1024x1024"
+        }))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        429,
+        "Request should be rate limited when token usage exceeds window limit"
+    );
+    let body: serde_json::Value = response.json();
+    let error = body.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        error.to_lowercase().contains("token"),
+        "Error message should mention token limit, got: {}",
+        error
+    );
+}
+
+/// Cost window limit: when user's cost usage exceeds limit, next /v1/images/generations request returns 429.
+#[tokio::test]
+async fn test_image_generations_cost_limit_blocks_request_when_usage_exceeds_limit() {
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        rate_limit_config: Some(RateLimitConfig {
+            max_concurrent: 10,
+            max_requests_per_window: 100,
+            window_duration: Duration::seconds(1),
+            window_limits: vec![],
+            token_window_limits: vec![],
+            cost_window_limits: vec![WindowLimit {
+                window_duration: Duration::seconds(60),
+                limit: 1_000,
+            }],
+        }),
+        ..Default::default()
+    })
+    .await;
+
+    let email = "image-generations-cost-limit@example.com";
+    let token = mock_login(&server, email).await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(email)
+        .await
+        .expect("db")
+        .expect("user created by mock_login");
+    db.analytics_repository()
+        .record_user_usage(user.id, 0, Some(2_000))
+        .await
+        .expect("record usage");
+
+    let response = server
+        .post("/v1/images/generations")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
+        )
+        .json(&json!({
+            "prompt": "A beautiful sunset",
+            "n": 1,
+            "size": "1024x1024"
+        }))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        429,
+        "Request should be rate limited when cost usage exceeds window limit"
+    );
+    let body: serde_json::Value = response.json();
+    let error = body.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        error.to_lowercase().contains("cost") || error.to_lowercase().contains("nano"),
+        "Error message should mention cost limit, got: {}",
+        error
+    );
+}
+
 /// Test NEAR balance check skipped when no NEAR-linked account for /v1/images/generations
 #[tokio::test]
 async fn test_image_generations_near_balance_skipped_when_no_near_linked_account() {
@@ -529,6 +772,124 @@ async fn test_image_edits_rate_limit_blocks_rapid_requests() {
     );
 
     response1.await.unwrap();
+}
+
+/// Token window limit: when user's token usage exceeds limit, next /v1/images/edits request returns 429.
+#[tokio::test]
+async fn test_image_edits_token_limit_blocks_request_when_usage_exceeds_limit() {
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        rate_limit_config: Some(RateLimitConfig {
+            max_concurrent: 10,
+            max_requests_per_window: 100,
+            window_duration: Duration::seconds(1),
+            window_limits: vec![],
+            token_window_limits: vec![WindowLimit {
+                window_duration: Duration::seconds(60),
+                limit: 100,
+            }],
+            cost_window_limits: vec![],
+        }),
+        ..Default::default()
+    })
+    .await;
+
+    let email = "image-edits-token-limit@example.com";
+    let token = mock_login(&server, email).await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(email)
+        .await
+        .expect("db")
+        .expect("user created by mock_login");
+    db.analytics_repository()
+        .record_user_usage(user.id, 150, None)
+        .await
+        .expect("record usage");
+
+    let response = server
+        .post("/v1/images/edits")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
+        )
+        .json(&json!({
+            "image": "test",
+            "prompt": "Make it better"
+        }))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        429,
+        "Request should be rate limited when token usage exceeds window limit"
+    );
+    let body: serde_json::Value = response.json();
+    let error = body.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        error.to_lowercase().contains("token"),
+        "Error message should mention token limit, got: {}",
+        error
+    );
+}
+
+/// Cost window limit: when user's cost usage exceeds limit, next /v1/images/edits request returns 429.
+#[tokio::test]
+async fn test_image_edits_cost_limit_blocks_request_when_usage_exceeds_limit() {
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        rate_limit_config: Some(RateLimitConfig {
+            max_concurrent: 10,
+            max_requests_per_window: 100,
+            window_duration: Duration::seconds(1),
+            window_limits: vec![],
+            token_window_limits: vec![],
+            cost_window_limits: vec![WindowLimit {
+                window_duration: Duration::seconds(60),
+                limit: 1_000,
+            }],
+        }),
+        ..Default::default()
+    })
+    .await;
+
+    let email = "image-edits-cost-limit@example.com";
+    let token = mock_login(&server, email).await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(email)
+        .await
+        .expect("db")
+        .expect("user created by mock_login");
+    db.analytics_repository()
+        .record_user_usage(user.id, 0, Some(2_000))
+        .await
+        .expect("record usage");
+
+    let response = server
+        .post("/v1/images/edits")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
+        )
+        .json(&json!({
+            "image": "test",
+            "prompt": "Make it better"
+        }))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        429,
+        "Request should be rate limited when cost usage exceeds window limit"
+    );
+    let body: serde_json::Value = response.json();
+    let error = body.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        error.to_lowercase().contains("cost") || error.to_lowercase().contains("nano"),
+        "Error message should mention cost limit, got: {}",
+        error
+    );
 }
 
 /// Test NEAR balance check skipped when no NEAR-linked account for /v1/images/edits
