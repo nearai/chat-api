@@ -8,6 +8,7 @@ pub mod openapi;
 pub mod routes;
 pub mod state;
 pub mod static_files;
+pub mod usage_parsing;
 pub mod validation;
 
 pub use error::{ApiError, ApiErrorResponse};

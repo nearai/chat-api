@@ -1,5 +1,6 @@
 use crate::consts::{LIST_FILES_LIMIT_MAX, MAX_REQUEST_BODY_SIZE, MAX_RESPONSE_BODY_SIZE};
 use crate::middleware::auth::AuthenticatedUser;
+use crate::usage_parsing::{parse_usage_from_bytes, parse_usage_from_sse_line, ParsedUsage};
 use axum::{
     body::{to_bytes, Body},
     extract::{Extension, Path, Request, State},
@@ -4052,79 +4053,6 @@ fn is_streaming_response(headers: &HeaderMap) -> bool {
         .unwrap_or(false)
 }
 
-/// Parsed usage from an OpenAI-style response (usage.total_tokens, usage.input_tokens, usage.output_tokens, model).
-#[derive(Debug, Clone)]
-struct ParsedUsage {
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub total_tokens: u64,
-    pub model_name: Option<String>,
-}
-
-/// Parses usage from an already-parsed JSON value (OpenAI-style / cloud-api style).
-/// Supports both:
-/// - Non-streaming responses where the top-level object has "usage" and "model"
-/// - Streaming SSE envelopes where the top-level has a "response" object that contains "usage" and "model"
-fn parse_usage_from_value(root: &serde_json::Value) -> Option<ParsedUsage> {
-    // Find the object that directly contains the "usage" field:
-    // - Prefer top-level "usage"
-    // - Fallback to "response.usage" (SSE envelope)
-    let container = if root.get("usage").is_some() {
-        root
-    } else if let Some(response_obj) = root.get("response") {
-        if response_obj.get("usage").is_some() {
-            response_obj
-        } else {
-            return None;
-        }
-    } else {
-        return None;
-    };
-
-    let usage = container.get("usage")?.as_object()?;
-    let total = usage
-        .get("total_tokens")
-        .and_then(|v| v.as_u64())
-        .or_else(|| {
-            let input = usage
-                .get("input_tokens")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let output = usage
-                .get("output_tokens")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            Some(input + output)
-        })?;
-    let input_tokens = usage
-        .get("input_tokens")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    let output_tokens = usage
-        .get("output_tokens")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-
-    // Model name is normally on the same object as "usage". Fall back to top-level "model" if needed.
-    let model_name = container
-        .get("model")
-        .and_then(|v| v.as_str())
-        .map(String::from)
-        .or_else(|| root.get("model").and_then(|v| v.as_str()).map(String::from));
-    Some(ParsedUsage {
-        input_tokens,
-        output_tokens,
-        total_tokens: total,
-        model_name,
-    })
-}
-
-/// Parses usage from a response JSON body (OpenAI-style).
-fn parse_usage_from_json(bytes: &[u8]) -> Option<ParsedUsage> {
-    let root = serde_json::from_slice::<serde_json::Value>(bytes).ok()?;
-    parse_usage_from_value(&root)
-}
-
 /// Parse OpenAI/cloud-api image response (generations or edits) to get number of images (data array length).
 fn parse_image_response_data_count(bytes: &[u8]) -> Option<u32> {
     let root = serde_json::from_slice::<serde_json::Value>(bytes).ok()?;
@@ -4173,21 +4101,17 @@ async fn record_usage_from_body(
     user_id: UserId,
     body: &[u8],
 ) -> bool {
-    let Some(usage) = parse_usage_from_json(body) else {
+    let Some(usage) = parse_usage_from_bytes(body) else {
         return false;
     };
     if usage.total_tokens == 0 {
         return false;
     }
-    let cost_nano_usd = if let Some(ref model) = usage.model_name {
-        state
-            .model_pricing_cache
-            .get_pricing(model)
-            .await
-            .map(|p| p.cost_nano_usd(usage.input_tokens, usage.output_tokens))
-    } else {
-        None
-    };
+    let cost_nano_usd = state
+        .model_pricing_cache
+        .get_pricing(&usage.model)
+        .await
+        .map(|p| p.cost_nano_usd(usage.input_tokens, usage.output_tokens));
     if let Err(e) = state
         .user_usage_service
         .record_user_usage(user_id, usage.total_tokens, cost_nano_usd)
@@ -4197,19 +4121,6 @@ async fn record_usage_from_body(
         return false;
     }
     true
-}
-
-/// Try to extract usage and model from SSE data line (data: {...}).
-/// Expects OpenAI/cloud-api style: object with "usage" and optionally "model".
-fn try_extract_usage_from_sse_line(line: &str) -> Option<ParsedUsage> {
-    let data = line.strip_prefix("data: ")?;
-    // SSE lines may be terminated with \r\n; trim trailing \r and whitespace
-    let data = data.trim_end_matches('\r').trim();
-    if data == "[DONE]" || data.is_empty() {
-        return None;
-    }
-    let root = serde_json::from_str::<serde_json::Value>(data).ok()?;
-    parse_usage_from_value(&root)
 }
 
 /// Stream wrapper that parses SSE for usage (e.g. event: response.completed) and records usage on stream end.
@@ -4256,7 +4167,7 @@ where
                 if let Ok(text) = std::str::from_utf8(&bytes) {
                     this.buffer.push_str(text);
                     for line in this.buffer.lines() {
-                        if let Some(usage) = try_extract_usage_from_sse_line(line) {
+                        if let Some(usage) = parse_usage_from_sse_line(line) {
                             this.usage = Some(usage);
                         }
                     }
@@ -4274,20 +4185,17 @@ where
                 let user_id = this.user_id;
                 if let Some(usage) = usage {
                     tracing::debug!(
-                        "UsageTrackingStreamFull: parsed streaming usage for user_id={}, total_tokens={}, model={:?}",
+                        "UsageTrackingStreamFull: parsed streaming usage for user_id={}, total_tokens={}, model={}",
                         user_id,
                         usage.total_tokens,
-                        usage.model_name
+                        usage.model
                     );
                     if usage.total_tokens > 0 {
                         tokio::spawn(async move {
-                            let cost_nano_usd = if let Some(ref model) = usage.model_name {
-                                pricing_cache.get_pricing(model).await.map(|p| {
-                                    p.cost_nano_usd(usage.input_tokens, usage.output_tokens)
-                                })
-                            } else {
-                                None
-                            };
+                            let cost_nano_usd = pricing_cache
+                                .get_pricing(&usage.model)
+                                .await
+                                .map(|p| p.cost_nano_usd(usage.input_tokens, usage.output_tokens));
                             if let Err(e) = user_usage
                                 .record_user_usage(user_id, usage.total_tokens, cost_nano_usd)
                                 .await
@@ -4330,34 +4238,4 @@ async fn collect_stream_to_bytes(
     }
 
     Ok(Bytes::from(collected))
-}
-
-#[cfg(test)]
-mod usage_parsing_tests {
-    use super::{parse_usage_from_json, try_extract_usage_from_sse_line};
-
-    #[test]
-    fn test_parse_usage_from_json_total_tokens() {
-        let body = br#"{"model":"gpt-test","usage":{"total_tokens":12,"input_tokens":5,"output_tokens":7}}"#;
-        let parsed = parse_usage_from_json(body).expect("should parse usage");
-        assert_eq!(parsed.input_tokens, 5);
-        assert_eq!(parsed.output_tokens, 7);
-        assert_eq!(parsed.total_tokens, 12);
-        assert_eq!(parsed.model_name.as_deref(), Some("gpt-test"));
-    }
-
-    #[test]
-    fn test_parse_usage_from_json_fallback_sum() {
-        let body = br#"{"model":"gpt-test","usage":{"input_tokens":2,"output_tokens":3}}"#;
-        let parsed = parse_usage_from_json(body).expect("should parse usage");
-        assert_eq!(parsed.total_tokens, 5);
-    }
-
-    #[test]
-    fn test_try_extract_usage_from_sse_line() {
-        let line = r#"data: {"model":"gpt-test","usage":{"total_tokens":10,"input_tokens":4,"output_tokens":6}}"#;
-        let parsed = try_extract_usage_from_sse_line(line).expect("should parse sse usage");
-        assert_eq!(parsed.total_tokens, 10);
-        assert_eq!(parsed.model_name.as_deref(), Some("gpt-test"));
-    }
 }
