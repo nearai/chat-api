@@ -170,12 +170,17 @@ pub trait PaymentWebhookRepository: Send + Sync {
     ) -> anyhow::Result<StoreWebhookResult>;
 }
 
-/// Subscription plan with price ID
+/// Subscription plan with optional plan limits/features
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubscriptionPlan {
     pub name: String,
-    pub price_id: String,
+    /// Maximum deployments allowed for this plan (if configured)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_deployments: Option<u64>,
+    /// Maximum monthly tokens allowed for this plan (if configured)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_monthly_tokens: Option<u64>,
 }
 
 /// Service trait for subscription management

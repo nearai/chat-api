@@ -515,17 +515,9 @@ async fn test_list_plans_returns_configured_plans() {
         "Should have premium plan"
     );
 
-    // Verify price_id exists
+    // Verify plan names are present (max_deployments, max_monthly_tokens are optional)
     for plan in plans_array {
-        assert!(
-            plan.get("price_id").is_some(),
-            "Each plan should have price_id"
-        );
-        let price_id = plan.get("price_id").unwrap().as_str().unwrap();
-        assert!(
-            price_id.starts_with("price_"),
-            "price_id should start with 'price_'"
-        );
+        assert!(plan.get("name").is_some(), "Each plan should have name");
     }
 }
 

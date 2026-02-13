@@ -272,12 +272,35 @@ impl SubscriptionService for SubscriptionServiceImpl {
     async fn get_available_plans(&self) -> Result<Vec<SubscriptionPlan>, SubscriptionError> {
         tracing::debug!("Getting available subscription plans");
 
-        // Return Stripe plans (primary provider for now)
+        // Return Stripe plans (primary provider for now) with limits from config
         let stripe_plans = self.get_plans_for_provider("stripe").await?;
+
+        let configs = self
+            .system_configs_service
+            .get_configs()
+            .await
+            .map_err(|e| SubscriptionError::InternalError(e.to_string()))?;
+        let subscription_plans = configs
+            .and_then(|c| c.subscription_plans)
+            .unwrap_or_default();
 
         let plans: Vec<SubscriptionPlan> = stripe_plans
             .into_iter()
-            .map(|(name, price_id)| SubscriptionPlan { name, price_id })
+            .map(|(name, _price_id)| {
+                let max_deployments = subscription_plans
+                    .get(&name)
+                    .and_then(|c| c.deployments.as_ref())
+                    .map(|d| d.max);
+                let max_monthly_tokens = subscription_plans
+                    .get(&name)
+                    .and_then(|c| c.monthly_tokens.as_ref())
+                    .map(|m| m.max);
+                SubscriptionPlan {
+                    name,
+                    max_deployments,
+                    max_monthly_tokens,
+                }
+            })
             .collect();
 
         Ok(plans)
