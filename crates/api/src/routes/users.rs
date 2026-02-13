@@ -1,9 +1,11 @@
 use crate::{error::ApiError, middleware::AuthenticatedUser, models::*, state::AppState};
 use axum::{
-    extract::{Extension, State},
+    extract::{Extension, Query, State},
     routing::{get, patch, post},
     Json, Router,
 };
+use chrono::{DateTime, Utc};
+use serde::Deserialize;
 /// Get current user
 ///
 /// Returns the profile of the currently authenticated user, including their linked OAuth accounts.
@@ -39,15 +41,30 @@ pub async fn get_current_user(
     Ok(Json(profile.into()))
 }
 
-/// Get current user's usage (all-time token sum and cost in nano-USD).
+/// Query parameters for usage time range.
+#[derive(Debug, Deserialize)]
+pub struct UsageTimeRangeQuery {
+    /// Start of the time period (ISO 8601). When set, both start and end must be set; interval is [start, end).
+    pub start: Option<DateTime<Utc>>,
+    /// End of the time period (ISO 8601). When set, both start and end must be set; interval is [start, end).
+    pub end: Option<DateTime<Utc>>,
+}
+
+/// Get current user's usage (all-time or within time range).
 ///
 /// Returns the authenticated user's own usage. No admin required.
+/// Without start/end, returns all-time usage.
 #[utoipa::path(
     get,
     path = "/v1/users/me/usage",
     tag = "Users",
+    params(
+        ("start" = Option<DateTime<Utc>>, Query, description = "Start of time period (ISO 8601); use with end; interval [start, end)"),
+        ("end" = Option<DateTime<Utc>>, Query, description = "End of time period (ISO 8601); use with start; interval [start, end)")
+    ),
     responses(
         (status = 200, description = "Current user usage", body = UserUsageResponse),
+        (status = 400, description = "Bad request - start and end must be used together, start must be before end", body = crate::error::ApiErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 404, description = "No usage recorded", body = crate::error::ApiErrorResponse),
         (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
@@ -59,10 +76,20 @@ pub async fn get_current_user(
 pub async fn get_my_usage(
     State(app_state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    Query(params): Query<UsageTimeRangeQuery>,
 ) -> Result<Json<UserUsageResponse>, ApiError> {
+    let (start, end) = (params.start, params.end);
+    if let (Some(s), Some(e)) = (start, end) {
+        if s >= e {
+            return Err(ApiError::bad_request("start must be before end"));
+        }
+    } else if start.is_some() || end.is_some() {
+        return Err(ApiError::bad_request("start and end must be used together"));
+    }
+
     let summary = app_state
         .user_usage_service
-        .get_usage_by_user_id(user.user_id, None, None)
+        .get_usage_by_user_id(user.user_id, start, end)
         .await
         .map_err(|e| {
             tracing::error!("Failed to get usage for user_id={}: {}", user.user_id, e);

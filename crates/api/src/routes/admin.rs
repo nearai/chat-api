@@ -333,16 +333,30 @@ fn default_top_usage_limit() -> i64 {
     LIST_USERS_LIMIT_MAX
 }
 
-/// Get usage for a single user by ID (all-time token sum and cost).
+/// Query parameters for usage by user ID (time range).
+#[derive(Debug, Deserialize)]
+pub struct UsageByUserQuery {
+    /// Start of the time period (ISO 8601). When set, both start and end must be set; interval is [start, end).
+    pub start: Option<DateTime<Utc>>,
+    /// End of the time period (ISO 8601). When set, both start and end must be set; interval is [start, end).
+    pub end: Option<DateTime<Utc>>,
+}
+
+/// Get usage for a single user by ID (all-time or within time range).
 ///
 /// Requires admin authentication.
 #[utoipa::path(
     get,
     path = "/v1/admin/usage/users/{user_id}",
     tag = "Admin",
-    params(("user_id" = uuid::Uuid, Path, description = "User ID")),
+    params(
+        ("user_id" = uuid::Uuid, Path, description = "User ID"),
+        ("start" = Option<DateTime<Utc>>, Query, description = "Start of time period (ISO 8601); use with end; interval [start, end)"),
+        ("end" = Option<DateTime<Utc>>, Query, description = "End of time period (ISO 8601); use with start; interval [start, end)")
+    ),
     responses(
         (status = 200, description = "Usage retrieved", body = crate::models::UserUsageResponse),
+        (status = 400, description = "Bad request - start and end must be used together, start must be before end", body = crate::error::ApiErrorResponse),
         (status = 404, description = "User has no usage or not found", body = crate::error::ApiErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
@@ -355,10 +369,20 @@ fn default_top_usage_limit() -> i64 {
 pub async fn get_usage_by_user_id(
     State(app_state): State<AppState>,
     Path(user_id): Path<UserId>,
+    Query(params): Query<UsageByUserQuery>,
 ) -> Result<Json<UserUsageResponse>, ApiError> {
+    let (start, end) = (params.start, params.end);
+    if let (Some(s), Some(e)) = (start, end) {
+        if s >= e {
+            return Err(ApiError::bad_request("start must be before end"));
+        }
+    } else if start.is_some() || end.is_some() {
+        return Err(ApiError::bad_request("start and end must be used together"));
+    }
+
     let summary = app_state
         .user_usage_service
-        .get_usage_by_user_id(user_id, None, None)
+        .get_usage_by_user_id(user_id, start, end)
         .await
         .map_err(|e| {
             tracing::error!("Failed to get usage for user_id={}: {}", user_id, e);
