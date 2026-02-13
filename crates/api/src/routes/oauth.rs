@@ -442,7 +442,7 @@ pub async fn logout(
 ///
 /// This endpoint allows creating a user and getting a session token directly,
 /// bypassing the OAuth flow. Only available in test builds.
-#[cfg(feature = "test")]
+#[cfg(any(test, feature = "test"))]
 pub async fn mock_login(
     State(app_state): State<AppState>,
     axum::Json(request): axum::Json<MockLoginRequest>,
@@ -691,8 +691,8 @@ pub fn create_oauth_router() -> Router<AppState> {
         // Unified callback route for all providers
         .route("/callback", get(oauth_callback));
 
-    // Add mock login route only in test builds
-    #[cfg(feature = "test")]
+    // Add mock login route only in test builds (cfg(test) = true when running `cargo test`)
+    #[cfg(any(test, feature = "test"))]
     let router = router.route("/mock-login", axum::routing::post(mock_login));
 
     router
