@@ -338,7 +338,7 @@ pub async fn insert_test_subscription(
 }
 
 /// Set subscription_plans configuration
-/// plans should be in format: { "plan_name": { "providers": { "stripe": { "price_id": "price_xxx" } }, "deployments": { "max": 1 }, "monthly_tokens": { "max": 1000000 } } }
+/// plans should be in format: { "plan_name": { "providers": { "stripe": { "price_id": "price_xxx" } }, "private_assistant_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } } }
 pub async fn set_subscription_plans(server: &TestServer, plans: serde_json::Value) {
     let admin_email = "test_setup_admin@admin.org";
     let admin_token = mock_login(server, admin_email).await;

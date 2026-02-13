@@ -287,18 +287,16 @@ impl SubscriptionService for SubscriptionServiceImpl {
         let plans: Vec<SubscriptionPlan> = stripe_plans
             .into_keys()
             .map(|name| {
-                let max_deployments = subscription_plans
+                let private_assistant_instances = subscription_plans
                     .get(&name)
-                    .and_then(|c| c.deployments.as_ref())
-                    .map(|d| d.max);
-                let max_monthly_tokens = subscription_plans
+                    .and_then(|c| c.private_assistant_instances.clone());
+                let monthly_tokens = subscription_plans
                     .get(&name)
-                    .and_then(|c| c.monthly_tokens.as_ref())
-                    .map(|m| m.max);
+                    .and_then(|c| c.monthly_tokens.clone());
                 SubscriptionPlan {
                     name,
-                    max_deployments,
-                    max_monthly_tokens,
+                    private_assistant_instances,
+                    monthly_tokens,
                 }
             })
             .collect();

@@ -3,6 +3,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use crate::system_configs::ports::PlanLimitConfig;
 use crate::UserId;
 
 /// Database model for subscription records (generic, supports multiple providers e.g. Stripe)
@@ -180,12 +181,12 @@ pub trait PaymentWebhookRepository: Send + Sync {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubscriptionPlan {
     pub name: String,
-    /// Maximum deployments allowed for this plan (if configured)
+    /// Private assistant instance limits (e.g. { "max": 1 })
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_deployments: Option<u64>,
-    /// Maximum monthly tokens allowed for this plan (if configured)
+    pub private_assistant_instances: Option<PlanLimitConfig>,
+    /// Monthly token limits (e.g. { "max": 1000000 })
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_monthly_tokens: Option<u64>,
+    pub monthly_tokens: Option<PlanLimitConfig>,
 }
 
 /// Service trait for subscription management
