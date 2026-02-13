@@ -105,6 +105,23 @@ pub async fn create_test_server_and_db(
         ),
     );
 
+    // Initialize subscription service for testing
+    let subscription_service = Arc::new(services::subscription::SubscriptionServiceImpl::new(
+        services::subscription::SubscriptionServiceConfig {
+            db_pool: db.pool().clone(),
+            stripe_customer_repo: db.stripe_customer_repository()
+                as Arc<dyn services::subscription::ports::StripeCustomerRepository>,
+            subscription_repo: db.subscription_repository()
+                as Arc<dyn services::subscription::ports::SubscriptionRepository>,
+            webhook_repo: db.payment_webhook_repository()
+                as Arc<dyn services::subscription::ports::PaymentWebhookRepository>,
+            system_configs_service: system_configs_service.clone()
+                as Arc<dyn services::system_configs::ports::SystemConfigsService>,
+            stripe_secret_key: config.stripe.secret_key.clone(),
+            stripe_webhook_secret: config.stripe.webhook_secret.clone(),
+        },
+    ));
+
     // Create VPC credentials service based on provided credentials
     let vpc_credentials_service: Arc<dyn services::vpc::VpcCredentialsService> =
         match test_config.vpc_credentials {
@@ -185,6 +202,7 @@ pub async fn create_test_server_and_db(
         user_settings_service,
         model_service,
         system_configs_service,
+        subscription_service,
         session_repository: session_repo,
         vpc_credentials_service,
         user_repository: user_repo,
@@ -236,4 +254,66 @@ pub async fn mock_login(server: &TestServer, email: &str) -> String {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .expect("Response should contain token")
+}
+
+/// Clear subscription_plans configuration from system_configs
+/// Sets subscription_plans to an empty map, which is treated as "not configured"
+pub async fn clear_subscription_plans(server: &TestServer) {
+    let admin_email = "test_cleanup_admin@admin.org";
+    let admin_token = mock_login(server, admin_email).await;
+
+    // Set subscription_plans to empty object {} (empty HashMap)
+    // This is treated as "not configured" by get_plans_for_provider()
+    let config_body = json!({
+        "subscription_plans": {}
+    });
+
+    let response = server
+        .patch("/v1/admin/configs")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&config_body)
+        .await;
+
+    assert!(
+        response.status_code().is_success(),
+        "Failed to clear subscription_plans: {}",
+        response.status_code()
+    );
+}
+
+/// Set subscription_plans configuration
+/// plans should be in format: { "plan_name": { "providers": { "stripe": { "price_id": "price_xxx" } }, "deployments": { "max": 1 }, "monthly_tokens": { "max": 1000000 } } }
+pub async fn set_subscription_plans(server: &TestServer, plans: serde_json::Value) {
+    let admin_email = "test_setup_admin@admin.org";
+    let admin_token = mock_login(server, admin_email).await;
+
+    let config_body = json!({
+        "subscription_plans": plans
+    });
+
+    let response = server
+        .patch("/v1/admin/configs")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&config_body)
+        .await;
+
+    assert!(
+        response.status_code().is_success(),
+        "Failed to set subscription_plans: {}",
+        response.status_code()
+    );
 }

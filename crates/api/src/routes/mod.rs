@@ -3,6 +3,7 @@ pub mod api;
 pub mod attestation;
 pub mod configs;
 pub mod oauth;
+pub mod subscriptions;
 pub mod users;
 
 use axum::{middleware::from_fn_with_state, routing::get, Json, Router};
@@ -124,6 +125,14 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         crate::middleware::auth_middleware,
     ));
 
+    // Subscription routes (requires user authentication)
+    let subscription_routes = subscriptions::create_subscriptions_router().layer(
+        from_fn_with_state(auth_state.clone(), crate::middleware::auth_middleware),
+    );
+
+    // Public subscription routes (webhook, no auth required)
+    let public_subscription_routes = subscriptions::create_public_subscriptions_router();
+
     // Conversation read routes with optional authentication
     // These routes work for both authenticated users and unauthenticated users
     // (for accessing publicly shared conversations)
@@ -144,6 +153,8 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
     let router = Router::new()
         .route("/health", get(health_check))
         .merge(configs_routes) // Configs route (requires user auth)
+        .merge(subscription_routes) // Subscription routes (requires user auth)
+        .merge(public_subscription_routes) // Public subscription webhook route (no auth)
         .nest("/v1/auth", auth_routes)
         .nest("/v1/auth", logout_route) // Logout route with auth middleware
         .nest("/v1/users", user_routes)
