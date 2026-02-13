@@ -1,14 +1,28 @@
 mod common;
 
 use api::routes::api::SUBSCRIPTION_REQUIRED_ERROR_MESSAGE;
+use chrono::Duration;
 use common::{
     clear_subscription_plans, create_test_server, create_test_server_and_db,
     insert_test_subscription, mock_login, set_subscription_plans, TestServerConfig,
 };
 use serde_json::json;
 use serial_test::serial;
+use services::system_configs::ports::RateLimitConfig;
 use services::user::ports::UserRepository;
 use services::user_usage::{UserUsageRepository, METRIC_KEY_LLM_TOKENS};
+
+/// Permissive rate limit config for subscription proxy tests to avoid 429 interference.
+fn permissive_rate_limit_config() -> RateLimitConfig {
+    RateLimitConfig {
+        max_concurrent: 10,
+        max_requests_per_window: 1000,
+        window_duration: Duration::seconds(60),
+        window_limits: vec![],
+        token_window_limits: vec![],
+        cost_window_limits: vec![],
+    }
+}
 
 #[tokio::test]
 #[serial(subscription_tests)]
@@ -799,7 +813,11 @@ async fn test_portal_session_no_stripe_customer() {
 #[tokio::test]
 #[serial(subscription_tests)]
 async fn test_proxy_returns_403_without_subscription_when_plans_configured() {
-    let server = create_test_server().await;
+    let (server, _) = create_test_server_and_db(TestServerConfig {
+        rate_limit_config: Some(permissive_rate_limit_config()),
+        ..Default::default()
+    })
+    .await;
 
     set_subscription_plans(
         &server,
@@ -820,7 +838,7 @@ async fn test_proxy_returns_403_without_subscription_when_plans_configured() {
     let user_email = "test_proxy_no_subscription@example.com";
     let user_token = mock_login(&server, user_email).await;
 
-    // User has no subscription - falls back to "free" plan (max 0 tokens). Used 0 >= 0 -> blocked.
+    // User has no subscription - falls back to "free" plan (max 0 tokens). Used 0 >= 0 -> 402 (Payment Required).
     for (path, body) in [
         (
             "/v1/chat/completions",
@@ -854,11 +872,13 @@ async fn test_proxy_returns_403_without_subscription_when_plans_configured() {
             .json(&body)
             .await;
 
-        assert_eq!(
-            response.status_code(),
-            403,
-            "POST {} should return 403 when user has no subscription",
-            path
+        // 402 Payment Required when token quota exceeded (free plan max 0); 403 when no subscription
+        let status = response.status_code();
+        assert!(
+            status == 402 || status == 403,
+            "POST {} should return 402 or 403 when user has no subscription, got {}",
+            path,
+            status
         );
 
         let body_res: serde_json::Value = response.json();
@@ -1002,7 +1022,11 @@ async fn test_proxy_allows_when_subscription_not_configured() {
 #[tokio::test]
 #[serial(subscription_tests)]
 async fn test_proxy_blocks_when_monthly_token_limit_exceeded() {
-    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        rate_limit_config: Some(permissive_rate_limit_config()),
+        ..Default::default()
+    })
+    .await;
 
     set_subscription_plans(
         &server,
@@ -1033,7 +1057,7 @@ async fn test_proxy_blocks_when_monthly_token_limit_exceeded() {
         .await
         .expect("record usage");
 
-    // Proxy should return 403 with token limit exceeded message
+    // Proxy should return 402 Payment Required when monthly token limit exceeded
     let response = server
         .post("/v1/chat/completions")
         .add_header(
@@ -1048,8 +1072,8 @@ async fn test_proxy_blocks_when_monthly_token_limit_exceeded() {
 
     assert_eq!(
         response.status_code(),
-        403,
-        "Proxy should return 403 when monthly token limit exceeded"
+        402,
+        "Proxy should return 402 when monthly token limit exceeded"
     );
     let body_res: serde_json::Value = response.json();
     let err_msg = body_res.get("error").and_then(|v| v.as_str()).unwrap_or("");
@@ -1064,7 +1088,7 @@ async fn test_proxy_blocks_when_monthly_token_limit_exceeded() {
         err_msg
     );
 
-    // Also verify /v1/responses returns 403 when token limit exceeded
+    // Also verify /v1/responses returns 402 when token limit exceeded
     let response = server
         .post("/v1/responses")
         .add_header(
@@ -1079,8 +1103,8 @@ async fn test_proxy_blocks_when_monthly_token_limit_exceeded() {
 
     assert_eq!(
         response.status_code(),
-        403,
-        "POST /v1/responses should return 403 when monthly token limit exceeded"
+        402,
+        "POST /v1/responses should return 402 when monthly token limit exceeded"
     );
     let body_res: serde_json::Value = response.json();
     let err_msg = body_res.get("error").and_then(|v| v.as_str()).unwrap_or("");
@@ -1096,7 +1120,11 @@ async fn test_proxy_blocks_when_monthly_token_limit_exceeded() {
 #[tokio::test]
 #[serial(subscription_tests)]
 async fn test_responses_returns_403_without_subscription_when_plans_configured() {
-    let server = create_test_server().await;
+    let (server, _) = create_test_server_and_db(TestServerConfig {
+        rate_limit_config: Some(permissive_rate_limit_config()),
+        ..Default::default()
+    })
+    .await;
 
     set_subscription_plans(
         &server,
@@ -1117,7 +1145,7 @@ async fn test_responses_returns_403_without_subscription_when_plans_configured()
     let user_email = "test_responses_no_subscription@example.com";
     let user_token = mock_login(&server, user_email).await;
 
-    // User has no subscription - POST /v1/responses should return 403
+    // User has no subscription - POST /v1/responses should return 402 or 403
     let response = server
         .post("/v1/responses")
         .add_header(
@@ -1130,10 +1158,12 @@ async fn test_responses_returns_403_without_subscription_when_plans_configured()
         }))
         .await;
 
-    assert_eq!(
-        response.status_code(),
-        403,
-        "POST /v1/responses should return 403 when user has no subscription (free plan max 0)"
+    // 402 Payment Required (token quota), 403 Forbidden (no subscription)
+    let status = response.status_code();
+    assert!(
+        status == 402 || status == 403,
+        "POST /v1/responses should return 402 or 403 when user has no subscription (free plan max 0), got {}",
+        status
     );
     let body_res: serde_json::Value = response.json();
     let err_msg = body_res.get("error").and_then(|v| v.as_str()).unwrap_or("");

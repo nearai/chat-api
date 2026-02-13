@@ -2735,7 +2735,7 @@ async fn ensure_user_has_sufficient_token_quota(
                 limit
             );
             Err((
-                StatusCode::FORBIDDEN,
+                StatusCode::PAYMENT_REQUIRED,
                 Json(ErrorResponse {
                     error: format!(
                         "{} You have used {} of {} tokens this period.",
