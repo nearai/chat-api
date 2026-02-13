@@ -6,6 +6,7 @@ pub mod file;
 pub mod metrics;
 pub mod model;
 pub mod response;
+pub mod subscription;
 pub mod system_configs;
 pub mod types;
 pub mod user;

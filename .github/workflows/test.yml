@@ -70,6 +70,8 @@ jobs:
         DATABASE_TLS_ENABLED: "false"
         RUST_LOG: debug
         DEV: "true"
+        STRIPE_SECRET_KEY: "sk_test_dummy_key_for_testing"
+        STRIPE_WEBHOOK_SECRET: "whsec_test_dummy_secret_for_testing"
 
     - name: Build release
       run: cargo build --release
