@@ -54,6 +54,14 @@ pub struct PaymentWebhook {
     pub created_at: DateTime<Utc>,
 }
 
+/// Result of storing a webhook event, with idempotency flag
+#[derive(Debug, Clone)]
+pub struct StoreWebhookResult {
+    pub webhook: PaymentWebhook,
+    /// True if the webhook was newly inserted; false if it already existed (duplicate/retry)
+    pub is_new: bool,
+}
+
 /// Error types for subscription operations
 #[derive(Debug)]
 pub enum SubscriptionError {
@@ -151,14 +159,15 @@ pub trait SubscriptionRepository: Send + Sync {
 /// Repository trait for payment webhook events
 #[async_trait]
 pub trait PaymentWebhookRepository: Send + Sync {
-    /// Store webhook event (idempotent via UNIQUE constraint)
+    /// Store webhook event (idempotent via UNIQUE constraint).
+    /// Returns the webhook and whether it was newly inserted (true) or already existed (false).
     async fn store_webhook(
         &self,
         txn: &tokio_postgres::Transaction<'_>,
         provider: String,
         event_id: String,
         payload: serde_json::Value,
-    ) -> anyhow::Result<PaymentWebhook>;
+    ) -> anyhow::Result<StoreWebhookResult>;
 }
 
 /// Subscription plan with price ID

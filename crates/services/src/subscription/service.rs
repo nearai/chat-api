@@ -562,7 +562,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
         // Store webhook (idempotent via UNIQUE constraint)
-        let stored_webhook = self
+        let store_result = self
             .webhook_repo
             .store_webhook(
                 &txn,
@@ -573,22 +573,13 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
-        // Check if this webhook was already processed (already existed in DB)
-        // If the webhook was just created, created_at will be very recent (< 1 second ago)
-        // If it already existed, created_at will be older
-        let is_duplicate = {
-            let age = chrono::Utc::now()
-                .signed_duration_since(stored_webhook.created_at)
-                .num_milliseconds();
-            age > 1000 // If older than 1 second, it's a duplicate/retry
-        };
-
-        if is_duplicate {
+        // Skip processing if this webhook was already processed (duplicate/retry)
+        if !store_result.is_new {
             tracing::info!(
                 "Webhook already processed (duplicate): event_id={}, type={}, original_created_at={}",
                 event_id,
                 event_type,
-                stored_webhook.created_at
+                store_result.webhook.created_at
             );
             // Commit transaction and return success without calling Stripe API
             txn.commit()

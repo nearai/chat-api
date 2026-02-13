@@ -9,6 +9,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use services::subscription::ports::{SubscriptionError, SubscriptionPlan, SubscriptionWithPlan};
+use url::Url;
 use utoipa::ToSchema;
 
 /// Request to create a new subscription
@@ -27,6 +28,23 @@ pub struct CreateSubscriptionRequest {
 
 fn default_provider() -> String {
     "stripe".to_string()
+}
+
+/// Validates that a URL is valid and uses http or https scheme.
+fn validate_redirect_url(url_str: &str, field_name: &str) -> Result<(), ApiError> {
+    let url = Url::parse(url_str).map_err(|_| {
+        ApiError::bad_request(format!(
+            "Invalid {}: must be a valid URL (e.g., https://example.com/success)",
+            field_name
+        ))
+    })?;
+    match url.scheme() {
+        "http" | "https" => Ok(()),
+        _ => Err(ApiError::bad_request(format!(
+            "Invalid {}: URL scheme must be http or https",
+            field_name
+        ))),
+    }
 }
 
 /// Response containing checkout URL
@@ -112,6 +130,9 @@ pub async fn create_subscription(
         req.provider,
         req.plan
     );
+
+    validate_redirect_url(&req.success_url, "success_url")?;
+    validate_redirect_url(&req.cancel_url, "cancel_url")?;
 
     let checkout_url = app_state
         .subscription_service
