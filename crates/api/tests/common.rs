@@ -119,6 +119,7 @@ pub async fn create_test_server_and_db(
                 as Arc<dyn services::subscription::ports::PaymentWebhookRepository>,
             system_configs_service: system_configs_service.clone()
                 as Arc<dyn services::system_configs::ports::SystemConfigsService>,
+            user_repository: user_repo.clone(),
             stripe_secret_key: config.stripe.secret_key.clone(),
             stripe_webhook_secret: config.stripe.webhook_secret.clone(),
         },

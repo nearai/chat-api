@@ -3,6 +3,7 @@ use super::ports::{
     SubscriptionPlan, SubscriptionRepository, SubscriptionService, SubscriptionWithPlan,
 };
 use crate::system_configs::ports::{SubscriptionPlanConfig, SystemConfigsService};
+use crate::user::ports::UserRepository;
 use crate::UserId;
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -20,6 +21,7 @@ pub struct SubscriptionServiceConfig {
     pub subscription_repo: Arc<dyn SubscriptionRepository>,
     pub webhook_repo: Arc<dyn PaymentWebhookRepository>,
     pub system_configs_service: Arc<dyn SystemConfigsService>,
+    pub user_repository: Arc<dyn UserRepository>,
     pub stripe_secret_key: String,
     pub stripe_webhook_secret: String,
 }
@@ -30,6 +32,7 @@ pub struct SubscriptionServiceImpl {
     subscription_repo: Arc<dyn SubscriptionRepository>,
     webhook_repo: Arc<dyn PaymentWebhookRepository>,
     system_configs_service: Arc<dyn SystemConfigsService>,
+    user_repository: Arc<dyn UserRepository>,
     stripe_secret_key: String,
     stripe_webhook_secret: String,
 }
@@ -42,6 +45,7 @@ impl SubscriptionServiceImpl {
             subscription_repo: config.subscription_repo,
             webhook_repo: config.webhook_repo,
             system_configs_service: config.system_configs_service,
+            user_repository: config.user_repository,
             stripe_secret_key: config.stripe_secret_key,
             stripe_webhook_secret: config.stripe_webhook_secret,
         }
@@ -145,13 +149,30 @@ impl SubscriptionServiceImpl {
             return Ok(customer_id);
         }
 
-        // Create new Stripe customer
+        // Fetch user to get email and name for Stripe customer
+        let user = self
+            .user_repository
+            .get_user(user_id)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
+            .ok_or_else(|| {
+                SubscriptionError::InternalError(
+                    "User not found when creating Stripe customer".to_string(),
+                )
+            })?;
+
+        // Skip email for NEAR wallet users (they have placeholder like account_id@near)
+        let email_for_stripe = (!user.email.ends_with("@near")).then_some(user.email.as_str());
+
+        // Create new Stripe customer with email and name for Stripe Dashboard/receipts
         tracing::info!("Creating new Stripe customer for user_id={}", user_id);
         let client = self.get_stripe_client();
 
         let customer = Customer::create(
             &client,
             stripe::CreateCustomer {
+                email: email_for_stripe,
+                name: user.name.as_deref(),
                 metadata: Some(
                     vec![("user_id".to_string(), user_id.0.to_string())]
                         .into_iter()
