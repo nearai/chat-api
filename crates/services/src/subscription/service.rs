@@ -706,8 +706,12 @@ impl SubscriptionService for SubscriptionServiceImpl {
         tracing::info!("Creating portal session for user_id={}", user_id);
 
         // Check Stripe configuration
-        if self.stripe_secret_key.is_empty() {
-            tracing::debug!("Stripe secret key is empty, Stripe not configured");
+        if self.stripe_secret_key.is_empty() || self.stripe_webhook_secret.is_empty() {
+            tracing::debug!(
+                "Stripe secrets not configured (secret_key_empty={}, webhook_secret_empty={})",
+                self.stripe_secret_key.is_empty(),
+                self.stripe_webhook_secret.is_empty()
+            );
             return Err(SubscriptionError::NotConfigured);
         }
 

@@ -331,18 +331,6 @@ pub async fn create_portal_session(
             SubscriptionError::NotConfigured => {
                 ApiError::service_unavailable("Stripe is not configured")
             }
-            SubscriptionError::DatabaseError(msg) => {
-                tracing::error!(error = ?msg, "Database error creating portal session");
-                ApiError::internal_server_error("Failed to create portal session")
-            }
-            SubscriptionError::StripeError(msg) => {
-                tracing::error!(error = ?msg, "Stripe error creating portal session");
-                ApiError::internal_server_error("Failed to create portal session")
-            }
-            SubscriptionError::InternalError(msg) => {
-                tracing::error!(error = ?msg, "Internal error creating portal session");
-                ApiError::internal_server_error("Failed to create portal session")
-            }
             _ => {
                 tracing::error!(error = ?e, "Failed to create portal session");
                 ApiError::internal_server_error("Failed to create portal session")
