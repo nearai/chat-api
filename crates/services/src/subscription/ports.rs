@@ -67,6 +67,8 @@ pub enum SubscriptionError {
     NotConfigured,
     /// No active subscription found for user
     NoActiveSubscription,
+    /// User has no Stripe customer record
+    NoStripeCustomer,
     /// Stripe API error
     StripeError(String),
     /// Database error
@@ -87,6 +89,7 @@ impl fmt::Display for SubscriptionError {
             Self::InvalidProvider(provider) => write!(f, "Invalid provider: {}", provider),
             Self::NotConfigured => write!(f, "Stripe is not configured"),
             Self::NoActiveSubscription => write!(f, "No active subscription found"),
+            Self::NoStripeCustomer => write!(f, "User has no Stripe customer record"),
             Self::StripeError(msg) => write!(f, "Stripe error: {}", msg),
             Self::DatabaseError(msg) => write!(f, "Database error: {}", msg),
             Self::WebhookVerificationFailed(msg) => {
@@ -201,4 +204,12 @@ pub trait SubscriptionService: Send + Sync {
         payload: &[u8],
         signature: &str,
     ) -> Result<(), SubscriptionError>;
+
+    /// Create a customer portal session for managing subscriptions
+    /// Returns the portal URL
+    async fn create_customer_portal_session(
+        &self,
+        user_id: UserId,
+        return_url: String,
+    ) -> Result<String, SubscriptionError>;
 }

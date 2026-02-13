@@ -45,7 +45,7 @@ opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "metrics"] }
 utoipa = { version = "5", optional = true }
 near-api = "0.8.0"
 # Stripe payment integration
-async-stripe = { version = "0.41", features = ["runtime-tokio-hyper"] }
+async-stripe = { version = "0.41", features = ["runtime-tokio-hyper", "billing"] }
 
 [features]
 utoipa = ["dep:utoipa"]
