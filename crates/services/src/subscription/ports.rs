@@ -5,11 +5,12 @@ use std::fmt;
 
 use crate::UserId;
 
-/// Database model for subscription records from Stripe
+/// Database model for subscription records (generic, supports multiple providers e.g. Stripe)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Subscription {
     pub subscription_id: String,
     pub user_id: UserId,
+    pub provider: String,
     pub customer_id: String,
     pub price_id: String,
     pub status: String,
@@ -25,6 +26,7 @@ pub struct Subscription {
 pub struct SubscriptionWithPlan {
     pub subscription_id: String,
     pub user_id: String,
+    pub provider: String,
     pub plan: String, // Resolved from price_id
     pub status: String,
     pub current_period_end: DateTime<Utc>,
@@ -59,6 +61,8 @@ pub enum SubscriptionError {
     ActiveSubscriptionExists,
     /// Invalid plan name provided
     InvalidPlan(String),
+    /// Invalid or unsupported payment provider
+    InvalidProvider(String),
     /// Stripe is not configured
     NotConfigured,
     /// No active subscription found for user
@@ -80,6 +84,7 @@ impl fmt::Display for SubscriptionError {
                 write!(f, "User already has an active subscription")
             }
             Self::InvalidPlan(plan) => write!(f, "Invalid plan: {}", plan),
+            Self::InvalidProvider(provider) => write!(f, "Invalid provider: {}", provider),
             Self::NotConfigured => write!(f, "Stripe is not configured"),
             Self::NoActiveSubscription => write!(f, "No active subscription found"),
             Self::StripeError(msg) => write!(f, "Stripe error: {}", msg),
@@ -169,9 +174,11 @@ pub trait SubscriptionService: Send + Sync {
 
     /// Create a subscription checkout session for a user
     /// Returns the checkout URL
+    /// provider: payment provider name (e.g. "stripe")
     async fn create_subscription(
         &self,
         user_id: UserId,
+        provider: String,
         plan: String,
         success_url: String,
         cancel_url: String,

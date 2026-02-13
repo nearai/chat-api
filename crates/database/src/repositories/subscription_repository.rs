@@ -29,24 +29,26 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
         let row = txn
             .query_one(
                 "INSERT INTO subscriptions (
-                    subscription_id, user_id, customer_id, price_id,
+                    subscription_id, user_id, provider, customer_id, price_id,
                     status, current_period_end, cancel_at_period_end
                  )
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                  ON CONFLICT (subscription_id)
                  DO UPDATE SET
                      user_id = EXCLUDED.user_id,
+                     provider = EXCLUDED.provider,
                      customer_id = EXCLUDED.customer_id,
                      price_id = EXCLUDED.price_id,
                      status = EXCLUDED.status,
                      current_period_end = EXCLUDED.current_period_end,
                      cancel_at_period_end = EXCLUDED.cancel_at_period_end,
                      updated_at = NOW()
-                 RETURNING subscription_id, user_id, customer_id, price_id, status,
+                 RETURNING subscription_id, user_id, provider, customer_id, price_id, status,
                            current_period_end, cancel_at_period_end, created_at, updated_at",
                 &[
                     &subscription.subscription_id,
                     &subscription.user_id,
+                    &subscription.provider,
                     &subscription.customer_id,
                     &subscription.price_id,
                     &subscription.status,
@@ -59,6 +61,7 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
         Ok(Subscription {
             subscription_id: row.get("subscription_id"),
             user_id: row.get("user_id"),
+            provider: row.get("provider"),
             customer_id: row.get("customer_id"),
             price_id: row.get("price_id"),
             status: row.get("status"),
@@ -79,7 +82,7 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
 
         let rows = client
             .query(
-                "SELECT subscription_id, user_id, customer_id, price_id, status,
+                "SELECT subscription_id, user_id, provider, customer_id, price_id, status,
                         current_period_end, cancel_at_period_end, created_at, updated_at
                  FROM subscriptions
                  WHERE user_id = $1
@@ -93,6 +96,7 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
             .map(|row| Subscription {
                 subscription_id: row.get("subscription_id"),
                 user_id: row.get("user_id"),
+                provider: row.get("provider"),
                 customer_id: row.get("customer_id"),
                 price_id: row.get("price_id"),
                 status: row.get("status"),
@@ -119,7 +123,7 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
 
         let row = client
             .query_opt(
-                "SELECT subscription_id, user_id, customer_id, price_id, status,
+                "SELECT subscription_id, user_id, provider, customer_id, price_id, status,
                         current_period_end, cancel_at_period_end, created_at, updated_at
                  FROM subscriptions
                  WHERE user_id = $1 AND status IN ('active', 'trialing')
@@ -132,6 +136,7 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
         Ok(row.map(|row| Subscription {
             subscription_id: row.get("subscription_id"),
             user_id: row.get("user_id"),
+            provider: row.get("provider"),
             customer_id: row.get("customer_id"),
             price_id: row.get("price_id"),
             status: row.get("status"),
@@ -152,7 +157,7 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
 
         let rows = client
             .query(
-                "SELECT subscription_id, user_id, customer_id, price_id, status,
+                "SELECT subscription_id, user_id, provider, customer_id, price_id, status,
                         current_period_end, cancel_at_period_end, created_at, updated_at
                  FROM subscriptions
                  WHERE user_id = $1 AND status IN ('active', 'trialing')
@@ -167,6 +172,7 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
             .map(|row| Subscription {
                 subscription_id: row.get("subscription_id"),
                 user_id: row.get("user_id"),
+                provider: row.get("provider"),
                 customer_id: row.get("customer_id"),
                 price_id: row.get("price_id"),
                 status: row.get("status"),

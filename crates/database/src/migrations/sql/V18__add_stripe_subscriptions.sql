@@ -12,10 +12,11 @@ CREATE TRIGGER update_stripe_customers_updated_at
     FOR EACH ROW
     EXECUTE FUNCTION update_updated_at_column();
 
--- Table for storing subscription records from Stripe
+-- Table for storing subscription records (generic, supports multiple providers e.g. Stripe)
 CREATE TABLE subscriptions (
     subscription_id VARCHAR(255) PRIMARY KEY,
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    provider VARCHAR(50) NOT NULL DEFAULT 'stripe',
     customer_id VARCHAR(255) NOT NULL,
     price_id VARCHAR(255) NOT NULL,
     status VARCHAR(50) NOT NULL,
@@ -33,6 +34,9 @@ CREATE INDEX idx_subscriptions_customer_id ON subscriptions(customer_id);
 
 -- Index for efficient status filtering
 CREATE INDEX idx_subscriptions_status ON subscriptions(status);
+
+-- Index for efficient provider filtering
+CREATE INDEX idx_subscriptions_provider ON subscriptions(provider);
 
 -- Trigger for updating updated_at timestamp on subscriptions
 CREATE TRIGGER update_subscriptions_updated_at

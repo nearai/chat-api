@@ -14,12 +14,19 @@ use utoipa::ToSchema;
 /// Request to create a new subscription
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct CreateSubscriptionRequest {
+    /// Payment provider (e.g., "stripe"). Defaults to "stripe" if not specified.
+    #[serde(default = "default_provider")]
+    pub provider: String,
     /// Plan name (e.g., "basic", "pro")
     pub plan: String,
     /// URL to redirect after successful checkout
     pub success_url: String,
     /// URL to redirect after cancelled checkout
     pub cancel_url: String,
+}
+
+fn default_provider() -> String {
+    "stripe".to_string()
 }
 
 /// Response containing checkout URL
@@ -86,14 +93,21 @@ pub async fn create_subscription(
     Json(req): Json<CreateSubscriptionRequest>,
 ) -> Result<Json<CreateSubscriptionResponse>, ApiError> {
     tracing::info!(
-        "Creating subscription for user_id={}, plan={}",
+        "Creating subscription for user_id={}, provider={}, plan={}",
         user.user_id,
+        req.provider,
         req.plan
     );
 
     let checkout_url = app_state
         .subscription_service
-        .create_subscription(user.user_id, req.plan, req.success_url, req.cancel_url)
+        .create_subscription(
+            user.user_id,
+            req.provider,
+            req.plan,
+            req.success_url,
+            req.cancel_url,
+        )
         .await
         .map_err(|e| match e {
             SubscriptionError::ActiveSubscriptionExists => {
@@ -101,6 +115,9 @@ pub async fn create_subscription(
             }
             SubscriptionError::InvalidPlan(plan) => {
                 ApiError::bad_request(format!("Invalid plan: {}", plan))
+            }
+            SubscriptionError::InvalidProvider(provider) => {
+                ApiError::bad_request(format!("Invalid provider: {}", provider))
             }
             SubscriptionError::NotConfigured => {
                 ApiError::service_unavailable("Stripe is not configured")

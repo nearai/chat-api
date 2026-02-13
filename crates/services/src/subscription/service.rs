@@ -154,11 +154,29 @@ impl SubscriptionServiceImpl {
         Ok(customer.id.to_string())
     }
 
+    /// Supported payment providers
+    const SUPPORTED_PROVIDERS: &[&str] = &["stripe"];
+
+    /// Validate that the provider is supported
+    fn validate_provider(provider: &str) -> Result<(), SubscriptionError> {
+        let provider_lower = provider.to_lowercase();
+        if Self::SUPPORTED_PROVIDERS.contains(&provider_lower.as_str()) {
+            Ok(())
+        } else {
+            Err(SubscriptionError::InvalidProvider(format!(
+                "Unsupported provider: '{}'. Supported: {}",
+                provider,
+                Self::SUPPORTED_PROVIDERS.join(", ")
+            )))
+        }
+    }
+
     /// Convert Stripe subscription to our Subscription model
     fn stripe_subscription_to_model(
         &self,
         stripe_sub: &StripeSubscription,
         user_id: UserId,
+        provider: &str,
     ) -> Result<Subscription, SubscriptionError> {
         let price_id = stripe_sub
             .items
@@ -179,6 +197,7 @@ impl SubscriptionServiceImpl {
         Ok(Subscription {
             subscription_id: stripe_sub.id.to_string(),
             user_id,
+            provider: provider.to_string(),
             customer_id,
             price_id,
             status: stripe_sub.status.to_string(),
@@ -232,15 +251,20 @@ impl SubscriptionService for SubscriptionServiceImpl {
     async fn create_subscription(
         &self,
         user_id: UserId,
+        provider: String,
         plan: String,
         success_url: String,
         cancel_url: String,
     ) -> Result<String, SubscriptionError> {
         tracing::info!(
-            "Creating subscription checkout for user_id={}, plan={}",
+            "Creating subscription checkout for user_id={}, provider={}, plan={}",
             user_id,
+            provider,
             plan
         );
+
+        // Validate provider (only stripe supported for now)
+        Self::validate_provider(&provider)?;
 
         // Get stripe plans from system configs
         let stripe_plans = self.get_stripe_plans().await?;
@@ -337,7 +361,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .map_err(|e| SubscriptionError::StripeError(e.to_string()))?;
 
         // Update database (with transaction)
-        let updated_model = self.stripe_subscription_to_model(&updated_sub, user_id)?;
+        let updated_model =
+            self.stripe_subscription_to_model(&updated_sub, user_id, &subscription.provider)?;
         let mut db_client = self
             .db_pool
             .get()
@@ -401,6 +426,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 SubscriptionWithPlan {
                     subscription_id: sub.subscription_id,
                     user_id: sub.user_id.0.to_string(),
+                    provider: sub.provider,
                     plan,
                     status: sub.status,
                     current_period_end: sub.current_period_end,
@@ -580,8 +606,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 SubscriptionError::InternalError(format!("Invalid user_id: {}", e))
             })?);
 
-            // Convert to our model
-            let subscription = self.stripe_subscription_to_model(&stripe_sub, user_id)?;
+            // Convert to our model (Stripe webhook => provider is stripe)
+            let subscription = self.stripe_subscription_to_model(&stripe_sub, user_id, "stripe")?;
             Some((subscription_id.to_string(), subscription))
         } else {
             None

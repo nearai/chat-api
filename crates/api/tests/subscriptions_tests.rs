@@ -146,6 +146,52 @@ async fn test_create_subscription_not_configured() {
 
 #[tokio::test]
 #[serial(subscription_tests)]
+async fn test_create_subscription_invalid_provider() {
+    let server = create_test_server().await;
+
+    // Configure stripe with some plans
+    set_stripe_plans(
+        &server,
+        json!({
+            "basic": "price_test_basic",
+            "pro": "price_test_pro"
+        }),
+    )
+    .await;
+
+    let user_email = "test_create_invalid_provider@example.com";
+    let user_token = mock_login(&server, user_email).await;
+
+    let request_body = json!({
+        "provider": "paypal",
+        "plan": "basic",
+        "success_url": "https://example.com/success",
+        "cancel_url": "https://example.com/cancel"
+    });
+
+    let response = server
+        .post("/v1/subscriptions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&request_body)
+        .await;
+
+    // Should return 400 for unsupported provider
+    assert_eq!(
+        response.status_code(),
+        400,
+        "Should return 400 for invalid/unsupported provider"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
 async fn test_create_subscription_invalid_plan() {
     let server = create_test_server().await;
 
