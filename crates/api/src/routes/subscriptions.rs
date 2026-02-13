@@ -279,7 +279,7 @@ pub async fn list_subscriptions(
 }
 
 /// Handle Stripe webhook events (public endpoint - no auth required)
-pub async fn handle_webhook(
+pub async fn handle_stripe_webhook(
     State(app_state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
@@ -326,6 +326,9 @@ pub fn create_subscriptions_router() -> Router<AppState> {
 /// Create public subscription router (for webhooks and plans - no auth)
 pub fn create_public_subscriptions_router() -> Router<AppState> {
     Router::new()
-        .route("/v1/subscriptions/webhook", post(handle_webhook))
+        .route(
+            "/v1/subscription/stripe/webhook",
+            post(handle_stripe_webhook),
+        )
         .route("/v1/subscriptions/plans", get(list_plans))
 }

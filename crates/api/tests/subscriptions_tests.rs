@@ -285,9 +285,9 @@ async fn test_webhook_requires_signature() {
         "type": "customer.subscription.created"
     });
 
-    // POST /v1/subscriptions/webhook without signature should return 400
+    // POST /v1/subscription/stripe/webhook without signature should return 400
     let response = server
-        .post("/v1/subscriptions/webhook")
+        .post("/v1/subscription/stripe/webhook")
         .add_header(
             http::HeaderName::from_static("content-type"),
             http::HeaderValue::from_static("application/json"),
