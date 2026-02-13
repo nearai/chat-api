@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::Duration;
+use chrono::{DateTime, Duration, Utc};
 
 use crate::UserId;
 
@@ -65,7 +65,11 @@ impl UserUsageService for UserUsageServiceImpl {
         &self,
         limit: i64,
         rank_by: super::ports::UsageRankBy,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
     ) -> anyhow::Result<Vec<super::ports::UserUsageSummary>> {
-        self.repo.get_top_users_usage(limit, rank_by).await
+        self.repo
+            .get_top_users_usage(limit, rank_by, start, end)
+            .await
     }
 }

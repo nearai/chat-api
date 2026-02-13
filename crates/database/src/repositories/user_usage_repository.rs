@@ -2,7 +2,7 @@
 
 use crate::pool::DbPool;
 use async_trait::async_trait;
-use chrono::Duration;
+use chrono::{DateTime, Duration, Utc};
 use services::user_usage::{UsageRankBy, UserUsageRepository, UserUsageSummary};
 use services::UserId;
 
@@ -125,12 +125,15 @@ impl UserUsageRepository for PostgresUserUsageRepository {
         &self,
         limit: i64,
         rank_by: UsageRankBy,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
     ) -> anyhow::Result<Vec<UserUsageSummary>> {
         let client = self.pool.get().await?;
         let order = match rank_by {
             UsageRankBy::Token => "token_sum DESC",
             UsageRankBy::Cost => "cost_nano_usd DESC",
         };
+        // Time range: [start, end) — left-closed, right-open. NULL means no bound.
         let query = format!(
             r#"
             WITH agg AS (
@@ -140,6 +143,8 @@ impl UserUsageRepository for PostgresUserUsageRepository {
                     COALESCE(SUM(CASE WHEN metric_key IN ('image.generate', 'image.edit') THEN quantity ELSE 0 END), 0)::bigint AS image_num,
                     COALESCE(SUM(COALESCE(cost_nano_usd, 0)), 0)::bigint AS cost_nano_usd
                 FROM user_usage_event
+                WHERE ($2::timestamptz IS NULL OR created_at >= $2)
+                  AND ($3::timestamptz IS NULL OR created_at < $3)
                 GROUP BY user_id
             )
             SELECT user_id, token_sum, image_num, cost_nano_usd
@@ -149,7 +154,7 @@ impl UserUsageRepository for PostgresUserUsageRepository {
             "#,
             order
         );
-        let rows = client.query(&query, &[&limit]).await?;
+        let rows = client.query(&query, &[&limit, &start, &end]).await?;
         Ok(rows
             .iter()
             .map(|row| UserUsageSummary {

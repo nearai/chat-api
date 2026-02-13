@@ -319,6 +319,10 @@ pub struct TopUsageQuery {
     /// Maximum number of users to return (default: LIST_USERS_LIMIT_MAX)
     #[serde(default = "default_top_usage_limit")]
     pub limit: i64,
+    /// Start of the time period (ISO 8601). When set, both start and end must be set; interval is [start, end).
+    pub start: Option<DateTime<Utc>>,
+    /// End of the time period (ISO 8601). When set, both start and end must be set; interval is [start, end).
+    pub end: Option<DateTime<Utc>>,
 }
 
 fn default_usage_rank_by() -> String {
@@ -383,7 +387,9 @@ pub async fn get_usage_by_user_id(
     tag = "Admin",
     params(
         ("rank_by" = Option<String>, Query, description = "Rank by 'token' or 'cost' (default: token)"),
-        ("limit" = Option<i64>, Query, description = "Max users to return (default: 100)")
+        ("limit" = Option<i64>, Query, description = "Max users to return (default: 100)"),
+        ("start" = Option<DateTime<Utc>>, Query, description = "Start of time period (ISO 8601); use with end; interval [start, end)"),
+        ("end" = Option<DateTime<Utc>>, Query, description = "End of time period (ISO 8601); use with start; interval [start, end)")
     ),
     responses(
         (status = 200, description = "Top usage list", body = TopUsageResponse),
@@ -413,9 +419,16 @@ pub async fn get_top_usage(
         )));
     }
 
+    let (start, end) = (params.start, params.end);
+    if let (Some(s), Some(e)) = (start, end) {
+        if s >= e {
+            return Err(ApiError::bad_request("start must be before end"));
+        }
+    }
+
     let users = app_state
         .user_usage_service
-        .get_top_users_usage(params.limit, rank_by)
+        .get_top_users_usage(params.limit, rank_by, params.start, params.end)
         .await
         .map_err(|e| {
             tracing::error!("Failed to get top usage: {}", e);

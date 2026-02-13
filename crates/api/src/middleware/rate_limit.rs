@@ -673,6 +673,8 @@ mod tests {
                 &self,
                 _limit: i64,
                 _rank_by: UsageRankBy,
+                _start: Option<chrono::DateTime<chrono::Utc>>,
+                _end: Option<chrono::DateTime<chrono::Utc>>,
             ) -> anyhow::Result<Vec<UserUsageSummary>> {
                 Ok(vec![])
             }
@@ -729,6 +731,8 @@ mod tests {
                 &self,
                 _limit: i64,
                 _rank_by: UsageRankBy,
+                _start: Option<chrono::DateTime<chrono::Utc>>,
+                _end: Option<chrono::DateTime<chrono::Utc>>,
             ) -> anyhow::Result<Vec<UserUsageSummary>> {
                 Ok(vec![])
             }

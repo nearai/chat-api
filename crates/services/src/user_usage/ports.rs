@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use chrono::Duration;
+use chrono::{DateTime, Duration, Utc};
 
 use crate::UserId;
 
@@ -58,11 +58,14 @@ pub trait UserUsageRepository: Send + Sync {
         user_id: UserId,
     ) -> anyhow::Result<Option<UserUsageSummary>>;
 
-    /// Top N users by usage (all-time), ordered by token_sum or cost_nano_usd.
+    /// Top N users by usage, ordered by token_sum or cost_nano_usd.
+    /// When start/end are Some, only events with created_at in [start, end) are included.
     async fn get_top_users_usage(
         &self,
         limit: i64,
         rank_by: UsageRankBy,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
     ) -> anyhow::Result<Vec<UserUsageSummary>>;
 }
 
@@ -96,10 +99,12 @@ pub trait UserUsageService: Send + Sync {
         user_id: UserId,
     ) -> anyhow::Result<Option<UserUsageSummary>>;
 
-    /// Top N users by usage (all-time), ordered by token or cost.
+    /// Top N users by usage, ordered by token or cost. Optional [start, end) time range.
     async fn get_top_users_usage(
         &self,
         limit: i64,
         rank_by: UsageRankBy,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
     ) -> anyhow::Result<Vec<UserUsageSummary>>;
 }
