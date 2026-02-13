@@ -88,10 +88,11 @@ impl UserUsageRepository for PostgresUserUsageRepository {
     async fn get_usage_by_user_id(
         &self,
         user_id: UserId,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
     ) -> anyhow::Result<Option<UserUsageSummary>> {
         let client = self.pool.get().await?;
-        // Group by user_id so that query_opt returns None when the user has no usage events.
-        // This allows API layer to distinguish "no usage" from "0 usage".
+        // Time range: [start, end) — left-closed, right-open. NULL means no bound.
         let row = client
             .query_opt(
                 r#"
@@ -102,9 +103,11 @@ impl UserUsageRepository for PostgresUserUsageRepository {
                     COALESCE(SUM(COALESCE(cost_nano_usd, 0)), 0)::bigint AS cost_nano_usd
                 FROM user_usage_event
                 WHERE user_id = $1
+                  AND ($2::timestamptz IS NULL OR created_at >= $2)
+                  AND ($3::timestamptz IS NULL OR created_at < $3)
                 GROUP BY user_id
                 "#,
-                &[&user_id],
+                &[&user_id, &start, &end],
             )
             .await?;
 

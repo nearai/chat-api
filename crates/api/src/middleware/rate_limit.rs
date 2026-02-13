@@ -660,6 +660,8 @@ mod tests {
             async fn get_usage_by_user_id(
                 &self,
                 user_id: UserId,
+                _start: Option<chrono::DateTime<chrono::Utc>>,
+                _end: Option<chrono::DateTime<chrono::Utc>>,
             ) -> anyhow::Result<Option<UserUsageSummary>> {
                 Ok(Some(UserUsageSummary {
                     user_id,
@@ -718,6 +720,8 @@ mod tests {
             async fn get_usage_by_user_id(
                 &self,
                 user_id: UserId,
+                _start: Option<chrono::DateTime<chrono::Utc>>,
+                _end: Option<chrono::DateTime<chrono::Utc>>,
             ) -> anyhow::Result<Option<UserUsageSummary>> {
                 Ok(Some(UserUsageSummary {
                     user_id,

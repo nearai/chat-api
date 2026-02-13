@@ -62,7 +62,7 @@ pub async fn get_my_usage(
 ) -> Result<Json<UserUsageResponse>, ApiError> {
     let summary = app_state
         .user_usage_service
-        .get_usage_by_user_id(user.user_id)
+        .get_usage_by_user_id(user.user_id, None, None)
         .await
         .map_err(|e| {
             tracing::error!("Failed to get usage for user_id={}: {}", user.user_id, e);

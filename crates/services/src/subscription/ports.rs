@@ -76,6 +76,8 @@ pub enum SubscriptionError {
     NotConfigured,
     /// No active subscription found for user
     NoActiveSubscription,
+    /// Monthly token limit exceeded (used >= limit)
+    MonthlyTokenLimitExceeded { used: i64, limit: u64 },
     /// Subscription is not scheduled for cancellation (cannot resume)
     SubscriptionNotScheduledForCancellation,
     /// User has no Stripe customer record
@@ -100,6 +102,13 @@ impl fmt::Display for SubscriptionError {
             Self::InvalidProvider(provider) => write!(f, "Invalid provider: {}", provider),
             Self::NotConfigured => write!(f, "Stripe is not configured"),
             Self::NoActiveSubscription => write!(f, "No active subscription found"),
+            Self::MonthlyTokenLimitExceeded { used, limit } => {
+                write!(
+                    f,
+                    "Monthly token limit exceeded: used {} of {} tokens",
+                    used, limit
+                )
+            }
             Self::SubscriptionNotScheduledForCancellation => {
                 write!(f, "Subscription is not scheduled for cancellation")
             }
@@ -235,4 +244,12 @@ pub trait SubscriptionService: Send + Sync {
         user_id: UserId,
         return_url: String,
     ) -> Result<String, SubscriptionError>;
+
+    /// Check that user has an active subscription for proxy/chat access.
+    /// Returns Ok(()) when allowed, Err(NoActiveSubscription) when subscription required but not found.
+    /// When Stripe is not configured (NotConfigured), returns Ok(()) to allow access (no gating).
+    async fn require_subscription_for_proxy(
+        &self,
+        user_id: UserId,
+    ) -> Result<(), SubscriptionError>;
 }

@@ -1,11 +1,14 @@
 mod common;
 
+use api::routes::api::SUBSCRIPTION_REQUIRED_ERROR_MESSAGE;
 use common::{
     clear_subscription_plans, create_test_server, create_test_server_and_db,
     insert_test_subscription, mock_login, set_subscription_plans, TestServerConfig,
 };
 use serde_json::json;
 use serial_test::serial;
+use services::user::ports::UserRepository;
+use services::user_usage::{UserUsageRepository, METRIC_KEY_LLM_TOKENS};
 
 #[tokio::test]
 #[serial(subscription_tests)]
@@ -788,5 +791,356 @@ async fn test_portal_session_no_stripe_customer() {
         response.status_code(),
         404,
         "Should return 404 when user has no Stripe customer"
+    );
+}
+
+// --- Subscription-gated proxy/chat tests ---
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_proxy_returns_403_without_subscription_when_plans_configured() {
+    let server = create_test_server().await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "free": {
+                "providers": {},
+                "monthly_tokens": {"max": 0}
+            },
+            "basic": {
+                "providers": {"stripe": {"price_id": "price_test_basic"}},
+                "private_assistant_instances": {"max": 1},
+                "monthly_tokens": {"max": 1000000}
+            }
+        }),
+    )
+    .await;
+
+    let user_email = "test_proxy_no_subscription@example.com";
+    let user_token = mock_login(&server, user_email).await;
+
+    // User has no subscription - falls back to "free" plan (max 0 tokens). Used 0 >= 0 -> blocked.
+    for (path, body) in [
+        (
+            "/v1/chat/completions",
+            json!({
+                "model": "gpt-4o",
+                "messages": [{"role": "user", "content": "Hello"}]
+            }),
+        ),
+        (
+            "/v1/responses",
+            json!({
+                "model": "gpt-4o",
+                "input": "Hello"
+            }),
+        ),
+        (
+            "/v1/images/generations",
+            json!({
+                "prompt": "A sunset",
+                "n": 1,
+                "size": "1024x1024"
+            }),
+        ),
+    ] {
+        let response = server
+            .post(path)
+            .add_header(
+                http::HeaderName::from_static("authorization"),
+                http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+            )
+            .json(&body)
+            .await;
+
+        assert_eq!(
+            response.status_code(),
+            403,
+            "POST {} should return 403 when user has no subscription",
+            path
+        );
+
+        let body_res: serde_json::Value = response.json();
+        let err_msg = body_res.get("error").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            err_msg.contains("Monthly token limit exceeded")
+                || err_msg == SUBSCRIPTION_REQUIRED_ERROR_MESSAGE,
+            "POST {} should return token limit or subscription error, got: {}",
+            path,
+            err_msg
+        );
+    }
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_proxy_allows_with_subscription() {
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": {"stripe": {"price_id": "price_test_basic"}},
+                "private_assistant_instances": {"max": 1},
+                "monthly_tokens": {"max": 1000000}
+            }
+        }),
+    )
+    .await;
+
+    let user_email = "test_proxy_with_subscription@example.com";
+    insert_test_subscription(&server, &db, user_email, false).await;
+    let user_token = mock_login(&server, user_email).await;
+
+    // User has active subscription - proxy should allow (may get 502 from upstream)
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}]
+        }))
+        .await;
+
+    assert_ne!(
+        response.status_code(),
+        403,
+        "User with subscription should not get 403 (may get 502/other from upstream)"
+    );
+    let body_res: serde_json::Value = response.json();
+    assert_ne!(
+        body_res.get("error").and_then(|v| v.as_str()),
+        Some(SUBSCRIPTION_REQUIRED_ERROR_MESSAGE),
+        "User with subscription should not get subscription required error"
+    );
+
+    // Also verify /v1/responses allows with subscription
+    let response = server
+        .post("/v1/responses")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-4o",
+            "input": "Hello"
+        }))
+        .await;
+
+    assert_ne!(
+        response.status_code(),
+        403,
+        "POST /v1/responses with subscription should not get 403 (may get 502/other from upstream)"
+    );
+    let body_res: serde_json::Value = response.json();
+    assert_ne!(
+        body_res.get("error").and_then(|v| v.as_str()),
+        Some(SUBSCRIPTION_REQUIRED_ERROR_MESSAGE),
+        "POST /v1/responses with subscription should not get subscription required error"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_proxy_allows_when_subscription_not_configured() {
+    let server = create_test_server().await;
+
+    clear_subscription_plans(&server).await;
+
+    let user_email = "test_proxy_no_plans@example.com";
+    let user_token = mock_login(&server, user_email).await;
+
+    // No plans configured - gating is skipped, should not get 403
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}]
+        }))
+        .await;
+
+    assert_ne!(
+        response.status_code(),
+        403,
+        "When subscription plans not configured, should not gate proxy (may get 502/other)"
+    );
+    let body_res: serde_json::Value = response.json();
+    assert_ne!(
+        body_res.get("error").and_then(|v| v.as_str()),
+        Some(SUBSCRIPTION_REQUIRED_ERROR_MESSAGE)
+    );
+
+    // Also verify /v1/responses allows when subscription not configured
+    let response = server
+        .post("/v1/responses")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-4o",
+            "input": "Hello"
+        }))
+        .await;
+
+    assert_ne!(
+        response.status_code(),
+        403,
+        "POST /v1/responses when subscription not configured should not get 403"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_proxy_blocks_when_monthly_token_limit_exceeded() {
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": {"stripe": {"price_id": "price_test_basic"}},
+                "private_assistant_instances": {"max": 1},
+                "monthly_tokens": {"max": 100}
+            }
+        }),
+    )
+    .await;
+
+    let user_email = "test_proxy_token_limit@example.com";
+    insert_test_subscription(&server, &db, user_email, false).await;
+    let user_token = mock_login(&server, user_email).await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .expect("get user")
+        .expect("user exists");
+
+    // Record 150 tokens (exceeds limit of 100)
+    db.user_usage_repository()
+        .record_usage_event(user.id, METRIC_KEY_LLM_TOKENS, 150, Some(0), None)
+        .await
+        .expect("record usage");
+
+    // Proxy should return 403 with token limit exceeded message
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}]
+        }))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        403,
+        "Proxy should return 403 when monthly token limit exceeded"
+    );
+    let body_res: serde_json::Value = response.json();
+    let err_msg = body_res.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        err_msg.contains("Monthly token limit exceeded"),
+        "Error should mention token limit, got: {}",
+        err_msg
+    );
+    assert!(
+        err_msg.contains("150") && err_msg.contains("100"),
+        "Error should include used and limit values, got: {}",
+        err_msg
+    );
+
+    // Also verify /v1/responses returns 403 when token limit exceeded
+    let response = server
+        .post("/v1/responses")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-4o",
+            "input": "Hello"
+        }))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        403,
+        "POST /v1/responses should return 403 when monthly token limit exceeded"
+    );
+    let body_res: serde_json::Value = response.json();
+    let err_msg = body_res.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        err_msg.contains("Monthly token limit exceeded")
+            && err_msg.contains("150")
+            && err_msg.contains("100"),
+        "POST /v1/responses error should mention token limit with values, got: {}",
+        err_msg
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_responses_returns_403_without_subscription_when_plans_configured() {
+    let server = create_test_server().await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "free": {
+                "providers": {},
+                "monthly_tokens": {"max": 0}
+            },
+            "basic": {
+                "providers": {"stripe": {"price_id": "price_test_basic"}},
+                "private_assistant_instances": {"max": 1},
+                "monthly_tokens": {"max": 1000000}
+            }
+        }),
+    )
+    .await;
+
+    let user_email = "test_responses_no_subscription@example.com";
+    let user_token = mock_login(&server, user_email).await;
+
+    // User has no subscription - POST /v1/responses should return 403
+    let response = server
+        .post("/v1/responses")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-4o",
+            "input": "Hello"
+        }))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        403,
+        "POST /v1/responses should return 403 when user has no subscription (free plan max 0)"
+    );
+    let body_res: serde_json::Value = response.json();
+    let err_msg = body_res.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        err_msg.contains("Monthly token limit exceeded")
+            || err_msg == SUBSCRIPTION_REQUIRED_ERROR_MESSAGE,
+        "POST /v1/responses should return token limit or subscription error, got: {}",
+        err_msg
     );
 }
