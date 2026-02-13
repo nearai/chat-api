@@ -1,7 +1,24 @@
 use async_trait::async_trait;
-use chrono::Duration;
+use chrono::{DateTime, Duration, Utc};
 
 use crate::UserId;
+
+/// Per-user usage aggregate (all-time token sum, image count, and cost sum).
+#[derive(Debug, Clone)]
+pub struct UserUsageSummary {
+    pub user_id: UserId,
+    pub token_sum: i64,
+    /// Sum of quantity for image.generate + image.edit (image count).
+    pub image_num: i64,
+    pub cost_nano_usd: i64,
+}
+
+/// Rank order for top usage listing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageRankBy {
+    Token,
+    Cost,
+}
 
 /// Metric keys for user_usage_event (matches DB constraint).
 pub const METRIC_KEY_LLM_TOKENS: &str = "llm.tokens";
@@ -34,6 +51,22 @@ pub trait UserUsageRepository: Send + Sync {
         user_id: UserId,
         window_duration: Duration,
     ) -> anyhow::Result<i64>;
+
+    /// All-time usage for a single user (token sum for llm.tokens, cost sum).
+    async fn get_usage_by_user_id(
+        &self,
+        user_id: UserId,
+    ) -> anyhow::Result<Option<UserUsageSummary>>;
+
+    /// Top N users by usage, ordered by token_sum or cost_nano_usd.
+    /// When start/end are Some, only events with created_at in [start, end) are included.
+    async fn get_top_users_usage(
+        &self,
+        limit: i64,
+        rank_by: UsageRankBy,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+    ) -> anyhow::Result<Vec<UserUsageSummary>>;
 }
 
 /// Service interface for per-user usage events.
@@ -59,4 +92,19 @@ pub trait UserUsageService: Send + Sync {
         user_id: UserId,
         window_duration: Duration,
     ) -> anyhow::Result<i64>;
+
+    /// All-time usage for a single user.
+    async fn get_usage_by_user_id(
+        &self,
+        user_id: UserId,
+    ) -> anyhow::Result<Option<UserUsageSummary>>;
+
+    /// Top N users by usage, ordered by token or cost. Optional [start, end) time range.
+    async fn get_top_users_usage(
+        &self,
+        limit: i64,
+        rank_by: UsageRankBy,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+    ) -> anyhow::Result<Vec<UserUsageSummary>>;
 }
