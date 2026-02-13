@@ -2221,7 +2221,7 @@ async fn proxy_responses(
 
     // Check if user is currently banned before proceeding
     ensure_user_not_banned(&state, &user).await?;
-    ensure_user_has_active_subscription(&state, &user).await?;
+    ensure_user_has_sufficient_token_quota(&state, &user).await?;
 
     // Trigger an asynchronous NEAR balance check. This does NOT block the current request:
     // if the balance is too low, a ban will be created and will affect subsequent requests.
@@ -2702,9 +2702,9 @@ async fn ensure_user_not_banned(
     Ok(())
 }
 
-/// Ensure the authenticated user has an active subscription for proxy/chat access.
-/// When subscription plans are configured, users without a subscription get 403.
-async fn ensure_user_has_active_subscription(
+/// Ensure the authenticated user has sufficient token quota in their subscription for proxy/chat access.
+/// When subscription plans are configured, users without a plan or over their monthly limit get 403.
+async fn ensure_user_has_sufficient_token_quota(
     state: &crate::state::AppState,
     user: &AuthenticatedUser,
 ) -> Result<(), Response> {
@@ -3492,7 +3492,7 @@ async fn proxy_chat_completions(
     );
 
     ensure_user_not_banned(&state, &user).await?;
-    ensure_user_has_active_subscription(&state, &user).await?;
+    ensure_user_has_sufficient_token_quota(&state, &user).await?;
     spawn_near_balance_check(&state, &user);
 
     let body_bytes = extract_body_bytes(request).await?;
@@ -3630,7 +3630,7 @@ async fn proxy_image_generations(
     );
 
     ensure_user_not_banned(&state, &user).await?;
-    ensure_user_has_active_subscription(&state, &user).await?;
+    ensure_user_has_sufficient_token_quota(&state, &user).await?;
     spawn_near_balance_check(&state, &user);
 
     let body_bytes = extract_body_bytes(request).await?;
@@ -3814,7 +3814,7 @@ async fn proxy_image_edits(
     );
 
     ensure_user_not_banned(&state, &user).await?;
-    ensure_user_has_active_subscription(&state, &user).await?;
+    ensure_user_has_sufficient_token_quota(&state, &user).await?;
     spawn_near_balance_check(&state, &user);
 
     // Read full multipart body as bytes (to keep original formdata for forwarding).
