@@ -219,7 +219,7 @@ async fn test_shared_conversation_author_attribution() {
     let shared_token = mock_login(&server, "shared@test.com").await;
 
     // Step 1: Owner creates conversation
-    println!("1. Owner creating a conversation...");
+    println!("\n1. Owner creating a conversation...");
     let create_conv_body = json!({
         "metadata": {"test": "shared_author"}
     });

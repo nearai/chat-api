@@ -53,12 +53,16 @@ pub struct AppState {
     pub metrics_service: Arc<dyn services::metrics::MetricsServiceTrait>,
     /// Analytics service for database-backed analytics and rate limiting
     pub analytics_service: Arc<dyn services::analytics::AnalyticsServiceTrait>,
+    /// User usage service for token and cost accounting
+    pub user_usage_service: Arc<dyn services::user_usage::UserUsageService>,
     /// NEAR RPC URL used for on-chain balance checks (if configured)
     pub near_rpc_url: Url,
     /// In-memory cache for NEAR account balances to avoid frequent RPC calls
     pub near_balance_cache: NearBalanceCache,
     /// In-memory cache for model settings needed by /v1/responses (public + system_prompt)
     pub model_settings_cache: ModelSettingsCache,
+    /// In-memory cache for model pricing (input/output nano per token) from cloud-api for cost calculation
+    pub model_pricing_cache: crate::model_pricing::ModelPricingCache,
     /// Rate limit state for hot-reloadable rate limit configuration
     pub rate_limit_state: crate::middleware::RateLimitState,
 }

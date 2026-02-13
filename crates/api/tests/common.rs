@@ -3,11 +3,13 @@
 use api::middleware::RateLimitState;
 use api::{create_router_with_cors, AppState};
 use axum_test::TestServer;
+use chrono::Duration;
 use serde_json::json;
 use services::analytics::AnalyticsServiceImpl;
 use services::conversation::share_service::ConversationShareServiceImpl;
 use services::file::service::FileServiceImpl;
 use services::metrics::MockMetricsService;
+use services::system_configs::ports::RateLimitConfig;
 use services::vpc::test_helpers::MockVpcCredentialsService;
 use services::vpc::VpcCredentials;
 use std::sync::Arc;
@@ -21,6 +23,10 @@ static MIGRATIONS_INITIALIZED: OnceCell<()> = OnceCell::const_new();
 pub struct TestServerConfig {
     pub vpc_credentials: Option<VpcCredentials>,
     pub cloud_api_base_url: String,
+    /// Optional override for `/v1/responses` rate limiting in tests.
+    ///
+    /// If not set, tests use a permissive default to avoid unrelated flakiness.
+    pub rate_limit_config: Option<RateLimitConfig>,
 }
 
 /// Create a test server with all services initialized (VPC not configured)
@@ -30,6 +36,14 @@ pub async fn create_test_server() -> TestServer {
 
 /// Create a test server with custom configuration
 pub async fn create_test_server_with_config(test_config: TestServerConfig) -> TestServer {
+    let (server, _) = create_test_server_and_db(test_config).await;
+    server
+}
+
+/// Create a test server and database for tests that need to pre-populate DB (e.g. token/cost rate limit).
+pub async fn create_test_server_and_db(
+    test_config: TestServerConfig,
+) -> (TestServer, database::Database) {
     // Load .env file
     dotenvy::dotenv().ok();
 
@@ -135,11 +149,34 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
     let analytics_repo = db.analytics_repository();
     let analytics_service: Arc<dyn services::analytics::AnalyticsServiceTrait> =
         Arc::new(AnalyticsServiceImpl::new(
-            analytics_repo as Arc<dyn services::analytics::AnalyticsRepository>,
+            analytics_repo.clone() as Arc<dyn services::analytics::AnalyticsRepository>
         ));
 
+    // Create user usage service
+    let user_usage_repo =
+        db.user_usage_repository() as Arc<dyn services::user_usage::UserUsageRepository>;
+    let user_usage_service: Arc<dyn services::user_usage::UserUsageService> = Arc::new(
+        services::user_usage::UserUsageServiceImpl::new(user_usage_repo),
+    );
+
     // Create rate limit state for testing
-    let rate_limit_state = RateLimitState::new(analytics_service.clone());
+    // Use a permissive default to avoid unrelated rate-limit interference.
+    // Individual rate limit tests can override via `TestServerConfig.rate_limit_config`.
+    let default_rate_limit_config = RateLimitConfig {
+        max_concurrent: 2,
+        max_requests_per_window: 100,
+        window_duration: Duration::seconds(60),
+        window_limits: vec![],
+        token_window_limits: vec![],
+        cost_window_limits: vec![],
+    };
+    let rate_limit_state = RateLimitState::with_config(
+        test_config
+            .rate_limit_config
+            .unwrap_or(default_rate_limit_config),
+        analytics_service.clone(),
+        user_usage_service.clone(),
+    );
 
     // Create application state
     let app_state = AppState {
@@ -160,9 +197,13 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
         cloud_api_base_url: test_config.cloud_api_base_url.clone(),
         metrics_service,
         analytics_service,
+        user_usage_service,
         near_rpc_url: config.near.rpc_url.clone(),
         near_balance_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         model_settings_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        model_pricing_cache: api::model_pricing::ModelPricingCache::new(
+            test_config.cloud_api_base_url.clone(),
+        ),
         rate_limit_state,
     };
 
@@ -170,7 +211,8 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
     let app = create_router_with_cors(app_state, config::CorsConfig::default());
 
     // Create test server
-    TestServer::new(app).expect("Failed to create test server")
+    let server = TestServer::new(app).expect("Failed to create test server");
+    (server, db)
 }
 
 /// Helper function to get/create a user and get a session token via mock login.

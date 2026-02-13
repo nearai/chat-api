@@ -10,6 +10,7 @@ pub use repositories::{
     PostgresConversationShareRepository, PostgresFileRepository, PostgresModelRepository,
     PostgresNearNonceRepository, PostgresOAuthRepository, PostgresSessionRepository,
     PostgresSystemConfigsRepository, PostgresUserRepository, PostgresUserSettingsRepository,
+    PostgresUserUsageRepository,
 };
 
 use crate::pool::create_pool_with_native_tls;
@@ -34,6 +35,7 @@ pub struct Database {
     app_config_repository: Arc<PostgresAppConfigRepository>,
     near_nonce_repository: Arc<PostgresNearNonceRepository>,
     analytics_repository: Arc<PostgresAnalyticsRepository>,
+    user_usage_repository: Arc<PostgresUserUsageRepository>,
     model_repository: Arc<PostgresModelRepository>,
     cluster_manager: Option<Arc<ClusterManager>>,
 }
@@ -54,6 +56,7 @@ impl Database {
         let app_config_repository = Arc::new(PostgresAppConfigRepository::new(pool.clone()));
         let near_nonce_repository = Arc::new(PostgresNearNonceRepository::new(pool.clone()));
         let analytics_repository = Arc::new(PostgresAnalyticsRepository::new(pool.clone()));
+        let user_usage_repository = Arc::new(PostgresUserUsageRepository::new(pool.clone()));
         let model_repository = Arc::new(PostgresModelRepository::new(pool.clone()));
 
         Self {
@@ -69,6 +72,7 @@ impl Database {
             app_config_repository,
             near_nonce_repository,
             analytics_repository,
+            user_usage_repository,
             model_repository,
             cluster_manager: None,
         }
@@ -242,6 +246,11 @@ impl Database {
     /// Get the analytics repository
     pub fn analytics_repository(&self) -> Arc<PostgresAnalyticsRepository> {
         self.analytics_repository.clone()
+    }
+
+    /// Get the user usage repository
+    pub fn user_usage_repository(&self) -> Arc<PostgresUserUsageRepository> {
+        self.user_usage_repository.clone()
     }
 
     /// Get the model settings repository
