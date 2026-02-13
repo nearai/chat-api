@@ -438,6 +438,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
             active_only
         );
 
+        // Verify subscriptions are configured (at least Stripe provider has plans)
+        self.get_plans_for_provider("stripe").await?;
+
         // Get subscription_plans from config for plan name resolution across providers
         let configs = self
             .system_configs_service
