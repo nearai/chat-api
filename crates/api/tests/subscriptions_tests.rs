@@ -1,6 +1,9 @@
 mod common;
 
-use common::{clear_subscription_plans, create_test_server, mock_login, set_subscription_plans};
+use common::{
+    clear_subscription_plans, create_test_server, create_test_server_and_db,
+    insert_test_subscription, mock_login, set_subscription_plans, TestServerConfig,
+};
 use serde_json::json;
 use serial_test::serial;
 
@@ -272,6 +275,134 @@ async fn test_cancel_subscription_not_found() {
         response.status_code(),
         404,
         "Should return 404 when no active subscription exists"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_resume_subscription_requires_auth() {
+    let server = create_test_server().await;
+
+    // POST /v1/subscriptions/resume without authentication should return 401
+    let response = server.post("/v1/subscriptions/resume").await;
+
+    assert_eq!(
+        response.status_code(),
+        401,
+        "POST /v1/subscriptions/resume should require authentication"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_resume_subscription_not_found() {
+    let server = create_test_server().await;
+
+    let user_email = "test_resume_subscription@example.com";
+    let user_token = mock_login(&server, user_email).await;
+
+    // Attempt to resume non-existent subscription
+    let response = server
+        .post("/v1/subscriptions/resume")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .await;
+
+    // Should return 404 when no active subscription exists
+    assert_eq!(
+        response.status_code(),
+        404,
+        "Should return 404 when no active subscription exists"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_resume_subscription_not_scheduled_for_cancellation() {
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "deployments": { "max": 1 }, "monthly_tokens": { "max": 1000000 } }
+        }),
+    )
+    .await;
+
+    let user_email = "test_resume_not_scheduled@example.com";
+    insert_test_subscription(&server, &db, user_email, false).await;
+
+    let user_token = mock_login(&server, user_email).await;
+
+    // Attempt to resume subscription that is NOT scheduled for cancellation
+    let response = server
+        .post("/v1/subscriptions/resume")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .await;
+
+    // Should return 400 when subscription is not scheduled for cancellation
+    assert_eq!(
+        response.status_code(),
+        400,
+        "Should return 400 when subscription is not scheduled for cancellation"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_list_subscriptions_successfully() {
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "deployments": { "max": 1 }, "monthly_tokens": { "max": 1000000 } }
+        }),
+    )
+    .await;
+
+    let user_email = "test_list_with_sub@example.com";
+    insert_test_subscription(&server, &db, user_email, false).await;
+
+    let user_token = mock_login(&server, user_email).await;
+
+    let response = server
+        .get("/v1/subscriptions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        200,
+        "Should return 200 when listing subscriptions with data"
+    );
+
+    let body: serde_json::Value = response.json();
+    let subscriptions = body
+        .get("subscriptions")
+        .expect("Should have subscriptions field")
+        .as_array()
+        .expect("subscriptions should be array");
+
+    assert_eq!(
+        subscriptions.len(),
+        1,
+        "Should have exactly one subscription"
+    );
+
+    let sub = &subscriptions[0];
+    assert_eq!(sub.get("plan").and_then(|v| v.as_str()), Some("basic"));
+    assert_eq!(
+        sub.get("cancel_at_period_end").and_then(|v| v.as_bool()),
+        Some(false)
     );
 }
 

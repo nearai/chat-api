@@ -10,10 +10,12 @@ use services::conversation::share_service::ConversationShareServiceImpl;
 use services::file::service::FileServiceImpl;
 use services::metrics::MockMetricsService;
 use services::system_configs::ports::RateLimitConfig;
+use services::user::ports::UserRepository;
 use services::vpc::test_helpers::MockVpcCredentialsService;
 use services::vpc::VpcCredentials;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
+use uuid::Uuid;
 
 // Global once cell to ensure migrations only run once across all tests
 static MIGRATIONS_INITIALIZED: OnceCell<()> = OnceCell::const_new();
@@ -286,6 +288,53 @@ pub async fn clear_subscription_plans(server: &TestServer) {
         "Failed to clear subscription_plans: {}",
         response.status_code()
     );
+}
+
+/// Insert a test subscription directly into the database for testing.
+/// Requires the user to exist (call mock_login first). The subscription uses a fake Stripe
+/// subscription_id; cancel/resume will fail at the Stripe API call, but list and
+/// "not scheduled for cancellation" checks work.
+pub async fn insert_test_subscription(
+    server: &TestServer,
+    db: &database::Database,
+    user_email: &str,
+    cancel_at_period_end: bool,
+) {
+    let _token = mock_login(server, user_email).await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .expect("get user")
+        .expect("user created by mock_login");
+
+    let period_end = chrono::Utc::now() + chrono::Duration::days(30);
+    let sub_id = format!("sub_test_{}", Uuid::new_v4());
+
+    let client = db.pool().get().await.expect("get pool client");
+    client
+        .execute(
+            "INSERT INTO subscriptions (
+                subscription_id, user_id, provider, customer_id, price_id, status,
+                current_period_end, cancel_at_period_end
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (subscription_id) DO UPDATE SET
+                cancel_at_period_end = EXCLUDED.cancel_at_period_end,
+                updated_at = NOW()",
+            &[
+                &sub_id,
+                &user.id,
+                &"stripe",
+                &"cus_test",
+                &"price_test_basic",
+                &"active",
+                &period_end,
+                &cancel_at_period_end,
+            ],
+        )
+        .await
+        .expect("insert subscription");
 }
 
 /// Set subscription_plans configuration

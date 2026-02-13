@@ -75,6 +75,8 @@ pub enum SubscriptionError {
     NotConfigured,
     /// No active subscription found for user
     NoActiveSubscription,
+    /// Subscription is not scheduled for cancellation (cannot resume)
+    SubscriptionNotScheduledForCancellation,
     /// User has no Stripe customer record
     NoStripeCustomer,
     /// Stripe API error
@@ -97,6 +99,9 @@ impl fmt::Display for SubscriptionError {
             Self::InvalidProvider(provider) => write!(f, "Invalid provider: {}", provider),
             Self::NotConfigured => write!(f, "Stripe is not configured"),
             Self::NoActiveSubscription => write!(f, "No active subscription found"),
+            Self::SubscriptionNotScheduledForCancellation => {
+                write!(f, "Subscription is not scheduled for cancellation")
+            }
             Self::NoStripeCustomer => write!(f, "User has no Stripe customer record"),
             Self::StripeError(msg) => write!(f, "Stripe error: {}", msg),
             Self::DatabaseError(msg) => write!(f, "Database error: {}", msg),
@@ -203,6 +208,9 @@ pub trait SubscriptionService: Send + Sync {
 
     /// Cancel a user's active subscription (at period end)
     async fn cancel_subscription(&self, user_id: UserId) -> Result<(), SubscriptionError>;
+
+    /// Resume a subscription that was scheduled to cancel at period end
+    async fn resume_subscription(&self, user_id: UserId) -> Result<(), SubscriptionError>;
 
     /// Get subscriptions for a user with plan names resolved
     /// If active_only is true, returns only active (not expired) subscriptions

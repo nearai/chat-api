@@ -61,6 +61,13 @@ pub struct CancelSubscriptionResponse {
     pub message: String,
 }
 
+/// Response for subscription resume
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ResumeSubscriptionResponse {
+    /// Success message
+    pub message: String,
+}
+
 /// Response containing user's subscriptions
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ListSubscriptionsResponse {
@@ -181,6 +188,10 @@ pub async fn create_subscription(
                 tracing::error!(error = ?msg, "Unexpected webhook error in create");
                 ApiError::internal_server_error("Failed to create subscription")
             }
+            SubscriptionError::SubscriptionNotScheduledForCancellation => {
+                tracing::error!("Unexpected SubscriptionNotScheduledForCancellation in create");
+                ApiError::internal_server_error("Failed to create subscription")
+            }
         })?;
 
     Ok(Json(CreateSubscriptionResponse { checkout_url }))
@@ -231,6 +242,58 @@ pub async fn cancel_subscription(
 
     Ok(Json(CancelSubscriptionResponse {
         message: "Subscription will be canceled at period end".to_string(),
+    }))
+}
+
+/// Resume a subscription that was scheduled to cancel at period end
+#[utoipa::path(
+    post,
+    path = "/v1/subscriptions/resume",
+    tag = "Subscriptions",
+    responses(
+        (status = 200, description = "Subscription resumed successfully", body = ResumeSubscriptionResponse),
+        (status = 400, description = "Subscription is not scheduled for cancellation", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "No active subscription found", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn resume_subscription(
+    State(app_state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+) -> Result<Json<ResumeSubscriptionResponse>, ApiError> {
+    tracing::info!("Resuming subscription for user_id={}", user.user_id);
+
+    app_state
+        .subscription_service
+        .resume_subscription(user.user_id)
+        .await
+        .map_err(|e| match e {
+            SubscriptionError::NoActiveSubscription => {
+                ApiError::not_found("No active subscription found")
+            }
+            SubscriptionError::SubscriptionNotScheduledForCancellation => {
+                ApiError::bad_request("Subscription is not scheduled for cancellation")
+            }
+            SubscriptionError::DatabaseError(msg) => {
+                tracing::error!(error = ?msg, "Database error resuming subscription");
+                ApiError::internal_server_error("Failed to resume subscription")
+            }
+            SubscriptionError::StripeError(msg) => {
+                tracing::error!(error = ?msg, "Stripe error resuming subscription");
+                ApiError::internal_server_error("Failed to resume subscription")
+            }
+            _ => {
+                tracing::error!(error = ?e, "Failed to resume subscription");
+                ApiError::internal_server_error("Failed to resume subscription")
+            }
+        })?;
+
+    Ok(Json(ResumeSubscriptionResponse {
+        message: "Subscription resumed successfully".to_string(),
     }))
 }
 
@@ -404,6 +467,7 @@ pub fn create_subscriptions_router() -> Router<AppState> {
         .route("/v1/subscriptions", post(create_subscription))
         .route("/v1/subscriptions", get(list_subscriptions))
         .route("/v1/subscriptions/cancel", post(cancel_subscription))
+        .route("/v1/subscriptions/resume", post(resume_subscription))
         .route("/v1/subscriptions/portal", post(create_portal_session))
 }
 

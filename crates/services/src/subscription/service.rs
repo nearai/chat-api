@@ -285,8 +285,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .unwrap_or_default();
 
         let plans: Vec<SubscriptionPlan> = stripe_plans
-            .into_iter()
-            .map(|(name, _price_id)| {
+            .into_keys()
+            .map(|name| {
                 let max_deployments = subscription_plans
                     .get(&name)
                     .and_then(|c| c.deployments.as_ref())
@@ -443,6 +443,69 @@ impl SubscriptionService for SubscriptionServiceImpl {
 
         tracing::info!(
             "Subscription canceled at period end: user_id={}, subscription_id={}",
+            user_id,
+            subscription.subscription_id
+        );
+
+        Ok(())
+    }
+
+    async fn resume_subscription(&self, user_id: UserId) -> Result<(), SubscriptionError> {
+        tracing::info!("Resuming subscription for user_id={}", user_id);
+
+        // Get active subscription
+        let subscription = self
+            .subscription_repo
+            .get_active_subscription(user_id)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
+            .ok_or(SubscriptionError::NoActiveSubscription)?;
+
+        // Only allow resume when subscription is scheduled to cancel at period end
+        if !subscription.cancel_at_period_end {
+            return Err(SubscriptionError::SubscriptionNotScheduledForCancellation);
+        }
+
+        // Resume subscription via Stripe API (clear cancel_at_period_end)
+        let client = self.get_stripe_client();
+        let subscription_id: stripe::SubscriptionId = subscription
+            .subscription_id
+            .parse()
+            .map_err(|_| SubscriptionError::StripeError("Invalid subscription ID".into()))?;
+
+        let params = stripe::UpdateSubscription {
+            cancel_at_period_end: Some(false),
+            ..Default::default()
+        };
+
+        let updated_sub = StripeSubscription::update(&client, &subscription_id, params)
+            .await
+            .map_err(|e| SubscriptionError::StripeError(e.to_string()))?;
+
+        // Update database (with transaction)
+        let updated_model =
+            self.stripe_subscription_to_model(&updated_sub, user_id, &subscription.provider)?;
+        let mut db_client = self
+            .db_pool
+            .get()
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+        let txn = db_client
+            .transaction()
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        self.subscription_repo
+            .upsert_subscription(&txn, updated_model)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        txn.commit()
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        tracing::info!(
+            "Subscription resumed: user_id={}, subscription_id={}",
             user_id,
             subscription.subscription_id
         );
