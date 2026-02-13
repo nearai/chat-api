@@ -53,4 +53,19 @@ impl UserUsageService for UserUsageServiceImpl {
     ) -> anyhow::Result<i64> {
         self.repo.get_cost_usage_sum(user_id, window_duration).await
     }
+
+    async fn get_usage_by_user_id(
+        &self,
+        user_id: UserId,
+    ) -> anyhow::Result<Option<super::ports::UserUsageSummary>> {
+        self.repo.get_usage_by_user_id(user_id).await
+    }
+
+    async fn get_top_users_usage(
+        &self,
+        limit: i64,
+        rank_by: super::ports::UsageRankBy,
+    ) -> anyhow::Result<Vec<super::ports::UserUsageSummary>> {
+        self.repo.get_top_users_usage(limit, rank_by).await
+    }
 }

@@ -3,7 +3,7 @@
 use crate::pool::DbPool;
 use async_trait::async_trait;
 use chrono::Duration;
-use services::user_usage::UserUsageRepository;
+use services::user_usage::{UsageRankBy, UserUsageRepository, UserUsageSummary};
 use services::UserId;
 
 pub struct PostgresUserUsageRepository {
@@ -83,5 +83,69 @@ impl UserUsageRepository for PostgresUserUsageRepository {
             )
             .await?;
         Ok(row.get(0))
+    }
+
+    async fn get_usage_by_user_id(
+        &self,
+        user_id: UserId,
+    ) -> anyhow::Result<Option<UserUsageSummary>> {
+        let client = self.pool.get().await?;
+        let row = client
+            .query_one(
+                r#"
+                SELECT
+                    COALESCE(SUM(CASE WHEN metric_key = 'llm.tokens' THEN quantity ELSE 0 END), 0)::bigint AS token_sum,
+                    COALESCE(SUM(COALESCE(cost_nano_usd, 0)), 0)::bigint AS cost_nano_usd
+                FROM user_usage_event
+                WHERE user_id = $1
+                "#,
+                &[&user_id],
+            )
+            .await?;
+        let token_sum: i64 = row.get(0);
+        let cost_nano_usd: i64 = row.get(1);
+        Ok(Some(UserUsageSummary {
+            user_id,
+            token_sum,
+            cost_nano_usd,
+        }))
+    }
+
+    async fn get_top_users_usage(
+        &self,
+        limit: i64,
+        rank_by: UsageRankBy,
+    ) -> anyhow::Result<Vec<UserUsageSummary>> {
+        let client = self.pool.get().await?;
+        let order = match rank_by {
+            UsageRankBy::Token => "token_sum DESC",
+            UsageRankBy::Cost => "cost_nano_usd DESC",
+        };
+        let query = format!(
+            r#"
+            WITH agg AS (
+                SELECT
+                    user_id,
+                    COALESCE(SUM(CASE WHEN metric_key = 'llm.tokens' THEN quantity ELSE 0 END), 0)::bigint AS token_sum,
+                    COALESCE(SUM(COALESCE(cost_nano_usd, 0)), 0)::bigint AS cost_nano_usd
+                FROM user_usage_event
+                GROUP BY user_id
+            )
+            SELECT user_id, token_sum, cost_nano_usd
+            FROM agg
+            ORDER BY {}
+            LIMIT $1
+            "#,
+            order
+        );
+        let rows = client.query(&query, &[&limit]).await?;
+        Ok(rows
+            .iter()
+            .map(|row| UserUsageSummary {
+                user_id: row.get(0),
+                token_sum: row.get(1),
+                cost_nano_usd: row.get(2),
+            })
+            .collect())
     }
 }

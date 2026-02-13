@@ -3,6 +3,21 @@ use chrono::Duration;
 
 use crate::UserId;
 
+/// Per-user usage aggregate (all-time token sum and cost sum).
+#[derive(Debug, Clone)]
+pub struct UserUsageSummary {
+    pub user_id: UserId,
+    pub token_sum: i64,
+    pub cost_nano_usd: i64,
+}
+
+/// Rank order for top usage listing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageRankBy {
+    Token,
+    Cost,
+}
+
 /// Metric keys for user_usage_event (matches DB constraint).
 pub const METRIC_KEY_LLM_TOKENS: &str = "llm.tokens";
 pub const METRIC_KEY_IMAGE_GENERATE: &str = "image.generate";
@@ -34,6 +49,19 @@ pub trait UserUsageRepository: Send + Sync {
         user_id: UserId,
         window_duration: Duration,
     ) -> anyhow::Result<i64>;
+
+    /// All-time usage for a single user (token sum for llm.tokens, cost sum).
+    async fn get_usage_by_user_id(
+        &self,
+        user_id: UserId,
+    ) -> anyhow::Result<Option<UserUsageSummary>>;
+
+    /// Top N users by usage (all-time), ordered by token_sum or cost_nano_usd.
+    async fn get_top_users_usage(
+        &self,
+        limit: i64,
+        rank_by: UsageRankBy,
+    ) -> anyhow::Result<Vec<UserUsageSummary>>;
 }
 
 /// Service interface for per-user usage events.
@@ -59,4 +87,17 @@ pub trait UserUsageService: Send + Sync {
         user_id: UserId,
         window_duration: Duration,
     ) -> anyhow::Result<i64>;
+
+    /// All-time usage for a single user.
+    async fn get_usage_by_user_id(
+        &self,
+        user_id: UserId,
+    ) -> anyhow::Result<Option<UserUsageSummary>>;
+
+    /// Top N users by usage (all-time), ordered by token or cost.
+    async fn get_top_users_usage(
+        &self,
+        limit: i64,
+        rank_by: UsageRankBy,
+    ) -> anyhow::Result<Vec<UserUsageSummary>>;
 }

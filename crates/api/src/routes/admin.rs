@@ -10,6 +10,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use services::analytics::{ActivityLogEntry, AnalyticsSummary, TopActiveUsersResponse};
 use services::model::ports::{UpdateModelParams, UpsertModelParams};
+use services::user_usage::{UsageRankBy, UserUsageSummary};
 use services::UserId;
 
 /// Pagination query parameters
@@ -299,6 +300,150 @@ pub async fn get_top_users(
         period_start: params.start,
         period_end: params.end,
         users,
+    }))
+}
+
+/// Usage response for a single user (all-time token sum and cost in nano-USD).
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct UserUsageResponse {
+    pub user_id: UserId,
+    pub token_sum: i64,
+    pub cost_nano_usd: i64,
+}
+
+/// Response for top usage listing.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct TopUsageResponse {
+    pub users: Vec<UserUsageResponse>,
+    pub rank_by: String,
+}
+
+/// Query parameters for top usage endpoint.
+#[derive(Debug, Deserialize)]
+pub struct TopUsageQuery {
+    /// Rank by "token" or "cost" (default: token)
+    #[serde(default = "default_usage_rank_by")]
+    pub rank_by: String,
+    /// Maximum number of users to return (default: LIST_USERS_LIMIT_MAX)
+    #[serde(default = "default_top_usage_limit")]
+    pub limit: i64,
+}
+
+fn default_usage_rank_by() -> String {
+    "token".to_string()
+}
+
+fn default_top_usage_limit() -> i64 {
+    LIST_USERS_LIMIT_MAX
+}
+
+/// Get usage for a single user by ID (all-time token sum and cost).
+///
+/// Requires admin authentication.
+#[utoipa::path(
+    get,
+    path = "/v1/admin/usage/users/{user_id}",
+    tag = "Admin",
+    params(("user_id" = uuid::Uuid, Path, description = "User ID")),
+    responses(
+        (status = 200, description = "Usage retrieved", body = UserUsageResponse),
+        (status = 404, description = "User has no usage or not found", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn get_usage_by_user_id(
+    State(app_state): State<AppState>,
+    Path(user_id): Path<UserId>,
+) -> Result<Json<UserUsageResponse>, ApiError> {
+    let summary = app_state
+        .user_usage_service
+        .get_usage_by_user_id(user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get usage for user_id={}: {}", user_id, e);
+            ApiError::internal_server_error("Failed to retrieve usage")
+        })?;
+
+    let summary = summary.ok_or_else(|| {
+        tracing::info!("No usage found for user_id={}", user_id);
+        ApiError::status(StatusCode::NOT_FOUND, "User has no usage or not found")
+    })?;
+
+    Ok(Json(UserUsageResponse {
+        user_id: summary.user_id,
+        token_sum: summary.token_sum,
+        cost_nano_usd: summary.cost_nano_usd,
+    }))
+}
+
+/// Get top N users by usage (all-time), ranked by token or cost.
+///
+/// Requires admin authentication.
+#[utoipa::path(
+    get,
+    path = "/v1/admin/usage/top",
+    tag = "Admin",
+    params(
+        ("rank_by" = Option<String>, Query, description = "Rank by 'token' or 'cost' (default: token)"),
+        ("limit" = Option<i64>, Query, description = "Max users to return (default: 100)")
+    ),
+    responses(
+        (status = 200, description = "Top usage list", body = TopUsageResponse),
+        (status = 400, description = "Bad request - invalid rank_by or limit", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn get_top_usage(
+    State(app_state): State<AppState>,
+    Query(params): Query<TopUsageQuery>,
+) -> Result<Json<TopUsageResponse>, ApiError> {
+    let rank_by = match params.rank_by.to_lowercase().as_str() {
+        "token" => UsageRankBy::Token,
+        "cost" => UsageRankBy::Cost,
+        _ => return Err(ApiError::bad_request("rank_by must be 'token' or 'cost'")),
+    };
+
+    if params.limit < 1 || params.limit > LIST_USERS_LIMIT_MAX {
+        return Err(ApiError::bad_request(format!(
+            "limit must be between 1 and {}",
+            LIST_USERS_LIMIT_MAX
+        )));
+    }
+
+    let users = app_state
+        .user_usage_service
+        .get_top_users_usage(params.limit, rank_by)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get top usage: {}", e);
+            ApiError::internal_server_error("Failed to retrieve top usage")
+        })?;
+
+    let rank_by_str = match rank_by {
+        UsageRankBy::Token => "token",
+        UsageRankBy::Cost => "cost",
+    };
+
+    Ok(Json(TopUsageResponse {
+        users: users
+            .into_iter()
+            .map(|s| UserUsageResponse {
+                user_id: s.user_id,
+                token_sum: s.token_sum,
+                cost_nano_usd: s.cost_nano_usd,
+            })
+            .collect(),
+        rank_by: rank_by_str.to_string(),
     }))
 }
 
@@ -749,4 +894,6 @@ pub fn create_admin_router() -> Router<AppState> {
         )
         .route("/analytics", get(get_analytics))
         .route("/analytics/top-users", get(get_top_users))
+        .route("/usage/users/{user_id}", get(get_usage_by_user_id))
+        .route("/usage/top", get(get_top_usage))
 }
