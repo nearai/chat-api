@@ -22,6 +22,7 @@ use utoipa::OpenApi;
         crate::routes::oauth::logout,
         // User endpoints
         crate::routes::users::get_current_user,
+        crate::routes::users::get_my_usage,
         // Conversation endpoints
         crate::routes::api::create_conversation,
         crate::routes::api::list_conversations,
@@ -71,6 +72,8 @@ use utoipa::OpenApi;
         crate::routes::admin::revoke_vpc_credentials,
         crate::routes::admin::upsert_system_configs,
         crate::routes::admin::get_system_configs_admin,
+        crate::routes::admin::get_usage_by_user_id,
+        crate::routes::admin::get_top_usage,
         // Configs endpoints
         crate::routes::configs::get_system_configs,
         crate::routes::users::get_user_settings,
@@ -104,6 +107,9 @@ use utoipa::OpenApi;
         // System configs models
         crate::models::SystemConfigsResponse,
         crate::models::UpsertSystemConfigsRequest,
+        // Admin usage models (UserUsageResponse shared with /users/me/usage)
+        crate::models::UserUsageResponse,
+        crate::routes::admin::TopUsageResponse,
         // Conversation share models
         crate::routes::api::ErrorResponse,
         crate::routes::api::ShareRecipientPayload,
