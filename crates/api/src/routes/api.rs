@@ -3792,6 +3792,7 @@ async fn proxy_image_edits(
     let mut multipart = Multipart::new(stream, boundary);
 
     let mut request_model: Option<String> = None;
+    let mut request_n: Option<String> = None;
 
     while let Some(field) = multipart.next_field().await.map_err(|e| {
         tracing::error!(
@@ -3826,6 +3827,23 @@ async fn proxy_image_edits(
                 })?;
                 request_model = Some(text);
             }
+            Some("n") => {
+                let text = field.text().await.map_err(|e| {
+                    tracing::error!(
+                        "Failed to read `n` field in image edits request (user_id={}): {}",
+                        user.user_id,
+                        e
+                    );
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse {
+                            error: "Invalid `n` field in image edits request".to_string(),
+                        }),
+                    )
+                        .into_response()
+                })?;
+                request_n = Some(text);
+            }
             _ => {
                 // Other fields: we don't need to inspect, but they remain in body_bytes for forwarding.
             }
@@ -3845,6 +3863,48 @@ async fn proxy_image_edits(
         )
             .into_response()
     })?;
+
+    // n is optional, default 1; if present must be a positive integer
+    let image_count: u32 = match request_n.as_deref() {
+        None | Some("") => 1,
+        Some(s) => {
+            let n: u64 = s.trim().parse().map_err(|_| {
+                tracing::error!(
+                    "Invalid `n` (must be positive integer) in image edits request for user_id={}",
+                    user.user_id
+                );
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "`n` must be a positive integer".to_string(),
+                    }),
+                )
+                    .into_response()
+            })?;
+            if n == 0 {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "`n` must be a positive integer".to_string(),
+                    }),
+                )
+                    .into_response());
+            }
+            u32::try_from(n).map_err(|_| {
+                tracing::error!(
+                    "`n` out of range in image edits request for user_id={}",
+                    user.user_id
+                );
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "`n` must be a positive integer within valid range".to_string(),
+                    }),
+                )
+                    .into_response()
+            })?
+        }
+    };
 
     let proxy_response = state
         .proxy_service
@@ -3892,13 +3952,13 @@ async fn proxy_image_edits(
                     .into_response());
             }
         };
-        // Use model from request; edits always produce 1 image.
         let state_clone = state.clone();
         let user_id = user.user_id;
         let model = request_model.clone();
         let mk = services::user_usage::METRIC_KEY_IMAGE_EDIT;
+        let qty = image_count as i64;
         tokio::spawn(async move {
-            record_image_usage(&state_clone, user_id, mk, 1, Some(model.as_str())).await;
+            record_image_usage(&state_clone, user_id, mk, qty, Some(model.as_str())).await;
         });
         Body::from(bytes)
     };
