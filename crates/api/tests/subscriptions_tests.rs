@@ -592,13 +592,17 @@ async fn test_portal_session_no_stripe_customer() {
     let server = create_test_server().await;
 
     // Configure Stripe plans so Stripe is considered "configured"
-    set_subscription_plans(&server, json!({
-        "basic": {
-            "providers": {"stripe": {"price_id": "price_test_basic"}},
-            "deployments": {"max": 1},
-            "monthly_tokens": {"max": 1000000}
-        }
-    })).await;
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": {"stripe": {"price_id": "price_test_basic"}},
+                "deployments": {"max": 1},
+                "monthly_tokens": {"max": 1000000}
+            }
+        }),
+    )
+    .await;
 
     let user_email = "test_portal_no_customer@example.com";
     let user_token = mock_login(&server, user_email).await;
