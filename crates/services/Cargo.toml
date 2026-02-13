@@ -28,6 +28,7 @@ bytes = "1.5"
 http = "1.0"
 tokio-stream = "0.1"
 tokio-postgres = { version = "0.7", features = ["with-uuid-1"] }
+deadpool-postgres = "0.14"
 # MCP protocol
 rmcp = { version = "0.6", features = [
     "client",
@@ -43,6 +44,8 @@ opentelemetry = { version = "0.31", features = ["metrics"] }
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "metrics"] }
 utoipa = { version = "5", optional = true }
 near-api = "0.8.0"
+# Stripe payment integration
+async-stripe = { version = "0.41", features = ["runtime-tokio-hyper"] }
 
 [features]
 utoipa = ["dep:utoipa"]

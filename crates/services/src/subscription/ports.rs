@@ -1,0 +1,204 @@
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use std::fmt;
+
+use crate::UserId;
+
+/// Database model for subscription records (generic, supports multiple providers e.g. Stripe)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Subscription {
+    pub subscription_id: String,
+    pub user_id: UserId,
+    pub provider: String,
+    pub customer_id: String,
+    pub price_id: String,
+    pub status: String,
+    pub current_period_end: DateTime<Utc>,
+    pub cancel_at_period_end: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// API response model with plan name resolved from price_id
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscriptionWithPlan {
+    pub subscription_id: String,
+    pub user_id: String,
+    pub provider: String,
+    pub plan: String, // Resolved from price_id
+    pub status: String,
+    pub current_period_end: DateTime<Utc>,
+    pub cancel_at_period_end: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Stripe customer mapping data
+#[derive(Debug, Clone)]
+pub struct StripeCustomer {
+    pub user_id: UserId,
+    pub customer_id: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Payment webhook event data
+#[derive(Debug, Clone)]
+pub struct PaymentWebhook {
+    pub id: uuid::Uuid,
+    pub provider: String,
+    pub event_id: String,
+    pub payload: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Error types for subscription operations
+#[derive(Debug)]
+pub enum SubscriptionError {
+    /// User already has an active subscription
+    ActiveSubscriptionExists,
+    /// Invalid plan name provided
+    InvalidPlan(String),
+    /// Invalid or unsupported payment provider
+    InvalidProvider(String),
+    /// Stripe is not configured
+    NotConfigured,
+    /// No active subscription found for user
+    NoActiveSubscription,
+    /// Stripe API error
+    StripeError(String),
+    /// Database error
+    DatabaseError(String),
+    /// Webhook verification failed
+    WebhookVerificationFailed(String),
+    /// Internal error
+    InternalError(String),
+}
+
+impl fmt::Display for SubscriptionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ActiveSubscriptionExists => {
+                write!(f, "User already has an active subscription")
+            }
+            Self::InvalidPlan(plan) => write!(f, "Invalid plan: {}", plan),
+            Self::InvalidProvider(provider) => write!(f, "Invalid provider: {}", provider),
+            Self::NotConfigured => write!(f, "Stripe is not configured"),
+            Self::NoActiveSubscription => write!(f, "No active subscription found"),
+            Self::StripeError(msg) => write!(f, "Stripe error: {}", msg),
+            Self::DatabaseError(msg) => write!(f, "Database error: {}", msg),
+            Self::WebhookVerificationFailed(msg) => {
+                write!(f, "Webhook verification failed: {}", msg)
+            }
+            Self::InternalError(msg) => write!(f, "Internal error: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for SubscriptionError {}
+
+impl From<anyhow::Error> for SubscriptionError {
+    fn from(err: anyhow::Error) -> Self {
+        Self::DatabaseError(err.to_string())
+    }
+}
+
+/// Repository trait for Stripe customer mappings
+#[async_trait]
+pub trait StripeCustomerRepository: Send + Sync {
+    /// Get Stripe customer ID for a user
+    async fn get_customer_id(&self, user_id: UserId) -> anyhow::Result<Option<String>>;
+
+    /// Create or update customer mapping (upsert)
+    async fn create_customer_mapping(
+        &self,
+        user_id: UserId,
+        customer_id: String,
+    ) -> anyhow::Result<StripeCustomer>;
+}
+
+/// Repository trait for subscription records
+#[async_trait]
+pub trait SubscriptionRepository: Send + Sync {
+    /// Insert or update a subscription
+    async fn upsert_subscription(
+        &self,
+        txn: &tokio_postgres::Transaction<'_>,
+        subscription: Subscription,
+    ) -> anyhow::Result<Subscription>;
+
+    /// Get all subscriptions for a user
+    async fn get_user_subscriptions(&self, user_id: UserId) -> anyhow::Result<Vec<Subscription>>;
+
+    /// Get active subscriptions for a user (status IN ('active', 'trialing') AND period not ended)
+    async fn get_active_subscriptions(&self, user_id: UserId) -> anyhow::Result<Vec<Subscription>>;
+
+    /// Get active subscription for a user (status IN ('active', 'trialing'))
+    async fn get_active_subscription(
+        &self,
+        user_id: UserId,
+    ) -> anyhow::Result<Option<Subscription>>;
+
+    /// Delete a subscription record
+    async fn delete_subscription(&self, subscription_id: &str) -> anyhow::Result<()>;
+}
+
+/// Repository trait for payment webhook events
+#[async_trait]
+pub trait PaymentWebhookRepository: Send + Sync {
+    /// Store webhook event (idempotent via UNIQUE constraint)
+    async fn store_webhook(
+        &self,
+        txn: &tokio_postgres::Transaction<'_>,
+        provider: String,
+        event_id: String,
+        payload: serde_json::Value,
+    ) -> anyhow::Result<PaymentWebhook>;
+}
+
+/// Subscription plan with price ID
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscriptionPlan {
+    pub name: String,
+    pub price_id: String,
+}
+
+/// Service trait for subscription management
+#[async_trait]
+pub trait SubscriptionService: Send + Sync {
+    /// Get available subscription plans
+    async fn get_available_plans(&self) -> Result<Vec<SubscriptionPlan>, SubscriptionError>;
+
+    /// Create a subscription checkout session for a user
+    /// Returns the checkout URL
+    /// provider: payment provider name (e.g. "stripe")
+    async fn create_subscription(
+        &self,
+        user_id: UserId,
+        provider: String,
+        plan: String,
+        success_url: String,
+        cancel_url: String,
+    ) -> Result<String, SubscriptionError>;
+
+    /// Cancel a user's active subscription (at period end)
+    async fn cancel_subscription(&self, user_id: UserId) -> Result<(), SubscriptionError>;
+
+    /// Get subscriptions for a user with plan names resolved
+    /// If active_only is true, returns only active (not expired) subscriptions
+    async fn get_user_subscriptions(
+        &self,
+        user_id: UserId,
+        active_only: bool,
+    ) -> Result<Vec<SubscriptionWithPlan>, SubscriptionError>;
+
+    /// Handle incoming webhook from payment provider
+    async fn handle_webhook(
+        &self,
+        payload: &[u8],
+        signature: &str,
+    ) -> Result<(), SubscriptionError>;
+}

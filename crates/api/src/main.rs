@@ -177,6 +177,24 @@ async fn main() -> anyhow::Result<()> {
         ),
     );
 
+    // Initialize subscription service
+    tracing::info!("Initializing subscription service...");
+    let subscription_service = Arc::new(services::subscription::SubscriptionServiceImpl::new(
+        services::subscription::SubscriptionServiceConfig {
+            db_pool: db.pool().clone(),
+            stripe_customer_repo: db.stripe_customer_repository()
+                as Arc<dyn services::subscription::ports::StripeCustomerRepository>,
+            subscription_repo: db.subscription_repository()
+                as Arc<dyn services::subscription::ports::SubscriptionRepository>,
+            webhook_repo: db.payment_webhook_repository()
+                as Arc<dyn services::subscription::ports::PaymentWebhookRepository>,
+            system_configs_service: system_configs_service.clone()
+                as Arc<dyn services::system_configs::ports::SystemConfigsService>,
+            stripe_secret_key: config.stripe.secret_key.clone(),
+            stripe_webhook_secret: config.stripe.webhook_secret.clone(),
+        },
+    ));
+
     // Initialize metrics service
     tracing::info!("Initializing metrics service...");
     let metrics_service: Arc<dyn services::metrics::MetricsServiceTrait> =
@@ -252,6 +270,7 @@ async fn main() -> anyhow::Result<()> {
         user_settings_service,
         model_service,
         system_configs_service: system_configs_service.clone(),
+        subscription_service,
         session_repository: session_repo,
         proxy_service,
         conversation_service,

@@ -58,6 +58,11 @@ use utoipa::OpenApi;
         crate::routes::api::proxy_models,
         crate::routes::api::proxy_model_list,
         crate::routes::api::proxy_signature,
+        // Subscription endpoints
+        crate::routes::subscriptions::create_subscription,
+        crate::routes::subscriptions::cancel_subscription,
+        crate::routes::subscriptions::list_plans,
+        crate::routes::subscriptions::list_subscriptions,
         // Admin endpoints
         crate::routes::admin::list_users,
         crate::routes::admin::list_models,
@@ -116,6 +121,14 @@ use utoipa::OpenApi;
         crate::models::FileListResponse,
         crate::models::FileGetResponse,
         crate::routes::api::ListFilesParams,
+        // Subscription models
+        crate::routes::subscriptions::CreateSubscriptionRequest,
+        crate::routes::subscriptions::CreateSubscriptionResponse,
+        crate::routes::subscriptions::CancelSubscriptionResponse,
+        crate::routes::subscriptions::ListSubscriptionsResponse,
+        crate::routes::subscriptions::ListPlansResponse,
+        services::subscription::ports::SubscriptionWithPlan,
+        services::subscription::ports::SubscriptionPlan,
         // Attestation models
         crate::models::ApiGatewayAttestation,
         crate::models::ModelAttestation,
@@ -130,6 +143,7 @@ use utoipa::OpenApi;
         (name = "Share Groups", description = "Share group management endpoints"),
         (name = "Files", description = "File management endpoints"),
         (name = "Proxy", description = "Proxy endpoints for OpenAI-compatible APIs"),
+        (name = "Subscriptions", description = "Subscription management endpoints for Stripe integration"),
         (name = "Admin", description = "Admin management endpoints"),
         (name = "Configs", description = "System configuration endpoints"),
         (name = "attestation", description = "Attestation reporting endpoints for TEE verification")

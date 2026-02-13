@@ -8,7 +8,8 @@ pub use pool::DbPool;
 pub use repositories::{
     PostgresAnalyticsRepository, PostgresAppConfigRepository, PostgresConversationRepository,
     PostgresConversationShareRepository, PostgresFileRepository, PostgresModelRepository,
-    PostgresNearNonceRepository, PostgresOAuthRepository, PostgresSessionRepository,
+    PostgresNearNonceRepository, PostgresOAuthRepository, PostgresPaymentWebhookRepository,
+    PostgresSessionRepository, PostgresStripeCustomerRepository, PostgresSubscriptionRepository,
     PostgresSystemConfigsRepository, PostgresUserRepository, PostgresUserSettingsRepository,
     PostgresUserUsageRepository,
 };
@@ -37,6 +38,9 @@ pub struct Database {
     analytics_repository: Arc<PostgresAnalyticsRepository>,
     user_usage_repository: Arc<PostgresUserUsageRepository>,
     model_repository: Arc<PostgresModelRepository>,
+    stripe_customer_repository: Arc<PostgresStripeCustomerRepository>,
+    subscription_repository: Arc<PostgresSubscriptionRepository>,
+    payment_webhook_repository: Arc<PostgresPaymentWebhookRepository>,
     cluster_manager: Option<Arc<ClusterManager>>,
 }
 
@@ -58,6 +62,11 @@ impl Database {
         let analytics_repository = Arc::new(PostgresAnalyticsRepository::new(pool.clone()));
         let user_usage_repository = Arc::new(PostgresUserUsageRepository::new(pool.clone()));
         let model_repository = Arc::new(PostgresModelRepository::new(pool.clone()));
+        let stripe_customer_repository =
+            Arc::new(PostgresStripeCustomerRepository::new(pool.clone()));
+        let subscription_repository = Arc::new(PostgresSubscriptionRepository::new(pool.clone()));
+        let payment_webhook_repository =
+            Arc::new(PostgresPaymentWebhookRepository::new(pool.clone()));
 
         Self {
             pool,
@@ -74,6 +83,9 @@ impl Database {
             analytics_repository,
             user_usage_repository,
             model_repository,
+            stripe_customer_repository,
+            subscription_repository,
+            payment_webhook_repository,
             cluster_manager: None,
         }
     }
@@ -261,5 +273,20 @@ impl Database {
     /// Get the system configs repository
     pub fn system_configs_repository(&self) -> Arc<PostgresSystemConfigsRepository> {
         self.system_configs_repository.clone()
+    }
+
+    /// Get the Stripe customer repository
+    pub fn stripe_customer_repository(&self) -> Arc<PostgresStripeCustomerRepository> {
+        self.stripe_customer_repository.clone()
+    }
+
+    /// Get the subscription repository
+    pub fn subscription_repository(&self) -> Arc<PostgresSubscriptionRepository> {
+        self.subscription_repository.clone()
+    }
+
+    /// Get the payment webhook repository
+    pub fn payment_webhook_repository(&self) -> Arc<PostgresPaymentWebhookRepository> {
+        self.payment_webhook_repository.clone()
     }
 }
