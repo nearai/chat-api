@@ -567,3 +567,59 @@ async fn test_list_plans_empty_configuration() {
         "Should return 503 when Stripe plans are empty"
     );
 }
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_portal_session_requires_auth() {
+    let server = create_test_server().await;
+
+    // POST /v1/subscriptions/portal without authentication should return 401
+    let response = server
+        .post("/v1/subscriptions/portal")
+        .json(&json!({"return_url": "https://example.com"}))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        401,
+        "POST /v1/subscriptions/portal should require authentication"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_portal_session_no_stripe_customer() {
+    let server = create_test_server().await;
+
+    // Configure Stripe plans so Stripe is considered "configured"
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": {"stripe": {"price_id": "price_test_basic"}},
+                "deployments": {"max": 1},
+                "monthly_tokens": {"max": 1000000}
+            }
+        }),
+    )
+    .await;
+
+    let user_email = "test_portal_no_customer@example.com";
+    let user_token = mock_login(&server, user_email).await;
+
+    // User has no Stripe customer record, should return 404
+    let response = server
+        .post("/v1/subscriptions/portal")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .json(&json!({"return_url": "https://example.com"}))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        404,
+        "Should return 404 when user has no Stripe customer"
+    );
+}
