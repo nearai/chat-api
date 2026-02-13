@@ -3562,7 +3562,7 @@ async fn proxy_image_generations(
     spawn_near_balance_check(&state, &user);
 
     let body_bytes = extract_body_bytes(request).await?;
-    // Parse request JSON: model and n are required for image generations.
+    // Parse request JSON: model is required; n is optional, default 1.
     let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).map_err(|e| {
         tracing::error!(
             "Failed to parse image generations request body as JSON for user_id={}: {}",
@@ -3596,24 +3596,46 @@ async fn proxy_image_generations(
         })?
         .to_string();
 
-    let image_count: u32 = body_json
-        .get("n")
-        .and_then(|v| v.as_u64())
-        .filter(|&n| n > 0)
-        .and_then(|n| u32::try_from(n).ok())
-        .ok_or_else(|| {
-            tracing::error!(
-                "Missing or invalid `n` in image generations request for user_id={}",
-                user.user_id
-            );
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: "`n` (positive integer) is required for image generations".to_string(),
-                }),
-            )
-                .into_response()
-        })?;
+    let image_count: u32 = match body_json.get("n") {
+        None => 1,
+        Some(v) => {
+            let n = v.as_u64().ok_or_else(|| {
+                tracing::error!(
+                    "Invalid `n` (must be positive integer) in image generations request for user_id={}",
+                    user.user_id
+                );
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "`n` must be a positive integer".to_string(),
+                    }),
+                )
+                    .into_response()
+            })?;
+            if n == 0 {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "`n` must be a positive integer".to_string(),
+                    }),
+                )
+                    .into_response());
+            }
+            u32::try_from(n).map_err(|_| {
+                tracing::error!(
+                    "`n` out of range in image generations request for user_id={}",
+                    user.user_id
+                );
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "`n` must be a positive integer within valid range".to_string(),
+                    }),
+                )
+                    .into_response()
+            })?
+        }
+    };
 
     let content_length = HeaderValue::from_str(&body_bytes.len().to_string())
         .expect("usize to string conversion always produces valid HeaderValue");
