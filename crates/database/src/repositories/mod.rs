@@ -13,6 +13,7 @@ pub mod subscription_repository;
 pub mod system_configs_repository;
 pub mod user_repository;
 pub mod user_settings_repository;
+pub mod user_usage_repository;
 
 pub use analytics_repository::PostgresAnalyticsRepository;
 pub use app_config_repository::PostgresAppConfigRepository;
@@ -29,3 +30,4 @@ pub use subscription_repository::PostgresSubscriptionRepository;
 pub use system_configs_repository::PostgresSystemConfigsRepository;
 pub use user_repository::PostgresUserRepository;
 pub use user_settings_repository::PostgresUserSettingsRepository;
+pub use user_usage_repository::PostgresUserUsageRepository;

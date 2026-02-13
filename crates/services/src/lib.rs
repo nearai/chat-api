@@ -10,6 +10,7 @@ pub mod subscription;
 pub mod system_configs;
 pub mod types;
 pub mod user;
+pub mod user_usage;
 pub mod vpc;
 
 pub use types::{SessionId, UserId};

@@ -1,5 +1,9 @@
 use crate::consts::{LIST_FILES_LIMIT_MAX, MAX_REQUEST_BODY_SIZE, MAX_RESPONSE_BODY_SIZE};
 use crate::middleware::auth::AuthenticatedUser;
+use crate::usage_parsing::{
+    parse_chat_completion_usage_from_bytes, parse_response_usage_from_bytes,
+    UsageTrackingStreamChatCompletions, UsageTrackingStreamResponseCompleted,
+};
 use axum::{
     body::{to_bytes, Body},
     extract::{Extension, Path, Request, State},
@@ -11,7 +15,9 @@ use axum::{
 use bytes::Bytes;
 use chrono::{Duration, Utc};
 use flate2::read::GzDecoder;
+use futures::stream;
 use http::{header::CONTENT_LENGTH, HeaderValue};
+use multer::Multipart;
 use near_api::{Account, AccountId, NetworkConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -2425,14 +2431,62 @@ async fn proxy_responses(
         }
     }
 
-    let response_body = Body::from_stream(proxy_response.body);
-
-    build_response(
+    // Wrap the response stream: record usage (token/cost)
+    tracing::debug!(
+        "proxy_responses: upstream status={}, content_type={:?}, is_streaming={}",
         proxy_response.status,
-        proxy_response.headers.clone(),
-        response_body,
-    )
-    .await
+        proxy_response
+            .headers
+            .get(http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        is_streaming_response(&proxy_response.headers),
+    );
+
+    let response_body = if !(200..300).contains(&proxy_response.status) {
+        Body::from_stream(proxy_response.body)
+    } else if is_streaming_response(&proxy_response.headers) {
+        let usage_stream = UsageTrackingStreamResponseCompleted::new(
+            proxy_response.body,
+            state.user_usage_service.clone(),
+            state.model_pricing_cache.clone(),
+            user.user_id,
+        );
+        Body::from_stream(usage_stream)
+    } else {
+        let bytes = match collect_stream_to_bytes(proxy_response.body).await {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::error!("Upstream stream error for user_id={}: {}", user.user_id, e);
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    Json(ErrorResponse {
+                        error: "Failed to read response body".to_string(),
+                    }),
+                )
+                    .into_response());
+            }
+        };
+        // For non-streaming responses, decompress (if gzipped) before parsing usage.
+        let usage_bytes =
+            decompress_if_gzipped(&bytes, &proxy_response.headers).unwrap_or_else(|e| {
+                tracing::error!(
+                    "Failed to decompress non-stream response for user_id={}: {}",
+                    user.user_id,
+                    e
+                );
+                bytes.to_vec()
+            });
+        // Fire-and-forget: record usage in background to avoid blocking on pricing fetch + DB write
+        let state_clone = state.clone();
+        let user_id = user.user_id;
+        let usage_bytes_clone = usage_bytes.clone();
+        tokio::spawn(async move {
+            record_response_usage_from_body(&state_clone, user_id, &usage_bytes_clone).await;
+        });
+        Body::from(bytes)
+    };
+
+    build_response(proxy_response.status, proxy_response.headers, response_body).await
 }
 
 /// Ensure that if the authenticated user logged in with NEAR (has a NEAR-linked account),
@@ -3020,7 +3074,102 @@ async fn get_model_settings_with_cache(
     Ok((model_system_prompt, model_settings_cache_hit))
 }
 
-/// Configuration for proxying POST requests to cloud-api endpoints.
+/// Prepares chat completions request body with optional model system prompt injection.
+async fn prepare_chat_completions_body(
+    state: &crate::state::AppState,
+    user: &AuthenticatedUser,
+    body_bytes: Bytes,
+) -> Result<Bytes, Response> {
+    let mut body_json: Option<serde_json::Value> = None;
+    let mut model_system_prompt: Option<String> = None;
+
+    if !body_bytes.is_empty() {
+        match serde_json::from_slice::<serde_json::Value>(&body_bytes) {
+            Ok(v) => {
+                body_json = Some(v);
+                if let Some(model_id) = body_json
+                    .as_ref()
+                    .and_then(|b| b.get("model"))
+                    .and_then(|v| v.as_str())
+                {
+                    match get_model_settings_with_cache(state, model_id, user.user_id).await {
+                        Ok((prompt, _)) => model_system_prompt = prompt,
+                        Err(e) => return Err(e),
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::debug!(
+                    "Failed to parse request body as JSON for chat/completions (user_id={}): {}",
+                    user.user_id,
+                    e
+                );
+            }
+        }
+    }
+
+    let modified_body_bytes = if let Some(mut body) = body_json {
+        let mut modified = false;
+        if let Some(system_prompt) = model_system_prompt.as_ref() {
+            if let Some(messages) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
+                let has_system_message = messages
+                    .iter()
+                    .any(|msg| msg.get("role").and_then(|r| r.as_str()) == Some("system"));
+                if !has_system_message {
+                    let system_msg = json!({ "role": "system", "content": system_prompt });
+                    messages.insert(0, system_msg);
+                    modified = true;
+                } else if let Some(first_system_idx) = messages
+                    .iter()
+                    .position(|msg| msg.get("role").and_then(|r| r.as_str()) == Some("system"))
+                {
+                    let first_system = &mut messages[first_system_idx];
+                    if let Some(content_str) = first_system.get("content").and_then(|c| c.as_str())
+                    {
+                        first_system["content"] = serde_json::Value::String(format!(
+                            "{}\n\n{}",
+                            system_prompt, content_str
+                        ));
+                        modified = true;
+                    } else if let Some(content_arr) = first_system
+                        .get_mut("content")
+                        .and_then(|c| c.as_array_mut())
+                    {
+                        content_arr.insert(0, json!({ "type": "text", "text": system_prompt }));
+                        modified = true;
+                    } else {
+                        first_system["content"] =
+                            serde_json::Value::String(system_prompt.to_string());
+                        modified = true;
+                    }
+                }
+            } else {
+                body["messages"] = json!([{ "role": "system", "content": system_prompt }]);
+                modified = true;
+            }
+        }
+        if modified {
+            serde_json::to_vec(&body).map(Bytes::from).map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "Failed to modify request body".to_string(),
+                    }),
+                )
+                    .into_response()
+            })
+        } else {
+            Ok(body_bytes)
+        }
+    } else {
+        Ok(body_bytes)
+    }?;
+    Ok(modified_body_bytes)
+}
+
+/// Configuration for proxying POST requests to cloud-api endpoints (no usage tracking).
+/// Used by proxy_post_to_cloud_api for future POST endpoints that do not need usage tracking.
+#[allow(dead_code)]
 struct ProxyEndpointConfig {
     /// Path for the proxy service (e.g., "chat/completions")
     endpoint_path: &'static str,
@@ -3032,16 +3181,11 @@ struct ProxyEndpointConfig {
     enable_model_prompt: bool,
 }
 
-/// Shared helper function for proxying POST requests to cloud-api endpoints.
+/// Shared helper for proxying POST requests to cloud-api endpoints (no usage tracking).
+/// Use dedicated handlers (proxy_chat_completions, proxy_image_*) for endpoints that track usage.
 ///
-/// This function handles common logic including:
-/// - User ban checks
-/// - NEAR balance checks (async)
-/// - Body extraction
-/// - Model settings lookup and system prompt injection (if config.enable_model_prompt is true)
-/// - Request forwarding
-/// - Error handling
-/// - Response building
+/// Handles: ban check, NEAR check, body extraction, optional model prompt injection, forward, response.
+#[allow(dead_code)]
 async fn proxy_post_to_cloud_api(
     state: &crate::state::AppState,
     user: &AuthenticatedUser,
@@ -3244,7 +3388,7 @@ async fn proxy_post_to_cloud_api(
     .await
 }
 
-/// Proxy chat completions endpoint - OpenAI-compatible chat completions with model system prompt injection
+/// Proxy chat completions endpoint - OpenAI-compatible chat completions with model system prompt injection and usage tracking.
 #[utoipa::path(
     post,
     path = "/v1/chat/completions",
@@ -3264,25 +3408,124 @@ async fn proxy_post_to_cloud_api(
 async fn proxy_chat_completions(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    headers: HeaderMap,
+    mut headers: HeaderMap,
     request: Request,
 ) -> Result<Response, Response> {
-    proxy_post_to_cloud_api(
-        &state,
-        &user,
-        headers,
-        request,
-        ProxyEndpointConfig {
-            endpoint_path: "chat/completions",
-            endpoint_full_path: "/v1/chat/completions",
-            set_content_length: true,
-            enable_model_prompt: true,
-        },
+    const ENDPOINT_PATH: &str = "chat/completions";
+    const ENDPOINT_FULL_PATH: &str = "/v1/chat/completions";
+
+    tracing::info!(
+        "proxy_chat_completions: POST {} for user_id={}, session_id={}",
+        ENDPOINT_FULL_PATH,
+        user.user_id,
+        user.session_id
+    );
+
+    ensure_user_not_banned(&state, &user).await?;
+    spawn_near_balance_check(&state, &user);
+
+    let body_bytes = extract_body_bytes(request).await?;
+    tracing::debug!(
+        "Extracted request body: {} bytes for POST {}",
+        body_bytes.len(),
+        ENDPOINT_FULL_PATH
+    );
+
+    let modified_body_bytes = prepare_chat_completions_body(&state, &user, body_bytes).await?;
+    let content_length = HeaderValue::from_str(&modified_body_bytes.len().to_string())
+        .expect("usize to string conversion always produces valid HeaderValue");
+    headers.insert(CONTENT_LENGTH, content_length);
+
+    let proxy_response = state
+        .proxy_service
+        .forward_request(
+            Method::POST,
+            ENDPOINT_PATH,
+            headers.clone(),
+            Some(modified_body_bytes),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Cloud API error for POST {} (user_id={}): {}",
+                ENDPOINT_FULL_PATH,
+                user.user_id,
+                e
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("Cloud API error: {e}"),
+                }),
+            )
+                .into_response()
+        })?;
+
+    tracing::info!(
+        "Received response from cloud-api: status={} for POST {} (user_id={})",
+        proxy_response.status,
+        ENDPOINT_FULL_PATH,
+        user.user_id
+    );
+
+    let response_body = if !(200..300).contains(&proxy_response.status) {
+        Body::from_stream(proxy_response.body)
+    } else if is_streaming_response(&proxy_response.headers) {
+        let usage_stream = UsageTrackingStreamChatCompletions::new(
+            proxy_response.body,
+            state.user_usage_service.clone(),
+            state.model_pricing_cache.clone(),
+            user.user_id,
+        );
+        Body::from_stream(usage_stream)
+    } else {
+        let bytes = match collect_stream_to_bytes(proxy_response.body).await {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::error!(
+                    "Upstream stream error for user_id={} on {}: {}",
+                    user.user_id,
+                    ENDPOINT_FULL_PATH,
+                    e
+                );
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    Json(ErrorResponse {
+                        error: "Failed to read response body".to_string(),
+                    }),
+                )
+                    .into_response());
+            }
+        };
+        let usage_bytes =
+            decompress_if_gzipped(&bytes, &proxy_response.headers).unwrap_or_else(|e| {
+                tracing::error!(
+                    "Failed to decompress non-stream response for user_id={} on {}: {}",
+                    user.user_id,
+                    ENDPOINT_FULL_PATH,
+                    e
+                );
+                bytes.to_vec()
+            });
+        // Return the original upstream bytes so they remain consistent with any forwarded content-encoding headers.
+        let state_clone = state.clone();
+        let user_id = user.user_id;
+        let body = usage_bytes.clone();
+        tokio::spawn(async move {
+            record_chat_usage_from_body(&state_clone, user_id, &body).await;
+        });
+        Body::from(bytes)
+    };
+
+    build_response(
+        proxy_response.status,
+        proxy_response.headers.clone(),
+        response_body,
     )
     .await
 }
 
-/// Proxy image generation to cloud-api (OpenAI-compatible endpoint)
+/// Proxy image generation to cloud-api (OpenAI-compatible endpoint) with usage tracking.
 #[utoipa::path(
     post,
     path = "/v1/images/generations",
@@ -3302,26 +3545,170 @@ async fn proxy_chat_completions(
 async fn proxy_image_generations(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    headers: HeaderMap,
+    mut headers: HeaderMap,
     request: Request,
 ) -> Result<Response, Response> {
-    proxy_post_to_cloud_api(
-        &state,
-        &user,
-        headers,
-        request,
-        ProxyEndpointConfig {
-            endpoint_path: "images/generations",
-            endpoint_full_path: "/v1/images/generations",
-            set_content_length: true,
-            enable_model_prompt: false,
-        },
+    const ENDPOINT_PATH: &str = "images/generations";
+    const ENDPOINT_FULL_PATH: &str = "/v1/images/generations";
+
+    tracing::info!(
+        "proxy_image_generations: POST {} for user_id={}, session_id={}",
+        ENDPOINT_FULL_PATH,
+        user.user_id,
+        user.session_id
+    );
+
+    ensure_user_not_banned(&state, &user).await?;
+    spawn_near_balance_check(&state, &user);
+
+    let body_bytes = extract_body_bytes(request).await?;
+    // Parse request JSON: model is required; n is optional, default 1.
+    let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).map_err(|e| {
+        tracing::error!(
+            "Failed to parse image generations request body as JSON for user_id={}: {}",
+            user.user_id,
+            e
+        );
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Invalid JSON body for image generations request".to_string(),
+            }),
+        )
+            .into_response()
+    })?;
+
+    let image_request_model = body_json
+        .get("model")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            tracing::error!(
+                "Missing or invalid `model` in image generations request for user_id={}",
+                user.user_id
+            );
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "`model` is required for image generations".to_string(),
+                }),
+            )
+                .into_response()
+        })?
+        .to_string();
+
+    let image_count: u32 = match body_json.get("n") {
+        None => 1,
+        Some(v) => {
+            let n = v.as_u64().ok_or_else(|| {
+                tracing::error!(
+                    "Invalid `n` (must be positive integer) in image generations request for user_id={}",
+                    user.user_id
+                );
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "`n` must be a positive integer".to_string(),
+                    }),
+                )
+                    .into_response()
+            })?;
+            if n == 0 {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "`n` must be a positive integer".to_string(),
+                    }),
+                )
+                    .into_response());
+            }
+            u32::try_from(n).map_err(|_| {
+                tracing::error!(
+                    "`n` out of range in image generations request for user_id={}",
+                    user.user_id
+                );
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "`n` must be a positive integer within valid range".to_string(),
+                    }),
+                )
+                    .into_response()
+            })?
+        }
+    };
+
+    let content_length = HeaderValue::from_str(&body_bytes.len().to_string())
+        .expect("usize to string conversion always produces valid HeaderValue");
+    headers.insert(CONTENT_LENGTH, content_length);
+
+    let proxy_response = state
+        .proxy_service
+        .forward_request(
+            Method::POST,
+            ENDPOINT_PATH,
+            headers.clone(),
+            Some(body_bytes),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Cloud API error for POST {} (user_id={}): {}",
+                ENDPOINT_FULL_PATH,
+                user.user_id,
+                e
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("Cloud API error: {e}"),
+                }),
+            )
+                .into_response()
+        })?;
+
+    let response_body = if !(200..300).contains(&proxy_response.status) {
+        Body::from_stream(proxy_response.body)
+    } else {
+        let bytes = match collect_stream_to_bytes(proxy_response.body).await {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::error!(
+                    "Upstream stream error for user_id={} on {}: {}",
+                    user.user_id,
+                    ENDPOINT_FULL_PATH,
+                    e
+                );
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    Json(ErrorResponse {
+                        error: "Failed to read response body".to_string(),
+                    }),
+                )
+                    .into_response());
+            }
+        };
+        // Use image_count and model from the request to compute cost; we don't depend on response body shape.
+        let state_clone = state.clone();
+        let user_id = user.user_id;
+        let model = image_request_model.clone();
+        let qty = image_count as i64;
+        let mk = services::user_usage::METRIC_KEY_IMAGE_GENERATE;
+        tokio::spawn(async move {
+            record_image_usage(&state_clone, user_id, mk, qty, Some(model.as_str())).await;
+        });
+        Body::from(bytes)
+    };
+
+    build_response(
+        proxy_response.status,
+        proxy_response.headers.clone(),
+        response_body,
     )
     .await
 }
 
-/// Proxy image edits to cloud-api (OpenAI-compatible endpoint)
-/// Note: This endpoint accepts multipart/form-data
+/// Proxy image edits to cloud-api (OpenAI-compatible endpoint) with usage tracking.
+/// Note: This endpoint accepts multipart/form-data.
 #[utoipa::path(
     post,
     path = "/v1/images/edits",
@@ -3344,17 +3731,242 @@ async fn proxy_image_edits(
     headers: HeaderMap,
     request: Request,
 ) -> Result<Response, Response> {
-    proxy_post_to_cloud_api(
-        &state,
-        &user,
-        headers,
-        request,
-        ProxyEndpointConfig {
-            endpoint_path: "images/edits",
-            endpoint_full_path: "/v1/images/edits",
-            set_content_length: false, // Don't set content-length header (preserve original headers for multipart/form-data)
-            enable_model_prompt: false, // No model system prompt for image edits
-        },
+    const ENDPOINT_PATH: &str = "images/edits";
+    const ENDPOINT_FULL_PATH: &str = "/v1/images/edits";
+
+    tracing::info!(
+        "proxy_image_edits: POST {} for user_id={}, session_id={}",
+        ENDPOINT_FULL_PATH,
+        user.user_id,
+        user.session_id
+    );
+
+    ensure_user_not_banned(&state, &user).await?;
+    spawn_near_balance_check(&state, &user);
+
+    // Read full multipart body as bytes (to keep original formdata for forwarding).
+    let body_bytes = extract_body_bytes(request).await?;
+
+    // Parse Content-Type to extract boundary.
+    let content_type = headers
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| {
+            tracing::error!(
+                "Missing or invalid Content-Type for image edits request (user_id={})",
+                user.user_id
+            );
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Content-Type header with multipart boundary is required".to_string(),
+                }),
+            )
+                .into_response()
+        })?;
+
+    let boundary = content_type
+        .split(';')
+        .find_map(|part| {
+            let part = part.trim();
+            part.strip_prefix("boundary=")
+                .map(|b| b.trim_matches('"').to_string())
+        })
+        .ok_or_else(|| {
+            tracing::error!(
+                "Missing boundary in Content-Type for image edits request (user_id={})",
+                user.user_id
+            );
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "multipart/form-data boundary is required".to_string(),
+                }),
+            )
+                .into_response()
+        })?;
+
+    // Use multer to parse multipart fields from the raw bytes, without modifying them.
+    let body_for_multipart = body_bytes.clone();
+    let stream = stream::once(async move { Ok::<Bytes, std::io::Error>(body_for_multipart) });
+    let mut multipart = Multipart::new(stream, boundary);
+
+    let mut request_model: Option<String> = None;
+    let mut request_n: Option<String> = None;
+
+    while let Some(field) = multipart.next_field().await.map_err(|e| {
+        tracing::error!(
+            "Failed to parse multipart field for image edits (user_id={}): {}",
+            user.user_id,
+            e
+        );
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Invalid multipart/form-data body for image edits".to_string(),
+            }),
+        )
+            .into_response()
+    })? {
+        let name = field.name().map(|s| s.to_string());
+        match name.as_deref() {
+            Some("model") => {
+                let text = field.text().await.map_err(|e| {
+                    tracing::error!(
+                        "Failed to read `model` field in image edits request (user_id={}): {}",
+                        user.user_id,
+                        e
+                    );
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse {
+                            error: "Invalid `model` field in image edits request".to_string(),
+                        }),
+                    )
+                        .into_response()
+                })?;
+                request_model = Some(text);
+            }
+            Some("n") => {
+                let text = field.text().await.map_err(|e| {
+                    tracing::error!(
+                        "Failed to read `n` field in image edits request (user_id={}): {}",
+                        user.user_id,
+                        e
+                    );
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse {
+                            error: "Invalid `n` field in image edits request".to_string(),
+                        }),
+                    )
+                        .into_response()
+                })?;
+                request_n = Some(text);
+            }
+            _ => {
+                // Other fields: we don't need to inspect, but they remain in body_bytes for forwarding.
+            }
+        }
+    }
+
+    let request_model = request_model.ok_or_else(|| {
+        tracing::error!(
+            "Missing `model` field in image edits request for user_id={}",
+            user.user_id
+        );
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "`model` is required for image edits".to_string(),
+            }),
+        )
+            .into_response()
+    })?;
+
+    // n is optional, default 1; if present must be a positive integer
+    let image_count: u32 = match request_n.as_deref() {
+        None | Some("") => 1,
+        Some(s) => {
+            let n: u64 = s.trim().parse().map_err(|_| {
+                tracing::error!(
+                    "Invalid `n` (must be positive integer) in image edits request for user_id={}",
+                    user.user_id
+                );
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "`n` must be a positive integer".to_string(),
+                    }),
+                )
+                    .into_response()
+            })?;
+            if n == 0 {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "`n` must be a positive integer".to_string(),
+                    }),
+                )
+                    .into_response());
+            }
+            u32::try_from(n).map_err(|_| {
+                tracing::error!(
+                    "`n` out of range in image edits request for user_id={}",
+                    user.user_id
+                );
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "`n` must be a positive integer within valid range".to_string(),
+                    }),
+                )
+                    .into_response()
+            })?
+        }
+    };
+
+    let proxy_response = state
+        .proxy_service
+        .forward_request(
+            Method::POST,
+            ENDPOINT_PATH,
+            headers.clone(),
+            Some(body_bytes),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Cloud API error for POST {} (user_id={}): {}",
+                ENDPOINT_FULL_PATH,
+                user.user_id,
+                e
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("Cloud API error: {e}"),
+                }),
+            )
+                .into_response()
+        })?;
+
+    let response_body = if !(200..300).contains(&proxy_response.status) {
+        Body::from_stream(proxy_response.body)
+    } else {
+        let bytes = match collect_stream_to_bytes(proxy_response.body).await {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::error!(
+                    "Upstream stream error for user_id={} on {}: {}",
+                    user.user_id,
+                    ENDPOINT_FULL_PATH,
+                    e
+                );
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    Json(ErrorResponse {
+                        error: "Failed to read response body".to_string(),
+                    }),
+                )
+                    .into_response());
+            }
+        };
+        let state_clone = state.clone();
+        let user_id = user.user_id;
+        let model = request_model.clone();
+        let mk = services::user_usage::METRIC_KEY_IMAGE_EDIT;
+        let qty = image_count as i64;
+        tokio::spawn(async move {
+            record_image_usage(&state_clone, user_id, mk, qty, Some(model.as_str())).await;
+        });
+        Body::from(bytes)
+    };
+
+    build_response(
+        proxy_response.status,
+        proxy_response.headers.clone(),
+        response_body,
     )
     .await
 }
@@ -3870,4 +4482,143 @@ fn decompress_if_gzipped(bytes: &[u8], headers: &HeaderMap) -> Result<Vec<u8>, s
 
     // Not gzipped, return as-is
     Ok(bytes.to_vec())
+}
+
+/// Returns true if response headers indicate a streaming (SSE) response.
+fn is_streaming_response(headers: &HeaderMap) -> bool {
+    headers
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.contains("text/event-stream"))
+        .unwrap_or(false)
+}
+
+/// Record image usage (metric_key + quantity; cost from model pricing × quantity).
+/// Used for /v1/images/generations (image.generate, quantity=n) and /v1/images/edits (image.edit, quantity=1).
+async fn record_image_usage(
+    state: &crate::state::AppState,
+    user_id: UserId,
+    metric_key: &str,
+    quantity: i64,
+    model_name: Option<&str>,
+) {
+    if quantity <= 0 {
+        return;
+    }
+    let cost_nano_usd = if let Some(model) = model_name {
+        state
+            .model_pricing_cache
+            .get_pricing(model)
+            .await
+            .map(|p| p.cost_nano_usd_for_images(quantity as u32))
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    if let Err(e) = state
+        .user_usage_service
+        .record_usage_event(
+            user_id,
+            metric_key,
+            quantity,
+            Some(cost_nano_usd),
+            model_name,
+        )
+        .await
+    {
+        tracing::warn!(
+            "Failed to record image usage for user_id={}: {}",
+            user_id,
+            e
+        );
+    }
+}
+
+/// Record token and cost usage from parsed **chat completions** response body.
+/// Returns true if usage was recorded.
+async fn record_chat_usage_from_body(
+    state: &crate::state::AppState,
+    user_id: UserId,
+    body: &[u8],
+) -> bool {
+    let Some(usage) = parse_chat_completion_usage_from_bytes(body) else {
+        return false;
+    };
+    if usage.total_tokens == 0 {
+        return false;
+    }
+    let cost_nano_usd = state
+        .model_pricing_cache
+        .get_pricing(&usage.model)
+        .await
+        .map(|p| p.cost_nano_usd(usage.input_tokens, usage.output_tokens));
+    if let Err(e) = state
+        .user_usage_service
+        .record_usage_event(
+            user_id,
+            services::user_usage::METRIC_KEY_LLM_TOKENS,
+            usage.total_tokens as i64,
+            cost_nano_usd,
+            Some(usage.model.as_str()),
+        )
+        .await
+    {
+        tracing::warn!("Failed to record usage for user_id={}: {}", user_id, e);
+        return false;
+    }
+    true
+}
+
+/// Record token and cost usage from parsed **/v1/responses** body.
+/// Returns true if usage was recorded.
+async fn record_response_usage_from_body(
+    state: &crate::state::AppState,
+    user_id: UserId,
+    body: &[u8],
+) -> bool {
+    let Some(usage) = parse_response_usage_from_bytes(body) else {
+        return false;
+    };
+    if usage.total_tokens == 0 {
+        return false;
+    }
+    let cost_nano_usd = state
+        .model_pricing_cache
+        .get_pricing(&usage.model)
+        .await
+        .map(|p| p.cost_nano_usd(usage.input_tokens, usage.output_tokens));
+    if let Err(e) = state
+        .user_usage_service
+        .record_usage_event(
+            user_id,
+            services::user_usage::METRIC_KEY_LLM_TOKENS,
+            usage.total_tokens as i64,
+            cost_nano_usd,
+            Some(usage.model.as_str()),
+        )
+        .await
+    {
+        tracing::warn!("Failed to record usage for user_id={}: {}", user_id, e);
+        return false;
+    }
+    true
+}
+
+/// Collect a stream into bytes. Returns the first stream error instead of silently truncating.
+async fn collect_stream_to_bytes(
+    stream: impl futures::Stream<Item = Result<Bytes, reqwest::Error>>,
+) -> Result<Bytes, reqwest::Error> {
+    use futures::StreamExt;
+
+    let mut collected = Vec::new();
+    tokio::pin!(stream);
+
+    while let Some(result) = stream.next().await {
+        match result {
+            Ok(bytes) => collected.extend_from_slice(&bytes),
+            Err(e) => return Err(e),
+        }
+    }
+
+    Ok(Bytes::from(collected))
 }

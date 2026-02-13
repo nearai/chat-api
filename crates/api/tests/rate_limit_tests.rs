@@ -1,13 +1,35 @@
 mod common;
 
-use common::{create_test_server, mock_login};
+use chrono::Duration;
+use common::{
+    create_test_server_and_db, create_test_server_with_config, mock_login, TestServerConfig,
+};
 use futures::future::join_all;
 use serde_json::json;
+use services::system_configs::ports::{RateLimitConfig, WindowLimit};
+use services::user::ports::UserRepository;
+use services::user_usage::{UserUsageRepository, METRIC_KEY_LLM_TOKENS};
+use std::future::IntoFuture;
 use std::sync::Arc;
+
+async fn create_rate_limited_test_server() -> axum_test::TestServer {
+    create_test_server_with_config(TestServerConfig {
+        rate_limit_config: Some(RateLimitConfig {
+            max_concurrent: 2,
+            max_requests_per_window: 1,
+            window_duration: Duration::seconds(1),
+            window_limits: vec![],
+            token_window_limits: vec![],
+            cost_window_limits: vec![],
+        }),
+        ..Default::default()
+    })
+    .await
+}
 
 #[tokio::test]
 async fn test_rate_limit_first_request_succeeds() {
-    let server = create_test_server().await;
+    let server = create_rate_limited_test_server().await;
     let token = mock_login(&server, "rate-limit-test-1@example.com").await;
 
     let response = server
@@ -32,7 +54,7 @@ async fn test_rate_limit_first_request_succeeds() {
 
 #[tokio::test]
 async fn test_rate_limit_blocks_rapid_requests() {
-    let server = create_test_server().await;
+    let server = create_rate_limited_test_server().await;
     let token = mock_login(&server, "rate-limit-test-2@example.com").await;
 
     let request_body = json!({
@@ -41,14 +63,18 @@ async fn test_rate_limit_blocks_rapid_requests() {
     });
 
     // First request
-    let _response1 = server
-        .post("/v1/responses")
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
-        )
-        .json(&request_body)
-        .await;
+    let response1 = tokio::spawn(
+        server
+            .post("/v1/responses")
+            .add_header(
+                http::HeaderName::from_static("authorization"),
+                http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
+            )
+            .json(&request_body)
+            .into_future(),
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     // Second request immediately after should be rate limited
     let response2 = server
@@ -71,11 +97,13 @@ async fn test_rate_limit_blocks_rapid_requests() {
         body.get("error").is_some(),
         "Rate limit response should have error field"
     );
+
+    response1.await.unwrap();
 }
 
 #[tokio::test]
 async fn test_rate_limit_per_user_isolation() {
-    let server = create_test_server().await;
+    let server = create_rate_limited_test_server().await;
     let token1 = mock_login(&server, "rate-limit-user-a@example.com").await;
     let token2 = mock_login(&server, "rate-limit-user-b@example.com").await;
 
@@ -113,7 +141,7 @@ async fn test_rate_limit_per_user_isolation() {
 
 #[tokio::test]
 async fn test_non_rate_limited_endpoints_unaffected() {
-    let server = create_test_server().await;
+    let server = create_rate_limited_test_server().await;
     let token = mock_login(&server, "rate-limit-test-3@example.com").await;
 
     // Make multiple rapid requests to model/list (not rate limited)
@@ -137,7 +165,7 @@ async fn test_non_rate_limited_endpoints_unaffected() {
 
 #[tokio::test]
 async fn test_concurrent_requests_rate_limited() {
-    let server = Arc::new(create_test_server().await);
+    let server = Arc::new(create_rate_limited_test_server().await);
     let token = Arc::new(mock_login(&server, "rate-limit-concurrent@example.com").await);
 
     let request_body = json!({
@@ -179,5 +207,125 @@ async fn test_concurrent_requests_rate_limited() {
         "Expected at least 2 rate-limited responses, got {} (results: {:?})",
         rate_limited_count,
         results
+    );
+}
+
+/// Token window limit: when user's token usage in the window exceeds the limit, next request returns 429.
+#[tokio::test]
+async fn test_token_limit_blocks_request_when_usage_exceeds_limit() {
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        rate_limit_config: Some(RateLimitConfig {
+            max_concurrent: 10,
+            max_requests_per_window: 100,
+            window_duration: Duration::seconds(1),
+            window_limits: vec![],
+            token_window_limits: vec![WindowLimit {
+                window_duration: Duration::seconds(60),
+                limit: 100,
+            }],
+            cost_window_limits: vec![],
+        }),
+        ..Default::default()
+    })
+    .await;
+
+    let email = "token-limit@example.com";
+    let token = mock_login(&server, email).await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(email)
+        .await
+        .expect("db")
+        .expect("user created by mock_login");
+    db.user_usage_repository()
+        .record_usage_event(user.id, METRIC_KEY_LLM_TOKENS, 150, None, None)
+        .await
+        .expect("record usage");
+    // 150 tokens in window > limit 100 => next request should be rate limited
+
+    let response = server
+        .post("/v1/responses")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
+        )
+        .json(&json!({
+            "model": "test-model",
+            "input": "Hello"
+        }))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        429,
+        "Request should be rate limited when token usage exceeds window limit"
+    );
+    let body: serde_json::Value = response.json();
+    let error = body.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        error.to_lowercase().contains("token"),
+        "Error message should mention token limit, got: {}",
+        error
+    );
+}
+
+/// Cost window limit: when user's cost usage in the window exceeds the limit, next request returns 429.
+#[tokio::test]
+async fn test_cost_limit_blocks_request_when_usage_exceeds_limit() {
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        rate_limit_config: Some(RateLimitConfig {
+            max_concurrent: 10,
+            max_requests_per_window: 100,
+            window_duration: Duration::seconds(1),
+            window_limits: vec![],
+            token_window_limits: vec![],
+            cost_window_limits: vec![WindowLimit {
+                window_duration: Duration::seconds(60),
+                limit: 1_000, // nano-USD
+            }],
+        }),
+        ..Default::default()
+    })
+    .await;
+
+    let email = "cost-limit@example.com";
+    let token = mock_login(&server, email).await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(email)
+        .await
+        .expect("db")
+        .expect("user created by mock_login");
+    db.user_usage_repository()
+        .record_usage_event(user.id, METRIC_KEY_LLM_TOKENS, 0, Some(2_000), None)
+        .await
+        .expect("record usage");
+    // 2000 nano-USD in window > limit 1000 => next request should be rate limited
+
+    let response = server
+        .post("/v1/responses")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
+        )
+        .json(&json!({
+            "model": "test-model",
+            "input": "Hello"
+        }))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        429,
+        "Request should be rate limited when cost usage exceeds window limit"
+    );
+    let body: serde_json::Value = response.json();
+    let error = body.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        error.to_lowercase().contains("cost") || error.to_lowercase().contains("nano"),
+        "Error message should mention cost limit, got: {}",
+        error
     );
 }

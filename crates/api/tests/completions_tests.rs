@@ -1,16 +1,39 @@
 mod common;
 
 use api::routes::api::USER_BANNED_ERROR_MESSAGE;
-use common::{create_test_server, mock_login};
+use chrono::Duration;
+use common::{
+    create_test_server, create_test_server_and_db, create_test_server_with_config, mock_login,
+    TestServerConfig,
+};
 use futures::future::join_all;
 use serde_json::json;
+use services::system_configs::ports::{RateLimitConfig, WindowLimit};
+use services::user::ports::UserRepository;
+use services::user_usage::{UserUsageRepository, METRIC_KEY_LLM_TOKENS};
+use std::future::IntoFuture;
 use std::sync::Arc;
 use tokio::time::sleep;
+
+async fn create_rate_limited_test_server() -> axum_test::TestServer {
+    create_test_server_with_config(TestServerConfig {
+        rate_limit_config: Some(RateLimitConfig {
+            max_concurrent: 2,
+            max_requests_per_window: 1,
+            window_duration: Duration::seconds(1),
+            window_limits: vec![],
+            token_window_limits: vec![],
+            cost_window_limits: vec![],
+        }),
+        ..Default::default()
+    })
+    .await
+}
 
 /// Test rate limiting for /v1/chat/completions endpoint
 #[tokio::test]
 async fn test_chat_completions_rate_limit_first_request_succeeds() {
-    let server = create_test_server().await;
+    let server = create_rate_limited_test_server().await;
     let token = mock_login(&server, "chat-completions-rate-limit-1@example.com").await;
 
     let response = server
@@ -36,7 +59,7 @@ async fn test_chat_completions_rate_limit_first_request_succeeds() {
 /// Test rate limiting blocks rapid requests for /v1/chat/completions
 #[tokio::test]
 async fn test_chat_completions_rate_limit_blocks_rapid_requests() {
-    let server = create_test_server().await;
+    let server = create_rate_limited_test_server().await;
     let token = mock_login(&server, "chat-completions-rate-limit-2@example.com").await;
 
     let request_body = json!({
@@ -44,15 +67,19 @@ async fn test_chat_completions_rate_limit_blocks_rapid_requests() {
         "messages": [{"role": "user", "content": "Hello"}]
     });
 
-    // First request
-    let _response1 = server
-        .post("/v1/chat/completions")
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
-        )
-        .json(&request_body)
-        .await;
+    // First request (spawn so it is in flight when second is sent)
+    let response1 = tokio::spawn(
+        server
+            .post("/v1/chat/completions")
+            .add_header(
+                http::HeaderName::from_static("authorization"),
+                http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
+            )
+            .json(&request_body)
+            .into_future(),
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     // Second request immediately after should be rate limited
     let response2 = server
@@ -75,12 +102,14 @@ async fn test_chat_completions_rate_limit_blocks_rapid_requests() {
         body.get("error").is_some(),
         "Rate limit response should have error field"
     );
+
+    response1.await.unwrap();
 }
 
 /// Test rate limiting per-user isolation for /v1/chat/completions
 #[tokio::test]
 async fn test_chat_completions_rate_limit_per_user_isolation() {
-    let server = create_test_server().await;
+    let server = create_rate_limited_test_server().await;
     let token1 = mock_login(&server, "chat-completions-user-a@example.com").await;
     let token2 = mock_login(&server, "chat-completions-user-b@example.com").await;
 
@@ -119,7 +148,7 @@ async fn test_chat_completions_rate_limit_per_user_isolation() {
 /// Test concurrent requests rate limiting for /v1/chat/completions
 #[tokio::test]
 async fn test_chat_completions_concurrent_requests_rate_limited() {
-    let server = Arc::new(create_test_server().await);
+    let server = Arc::new(create_rate_limited_test_server().await);
     let token = Arc::new(mock_login(&server, "chat-completions-concurrent@example.com").await);
 
     let request_body = json!({
@@ -161,6 +190,124 @@ async fn test_chat_completions_concurrent_requests_rate_limited() {
         "Expected at least 2 rate-limited responses, got {} (results: {:?})",
         rate_limited_count,
         results
+    );
+}
+
+/// Token window limit: when user's token usage exceeds limit, next /v1/chat/completions request returns 429.
+#[tokio::test]
+async fn test_chat_completions_token_limit_blocks_request_when_usage_exceeds_limit() {
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        rate_limit_config: Some(RateLimitConfig {
+            max_concurrent: 10,
+            max_requests_per_window: 100,
+            window_duration: Duration::seconds(1),
+            window_limits: vec![],
+            token_window_limits: vec![WindowLimit {
+                window_duration: Duration::seconds(60),
+                limit: 100,
+            }],
+            cost_window_limits: vec![],
+        }),
+        ..Default::default()
+    })
+    .await;
+
+    let email = "chat-completions-token-limit@example.com";
+    let token = mock_login(&server, email).await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(email)
+        .await
+        .expect("db")
+        .expect("user created by mock_login");
+    db.user_usage_repository()
+        .record_usage_event(user.id, METRIC_KEY_LLM_TOKENS, 150, None, None)
+        .await
+        .expect("record usage");
+
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}]
+        }))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        429,
+        "Request should be rate limited when token usage exceeds window limit"
+    );
+    let body: serde_json::Value = response.json();
+    let error = body.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        error.to_lowercase().contains("token"),
+        "Error message should mention token limit, got: {}",
+        error
+    );
+}
+
+/// Cost window limit: when user's cost usage exceeds limit, next /v1/chat/completions request returns 429.
+#[tokio::test]
+async fn test_chat_completions_cost_limit_blocks_request_when_usage_exceeds_limit() {
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        rate_limit_config: Some(RateLimitConfig {
+            max_concurrent: 10,
+            max_requests_per_window: 100,
+            window_duration: Duration::seconds(1),
+            window_limits: vec![],
+            token_window_limits: vec![],
+            cost_window_limits: vec![WindowLimit {
+                window_duration: Duration::seconds(60),
+                limit: 1_000,
+            }],
+        }),
+        ..Default::default()
+    })
+    .await;
+
+    let email = "chat-completions-cost-limit@example.com";
+    let token = mock_login(&server, email).await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(email)
+        .await
+        .expect("db")
+        .expect("user created by mock_login");
+    db.user_usage_repository()
+        .record_usage_event(user.id, METRIC_KEY_LLM_TOKENS, 0, Some(2_000), None)
+        .await
+        .expect("record usage");
+
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}]
+        }))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        429,
+        "Request should be rate limited when cost usage exceeds window limit"
+    );
+    let body: serde_json::Value = response.json();
+    let error = body.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        error.to_lowercase().contains("cost") || error.to_lowercase().contains("nano"),
+        "Error message should mention cost limit, got: {}",
+        error
     );
 }
 
@@ -326,7 +473,7 @@ async fn test_chat_completions_near_balance_blocks_poor_account() {
 /// Test rate limiting for /v1/images/generations endpoint
 #[tokio::test]
 async fn test_image_generations_rate_limit_first_request_succeeds() {
-    let server = create_test_server().await;
+    let server = create_rate_limited_test_server().await;
     let token = mock_login(&server, "image-generations-rate-limit-1@example.com").await;
 
     let response = server
@@ -353,7 +500,7 @@ async fn test_image_generations_rate_limit_first_request_succeeds() {
 /// Test rate limiting blocks rapid requests for /v1/images/generations
 #[tokio::test]
 async fn test_image_generations_rate_limit_blocks_rapid_requests() {
-    let server = create_test_server().await;
+    let server = create_rate_limited_test_server().await;
     let token = mock_login(&server, "image-generations-rate-limit-2@example.com").await;
 
     let request_body = json!({
@@ -362,15 +509,19 @@ async fn test_image_generations_rate_limit_blocks_rapid_requests() {
         "size": "1024x1024"
     });
 
-    // First request
-    let _response1 = server
-        .post("/v1/images/generations")
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
-        )
-        .json(&request_body)
-        .await;
+    // First request (spawn so it is in flight when second is sent)
+    let response1 = tokio::spawn(
+        server
+            .post("/v1/images/generations")
+            .add_header(
+                http::HeaderName::from_static("authorization"),
+                http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
+            )
+            .json(&request_body)
+            .into_future(),
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     // Second request immediately after should be rate limited
     let response2 = server
@@ -392,6 +543,128 @@ async fn test_image_generations_rate_limit_blocks_rapid_requests() {
     assert!(
         body.get("error").is_some(),
         "Rate limit response should have error field"
+    );
+
+    response1.await.unwrap();
+}
+
+/// Token window limit: when user's token usage exceeds limit, next /v1/images/generations request returns 429.
+#[tokio::test]
+async fn test_image_generations_token_limit_blocks_request_when_usage_exceeds_limit() {
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        rate_limit_config: Some(RateLimitConfig {
+            max_concurrent: 10,
+            max_requests_per_window: 100,
+            window_duration: Duration::seconds(1),
+            window_limits: vec![],
+            token_window_limits: vec![WindowLimit {
+                window_duration: Duration::seconds(60),
+                limit: 100,
+            }],
+            cost_window_limits: vec![],
+        }),
+        ..Default::default()
+    })
+    .await;
+
+    let email = "image-generations-token-limit@example.com";
+    let token = mock_login(&server, email).await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(email)
+        .await
+        .expect("db")
+        .expect("user created by mock_login");
+    db.user_usage_repository()
+        .record_usage_event(user.id, METRIC_KEY_LLM_TOKENS, 150, None, None)
+        .await
+        .expect("record usage");
+
+    let response = server
+        .post("/v1/images/generations")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
+        )
+        .json(&json!({
+            "prompt": "A beautiful sunset",
+            "n": 1,
+            "size": "1024x1024"
+        }))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        429,
+        "Request should be rate limited when token usage exceeds window limit"
+    );
+    let body: serde_json::Value = response.json();
+    let error = body.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        error.to_lowercase().contains("token"),
+        "Error message should mention token limit, got: {}",
+        error
+    );
+}
+
+/// Cost window limit: when user's cost usage exceeds limit, next /v1/images/generations request returns 429.
+#[tokio::test]
+async fn test_image_generations_cost_limit_blocks_request_when_usage_exceeds_limit() {
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        rate_limit_config: Some(RateLimitConfig {
+            max_concurrent: 10,
+            max_requests_per_window: 100,
+            window_duration: Duration::seconds(1),
+            window_limits: vec![],
+            token_window_limits: vec![],
+            cost_window_limits: vec![WindowLimit {
+                window_duration: Duration::seconds(60),
+                limit: 1_000,
+            }],
+        }),
+        ..Default::default()
+    })
+    .await;
+
+    let email = "image-generations-cost-limit@example.com";
+    let token = mock_login(&server, email).await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(email)
+        .await
+        .expect("db")
+        .expect("user created by mock_login");
+    db.user_usage_repository()
+        .record_usage_event(user.id, METRIC_KEY_LLM_TOKENS, 0, Some(2_000), None)
+        .await
+        .expect("record usage");
+
+    let response = server
+        .post("/v1/images/generations")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
+        )
+        .json(&json!({
+            "prompt": "A beautiful sunset",
+            "n": 1,
+            "size": "1024x1024"
+        }))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        429,
+        "Request should be rate limited when cost usage exceeds window limit"
+    );
+    let body: serde_json::Value = response.json();
+    let error = body.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        error.to_lowercase().contains("cost") || error.to_lowercase().contains("nano"),
+        "Error message should mention cost limit, got: {}",
+        error
     );
 }
 
@@ -426,7 +699,7 @@ async fn test_image_generations_near_balance_skipped_when_no_near_linked_account
 /// Test rate limiting for /v1/images/edits endpoint
 #[tokio::test]
 async fn test_image_edits_rate_limit_first_request_succeeds() {
-    let server = create_test_server().await;
+    let server = create_rate_limited_test_server().await;
     let token = mock_login(&server, "image-edits-rate-limit-1@example.com").await;
 
     // Note: /v1/images/edits accepts multipart/form-data, but for rate limit testing
@@ -454,7 +727,7 @@ async fn test_image_edits_rate_limit_first_request_succeeds() {
 /// Test rate limiting blocks rapid requests for /v1/images/edits
 #[tokio::test]
 async fn test_image_edits_rate_limit_blocks_rapid_requests() {
-    let server = create_test_server().await;
+    let server = create_rate_limited_test_server().await;
     let token = mock_login(&server, "image-edits-rate-limit-2@example.com").await;
 
     let request_body = json!({
@@ -462,15 +735,19 @@ async fn test_image_edits_rate_limit_blocks_rapid_requests() {
         "prompt": "Make it better"
     });
 
-    // First request
-    let _response1 = server
-        .post("/v1/images/edits")
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
-        )
-        .json(&request_body)
-        .await;
+    // First request (spawn so it is in flight when second is sent)
+    let response1 = tokio::spawn(
+        server
+            .post("/v1/images/edits")
+            .add_header(
+                http::HeaderName::from_static("authorization"),
+                http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
+            )
+            .json(&request_body)
+            .into_future(),
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     // Second request immediately after should be rate limited
     let response2 = server
@@ -492,6 +769,126 @@ async fn test_image_edits_rate_limit_blocks_rapid_requests() {
     assert!(
         body.get("error").is_some(),
         "Rate limit response should have error field"
+    );
+
+    response1.await.unwrap();
+}
+
+/// Token window limit: when user's token usage exceeds limit, next /v1/images/edits request returns 429.
+#[tokio::test]
+async fn test_image_edits_token_limit_blocks_request_when_usage_exceeds_limit() {
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        rate_limit_config: Some(RateLimitConfig {
+            max_concurrent: 10,
+            max_requests_per_window: 100,
+            window_duration: Duration::seconds(1),
+            window_limits: vec![],
+            token_window_limits: vec![WindowLimit {
+                window_duration: Duration::seconds(60),
+                limit: 100,
+            }],
+            cost_window_limits: vec![],
+        }),
+        ..Default::default()
+    })
+    .await;
+
+    let email = "image-edits-token-limit@example.com";
+    let token = mock_login(&server, email).await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(email)
+        .await
+        .expect("db")
+        .expect("user created by mock_login");
+    db.user_usage_repository()
+        .record_usage_event(user.id, METRIC_KEY_LLM_TOKENS, 150, None, None)
+        .await
+        .expect("record usage");
+
+    let response = server
+        .post("/v1/images/edits")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
+        )
+        .json(&json!({
+            "image": "test",
+            "prompt": "Make it better"
+        }))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        429,
+        "Request should be rate limited when token usage exceeds window limit"
+    );
+    let body: serde_json::Value = response.json();
+    let error = body.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        error.to_lowercase().contains("token"),
+        "Error message should mention token limit, got: {}",
+        error
+    );
+}
+
+/// Cost window limit: when user's cost usage exceeds limit, next /v1/images/edits request returns 429.
+#[tokio::test]
+async fn test_image_edits_cost_limit_blocks_request_when_usage_exceeds_limit() {
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        rate_limit_config: Some(RateLimitConfig {
+            max_concurrent: 10,
+            max_requests_per_window: 100,
+            window_duration: Duration::seconds(1),
+            window_limits: vec![],
+            token_window_limits: vec![],
+            cost_window_limits: vec![WindowLimit {
+                window_duration: Duration::seconds(60),
+                limit: 1_000,
+            }],
+        }),
+        ..Default::default()
+    })
+    .await;
+
+    let email = "image-edits-cost-limit@example.com";
+    let token = mock_login(&server, email).await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(email)
+        .await
+        .expect("db")
+        .expect("user created by mock_login");
+    db.user_usage_repository()
+        .record_usage_event(user.id, METRIC_KEY_LLM_TOKENS, 0, Some(2_000), None)
+        .await
+        .expect("record usage");
+
+    let response = server
+        .post("/v1/images/edits")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
+        )
+        .json(&json!({
+            "image": "test",
+            "prompt": "Make it better"
+        }))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        429,
+        "Request should be rate limited when cost usage exceeds window limit"
+    );
+    let body: serde_json::Value = response.json();
+    let error = body.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        error.to_lowercase().contains("cost") || error.to_lowercase().contains("nano"),
+        "Error message should mention cost limit, got: {}",
+        error
     );
 }
 

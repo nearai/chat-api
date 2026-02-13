@@ -157,9 +157,16 @@ async fn main() -> anyhow::Result<()> {
     // Initialize file service
     let file_service = Arc::new(FileServiceImpl::new(file_repo, proxy_service.clone()));
 
-    // Initialize analytics service
+    // Initialize analytics and user usage services
     tracing::info!("Initializing analytics service...");
-    let analytics_service = Arc::new(AnalyticsServiceImpl::new(analytics_repo));
+    let analytics_service = Arc::new(AnalyticsServiceImpl::new(analytics_repo.clone()));
+
+    tracing::info!("Initializing user usage service...");
+    let user_usage_repo = db.user_usage_repository();
+    let user_usage_service: Arc<dyn services::user_usage::UserUsageService> =
+        Arc::new(services::user_usage::UserUsageServiceImpl::new(
+            user_usage_repo as Arc<dyn services::user_usage::UserUsageRepository>,
+        ));
 
     // Initialize system configs service
     tracing::info!("Initializing system configs service...");
@@ -250,8 +257,11 @@ async fn main() -> anyhow::Result<()> {
         .rate_limit;
 
     // Create rate limit state
-    let rate_limit_state =
-        RateLimitState::with_config(rate_limit_config, analytics_service.clone());
+    let rate_limit_state = RateLimitState::with_config(
+        rate_limit_config,
+        analytics_service.clone(),
+        user_usage_service.clone(),
+    );
 
     // Create application state
     let app_state = AppState {
@@ -273,9 +283,13 @@ async fn main() -> anyhow::Result<()> {
         cloud_api_base_url: config.openai.base_url.clone().unwrap_or_default(),
         metrics_service,
         analytics_service,
+        user_usage_service,
         near_rpc_url: config.near.rpc_url.clone(),
         near_balance_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         model_settings_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        model_pricing_cache: api::model_pricing::ModelPricingCache::new(
+            config.openai.base_url.clone().unwrap_or_default(),
+        ),
         rate_limit_state,
     };
 
