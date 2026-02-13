@@ -73,6 +73,34 @@ pub struct RateLimitConfig {
     pub cost_window_limits: Vec<WindowLimit>,
 }
 
+/// Provider-specific price configuration (e.g. Stripe price_id)
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaymentProviderConfig {
+    pub price_id: String,
+}
+
+/// Limit configuration for a plan (e.g. max deployments, max monthly tokens)
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanLimitConfig {
+    pub max: u64,
+}
+
+/// Subscription plan configuration with provider-specific pricing and limits
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscriptionPlanConfig {
+    /// Provider-specific configs (e.g. "stripe" -> { "price_id": "price_xxx" })
+    pub providers: HashMap<String, PaymentProviderConfig>,
+    /// Deployment limits (e.g. { "max": 1 })
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deployments: Option<PlanLimitConfig>,
+    /// Monthly token limits (e.g. { "max": 1000000 })
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub monthly_tokens: Option<PlanLimitConfig>,
+}
+
 impl Default for RateLimitConfig {
     fn default() -> Self {
         Self {
@@ -97,16 +125,16 @@ pub struct SystemConfigs {
     pub default_model: Option<String>,
     /// Rate limit configuration
     pub rate_limit: RateLimitConfig,
-    /// Stripe plan configurations mapping plan names to Stripe price IDs
+    /// Subscription plan configurations (plan name -> config with providers, deployments, monthly_tokens)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub stripe_plans: Option<HashMap<String, String>>,
+    pub subscription_plans: Option<HashMap<String, SubscriptionPlanConfig>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PartialSystemConfigs {
     pub default_model: Option<String>,
     pub rate_limit: Option<RateLimitConfig>,
-    pub stripe_plans: Option<HashMap<String, String>>,
+    pub subscription_plans: Option<HashMap<String, SubscriptionPlanConfig>>,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -115,7 +143,7 @@ impl Default for SystemConfigs {
         Self {
             default_model: None,
             rate_limit: RateLimitConfig::default(),
-            stripe_plans: None,
+            subscription_plans: None,
         }
     }
 }
@@ -125,7 +153,7 @@ impl SystemConfigs {
         Self {
             default_model: partial.default_model.or(self.default_model),
             rate_limit: partial.rate_limit.unwrap_or(self.rate_limit),
-            stripe_plans: partial.stripe_plans.or(self.stripe_plans),
+            subscription_plans: partial.subscription_plans.or(self.subscription_plans),
         }
     }
 }

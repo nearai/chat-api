@@ -256,16 +256,16 @@ pub async fn mock_login(server: &TestServer, email: &str) -> String {
         .expect("Response should contain token")
 }
 
-/// Clear stripe_plans configuration from system_configs
-/// Sets stripe_plans to an empty map, which is treated as "not configured"
-pub async fn clear_stripe_plans(server: &TestServer) {
+/// Clear subscription_plans configuration from system_configs
+/// Sets subscription_plans to an empty map, which is treated as "not configured"
+pub async fn clear_subscription_plans(server: &TestServer) {
     let admin_email = "test_cleanup_admin@admin.org";
     let admin_token = mock_login(server, admin_email).await;
 
-    // Set stripe_plans to empty object {} (empty HashMap)
-    // This is treated as "not configured" by get_stripe_plans()
+    // Set subscription_plans to empty object {} (empty HashMap)
+    // This is treated as "not configured" by get_plans_for_provider()
     let config_body = json!({
-        "stripe_plans": {}
+        "subscription_plans": {}
     });
 
     let response = server
@@ -283,18 +283,19 @@ pub async fn clear_stripe_plans(server: &TestServer) {
 
     assert!(
         response.status_code().is_success(),
-        "Failed to clear stripe_plans: {}",
+        "Failed to clear subscription_plans: {}",
         response.status_code()
     );
 }
 
-/// Set stripe_plans configuration
-pub async fn set_stripe_plans(server: &TestServer, plans: serde_json::Value) {
+/// Set subscription_plans configuration
+/// plans should be in format: { "plan_name": { "providers": { "stripe": { "price_id": "price_xxx" } }, "deployments": { "max": 1 }, "monthly_tokens": { "max": 1000000 } } }
+pub async fn set_subscription_plans(server: &TestServer, plans: serde_json::Value) {
     let admin_email = "test_setup_admin@admin.org";
     let admin_token = mock_login(server, admin_email).await;
 
     let config_body = json!({
-        "stripe_plans": plans
+        "subscription_plans": plans
     });
 
     let response = server
@@ -312,7 +313,7 @@ pub async fn set_stripe_plans(server: &TestServer, plans: serde_json::Value) {
 
     assert!(
         response.status_code().is_success(),
-        "Failed to set stripe_plans: {}",
+        "Failed to set subscription_plans: {}",
         response.status_code()
     );
 }

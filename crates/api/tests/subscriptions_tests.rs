@@ -1,6 +1,6 @@
 mod common;
 
-use common::{clear_stripe_plans, create_test_server, mock_login, set_stripe_plans};
+use common::{clear_subscription_plans, create_test_server, mock_login, set_subscription_plans};
 use serde_json::json;
 use serial_test::serial;
 
@@ -24,8 +24,8 @@ async fn test_list_subscriptions_requires_auth() {
 async fn test_list_subscriptions_not_configured() {
     let server = create_test_server().await;
 
-    // Ensure stripe is not configured
-    clear_stripe_plans(&server).await;
+    // Ensure subscriptions are not configured
+    clear_subscription_plans(&server).await;
 
     let user_email = "test_subscription_not_configured@example.com";
     let user_token = mock_login(&server, user_email).await;
@@ -51,12 +51,12 @@ async fn test_list_subscriptions_not_configured() {
 async fn test_list_subscriptions_configured_returns_empty() {
     let server = create_test_server().await;
 
-    // Configure stripe with some plans
-    set_stripe_plans(
+    // Configure subscription plans with Stripe provider
+    set_subscription_plans(
         &server,
         json!({
-            "basic": "price_test_basic",
-            "pro": "price_test_pro"
+            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "deployments": { "max": 1 }, "monthly_tokens": { "max": 1000000 } },
+            "pro": { "providers": { "stripe": { "price_id": "price_test_pro" } }, "deployments": { "max": 1 }, "monthly_tokens": { "max": 1000000 } }
         }),
     )
     .await;
@@ -111,8 +111,8 @@ async fn test_create_subscription_requires_auth() {
 async fn test_create_subscription_not_configured() {
     let server = create_test_server().await;
 
-    // Ensure stripe is not configured
-    clear_stripe_plans(&server).await;
+    // Ensure subscriptions are not configured
+    clear_subscription_plans(&server).await;
 
     let user_email = "test_create_not_configured@example.com";
     let user_token = mock_login(&server, user_email).await;
@@ -149,12 +149,12 @@ async fn test_create_subscription_not_configured() {
 async fn test_create_subscription_invalid_provider() {
     let server = create_test_server().await;
 
-    // Configure stripe with some plans
-    set_stripe_plans(
+    // Configure subscription plans with Stripe provider
+    set_subscription_plans(
         &server,
         json!({
-            "basic": "price_test_basic",
-            "pro": "price_test_pro"
+            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "deployments": { "max": 1 }, "monthly_tokens": { "max": 1000000 } },
+            "pro": { "providers": { "stripe": { "price_id": "price_test_pro" } }, "deployments": { "max": 1 }, "monthly_tokens": { "max": 1000000 } }
         }),
     )
     .await;
@@ -195,12 +195,12 @@ async fn test_create_subscription_invalid_provider() {
 async fn test_create_subscription_invalid_plan() {
     let server = create_test_server().await;
 
-    // Configure stripe with some plans
-    set_stripe_plans(
+    // Configure subscription plans with Stripe provider
+    set_subscription_plans(
         &server,
         json!({
-            "basic": "price_test_basic",
-            "pro": "price_test_pro"
+            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "deployments": { "max": 1 }, "monthly_tokens": { "max": 1000000 } },
+            "pro": { "providers": { "stripe": { "price_id": "price_test_pro" } }, "deployments": { "max": 1 }, "monthly_tokens": { "max": 1000000 } }
         }),
     )
     .await;
@@ -304,17 +304,17 @@ async fn test_webhook_requires_signature() {
 
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn test_configure_stripe_plans_as_admin() {
+async fn test_configure_subscription_plans_as_admin() {
     let server = create_test_server().await;
 
     let admin_email = "test_admin_stripe@admin.org";
     let admin_token = mock_login(&server, admin_email).await;
 
-    // Configure Stripe plans
+    // Configure subscription plans
     let config_body = json!({
-        "stripe_plans": {
-            "basic": "price_test_basic_123",
-            "pro": "price_test_pro_456"
+        "subscription_plans": {
+            "basic": { "providers": { "stripe": { "price_id": "price_test_basic_123" } }, "deployments": { "max": 1 }, "monthly_tokens": { "max": 1000000 } },
+            "pro": { "providers": { "stripe": { "price_id": "price_test_pro_456" } }, "deployments": { "max": 1 }, "monthly_tokens": { "max": 1000000 } }
         }
     });
 
@@ -337,33 +337,44 @@ async fn test_configure_stripe_plans_as_admin() {
     );
 
     let body: serde_json::Value = response.json();
-    let stripe_plans = body.get("stripe_plans").expect("Should have stripe_plans");
+    let subscription_plans = body
+        .get("subscription_plans")
+        .expect("Should have subscription_plans");
+    let basic = subscription_plans
+        .get("basic")
+        .expect("Should have basic plan");
+    let pro = subscription_plans.get("pro").expect("Should have pro plan");
 
     assert_eq!(
-        stripe_plans.get("basic"),
+        basic
+            .get("providers")
+            .and_then(|p| p.get("stripe"))
+            .and_then(|s| s.get("price_id")),
         Some(&json!("price_test_basic_123")),
-        "Should have basic plan configured"
+        "Should have basic plan with Stripe price_id configured"
     );
     assert_eq!(
-        stripe_plans.get("pro"),
+        pro.get("providers")
+            .and_then(|p| p.get("stripe"))
+            .and_then(|s| s.get("price_id")),
         Some(&json!("price_test_pro_456")),
-        "Should have pro plan configured"
+        "Should have pro plan with Stripe price_id configured"
     );
 }
 
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn test_stripe_plans_persisted_in_database() {
+async fn test_subscription_plans_persisted_in_database() {
     let server = create_test_server().await;
 
     let admin_email = "test_admin_stripe_persist@admin.org";
     let admin_token = mock_login(&server, admin_email).await;
 
-    // Configure Stripe plans
+    // Configure subscription plans
     let config_body = json!({
-        "stripe_plans": {
-            "basic": "price_persist_basic",
-            "pro": "price_persist_pro"
+        "subscription_plans": {
+            "basic": { "providers": { "stripe": { "price_id": "price_persist_basic" } } },
+            "pro": { "providers": { "stripe": { "price_id": "price_persist_pro" } } }
         }
     });
 
@@ -394,15 +405,27 @@ async fn test_stripe_plans_persisted_in_database() {
     assert_eq!(response.status_code(), 200);
 
     let body: serde_json::Value = response.json();
-    let stripe_plans = body.get("stripe_plans").expect("Should have stripe_plans");
+    let subscription_plans = body
+        .get("subscription_plans")
+        .expect("Should have subscription_plans");
+    let basic_price = subscription_plans
+        .get("basic")
+        .and_then(|p| p.get("providers"))
+        .and_then(|p| p.get("stripe"))
+        .and_then(|s| s.get("price_id"));
+    let pro_price = subscription_plans
+        .get("pro")
+        .and_then(|p| p.get("providers"))
+        .and_then(|p| p.get("stripe"))
+        .and_then(|s| s.get("price_id"));
 
     assert_eq!(
-        stripe_plans.get("basic"),
+        basic_price,
         Some(&json!("price_persist_basic")),
         "Basic plan should be persisted"
     );
     assert_eq!(
-        stripe_plans.get("pro"),
+        pro_price,
         Some(&json!("price_persist_pro")),
         "Pro plan should be persisted"
     );
@@ -437,11 +460,11 @@ async fn test_list_plans_returns_configured_plans() {
     let admin_email = "test_list_plans@admin.org";
     let admin_token = mock_login(&server, admin_email).await;
 
-    // Configure Stripe plans
+    // Configure subscription plans
     let config_body = json!({
-        "stripe_plans": {
-            "starter": "price_starter_789",
-            "premium": "price_premium_012"
+        "subscription_plans": {
+            "starter": { "providers": { "stripe": { "price_id": "price_starter_789" } } },
+            "premium": { "providers": { "stripe": { "price_id": "price_premium_012" } } }
         }
     });
 
@@ -514,9 +537,9 @@ async fn test_list_plans_empty_configuration() {
     let admin_email = "test_list_plans_empty@admin.org";
     let admin_token = mock_login(&server, admin_email).await;
 
-    // Configure empty Stripe plans
+    // Configure empty subscription plans
     let config_body = json!({
-        "stripe_plans": {}
+        "subscription_plans": {}
     });
 
     let response = server

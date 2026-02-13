@@ -2,7 +2,7 @@ use super::ports::{
     PaymentWebhookRepository, StripeCustomerRepository, Subscription, SubscriptionError,
     SubscriptionPlan, SubscriptionRepository, SubscriptionService, SubscriptionWithPlan,
 };
-use crate::system_configs::ports::SystemConfigsService;
+use crate::system_configs::ports::{SubscriptionPlanConfig, SystemConfigsService};
 use crate::UserId;
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -47,12 +47,21 @@ impl SubscriptionServiceImpl {
         }
     }
 
-    /// Get stripe plans configuration from system configs (lazy loading)
-    async fn get_stripe_plans(&self) -> Result<HashMap<String, String>, SubscriptionError> {
-        tracing::debug!("Getting stripe plans from system configs");
+    /// Get subscription plans for a provider from system configs (lazy loading)
+    /// Returns HashMap<plan_name, price_id> for the given provider
+    async fn get_plans_for_provider(
+        &self,
+        provider: &str,
+    ) -> Result<HashMap<String, String>, SubscriptionError> {
+        tracing::debug!(
+            "Getting subscription plans for provider={} from system configs",
+            provider
+        );
 
-        // Treat missing/empty Stripe secrets as "not configured" to avoid runtime Stripe errors.
-        if self.stripe_secret_key.is_empty() || self.stripe_webhook_secret.is_empty() {
+        // Treat missing/empty Stripe secrets as "not configured" when provider is stripe
+        if provider.to_lowercase() == "stripe"
+            && (self.stripe_secret_key.is_empty() || self.stripe_webhook_secret.is_empty())
+        {
             tracing::debug!(
                 "Stripe secrets are not set (secret_key_empty={}, webhook_secret_empty={}), Stripe not configured",
                 self.stripe_secret_key.is_empty(),
@@ -72,27 +81,42 @@ impl SubscriptionServiceImpl {
 
         tracing::debug!("System configs retrieved: has_config={}", configs.is_some());
 
-        // If configs is None or stripe_plans is None, Stripe is not configured
-        let plans = match configs {
+        let subscription_plans = match configs {
             None => {
-                tracing::debug!("No system configs found, Stripe not configured");
+                tracing::debug!("No system configs found, subscriptions not configured");
                 return Err(SubscriptionError::NotConfigured);
             }
             Some(c) => {
                 tracing::debug!(
-                    "System configs found, checking stripe_plans: has_plans={}",
-                    c.stripe_plans.is_some()
+                    "System configs found, checking subscription_plans: has_plans={}",
+                    c.subscription_plans.is_some()
                 );
-                c.stripe_plans.ok_or(SubscriptionError::NotConfigured)?
+                c.subscription_plans
+                    .ok_or(SubscriptionError::NotConfigured)?
             }
         };
 
+        // Extract plan_name -> price_id for the requested provider
+        let mut plans = HashMap::new();
+        for (plan_name, plan_config) in subscription_plans {
+            if let Some(provider_config) = plan_config.providers.get(provider) {
+                plans.insert(plan_name, provider_config.price_id.clone());
+            }
+        }
+
         if plans.is_empty() {
-            tracing::debug!("Stripe plans is empty, Stripe not configured");
+            tracing::debug!(
+                "No plans found for provider={}, subscriptions not configured",
+                provider
+            );
             return Err(SubscriptionError::NotConfigured);
         }
 
-        tracing::debug!("Stripe plans found with {} entries", plans.len());
+        tracing::debug!(
+            "Subscription plans found for {}: {} entries",
+            provider,
+            plans.len()
+        );
         Ok(plans)
     }
 
@@ -208,15 +232,25 @@ impl SubscriptionServiceImpl {
             updated_at: chrono::Utc::now(),
         })
     }
+}
 
-    /// Resolve plan name from price_id
-    fn resolve_plan_name(&self, price_id: &str, plans: &HashMap<String, String>) -> String {
-        plans
-            .iter()
-            .find(|(_, v)| v.as_str() == price_id)
-            .map(|(k, _)| k.clone())
-            .unwrap_or_else(|| "unknown".to_string())
-    }
+/// Resolve plan name from provider, price_id and subscription_plans config
+fn resolve_plan_name_from_config(
+    provider: &str,
+    price_id: &str,
+    plans: &HashMap<String, SubscriptionPlanConfig>,
+) -> String {
+    plans
+        .iter()
+        .find(|(_, config)| {
+            config
+                .providers
+                .get(provider)
+                .map(|p| p.price_id.as_str() == price_id)
+                .unwrap_or(false)
+        })
+        .map(|(name, _)| name.clone())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 /// Generate idempotency key for checkout session creation
@@ -238,7 +272,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
     async fn get_available_plans(&self) -> Result<Vec<SubscriptionPlan>, SubscriptionError> {
         tracing::debug!("Getting available subscription plans");
 
-        let stripe_plans = self.get_stripe_plans().await?;
+        // Return Stripe plans (primary provider for now)
+        let stripe_plans = self.get_plans_for_provider("stripe").await?;
 
         let plans: Vec<SubscriptionPlan> = stripe_plans
             .into_iter()
@@ -266,8 +301,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
         // Validate provider (only stripe supported for now)
         Self::validate_provider(&provider)?;
 
-        // Get stripe plans from system configs
-        let stripe_plans = self.get_stripe_plans().await?;
+        // Get plans for provider from system configs
+        let provider_plans = self.get_plans_for_provider(&provider).await?;
 
         // Check if user already has active subscription
         if self
@@ -281,9 +316,10 @@ impl SubscriptionService for SubscriptionServiceImpl {
         }
 
         // Validate plan and get price_id
-        let price_id = stripe_plans
+        let price_id = provider_plans
             .get(&plan)
-            .ok_or_else(|| SubscriptionError::InvalidPlan(plan.clone()))?;
+            .ok_or_else(|| SubscriptionError::InvalidPlan(plan.clone()))?
+            .clone();
 
         // Get or create Stripe customer
         let customer_id = self.get_or_create_stripe_customer(user_id).await?;
@@ -292,7 +328,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
         let base_client = self.get_stripe_client();
 
         // Generate idempotency key with 1-hour time window
-        let idempotency_key = generate_checkout_idempotency_key(&user_id, price_id);
+        let idempotency_key = generate_checkout_idempotency_key(&user_id, &price_id);
 
         // Clone client and set request strategy with idempotency key
         let client = base_client
@@ -402,8 +438,15 @@ impl SubscriptionService for SubscriptionServiceImpl {
             active_only
         );
 
-        // Get stripe plans from system configs
-        let stripe_plans = self.get_stripe_plans().await?;
+        // Get subscription_plans from config for plan name resolution across providers
+        let configs = self
+            .system_configs_service
+            .get_configs()
+            .await
+            .map_err(|e| SubscriptionError::InternalError(e.to_string()))?;
+        let subscription_plans = configs
+            .and_then(|c| c.subscription_plans)
+            .unwrap_or_default();
 
         // Get subscriptions from database
         let subscriptions = if active_only {
@@ -422,7 +465,11 @@ impl SubscriptionService for SubscriptionServiceImpl {
         let result: Vec<SubscriptionWithPlan> = subscriptions
             .into_iter()
             .map(|sub| {
-                let plan = self.resolve_plan_name(&sub.price_id, &stripe_plans);
+                let plan = resolve_plan_name_from_config(
+                    &sub.provider,
+                    &sub.price_id,
+                    &subscription_plans,
+                );
                 SubscriptionWithPlan {
                     subscription_id: sub.subscription_id,
                     user_id: sub.user_id.0.to_string(),
