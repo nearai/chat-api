@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use services::analytics::{ActivityLogEntry, AnalyticsSummary, TopActiveUsersResponse};
 use services::model::ports::{UpdateModelParams, UpsertModelParams};
-use services::user_usage::{UsageRankBy, UserUsageSummary};
+use services::user_usage::UsageRankBy;
 use services::UserId;
 
 /// Pagination query parameters
@@ -303,18 +303,10 @@ pub async fn get_top_users(
     }))
 }
 
-/// Usage response for a single user (all-time token sum and cost in nano-USD).
-#[derive(Debug, Serialize, utoipa::ToSchema)]
-pub struct UserUsageResponse {
-    pub user_id: UserId,
-    pub token_sum: i64,
-    pub cost_nano_usd: i64,
-}
-
 /// Response for top usage listing.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct TopUsageResponse {
-    pub users: Vec<UserUsageResponse>,
+    pub users: Vec<crate::models::UserUsageResponse>,
     pub rank_by: String,
 }
 
@@ -346,7 +338,7 @@ fn default_top_usage_limit() -> i64 {
     tag = "Admin",
     params(("user_id" = uuid::Uuid, Path, description = "User ID")),
     responses(
-        (status = 200, description = "Usage retrieved", body = UserUsageResponse),
+        (status = 200, description = "Usage retrieved", body = crate::models::UserUsageResponse),
         (status = 404, description = "User has no usage or not found", body = crate::error::ApiErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
@@ -371,10 +363,10 @@ pub async fn get_usage_by_user_id(
 
     let summary = summary.ok_or_else(|| {
         tracing::info!("No usage found for user_id={}", user_id);
-        ApiError::status(StatusCode::NOT_FOUND, "User has no usage or not found")
+        ApiError::not_found("User has no usage or not found")
     })?;
 
-    Ok(Json(UserUsageResponse {
+    Ok(Json(crate::models::UserUsageResponse {
         user_id: summary.user_id,
         token_sum: summary.token_sum,
         cost_nano_usd: summary.cost_nano_usd,
@@ -437,7 +429,7 @@ pub async fn get_top_usage(
     Ok(Json(TopUsageResponse {
         users: users
             .into_iter()
-            .map(|s| UserUsageResponse {
+            .map(|s| crate::models::UserUsageResponse {
                 user_id: s.user_id,
                 token_sum: s.token_sum,
                 cost_nano_usd: s.cost_nano_usd,

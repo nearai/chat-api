@@ -4,7 +4,6 @@ use axum::{
     routing::{get, patch, post},
     Json, Router,
 };
-
 /// Get current user
 ///
 /// Returns the profile of the currently authenticated user, including their linked OAuth accounts.
@@ -38,6 +37,48 @@ pub async fn get_current_user(
         })?;
 
     Ok(Json(profile.into()))
+}
+
+/// Get current user's usage (all-time token sum and cost in nano-USD).
+///
+/// Returns the authenticated user's own usage. No admin required.
+#[utoipa::path(
+    get,
+    path = "/v1/users/me/usage",
+    tag = "Users",
+    responses(
+        (status = 200, description = "Current user usage", body = UserUsageResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "No usage recorded", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn get_my_usage(
+    State(app_state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+) -> Result<Json<UserUsageResponse>, ApiError> {
+    let summary = app_state
+        .user_usage_service
+        .get_usage_by_user_id(user.user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get usage for user_id={}: {}", user.user_id, e);
+            ApiError::internal_server_error("Failed to retrieve usage")
+        })?;
+
+    let summary = summary.ok_or_else(|| {
+        tracing::info!("No usage found for user_id={}", user.user_id);
+        ApiError::not_found("No usage recorded")
+    })?;
+
+    Ok(Json(UserUsageResponse {
+        user_id: summary.user_id,
+        token_sum: summary.token_sum,
+        cost_nano_usd: summary.cost_nano_usd,
+    }))
 }
 
 /// Get user settings
@@ -180,6 +221,7 @@ pub async fn update_user_settings_partially(
 pub fn create_user_router() -> Router<AppState> {
     Router::new()
         .route("/me", get(get_current_user))
+        .route("/me/usage", get(get_my_usage))
         .route("/me/settings", get(get_user_settings))
         .route("/me/settings", post(update_user_settings))
         .route("/me/settings", patch(update_user_settings_partially))

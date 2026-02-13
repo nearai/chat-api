@@ -389,6 +389,14 @@ pub struct ModelListResponse {
     pub total: i64,
 }
 
+/// User usage summary (token sum and cost in nano-USD). Used by /users/me/usage and admin usage API.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UserUsageResponse {
+    pub user_id: services::UserId,
+    pub token_sum: i64,
+    pub cost_nano_usd: i64,
+}
+
 /// Paginated user list response
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UserListResponse {
