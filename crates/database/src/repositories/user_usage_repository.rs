@@ -95,6 +95,7 @@ impl UserUsageRepository for PostgresUserUsageRepository {
                 r#"
                 SELECT
                     COALESCE(SUM(CASE WHEN metric_key = 'llm.tokens' THEN quantity ELSE 0 END), 0)::bigint AS token_sum,
+                    COALESCE(SUM(CASE WHEN metric_key IN ('image.generate', 'image.edit') THEN quantity ELSE 0 END), 0)::bigint AS image_num,
                     COALESCE(SUM(COALESCE(cost_nano_usd, 0)), 0)::bigint AS cost_nano_usd
                 FROM user_usage_event
                 WHERE user_id = $1
@@ -103,10 +104,12 @@ impl UserUsageRepository for PostgresUserUsageRepository {
             )
             .await?;
         let token_sum: i64 = row.get(0);
-        let cost_nano_usd: i64 = row.get(1);
+        let image_num: i64 = row.get(1);
+        let cost_nano_usd: i64 = row.get(2);
         Ok(Some(UserUsageSummary {
             user_id,
             token_sum,
+            image_num,
             cost_nano_usd,
         }))
     }
@@ -127,11 +130,12 @@ impl UserUsageRepository for PostgresUserUsageRepository {
                 SELECT
                     user_id,
                     COALESCE(SUM(CASE WHEN metric_key = 'llm.tokens' THEN quantity ELSE 0 END), 0)::bigint AS token_sum,
+                    COALESCE(SUM(CASE WHEN metric_key IN ('image.generate', 'image.edit') THEN quantity ELSE 0 END), 0)::bigint AS image_num,
                     COALESCE(SUM(COALESCE(cost_nano_usd, 0)), 0)::bigint AS cost_nano_usd
                 FROM user_usage_event
                 GROUP BY user_id
             )
-            SELECT user_id, token_sum, cost_nano_usd
+            SELECT user_id, token_sum, image_num, cost_nano_usd
             FROM agg
             ORDER BY {}
             LIMIT $1
@@ -144,7 +148,8 @@ impl UserUsageRepository for PostgresUserUsageRepository {
             .map(|row| UserUsageSummary {
                 user_id: row.get(0),
                 token_sum: row.get(1),
-                cost_nano_usd: row.get(2),
+                image_num: row.get(2),
+                cost_nano_usd: row.get(3),
             })
             .collect())
     }

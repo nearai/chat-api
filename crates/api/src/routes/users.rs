@@ -77,6 +77,7 @@ pub async fn get_my_usage(
     Ok(Json(UserUsageResponse {
         user_id: summary.user_id,
         token_sum: summary.token_sum,
+        image_num: summary.image_num,
         cost_nano_usd: summary.cost_nano_usd,
     }))
 }

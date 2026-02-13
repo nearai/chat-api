@@ -3,11 +3,13 @@ use chrono::Duration;
 
 use crate::UserId;
 
-/// Per-user usage aggregate (all-time token sum and cost sum).
+/// Per-user usage aggregate (all-time token sum, image count, and cost sum).
 #[derive(Debug, Clone)]
 pub struct UserUsageSummary {
     pub user_id: UserId,
     pub token_sum: i64,
+    /// Sum of quantity for image.generate + image.edit (image count).
+    pub image_num: i64,
     pub cost_nano_usd: i64,
 }
 

@@ -369,6 +369,7 @@ pub async fn get_usage_by_user_id(
     Ok(Json(crate::models::UserUsageResponse {
         user_id: summary.user_id,
         token_sum: summary.token_sum,
+        image_num: summary.image_num,
         cost_nano_usd: summary.cost_nano_usd,
     }))
 }
@@ -432,6 +433,7 @@ pub async fn get_top_usage(
             .map(|s| crate::models::UserUsageResponse {
                 user_id: s.user_id,
                 token_sum: s.token_sum,
+                image_num: s.image_num,
                 cost_nano_usd: s.cost_nano_usd,
             })
             .collect(),

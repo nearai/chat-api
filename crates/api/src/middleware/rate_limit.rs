@@ -664,6 +664,7 @@ mod tests {
                 Ok(Some(UserUsageSummary {
                     user_id,
                     token_sum: 0,
+                    image_num: 0,
                     cost_nano_usd: 0,
                 }))
             }
@@ -719,6 +720,7 @@ mod tests {
                 Ok(Some(UserUsageSummary {
                     user_id,
                     token_sum: self.token_sum,
+                    image_num: 0,
                     cost_nano_usd: self.cost_sum,
                 }))
             }
