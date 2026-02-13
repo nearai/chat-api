@@ -622,7 +622,7 @@ mod tests {
             AnalyticsSummary, CheckAndRecordActivityRequest, CheckAndRecordActivityResult,
             RecordActivityRequest, TopActiveUser,
         };
-        use services::user_usage::UserUsageService;
+        use services::user_usage::{UsageRankBy, UserUsageService, UserUsageSummary};
         use tokio::sync::Mutex;
 
         /// User usage mock that returns zero usage (always under limit).
@@ -655,6 +655,25 @@ mod tests {
                 _window_duration: ChronoDuration,
             ) -> anyhow::Result<i64> {
                 Ok(0)
+            }
+
+            async fn get_usage_by_user_id(
+                &self,
+                user_id: UserId,
+            ) -> anyhow::Result<Option<UserUsageSummary>> {
+                Ok(Some(UserUsageSummary {
+                    user_id,
+                    token_sum: 0,
+                    cost_nano_usd: 0,
+                }))
+            }
+
+            async fn get_top_users_usage(
+                &self,
+                _limit: i64,
+                _rank_by: UsageRankBy,
+            ) -> anyhow::Result<Vec<UserUsageSummary>> {
+                Ok(vec![])
             }
         }
 
@@ -691,6 +710,25 @@ mod tests {
                 _window_duration: ChronoDuration,
             ) -> anyhow::Result<i64> {
                 Ok(self.cost_sum)
+            }
+
+            async fn get_usage_by_user_id(
+                &self,
+                user_id: UserId,
+            ) -> anyhow::Result<Option<UserUsageSummary>> {
+                Ok(Some(UserUsageSummary {
+                    user_id,
+                    token_sum: self.token_sum,
+                    cost_nano_usd: self.cost_sum,
+                }))
+            }
+
+            async fn get_top_users_usage(
+                &self,
+                _limit: i64,
+                _rank_by: UsageRankBy,
+            ) -> anyhow::Result<Vec<UserUsageSummary>> {
+                Ok(vec![])
             }
         }
 
