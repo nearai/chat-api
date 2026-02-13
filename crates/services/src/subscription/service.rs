@@ -8,9 +8,9 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 use stripe::{
-    CheckoutSession, CheckoutSessionMode, Client, CreateCheckoutSession,
-    CreateCheckoutSessionLineItems, Customer, RequestStrategy, Subscription as StripeSubscription,
-    Webhook, WebhookError,
+    BillingPortalSession, CheckoutSession, CheckoutSessionMode, Client, CreateBillingPortalSession,
+    CreateCheckoutSession, CreateCheckoutSessionLineItems, Customer, CustomerId, RequestStrategy,
+    Subscription as StripeSubscription, Webhook, WebhookError,
 };
 
 /// Configuration for SubscriptionServiceImpl
@@ -696,5 +696,55 @@ impl SubscriptionService for SubscriptionServiceImpl {
         );
 
         Ok(())
+    }
+
+    async fn create_customer_portal_session(
+        &self,
+        user_id: UserId,
+        return_url: String,
+    ) -> Result<String, SubscriptionError> {
+        tracing::info!("Creating portal session for user_id={}", user_id);
+
+        // Check Stripe configuration
+        if self.stripe_secret_key.is_empty() {
+            tracing::debug!("Stripe secret key is empty, Stripe not configured");
+            return Err(SubscriptionError::NotConfigured);
+        }
+
+        // Get user's Stripe customer ID
+        let customer_id = self
+            .stripe_customer_repo
+            .get_customer_id(user_id)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
+            .ok_or(SubscriptionError::NoStripeCustomer)?;
+
+        tracing::debug!(
+            "Found Stripe customer: user_id={}, customer_id={}",
+            user_id,
+            customer_id
+        );
+
+        // Parse customer ID
+        let customer_id_parsed: CustomerId = customer_id
+            .parse()
+            .map_err(|_| SubscriptionError::InternalError("Invalid customer ID format".into()))?;
+
+        // Create billing portal session
+        let client = self.get_stripe_client();
+        let mut params = CreateBillingPortalSession::new(customer_id_parsed);
+        params.return_url = Some(&return_url);
+
+        let session = BillingPortalSession::create(&client, params)
+            .await
+            .map_err(|e| SubscriptionError::StripeError(e.to_string()))?;
+
+        tracing::info!(
+            "Portal session created: user_id={}, session_id={}",
+            user_id,
+            session.id
+        );
+
+        Ok(session.url)
     }
 }

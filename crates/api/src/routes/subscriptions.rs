@@ -69,6 +69,20 @@ pub struct ListPlansResponse {
     pub plans: Vec<SubscriptionPlan>,
 }
 
+/// Request to create a customer portal session
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct CreatePortalSessionRequest {
+    /// URL to redirect after leaving the portal
+    pub return_url: String,
+}
+
+/// Response containing portal URL
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct CreatePortalSessionResponse {
+    /// Stripe customer portal URL
+    pub url: String,
+}
+
 /// Create a subscription checkout session
 #[utoipa::path(
     post,
@@ -136,6 +150,10 @@ pub async fn create_subscription(
             }
             SubscriptionError::NoActiveSubscription => {
                 tracing::error!("Unexpected NoActiveSubscription in create");
+                ApiError::internal_server_error("Failed to create subscription")
+            }
+            SubscriptionError::NoStripeCustomer => {
+                tracing::error!("Unexpected NoStripeCustomer in create");
                 ApiError::internal_server_error("Failed to create subscription")
             }
             SubscriptionError::WebhookVerificationFailed(msg) => {
@@ -278,6 +296,62 @@ pub async fn list_subscriptions(
     Ok(Json(ListSubscriptionsResponse { subscriptions }))
 }
 
+/// Create a customer portal session
+#[utoipa::path(
+    post,
+    path = "/v1/subscriptions/portal",
+    tag = "Subscriptions",
+    request_body = CreatePortalSessionRequest,
+    responses(
+        (status = 200, description = "Portal session created successfully", body = CreatePortalSessionResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "No Stripe customer found", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse),
+        (status = 503, description = "Stripe not configured", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn create_portal_session(
+    State(app_state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Json(req): Json<CreatePortalSessionRequest>,
+) -> Result<Json<CreatePortalSessionResponse>, ApiError> {
+    tracing::info!("Creating portal session for user_id={}", user.user_id);
+
+    let url = app_state
+        .subscription_service
+        .create_customer_portal_session(user.user_id, req.return_url)
+        .await
+        .map_err(|e| match e {
+            SubscriptionError::NoStripeCustomer => {
+                ApiError::not_found("No Stripe customer found for this user")
+            }
+            SubscriptionError::NotConfigured => {
+                ApiError::service_unavailable("Stripe is not configured")
+            }
+            SubscriptionError::DatabaseError(msg) => {
+                tracing::error!(error = ?msg, "Database error creating portal session");
+                ApiError::internal_server_error("Failed to create portal session")
+            }
+            SubscriptionError::StripeError(msg) => {
+                tracing::error!(error = ?msg, "Stripe error creating portal session");
+                ApiError::internal_server_error("Failed to create portal session")
+            }
+            SubscriptionError::InternalError(msg) => {
+                tracing::error!(error = ?msg, "Internal error creating portal session");
+                ApiError::internal_server_error("Failed to create portal session")
+            }
+            _ => {
+                tracing::error!(error = ?e, "Failed to create portal session");
+                ApiError::internal_server_error("Failed to create portal session")
+            }
+        })?;
+
+    Ok(Json(CreatePortalSessionResponse { url }))
+}
+
 /// Handle Stripe webhook events (public endpoint - no auth required)
 pub async fn handle_stripe_webhook(
     State(app_state): State<AppState>,
@@ -321,6 +395,7 @@ pub fn create_subscriptions_router() -> Router<AppState> {
         .route("/v1/subscriptions", post(create_subscription))
         .route("/v1/subscriptions", get(list_subscriptions))
         .route("/v1/subscriptions/cancel", post(cancel_subscription))
+        .route("/v1/subscriptions/portal", post(create_portal_session))
 }
 
 /// Create public subscription router (for webhooks and plans - no auth)
