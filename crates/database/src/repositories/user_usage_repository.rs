@@ -90,27 +90,34 @@ impl UserUsageRepository for PostgresUserUsageRepository {
         user_id: UserId,
     ) -> anyhow::Result<Option<UserUsageSummary>> {
         let client = self.pool.get().await?;
+        // Group by user_id so that query_opt returns None when the user has no usage events.
+        // This allows API layer to distinguish "no usage" from "0 usage".
         let row = client
-            .query_one(
+            .query_opt(
                 r#"
                 SELECT
+                    user_id,
                     COALESCE(SUM(CASE WHEN metric_key = 'llm.tokens' THEN quantity ELSE 0 END), 0)::bigint AS token_sum,
                     COALESCE(SUM(CASE WHEN metric_key IN ('image.generate', 'image.edit') THEN quantity ELSE 0 END), 0)::bigint AS image_num,
                     COALESCE(SUM(COALESCE(cost_nano_usd, 0)), 0)::bigint AS cost_nano_usd
                 FROM user_usage_event
                 WHERE user_id = $1
+                GROUP BY user_id
                 "#,
                 &[&user_id],
             )
             .await?;
-        let token_sum: i64 = row.get(0);
-        let image_num: i64 = row.get(1);
-        let cost_nano_usd: i64 = row.get(2);
+
+        let row = match row {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+
         Ok(Some(UserUsageSummary {
-            user_id,
-            token_sum,
-            image_num,
-            cost_nano_usd,
+            user_id: row.get(0),
+            token_sum: row.get(1),
+            image_num: row.get(2),
+            cost_nano_usd: row.get(3),
         }))
     }
 
