@@ -104,8 +104,8 @@ pub struct SubscriptionPlanConfig {
 impl Default for RateLimitConfig {
     fn default() -> Self {
         Self {
-            max_concurrent: 10,
-            max_requests_per_window: 10,
+            max_concurrent: 5,
+            max_requests_per_window: 5,
             window_duration: Duration::seconds(1),
             window_limits: vec![WindowLimit {
                 window_duration: Duration::days(1),
