@@ -333,14 +333,27 @@ fn default_top_usage_limit() -> i64 {
     LIST_USERS_LIMIT_MAX
 }
 
-/// Get usage for a single user by ID (all-time token sum and cost).
+/// Query parameters for single-user usage (admin).
+#[derive(Debug, Deserialize)]
+pub struct UsageByUserQuery {
+    /// Start of time period (ISO 8601). Optional; interval [start, end).
+    pub start: Option<DateTime<Utc>>,
+    /// End of time period (ISO 8601). Optional; interval [start, end).
+    pub end: Option<DateTime<Utc>>,
+}
+
+/// Get usage for a single user by ID (optional time range; omit both for all-time).
 ///
 /// Requires admin authentication.
 #[utoipa::path(
     get,
     path = "/v1/admin/usage/users/{user_id}",
     tag = "Admin",
-    params(("user_id" = uuid::Uuid, Path, description = "User ID")),
+    params(
+        ("user_id" = uuid::Uuid, Path, description = "User ID"),
+        ("start" = Option<DateTime<Utc>>, Query, description = "Start of time period (ISO 8601); interval [start, end)"),
+        ("end" = Option<DateTime<Utc>>, Query, description = "End of time period (ISO 8601); interval [start, end)")
+    ),
     responses(
         (status = 200, description = "Usage retrieved", body = crate::models::UserUsageResponse),
         (status = 404, description = "User has no usage or not found", body = crate::error::ApiErrorResponse),
@@ -355,10 +368,16 @@ fn default_top_usage_limit() -> i64 {
 pub async fn get_usage_by_user_id(
     State(app_state): State<AppState>,
     Path(user_id): Path<UserId>,
+    Query(params): Query<UsageByUserQuery>,
 ) -> Result<Json<UserUsageResponse>, ApiError> {
+    if let (Some(s), Some(e)) = (params.start, params.end) {
+        if s >= e {
+            return Err(ApiError::bad_request("start must be before end"));
+        }
+    }
     let summary = app_state
         .user_usage_service
-        .get_usage_by_user_id(user_id)
+        .get_usage_by_user_id(user_id, params.start, params.end)
         .await
         .map_err(|e| {
             tracing::error!("Failed to get usage for user_id={}: {}", user_id, e);

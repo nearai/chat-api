@@ -1,9 +1,11 @@
 use crate::{error::ApiError, middleware::AuthenticatedUser, models::*, state::AppState};
 use axum::{
-    extract::{Extension, State},
+    extract::{Extension, Query, State},
     routing::{get, patch, post},
     Json, Router,
 };
+use chrono::{DateTime, Utc};
+use serde::Deserialize;
 /// Get current user
 ///
 /// Returns the profile of the currently authenticated user, including their linked OAuth accounts.
@@ -39,13 +41,26 @@ pub async fn get_current_user(
     Ok(Json(profile.into()))
 }
 
-/// Get current user's usage (all-time token sum and cost in nano-USD).
+/// Query parameters for current user usage.
+#[derive(Debug, Deserialize)]
+pub struct MyUsageQuery {
+    /// Start of time period (ISO 8601). Optional; interval [start, end).
+    pub start: Option<DateTime<Utc>>,
+    /// End of time period (ISO 8601). Optional; interval [start, end).
+    pub end: Option<DateTime<Utc>>,
+}
+
+/// Get current user's usage (optional time range; omit both for all-time).
 ///
 /// Returns the authenticated user's own usage. No admin required.
 #[utoipa::path(
     get,
     path = "/v1/users/me/usage",
     tag = "Users",
+    params(
+        ("start" = Option<DateTime<Utc>>, Query, description = "Start of time period (ISO 8601); interval [start, end)"),
+        ("end" = Option<DateTime<Utc>>, Query, description = "End of time period (ISO 8601); interval [start, end)")
+    ),
     responses(
         (status = 200, description = "Current user usage", body = UserUsageResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
@@ -59,10 +74,16 @@ pub async fn get_current_user(
 pub async fn get_my_usage(
     State(app_state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    Query(params): Query<MyUsageQuery>,
 ) -> Result<Json<UserUsageResponse>, ApiError> {
+    if let (Some(s), Some(e)) = (params.start, params.end) {
+        if s >= e {
+            return Err(ApiError::bad_request("start must be before end"));
+        }
+    }
     let summary = app_state
         .user_usage_service
-        .get_usage_by_user_id(user.user_id)
+        .get_usage_by_user_id(user.user_id, params.start, params.end)
         .await
         .map_err(|e| {
             tracing::error!("Failed to get usage for user_id={}: {}", user.user_id, e);
