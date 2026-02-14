@@ -57,8 +57,10 @@ impl UserUsageService for UserUsageServiceImpl {
     async fn get_usage_by_user_id(
         &self,
         user_id: UserId,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
     ) -> anyhow::Result<Option<super::ports::UserUsageSummary>> {
-        self.repo.get_usage_by_user_id(user_id).await
+        self.repo.get_usage_by_user_id(user_id, start, end).await
     }
 
     async fn get_top_users_usage(

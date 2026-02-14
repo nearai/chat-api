@@ -4,7 +4,7 @@ use api::routes::api::USER_BANNED_ERROR_MESSAGE;
 use chrono::Duration;
 use common::{
     create_test_server, create_test_server_and_db, create_test_server_with_config, mock_login,
-    TestServerConfig,
+    restrictive_rate_limit_config, TestServerConfig,
 };
 use futures::future::join_all;
 use serde_json::json;
@@ -17,14 +17,7 @@ use tokio::time::sleep;
 
 async fn create_rate_limited_test_server() -> axum_test::TestServer {
     create_test_server_with_config(TestServerConfig {
-        rate_limit_config: Some(RateLimitConfig {
-            max_concurrent: 2,
-            max_requests_per_window: 1,
-            window_duration: Duration::seconds(1),
-            window_limits: vec![],
-            token_window_limits: vec![],
-            cost_window_limits: vec![],
-        }),
+        rate_limit_config: Some(restrictive_rate_limit_config()),
         ..Default::default()
     })
     .await
@@ -182,8 +175,7 @@ async fn test_chat_completions_concurrent_requests_rate_limited() {
         .map(|r| r.unwrap())
         .collect();
 
-    // At least one request should be rate limited (429)
-    // With config: max 1 req/sec, max 2 concurrent, at least 2 of 3 should be rejected
+    // With config: max 1 req/sec, max 2 concurrent, at least 2 of 3 should be rate limited (429)
     let rate_limited_count = results.iter().filter(|&&s| s == 429).count();
     assert!(
         rate_limited_count >= 2,

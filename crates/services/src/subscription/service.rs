@@ -3,15 +3,20 @@ use super::ports::{
     SubscriptionPlan, SubscriptionRepository, SubscriptionService, SubscriptionWithPlan,
 };
 use crate::system_configs::ports::{SubscriptionPlanConfig, SystemConfigsService};
+use crate::user::ports::UserRepository;
+use crate::user_usage::ports::UserUsageRepository;
 use crate::UserId;
 use async_trait::async_trait;
+use chrono::{Datelike, NaiveTime, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 use stripe::{
     BillingPortalSession, CheckoutSession, CheckoutSessionMode, Client, CreateBillingPortalSession,
     CreateCheckoutSession, CreateCheckoutSessionLineItems, Customer, CustomerId, RequestStrategy,
     Subscription as StripeSubscription, Webhook, WebhookError,
 };
+use tokio::sync::RwLock;
 
 /// Configuration for SubscriptionServiceImpl
 pub struct SubscriptionServiceConfig {
@@ -20,9 +25,21 @@ pub struct SubscriptionServiceConfig {
     pub subscription_repo: Arc<dyn SubscriptionRepository>,
     pub webhook_repo: Arc<dyn PaymentWebhookRepository>,
     pub system_configs_service: Arc<dyn SystemConfigsService>,
+    pub user_repository: Arc<dyn UserRepository>,
+    pub user_usage_repo: Arc<dyn UserUsageRepository>,
     pub stripe_secret_key: String,
     pub stripe_webhook_secret: String,
 }
+
+/// Cached token limit for a user. Invalid after TTL_CACHE_SECS (10 mins) or when plan changes.
+struct CachedTokenLimit {
+    max_tokens: u64,
+    period_start: chrono::DateTime<Utc>,
+    period_end: chrono::DateTime<Utc>,
+    cached_at: Instant,
+}
+
+const TTL_CACHE_SECS: u64 = 600; // 10 minutes
 
 pub struct SubscriptionServiceImpl {
     db_pool: deadpool_postgres::Pool,
@@ -30,8 +47,11 @@ pub struct SubscriptionServiceImpl {
     subscription_repo: Arc<dyn SubscriptionRepository>,
     webhook_repo: Arc<dyn PaymentWebhookRepository>,
     system_configs_service: Arc<dyn SystemConfigsService>,
+    user_repository: Arc<dyn UserRepository>,
+    user_usage_repo: Arc<dyn UserUsageRepository>,
     stripe_secret_key: String,
     stripe_webhook_secret: String,
+    token_limit_cache: Arc<RwLock<HashMap<UserId, CachedTokenLimit>>>,
 }
 
 impl SubscriptionServiceImpl {
@@ -42,9 +62,19 @@ impl SubscriptionServiceImpl {
             subscription_repo: config.subscription_repo,
             webhook_repo: config.webhook_repo,
             system_configs_service: config.system_configs_service,
+            user_repository: config.user_repository,
+            user_usage_repo: config.user_usage_repo,
             stripe_secret_key: config.stripe_secret_key,
             stripe_webhook_secret: config.stripe_webhook_secret,
+            token_limit_cache: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Invalidate token limit cache for a user (e.g. when plan changes via webhook or cancel/resume).
+    async fn invalidate_token_limit_cache(&self, user_id: UserId) {
+        let mut guard = self.token_limit_cache.write().await;
+        guard.remove(&user_id);
+        tracing::debug!("Invalidated token limit cache for user_id={}", user_id);
     }
 
     /// Get subscription plans for a provider from system configs (lazy loading)
@@ -145,13 +175,30 @@ impl SubscriptionServiceImpl {
             return Ok(customer_id);
         }
 
-        // Create new Stripe customer
+        // Fetch user to get email and name for Stripe customer
+        let user = self
+            .user_repository
+            .get_user(user_id)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
+            .ok_or_else(|| {
+                SubscriptionError::InternalError(
+                    "User not found when creating Stripe customer".to_string(),
+                )
+            })?;
+
+        // Skip email for NEAR wallet users (they have placeholder like account_id@near)
+        let email_for_stripe = (!user.email.ends_with("@near")).then_some(user.email.as_str());
+
+        // Create new Stripe customer with email and name for Stripe Dashboard/receipts
         tracing::info!("Creating new Stripe customer for user_id={}", user_id);
         let client = self.get_stripe_client();
 
         let customer = Customer::create(
             &client,
             stripe::CreateCustomer {
+                email: email_for_stripe,
+                name: user.name.as_deref(),
                 metadata: Some(
                     vec![("user_id".to_string(), user_id.0.to_string())]
                         .into_iter()
@@ -234,6 +281,47 @@ impl SubscriptionServiceImpl {
     }
 }
 
+/// Subtract one calendar month from a datetime, keeping the same day when possible.
+/// E.g. March 15 00:00 → Feb 15 00:00. March 31 → Feb 28/29 (last day of month).
+fn sub_one_month_same_day(dt: chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
+    use chrono::NaiveDate;
+    let d = dt.date_naive();
+    let (y, m, day) = (d.year(), d.month(), d.day());
+    let (new_y, new_m) = if m == 1 { (y - 1, 12) } else { (y, m - 1) };
+    let new_d = NaiveDate::from_ymd_opt(new_y, new_m, day).unwrap_or_else(|| {
+        // Day overflow (e.g. March 31 -> Feb 31 doesn't exist): use last day of month
+        let (next_y, next_m) = if new_m == 12 {
+            (new_y + 1, 1)
+        } else {
+            (new_y, new_m + 1)
+        };
+        NaiveDate::from_ymd_opt(next_y, next_m, 1)
+            .and_then(|first_of_next| first_of_next.pred_opt())
+            .unwrap_or_else(|| {
+                NaiveDate::from_ymd_opt(new_y, new_m, 28).expect("28th day of month exists")
+            })
+    });
+    chrono::DateTime::from_naive_utc_and_offset(new_d.and_time(dt.time()), Utc)
+}
+
+/// Returns (period_start, period_end) for the current calendar month.
+/// period_start = 00:00 on the 1st, period_end = 00:00 on the 1st of next month (24:00 on last day).
+fn current_calendar_month_period(
+    now: chrono::DateTime<Utc>,
+) -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
+    use chrono::NaiveDate;
+    let (y, m, _) = (now.year(), now.month(), now.day());
+    let midnight = NaiveTime::from_hms_opt(0, 0, 0).expect("midnight is valid");
+    let period_start = NaiveDate::from_ymd_opt(y, m, 1)
+        .map(|d| chrono::DateTime::from_naive_utc_and_offset(d.and_time(midnight), Utc))
+        .expect("first of month is valid");
+    let (next_y, next_m) = if m == 12 { (y + 1, 1) } else { (y, m + 1) };
+    let period_end = NaiveDate::from_ymd_opt(next_y, next_m, 1)
+        .map(|d| chrono::DateTime::from_naive_utc_and_offset(d.and_time(midnight), Utc))
+        .expect("first of next month is valid");
+    (period_start, period_end)
+}
+
 /// Resolve plan name from provider, price_id and subscription_plans config
 fn resolve_plan_name_from_config(
     provider: &str,
@@ -272,12 +360,33 @@ impl SubscriptionService for SubscriptionServiceImpl {
     async fn get_available_plans(&self) -> Result<Vec<SubscriptionPlan>, SubscriptionError> {
         tracing::debug!("Getting available subscription plans");
 
-        // Return Stripe plans (primary provider for now)
+        // Return Stripe plans (primary provider for now) with limits from config
         let stripe_plans = self.get_plans_for_provider("stripe").await?;
 
+        let configs = self
+            .system_configs_service
+            .get_configs()
+            .await
+            .map_err(|e| SubscriptionError::InternalError(e.to_string()))?;
+        let subscription_plans = configs
+            .and_then(|c| c.subscription_plans)
+            .unwrap_or_default();
+
         let plans: Vec<SubscriptionPlan> = stripe_plans
-            .into_iter()
-            .map(|(name, price_id)| SubscriptionPlan { name, price_id })
+            .into_keys()
+            .map(|name| {
+                let private_assistant_instances = subscription_plans
+                    .get(&name)
+                    .and_then(|c| c.private_assistant_instances.clone());
+                let monthly_tokens = subscription_plans
+                    .get(&name)
+                    .and_then(|c| c.monthly_tokens.clone());
+                SubscriptionPlan {
+                    name,
+                    private_assistant_instances,
+                    monthly_tokens,
+                }
+            })
             .collect();
 
         Ok(plans)
@@ -414,12 +523,81 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
+        // Invalidate cache before commit so no request sees stale cache after DB is updated
+        self.invalidate_token_limit_cache(user_id).await;
+
         txn.commit()
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
         tracing::info!(
             "Subscription canceled at period end: user_id={}, subscription_id={}",
+            user_id,
+            subscription.subscription_id
+        );
+
+        Ok(())
+    }
+
+    async fn resume_subscription(&self, user_id: UserId) -> Result<(), SubscriptionError> {
+        tracing::info!("Resuming subscription for user_id={}", user_id);
+
+        // Get active subscription
+        let subscription = self
+            .subscription_repo
+            .get_active_subscription(user_id)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
+            .ok_or(SubscriptionError::NoActiveSubscription)?;
+
+        // Only allow resume when subscription is scheduled to cancel at period end
+        if !subscription.cancel_at_period_end {
+            return Err(SubscriptionError::SubscriptionNotScheduledForCancellation);
+        }
+
+        // Resume subscription via Stripe API (clear cancel_at_period_end)
+        let client = self.get_stripe_client();
+        let subscription_id: stripe::SubscriptionId = subscription
+            .subscription_id
+            .parse()
+            .map_err(|_| SubscriptionError::StripeError("Invalid subscription ID".into()))?;
+
+        let params = stripe::UpdateSubscription {
+            cancel_at_period_end: Some(false),
+            ..Default::default()
+        };
+
+        let updated_sub = StripeSubscription::update(&client, &subscription_id, params)
+            .await
+            .map_err(|e| SubscriptionError::StripeError(e.to_string()))?;
+
+        // Update database (with transaction)
+        let updated_model =
+            self.stripe_subscription_to_model(&updated_sub, user_id, &subscription.provider)?;
+        let mut db_client = self
+            .db_pool
+            .get()
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+        let txn = db_client
+            .transaction()
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        self.subscription_repo
+            .upsert_subscription(&txn, updated_model)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        // Invalidate cache before commit so no request sees stale cache after DB is updated
+        self.invalidate_token_limit_cache(user_id).await;
+
+        txn.commit()
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        tracing::info!(
+            "Subscription resumed: user_id={}, subscription_id={}",
             user_id,
             subscription.subscription_id
         );
@@ -490,7 +668,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
         Ok(result)
     }
 
-    async fn handle_webhook(
+    async fn handle_stripe_webhook(
         &self,
         payload: &[u8],
         signature: &str,
@@ -518,9 +696,15 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     tracing::error!("Webhook signature verification failed: error={}", e);
                     return Err(SubscriptionError::WebhookVerificationFailed(e.to_string()));
                 }
-                // Parsing error - signature is OK, we can continue
-                WebhookError::BadParse(_) => {
-                    tracing::debug!("Webhook event parsing failed (signature OK): error={}", e);
+                // Payload parse error - return 400 immediately instead of continuing to JSON parse
+                WebhookError::BadParse(parse_err) => {
+                    tracing::warn!(
+                        "Webhook payload parse failed (invalid Stripe event structure): error={}",
+                        parse_err
+                    );
+                    return Err(SubscriptionError::WebhookVerificationFailed(
+                        parse_err.to_string(),
+                    ));
                 }
             }
         } else {
@@ -562,7 +746,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
         // Store webhook (idempotent via UNIQUE constraint)
-        let stored_webhook = self
+        let store_result = self
             .webhook_repo
             .store_webhook(
                 &txn,
@@ -573,22 +757,13 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
-        // Check if this webhook was already processed (already existed in DB)
-        // If the webhook was just created, created_at will be very recent (< 1 second ago)
-        // If it already existed, created_at will be older
-        let is_duplicate = {
-            let age = chrono::Utc::now()
-                .signed_duration_since(stored_webhook.created_at)
-                .num_milliseconds();
-            age > 1000 // If older than 1 second, it's a duplicate/retry
-        };
-
-        if is_duplicate {
+        // Skip processing if this webhook was already processed (duplicate/retry)
+        if !store_result.is_new {
             tracing::info!(
                 "Webhook already processed (duplicate): event_id={}, type={}, original_created_at={}",
                 event_id,
                 event_type,
-                stored_webhook.created_at
+                store_result.webhook.created_at
             );
             // Commit transaction and return success without calling Stripe API
             txn.commit()
@@ -664,7 +839,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
         };
 
         // Upsert subscription if we have data
-        if let Some((subscription_id, subscription)) = subscription_data {
+        let user_id_to_invalidate = if let Some((subscription_id, subscription)) = subscription_data
+        {
             let user_id = subscription.user_id;
             self.subscription_repo
                 .upsert_subscription(&txn, subscription)
@@ -676,12 +852,19 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 subscription_id,
                 user_id
             );
+            Some(user_id)
         } else {
             tracing::debug!(
                 "Non-subscription webhook stored: event_id={}, type={}",
                 event_id,
                 event_type
             );
+            None
+        };
+
+        // Invalidate cache before commit so no request sees stale cache after DB is updated
+        if let Some(user_id) = user_id_to_invalidate {
+            self.invalidate_token_limit_cache(user_id).await;
         }
 
         // Commit transaction
@@ -750,5 +933,135 @@ impl SubscriptionService for SubscriptionServiceImpl {
         );
 
         Ok(session.url)
+    }
+
+    async fn require_subscription_for_proxy(
+        &self,
+        user_id: UserId,
+    ) -> Result<(), SubscriptionError> {
+        // When Stripe is not configured, allow access (no subscription gating)
+        match self.get_plans_for_provider("stripe").await {
+            Err(SubscriptionError::NotConfigured) => {
+                tracing::debug!(
+                    "Subscription gating skipped: Stripe not configured, allowing user_id={}",
+                    user_id
+                );
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+            Ok(_) => {}
+        }
+
+        // 1. Determine max token limit (with 10-min cache unless plan changed)
+        let cached_limit = {
+            let cache_guard = self.token_limit_cache.read().await;
+            if let Some(cached) = cache_guard.get(&user_id) {
+                if cached.cached_at.elapsed().as_secs() < TTL_CACHE_SECS {
+                    tracing::debug!(
+                        "Using cached token limit for user_id={} (max={}, age_secs={})",
+                        user_id,
+                        cached.max_tokens,
+                        cached.cached_at.elapsed().as_secs()
+                    );
+                    Some((cached.max_tokens, cached.period_start, cached.period_end))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+
+        let (max_tokens, period_start, period_end) = match cached_limit {
+            Some((max, start, end)) => (max, start, end),
+            None => {
+                // Cache miss or expired: compute and store
+                let configs = self
+                    .system_configs_service
+                    .get_configs()
+                    .await
+                    .map_err(|e| SubscriptionError::InternalError(e.to_string()))?;
+                let subscription_plans = configs
+                    .and_then(|c| c.subscription_plans)
+                    .unwrap_or_default();
+
+                let computed = match self
+                    .subscription_repo
+                    .get_active_subscription(user_id)
+                    .await
+                    .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
+                {
+                    Some(ref sub) => {
+                        let plan_name = resolve_plan_name_from_config(
+                            "stripe",
+                            &sub.price_id,
+                            &subscription_plans,
+                        );
+                        let max_tokens = subscription_plans
+                            .get(&plan_name)
+                            .and_then(|c| c.monthly_tokens.as_ref())
+                            .map(|l| l.max)
+                            .unwrap_or(1_000_000);
+                        let period_end = sub.current_period_end;
+                        let period_start = sub_one_month_same_day(period_end);
+                        (max_tokens, period_start, period_end)
+                    }
+                    None => {
+                        let max_tokens = subscription_plans
+                            .get("free")
+                            .and_then(|c| c.monthly_tokens.as_ref())
+                            .map(|l| l.max)
+                            .unwrap_or(1_000_000);
+                        // Free users: calendar month — 00:00 on 1st through 24:00 on last day
+                        let (period_start, period_end) = current_calendar_month_period(Utc::now());
+                        (max_tokens, period_start, period_end)
+                    }
+                };
+
+                // Store in cache
+                {
+                    let mut cache_guard = self.token_limit_cache.write().await;
+                    cache_guard.insert(
+                        user_id,
+                        CachedTokenLimit {
+                            max_tokens: computed.0,
+                            period_start: computed.1,
+                            period_end: computed.2,
+                            cached_at: Instant::now(),
+                        },
+                    );
+                }
+                computed
+            }
+        };
+
+        // 2. Get used tokens in the period
+        let used = self
+            .user_usage_repo
+            .get_usage_by_user_id(user_id, Some(period_start), Some(period_end))
+            .await
+            .map_err(|e| SubscriptionError::InternalError(e.to_string()))?
+            .map(|s| s.token_sum)
+            .unwrap_or(0);
+
+        // 3. Enforce limit
+        if used >= max_tokens as i64 {
+            tracing::info!(
+                "Blocking proxy access for user_id={}: monthly token limit exceeded (used {} of {})",
+                user_id, used, max_tokens
+            );
+            return Err(SubscriptionError::MonthlyTokenLimitExceeded {
+                used,
+                limit: max_tokens,
+            });
+        }
+
+        tracing::debug!(
+            "User user_id={} within token limit (used {} of {}), allowing proxy access",
+            user_id,
+            used,
+            max_tokens
+        );
+        Ok(())
     }
 }

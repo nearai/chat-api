@@ -3,6 +3,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use crate::system_configs::ports::PlanLimitConfig;
 use crate::UserId;
 
 /// Database model for subscription records (generic, supports multiple providers e.g. Stripe)
@@ -54,6 +55,14 @@ pub struct PaymentWebhook {
     pub created_at: DateTime<Utc>,
 }
 
+/// Result of storing a webhook event, with idempotency flag
+#[derive(Debug, Clone)]
+pub struct StoreWebhookResult {
+    pub webhook: PaymentWebhook,
+    /// True if the webhook was newly inserted; false if it already existed (duplicate/retry)
+    pub is_new: bool,
+}
+
 /// Error types for subscription operations
 #[derive(Debug)]
 pub enum SubscriptionError {
@@ -67,6 +76,10 @@ pub enum SubscriptionError {
     NotConfigured,
     /// No active subscription found for user
     NoActiveSubscription,
+    /// Monthly token limit exceeded (used >= limit)
+    MonthlyTokenLimitExceeded { used: i64, limit: u64 },
+    /// Subscription is not scheduled for cancellation (cannot resume)
+    SubscriptionNotScheduledForCancellation,
     /// User has no Stripe customer record
     NoStripeCustomer,
     /// Stripe API error
@@ -89,6 +102,16 @@ impl fmt::Display for SubscriptionError {
             Self::InvalidProvider(provider) => write!(f, "Invalid provider: {}", provider),
             Self::NotConfigured => write!(f, "Stripe is not configured"),
             Self::NoActiveSubscription => write!(f, "No active subscription found"),
+            Self::MonthlyTokenLimitExceeded { used, limit } => {
+                write!(
+                    f,
+                    "Monthly token limit exceeded: used {} of {} tokens",
+                    used, limit
+                )
+            }
+            Self::SubscriptionNotScheduledForCancellation => {
+                write!(f, "Subscription is not scheduled for cancellation")
+            }
             Self::NoStripeCustomer => write!(f, "User has no Stripe customer record"),
             Self::StripeError(msg) => write!(f, "Stripe error: {}", msg),
             Self::DatabaseError(msg) => write!(f, "Database error: {}", msg),
@@ -151,22 +174,28 @@ pub trait SubscriptionRepository: Send + Sync {
 /// Repository trait for payment webhook events
 #[async_trait]
 pub trait PaymentWebhookRepository: Send + Sync {
-    /// Store webhook event (idempotent via UNIQUE constraint)
+    /// Store webhook event (idempotent via UNIQUE constraint).
+    /// Returns the webhook and whether it was newly inserted (true) or already existed (false).
     async fn store_webhook(
         &self,
         txn: &tokio_postgres::Transaction<'_>,
         provider: String,
         event_id: String,
         payload: serde_json::Value,
-    ) -> anyhow::Result<PaymentWebhook>;
+    ) -> anyhow::Result<StoreWebhookResult>;
 }
 
-/// Subscription plan with price ID
+/// Subscription plan with optional plan limits/features
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubscriptionPlan {
     pub name: String,
-    pub price_id: String,
+    /// Private assistant instance limits (e.g. { "max": 1 })
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub private_assistant_instances: Option<PlanLimitConfig>,
+    /// Monthly token limits (e.g. { "max": 1000000 })
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub monthly_tokens: Option<PlanLimitConfig>,
 }
 
 /// Service trait for subscription management
@@ -190,6 +219,9 @@ pub trait SubscriptionService: Send + Sync {
     /// Cancel a user's active subscription (at period end)
     async fn cancel_subscription(&self, user_id: UserId) -> Result<(), SubscriptionError>;
 
+    /// Resume a subscription that was scheduled to cancel at period end
+    async fn resume_subscription(&self, user_id: UserId) -> Result<(), SubscriptionError>;
+
     /// Get subscriptions for a user with plan names resolved
     /// If active_only is true, returns only active (not expired) subscriptions
     async fn get_user_subscriptions(
@@ -199,7 +231,7 @@ pub trait SubscriptionService: Send + Sync {
     ) -> Result<Vec<SubscriptionWithPlan>, SubscriptionError>;
 
     /// Handle incoming webhook from payment provider
-    async fn handle_webhook(
+    async fn handle_stripe_webhook(
         &self,
         payload: &[u8],
         signature: &str,
@@ -212,4 +244,12 @@ pub trait SubscriptionService: Send + Sync {
         user_id: UserId,
         return_url: String,
     ) -> Result<String, SubscriptionError>;
+
+    /// Check that user has an active subscription for proxy/chat access.
+    /// Returns Ok(()) when allowed, Err(NoActiveSubscription) when subscription required but not found.
+    /// When Stripe is not configured (NotConfigured), returns Ok(()) to allow access (no gating).
+    async fn require_subscription_for_proxy(
+        &self,
+        user_id: UserId,
+    ) -> Result<(), SubscriptionError>;
 }
