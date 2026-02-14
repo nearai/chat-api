@@ -7,7 +7,7 @@ use crate::user::ports::UserRepository;
 use crate::user_usage::ports::UserUsageRepository;
 use crate::UserId;
 use async_trait::async_trait;
-use chrono::{Datelike, Duration, Utc};
+use chrono::{Datelike, NaiveDate, NaiveTime, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -302,6 +302,24 @@ fn sub_one_month_same_day(dt: chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
             })
     });
     chrono::DateTime::from_naive_utc_and_offset(new_d.and_time(dt.time()), Utc)
+}
+
+/// Returns (period_start, period_end) for the current calendar month.
+/// period_start = 00:00 on the 1st, period_end = 00:00 on the 1st of next month (24:00 on last day).
+fn current_calendar_month_period(
+    now: chrono::DateTime<Utc>,
+) -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
+    use chrono::NaiveDate;
+    let (y, m, _) = (now.year(), now.month(), now.day());
+    let midnight = NaiveTime::from_hms_opt(0, 0, 0).expect("midnight is valid");
+    let period_start = NaiveDate::from_ymd_opt(y, m, 1)
+        .map(|d| chrono::DateTime::from_naive_utc_and_offset(d.and_time(midnight), Utc))
+        .expect("first of month is valid");
+    let (next_y, next_m) = if m == 12 { (y + 1, 1) } else { (y, m + 1) };
+    let period_end = NaiveDate::from_ymd_opt(next_y, next_m, 1)
+        .map(|d| chrono::DateTime::from_naive_utc_and_offset(d.and_time(midnight), Utc))
+        .expect("first of next month is valid");
+    (period_start, period_end)
 }
 
 /// Resolve plan name from provider, price_id and subscription_plans config
@@ -991,8 +1009,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
                             .and_then(|c| c.monthly_tokens.as_ref())
                             .map(|l| l.max)
                             .unwrap_or(1_000_000);
-                        let period_end = Utc::now();
-                        let period_start = period_end - Duration::days(30);
+                        // Free users: calendar month — 00:00 on 1st through 24:00 on last day
+                        let (period_start, period_end) = current_calendar_month_period(Utc::now());
                         (max_tokens, period_start, period_end)
                     }
                 };
