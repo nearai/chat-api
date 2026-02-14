@@ -195,6 +195,18 @@ pub async fn create_test_server_and_db(
         user_usage_service.clone(),
     );
 
+    // Create OpenClaw service for testing
+    let openclaw_repo = db.openclaw_repository();
+    let openclaw_service = Arc::new(services::openclaw::OpenClawServiceImpl::new(
+        openclaw_repo.clone(),
+        config.openclaw.api_base_url.clone(),
+        config.openclaw.api_token.clone(),
+    ));
+
+    // Create OpenClaw proxy service for testing
+    let openclaw_proxy_service: Arc<dyn services::openclaw::OpenClawProxyService> =
+        Arc::new(services::openclaw::proxy::OpenClawProxy::new());
+
     // Create application state
     let app_state = AppState {
         oauth_service,
@@ -210,6 +222,9 @@ pub async fn create_test_server_and_db(
         conversation_service,
         conversation_share_service,
         file_service,
+        openclaw_service,
+        openclaw_repository: openclaw_repo,
+        openclaw_proxy_service,
         redirect_uri: config.oauth.redirect_uri,
         admin_domains: Arc::new(admin_domains),
         cloud_api_base_url: test_config.cloud_api_base_url.clone(),

@@ -698,3 +698,229 @@ impl From<FileData> for FileGetResponse {
         }
     }
 }
+
+// ============================================================================
+// OpenClaw Models
+// ============================================================================
+
+/// Request to create an OpenClaw instance (proxied to OpenClaw API)
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateInstanceRequest {
+    /// Image to use for the instance (null for default)
+    #[serde(default)]
+    pub image: Option<String>,
+    /// Instance name (null for auto-generated)
+    #[serde(default)]
+    pub name: Option<String>,
+    /// OpenClaw API key for authentication
+    pub nearai_api_key: String,
+    /// SSH public key
+    #[serde(default)]
+    pub ssh_pubkey: Option<String>,
+}
+
+/// Request to update an OpenClaw instance
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateInstanceRequest {
+    /// New instance name (optional)
+    pub name: Option<String>,
+    /// New public SSH key (optional)
+    pub public_ssh_key: Option<String>,
+}
+
+/// OpenClaw API instance response
+#[derive(Debug, Deserialize)]
+pub struct OpenClawApiResponse {
+    pub instance: OpenClawApiInstance,
+    pub message: String,
+    pub stage: String,
+}
+
+/// OpenClaw API instance data
+#[derive(Debug, Deserialize)]
+pub struct OpenClawApiInstance {
+    pub dashboard_url: String,
+    pub gateway_port: i32,
+    pub image: String,
+    pub image_digest: Option<String>,
+    pub name: String,
+    pub ssh_command: String,
+    pub ssh_port: i32,
+    pub token: String,
+    pub url: String,
+    #[serde(default)]
+    pub ssh_pubkey: Option<String>,
+}
+
+/// OpenClaw instance response
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct InstanceResponse {
+    pub id: String,
+    pub instance_id: String,
+    pub name: String,
+    pub public_ssh_key: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl From<services::openclaw::ports::OpenClawInstance> for InstanceResponse {
+    fn from(inst: services::openclaw::ports::OpenClawInstance) -> Self {
+        Self {
+            id: inst.id.to_string(),
+            instance_id: inst.instance_id,
+            name: inst.name,
+            public_ssh_key: inst.public_ssh_key,
+            created_at: inst.created_at.to_rfc3339(),
+            updated_at: inst.updated_at.to_rfc3339(),
+        }
+    }
+}
+
+/// Request to create an API key
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateApiKeyRequest {
+    /// Human-readable key name
+    pub name: String,
+    /// Optional spend limit in nano-dollars ($1.00 = 1,000,000,000 nano-dollars)
+    pub spend_limit: Option<i64>,
+    /// Optional expiration timestamp
+    pub expires_at: Option<String>,
+}
+
+/// Response when creating an API key (includes plaintext key)
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CreateApiKeyResponse {
+    pub id: String,
+    pub name: String,
+    /// The plaintext API key (only returned on creation!)
+    pub api_key: String,
+    pub spend_limit: Option<String>,
+    pub expires_at: Option<String>,
+    pub created_at: String,
+}
+
+/// API key response (no plaintext key)
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ApiKeyResponse {
+    pub id: String,
+    pub name: String,
+    pub spend_limit: Option<String>,
+    pub expires_at: Option<String>,
+    pub last_used_at: Option<String>,
+    pub is_active: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl From<services::openclaw::ports::OpenClawApiKey> for ApiKeyResponse {
+    fn from(key: services::openclaw::ports::OpenClawApiKey) -> Self {
+        Self {
+            id: key.id.to_string(),
+            name: key.name,
+            spend_limit: key.spend_limit.map(format_nano_dollars),
+            expires_at: key.expires_at.map(|e| e.to_rfc3339()),
+            last_used_at: key.last_used_at.map(|u| u.to_rfc3339()),
+            is_active: key.is_active,
+            created_at: key.created_at.to_rfc3339(),
+            updated_at: key.updated_at.to_rfc3339(),
+        }
+    }
+}
+
+/// Usage log entry response
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UsageResponse {
+    pub id: String,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub total_tokens: i64,
+    pub input_cost: String,  // nano-dollars formatted as string
+    pub output_cost: String, // nano-dollars formatted as string
+    pub total_cost: String,  // nano-dollars formatted as string
+    pub model_id: String,
+    pub request_type: String,
+    pub created_at: String,
+}
+
+impl From<services::openclaw::ports::UsageLogEntry> for UsageResponse {
+    fn from(usage: services::openclaw::ports::UsageLogEntry) -> Self {
+        Self {
+            id: usage.id.to_string(),
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            total_tokens: usage.total_tokens,
+            input_cost: format_nano_dollars(usage.input_cost),
+            output_cost: format_nano_dollars(usage.output_cost),
+            total_cost: format_nano_dollars(usage.total_cost),
+            model_id: usage.model_id,
+            request_type: usage.request_type,
+            created_at: usage.created_at.to_rfc3339(),
+        }
+    }
+}
+
+/// Instance balance response
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct BalanceResponse {
+    pub total_spent: String, // formatted nano-dollars
+    pub total_requests: i64,
+    pub total_tokens: i64,
+    pub last_usage_at: Option<String>,
+    pub updated_at: String,
+}
+
+impl From<services::openclaw::ports::InstanceBalance> for BalanceResponse {
+    fn from(balance: services::openclaw::ports::InstanceBalance) -> Self {
+        Self {
+            total_spent: format_nano_dollars(balance.total_spent),
+            total_requests: balance.total_requests,
+            total_tokens: balance.total_tokens,
+            last_usage_at: balance.last_usage_at.map(|u| u.to_rfc3339()),
+            updated_at: balance.updated_at.to_rfc3339(),
+        }
+    }
+}
+
+/// Paginated list response
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct PaginatedResponse<T> {
+    pub items: Vec<T>,
+    pub limit: i64,
+    pub offset: i64,
+    pub total: i64,
+}
+
+/// Query parameters for usage listing
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UsageQueryParams {
+    /// Start date (ISO 8601 format, optional)
+    pub start_date: Option<String>,
+    /// End date (ISO 8601 format, optional)
+    pub end_date: Option<String>,
+    /// Maximum number of items to return (default 20)
+    #[serde(default = "default_limit")]
+    pub limit: i64,
+    /// Number of items to skip (default 0)
+    #[serde(default)]
+    pub offset: i64,
+}
+
+fn default_limit() -> i64 {
+    20
+}
+
+/// Format nano-dollars as a decimal string (e.g., "0.000000001" for 1 nano-dollar)
+pub fn format_nano_dollars(nano_dollars: i64) -> String {
+    // Use integer arithmetic to avoid floating point precision errors
+    let dollars = nano_dollars / 1_000_000_000;
+    let nanos = (nano_dollars % 1_000_000_000).abs();
+
+    if nanos == 0 {
+        return dollars.to_string();
+    }
+
+    format!("{}.{:09}", dollars, nanos)
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_string()
+}

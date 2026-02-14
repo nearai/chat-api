@@ -297,8 +297,26 @@ impl Default for NearConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-/// Configuration for global and per-module logging settings.
+/// Configuration for OpenClaw API integration
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct OpenClawConfig {
+    /// OpenClaw API base URL
+    pub api_base_url: String,
+    /// OpenClaw API bearer token for authentication
+    pub api_token: String,
+}
+
+impl Default for OpenClawConfig {
+    fn default() -> Self {
+        Self {
+            api_base_url: std::env::var("OPENCLAW_API_BASE_URL")
+                .unwrap_or_else(|_| "https://api.agent.near.ai".to_string()),
+            api_token: std::env::var("OPENCLAW_API_TOKEN").unwrap_or_else(|_| "".to_string()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
 pub struct LoggingConfig {
     /// Global log level for the application.
     ///
@@ -351,6 +369,7 @@ pub struct Config {
     pub vpc_auth: VpcAuthConfig,
     pub telemetry: TelemetryConfig,
     pub logging: LoggingConfig,
+    pub openclaw: OpenClawConfig,
 }
 
 impl Config {
@@ -367,6 +386,7 @@ impl Config {
             vpc_auth: VpcAuthConfig::default(),
             telemetry: TelemetryConfig::default(),
             logging: LoggingConfig::default(),
+            openclaw: OpenClawConfig::default(),
         }
     }
 }

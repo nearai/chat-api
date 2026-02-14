@@ -18,6 +18,21 @@ pub struct AuthenticatedUser {
     pub session_id: SessionId,
 }
 
+/// OpenClaw API key authentication info inserted into request extensions
+/// Extract in route handlers using `Extension<AuthenticatedApiKey>`
+#[derive(Debug, Clone)]
+pub struct AuthenticatedApiKey {
+    pub api_key_info: services::openclaw::ports::OpenClawApiKey,
+    pub instance: services::openclaw::ports::OpenClawInstance,
+}
+
+/// State for OpenClaw API key authentication middleware
+#[derive(Clone)]
+pub struct OpenClawAuthState {
+    pub openclaw_service: Arc<dyn services::openclaw::OpenClawService>,
+    pub openclaw_repository: Arc<dyn services::openclaw::ports::OpenClawRepository>,
+}
+
 /// State for authentication middleware
 #[derive(Clone)]
 pub struct AuthState {
@@ -326,5 +341,155 @@ pub async fn admin_auth_middleware(
     // Add authenticated user to request extensions
     request.extensions_mut().insert(authenticated_user);
     let response = next.run(request).await;
+    Ok(response)
+}
+
+/// Extract and validate OpenClaw API key from Authorization header
+fn extract_openclaw_api_key_from_request(request: &Request) -> Result<String, ApiError> {
+    let auth_header = request
+        .headers()
+        .get("authorization")
+        .and_then(|h| h.to_str().ok());
+
+    let auth_value = auth_header.ok_or_else(|| {
+        tracing::warn!("No authorization header found for OpenClaw API key");
+        ApiError::missing_auth_header()
+    })?;
+
+    let token = auth_value.strip_prefix("Bearer ").ok_or_else(|| {
+        tracing::warn!(
+            "Authorization header does not start with 'Bearer ', header: {}",
+            auth_value
+        );
+        ApiError::invalid_auth_header()
+    })?;
+
+    // Validate API key format (should start with oc_ and be 35 chars)
+    if !token.starts_with("oc_") {
+        tracing::warn!("Invalid OpenClaw API key format: does not start with 'oc_'");
+        return Err(ApiError::invalid_token());
+    }
+
+    if token.len() != 35 {
+        tracing::warn!(
+            "Invalid OpenClaw API key format: expected length 35, got {}",
+            token.len()
+        );
+        return Err(ApiError::invalid_token());
+    }
+
+    Ok(token.to_string())
+}
+
+/// Hash an API key for lookup
+fn hash_api_key(key: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(key.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+/// OpenClaw API key authentication middleware
+pub async fn openclaw_api_key_middleware(
+    State(state): State<OpenClawAuthState>,
+    mut request: Request,
+    next: Next,
+) -> Result<Response, Response> {
+    let path = request.uri().path().to_string();
+    let method = request.method().clone();
+
+    tracing::info!(
+        "OpenClaw API key auth middleware invoked for {} {}",
+        method,
+        path
+    );
+
+    let api_key = extract_openclaw_api_key_from_request(&request).map_err(|e| e.into_response())?;
+
+    // Hash the API key for lookup
+    let key_hash = hash_api_key(&api_key);
+    tracing::debug!(
+        "OpenClaw API key hashed, hash prefix: {}...",
+        &key_hash.chars().take(16).collect::<String>()
+    );
+
+    // Get instance and API key info from repository
+    let (instance, api_key_info) = state
+        .openclaw_repository
+        .get_instance_by_api_key_hash(&key_hash)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get API key from repository: {}", e);
+            ApiError::internal_server_error("Failed to authenticate API key").into_response()
+        })?
+        .ok_or_else(|| {
+            tracing::warn!("OpenClaw API key not found or inactive");
+            ApiError::invalid_token().into_response()
+        })?;
+
+    // Check if key is expired
+    if let Some(expires_at) = api_key_info.expires_at {
+        let now = Utc::now();
+        if expires_at < now {
+            tracing::warn!(
+                "OpenClaw API key expired: api_key_id={}, expired_at={}",
+                api_key_info.id,
+                expires_at
+            );
+            return Err(ApiError::invalid_token().into_response());
+        }
+    }
+
+    // Validate instance has required connection info
+    if instance.instance_url.is_none() || instance.instance_token.is_none() {
+        tracing::warn!(
+            "OpenClaw instance missing connection info: instance_id={}",
+            instance.id
+        );
+        return Err(
+            ApiError::internal_server_error("Instance not properly configured").into_response(),
+        );
+    }
+
+    // Update last_used_at timestamp
+    if let Err(e) = state
+        .openclaw_repository
+        .update_api_key_last_used(api_key_info.id)
+        .await
+    {
+        tracing::error!(
+            "Failed to update API key last_used_at: api_key_id={}, error={}",
+            api_key_info.id,
+            e
+        );
+        // Continue despite this error
+    }
+
+    tracing::info!(
+        "OpenClaw API key authenticated: user_id={}, instance_id={}, api_key_id={}",
+        api_key_info.user_id,
+        instance.id,
+        api_key_info.id
+    );
+
+    // Create authenticated API key info
+    let authenticated_api_key = AuthenticatedApiKey {
+        api_key_info: api_key_info.clone(),
+        instance,
+    };
+
+    // Also insert AuthenticatedUser for rate limiting to work
+    let authenticated_user = AuthenticatedUser {
+        user_id: api_key_info.user_id,
+        session_id: SessionId(uuid::Uuid::new_v4()),
+    };
+
+    request.extensions_mut().insert(authenticated_api_key);
+    request.extensions_mut().insert(authenticated_user);
+
+    let response = next.run(request).await;
+    tracing::debug!(
+        "OpenClaw API key request completed with status: {}",
+        response.status()
+    );
     Ok(response)
 }

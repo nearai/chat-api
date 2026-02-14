@@ -81,6 +81,22 @@ use utoipa::OpenApi;
         crate::routes::users::update_user_settings,
         // Attestation endpoints
         crate::routes::attestation::get_attestation_report,
+        // OpenClaw endpoints
+        crate::routes::openclaw::list_instances,
+        crate::routes::openclaw::get_instance,
+        crate::routes::openclaw::admin_create_instance,
+        crate::routes::openclaw::admin_delete_instance,
+        crate::routes::openclaw::admin_start_instance,
+        crate::routes::openclaw::admin_stop_instance,
+        crate::routes::openclaw::admin_restart_instance,
+        crate::routes::openclaw::admin_create_backup,
+        crate::routes::openclaw::admin_list_backups,
+        crate::routes::openclaw::admin_get_backup,
+        crate::routes::openclaw::create_api_key,
+        crate::routes::openclaw::list_api_keys,
+        crate::routes::openclaw::revoke_api_key,
+        crate::routes::openclaw::get_instance_usage,
+        crate::routes::openclaw::get_instance_balance,
     ),
     components(schemas(
         // Request/Response models
@@ -139,6 +155,15 @@ use utoipa::OpenApi;
         crate::models::ApiGatewayAttestation,
         crate::models::ModelAttestation,
         crate::models::CombinedAttestationReport,
+        // OpenClaw models
+        crate::models::InstanceResponse,
+        crate::routes::openclaw::AdminCreateInstanceRequest,
+        crate::models::CreateApiKeyRequest,
+        crate::models::CreateApiKeyResponse,
+        crate::models::ApiKeyResponse,
+        crate::models::UsageResponse,
+        crate::models::BalanceResponse,
+        crate::models::UsageQueryParams,
     )),
     modifiers(&SecurityAddon),
     tags(
@@ -152,6 +177,7 @@ use utoipa::OpenApi;
         (name = "Subscriptions", description = "Subscription management endpoints for Stripe integration"),
         (name = "Admin", description = "Admin management endpoints"),
         (name = "Configs", description = "System configuration endpoints"),
+        (name = "OpenClaw", description = "OpenClaw compute instance management endpoints"),
         (name = "attestation", description = "Attestation reporting endpoints for TEE verification")
     )
 )]

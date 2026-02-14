@@ -15,6 +15,7 @@ use services::{
     file::service::FileServiceImpl,
     metrics::{MockMetricsService, OtlpMetricsService},
     model::service::ModelServiceImpl,
+    openclaw::proxy::OpenClawProxy,
     response::service::OpenAIProxy,
     system_configs::ports::SystemConfigsService,
     user::UserServiceImpl,
@@ -157,6 +158,20 @@ async fn main() -> anyhow::Result<()> {
     // Initialize file service
     let file_service = Arc::new(FileServiceImpl::new(file_repo, proxy_service.clone()));
 
+    // Initialize OpenClaw service
+    tracing::info!("Initializing OpenClaw service...");
+    let openclaw_repo = db.openclaw_repository();
+    let openclaw_service = Arc::new(services::openclaw::OpenClawServiceImpl::new(
+        openclaw_repo.clone(),
+        config.openclaw.api_base_url.clone(),
+        config.openclaw.api_token.clone(),
+    ));
+
+    // Initialize OpenClaw proxy service
+    tracing::info!("Initializing OpenClaw proxy service...");
+    let openclaw_proxy_service: Arc<dyn services::openclaw::OpenClawProxyService> =
+        Arc::new(OpenClawProxy::new());
+
     // Initialize analytics and user usage services
     tracing::info!("Initializing analytics service...");
     let analytics_service = Arc::new(AnalyticsServiceImpl::new(analytics_repo.clone()));
@@ -276,6 +291,9 @@ async fn main() -> anyhow::Result<()> {
         conversation_service,
         conversation_share_service,
         file_service,
+        openclaw_service,
+        openclaw_repository: openclaw_repo,
+        openclaw_proxy_service,
         redirect_uri: config.oauth.redirect_uri,
         admin_domains: Arc::new(config.admin.admin_domains),
         user_repository: user_repo.clone(),

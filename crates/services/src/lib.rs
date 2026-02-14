@@ -5,6 +5,7 @@ pub mod conversation;
 pub mod file;
 pub mod metrics;
 pub mod model;
+pub mod openclaw;
 pub mod response;
 pub mod subscription;
 pub mod system_configs;

@@ -3,6 +3,7 @@ pub mod api;
 pub mod attestation;
 pub mod configs;
 pub mod oauth;
+pub mod openclaw;
 pub mod subscriptions;
 pub mod users;
 
@@ -15,7 +16,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use utoipa::ToSchema;
 
 use crate::{
-    middleware::{AuthState, MetricsState},
+    middleware::{AuthState, MetricsState, OpenClawAuthState},
     state::AppState,
     static_files,
 };
@@ -110,14 +111,47 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         crate::middleware::admin_auth_middleware,
     ));
 
+    // Admin OpenClaw routes (requires admin authentication)
+    let admin_openclaw_routes = openclaw::create_admin_openclaw_router().layer(from_fn_with_state(
+        auth_state.clone(),
+        crate::middleware::admin_auth_middleware,
+    ));
+
     // User routes (requires authentication)
     let user_routes = users::create_user_router().layer(from_fn_with_state(
         auth_state.clone(),
         crate::middleware::auth_middleware,
     ));
 
+    // OpenClaw routes (requires authentication)
+    let openclaw_routes = openclaw::create_openclaw_router().layer(from_fn_with_state(
+        auth_state.clone(),
+        crate::middleware::auth_middleware,
+    ));
+
     // Get rate limit state from app state
     let rate_limit_state = app_state.rate_limit_state.clone();
+
+    // OpenClaw API key auth state for chat completions endpoint
+    let openclaw_auth_state = OpenClawAuthState {
+        openclaw_service: app_state.openclaw_service.clone(),
+        openclaw_repository: app_state.openclaw_repository.clone(),
+    };
+
+    // OpenClaw chat completions router (requires API key authentication and rate limiting)
+    let openclaw_chat_routes = Router::new()
+        .route(
+            "/chat/completions",
+            axum::routing::post(openclaw::openclaw_chat_completions),
+        )
+        .layer(from_fn_with_state(
+            openclaw_auth_state.clone(),
+            crate::middleware::openclaw_api_key_middleware,
+        ))
+        .layer(from_fn_with_state(
+            rate_limit_state.clone(),
+            crate::middleware::rate_limit_middleware,
+        ));
 
     // Configs routes (requires user authentication, not admin)
     let configs_routes = configs::create_configs_router().layer(from_fn_with_state(
@@ -158,7 +192,10 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         .nest("/v1/auth", auth_routes)
         .nest("/v1/auth", logout_route) // Logout route with auth middleware
         .nest("/v1/users", user_routes)
+        .nest("/v1/openclaw", openclaw_routes) // OpenClaw routes (requires user auth)
+        .nest("/v1/openclaw", openclaw_chat_routes) // OpenClaw chat completions (requires API key auth)
         .nest("/v1/admin", admin_routes)
+        .nest("/v1/admin/openclaw", admin_openclaw_routes) // Admin OpenClaw routes (requires admin auth)
         .merge(optional_auth_routes) // Conversation read routes (optional auth)
         .merge(api_routes) // API routes (required auth)
         .merge(attestation_routes) // Merge attestation routes (already have /v1 prefix)
