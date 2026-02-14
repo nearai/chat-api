@@ -27,8 +27,8 @@ fn ensure_stripe_env_for_gating() {
 /// Permissive rate limit config for subscription proxy tests to avoid 429 interference.
 fn permissive_rate_limit_config() -> RateLimitConfig {
     RateLimitConfig {
-        max_concurrent: 10,
-        max_requests_per_window: 1000,
+        max_concurrent: 100,
+        max_requests_per_window: 10000,
         window_duration: Duration::seconds(60),
         window_limits: vec![],
         token_window_limits: vec![],
