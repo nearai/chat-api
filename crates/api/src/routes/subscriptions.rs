@@ -30,7 +30,8 @@ fn default_provider() -> String {
     "stripe".to_string()
 }
 
-/// Validates that a URL is valid and uses http or https scheme.
+/// Validates that a URL is valid and secure for Stripe checkout/portal redirects.
+/// Requires https for production. Allows http only for localhost/127.0.0.1 (development).
 fn validate_redirect_url(url_str: &str, field_name: &str) -> Result<(), ApiError> {
     let url = Url::parse(url_str).map_err(|_| {
         ApiError::bad_request(format!(
@@ -39,9 +40,24 @@ fn validate_redirect_url(url_str: &str, field_name: &str) -> Result<(), ApiError
         ))
     })?;
     match url.scheme() {
-        "http" | "https" => Ok(()),
+        "https" => Ok(()),
+        "http" => {
+            // Allow http only for local development (localhost, 127.0.0.1)
+            let host_ok = url
+                .host_str()
+                .map(|h| h == "localhost" || h == "127.0.0.1")
+                .unwrap_or(false);
+            if host_ok {
+                Ok(())
+            } else {
+                Err(ApiError::bad_request(format!(
+                    "Invalid {}: URL must use https for non-localhost addresses (http is only allowed for localhost/127.0.0.1 during development)",
+                    field_name
+                )))
+            }
+        }
         _ => Err(ApiError::bad_request(format!(
-            "Invalid {}: URL scheme must be http or https",
+            "Invalid {}: URL scheme must be https (or http for localhost/127.0.0.1 only)",
             field_name
         ))),
     }
@@ -407,6 +423,8 @@ pub async fn create_portal_session(
     Json(req): Json<CreatePortalSessionRequest>,
 ) -> Result<Json<CreatePortalSessionResponse>, ApiError> {
     tracing::info!("Creating portal session for user_id={}", user.user_id);
+
+    validate_redirect_url(&req.return_url, "return_url")?;
 
     let url = app_state
         .subscription_service
