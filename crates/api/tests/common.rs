@@ -312,7 +312,7 @@ pub async fn insert_test_subscription(
         .expect("get user")
         .expect("user created by mock_login");
 
-    // Use period_end = now + 1 day so "now" falls within [period_start, period_end) for usage queries.
+    // Use now+1day so "now" falls within [period_start, period_end) for usage queries.
     let period_end = chrono::Utc::now() + chrono::Duration::days(1);
     let sub_id = format!("sub_test_{}", Uuid::new_v4());
 
@@ -341,30 +341,14 @@ pub async fn insert_test_subscription(
         .expect("insert subscription");
 }
 
-/// Permissive rate limit config to avoid 429 when subscription tests hit proxy endpoints.
-/// Must be included in config PATCH because the admin handler overwrites rate_limit_state
-/// with the merged config's rate_limit on every PATCH.
-fn permissive_rate_limit_for_config_patch() -> serde_json::Value {
-    json!({
-        "max_concurrent": 10,
-        "max_requests_per_window": 1000,
-        "window_duration_seconds": 60,
-        "window_limits": [],
-        "token_window_limits": [],
-        "cost_window_limits": []
-    })
-}
-
 /// Set subscription_plans configuration
 /// plans should be in format: { "plan_name": { "providers": { "stripe": { "price_id": "price_xxx" } }, "private_assistant_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } } }
-/// Also sets a permissive rate_limit so proxy endpoints aren't blocked by 429.
 pub async fn set_subscription_plans(server: &TestServer, plans: serde_json::Value) {
     let admin_email = "test_setup_admin@admin.org";
     let admin_token = mock_login(server, admin_email).await;
 
     let config_body = json!({
-        "subscription_plans": plans,
-        "rate_limit": permissive_rate_limit_for_config_patch()
+        "subscription_plans": plans
     });
 
     let response = server
