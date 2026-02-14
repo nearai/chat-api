@@ -2,7 +2,8 @@ mod common;
 
 use chrono::Duration;
 use common::{
-    create_test_server_and_db, create_test_server_with_config, mock_login, TestServerConfig,
+    create_test_server_and_db, create_test_server_with_config, mock_login,
+    restrictive_rate_limit_config, TestServerConfig,
 };
 use futures::future::join_all;
 use serde_json::json;
@@ -14,14 +15,7 @@ use std::sync::Arc;
 
 async fn create_rate_limited_test_server() -> axum_test::TestServer {
     create_test_server_with_config(TestServerConfig {
-        rate_limit_config: Some(RateLimitConfig {
-            max_concurrent: 2,
-            max_requests_per_window: 1,
-            window_duration: Duration::seconds(1),
-            window_limits: vec![],
-            token_window_limits: vec![],
-            cost_window_limits: vec![],
-        }),
+        rate_limit_config: Some(restrictive_rate_limit_config()),
         ..Default::default()
     })
     .await

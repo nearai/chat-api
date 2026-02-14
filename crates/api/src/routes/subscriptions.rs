@@ -9,6 +9,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use services::subscription::ports::{SubscriptionError, SubscriptionPlan, SubscriptionWithPlan};
+use url::Url;
 use utoipa::ToSchema;
 
 /// Request to create a new subscription
@@ -29,6 +30,39 @@ fn default_provider() -> String {
     "stripe".to_string()
 }
 
+/// Validates that a URL is valid and secure for Stripe checkout/portal redirects.
+/// Requires https for production. Allows http only for localhost/127.0.0.1 (development).
+fn validate_redirect_url(url_str: &str, field_name: &str) -> Result<(), ApiError> {
+    let url = Url::parse(url_str).map_err(|_| {
+        ApiError::bad_request(format!(
+            "Invalid {}: must be a valid URL (e.g., https://example.com/success)",
+            field_name
+        ))
+    })?;
+    match url.scheme() {
+        "https" => Ok(()),
+        "http" => {
+            // Allow http only for local development (localhost, 127.0.0.1)
+            let host_ok = url
+                .host_str()
+                .map(|h| h == "localhost" || h == "127.0.0.1")
+                .unwrap_or(false);
+            if host_ok {
+                Ok(())
+            } else {
+                Err(ApiError::bad_request(format!(
+                    "Invalid {}: URL must use https for non-localhost addresses (http is only allowed for localhost/127.0.0.1 during development)",
+                    field_name
+                )))
+            }
+        }
+        _ => Err(ApiError::bad_request(format!(
+            "Invalid {}: URL scheme must be https (or http for localhost/127.0.0.1 only)",
+            field_name
+        ))),
+    }
+}
+
 /// Response containing checkout URL
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct CreateSubscriptionResponse {
@@ -39,6 +73,13 @@ pub struct CreateSubscriptionResponse {
 /// Response for subscription cancellation
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct CancelSubscriptionResponse {
+    /// Success message
+    pub message: String,
+}
+
+/// Response for subscription resume
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ResumeSubscriptionResponse {
     /// Success message
     pub message: String,
 }
@@ -113,6 +154,9 @@ pub async fn create_subscription(
         req.plan
     );
 
+    validate_redirect_url(&req.success_url, "success_url")?;
+    validate_redirect_url(&req.cancel_url, "cancel_url")?;
+
     let checkout_url = app_state
         .subscription_service
         .create_subscription(
@@ -158,6 +202,14 @@ pub async fn create_subscription(
             }
             SubscriptionError::WebhookVerificationFailed(msg) => {
                 tracing::error!(error = ?msg, "Unexpected webhook error in create");
+                ApiError::internal_server_error("Failed to create subscription")
+            }
+            SubscriptionError::SubscriptionNotScheduledForCancellation => {
+                tracing::error!("Unexpected SubscriptionNotScheduledForCancellation in create");
+                ApiError::internal_server_error("Failed to create subscription")
+            }
+            SubscriptionError::MonthlyTokenLimitExceeded { .. } => {
+                tracing::error!("Unexpected MonthlyTokenLimitExceeded in create");
                 ApiError::internal_server_error("Failed to create subscription")
             }
         })?;
@@ -210,6 +262,58 @@ pub async fn cancel_subscription(
 
     Ok(Json(CancelSubscriptionResponse {
         message: "Subscription will be canceled at period end".to_string(),
+    }))
+}
+
+/// Resume a subscription that was scheduled to cancel at period end
+#[utoipa::path(
+    post,
+    path = "/v1/subscriptions/resume",
+    tag = "Subscriptions",
+    responses(
+        (status = 200, description = "Subscription resumed successfully", body = ResumeSubscriptionResponse),
+        (status = 400, description = "Subscription is not scheduled for cancellation", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "No active subscription found", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn resume_subscription(
+    State(app_state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+) -> Result<Json<ResumeSubscriptionResponse>, ApiError> {
+    tracing::info!("Resuming subscription for user_id={}", user.user_id);
+
+    app_state
+        .subscription_service
+        .resume_subscription(user.user_id)
+        .await
+        .map_err(|e| match e {
+            SubscriptionError::NoActiveSubscription => {
+                ApiError::not_found("No active subscription found")
+            }
+            SubscriptionError::SubscriptionNotScheduledForCancellation => {
+                ApiError::bad_request("Subscription is not scheduled for cancellation")
+            }
+            SubscriptionError::DatabaseError(msg) => {
+                tracing::error!(error = ?msg, "Database error resuming subscription");
+                ApiError::internal_server_error("Failed to resume subscription")
+            }
+            SubscriptionError::StripeError(msg) => {
+                tracing::error!(error = ?msg, "Stripe error resuming subscription");
+                ApiError::internal_server_error("Failed to resume subscription")
+            }
+            _ => {
+                tracing::error!(error = ?e, "Failed to resume subscription");
+                ApiError::internal_server_error("Failed to resume subscription")
+            }
+        })?;
+
+    Ok(Json(ResumeSubscriptionResponse {
+        message: "Subscription resumed successfully".to_string(),
     }))
 }
 
@@ -320,6 +424,8 @@ pub async fn create_portal_session(
 ) -> Result<Json<CreatePortalSessionResponse>, ApiError> {
     tracing::info!("Creating portal session for user_id={}", user.user_id);
 
+    validate_redirect_url(&req.return_url, "return_url")?;
+
     let url = app_state
         .subscription_service
         .create_customer_portal_session(user.user_id, req.return_url)
@@ -357,7 +463,7 @@ pub async fn handle_stripe_webhook(
     // Process webhook
     app_state
         .subscription_service
-        .handle_webhook(&body, signature)
+        .handle_stripe_webhook(&body, signature)
         .await
         .map_err(|e| match e {
             SubscriptionError::WebhookVerificationFailed(msg) => {
@@ -383,6 +489,7 @@ pub fn create_subscriptions_router() -> Router<AppState> {
         .route("/v1/subscriptions", post(create_subscription))
         .route("/v1/subscriptions", get(list_subscriptions))
         .route("/v1/subscriptions/cancel", post(cancel_subscription))
+        .route("/v1/subscriptions/resume", post(resume_subscription))
         .route("/v1/subscriptions/portal", post(create_portal_session))
 }
 
@@ -390,7 +497,7 @@ pub fn create_subscriptions_router() -> Router<AppState> {
 pub fn create_public_subscriptions_router() -> Router<AppState> {
     Router::new()
         .route(
-            "/v1/subscription/stripe/webhook",
+            "/v1/subscriptions/stripe/webhook",
             post(handle_stripe_webhook),
         )
         .route("/v1/subscriptions/plans", get(list_plans))

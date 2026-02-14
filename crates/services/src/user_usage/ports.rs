@@ -52,10 +52,14 @@ pub trait UserUsageRepository: Send + Sync {
         window_duration: Duration,
     ) -> anyhow::Result<i64>;
 
-    /// All-time usage for a single user (token sum for llm.tokens, cost sum).
+    /// Usage for a single user (token sum, image count, cost).
+    /// When start/end are Some, only events with created_at in [start, end) are included.
+    /// When both are None, returns all-time usage.
     async fn get_usage_by_user_id(
         &self,
         user_id: UserId,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
     ) -> anyhow::Result<Option<UserUsageSummary>>;
 
     /// Top N users by usage, ordered by token_sum or cost_nano_usd.
@@ -93,10 +97,12 @@ pub trait UserUsageService: Send + Sync {
         window_duration: Duration,
     ) -> anyhow::Result<i64>;
 
-    /// All-time usage for a single user.
+    /// Usage for a single user. When start/end are Some, filters to [start, end). When both None, all-time.
     async fn get_usage_by_user_id(
         &self,
         user_id: UserId,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
     ) -> anyhow::Result<Option<UserUsageSummary>>;
 
     /// Top N users by usage, ordered by token or cost. Optional [start, end) time range.

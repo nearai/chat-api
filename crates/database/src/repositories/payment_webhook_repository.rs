@@ -1,6 +1,6 @@
 use crate::pool::DbPool;
 use async_trait::async_trait;
-use services::subscription::ports::{PaymentWebhook, PaymentWebhookRepository};
+use services::subscription::ports::{PaymentWebhook, PaymentWebhookRepository, StoreWebhookResult};
 
 pub struct PostgresPaymentWebhookRepository {
     #[allow(dead_code)]
@@ -21,7 +21,7 @@ impl PaymentWebhookRepository for PostgresPaymentWebhookRepository {
         provider: String,
         event_id: String,
         payload: serde_json::Value,
-    ) -> anyhow::Result<PaymentWebhook> {
+    ) -> anyhow::Result<StoreWebhookResult> {
         tracing::info!(
             "Repository: Storing payment webhook - provider={}, event_id={}",
             provider,
@@ -40,12 +40,15 @@ impl PaymentWebhookRepository for PostgresPaymentWebhookRepository {
             .await?;
 
         if let Some(row) = result {
-            Ok(PaymentWebhook {
-                id: row.get("id"),
-                provider: row.get("provider"),
-                event_id: row.get("event_id"),
-                payload: row.get("payload"),
-                created_at: row.get("created_at"),
+            Ok(StoreWebhookResult {
+                webhook: PaymentWebhook {
+                    id: row.get("id"),
+                    provider: row.get("provider"),
+                    event_id: row.get("event_id"),
+                    payload: row.get("payload"),
+                    created_at: row.get("created_at"),
+                },
+                is_new: true,
             })
         } else {
             // Webhook already exists, fetch it
@@ -64,12 +67,15 @@ impl PaymentWebhookRepository for PostgresPaymentWebhookRepository {
                 )
                 .await?;
 
-            Ok(PaymentWebhook {
-                id: row.get("id"),
-                provider: row.get("provider"),
-                event_id: row.get("event_id"),
-                payload: row.get("payload"),
-                created_at: row.get("created_at"),
+            Ok(StoreWebhookResult {
+                webhook: PaymentWebhook {
+                    id: row.get("id"),
+                    provider: row.get("provider"),
+                    event_id: row.get("event_id"),
+                    payload: row.get("payload"),
+                    created_at: row.get("created_at"),
+                },
+                is_new: false,
             })
         }
     }

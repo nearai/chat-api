@@ -10,10 +10,12 @@ use services::conversation::share_service::ConversationShareServiceImpl;
 use services::file::service::FileServiceImpl;
 use services::metrics::MockMetricsService;
 use services::system_configs::ports::RateLimitConfig;
+use services::user::ports::UserRepository;
 use services::vpc::test_helpers::MockVpcCredentialsService;
 use services::vpc::VpcCredentials;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
+use uuid::Uuid;
 
 // Global once cell to ensure migrations only run once across all tests
 static MIGRATIONS_INITIALIZED: OnceCell<()> = OnceCell::const_new();
@@ -27,6 +29,19 @@ pub struct TestServerConfig {
     ///
     /// If not set, tests use a permissive default to avoid unrelated flakiness.
     pub rate_limit_config: Option<RateLimitConfig>,
+}
+
+/// Restrictive rate limit config for rate limit tests.
+/// Use this when tests need to trigger 429 responses (e.g. test_rate_limit_blocks_rapid_requests).
+pub fn restrictive_rate_limit_config() -> RateLimitConfig {
+    RateLimitConfig {
+        max_concurrent: 2,
+        max_requests_per_window: 1,
+        window_duration: Duration::seconds(1),
+        window_limits: vec![],
+        token_window_limits: vec![],
+        cost_window_limits: vec![],
+    }
 }
 
 /// Create a test server with all services initialized (VPC not configured)
@@ -117,6 +132,9 @@ pub async fn create_test_server_and_db(
                 as Arc<dyn services::subscription::ports::PaymentWebhookRepository>,
             system_configs_service: system_configs_service.clone()
                 as Arc<dyn services::system_configs::ports::SystemConfigsService>,
+            user_repository: user_repo.clone(),
+            user_usage_repo: db.user_usage_repository()
+                as Arc<dyn services::user_usage::UserUsageRepository>,
             stripe_secret_key: config.stripe.secret_key.clone(),
             stripe_webhook_secret: config.stripe.webhook_secret.clone(),
         },
@@ -303,8 +321,56 @@ pub async fn clear_subscription_plans(server: &TestServer) {
     );
 }
 
+/// Insert a test subscription directly into the database for testing.
+/// Requires the user to exist (call mock_login first). The subscription uses a fake Stripe
+/// subscription_id; cancel/resume will fail at the Stripe API call, but list and
+/// "not scheduled for cancellation" checks work.
+pub async fn insert_test_subscription(
+    server: &TestServer,
+    db: &database::Database,
+    user_email: &str,
+    cancel_at_period_end: bool,
+) {
+    let _token = mock_login(server, user_email).await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .expect("get user")
+        .expect("user created by mock_login");
+
+    // Use now+1day so "now" falls within [period_start, period_end) for usage queries.
+    let period_end = chrono::Utc::now() + chrono::Duration::days(1);
+    let sub_id = format!("sub_test_{}", Uuid::new_v4());
+
+    let client = db.pool().get().await.expect("get pool client");
+    client
+        .execute(
+            "INSERT INTO subscriptions (
+                subscription_id, user_id, provider, customer_id, price_id, status,
+                current_period_end, cancel_at_period_end
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (subscription_id) DO UPDATE SET
+                cancel_at_period_end = EXCLUDED.cancel_at_period_end,
+                updated_at = NOW()",
+            &[
+                &sub_id,
+                &user.id,
+                &"stripe",
+                &"cus_test",
+                &"price_test_basic",
+                &"active",
+                &period_end,
+                &cancel_at_period_end,
+            ],
+        )
+        .await
+        .expect("insert subscription");
+}
+
 /// Set subscription_plans configuration
-/// plans should be in format: { "plan_name": { "providers": { "stripe": { "price_id": "price_xxx" } }, "deployments": { "max": 1 }, "monthly_tokens": { "max": 1000000 } } }
+/// plans should be in format: { "plan_name": { "providers": { "stripe": { "price_id": "price_xxx" } }, "private_assistant_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } } }
 pub async fn set_subscription_plans(server: &TestServer, plans: serde_json::Value) {
     let admin_email = "test_setup_admin@admin.org";
     let admin_token = mock_login(server, admin_email).await;
