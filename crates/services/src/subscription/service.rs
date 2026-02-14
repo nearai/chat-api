@@ -7,7 +7,7 @@ use crate::user::ports::UserRepository;
 use crate::user_usage::ports::UserUsageRepository;
 use crate::UserId;
 use async_trait::async_trait;
-use chrono::{Datelike, NaiveDate, NaiveTime, Utc};
+use chrono::{Datelike, NaiveTime, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -523,11 +523,12 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
+        // Invalidate cache before commit so no request sees stale cache after DB is updated
+        self.invalidate_token_limit_cache(user_id).await;
+
         txn.commit()
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-
-        self.invalidate_token_limit_cache(user_id).await;
 
         tracing::info!(
             "Subscription canceled at period end: user_id={}, subscription_id={}",
@@ -588,11 +589,12 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
+        // Invalidate cache before commit so no request sees stale cache after DB is updated
+        self.invalidate_token_limit_cache(user_id).await;
+
         txn.commit()
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-
-        self.invalidate_token_limit_cache(user_id).await;
 
         tracing::info!(
             "Subscription resumed: user_id={}, subscription_id={}",
@@ -860,14 +862,15 @@ impl SubscriptionService for SubscriptionServiceImpl {
             None
         };
 
+        // Invalidate cache before commit so no request sees stale cache after DB is updated
+        if let Some(user_id) = user_id_to_invalidate {
+            self.invalidate_token_limit_cache(user_id).await;
+        }
+
         // Commit transaction
         txn.commit()
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-
-        if let Some(user_id) = user_id_to_invalidate {
-            self.invalidate_token_limit_cache(user_id).await;
-        }
 
         tracing::info!(
             "Webhook processed successfully: event_id={}, type={}",
