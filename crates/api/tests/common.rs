@@ -31,6 +31,19 @@ pub struct TestServerConfig {
     pub rate_limit_config: Option<RateLimitConfig>,
 }
 
+/// Restrictive rate limit config for rate limit tests.
+/// Use this when tests need to trigger 429 responses (e.g. test_rate_limit_blocks_rapid_requests).
+pub fn restrictive_rate_limit_config() -> RateLimitConfig {
+    RateLimitConfig {
+        max_concurrent: 2,
+        max_requests_per_window: 1,
+        window_duration: Duration::seconds(1),
+        window_limits: vec![],
+        token_window_limits: vec![],
+        cost_window_limits: vec![],
+    }
+}
+
 /// Create a test server with all services initialized (VPC not configured)
 pub async fn create_test_server() -> TestServer {
     create_test_server_with_config(TestServerConfig::default()).await
