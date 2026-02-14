@@ -696,15 +696,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     tracing::error!("Webhook signature verification failed: error={}", e);
                     return Err(SubscriptionError::WebhookVerificationFailed(e.to_string()));
                 }
-                // Payload parse error - return 400 immediately instead of continuing to JSON parse
-                WebhookError::BadParse(parse_err) => {
-                    tracing::warn!(
-                        "Webhook payload parse failed (invalid Stripe event structure): error={}",
-                        parse_err
-                    );
-                    return Err(SubscriptionError::WebhookVerificationFailed(
-                        parse_err.to_string(),
-                    ));
+                // Parsing error - signature is OK, we can continue
+                WebhookError::BadParse(_) => {
+                    tracing::debug!("Webhook event parsing failed (signature OK): error={}", e);
                 }
             }
         } else {
