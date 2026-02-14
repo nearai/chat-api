@@ -379,6 +379,66 @@ impl AgentRepository for PostgresAgentRepository {
         Ok(api_key)
     }
 
+    async fn create_unbound_api_key(
+        &self,
+        user_id: UserId,
+        key_hash: String,
+        name: String,
+        spend_limit: Option<i64>,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> anyhow::Result<AgentApiKey> {
+        tracing::debug!("Creating unbound API key in DB: user_id={}", user_id);
+
+        let client = self.pool.get().await?;
+
+        let row = client
+            .query_one(
+                "INSERT INTO agent_api_keys (instance_id, user_id, key_hash, name, spend_limit, expires_at)
+                 VALUES (NULL, $1, $2, $3, $4, $5)
+                 RETURNING id, instance_id, user_id, key_hash, name, spend_limit, expires_at, last_used_at, is_active, created_at, updated_at",
+                &[&user_id, &key_hash, &name, &spend_limit, &expires_at],
+            )
+            .await?;
+
+        let api_key = AgentApiKey {
+            id: row.get(0),
+            instance_id: row.get(1),
+            user_id: row.get(2),
+            name: row.get(3),
+            spend_limit: row.get(4),
+            expires_at: row.get(5),
+            last_used_at: row.get(6),
+            is_active: row.get(7),
+            created_at: row.get(8),
+            updated_at: row.get(9),
+        };
+
+        Ok(api_key)
+    }
+
+    async fn bind_api_key_to_instance(
+        &self,
+        api_key_id: Uuid,
+        instance_id: Uuid,
+    ) -> anyhow::Result<()> {
+        tracing::debug!(
+            "Binding API key to instance: api_key_id={}, instance_id={}",
+            api_key_id,
+            instance_id
+        );
+
+        let client = self.pool.get().await?;
+
+        client
+            .execute(
+                "UPDATE agent_api_keys SET instance_id = $1, updated_at = NOW() WHERE id = $2",
+                &[&instance_id, &api_key_id],
+            )
+            .await?;
+
+        Ok(())
+    }
+
     async fn get_api_key_by_hash(&self, key_hash: &str) -> anyhow::Result<Option<AgentApiKey>> {
         let client = self.pool.get().await?;
 
@@ -742,16 +802,17 @@ impl AgentRepository for PostgresAgentRepository {
             )
             .await?;
 
-        // Update balance
+        // Update balance (including token tracking)
         transaction
             .execute(
                 "UPDATE agent_balance
                  SET total_spent = total_spent + $1,
                      total_requests = total_requests + 1,
+                     total_tokens = total_tokens + $2,
                      last_usage_at = NOW(),
                      updated_at = NOW()
-                 WHERE instance_id = $2",
-                &[&usage.total_cost, &usage.instance_id],
+                 WHERE instance_id = $3",
+                &[&usage.total_cost, &usage.total_tokens, &usage.instance_id],
             )
             .await?;
 

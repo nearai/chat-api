@@ -108,15 +108,3 @@ CREATE TRIGGER auto_create_agent_balance
     AFTER INSERT ON agent_instances
     FOR EACH ROW
     EXECUTE FUNCTION create_agent_balance();
-
--- Legacy view for backward compatibility with OpenClaw-specific code
-CREATE VIEW openclaw_instances AS
-SELECT id, user_id, instance_id, name, public_ssh_key, instance_url, instance_token, gateway_port, dashboard_url, created_at, updated_at
-FROM agent_instances
-WHERE type = 'openclaw';
-
-CREATE VIEW openclaw_api_keys AS
-SELECT ak.id, ak.instance_id, ak.user_id, ak.key_hash, ak.name, ak.spend_limit, ak.expires_at, ak.last_used_at, ak.is_active, ak.created_at, ak.updated_at
-FROM agent_api_keys ak
-INNER JOIN agent_instances ai ON ak.instance_id = ai.id
-WHERE ai.type = 'openclaw';

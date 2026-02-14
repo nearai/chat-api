@@ -111,11 +111,11 @@ async fn test_create_api_key_requires_auth() {
 //
 // 2. User Creates API Key:
 //    POST /v1/openclaw/instances/{id}/keys with name
-//    → Returns API key in oc_xxxxx format
+//    → Returns API key in ag_xxxxx format
 //    → Can revoke key via DELETE /v1/openclaw/keys/{key_id}
 //
 // 3. User Uses Chat Completions:
-//    POST /v1/openclaw/chat/completions with Bearer oc_xxxxx
+//    POST /v1/openclaw/chat/completions with Bearer ag_xxxxx
 //    → Middleware validates API key, looks up instance, checks auth
 //    → Proxy forwards request to instance_url with instance_token
 //    → Response streamed back to user

@@ -42,9 +42,13 @@ pub struct AgentProxy {
 
 impl AgentProxy {
     pub fn new() -> Self {
-        Self {
-            http_client: Client::new(),
-        }
+        // Create HTTP client with timeout to prevent indefinite hanging on unresponsive instances
+        let http_client = Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| Client::new());
+
+        Self { http_client }
     }
 }
 
@@ -111,9 +115,32 @@ impl AgentProxyService for AgentProxy {
             _ => return Err(anyhow::anyhow!("Unsupported HTTP method: {}", method)),
         };
 
-        // Add headers
+        // Whitelist of safe headers to forward to avoid header injection attacks
+        const SAFE_HEADERS: &[&str] = &[
+            "content-type",
+            "accept",
+            "accept-encoding",
+            "accept-language",
+            "user-agent",
+            "content-length",
+            "x-request-id",
+            "x-correlation-id",
+            "x-forwarded-for",
+            "x-forwarded-proto",
+            "x-real-ip",
+        ];
+
+        // Add headers (only forwarding whitelisted headers)
         for (name, value) in headers.iter() {
-            request_builder = request_builder.header(name, value.clone());
+            let header_name_lower = name.to_string().to_lowercase();
+            if SAFE_HEADERS.contains(&header_name_lower.as_str()) {
+                request_builder = request_builder.header(name, value.clone());
+            } else {
+                tracing::debug!(
+                    "Filtered out non-whitelisted header in proxy: {}",
+                    header_name_lower
+                );
+            }
         }
 
         // Add body if present

@@ -297,21 +297,21 @@ impl Default for NearConfig {
     }
 }
 
-/// Configuration for OpenClaw API integration
+/// Configuration for agent API integration (supports OpenClaw, IronClaw, etc.)
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct AgentConfig {
-    /// OpenClaw API base URL
+    /// Agent API base URL
     pub api_base_url: String,
-    /// OpenClaw API bearer token for authentication
+    /// Agent API bearer token for authentication
     pub api_token: String,
 }
 
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            api_base_url: std::env::var("OPENCLAW_API_BASE_URL")
+            api_base_url: std::env::var("AGENT_API_BASE_URL")
                 .unwrap_or_else(|_| "https://api.agent.near.ai".to_string()),
-            api_token: std::env::var("OPENCLAW_API_TOKEN").unwrap_or_else(|_| "".to_string()),
+            api_token: std::env::var("AGENT_API_TOKEN").unwrap_or_else(|_| "".to_string()),
         }
     }
 }

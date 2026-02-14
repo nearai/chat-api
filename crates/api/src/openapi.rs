@@ -89,9 +89,9 @@ use utoipa::OpenApi;
         crate::routes::openclaw::admin_list_all_instances,
         crate::routes::openclaw::admin_create_instance,
         crate::routes::openclaw::admin_delete_instance,
-        crate::routes::openclaw::admin_start_instance,
-        crate::routes::openclaw::admin_stop_instance,
-        crate::routes::openclaw::admin_restart_instance,
+        crate::routes::openclaw::start_instance,
+        crate::routes::openclaw::stop_instance,
+        crate::routes::openclaw::restart_instance,
         crate::routes::openclaw::admin_create_backup,
         crate::routes::openclaw::admin_list_backups,
         crate::routes::openclaw::admin_get_backup,
@@ -100,6 +100,7 @@ use utoipa::OpenApi;
         crate::routes::openclaw::revoke_api_key,
         crate::routes::openclaw::get_instance_usage,
         crate::routes::openclaw::get_instance_balance,
+        crate::routes::openclaw::agent_chat_completions,
     ),
     components(schemas(
         // Request/Response models
@@ -183,7 +184,8 @@ use utoipa::OpenApi;
         (name = "Subscriptions", description = "Subscription management endpoints"),
         (name = "Admin", description = "Admin management endpoints"),
         (name = "Configs", description = "System configuration endpoints"),
-        (name = "OpenClaw", description = "OpenClaw compute instance management endpoints"),
+        (name = "Agents", description = "Agent instance management endpoints"),
+        (name = "Admin Agents", description = "Admin-only agent management endpoints"),
         (name = "attestation", description = "Attestation reporting endpoints for TEE verification")
     )
 )]

@@ -3,88 +3,72 @@ mod common;
 use common::{create_test_server, mock_login};
 use uuid::Uuid;
 
-/// Test that starting an instance requires admin authentication
+/// Test that starting an instance requires authentication
 #[tokio::test]
-async fn test_start_instance_requires_admin() {
+async fn test_start_instance_requires_auth() {
     let server = create_test_server().await;
-    let user_token = mock_login(&server, "user@example.com").await;
     let fake_id = Uuid::new_v4();
 
     let response = server
-        .post(&format!("/v1/admin/openclaw/instances/{}/start", fake_id))
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
-        )
+        .post(&format!("/v1/openclaw/instances/{}/start", fake_id))
         .await;
 
     assert_eq!(
         response.status_code(),
-        403,
-        "Non-admin should get forbidden when starting instance"
+        401,
+        "Should require authentication to start instance"
     );
 }
 
-/// Test that stopping an instance requires admin authentication
+/// Test that stopping an instance requires authentication
 #[tokio::test]
-async fn test_stop_instance_requires_admin() {
+async fn test_stop_instance_requires_auth() {
     let server = create_test_server().await;
-    let user_token = mock_login(&server, "user@example.com").await;
     let fake_id = Uuid::new_v4();
 
     let response = server
-        .post(&format!("/v1/admin/openclaw/instances/{}/stop", fake_id))
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
-        )
+        .post(&format!("/v1/openclaw/instances/{}/stop", fake_id))
         .await;
 
     assert_eq!(
         response.status_code(),
-        403,
-        "Non-admin should get forbidden when stopping instance"
+        401,
+        "Should require authentication to stop instance"
     );
 }
 
-/// Test that restarting an instance requires admin authentication
+/// Test that restarting an instance requires authentication
 #[tokio::test]
-async fn test_restart_instance_requires_admin() {
+async fn test_restart_instance_requires_auth() {
     let server = create_test_server().await;
-    let user_token = mock_login(&server, "user@example.com").await;
     let fake_id = Uuid::new_v4();
 
     let response = server
-        .post(&format!("/v1/admin/openclaw/instances/{}/restart", fake_id))
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
-        )
+        .post(&format!("/v1/openclaw/instances/{}/restart", fake_id))
         .await;
 
     assert_eq!(
         response.status_code(),
-        403,
-        "Non-admin should get forbidden when restarting instance"
+        401,
+        "Should require authentication to restart instance"
     );
 }
 
-/// Test that starting an instance as admin returns 404 for non-existent instance
+/// Test that starting a non-existent instance returns 404
 #[tokio::test]
 async fn test_start_instance_not_found() {
     let server = create_test_server().await;
-    let admin_token = mock_login(&server, "admin@admin.org").await;
+    let user_token = mock_login(&server, "user@example.com").await;
     let fake_id = Uuid::new_v4();
 
     let response = server
-        .post(&format!("/v1/admin/openclaw/instances/{}/start", fake_id))
+        .post(&format!("/v1/openclaw/instances/{}/start", fake_id))
         .add_header(
             http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
         )
         .await;
 
-    // Should fail because instance doesn't exist
     assert_eq!(
         response.status_code(),
         404,
