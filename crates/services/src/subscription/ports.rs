@@ -231,7 +231,7 @@ pub trait SubscriptionService: Send + Sync {
     ) -> Result<Vec<SubscriptionWithPlan>, SubscriptionError>;
 
     /// Handle incoming webhook from payment provider
-    async fn handle_webhook(
+    async fn handle_stripe_webhook(
         &self,
         payload: &[u8],
         signature: &str,

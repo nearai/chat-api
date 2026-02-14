@@ -463,7 +463,7 @@ pub async fn handle_stripe_webhook(
     // Process webhook
     app_state
         .subscription_service
-        .handle_webhook(&body, signature)
+        .handle_stripe_webhook(&body, signature)
         .await
         .map_err(|e| match e {
             SubscriptionError::WebhookVerificationFailed(msg) => {

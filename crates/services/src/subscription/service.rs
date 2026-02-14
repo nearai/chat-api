@@ -648,7 +648,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
         Ok(result)
     }
 
-    async fn handle_webhook(
+    async fn handle_stripe_webhook(
         &self,
         payload: &[u8],
         signature: &str,
