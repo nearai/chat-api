@@ -1565,7 +1565,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_rate_limit_blocks_second_request_within_window() {
-        let state = default_state();
+        // Use explicit config: 1 request per window so second request is rate limited
+        let state = configured_state(RateLimitConfig {
+            max_concurrent: 10,
+            max_requests_per_window: 1,
+            window_duration: ChronoDuration::seconds(1),
+            window_limits: vec![],
+            token_window_limits: vec![],
+            cost_window_limits: vec![],
+        });
         let user = test_user_id(1);
 
         // First request should succeed
