@@ -297,7 +297,9 @@ fn sub_one_month_same_day(dt: chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
         };
         NaiveDate::from_ymd_opt(next_y, next_m, 1)
             .and_then(|first_of_next| first_of_next.pred_opt())
-            .unwrap_or_else(|| NaiveDate::from_ymd_opt(new_y, new_m, 28).unwrap())
+            .unwrap_or_else(|| {
+                NaiveDate::from_ymd_opt(new_y, new_m, 28).expect("28th day of month exists")
+            })
     });
     chrono::DateTime::from_naive_utc_and_offset(new_d.and_time(dt.time()), Utc)
 }
