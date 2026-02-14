@@ -299,14 +299,14 @@ impl Default for NearConfig {
 
 /// Configuration for OpenClaw API integration
 #[derive(Debug, Clone, serde::Deserialize)]
-pub struct OpenClawConfig {
+pub struct AgentConfig {
     /// OpenClaw API base URL
     pub api_base_url: String,
     /// OpenClaw API bearer token for authentication
     pub api_token: String,
 }
 
-impl Default for OpenClawConfig {
+impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             api_base_url: std::env::var("OPENCLAW_API_BASE_URL")
@@ -369,7 +369,7 @@ pub struct Config {
     pub vpc_auth: VpcAuthConfig,
     pub telemetry: TelemetryConfig,
     pub logging: LoggingConfig,
-    pub openclaw: OpenClawConfig,
+    pub agent: AgentConfig,
 }
 
 impl Config {
@@ -386,7 +386,7 @@ impl Config {
             vpc_auth: VpcAuthConfig::default(),
             telemetry: TelemetryConfig::default(),
             logging: LoggingConfig::default(),
-            openclaw: OpenClawConfig::default(),
+            agent: AgentConfig::default(),
         }
     }
 }

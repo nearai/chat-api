@@ -45,9 +45,9 @@ pub struct AppState {
     pub conversation_share_service:
         Arc<dyn services::conversation::ports::ConversationShareService>,
     pub file_service: Arc<dyn services::file::ports::FileService>,
-    pub openclaw_service: Arc<dyn services::openclaw::OpenClawService>,
-    pub openclaw_repository: Arc<dyn services::openclaw::ports::OpenClawRepository>,
-    pub openclaw_proxy_service: Arc<dyn services::openclaw::OpenClawProxyService>,
+    pub agent_service: Arc<dyn services::agent::AgentService>,
+    pub agent_repository: Arc<dyn services::agent::ports::AgentRepository>,
+    pub agent_proxy_service: Arc<dyn services::agent::AgentProxyService>,
     pub redirect_uri: String,
     pub admin_domains: Arc<Vec<String>>,
     pub vpc_credentials_service: Arc<dyn services::vpc::VpcCredentialsService>,

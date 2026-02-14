@@ -119,7 +119,7 @@ async fn test_create_api_key_requires_auth() {
 //    → Middleware validates API key, looks up instance, checks auth
 //    → Proxy forwards request to instance_url with instance_token
 //    → Response streamed back to user
-//    → Usage tracked in user_instance_usage_log
+//    → Usage tracked in agent_usage_log
 //
 // 4. User Monitors Usage:
 //    GET /v1/openclaw/instances/{id}/usage

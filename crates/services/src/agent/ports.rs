@@ -7,7 +7,7 @@ use crate::UserId;
 
 /// OpenClaw instance metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OpenClawInstance {
+pub struct AgentInstance {
     pub id: Uuid,
     pub user_id: UserId,
     pub instance_id: String,
@@ -23,7 +23,7 @@ pub struct OpenClawInstance {
 
 /// API key metadata (without plaintext key)
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OpenClawApiKey {
+pub struct AgentApiKey {
     pub id: Uuid,
     pub instance_id: Uuid,
     pub user_id: UserId,
@@ -96,38 +96,35 @@ pub struct CreateInstanceParams {
 }
 
 #[async_trait]
-pub trait OpenClawRepository: Send + Sync {
+pub trait AgentRepository: Send + Sync {
     // Instance operations
-    async fn create_instance(
-        &self,
-        params: CreateInstanceParams,
-    ) -> anyhow::Result<OpenClawInstance>;
+    async fn create_instance(&self, params: CreateInstanceParams) -> anyhow::Result<AgentInstance>;
 
-    async fn get_instance(&self, instance_id: Uuid) -> anyhow::Result<Option<OpenClawInstance>>;
+    async fn get_instance(&self, instance_id: Uuid) -> anyhow::Result<Option<AgentInstance>>;
 
     async fn get_instance_by_instance_id(
         &self,
         instance_id: &str,
-    ) -> anyhow::Result<Option<OpenClawInstance>>;
+    ) -> anyhow::Result<Option<AgentInstance>>;
 
     async fn get_instance_by_api_key_hash(
         &self,
         key_hash: &str,
-    ) -> anyhow::Result<Option<(OpenClawInstance, OpenClawApiKey)>>;
+    ) -> anyhow::Result<Option<(AgentInstance, AgentApiKey)>>;
 
     async fn list_user_instances(
         &self,
         user_id: UserId,
         limit: i64,
         offset: i64,
-    ) -> anyhow::Result<(Vec<OpenClawInstance>, i64)>;
+    ) -> anyhow::Result<(Vec<AgentInstance>, i64)>;
 
     async fn update_instance(
         &self,
         instance_id: Uuid,
         name: Option<String>,
         public_ssh_key: Option<String>,
-    ) -> anyhow::Result<OpenClawInstance>;
+    ) -> anyhow::Result<AgentInstance>;
 
     async fn delete_instance(&self, instance_id: Uuid) -> anyhow::Result<()>;
 
@@ -140,18 +137,18 @@ pub trait OpenClawRepository: Send + Sync {
         name: String,
         spend_limit: Option<i64>,
         expires_at: Option<DateTime<Utc>>,
-    ) -> anyhow::Result<OpenClawApiKey>;
+    ) -> anyhow::Result<AgentApiKey>;
 
-    async fn get_api_key_by_hash(&self, key_hash: &str) -> anyhow::Result<Option<OpenClawApiKey>>;
+    async fn get_api_key_by_hash(&self, key_hash: &str) -> anyhow::Result<Option<AgentApiKey>>;
 
-    async fn get_api_key_by_id(&self, api_key_id: Uuid) -> anyhow::Result<Option<OpenClawApiKey>>;
+    async fn get_api_key_by_id(&self, api_key_id: Uuid) -> anyhow::Result<Option<AgentApiKey>>;
 
     async fn list_instance_keys(
         &self,
         instance_id: Uuid,
         limit: i64,
         offset: i64,
-    ) -> anyhow::Result<(Vec<OpenClawApiKey>, i64)>;
+    ) -> anyhow::Result<(Vec<AgentApiKey>, i64)>;
 
     async fn revoke_api_key(&self, api_key_id: Uuid) -> anyhow::Result<()>;
 
@@ -181,17 +178,21 @@ pub trait OpenClawRepository: Send + Sync {
         total_cost: i64,
     ) -> anyhow::Result<()>;
 
+    /// Log usage and update balance atomically in a single database transaction.
+    /// This prevents race conditions where usage is logged but balance update fails (or vice versa).
+    async fn log_usage_and_update_balance(&self, usage: UsageLogEntry) -> anyhow::Result<()>;
+
     async fn get_user_total_spending(&self, user_id: UserId) -> anyhow::Result<i64>;
 }
 
 /// Service trait for OpenClaw business logic
 #[async_trait]
-pub trait OpenClawService: Send + Sync {
+pub trait AgentService: Send + Sync {
     // Instance management
     async fn list_instances_from_openclaw(
         &self,
         user_id: UserId,
-    ) -> anyhow::Result<Vec<OpenClawInstance>>;
+    ) -> anyhow::Result<Vec<AgentInstance>>;
 
     async fn create_instance_from_openclaw(
         &self,
@@ -200,7 +201,7 @@ pub trait OpenClawService: Send + Sync {
         image: Option<String>,
         name: Option<String>,
         ssh_pubkey: Option<String>,
-    ) -> anyhow::Result<OpenClawInstance>;
+    ) -> anyhow::Result<AgentInstance>;
 
     async fn create_instance(
         &self,
@@ -208,20 +209,20 @@ pub trait OpenClawService: Send + Sync {
         instance_id: String,
         name: String,
         public_ssh_key: Option<String>,
-    ) -> anyhow::Result<OpenClawInstance>;
+    ) -> anyhow::Result<AgentInstance>;
 
     async fn get_instance(
         &self,
         instance_id: Uuid,
         user_id: UserId,
-    ) -> anyhow::Result<Option<OpenClawInstance>>;
+    ) -> anyhow::Result<Option<AgentInstance>>;
 
     async fn list_instances(
         &self,
         user_id: UserId,
         limit: i64,
         offset: i64,
-    ) -> anyhow::Result<(Vec<OpenClawInstance>, i64)>;
+    ) -> anyhow::Result<(Vec<AgentInstance>, i64)>;
 
     async fn update_instance(
         &self,
@@ -229,7 +230,7 @@ pub trait OpenClawService: Send + Sync {
         user_id: UserId,
         name: Option<String>,
         public_ssh_key: Option<String>,
-    ) -> anyhow::Result<OpenClawInstance>;
+    ) -> anyhow::Result<AgentInstance>;
 
     async fn delete_instance(&self, instance_id: Uuid) -> anyhow::Result<()>;
 
@@ -243,7 +244,7 @@ pub trait OpenClawService: Send + Sync {
         name: String,
         spend_limit: Option<i64>,
         expires_at: Option<DateTime<Utc>>,
-    ) -> anyhow::Result<(OpenClawApiKey, String)>;
+    ) -> anyhow::Result<(AgentApiKey, String)>;
 
     async fn list_api_keys(
         &self,
@@ -251,17 +252,17 @@ pub trait OpenClawService: Send + Sync {
         user_id: UserId,
         limit: i64,
         offset: i64,
-    ) -> anyhow::Result<(Vec<OpenClawApiKey>, i64)>;
+    ) -> anyhow::Result<(Vec<AgentApiKey>, i64)>;
 
     async fn revoke_api_key(&self, api_key_id: Uuid, user_id: UserId) -> anyhow::Result<()>;
 
     // API key validation and usage
-    async fn validate_and_use_api_key(&self, api_key: &str) -> anyhow::Result<OpenClawApiKey>;
+    async fn validate_and_use_api_key(&self, api_key: &str) -> anyhow::Result<AgentApiKey>;
 
     // Usage tracking and balance
     async fn record_usage(
         &self,
-        api_key: &OpenClawApiKey,
+        api_key: &AgentApiKey,
         input_tokens: i64,
         output_tokens: i64,
         model_id: String,

@@ -8,6 +8,7 @@ use opentelemetry_sdk::{
     Resource,
 };
 use services::{
+    agent::proxy::AgentProxy,
     analytics::AnalyticsServiceImpl,
     auth::OAuthServiceImpl,
     conversation::service::ConversationServiceImpl,
@@ -15,7 +16,6 @@ use services::{
     file::service::FileServiceImpl,
     metrics::{MockMetricsService, OtlpMetricsService},
     model::service::ModelServiceImpl,
-    openclaw::proxy::OpenClawProxy,
     response::service::OpenAIProxy,
     system_configs::ports::SystemConfigsService,
     user::UserServiceImpl,
@@ -160,17 +160,17 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize OpenClaw service
     tracing::info!("Initializing OpenClaw service...");
-    let openclaw_repo = db.openclaw_repository();
-    let openclaw_service = Arc::new(services::openclaw::OpenClawServiceImpl::new(
+    let openclaw_repo = db.agent_repository();
+    let agent_service = Arc::new(services::agent::AgentServiceImpl::new(
         openclaw_repo.clone(),
-        config.openclaw.api_base_url.clone(),
-        config.openclaw.api_token.clone(),
+        config.agent.api_base_url.clone(),
+        config.agent.api_token.clone(),
     ));
 
-    // Initialize OpenClaw proxy service
-    tracing::info!("Initializing OpenClaw proxy service...");
-    let openclaw_proxy_service: Arc<dyn services::openclaw::OpenClawProxyService> =
-        Arc::new(OpenClawProxy::new());
+    // Initialize agent proxy service
+    tracing::info!("Initializing agent proxy service...");
+    let agent_proxy_service: Arc<dyn services::agent::AgentProxyService> =
+        Arc::new(AgentProxy::new());
 
     // Initialize analytics and user usage services
     tracing::info!("Initializing analytics service...");
@@ -294,9 +294,9 @@ async fn main() -> anyhow::Result<()> {
         conversation_service,
         conversation_share_service,
         file_service,
-        openclaw_service,
-        openclaw_repository: openclaw_repo,
-        openclaw_proxy_service,
+        agent_service,
+        agent_repository: openclaw_repo,
+        agent_proxy_service,
         redirect_uri: config.oauth.redirect_uri,
         admin_domains: Arc::new(config.admin.admin_domains),
         user_repository: user_repo.clone(),

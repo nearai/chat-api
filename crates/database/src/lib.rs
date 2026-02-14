@@ -6,9 +6,9 @@ pub mod repositories;
 
 pub use pool::DbPool;
 pub use repositories::{
-    PostgresAnalyticsRepository, PostgresAppConfigRepository, PostgresConversationRepository,
-    PostgresConversationShareRepository, PostgresFileRepository, PostgresModelRepository,
-    PostgresNearNonceRepository, PostgresOAuthRepository, PostgresOpenClawRepository,
+    PostgresAgentRepository, PostgresAnalyticsRepository, PostgresAppConfigRepository,
+    PostgresConversationRepository, PostgresConversationShareRepository, PostgresFileRepository,
+    PostgresModelRepository, PostgresNearNonceRepository, PostgresOAuthRepository,
     PostgresPaymentWebhookRepository, PostgresSessionRepository, PostgresStripeCustomerRepository,
     PostgresSubscriptionRepository, PostgresSystemConfigsRepository, PostgresUserRepository,
     PostgresUserSettingsRepository, PostgresUserUsageRepository,
@@ -41,7 +41,7 @@ pub struct Database {
     stripe_customer_repository: Arc<PostgresStripeCustomerRepository>,
     subscription_repository: Arc<PostgresSubscriptionRepository>,
     payment_webhook_repository: Arc<PostgresPaymentWebhookRepository>,
-    openclaw_repository: Arc<PostgresOpenClawRepository>,
+    agent_repository: Arc<PostgresAgentRepository>,
     cluster_manager: Option<Arc<ClusterManager>>,
 }
 
@@ -68,7 +68,7 @@ impl Database {
         let subscription_repository = Arc::new(PostgresSubscriptionRepository::new(pool.clone()));
         let payment_webhook_repository =
             Arc::new(PostgresPaymentWebhookRepository::new(pool.clone()));
-        let openclaw_repository = Arc::new(PostgresOpenClawRepository::new(pool.clone()));
+        let agent_repository = Arc::new(PostgresAgentRepository::new(pool.clone()));
 
         Self {
             pool,
@@ -88,7 +88,7 @@ impl Database {
             stripe_customer_repository,
             subscription_repository,
             payment_webhook_repository,
-            openclaw_repository,
+            agent_repository,
             cluster_manager: None,
         }
     }
@@ -294,7 +294,7 @@ impl Database {
     }
 
     /// Get the OpenClaw repository
-    pub fn openclaw_repository(&self) -> Arc<PostgresOpenClawRepository> {
-        self.openclaw_repository.clone()
+    pub fn agent_repository(&self) -> Arc<PostgresAgentRepository> {
+        self.agent_repository.clone()
     }
 }

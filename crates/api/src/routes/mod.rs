@@ -134,8 +134,8 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
 
     // OpenClaw API key auth state for chat completions endpoint
     let openclaw_auth_state = OpenClawAuthState {
-        openclaw_service: app_state.openclaw_service.clone(),
-        openclaw_repository: app_state.openclaw_repository.clone(),
+        agent_service: app_state.agent_service.clone(),
+        agent_repository: app_state.agent_repository.clone(),
     };
 
     // OpenClaw chat completions router (requires API key authentication and rate limiting)

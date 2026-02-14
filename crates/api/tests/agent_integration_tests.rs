@@ -298,7 +298,7 @@ async fn test_instance_management_endpoints() {
     let client = db.pool().get().await.unwrap();
     client
         .execute(
-            "INSERT INTO openclaw_instances (id, user_id, instance_id, name, instance_url, instance_token, created_at, updated_at)
+            "INSERT INTO agent_instances (id, user_id, instance_id, name, instance_url, instance_token, created_at, updated_at)
              VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())",
             &[
                 &instance_uuid,

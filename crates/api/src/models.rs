@@ -763,8 +763,8 @@ pub struct InstanceResponse {
     pub updated_at: String,
 }
 
-impl From<services::openclaw::ports::OpenClawInstance> for InstanceResponse {
-    fn from(inst: services::openclaw::ports::OpenClawInstance) -> Self {
+impl From<services::agent::ports::AgentInstance> for InstanceResponse {
+    fn from(inst: services::agent::ports::AgentInstance) -> Self {
         Self {
             id: inst.id.to_string(),
             instance_id: inst.instance_id,
@@ -812,8 +812,8 @@ pub struct ApiKeyResponse {
     pub updated_at: String,
 }
 
-impl From<services::openclaw::ports::OpenClawApiKey> for ApiKeyResponse {
-    fn from(key: services::openclaw::ports::OpenClawApiKey) -> Self {
+impl From<services::agent::ports::AgentApiKey> for ApiKeyResponse {
+    fn from(key: services::agent::ports::AgentApiKey) -> Self {
         Self {
             id: key.id.to_string(),
             name: key.name,
@@ -842,8 +842,8 @@ pub struct UsageResponse {
     pub created_at: String,
 }
 
-impl From<services::openclaw::ports::UsageLogEntry> for UsageResponse {
-    fn from(usage: services::openclaw::ports::UsageLogEntry) -> Self {
+impl From<services::agent::ports::UsageLogEntry> for UsageResponse {
+    fn from(usage: services::agent::ports::UsageLogEntry) -> Self {
         Self {
             id: usage.id.to_string(),
             input_tokens: usage.input_tokens,
@@ -869,8 +869,8 @@ pub struct BalanceResponse {
     pub updated_at: String,
 }
 
-impl From<services::openclaw::ports::InstanceBalance> for BalanceResponse {
-    fn from(balance: services::openclaw::ports::InstanceBalance) -> Self {
+impl From<services::agent::ports::InstanceBalance> for BalanceResponse {
+    fn from(balance: services::agent::ports::InstanceBalance) -> Self {
         Self {
             total_spent: format_nano_dollars(balance.total_spent),
             total_requests: balance.total_requests,

@@ -1,3 +1,4 @@
+pub mod agent_repository;
 pub mod analytics_repository;
 pub mod app_config_repository;
 pub mod conversation_repository;
@@ -6,7 +7,6 @@ pub mod file_repository;
 pub mod model_repository;
 pub mod near_nonce_repository;
 pub mod oauth_repository;
-pub mod openclaw_repository;
 pub mod payment_webhook_repository;
 pub mod session_repository;
 pub mod stripe_customer_repository;
@@ -16,6 +16,7 @@ pub mod user_repository;
 pub mod user_settings_repository;
 pub mod user_usage_repository;
 
+pub use agent_repository::PostgresAgentRepository;
 pub use analytics_repository::PostgresAnalyticsRepository;
 pub use app_config_repository::PostgresAppConfigRepository;
 pub use conversation_repository::PostgresConversationRepository;
@@ -24,7 +25,6 @@ pub use file_repository::PostgresFileRepository;
 pub use model_repository::PostgresModelRepository;
 pub use near_nonce_repository::PostgresNearNonceRepository;
 pub use oauth_repository::PostgresOAuthRepository;
-pub use openclaw_repository::PostgresOpenClawRepository;
 pub use payment_webhook_repository::PostgresPaymentWebhookRepository;
 pub use session_repository::PostgresSessionRepository;
 pub use stripe_customer_repository::PostgresStripeCustomerRepository;

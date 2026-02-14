@@ -5,11 +5,11 @@ use http::{HeaderMap, StatusCode};
 use reqwest::Client;
 use std::pin::Pin;
 
-use super::ports::OpenClawInstance;
+use super::ports::AgentInstance;
 
 /// Proxy service for forwarding requests to OpenClaw instances
 #[async_trait]
-pub trait OpenClawProxyService: Send + Sync {
+pub trait AgentProxyService: Send + Sync {
     /// Forward an HTTP request to an OpenClaw instance
     ///
     /// # Arguments
@@ -23,7 +23,7 @@ pub trait OpenClawProxyService: Send + Sync {
     /// A tuple of (status_code, response_headers, response_body_stream)
     async fn forward_request(
         &self,
-        instance: &OpenClawInstance,
+        instance: &AgentInstance,
         path: &str,
         method: &str,
         headers: HeaderMap,
@@ -36,11 +36,11 @@ pub trait OpenClawProxyService: Send + Sync {
 }
 
 /// OpenClaw request proxy implementation
-pub struct OpenClawProxy {
+pub struct AgentProxy {
     http_client: Client,
 }
 
-impl OpenClawProxy {
+impl AgentProxy {
     pub fn new() -> Self {
         Self {
             http_client: Client::new(),
@@ -48,17 +48,17 @@ impl OpenClawProxy {
     }
 }
 
-impl Default for OpenClawProxy {
+impl Default for AgentProxy {
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[async_trait]
-impl OpenClawProxyService for OpenClawProxy {
+impl AgentProxyService for AgentProxy {
     async fn forward_request(
         &self,
-        instance: &OpenClawInstance,
+        instance: &AgentInstance,
         path: &str,
         method: &str,
         mut headers: HeaderMap,

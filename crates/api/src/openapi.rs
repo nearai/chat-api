@@ -86,6 +86,7 @@ use utoipa::OpenApi;
         // OpenClaw endpoints
         crate::routes::openclaw::list_instances,
         crate::routes::openclaw::get_instance,
+        crate::routes::openclaw::admin_list_all_instances,
         crate::routes::openclaw::admin_create_instance,
         crate::routes::openclaw::admin_delete_instance,
         crate::routes::openclaw::admin_start_instance,

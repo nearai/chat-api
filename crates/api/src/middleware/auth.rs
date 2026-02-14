@@ -22,15 +22,15 @@ pub struct AuthenticatedUser {
 /// Extract in route handlers using `Extension<AuthenticatedApiKey>`
 #[derive(Debug, Clone)]
 pub struct AuthenticatedApiKey {
-    pub api_key_info: services::openclaw::ports::OpenClawApiKey,
-    pub instance: services::openclaw::ports::OpenClawInstance,
+    pub api_key_info: services::agent::ports::AgentApiKey,
+    pub instance: services::agent::ports::AgentInstance,
 }
 
 /// State for OpenClaw API key authentication middleware
 #[derive(Clone)]
 pub struct OpenClawAuthState {
-    pub openclaw_service: Arc<dyn services::openclaw::OpenClawService>,
-    pub openclaw_repository: Arc<dyn services::openclaw::ports::OpenClawRepository>,
+    pub agent_service: Arc<dyn services::agent::AgentService>,
+    pub agent_repository: Arc<dyn services::agent::ports::AgentRepository>,
 }
 
 /// State for authentication middleware
@@ -414,7 +414,7 @@ pub async fn openclaw_api_key_middleware(
 
     // Get instance and API key info from repository
     let (instance, api_key_info) = state
-        .openclaw_repository
+        .agent_repository
         .get_instance_by_api_key_hash(&key_hash)
         .await
         .map_err(|e| {
@@ -452,7 +452,7 @@ pub async fn openclaw_api_key_middleware(
 
     // Update last_used_at timestamp
     if let Err(e) = state
-        .openclaw_repository
+        .agent_repository
         .update_api_key_last_used(api_key_info.id)
         .await
     {

@@ -52,7 +52,7 @@ async fn test_openclaw_complete_workflow() {
     let client = db.pool().get().await.expect("Should get DB connection");
     client
         .execute(
-            "INSERT INTO openclaw_instances (id, user_id, instance_id, name, instance_url, instance_token, created_at, updated_at)
+            "INSERT INTO agent_instances (id, user_id, instance_id, name, instance_url, instance_token, created_at, updated_at)
              VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())",
             &[
                 &instance_uuid,
@@ -362,7 +362,7 @@ async fn test_api_key_isolation_between_users() {
     let client = db.pool().get().await.expect("Should get DB connection");
     client
         .execute(
-            "INSERT INTO openclaw_instances (id, user_id, instance_id, name, instance_url, instance_token, created_at, updated_at)
+            "INSERT INTO agent_instances (id, user_id, instance_id, name, instance_url, instance_token, created_at, updated_at)
              VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())",
             &[
                 &instance_uuid,

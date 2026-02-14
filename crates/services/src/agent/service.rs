@@ -7,28 +7,34 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use super::ports::{
-    CreateInstanceParams, InstanceBalance, OpenClawApiKey, OpenClawInstance, OpenClawRepository,
-    OpenClawService, TokenPricing, UsageLogEntry,
+    AgentApiKey, AgentInstance, AgentRepository, AgentService, CreateInstanceParams,
+    InstanceBalance, TokenPricing, UsageLogEntry,
 };
 
-pub struct OpenClawServiceImpl {
-    repository: Arc<dyn OpenClawRepository>,
+pub struct AgentServiceImpl {
+    repository: Arc<dyn AgentRepository>,
     http_client: Client,
-    openclaw_api_base_url: String,
-    openclaw_api_token: String,
+    agent_api_base_url: String,
+    agent_api_token: String,
 }
 
-impl OpenClawServiceImpl {
+impl AgentServiceImpl {
     pub fn new(
-        repository: Arc<dyn OpenClawRepository>,
+        repository: Arc<dyn AgentRepository>,
         api_base_url: String,
         api_token: String,
     ) -> Self {
+        // Create HTTP client with timeout to prevent connection pool exhaustion from hung upstream services
+        let http_client = Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| Client::new());
+
         Self {
             repository,
-            http_client: Client::new(),
-            openclaw_api_base_url: api_base_url,
-            openclaw_api_token: api_token,
+            http_client,
+            agent_api_base_url: api_base_url,
+            agent_api_token: api_token,
         }
     }
 
@@ -51,6 +57,12 @@ impl OpenClawServiceImpl {
     }
 
     /// Call OpenClaw API to create an instance
+    ///
+    /// # Security Note
+    /// This function receives a nearai_api_key credential that is passed to the OpenClaw API
+    /// in the request body. This is a sensitive credential and MUST NOT be logged, stored,
+    /// or exposed in any error messages. Only the HTTP request/response status codes and headers
+    /// should be logged for debugging purposes, never the request/response body.
     async fn call_openclaw_api_create(
         &self,
         nearai_api_key: &str,
@@ -58,7 +70,7 @@ impl OpenClawServiceImpl {
         name: Option<String>,
         ssh_pubkey: Option<String>,
     ) -> anyhow::Result<serde_json::Value> {
-        let url = format!("{}/instances", self.openclaw_api_base_url);
+        let url = format!("{}/instances", self.agent_api_base_url);
 
         let request_body = serde_json::json!({
             "image": image,
@@ -71,7 +83,7 @@ impl OpenClawServiceImpl {
             .http_client
             .post(&url)
             .header("Content-Type", "application/json")
-            .bearer_auth(&self.openclaw_api_token)
+            .bearer_auth(&self.agent_api_token)
             .json(&request_body)
             .send()
             .await
@@ -105,12 +117,12 @@ impl OpenClawServiceImpl {
 
     /// Call OpenClaw API to list instances
     async fn call_openclaw_api_list(&self) -> anyhow::Result<serde_json::Value> {
-        let url = format!("{}/instances", self.openclaw_api_base_url);
+        let url = format!("{}/instances", self.agent_api_base_url);
 
         let response = self
             .http_client
             .get(&url)
-            .bearer_auth(&self.openclaw_api_token)
+            .bearer_auth(&self.agent_api_token)
             .send()
             .await
             .map_err(|e| anyhow!("Failed to call OpenClaw API: {}", e))?;
@@ -133,11 +145,11 @@ impl OpenClawServiceImpl {
 }
 
 #[async_trait]
-impl OpenClawService for OpenClawServiceImpl {
+impl AgentService for AgentServiceImpl {
     async fn list_instances_from_openclaw(
         &self,
         _user_id: UserId,
-    ) -> anyhow::Result<Vec<OpenClawInstance>> {
+    ) -> anyhow::Result<Vec<AgentInstance>> {
         tracing::info!("Listing instances from OpenClaw API (read-only, no DB sync)");
 
         // Call OpenClaw API
@@ -168,7 +180,7 @@ impl OpenClawService for OpenClawServiceImpl {
             let instance_id = format!("openclaw-{}-{}", instance_name, Uuid::new_v4());
 
             // Create in-memory instance object (no database storage)
-            let instance = OpenClawInstance {
+            let instance = AgentInstance {
                 id: Uuid::new_v4(),
                 user_id: _user_id,
                 instance_id,
@@ -200,7 +212,7 @@ impl OpenClawService for OpenClawServiceImpl {
         image: Option<String>,
         name: Option<String>,
         ssh_pubkey: Option<String>,
-    ) -> anyhow::Result<OpenClawInstance> {
+    ) -> anyhow::Result<AgentInstance> {
         tracing::info!("Creating instance from OpenClaw API: user_id={}", user_id);
 
         // Call OpenClaw API
@@ -272,7 +284,7 @@ impl OpenClawService for OpenClawServiceImpl {
         instance_id: String,
         name: String,
         public_ssh_key: Option<String>,
-    ) -> anyhow::Result<OpenClawInstance> {
+    ) -> anyhow::Result<AgentInstance> {
         tracing::info!(
             "Creating OpenClaw instance: user_id={}, instance_id={}",
             user_id,
@@ -315,7 +327,7 @@ impl OpenClawService for OpenClawServiceImpl {
         &self,
         instance_id: Uuid,
         user_id: UserId,
-    ) -> anyhow::Result<Option<OpenClawInstance>> {
+    ) -> anyhow::Result<Option<AgentInstance>> {
         tracing::debug!(
             "Fetching instance: instance_id={}, user_id={}",
             instance_id,
@@ -343,7 +355,7 @@ impl OpenClawService for OpenClawServiceImpl {
         user_id: UserId,
         limit: i64,
         offset: i64,
-    ) -> anyhow::Result<(Vec<OpenClawInstance>, i64)> {
+    ) -> anyhow::Result<(Vec<AgentInstance>, i64)> {
         tracing::debug!(
             "Listing instances: user_id={}, limit={}, offset={}",
             user_id,
@@ -365,7 +377,7 @@ impl OpenClawService for OpenClawServiceImpl {
         user_id: UserId,
         name: Option<String>,
         public_ssh_key: Option<String>,
-    ) -> anyhow::Result<OpenClawInstance> {
+    ) -> anyhow::Result<AgentInstance> {
         tracing::info!(
             "Updating instance: instance_id={}, user_id={}",
             instance_id,
@@ -414,12 +426,12 @@ impl OpenClawService for OpenClawServiceImpl {
         // Use instance_id (the actual OpenClaw instance ID) for the deletion URL
         let delete_url = format!(
             "{}/instances/{}",
-            self.openclaw_api_base_url, instance.instance_id
+            self.agent_api_base_url, instance.instance_id
         );
         let response = self
             .http_client
             .delete(&delete_url)
-            .bearer_auth(&self.openclaw_api_token)
+            .bearer_auth(&self.agent_api_token)
             .send()
             .await
             .map_err(|e| anyhow!("Failed to call OpenClaw API delete: {}", e))?;
@@ -451,7 +463,7 @@ impl OpenClawService for OpenClawServiceImpl {
         name: String,
         spend_limit: Option<i64>,
         expires_at: Option<chrono::DateTime<Utc>>,
-    ) -> anyhow::Result<(OpenClawApiKey, String)> {
+    ) -> anyhow::Result<(AgentApiKey, String)> {
         tracing::info!(
             "Creating API key: instance_id={}, user_id={}",
             instance_id,
@@ -505,7 +517,7 @@ impl OpenClawService for OpenClawServiceImpl {
         user_id: UserId,
         limit: i64,
         offset: i64,
-    ) -> anyhow::Result<(Vec<OpenClawApiKey>, i64)> {
+    ) -> anyhow::Result<(Vec<AgentApiKey>, i64)> {
         tracing::debug!(
             "Listing API keys: instance_id={}, user_id={}, limit={}, offset={}",
             instance_id,
@@ -566,7 +578,7 @@ impl OpenClawService for OpenClawServiceImpl {
         Ok(())
     }
 
-    async fn validate_and_use_api_key(&self, api_key: &str) -> anyhow::Result<OpenClawApiKey> {
+    async fn validate_and_use_api_key(&self, api_key: &str) -> anyhow::Result<AgentApiKey> {
         // Validate format
         if !Self::validate_api_key_format(api_key) {
             tracing::warn!("Invalid API key format");
@@ -615,7 +627,7 @@ impl OpenClawService for OpenClawServiceImpl {
 
     async fn record_usage(
         &self,
-        api_key: &OpenClawApiKey,
+        api_key: &AgentApiKey,
         input_tokens: i64,
         output_tokens: i64,
         model_id: String,
@@ -671,11 +683,9 @@ impl OpenClawService for OpenClawServiceImpl {
             created_at: Utc::now(),
         };
 
-        // Log usage and update balance (atomic in service)
-        self.repository.log_usage(usage).await?;
-        self.repository
-            .update_instance_balance(api_key.instance_id, total_cost)
-            .await?;
+        // Log usage and update balance atomically in database transaction
+        // This ensures both operations commit together or both rollback
+        self.repository.log_usage_and_update_balance(usage).await?;
 
         tracing::info!(
             "Usage recorded successfully: api_key_id={}, total_cost={}",

@@ -48,7 +48,7 @@ pub async fn list_instances(
 
     // Get instances for the authenticated user from database
     let (instances, total) = app_state
-        .openclaw_service
+        .agent_service
         .list_instances(user.user_id, limit, offset)
         .await
         .map_err(|e| {
@@ -101,7 +101,7 @@ pub async fn get_instance(
     );
 
     let instance = app_state
-        .openclaw_service
+        .agent_service
         .get_instance(instance_uuid, user.user_id)
         .await
         .map_err(|e| {
@@ -161,7 +161,7 @@ pub async fn admin_create_instance(
     );
 
     let instance = app_state
-        .openclaw_service
+        .agent_service
         .create_instance_from_openclaw(
             services::UserId(request.user_id),
             request.nearai_api_key,
@@ -210,7 +210,7 @@ pub async fn admin_delete_instance(
     tracing::info!("Admin: Deleting instance: instance_id={}", instance_uuid);
 
     app_state
-        .openclaw_service
+        .agent_service
         .delete_instance(instance_uuid)
         .await
         .map_err(|e| {
@@ -270,7 +270,7 @@ pub async fn create_api_key(
     };
 
     let (api_key, plaintext_key) = app_state
-        .openclaw_service
+        .agent_service
         .create_api_key(
             instance_uuid,
             user.user_id,
@@ -331,7 +331,7 @@ pub async fn list_api_keys(
     let offset = params.offset.unwrap_or(0).max(0);
 
     let (keys, total) = app_state
-        .openclaw_service
+        .agent_service
         .list_api_keys(instance_uuid, user.user_id, limit, offset)
         .await
         .map_err(|e| {
@@ -382,7 +382,7 @@ pub async fn revoke_api_key(
     );
 
     app_state
-        .openclaw_service
+        .agent_service
         .revoke_api_key(api_key_uuid, user.user_id)
         .await
         .map_err(|e| {
@@ -451,7 +451,7 @@ pub async fn get_instance_usage(
     let offset = params.offset.max(0);
 
     let (usage, total) = app_state
-        .openclaw_service
+        .agent_service
         .get_instance_usage(
             instance_uuid,
             user.user_id,
@@ -509,7 +509,7 @@ pub async fn get_instance_balance(
     );
 
     let balance = app_state
-        .openclaw_service
+        .agent_service
         .get_instance_balance(instance_uuid, user.user_id)
         .await
         .map_err(|e| {
@@ -553,7 +553,7 @@ pub async fn admin_list_all_instances(
 
     // Call OpenClaw API to get all instances
     let instances = app_state
-        .openclaw_service
+        .agent_service
         .list_instances_from_openclaw(_user.user_id)
         .await
         .map_err(|e| {
@@ -594,7 +594,7 @@ pub async fn openclaw_chat_completions(
 
     // Forward request to instance
     let (status, headers, body_stream) = app_state
-        .openclaw_proxy_service
+        .agent_proxy_service
         .forward_request(
             &api_key.instance,
             "/v1/chat/completions",
@@ -662,7 +662,7 @@ pub async fn admin_start_instance(
     tracing::info!("Admin: Starting instance: instance_id={}", instance_uuid);
 
     let instance = app_state
-        .openclaw_repository
+        .agent_repository
         .get_instance(instance_uuid)
         .await
         .map_err(|e| {
@@ -676,7 +676,7 @@ pub async fn admin_start_instance(
         .ok_or_else(|| ApiError::not_found("Instance not found"))?;
 
     let (status, headers, body_stream) = app_state
-        .openclaw_proxy_service
+        .agent_proxy_service
         .forward_request(
             &instance,
             &format!("/v1/instances/{}/start", instance.instance_id),
@@ -729,7 +729,7 @@ pub async fn admin_stop_instance(
     tracing::info!("Admin: Stopping instance: instance_id={}", instance_uuid);
 
     let instance = app_state
-        .openclaw_repository
+        .agent_repository
         .get_instance(instance_uuid)
         .await
         .map_err(|e| {
@@ -743,7 +743,7 @@ pub async fn admin_stop_instance(
         .ok_or_else(|| ApiError::not_found("Instance not found"))?;
 
     let (status, headers, body_stream) = app_state
-        .openclaw_proxy_service
+        .agent_proxy_service
         .forward_request(
             &instance,
             &format!("/v1/instances/{}/stop", instance.instance_id),
@@ -796,7 +796,7 @@ pub async fn admin_restart_instance(
     tracing::info!("Admin: Restarting instance: instance_id={}", instance_uuid);
 
     let instance = app_state
-        .openclaw_repository
+        .agent_repository
         .get_instance(instance_uuid)
         .await
         .map_err(|e| {
@@ -810,7 +810,7 @@ pub async fn admin_restart_instance(
         .ok_or_else(|| ApiError::not_found("Instance not found"))?;
 
     let (status, headers, body_stream) = app_state
-        .openclaw_proxy_service
+        .agent_proxy_service
         .forward_request(
             &instance,
             &format!("/v1/instances/{}/restart", instance.instance_id),
@@ -863,7 +863,7 @@ pub async fn admin_create_backup(
     tracing::info!("Admin: Creating backup: instance_id={}", instance_uuid);
 
     let instance = app_state
-        .openclaw_repository
+        .agent_repository
         .get_instance(instance_uuid)
         .await
         .map_err(|e| {
@@ -877,7 +877,7 @@ pub async fn admin_create_backup(
         .ok_or_else(|| ApiError::not_found("Instance not found"))?;
 
     let (status, headers, body_stream) = app_state
-        .openclaw_proxy_service
+        .agent_proxy_service
         .forward_request(
             &instance,
             &format!("/v1/instances/{}/backup", instance.instance_id),
@@ -930,7 +930,7 @@ pub async fn admin_list_backups(
     tracing::info!("Admin: Listing backups: instance_id={}", instance_uuid);
 
     let instance = app_state
-        .openclaw_repository
+        .agent_repository
         .get_instance(instance_uuid)
         .await
         .map_err(|e| {
@@ -944,7 +944,7 @@ pub async fn admin_list_backups(
         .ok_or_else(|| ApiError::not_found("Instance not found"))?;
 
     let (status, headers, body_stream) = app_state
-        .openclaw_proxy_service
+        .agent_proxy_service
         .forward_request(
             &instance,
             &format!("/v1/instances/{}/backups", instance.instance_id),
@@ -1007,7 +1007,7 @@ pub async fn admin_get_backup(
     );
 
     let instance = app_state
-        .openclaw_repository
+        .agent_repository
         .get_instance(instance_uuid)
         .await
         .map_err(|e| {
@@ -1021,7 +1021,7 @@ pub async fn admin_get_backup(
         .ok_or_else(|| ApiError::not_found("Instance not found"))?;
 
     let (status, headers, body_stream) = app_state
-        .openclaw_proxy_service
+        .agent_proxy_service
         .forward_request(
             &instance,
             &format!(
