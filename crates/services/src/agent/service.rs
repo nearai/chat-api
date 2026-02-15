@@ -56,14 +56,14 @@ impl AgentServiceImpl {
         key.starts_with("ag_") && key.len() == 35
     }
 
-    /// Call OpenClaw API to create an instance
+    /// Call Agent API to create an instance
     ///
     /// # Security Note
-    /// This function receives a nearai_api_key credential that is passed to the OpenClaw API
+    /// This function receives a nearai_api_key credential that is passed to the Agent API
     /// in the request body. This is a sensitive credential and MUST NOT be logged, stored,
     /// or exposed in any error messages. Only the HTTP request/response status codes and headers
     /// should be logged for debugging purposes, never the request/response body.
-    async fn call_openclaw_api_create(
+    async fn call_agent_api_create(
         &self,
         nearai_api_key: &str,
         image: Option<String>,
@@ -87,18 +87,18 @@ impl AgentServiceImpl {
             .json(&request_body)
             .send()
             .await
-            .map_err(|e| anyhow!("Failed to call OpenClaw API: {}", e))?;
+            .map_err(|e| anyhow!("Failed to call Agent API: {}", e))?;
 
         if !response.status().is_success() {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
-            return Err(anyhow!("OpenClaw API error: {} - {}", status, error_text));
+            return Err(anyhow!("Agent API error: {} - {}", status, error_text));
         }
 
         let body_text = response
             .text()
             .await
-            .map_err(|e| anyhow!("Failed to read OpenClaw response: {}", e))?;
+            .map_err(|e| anyhow!("Failed to read Agent API response: {}", e))?;
 
         // Parse Server-Sent Events (SSE) response format
         // The response contains multiple "data: {...}" lines
@@ -107,16 +107,16 @@ impl AgentServiceImpl {
             .lines()
             .find(|line| line.starts_with("data: "))
             .and_then(|line| line.strip_prefix("data: "))
-            .ok_or_else(|| anyhow!("No data event found in OpenClaw response"))?;
+            .ok_or_else(|| anyhow!("No data event found in Agent API response"))?;
 
         let body = serde_json::from_str::<serde_json::Value>(first_event)
-            .map_err(|e| anyhow!("Failed to parse OpenClaw response: {}", e))?;
+            .map_err(|e| anyhow!("Failed to parse Agent API response: {}", e))?;
 
         Ok(body)
     }
 
-    /// Call OpenClaw API to list instances
-    async fn call_openclaw_api_list(&self) -> anyhow::Result<serde_json::Value> {
+    /// Call Agent API to list instances
+    async fn call_agent_api_list(&self) -> anyhow::Result<serde_json::Value> {
         let url = format!("{}/instances", self.agent_api_base_url);
 
         let response = self
@@ -125,11 +125,11 @@ impl AgentServiceImpl {
             .bearer_auth(&self.agent_api_token)
             .send()
             .await
-            .map_err(|e| anyhow!("Failed to call OpenClaw API: {}", e))?;
+            .map_err(|e| anyhow!("Failed to call Agent API: {}", e))?;
 
         if !response.status().is_success() {
             return Err(anyhow!(
-                "OpenClaw API error: {} - {}",
+                "Agent API error: {} - {}",
                 response.status(),
                 response.text().await.unwrap_or_default()
             ));
@@ -138,7 +138,7 @@ impl AgentServiceImpl {
         let body = response
             .json::<serde_json::Value>()
             .await
-            .map_err(|e| anyhow!("Failed to parse OpenClaw response: {}", e))?;
+            .map_err(|e| anyhow!("Failed to parse Agent API response: {}", e))?;
 
         Ok(body)
     }
@@ -146,29 +146,29 @@ impl AgentServiceImpl {
 
 #[async_trait]
 impl AgentService for AgentServiceImpl {
-    async fn list_instances_from_openclaw(
+    async fn list_instances_from_agent_api(
         &self,
         _user_id: UserId,
     ) -> anyhow::Result<Vec<AgentInstance>> {
-        tracing::info!("Listing instances from OpenClaw API (read-only, no DB sync)");
+        tracing::info!("Listing instances from Agent API (read-only, no DB sync)");
 
-        // Call OpenClaw API
-        let response = self.call_openclaw_api_list().await?;
+        // Call Agent API
+        let response = self.call_agent_api_list().await?;
 
         // Extract instances array from response
         let instances_array = response
             .get("instances")
             .and_then(|v| v.as_array())
-            .ok_or_else(|| anyhow!("Missing or invalid 'instances' array in OpenClaw response"))?;
+            .ok_or_else(|| anyhow!("Missing or invalid 'instances' array in Agent API response"))?;
 
         let mut instances = Vec::new();
 
-        // Process each instance from OpenClaw (read-only, no database sync)
+        // Process each instance from Agent API (read-only, no database sync)
         for instance_data in instances_array {
             let instance_name = instance_data
                 .get("name")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow!("Missing 'name' in OpenClaw instance data"))?
+                .ok_or_else(|| anyhow!("Missing 'name' in Agent API instance data"))?
                 .to_string();
 
             let instance_ssh_pubkey = instance_data
@@ -176,8 +176,8 @@ impl AgentService for AgentServiceImpl {
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
 
-            // Generate a unique instance_id based on the OpenClaw name
-            let instance_id = format!("openclaw-{}-{}", instance_name, Uuid::new_v4());
+            // Generate a unique instance_id based on the Agent API name
+            let instance_id = format!("agent-{}-{}", instance_name, Uuid::new_v4());
 
             // Create in-memory instance object (no database storage)
             let instance = AgentInstance {
@@ -198,14 +198,14 @@ impl AgentService for AgentServiceImpl {
         }
 
         tracing::info!(
-            "Listed {} instances from OpenClaw API (read-only)",
+            "Listed {} instances from Agent API (read-only)",
             instances.len()
         );
 
         Ok(instances)
     }
 
-    async fn create_instance_from_openclaw(
+    async fn create_instance_from_agent_api(
         &self,
         user_id: UserId,
         nearai_api_key: String,
@@ -213,25 +213,25 @@ impl AgentService for AgentServiceImpl {
         name: Option<String>,
         ssh_pubkey: Option<String>,
     ) -> anyhow::Result<AgentInstance> {
-        tracing::info!("Creating instance from OpenClaw API: user_id={}", user_id);
+        tracing::info!("Creating instance from Agent API: user_id={}", user_id);
 
-        // Call OpenClaw API
+        // Call Agent API
         let response = self
-            .call_openclaw_api_create(&nearai_api_key, image, name.clone(), ssh_pubkey.clone())
+            .call_agent_api_create(&nearai_api_key, image, name.clone(), ssh_pubkey.clone())
             .await?;
 
         // Extract instance data from response
         let instance_data = response
             .get("instance")
-            .ok_or_else(|| anyhow!("Missing 'instance' in OpenClaw response"))?;
+            .ok_or_else(|| anyhow!("Missing 'instance' in Agent API response"))?;
 
         let instance_name = instance_data
             .get("name")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("Missing 'name' in OpenClaw instance data"))?
+            .ok_or_else(|| anyhow!("Missing 'name' in Agent API instance data"))?
             .to_string();
 
-        // Extract connection information from OpenClaw API response
+        // Extract connection information from Agent API response
         let instance_url = instance_data
             .get("url")
             .and_then(|v| v.as_str())
@@ -252,8 +252,8 @@ impl AgentService for AgentServiceImpl {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        // Generate a unique instance_id based on the OpenClaw name
-        let instance_id = format!("openclaw-{}-{}", instance_name, Uuid::new_v4());
+        // Generate a unique instance_id based on the Agent API name
+        let instance_id = format!("agent-{}-{}", instance_name, Uuid::new_v4());
 
         // Store in database with connection info
         let instance = self
@@ -271,7 +271,7 @@ impl AgentService for AgentServiceImpl {
             .await?;
 
         tracing::info!(
-            "Instance created from OpenClaw API: instance_id={}, user_id={}",
+            "Instance created from Agent API: instance_id={}, user_id={}",
             instance.id,
             user_id
         );
@@ -286,7 +286,7 @@ impl AgentService for AgentServiceImpl {
         public_ssh_key: Option<String>,
     ) -> anyhow::Result<AgentInstance> {
         tracing::info!(
-            "Creating OpenClaw instance: user_id={}, instance_id={}",
+            "Creating agent instance: user_id={}, instance_id={}",
             user_id,
             instance_id
         );
@@ -422,8 +422,8 @@ impl AgentService for AgentServiceImpl {
             .await?
             .ok_or_else(|| anyhow!("Instance not found"))?;
 
-        // Call OpenClaw API to terminate the instance
-        // Use instance_id (the actual OpenClaw instance ID) for the deletion URL
+        // Call Agent API to terminate the instance
+        // Use instance_id (the actual agent instance ID) for the deletion URL
         let delete_url = format!(
             "{}/instances/{}",
             self.agent_api_base_url, instance.instance_id
@@ -434,11 +434,11 @@ impl AgentService for AgentServiceImpl {
             .bearer_auth(&self.agent_api_token)
             .send()
             .await
-            .map_err(|e| anyhow!("Failed to call OpenClaw API delete: {}", e))?;
+            .map_err(|e| anyhow!("Failed to call Agent API delete: {}", e))?;
 
         if !response.status().is_success() {
             return Err(anyhow!(
-                "OpenClaw API delete failed with status {}: instance_id={}",
+                "Agent API delete failed with status {}: instance_id={}",
                 response.status(),
                 instance_id
             ));

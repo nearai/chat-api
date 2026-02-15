@@ -1,9 +1,9 @@
 pub mod admin;
+pub mod agents;
 pub mod api;
 pub mod attestation;
 pub mod configs;
 pub mod oauth;
-pub mod openclaw;
 pub mod subscriptions;
 pub mod users;
 
@@ -111,8 +111,8 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         crate::middleware::admin_auth_middleware,
     ));
 
-    // Admin OpenClaw routes (requires admin authentication)
-    let admin_agent_routes = openclaw::create_admin_agent_router().layer(from_fn_with_state(
+    // Admin agent routes (requires admin authentication)
+    let admin_agent_routes = agents::create_admin_agent_router().layer(from_fn_with_state(
         auth_state.clone(),
         crate::middleware::admin_auth_middleware,
     ));
@@ -123,8 +123,8 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         crate::middleware::auth_middleware,
     ));
 
-    // OpenClaw routes (requires authentication)
-    let agent_routes = openclaw::create_agent_router().layer(from_fn_with_state(
+    // Agent routes (requires authentication)
+    let agent_routes = agents::create_agent_router().layer(from_fn_with_state(
         auth_state.clone(),
         crate::middleware::auth_middleware,
     ));
@@ -132,17 +132,17 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
     // Get rate limit state from app state
     let rate_limit_state = app_state.rate_limit_state.clone();
 
-    // OpenClaw API key auth state for chat completions endpoint
+    // Agent API key auth state for chat completions endpoint
     let agent_auth_state = AgentAuthState {
         agent_service: app_state.agent_service.clone(),
         agent_repository: app_state.agent_repository.clone(),
     };
 
-    // OpenClaw chat completions router (requires API key authentication and rate limiting)
-    let openclaw_chat_routes = Router::new()
+    // Agent chat completions router (requires API key authentication and rate limiting)
+    let agent_chat_routes = Router::new()
         .route(
             "/chat/completions",
-            axum::routing::post(openclaw::agent_chat_completions),
+            axum::routing::post(agents::agent_chat_completions),
         )
         .layer(from_fn_with_state(
             agent_auth_state.clone(),
@@ -192,10 +192,10 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         .nest("/v1/auth", auth_routes)
         .nest("/v1/auth", logout_route) // Logout route with auth middleware
         .nest("/v1/users", user_routes)
-        .nest("/v1/openclaw", agent_routes) // OpenClaw routes (requires user auth)
-        .nest("/v1/openclaw", openclaw_chat_routes) // OpenClaw chat completions (requires API key auth)
+        .nest("/v1/agents", agent_routes) // Agent routes (requires user auth)
+        .nest("/v1/agents", agent_chat_routes) // Agent chat completions (requires API key auth)
         .nest("/v1/admin", admin_routes)
-        .nest("/v1/admin/openclaw", admin_agent_routes) // Admin OpenClaw routes (requires admin auth)
+        .nest("/v1/admin/agents", admin_agent_routes) // Admin agent routes (requires admin auth)
         .merge(optional_auth_routes) // Conversation read routes (optional auth)
         .merge(api_routes) // API routes (required auth)
         .merge(attestation_routes) // Merge attestation routes (already have /v1 prefix)

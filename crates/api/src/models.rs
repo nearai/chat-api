@@ -700,10 +700,10 @@ impl From<FileData> for FileGetResponse {
 }
 
 // ============================================================================
-// OpenClaw Models
+// Agent Models
 // ============================================================================
 
-/// Request to create an OpenClaw instance (proxied to OpenClaw API)
+/// Request to create an agent instance (proxied to Agent API)
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateInstanceRequest {
     /// Image to use for the instance (null for default)
@@ -712,14 +712,14 @@ pub struct CreateInstanceRequest {
     /// Instance name (null for auto-generated)
     #[serde(default)]
     pub name: Option<String>,
-    /// OpenClaw API key for authentication
+    /// Agent API key for authentication
     pub nearai_api_key: String,
     /// SSH public key
     #[serde(default)]
     pub ssh_pubkey: Option<String>,
 }
 
-/// Request to update an OpenClaw instance
+/// Request to update an agent instance
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct UpdateInstanceRequest {
     /// New instance name (optional)
@@ -728,17 +728,17 @@ pub struct UpdateInstanceRequest {
     pub public_ssh_key: Option<String>,
 }
 
-/// OpenClaw API instance response
+/// Agent API instance response (deserialized from external Agent API)
 #[derive(Debug, Deserialize)]
-pub struct OpenClawApiResponse {
-    pub instance: OpenClawApiInstance,
+pub struct AgentApiResponse {
+    pub instance: AgentApiInstance,
     pub message: String,
     pub stage: String,
 }
 
-/// OpenClaw API instance data
+/// Agent API instance data (deserialized from external Agent API)
 #[derive(Debug, Deserialize)]
-pub struct OpenClawApiInstance {
+pub struct AgentApiInstance {
     pub dashboard_url: String,
     pub gateway_port: i32,
     pub image: String,
@@ -752,7 +752,7 @@ pub struct OpenClawApiInstance {
     pub ssh_pubkey: Option<String>,
 }
 
-/// OpenClaw instance response
+/// Agent instance response
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct InstanceResponse {
     pub id: String,

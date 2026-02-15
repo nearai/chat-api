@@ -7,13 +7,13 @@ use std::pin::Pin;
 
 use super::ports::AgentInstance;
 
-/// Proxy service for forwarding requests to OpenClaw instances
+/// Proxy service for forwarding requests to agent instances
 #[async_trait]
 pub trait AgentProxyService: Send + Sync {
-    /// Forward an HTTP request to an OpenClaw instance
+    /// Forward an HTTP request to an agent instance
     ///
     /// # Arguments
-    /// * `instance` - The OpenClaw instance to forward to
+    /// * `instance` - The agent instance to forward to
     /// * `path` - The request path (e.g., "/v1/chat/completions")
     /// * `method` - The HTTP method (e.g., "POST")
     /// * `headers` - Request headers (Authorization will be replaced with instance token)
@@ -35,7 +35,7 @@ pub trait AgentProxyService: Send + Sync {
     )>;
 }
 
-/// OpenClaw request proxy implementation
+/// Agent request proxy implementation
 pub struct AgentProxy {
     http_client: Client,
 }
@@ -86,7 +86,7 @@ impl AgentProxyService for AgentProxy {
         let url = format!("{}{}", instance_url, path);
 
         tracing::debug!(
-            "Forwarding {} request to OpenClaw instance: instance_id={}, url={}",
+            "Forwarding {} request to agent instance: instance_id={}, url={}",
             method,
             instance.id,
             url
@@ -151,11 +151,11 @@ impl AgentProxyService for AgentProxy {
         // Send the request
         let response = request_builder.send().await.map_err(|e| {
             tracing::error!(
-                "Failed to forward request to OpenClaw instance: instance_id={}, error={}",
+                "Failed to forward request to agent instance: instance_id={}, error={}",
                 instance.id,
                 e
             );
-            anyhow::anyhow!("Failed to forward request to OpenClaw instance: {}", e)
+            anyhow::anyhow!("Failed to forward request to agent instance: {}", e)
         })?;
 
         let status = response.status();
@@ -169,7 +169,7 @@ impl AgentProxyService for AgentProxy {
         })) as Pin<Box<dyn Stream<Item = anyhow::Result<Bytes>> + Send>>;
 
         tracing::debug!(
-            "Forwarded request to OpenClaw instance: instance_id={}, status={}",
+            "Forwarded request to agent instance: instance_id={}, status={}",
             instance.id,
             status
         );

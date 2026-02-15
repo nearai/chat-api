@@ -10,7 +10,7 @@ async fn test_start_instance_requires_auth() {
     let fake_id = Uuid::new_v4();
 
     let response = server
-        .post(&format!("/v1/openclaw/instances/{}/start", fake_id))
+        .post(&format!("/v1/agents/instances/{}/start", fake_id))
         .await;
 
     assert_eq!(
@@ -27,7 +27,7 @@ async fn test_stop_instance_requires_auth() {
     let fake_id = Uuid::new_v4();
 
     let response = server
-        .post(&format!("/v1/openclaw/instances/{}/stop", fake_id))
+        .post(&format!("/v1/agents/instances/{}/stop", fake_id))
         .await;
 
     assert_eq!(
@@ -44,7 +44,7 @@ async fn test_restart_instance_requires_auth() {
     let fake_id = Uuid::new_v4();
 
     let response = server
-        .post(&format!("/v1/openclaw/instances/{}/restart", fake_id))
+        .post(&format!("/v1/agents/instances/{}/restart", fake_id))
         .await;
 
     assert_eq!(
@@ -62,7 +62,7 @@ async fn test_start_instance_not_found() {
     let fake_id = Uuid::new_v4();
 
     let response = server
-        .post(&format!("/v1/openclaw/instances/{}/start", fake_id))
+        .post(&format!("/v1/agents/instances/{}/start", fake_id))
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
@@ -84,7 +84,7 @@ async fn test_create_backup_requires_admin() {
     let fake_id = Uuid::new_v4();
 
     let response = server
-        .post(&format!("/v1/admin/openclaw/instances/{}/backup", fake_id))
+        .post(&format!("/v1/admin/agents/instances/{}/backup", fake_id))
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
@@ -106,7 +106,7 @@ async fn test_list_backups_requires_admin() {
     let fake_id = Uuid::new_v4();
 
     let response = server
-        .get(&format!("/v1/admin/openclaw/instances/{}/backups", fake_id))
+        .get(&format!("/v1/admin/agents/instances/{}/backups", fake_id))
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
@@ -130,7 +130,7 @@ async fn test_get_backup_requires_admin() {
 
     let response = server
         .get(&format!(
-            "/v1/admin/openclaw/instances/{}/backups/{}",
+            "/v1/admin/agents/instances/{}/backups/{}",
             fake_id, fake_backup_id
         ))
         .add_header(
@@ -154,7 +154,7 @@ async fn test_list_backups_not_found() {
     let fake_id = Uuid::new_v4();
 
     let response = server
-        .get(&format!("/v1/admin/openclaw/instances/{}/backups", fake_id))
+        .get(&format!("/v1/admin/agents/instances/{}/backups", fake_id))
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),

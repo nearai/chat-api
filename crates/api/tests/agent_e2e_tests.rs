@@ -4,7 +4,7 @@ use common::{create_test_server_and_db, mock_login};
 use serde_json::json;
 use uuid::Uuid;
 
-/// E2E test for complete OpenClaw workflow:
+/// E2E test for complete Agent workflow:
 /// 1. Admin creates instance for user
 /// 2. User retrieves instance
 /// 3. Admin stops instance
@@ -12,7 +12,7 @@ use uuid::Uuid;
 /// 5. User calls inference with API key
 /// 6. Verify usage is captured
 #[tokio::test]
-async fn test_openclaw_complete_workflow() {
+async fn test_agent_complete_workflow() {
     let (server, db) = create_test_server_and_db(Default::default()).await;
 
     // 1. Create users: admin and regular user
@@ -40,7 +40,7 @@ async fn test_openclaw_complete_workflow() {
         .map(|s| s.to_string())
         .expect("User should have id");
 
-    // 2. Admin creates instance directly in database (simulating successful OpenClaw API call)
+    // 2. Admin creates instance directly in database (simulating successful Agent API call)
     let instance_uuid = Uuid::new_v4();
     let instance_id_str = format!(
         "inst_test_{}",
@@ -68,7 +68,7 @@ async fn test_openclaw_complete_workflow() {
 
     // 3. User retrieves instance
     let get_instance_response = server
-        .get(&format!("/v1/openclaw/instances/{}", instance_uuid))
+        .get(&format!("/v1/agents/instances/{}", instance_uuid))
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
@@ -88,7 +88,7 @@ async fn test_openclaw_complete_workflow() {
 
     // 4. User stops instance (now user-accessible, not admin-only)
     let stop_response = server
-        .post(&format!("/v1/openclaw/instances/{}/stop", instance_uuid))
+        .post(&format!("/v1/agents/instances/{}/stop", instance_uuid))
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
@@ -103,7 +103,7 @@ async fn test_openclaw_complete_workflow() {
 
     // 5. User starts instance (now user-accessible, not admin-only)
     let start_response = server
-        .post(&format!("/v1/openclaw/instances/{}/start", instance_uuid))
+        .post(&format!("/v1/agents/instances/{}/start", instance_uuid))
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
@@ -118,7 +118,7 @@ async fn test_openclaw_complete_workflow() {
 
     // 6. User creates API key for the instance
     let api_key_response = server
-        .post(&format!("/v1/openclaw/instances/{}/keys", instance_uuid))
+        .post(&format!("/v1/agents/instances/{}/keys", instance_uuid))
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
@@ -152,7 +152,7 @@ async fn test_openclaw_complete_workflow() {
 
     // 7. List API keys for instance
     let list_keys_response = server
-        .get(&format!("/v1/openclaw/instances/{}/keys", instance_uuid))
+        .get(&format!("/v1/agents/instances/{}/keys", instance_uuid))
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
@@ -169,7 +169,7 @@ async fn test_openclaw_complete_workflow() {
 
     // 8. Attempt chat completion with API key (will fail without mocked instance)
     let chat_response = server
-        .post("/v1/openclaw/chat/completions")
+        .post("/v1/agents/chat/completions")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {api_key}")).unwrap(),
@@ -194,7 +194,7 @@ async fn test_openclaw_complete_workflow() {
     let other_user_token = mock_login(&server, "otheruser@example.com").await;
 
     let other_instance_response = server
-        .get(&format!("/v1/openclaw/instances/{}", instance_uuid))
+        .get(&format!("/v1/agents/instances/{}", instance_uuid))
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {other_user_token}")).unwrap(),
@@ -210,7 +210,7 @@ async fn test_openclaw_complete_workflow() {
     // 10. Verify user cannot stop another user's instance (now user-endpoint, ownership check)
     let other_user_token = mock_login(&server, "other@example.com").await;
     let stop_other_user = server
-        .post(&format!("/v1/openclaw/instances/{}/stop", instance_uuid))
+        .post(&format!("/v1/agents/instances/{}/stop", instance_uuid))
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {other_user_token}")).unwrap(),
@@ -234,7 +234,7 @@ async fn test_lifecycle_operations_require_admin() {
 
     // Test start - user endpoint (returns 404 for non-existent instance)
     let start = server
-        .post(&format!("/v1/openclaw/instances/{}/start", instance_id))
+        .post(&format!("/v1/agents/instances/{}/start", instance_id))
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
@@ -248,7 +248,7 @@ async fn test_lifecycle_operations_require_admin() {
 
     // Test stop - user endpoint (returns 404 for non-existent instance)
     let stop = server
-        .post(&format!("/v1/openclaw/instances/{}/stop", instance_id))
+        .post(&format!("/v1/agents/instances/{}/stop", instance_id))
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
@@ -262,7 +262,7 @@ async fn test_lifecycle_operations_require_admin() {
 
     // Test restart - user endpoint (returns 404 for non-existent instance)
     let restart = server
-        .post(&format!("/v1/openclaw/instances/{}/restart", instance_id))
+        .post(&format!("/v1/agents/instances/{}/restart", instance_id))
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
@@ -277,7 +277,7 @@ async fn test_lifecycle_operations_require_admin() {
     // Test backup creation
     let backup = server
         .post(&format!(
-            "/v1/admin/openclaw/instances/{}/backup",
+            "/v1/admin/agents/instances/{}/backup",
             instance_id
         ))
         .add_header(
@@ -290,7 +290,7 @@ async fn test_lifecycle_operations_require_admin() {
     // Test list backups
     let list = server
         .get(&format!(
-            "/v1/admin/openclaw/instances/{}/backups",
+            "/v1/admin/agents/instances/{}/backups",
             instance_id
         ))
         .add_header(
@@ -303,7 +303,7 @@ async fn test_lifecycle_operations_require_admin() {
     // Test get backup
     let get = server
         .get(&format!(
-            "/v1/admin/openclaw/instances/{}/backups/{}",
+            "/v1/admin/agents/instances/{}/backups/{}",
             instance_id,
             Uuid::new_v4()
         ))
@@ -369,7 +369,7 @@ async fn test_api_key_isolation_between_users() {
 
     // User1 can create API key
     let api_key_response = server
-        .post(&format!("/v1/openclaw/instances/{}/keys", instance_uuid))
+        .post(&format!("/v1/agents/instances/{}/keys", instance_uuid))
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {user1_token}")).unwrap(),
@@ -390,7 +390,7 @@ async fn test_api_key_isolation_between_users() {
 
     // User2 cannot create key for User1's instance
     let user2_create_key = server
-        .post(&format!("/v1/openclaw/instances/{}/keys", instance_uuid))
+        .post(&format!("/v1/agents/instances/{}/keys", instance_uuid))
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {user2_token}")).unwrap(),
@@ -410,7 +410,7 @@ async fn test_api_key_isolation_between_users() {
 
     // User2 cannot list keys for User1's instance
     let user2_list_keys = server
-        .get(&format!("/v1/openclaw/instances/{}/keys", instance_uuid))
+        .get(&format!("/v1/agents/instances/{}/keys", instance_uuid))
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {user2_token}")).unwrap(),

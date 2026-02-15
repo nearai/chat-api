@@ -158,11 +158,11 @@ async fn main() -> anyhow::Result<()> {
     // Initialize file service
     let file_service = Arc::new(FileServiceImpl::new(file_repo, proxy_service.clone()));
 
-    // Initialize OpenClaw service
-    tracing::info!("Initializing OpenClaw service...");
-    let openclaw_repo = db.agent_repository();
+    // Initialize agent service
+    tracing::info!("Initializing agent service...");
+    let agent_repo = db.agent_repository();
     let agent_service = Arc::new(services::agent::AgentServiceImpl::new(
-        openclaw_repo.clone(),
+        agent_repo.clone(),
         config.agent.api_base_url.clone(),
         config.agent.api_token.clone(),
     ));
@@ -295,7 +295,7 @@ async fn main() -> anyhow::Result<()> {
         conversation_share_service,
         file_service,
         agent_service,
-        agent_repository: openclaw_repo,
+        agent_repository: agent_repo,
         agent_proxy_service,
         redirect_uri: config.oauth.redirect_uri,
         admin_domains: Arc::new(config.admin.admin_domains),
