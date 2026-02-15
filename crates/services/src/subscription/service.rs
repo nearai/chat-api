@@ -375,15 +375,15 @@ impl SubscriptionService for SubscriptionServiceImpl {
         let plans: Vec<SubscriptionPlan> = stripe_plans
             .into_keys()
             .map(|name| {
-                let private_assistant_instances = subscription_plans
+                let agent_instances = subscription_plans
                     .get(&name)
-                    .and_then(|c| c.private_assistant_instances.clone());
+                    .and_then(|c| c.agent_instances.clone());
                 let monthly_tokens = subscription_plans
                     .get(&name)
                     .and_then(|c| c.monthly_tokens.clone());
                 SubscriptionPlan {
                     name,
-                    private_assistant_instances,
+                    agent_instances,
                     monthly_tokens,
                 }
             })

@@ -190,9 +190,9 @@ pub trait PaymentWebhookRepository: Send + Sync {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubscriptionPlan {
     pub name: String,
-    /// Private assistant instance limits (e.g. { "max": 1 })
+    /// Agent instance limits (e.g. { "max": 1 })
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub private_assistant_instances: Option<PlanLimitConfig>,
+    pub agent_instances: Option<PlanLimitConfig>,
     /// Monthly token limits (e.g. { "max": 1000000 })
     #[serde(skip_serializing_if = "Option::is_none")]
     pub monthly_tokens: Option<PlanLimitConfig>,

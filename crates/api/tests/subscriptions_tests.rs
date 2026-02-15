@@ -88,8 +88,8 @@ async fn test_list_subscriptions_configured_returns_empty() {
     set_subscription_plans(
         &server,
         json!({
-            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "private_assistant_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } },
-            "pro": { "providers": { "stripe": { "price_id": "price_test_pro" } }, "private_assistant_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } }
+            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } },
+            "pro": { "providers": { "stripe": { "price_id": "price_test_pro" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } }
         }),
     )
     .await;
@@ -186,8 +186,8 @@ async fn test_create_subscription_invalid_provider() {
     set_subscription_plans(
         &server,
         json!({
-            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "private_assistant_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } },
-            "pro": { "providers": { "stripe": { "price_id": "price_test_pro" } }, "private_assistant_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } }
+            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } },
+            "pro": { "providers": { "stripe": { "price_id": "price_test_pro" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } }
         }),
     )
     .await;
@@ -232,8 +232,8 @@ async fn test_create_subscription_invalid_plan() {
     set_subscription_plans(
         &server,
         json!({
-            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "private_assistant_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } },
-            "pro": { "providers": { "stripe": { "price_id": "price_test_pro" } }, "private_assistant_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } }
+            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } },
+            "pro": { "providers": { "stripe": { "price_id": "price_test_pro" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } }
         }),
     )
     .await;
@@ -356,7 +356,7 @@ async fn test_resume_subscription_not_scheduled_for_cancellation() {
     set_subscription_plans(
         &server,
         json!({
-            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "private_assistant_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } }
+            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } }
         }),
     )
     .await;
@@ -391,7 +391,7 @@ async fn test_list_subscriptions_successfully() {
     set_subscription_plans(
         &server,
         json!({
-            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "private_assistant_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } }
+            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } }
         }),
     )
     .await;
@@ -476,8 +476,8 @@ async fn test_configure_subscription_plans_as_admin() {
     // Configure subscription plans
     let config_body = json!({
         "subscription_plans": {
-            "basic": { "providers": { "stripe": { "price_id": "price_test_basic_123" } }, "private_assistant_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } },
-            "pro": { "providers": { "stripe": { "price_id": "price_test_pro_456" } }, "private_assistant_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } }
+            "basic": { "providers": { "stripe": { "price_id": "price_test_basic_123" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } },
+            "pro": { "providers": { "stripe": { "price_id": "price_test_pro_456" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } }
         }
     });
 
@@ -628,12 +628,12 @@ async fn test_list_plans_returns_configured_plans() {
         "subscription_plans": {
             "starter": {
                 "providers": { "stripe": { "price_id": "price_starter_789" } },
-                "private_assistant_instances": { "max": 1 },
+                "agent_instances": { "max": 1 },
                 "monthly_tokens": { "max": 500_000 }
             },
             "premium": {
                 "providers": { "stripe": { "price_id": "price_premium_012" } },
-                "private_assistant_instances": { "max": 5 },
+                "agent_instances": { "max": 5 },
                 "monthly_tokens": { "max": 5_000_000 }
             }
         }
@@ -693,7 +693,7 @@ async fn test_list_plans_returns_configured_plans() {
         match name {
             "starter" => {
                 assert_eq!(
-                    plan.get("private_assistant_instances")
+                    plan.get("agent_instances")
                         .and_then(|d| d.get("max"))
                         .and_then(|m| m.as_u64()),
                     Some(1),
@@ -709,7 +709,7 @@ async fn test_list_plans_returns_configured_plans() {
             }
             "premium" => {
                 assert_eq!(
-                    plan.get("private_assistant_instances")
+                    plan.get("agent_instances")
                         .and_then(|d| d.get("max"))
                         .and_then(|m| m.as_u64()),
                     Some(5),
@@ -796,7 +796,7 @@ async fn test_portal_session_no_stripe_customer() {
         json!({
             "basic": {
                 "providers": {"stripe": {"price_id": "price_test_basic"}},
-                "private_assistant_instances": {"max": 1},
+                "agent_instances": {"max": 1},
                 "monthly_tokens": {"max": 1000000}
             }
         }),
@@ -844,7 +844,7 @@ async fn test_proxy_returns_403_without_subscription_when_plans_configured() {
             },
             "basic": {
                 "providers": {"stripe": {"price_id": "price_test_basic"}},
-                "private_assistant_instances": {"max": 1},
+                "agent_instances": {"max": 1},
                 "monthly_tokens": {"max": 1000000}
             }
         }),
@@ -919,7 +919,7 @@ async fn test_proxy_allows_with_subscription() {
         json!({
             "basic": {
                 "providers": {"stripe": {"price_id": "price_test_basic"}},
-                "private_assistant_instances": {"max": 1},
+                "agent_instances": {"max": 1},
                 "monthly_tokens": {"max": 1000000}
             }
         }),
@@ -1050,7 +1050,7 @@ async fn test_proxy_blocks_when_monthly_token_limit_exceeded() {
         json!({
             "basic": {
                 "providers": {"stripe": {"price_id": "price_test_basic"}},
-                "private_assistant_instances": {"max": 1},
+                "agent_instances": {"max": 1},
                 "monthly_tokens": {"max": 100}
             }
         }),
@@ -1150,7 +1150,7 @@ async fn test_responses_returns_403_without_subscription_when_plans_configured()
             },
             "basic": {
                 "providers": {"stripe": {"price_id": "price_test_basic"}},
-                "private_assistant_instances": {"max": 1},
+                "agent_instances": {"max": 1},
                 "monthly_tokens": {"max": 1000000}
             }
         }),
@@ -1490,7 +1490,7 @@ async fn test_subscription_gating_full_flow() {
             },
             "basic": {
                 "providers": { "stripe": { "price_id": "price_test_basic" } },
-                "private_assistant_instances": { "max": 1 },
+                "agent_instances": { "max": 1 },
                 "monthly_tokens": { "max": 1000000 }
             }
         }),

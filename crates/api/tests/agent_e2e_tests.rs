@@ -14,6 +14,12 @@ use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
 /// 6. Verify usage and isolation
 #[tokio::test]
 async fn test_agent_complete_workflow() {
+    // Initialize tracing so RUST_LOG=debug shows middleware logs
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_test_writer()
+        .try_init();
+
     // Mock LLM API so chat completions returns 200 (avoids upstream 401 with mock-api-key)
     let mock_llm = MockServer::start().await;
     let mock_body = json!({
