@@ -468,6 +468,7 @@ pub async fn dual_auth_middleware(
             api_key_info: api_key_info.clone(),
             instance,
         };
+
         let mut hasher = Sha256::new();
         hasher.update(api_key_info.id.as_bytes());
         let hash = hasher.finalize();

@@ -13,6 +13,12 @@ use uuid::Uuid;
 /// 6. Verify usage and isolation
 #[tokio::test]
 async fn test_agent_complete_workflow() {
+    // Initialize tracing so RUST_LOG=debug shows middleware logs
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_test_writer()
+        .try_init();
+
     let (server, db) = create_test_server_and_db(Default::default()).await;
 
     // 1. Create users: admin and regular user
