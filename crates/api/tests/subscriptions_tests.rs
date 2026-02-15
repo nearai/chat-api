@@ -855,8 +855,14 @@ async fn test_proxy_returns_403_without_subscription_when_plans_configured() {
     let user_token = mock_login(&server, user_email).await;
 
     // User has no subscription - falls back to "free" plan (max 0 tokens). Used 0 >= 0 -> 402 (Payment Required).
-    // Note: /v1/chat/completions now skips subscription validation for session tokens, so only test the other endpoints
     for (path, body) in [
+        (
+            "/v1/chat/completions",
+            json!({
+                "model": "gpt-4o",
+                "messages": [{"role": "user", "content": "Hello"}]
+            }),
+        ),
         (
             "/v1/responses",
             json!({
@@ -906,7 +912,7 @@ async fn test_proxy_returns_403_without_subscription_when_plans_configured() {
 #[tokio::test]
 #[serial(subscription_tests)]
 async fn test_proxy_allows_with_subscription() {
-    let (server, _db) = create_test_server_and_db(TestServerConfig::default()).await;
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
 
     set_subscription_plans(
         &server,
@@ -921,9 +927,10 @@ async fn test_proxy_allows_with_subscription() {
     .await;
 
     let user_email = "test_proxy_with_subscription@example.com";
+    insert_test_subscription(&server, &db, user_email, false).await;
     let user_token = mock_login(&server, user_email).await;
 
-    // Session token users are allowed through regardless of subscription (no validation for session tokens)
+    // User has active subscription - proxy should allow (may get 502 from upstream)
     let response = server
         .post("/v1/chat/completions")
         .add_header(
@@ -939,17 +946,14 @@ async fn test_proxy_allows_with_subscription() {
     assert_ne!(
         response.status_code(),
         403,
-        "Session token user should not get 403 subscription error (may get 502/other from upstream)"
+        "User with subscription should not get 403 (may get 502/other from upstream)"
     );
-    // Session tokens skip subscription validation, so shouldn't get subscription required error
-    if !response.status_code().is_server_error() {
-        let body_res: serde_json::Value = response.json();
-        assert_ne!(
-            body_res.get("error").and_then(|v| v.as_str()),
-            Some(SUBSCRIPTION_REQUIRED_ERROR_MESSAGE),
-            "Session token user should not get subscription required error"
-        );
-    }
+    let body_res: serde_json::Value = response.json();
+    assert_ne!(
+        body_res.get("error").and_then(|v| v.as_str()),
+        Some(SUBSCRIPTION_REQUIRED_ERROR_MESSAGE),
+        "User with subscription should not get subscription required error"
+    );
 
     // Also verify /v1/responses allows with subscription
     let response = server
@@ -969,14 +973,12 @@ async fn test_proxy_allows_with_subscription() {
         403,
         "POST /v1/responses with subscription should not get 403 (may get 502/other from upstream)"
     );
-    if !response.status_code().is_server_error() {
-        let body_res: serde_json::Value = response.json();
-        assert_ne!(
-            body_res.get("error").and_then(|v| v.as_str()),
-            Some(SUBSCRIPTION_REQUIRED_ERROR_MESSAGE),
-            "POST /v1/responses with subscription should not get subscription required error"
-        );
-    }
+    let body_res: serde_json::Value = response.json();
+    assert_ne!(
+        body_res.get("error").and_then(|v| v.as_str()),
+        Some(SUBSCRIPTION_REQUIRED_ERROR_MESSAGE),
+        "POST /v1/responses with subscription should not get subscription required error"
+    );
 }
 
 #[tokio::test]
@@ -1007,13 +1009,11 @@ async fn test_proxy_allows_when_subscription_not_configured() {
         403,
         "When subscription plans not configured, should not gate proxy (may get 502/other)"
     );
-    if !response.status_code().is_server_error() {
-        let body_res: serde_json::Value = response.json();
-        assert_ne!(
-            body_res.get("error").and_then(|v| v.as_str()),
-            Some(SUBSCRIPTION_REQUIRED_ERROR_MESSAGE)
-        );
-    }
+    let body_res: serde_json::Value = response.json();
+    assert_ne!(
+        body_res.get("error").and_then(|v| v.as_str()),
+        Some(SUBSCRIPTION_REQUIRED_ERROR_MESSAGE)
+    );
 
     // Also verify /v1/responses allows when subscription not configured
     let response = server
@@ -1074,10 +1074,38 @@ async fn test_proxy_blocks_when_monthly_token_limit_exceeded() {
         .await
         .expect("record usage");
 
-    // Note: /v1/chat/completions now skips subscription validation for session tokens
-    // So we only test /v1/responses which still validates subscriptions for session tokens
+    // Proxy should return 402 Payment Required when monthly token limit exceeded
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}]
+        }))
+        .await;
 
-    // Verify /v1/responses returns 402 when token limit exceeded
+    assert_eq!(
+        response.status_code(),
+        402,
+        "Proxy should return 402 when monthly token limit exceeded"
+    );
+    let body_res: serde_json::Value = response.json();
+    let err_msg = body_res.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        err_msg.contains("Monthly token limit exceeded"),
+        "Error should mention token limit, got: {}",
+        err_msg
+    );
+    assert!(
+        err_msg.contains("100"),
+        "Error should include limit value, got: {}",
+        err_msg
+    );
+
+    // Also verify /v1/responses returns 402 when token limit exceeded
     let response = server
         .post("/v1/responses")
         .add_header(
@@ -1443,15 +1471,16 @@ async fn test_admin_cancel_subscription_success() {
 
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn test_session_token_users_skip_subscription_validation() {
+async fn test_subscription_gating_full_flow() {
     ensure_stripe_env_for_gating();
-    let (server, _db) = create_test_server_and_db(TestServerConfig {
+    let (server, db) = create_test_server_and_db(TestServerConfig {
         rate_limit_config: Some(permissive_rate_limit_config()),
         ..Default::default()
     })
     .await;
 
-    // Configure subscription plans with free plan (0 tokens)
+    // Configure subscription plans: free plan with 0 tokens (requires subscription), and basic paid plan
+    // Users without subscription fall back to "free" plan and hit 402 Payment Required immediately
     set_subscription_plans(
         &server,
         json!({
@@ -1461,16 +1490,27 @@ async fn test_session_token_users_skip_subscription_validation() {
             },
             "basic": {
                 "providers": { "stripe": { "price_id": "price_test_basic" } },
+                "private_assistant_instances": { "max": 1 },
                 "monthly_tokens": { "max": 1000000 }
             }
         }),
     )
     .await;
 
-    // Create a session token user WITHOUT a subscription
-    let user_token = mock_login(&server, "test_session_token_user@example.com").await;
+    // Create test user
+    let user_email = "test_subscription_gating@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+    let user_token = mock_login(&server, user_email).await;
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .expect("get user")
+        .expect("user should exist");
 
-    // Session token users WITHOUT subscription should now be blocked (subscription validation enforced)
+    let admin_token = mock_login(&server, "test_gating_admin@admin.org").await;
+
+    // Step 1: Verify user CANNOT call inference without subscription
     let response = server
         .post("/v1/chat/completions")
         .add_header(
@@ -1485,12 +1525,106 @@ async fn test_session_token_users_skip_subscription_validation() {
         }))
         .await;
 
-    // Verify subscription validation is enforced for session token users
-    // They get 402 (token limit) because free plan has 0 tokens, or 403 if truly no subscription
-    let status = response.status_code();
     assert!(
-        status == 402 || status == 403,
-        "Session token user without sufficient subscription should get 402 or 403, got {}",
-        status
+        response.status_code() == 402 || response.status_code() == 403,
+        "User without subscription should be blocked (402 or 403), got {}",
+        response.status_code()
+    );
+    let body: serde_json::Value = response.json();
+    let error_msg = body.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        error_msg.contains("subscription") || error_msg.contains("limit"),
+        "Error should mention subscription or limit requirement, got: {}",
+        error_msg
+    );
+
+    // Step 2: Admin sets subscription for user
+    let response = server
+        .post(&format!("/v1/admin/users/{}/subscription", user.id))
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .json(&json!({
+            "provider": "stripe",
+            "plan": "basic",
+            "current_period_end": "2099-12-31T23:59:59Z"
+        }))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        200,
+        "Admin should successfully set subscription"
+    );
+
+    // Step 3: Verify user CAN call inference with subscription
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-4",
+            "messages": [
+                { "role": "user", "content": "Hello" }
+            ]
+        }))
+        .await;
+
+    assert_ne!(
+        response.status_code(),
+        402,
+        "User with subscription should NOT get 402 (payment required)"
+    );
+    assert_ne!(
+        response.status_code(),
+        403,
+        "User with subscription should NOT get 403 (forbidden due to no subscription)"
+    );
+    // Note: Response may be 401 if model is not found, or other errors, but NOT 402/403 subscription errors
+
+    // Step 4: Admin cancels subscription
+    let response = server
+        .delete(&format!("/v1/admin/users/{}/subscription", user.id))
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        200,
+        "Admin should successfully cancel subscription"
+    );
+
+    // Step 5: Verify user CANNOT call inference after subscription is canceled
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-4",
+            "messages": [
+                { "role": "user", "content": "Hello" }
+            ]
+        }))
+        .await;
+
+    assert!(
+        response.status_code() == 402 || response.status_code() == 403,
+        "User without subscription (after cancellation) should be blocked (402 or 403), got {}",
+        response.status_code()
+    );
+    let body: serde_json::Value = response.json();
+    let error_msg = body.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        error_msg.contains("subscription") || error_msg.contains("limit"),
+        "Error should mention subscription or limit requirement, got: {}",
+        error_msg
     );
 }

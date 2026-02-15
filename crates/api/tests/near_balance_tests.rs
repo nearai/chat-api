@@ -149,23 +149,17 @@ async fn test_near_balance_blocks_poor_account() {
         }))
         .await;
 
-    // User without subscription will get 402 or 403
-    // May be 402 (subscription validation) or 403 (ban after async check)
-    let status = second_response.status_code();
-    assert!(
-        status == 402 || status == 403,
-        "Subsequent requests should be blocked with 402 or 403, got {}",
-        status
+    assert_eq!(
+        second_response.status_code(),
+        403,
+        "Subsequent requests from poor NEAR account should be blocked by NEAR balance ban"
     );
 
-    // If blocked by ban (403), verify the error message
-    if status == 403 {
-        let body: serde_json::Value = second_response.json();
-        let error = body.get("error").and_then(|v| v.as_str());
-        assert_eq!(
-            error,
-            Some(USER_BANNED_ERROR_MESSAGE),
-            "Ban error message should indicate a temporary ban without exposing NEAR balance details"
-        );
-    }
+    let body: serde_json::Value = second_response.json();
+    let error = body.get("error").and_then(|v| v.as_str());
+    assert_eq!(
+        error,
+        Some(USER_BANNED_ERROR_MESSAGE),
+        "Ban error message should indicate a temporary ban without exposing NEAR balance details"
+    );
 }

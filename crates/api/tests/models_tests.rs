@@ -361,18 +361,16 @@ async fn test_responses_block_non_public_model() {
         .json(&body)
         .await;
 
-    // User without subscription will get 402 or 403 from subscription validation
-    let status = response.status_code();
-    assert!(
-        status == 402 || status == 403,
-        "Requests without valid subscription should be blocked with 402 or 403, got {}",
-        status
+    assert_eq!(
+        response.status_code(),
+        403,
+        "Requests with non-public model should be blocked with 403"
     );
 
     let body: serde_json::Value = response.json();
-    // Just verify error exists, don't check specific message since it may be subscription error
-    assert!(
-        body.get("error").is_some() || body.get("message").is_some(),
+    assert_eq!(
+        body.get("error").and_then(|v| v.as_str()),
+        Some("This model is not available"),
         "Error message should indicate model is not available"
     );
 }

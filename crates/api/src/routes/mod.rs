@@ -138,26 +138,19 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         agent_repository: app_state.agent_repository.clone(),
     };
 
-    // Unified chat completions router (accepts both session tokens and API keys)
-    // API key users: validation subscription + token limits enforced
-    // Session token users: no subscription validation
-    let chat_completions_auth_state = crate::middleware::ChatCompletionsAuthState {
-        auth_state: auth_state.clone(),
-        agent_auth_state: agent_auth_state.clone(),
-    };
-    let chat_completions_routes = Router::new()
+    // Agent chat completions router (requires API key authentication and rate limiting)
+    let agent_chat_routes = Router::new()
         .route(
-            "/v1/chat/completions",
-            axum::routing::post(api::proxy_chat_completions),
+            "/chat/completions",
+            axum::routing::post(agents::agent_chat_completions),
         )
-        // Note: Layers are applied in reverse order, so auth runs first, then rate limit
+        .layer(from_fn_with_state(
+            agent_auth_state.clone(),
+            crate::middleware::agent_api_key_middleware,
+        ))
         .layer(from_fn_with_state(
             rate_limit_state.clone(),
             crate::middleware::rate_limit_middleware,
-        ))
-        .layer(from_fn_with_state(
-            chat_completions_auth_state,
-            crate::middleware::chat_completions_auth_middleware,
         ));
 
     // Configs routes (requires user authentication, not admin)
@@ -200,7 +193,7 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         .nest("/v1/auth", logout_route) // Logout route with auth middleware
         .nest("/v1/users", user_routes)
         .nest("/v1/agents", agent_routes) // Agent routes (requires user auth)
-        .merge(chat_completions_routes) // Unified chat completions (accepts session token or API key)
+        .nest("/v1/agents", agent_chat_routes) // Agent chat completions (requires API key auth)
         .nest("/v1/admin", admin_routes)
         .nest("/v1/admin/agents", admin_agent_routes) // Admin agent routes (requires admin auth)
         .merge(optional_auth_routes) // Conversation read routes (optional auth)
