@@ -419,7 +419,7 @@ fn hash_api_key(key: &str) -> String {
 /// Dual auth middleware: accepts either session token OR agent API key.
 /// Agents use Bearer ag_xxxxx; users use Bearer sess_xxxxx.
 /// Used by chat completions, image generation/edit, and responses endpoints.
-pub async fn llm_api_auth_middleware(
+pub async fn dual_auth_middleware(
     State(state): State<DualAuthState>,
     mut request: Request,
     next: Next,
