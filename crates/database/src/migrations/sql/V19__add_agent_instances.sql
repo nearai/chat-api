@@ -1,5 +1,5 @@
--- Generic agent instances table (supports openclaw, ironclaw, and future agent types)
--- Type column specifies the agent type: 'openclaw', 'ironclaw', etc.
+-- Generic agent instances table (supports various agent types)
+-- Type column specifies the agent type (e.g. 'openclaw', 'ironclaw')
 CREATE TABLE agent_instances (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,

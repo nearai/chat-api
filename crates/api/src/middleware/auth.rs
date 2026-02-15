@@ -344,7 +344,7 @@ pub async fn admin_auth_middleware(
     Ok(response)
 }
 
-/// Extract and validate OpenClaw API key from Authorization header
+/// Extract and validate Agent API key from Authorization header
 fn extract_openclaw_api_key_from_request(request: &Request) -> Result<String, ApiError> {
     let auth_header = request
         .headers()

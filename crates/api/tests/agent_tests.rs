@@ -4,15 +4,15 @@ use common::{create_test_server_and_db, mock_login};
 use serde_json::json;
 use uuid::Uuid;
 
-/// Test creating an OpenClaw instance (as admin or regular user)
+/// Test creating an Agent instance (as admin or regular user)
 #[tokio::test]
-async fn test_create_openclaw_instance() {
+async fn test_create_agent_instance() {
     let server = create_test_server_and_db(Default::default()).await.0;
 
     let user_email = "test_user@example.com";
     let user_token = mock_login(&server, user_email).await;
 
-    // In real scenario, this would create via OpenClaw API
+    // In real scenario, this would create via Agent API
     // For now, we test the endpoint exists and requires auth
     let response = server
         .post("/v1/agents/instances")
@@ -26,12 +26,12 @@ async fn test_create_openclaw_instance() {
         }))
         .await;
 
-    // Should fail in test because we're not mocking the OpenClaw API
+    // Should fail in test because we're not mocking the Agent API
     // But we verify auth is required
     let status = response.status_code();
     assert!(
         status.is_client_error() || status.is_server_error(),
-        "Endpoint should require valid OpenClaw API key, got status: {}",
+        "Endpoint should require valid Agent API key, got status: {}",
         status
     );
 }
@@ -96,16 +96,16 @@ async fn test_create_api_key_requires_auth() {
     );
 }
 
-// Note: Chat completions endpoint tests require actual OpenClaw instances with proper
+// Note: Chat completions endpoint tests require actual Agent instances with proper
 // connection information (instance_url, instance_token). These are integration tests
-// that would need mock/stub OpenClaw infrastructure. See INTEGRATION_TESTS section below.
+// that would need mock/stub Agent infrastructure. See INTEGRATION_TESTS section below.
 
-// ===== INTEGRATION TEST SCENARIOS (would require OpenClaw mock/stub) =====
+// ===== INTEGRATION TEST SCENARIOS (would require Agent mock/stub) =====
 //
 // Real e2e flow tests that would demonstrate the complete user and admin flows:
 //
 // 1. Admin Creates Instance:
-//    POST /v1/agents/instances with OpenClaw API credentials
+//    POST /v1/agents/instances with Agent API credentials
 //    → Creates instance record with instance_url, instance_token, etc.
 //    → Can list instances via GET /v1/agents/instances
 //
@@ -127,9 +127,9 @@ async fn test_create_api_key_requires_auth() {
 //    → Returns tracked tokens, costs, request counts
 //
 // To implement these tests, would need:
-// - Mock OpenClaw API server or wiremock stubs
+// - Mock Agent API server or wiremock stubs
 // - Pre-populated database with test instances
-// - Proper assertion on OpenClaw response structure
+// - Proper assertion on Agent response structure
 // ========================
 
 /// Test that different users cannot use each other's API keys
@@ -164,7 +164,7 @@ async fn test_api_key_isolation_between_users() {
     let body1: serde_json::Value = response1.json();
     let body2: serde_json::Value = response2.json();
 
-    // Both should see empty arrays (since instances aren't created without real OpenClaw API)
+    // Both should see empty arrays (since instances aren't created without real Agent API)
     let items1 = body1.get("items").unwrap().as_array().unwrap();
     let items2 = body2.get("items").unwrap().as_array().unwrap();
 

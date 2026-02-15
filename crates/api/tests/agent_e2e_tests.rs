@@ -4,7 +4,7 @@ use common::{create_test_server_and_db, mock_login};
 use serde_json::json;
 use uuid::Uuid;
 
-/// E2E test for complete OpenClaw workflow:
+/// E2E test for complete Agent workflow:
 /// 1. Admin creates instance for user
 /// 2. User retrieves instance
 /// 3. Admin stops instance
@@ -12,7 +12,7 @@ use uuid::Uuid;
 /// 5. User calls inference with API key
 /// 6. Verify usage is captured
 #[tokio::test]
-async fn test_openclaw_complete_workflow() {
+async fn test_agent_complete_workflow() {
     let (server, db) = create_test_server_and_db(Default::default()).await;
 
     // 1. Create users: admin and regular user
@@ -40,7 +40,7 @@ async fn test_openclaw_complete_workflow() {
         .map(|s| s.to_string())
         .expect("User should have id");
 
-    // 2. Admin creates instance directly in database (simulating successful OpenClaw API call)
+    // 2. Admin creates instance directly in database (simulating successful Agent API call)
     let instance_uuid = Uuid::new_v4();
     let instance_id_str = format!(
         "inst_test_{}",
