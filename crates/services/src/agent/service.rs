@@ -1,7 +1,7 @@
 use crate::UserId;
 use anyhow::anyhow;
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use reqwest::Client;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -38,9 +38,9 @@ impl AgentServiceImpl {
         }
     }
 
-    /// Generate a new API key in format: oc_{uuid}
+    /// Generate a new API key in format: ag_{uuid}
     fn generate_api_key() -> String {
-        format!("oc_{}", Uuid::new_v4().to_string().replace("-", ""))
+        format!("ag_{}", Uuid::new_v4().to_string().replace("-", ""))
     }
 
     /// Hash an API key for storage using SHA-256
@@ -51,9 +51,9 @@ impl AgentServiceImpl {
         format!("{:x}", hasher.finalize())
     }
 
-    /// Validate API key format (must start with "oc_" and be 35 chars total)
+    /// Validate API key format (must start with "ag_" and be 35 chars total)
     fn validate_api_key_format(key: &str) -> bool {
-        key.starts_with("oc_") && key.len() == 35
+        key.starts_with("ag_") && key.len() == 35
     }
 
     /// Call OpenClaw API to create an instance
@@ -511,6 +511,98 @@ impl AgentService for AgentServiceImpl {
         Ok((api_key, plaintext_key))
     }
 
+    async fn create_unbound_api_key(
+        &self,
+        user_id: UserId,
+        name: String,
+        spend_limit: Option<i64>,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> anyhow::Result<(AgentApiKey, String)> {
+        tracing::info!("Creating unbound API key: user_id={}", user_id);
+
+        if name.is_empty() || name.len() > 255 {
+            return Err(anyhow!("Invalid name format"));
+        }
+
+        // Generate and hash key
+        let plaintext_key = Self::generate_api_key();
+        let key_hash = Self::hash_api_key(&plaintext_key);
+
+        let api_key = self
+            .repository
+            .create_unbound_api_key(user_id, key_hash, name, spend_limit, expires_at)
+            .await?;
+
+        tracing::info!(
+            "Unbound API key created successfully: api_key_id={}, user_id={}",
+            api_key.id,
+            user_id
+        );
+
+        Ok((api_key, plaintext_key))
+    }
+
+    async fn bind_api_key_to_instance(
+        &self,
+        api_key_id: Uuid,
+        instance_id: Uuid,
+        user_id: UserId,
+    ) -> anyhow::Result<AgentApiKey> {
+        tracing::info!(
+            "Binding API key to instance: api_key_id={}, instance_id={}, user_id={}",
+            api_key_id,
+            instance_id,
+            user_id
+        );
+
+        // Verify ownership of both key and instance
+        let api_key = self
+            .repository
+            .get_api_key_by_id(api_key_id)
+            .await?
+            .ok_or_else(|| anyhow!("API key not found"))?;
+
+        if api_key.user_id != user_id {
+            return Err(anyhow!("Access denied: API key does not belong to user"));
+        }
+
+        // Verify instance exists and belongs to user
+        let instance = self
+            .repository
+            .get_instance(instance_id)
+            .await?
+            .ok_or_else(|| anyhow!("Instance not found"))?;
+
+        if instance.user_id != user_id {
+            return Err(anyhow!("Access denied: Instance does not belong to user"));
+        }
+
+        // Verify key is unbound
+        if api_key.instance_id.is_some() {
+            return Err(anyhow!("API key is already bound to an instance"));
+        }
+
+        // Bind the key
+        self.repository
+            .bind_api_key_to_instance(api_key_id, instance_id)
+            .await?;
+
+        // Fetch and return updated key
+        let updated_key = self
+            .repository
+            .get_api_key_by_id(api_key_id)
+            .await?
+            .ok_or_else(|| anyhow!("Failed to fetch updated API key"))?;
+
+        tracing::info!(
+            "API key bound successfully: api_key_id={}, instance_id={}",
+            api_key_id,
+            instance_id
+        );
+
+        Ok(updated_key)
+    }
+
     async fn list_api_keys(
         &self,
         instance_id: Uuid,
@@ -641,6 +733,11 @@ impl AgentService for AgentServiceImpl {
             output_tokens
         );
 
+        // Verify API key is bound to an instance
+        let instance_id = api_key
+            .instance_id
+            .ok_or_else(|| anyhow!("API key is not bound to an instance"))?;
+
         let total_tokens = input_tokens + output_tokens;
 
         // Calculate costs
@@ -649,11 +746,7 @@ impl AgentService for AgentServiceImpl {
 
         // Check spend limit
         if let Some(limit) = api_key.spend_limit {
-            if let Ok(Some(balance)) = self
-                .repository
-                .get_instance_balance(api_key.instance_id)
-                .await
-            {
+            if let Ok(Some(balance)) = self.repository.get_instance_balance(instance_id).await {
                 if balance.total_spent + total_cost > limit {
                     tracing::warn!(
                         "Spend limit exceeded: api_key_id={}, current={}, limit={}",
@@ -670,7 +763,7 @@ impl AgentService for AgentServiceImpl {
         let usage = UsageLogEntry {
             id: Uuid::new_v4(),
             user_id: api_key.user_id,
-            instance_id: api_key.instance_id,
+            instance_id,
             api_key_id: api_key.id,
             input_tokens,
             output_tokens,

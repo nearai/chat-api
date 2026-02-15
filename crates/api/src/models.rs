@@ -787,6 +787,13 @@ pub struct CreateApiKeyRequest {
     pub expires_at: Option<String>,
 }
 
+/// Request to bind an unbound API key to an instance
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct BindApiKeyRequest {
+    /// The instance ID to bind the key to
+    pub instance_id: String,
+}
+
 /// Response when creating an API key (includes plaintext key)
 #[derive(Debug, Serialize, ToSchema)]
 pub struct CreateApiKeyResponse {
@@ -912,15 +919,24 @@ fn default_limit() -> i64 {
 /// Format nano-dollars as a decimal string (e.g., "0.000000001" for 1 nano-dollar)
 pub fn format_nano_dollars(nano_dollars: i64) -> String {
     // Use integer arithmetic to avoid floating point precision errors
-    let dollars = nano_dollars / 1_000_000_000;
-    let nanos = (nano_dollars % 1_000_000_000).abs();
+    // Handle negative values by working with absolute value and prepending sign
+    let is_negative = nano_dollars < 0;
+    let abs_nano = nano_dollars.abs();
+    let dollars = abs_nano / 1_000_000_000;
+    let nanos = abs_nano % 1_000_000_000;
 
-    if nanos == 0 {
-        return dollars.to_string();
+    let formatted = if nanos == 0 {
+        dollars.to_string()
+    } else {
+        format!("{}.{:09}", dollars, nanos)
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string()
+    };
+
+    if is_negative && formatted != "0" {
+        format!("-{}", formatted)
+    } else {
+        formatted
     }
-
-    format!("{}.{:09}", dollars, nanos)
-        .trim_end_matches('0')
-        .trim_end_matches('.')
-        .to_string()
 }

@@ -13,7 +13,7 @@ use uuid::Uuid;
 /// 6. Get instance usage
 ///
 /// NOTE: This test requires valid OpenClaw API credentials in .env file
-/// Set OPENCLAW_API_TOKEN and OPENCLAW_API_BASE_URL before running
+/// Set AGENT_API_TOKEN and AGENT_API_BASE_URL before running
 #[tokio::test]
 #[ignore]
 async fn test_openclaw_real_api_instance_creation() {
@@ -366,22 +366,21 @@ async fn test_instance_management_endpoints() {
         );
     }
 
-    // Verify non-admin cannot access
+    // Verify user can access their own instance's lifecycle operations (now user-endpoint)
+    // Try to start with different user - should get 403 forbidden
+    let other_user_token = mock_login(&server, "other@example.com").await;
     let non_admin_response = server
-        .post(&format!(
-            "/v1/admin/openclaw/instances/{}/start",
-            instance_uuid
-        ))
+        .post(&format!("/v1/openclaw/instances/{}/start", instance_uuid))
         .add_header(
             http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+            http::HeaderValue::from_str(&format!("Bearer {other_user_token}")).unwrap(),
         )
         .await;
 
     assert_eq!(
         non_admin_response.status_code(),
         403,
-        "Non-admin should be forbidden from lifecycle operations"
+        "Non-admin should be forbidden from lifecycle operations on other user's instance"
     );
     println!("✓ Non-admin correctly denied access (403)");
 

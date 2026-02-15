@@ -26,9 +26,9 @@ pub struct AuthenticatedApiKey {
     pub instance: services::agent::ports::AgentInstance,
 }
 
-/// State for OpenClaw API key authentication middleware
+/// State for agent API key authentication middleware
 #[derive(Clone)]
-pub struct OpenClawAuthState {
+pub struct AgentAuthState {
     pub agent_service: Arc<dyn services::agent::AgentService>,
     pub agent_repository: Arc<dyn services::agent::ports::AgentRepository>,
 }
@@ -364,15 +364,15 @@ fn extract_openclaw_api_key_from_request(request: &Request) -> Result<String, Ap
         ApiError::invalid_auth_header()
     })?;
 
-    // Validate API key format (should start with oc_ and be 35 chars)
-    if !token.starts_with("oc_") {
-        tracing::warn!("Invalid OpenClaw API key format: does not start with 'oc_'");
+    // Validate API key format (should start with ag_ and be 35 chars)
+    if !token.starts_with("ag_") {
+        tracing::warn!("Invalid agent API key format: does not start with 'ag_'");
         return Err(ApiError::invalid_token());
     }
 
     if token.len() != 35 {
         tracing::warn!(
-            "Invalid OpenClaw API key format: expected length 35, got {}",
+            "Invalid agent API key format: expected length 35, got {}",
             token.len()
         );
         return Err(ApiError::invalid_token());
@@ -388,9 +388,9 @@ fn hash_api_key(key: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-/// OpenClaw API key authentication middleware
-pub async fn openclaw_api_key_middleware(
-    State(state): State<OpenClawAuthState>,
+/// Agent API key authentication middleware
+pub async fn agent_api_key_middleware(
+    State(state): State<AgentAuthState>,
     mut request: Request,
     next: Next,
 ) -> Result<Response, Response> {
@@ -398,7 +398,7 @@ pub async fn openclaw_api_key_middleware(
     let method = request.method().clone();
 
     tracing::info!(
-        "OpenClaw API key auth middleware invoked for {} {}",
+        "Agent API key auth middleware invoked for {} {}",
         method,
         path
     );
@@ -477,10 +477,17 @@ pub async fn openclaw_api_key_middleware(
         instance,
     };
 
-    // Also insert AuthenticatedUser for rate limiting to work
+    // Also insert AuthenticatedUser for rate limiting to work.
+    // Derive a deterministic session ID from the API key ID so that
+    // requests authenticated with the same API key share a stable logical session identifier.
+    let mut hasher = Sha256::new();
+    hasher.update(api_key_info.id.as_bytes());
+    let hash = hasher.finalize();
+    let mut uuid_bytes = [0u8; 16];
+    uuid_bytes.copy_from_slice(&hash[..16]);
     let authenticated_user = AuthenticatedUser {
         user_id: api_key_info.user_id,
-        session_id: SessionId(uuid::Uuid::new_v4()),
+        session_id: SessionId(uuid::Uuid::from_bytes(uuid_bytes)),
     };
 
     request.extensions_mut().insert(authenticated_api_key);

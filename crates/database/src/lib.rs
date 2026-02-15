@@ -293,7 +293,7 @@ impl Database {
         self.payment_webhook_repository.clone()
     }
 
-    /// Get the OpenClaw repository
+    /// Get the agent repository
     pub fn agent_repository(&self) -> Arc<PostgresAgentRepository> {
         self.agent_repository.clone()
     }

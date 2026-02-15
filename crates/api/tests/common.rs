@@ -213,15 +213,15 @@ pub async fn create_test_server_and_db(
         user_usage_service.clone(),
     );
 
-    // Create OpenClaw service for testing
-    let openclaw_repo = db.agent_repository();
+    // Create agent service for testing
+    let agent_repo = db.agent_repository();
     let agent_service = Arc::new(services::agent::AgentServiceImpl::new(
-        openclaw_repo.clone(),
+        agent_repo.clone(),
         config.agent.api_base_url.clone(),
         config.agent.api_token.clone(),
     ));
 
-    // Create OpenClaw proxy service for testing
+    // Create agent proxy service for testing
     let agent_proxy_service: Arc<dyn services::agent::AgentProxyService> =
         Arc::new(services::agent::proxy::AgentProxy::new());
 
@@ -241,7 +241,7 @@ pub async fn create_test_server_and_db(
         conversation_share_service,
         file_service,
         agent_service,
-        agent_repository: openclaw_repo,
+        agent_repository: agent_repo,
         agent_proxy_service,
         redirect_uri: config.oauth.redirect_uri,
         admin_domains: Arc::new(admin_domains),

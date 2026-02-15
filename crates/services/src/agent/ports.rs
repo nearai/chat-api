@@ -25,7 +25,7 @@ pub struct AgentInstance {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentApiKey {
     pub id: Uuid,
-    pub instance_id: Uuid,
+    pub instance_id: Option<Uuid>,
     pub user_id: UserId,
     pub name: String,
     pub spend_limit: Option<i64>,
@@ -139,6 +139,23 @@ pub trait AgentRepository: Send + Sync {
         expires_at: Option<DateTime<Utc>>,
     ) -> anyhow::Result<AgentApiKey>;
 
+    /// Create an unbound API key (instance_id = NULL)
+    async fn create_unbound_api_key(
+        &self,
+        user_id: UserId,
+        key_hash: String,
+        name: String,
+        spend_limit: Option<i64>,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> anyhow::Result<AgentApiKey>;
+
+    /// Bind an unbound API key to an instance
+    async fn bind_api_key_to_instance(
+        &self,
+        api_key_id: Uuid,
+        instance_id: Uuid,
+    ) -> anyhow::Result<()>;
+
     async fn get_api_key_by_hash(&self, key_hash: &str) -> anyhow::Result<Option<AgentApiKey>>;
 
     async fn get_api_key_by_id(&self, api_key_id: Uuid) -> anyhow::Result<Option<AgentApiKey>>;
@@ -235,7 +252,7 @@ pub trait AgentService: Send + Sync {
     async fn delete_instance(&self, instance_id: Uuid) -> anyhow::Result<()>;
 
     // API key management
-    /// Create an API key - returns (api_key_info, plaintext_key)
+    /// Create an API key for a specific instance - returns (api_key_info, plaintext_key)
     /// The plaintext key is ONLY returned on creation!
     async fn create_api_key(
         &self,
@@ -245,6 +262,27 @@ pub trait AgentService: Send + Sync {
         spend_limit: Option<i64>,
         expires_at: Option<DateTime<Utc>>,
     ) -> anyhow::Result<(AgentApiKey, String)>;
+
+    /// Create an unbound API key (pre-deployment key without instance_id)
+    /// Used for deploying agents before we know their instance ID.
+    /// Returns (api_key_info, plaintext_key).
+    /// The plaintext key is ONLY returned on creation!
+    async fn create_unbound_api_key(
+        &self,
+        user_id: UserId,
+        name: String,
+        spend_limit: Option<i64>,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> anyhow::Result<(AgentApiKey, String)>;
+
+    /// Bind an unbound API key to an instance
+    /// Used when an agent registers itself after deployment.
+    async fn bind_api_key_to_instance(
+        &self,
+        api_key_id: Uuid,
+        instance_id: Uuid,
+        user_id: UserId,
+    ) -> anyhow::Result<AgentApiKey>;
 
     async fn list_api_keys(
         &self,

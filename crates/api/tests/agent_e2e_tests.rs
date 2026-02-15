@@ -19,7 +19,7 @@ async fn test_openclaw_complete_workflow() {
     let admin_email = "admin@admin.org";
     let user_email = "testuser@example.com";
 
-    let admin_token = mock_login(&server, admin_email).await;
+    let _admin_token = mock_login(&server, admin_email).await;
     let user_token = mock_login(&server, user_email).await;
 
     // Get user_id for the regular user (needed for instance creation)
@@ -86,15 +86,12 @@ async fn test_openclaw_complete_workflow() {
         Some(instance_uuid.to_string().as_str())
     );
 
-    // 4. Admin stops instance
+    // 4. User stops instance (now user-accessible, not admin-only)
     let stop_response = server
-        .post(&format!(
-            "/v1/admin/openclaw/instances/{}/stop",
-            instance_uuid
-        ))
+        .post(&format!("/v1/openclaw/instances/{}/stop", instance_uuid))
         .add_header(
             http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
         )
         .await;
 
@@ -104,15 +101,12 @@ async fn test_openclaw_complete_workflow() {
         "Will fail because we're not mocking the instance server, but confirms auth works"
     );
 
-    // 5. Admin starts instance
+    // 5. User starts instance (now user-accessible, not admin-only)
     let start_response = server
-        .post(&format!(
-            "/v1/admin/openclaw/instances/{}/start",
-            instance_uuid
-        ))
+        .post(&format!("/v1/openclaw/instances/{}/start", instance_uuid))
         .add_header(
             http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
         )
         .await;
 
@@ -151,8 +145,8 @@ async fn test_openclaw_complete_workflow() {
 
     // Verify API key format
     assert!(
-        api_key.starts_with("oc_"),
-        "API key should start with 'oc_'"
+        api_key.starts_with("ag_"),
+        "API key should start with 'ag_'"
     );
     assert_eq!(api_key.len(), 35, "API key should be 35 chars long");
 
@@ -213,22 +207,20 @@ async fn test_openclaw_complete_workflow() {
         "Other user should not be able to access this instance"
     );
 
-    // 10. Verify admin operations require admin access
-    let stop_non_admin = server
-        .post(&format!(
-            "/v1/admin/openclaw/instances/{}/stop",
-            instance_uuid
-        ))
+    // 10. Verify user cannot stop another user's instance (now user-endpoint, ownership check)
+    let other_user_token = mock_login(&server, "other@example.com").await;
+    let stop_other_user = server
+        .post(&format!("/v1/openclaw/instances/{}/stop", instance_uuid))
         .add_header(
             http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+            http::HeaderValue::from_str(&format!("Bearer {other_user_token}")).unwrap(),
         )
         .await;
 
     assert_eq!(
-        stop_non_admin.status_code(),
+        stop_other_user.status_code(),
         403,
-        "Non-admin user should not be able to stop instance"
+        "Other user should not be able to stop this instance"
     );
 }
 
@@ -240,38 +232,37 @@ async fn test_lifecycle_operations_require_admin() {
     let instance_id = Uuid::new_v4();
     let user_token = mock_login(&server, "user@example.com").await;
 
-    // Test start
+    // Test start - user endpoint (returns 404 for non-existent instance)
     let start = server
-        .post(&format!(
-            "/v1/admin/openclaw/instances/{}/start",
-            instance_id
-        ))
+        .post(&format!("/v1/openclaw/instances/{}/start", instance_id))
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
         )
         .await;
-    assert_eq!(start.status_code(), 403, "Non-admin cannot start instance");
+    assert_eq!(
+        start.status_code(),
+        404,
+        "Start returns 404 for non-existent instance"
+    );
 
-    // Test stop
+    // Test stop - user endpoint (returns 404 for non-existent instance)
     let stop = server
-        .post(&format!(
-            "/v1/admin/openclaw/instances/{}/stop",
-            instance_id
-        ))
+        .post(&format!("/v1/openclaw/instances/{}/stop", instance_id))
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
         )
         .await;
-    assert_eq!(stop.status_code(), 403, "Non-admin cannot stop instance");
+    assert_eq!(
+        stop.status_code(),
+        404,
+        "Stop returns 404 for non-existent instance"
+    );
 
-    // Test restart
+    // Test restart - user endpoint (returns 404 for non-existent instance)
     let restart = server
-        .post(&format!(
-            "/v1/admin/openclaw/instances/{}/restart",
-            instance_id
-        ))
+        .post(&format!("/v1/openclaw/instances/{}/restart", instance_id))
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
@@ -279,8 +270,8 @@ async fn test_lifecycle_operations_require_admin() {
         .await;
     assert_eq!(
         restart.status_code(),
-        403,
-        "Non-admin cannot restart instance"
+        404,
+        "Restart returns 404 for non-existent instance"
     );
 
     // Test backup creation

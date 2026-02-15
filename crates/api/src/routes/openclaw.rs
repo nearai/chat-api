@@ -13,13 +13,14 @@ use axum::{
 };
 use bytes::Bytes;
 use chrono::DateTime;
+use urlencoding::encode;
 use uuid::Uuid;
 
-/// List user's OpenClaw instances
+/// List user's agent instances
 #[utoipa::path(
     get,
     path = "/v1/openclaw/instances",
-    tag = "OpenClaw",
+    tag = "Agents",
     params(
         ("limit" = i64, Query, description = "Maximum items to return"),
         ("offset" = i64, Query, description = "Number of items to skip")
@@ -70,11 +71,11 @@ pub async fn list_instances(
     }))
 }
 
-/// Get a specific OpenClaw instance
+/// Get a specific agent instance
 #[utoipa::path(
     get,
     path = "/v1/openclaw/instances/{id}",
-    tag = "OpenClaw",
+    tag = "Agents",
     params(
         ("id" = String, Path, description = "Instance ID")
     ),
@@ -122,7 +123,7 @@ pub async fn get_instance(
 pub struct AdminCreateInstanceRequest {
     /// User ID to create the instance for
     pub user_id: Uuid,
-    /// OpenClaw API key for authentication
+    /// Agent API key for authentication
     pub nearai_api_key: String,
     /// Image to use for the instance (optional)
     #[serde(default)]
@@ -139,7 +140,7 @@ pub struct AdminCreateInstanceRequest {
 #[utoipa::path(
     post,
     path = "/v1/admin/openclaw/instances",
-    tag = "OpenClaw Admin",
+    tag = "Admin Agents",
     request_body = AdminCreateInstanceRequest,
     responses(
         (status = 201, description = "Instance created for user", body = InstanceResponse),
@@ -160,10 +161,32 @@ pub async fn admin_create_instance(
         request.user_id
     );
 
+    // Validate that the user exists before attempting to create an instance
+    let user_id = services::UserId(request.user_id);
+    app_state
+        .user_repository
+        .get_user(user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to check user existence: user_id={}, error={}",
+                user_id,
+                e
+            );
+            ApiError::internal_server_error("Failed to verify user")
+        })?
+        .ok_or_else(|| {
+            tracing::warn!(
+                "Admin attempted to create instance for non-existent user: user_id={}",
+                user_id
+            );
+            ApiError::bad_request("User does not exist")
+        })?;
+
     let instance = app_state
         .agent_service
         .create_instance_from_openclaw(
-            services::UserId(request.user_id),
+            user_id,
             request.nearai_api_key,
             request.image,
             request.name,
@@ -186,7 +209,7 @@ pub async fn admin_create_instance(
 #[utoipa::path(
     delete,
     path = "/v1/admin/openclaw/instances/{id}",
-    tag = "OpenClaw Admin",
+    tag = "Admin Agents",
     params(
         ("id" = String, Path, description = "Instance ID")
     ),
@@ -229,7 +252,7 @@ pub async fn admin_delete_instance(
 #[utoipa::path(
     post,
     path = "/v1/openclaw/instances/{id}/keys",
-    tag = "OpenClaw",
+    tag = "Agents",
     request_body = CreateApiKeyRequest,
     params(
         ("id" = String, Path, description = "Instance ID")
@@ -304,7 +327,7 @@ pub async fn create_api_key(
 #[utoipa::path(
     get,
     path = "/v1/openclaw/instances/{id}/keys",
-    tag = "OpenClaw",
+    tag = "Agents",
     params(
         ("id" = String, Path, description = "Instance ID"),
         ("limit" = i64, Query, description = "Maximum items to return"),
@@ -355,7 +378,7 @@ pub async fn list_api_keys(
 #[utoipa::path(
     delete,
     path = "/v1/openclaw/keys/{key_id}",
-    tag = "OpenClaw",
+    tag = "Agents",
     params(
         ("key_id" = String, Path, description = "API Key ID")
     ),
@@ -397,11 +420,114 @@ pub async fn revoke_api_key(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Create an unbound API key (pre-deployment key for agent setup)
+#[utoipa::path(
+    post,
+    path = "/v1/admin/agents/keys",
+    tag = "Admin Agents",
+    request_body = CreateApiKeyRequest,
+    responses(
+        (status = 200, description = "API key created", body = CreateApiKeyResponse),
+        (status = 400, description = "Invalid request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - admin only", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(("session_token" = []))
+)]
+pub async fn admin_create_unbound_api_key(
+    State(app_state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Json(request): Json<CreateApiKeyRequest>,
+) -> Result<Json<CreateApiKeyResponse>, ApiError> {
+    tracing::info!("Admin: Creating unbound API key: user_id={}", user.user_id);
+
+    let (api_key, plaintext_key) = app_state
+        .agent_service
+        .create_unbound_api_key(
+            user.user_id,
+            request.name.clone(),
+            request.spend_limit,
+            request.expires_at.as_ref().and_then(|s| {
+                chrono::DateTime::parse_from_rfc3339(s)
+                    .ok()
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+            }),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to create unbound API key: error={}", e);
+            ApiError::internal_server_error("Failed to create API key")
+        })?;
+
+    Ok(Json(CreateApiKeyResponse {
+        id: api_key.id.to_string(),
+        name: api_key.name,
+        api_key: plaintext_key,
+        spend_limit: api_key.spend_limit.map(|s| s.to_string()),
+        expires_at: api_key.expires_at.map(|dt| dt.to_rfc3339()),
+        created_at: api_key.created_at.to_rfc3339(),
+    }))
+}
+
+/// Bind an unbound API key to an instance
+#[utoipa::path(
+    post,
+    path = "/v1/admin/agents/keys/{key_id}/bind-instance",
+    tag = "Admin Agents",
+    params(("key_id" = String, Path, description = "API key ID")),
+    request_body = BindApiKeyRequest,
+    responses(
+        (status = 200, description = "API key bound", body = ApiKeyResponse),
+        (status = 400, description = "Invalid request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - admin only", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "Key or instance not found", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(("session_token" = []))
+)]
+pub async fn admin_bind_api_key_to_instance(
+    State(app_state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(key_id): Path<String>,
+    Json(request): Json<BindApiKeyRequest>,
+) -> Result<Json<ApiKeyResponse>, ApiError> {
+    let key_uuid =
+        Uuid::parse_str(&key_id).map_err(|_| ApiError::bad_request("Invalid key ID format"))?;
+
+    let instance_uuid = Uuid::parse_str(&request.instance_id)
+        .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
+
+    tracing::info!(
+        "Admin: Binding API key to instance: key_id={}, instance_id={}, user_id={}",
+        key_uuid,
+        instance_uuid,
+        user.user_id
+    );
+
+    let api_key = app_state
+        .agent_service
+        .bind_api_key_to_instance(key_uuid, instance_uuid, user.user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to bind API key: key_id={}, error={}", key_uuid, e);
+            match e.to_string().as_str() {
+                msg if msg.contains("not found") => ApiError::not_found(msg),
+                msg if msg.contains("Access denied") => ApiError::forbidden(msg),
+                msg if msg.contains("already bound") => ApiError::bad_request(msg),
+                _ => ApiError::internal_server_error("Failed to bind API key"),
+            }
+        })?;
+
+    Ok(Json(ApiKeyResponse::from(api_key)))
+}
+
 /// Get instance usage history
 #[utoipa::path(
     get,
     path = "/v1/openclaw/instances/{id}/usage",
-    tag = "OpenClaw",
+    tag = "Agents",
     params(
         ("id" = String, Path, description = "Instance ID"),
         ("start_date" = Option<String>, Query, description = "Start date (ISO 8601)"),
@@ -482,7 +608,7 @@ pub async fn get_instance_usage(
 #[utoipa::path(
     get,
     path = "/v1/openclaw/instances/{id}/balance",
-    tag = "OpenClaw",
+    tag = "Agents",
     params(
         ("id" = String, Path, description = "Instance ID")
     ),
@@ -536,7 +662,7 @@ pub struct PaginationParams {
 #[utoipa::path(
     get,
     path = "/v1/admin/openclaw/instances",
-    tag = "OpenClaw Admin",
+    tag = "Admin Agents",
     responses(
         (status = 200, description = "All instances retrieved", body = Vec<InstanceResponse>),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
@@ -566,11 +692,11 @@ pub async fn admin_list_all_instances(
 }
 
 /// OpenClaw chat completions endpoint - routes requests to OpenClaw instances
-/// Requires OpenClaw API key authentication
+/// Requires agent API key authentication
 #[utoipa::path(
     post,
     path = "/v1/openclaw/chat/completions",
-    tag = "OpenClaw",
+    tag = "Agents",
     request_body = serde_json::Value,
     responses(
         (status = 200, description = "Chat completion response"),
@@ -580,7 +706,7 @@ pub async fn admin_list_all_instances(
     ),
     security(("api_key" = []))
 )]
-pub async fn openclaw_chat_completions(
+pub async fn agent_chat_completions(
     State(app_state): State<AppState>,
     Extension(api_key): Extension<AuthenticatedApiKey>,
     body: Bytes,
@@ -612,8 +738,17 @@ pub async fn openclaw_chat_completions(
             ApiError::internal_server_error("Failed to forward request to OpenClaw instance")
         })?;
 
-    // TODO: Add usage tracking for streaming responses
-    // For now, just forward the response
+    // NOTE: Usage tracking for streaming chat completions is not implemented.
+    // Token-level usage accounting and spend limits are NOT enforced for this endpoint.
+    // This is a known limitation - if you rely on usage-based billing or limits,
+    // do not expose this endpoint directly to end users without additional controls.
+    tracing::warn!(
+        "Streaming chat completions request: usage tracking not implemented; \
+         billing and spend limits will not be enforced (instance_id={}, api_key_id={})",
+        api_key.instance.id,
+        api_key.api_key_info.id
+    );
+
     let response_body = axum::body::Body::from_stream(body_stream);
     let mut response = Response::new(response_body);
     *response.status_mut() = status;
@@ -622,8 +757,8 @@ pub async fn openclaw_chat_completions(
     Ok(response)
 }
 
-/// Create OpenClaw router with all routes (requires authentication for user routes)
-pub fn create_openclaw_router() -> Router<AppState> {
+/// Create agent router with all routes (requires authentication for user routes)
+pub fn create_agent_router() -> Router<AppState> {
     Router::new()
         .route("/instances", get(list_instances))
         .route("/instances/{id}", get(get_instance))
@@ -632,34 +767,41 @@ pub fn create_openclaw_router() -> Router<AppState> {
         .route("/keys/{key_id}", delete(revoke_api_key))
         .route("/instances/{id}/usage", get(get_instance_usage))
         .route("/instances/{id}/balance", get(get_instance_balance))
+        .route("/instances/{id}/start", post(start_instance))
+        .route("/instances/{id}/stop", post(stop_instance))
+        .route("/instances/{id}/restart", post(restart_instance))
 }
 
-/// Start an OpenClaw instance
+/// Start an agent instance
 #[utoipa::path(
     post,
-    path = "/v1/admin/openclaw/instances/{id}/start",
-    tag = "OpenClaw Admin",
+    path = "/v1/openclaw/instances/{id}/start",
+    tag = "Agents",
     params(
         ("id" = String, Path, description = "Instance ID")
     ),
     responses(
         (status = 200, description = "Instance started"),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
-        (status = 403, description = "Forbidden - admin only", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - not your instance", body = crate::error::ApiErrorResponse),
         (status = 404, description = "Instance not found", body = crate::error::ApiErrorResponse),
         (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
     ),
     security(("session_token" = []))
 )]
-pub async fn admin_start_instance(
+pub async fn start_instance(
     State(app_state): State<AppState>,
-    Extension(_user): Extension<AuthenticatedUser>,
+    Extension(user): Extension<AuthenticatedUser>,
     Path(instance_id): Path<String>,
 ) -> Result<Response, ApiError> {
     let instance_uuid = Uuid::parse_str(&instance_id)
         .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
 
-    tracing::info!("Admin: Starting instance: instance_id={}", instance_uuid);
+    tracing::debug!(
+        "Starting instance: instance_id={}, user_id={}",
+        instance_uuid,
+        user.user_id
+    );
 
     let instance = app_state
         .agent_repository
@@ -675,11 +817,17 @@ pub async fn admin_start_instance(
         })?
         .ok_or_else(|| ApiError::not_found("Instance not found"))?;
 
+    // Verify ownership
+    if instance.user_id != user.user_id {
+        return Err(ApiError::forbidden("This instance does not belong to you"));
+    }
+
+    let encoded_instance_id = encode(&instance.instance_id);
     let (status, headers, body_stream) = app_state
         .agent_proxy_service
         .forward_request(
             &instance,
-            &format!("/v1/instances/{}/start", instance.instance_id),
+            &format!("/v1/instances/{}/start", encoded_instance_id),
             "POST",
             axum::http::HeaderMap::new(),
             Bytes::new(),
@@ -701,32 +849,36 @@ pub async fn admin_start_instance(
     Ok(response)
 }
 
-/// Stop an OpenClaw instance
+/// Stop an agent instance
 #[utoipa::path(
     post,
-    path = "/v1/admin/openclaw/instances/{id}/stop",
-    tag = "OpenClaw Admin",
+    path = "/v1/openclaw/instances/{id}/stop",
+    tag = "Agents",
     params(
         ("id" = String, Path, description = "Instance ID")
     ),
     responses(
         (status = 200, description = "Instance stopped"),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
-        (status = 403, description = "Forbidden - admin only", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - not your instance", body = crate::error::ApiErrorResponse),
         (status = 404, description = "Instance not found", body = crate::error::ApiErrorResponse),
         (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
     ),
     security(("session_token" = []))
 )]
-pub async fn admin_stop_instance(
+pub async fn stop_instance(
     State(app_state): State<AppState>,
-    Extension(_user): Extension<AuthenticatedUser>,
+    Extension(user): Extension<AuthenticatedUser>,
     Path(instance_id): Path<String>,
 ) -> Result<Response, ApiError> {
     let instance_uuid = Uuid::parse_str(&instance_id)
         .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
 
-    tracing::info!("Admin: Stopping instance: instance_id={}", instance_uuid);
+    tracing::debug!(
+        "Stopping instance: instance_id={}, user_id={}",
+        instance_uuid,
+        user.user_id
+    );
 
     let instance = app_state
         .agent_repository
@@ -742,11 +894,17 @@ pub async fn admin_stop_instance(
         })?
         .ok_or_else(|| ApiError::not_found("Instance not found"))?;
 
+    // Verify ownership
+    if instance.user_id != user.user_id {
+        return Err(ApiError::forbidden("This instance does not belong to you"));
+    }
+
+    let encoded_instance_id = encode(&instance.instance_id);
     let (status, headers, body_stream) = app_state
         .agent_proxy_service
         .forward_request(
             &instance,
-            &format!("/v1/instances/{}/stop", instance.instance_id),
+            &format!("/v1/instances/{}/stop", encoded_instance_id),
             "POST",
             axum::http::HeaderMap::new(),
             Bytes::new(),
@@ -768,32 +926,36 @@ pub async fn admin_stop_instance(
     Ok(response)
 }
 
-/// Restart an OpenClaw instance
+/// Restart an agent instance
 #[utoipa::path(
     post,
-    path = "/v1/admin/openclaw/instances/{id}/restart",
-    tag = "OpenClaw Admin",
+    path = "/v1/openclaw/instances/{id}/restart",
+    tag = "Agents",
     params(
         ("id" = String, Path, description = "Instance ID")
     ),
     responses(
         (status = 200, description = "Instance restarted"),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
-        (status = 403, description = "Forbidden - admin only", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - not your instance", body = crate::error::ApiErrorResponse),
         (status = 404, description = "Instance not found", body = crate::error::ApiErrorResponse),
         (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
     ),
     security(("session_token" = []))
 )]
-pub async fn admin_restart_instance(
+pub async fn restart_instance(
     State(app_state): State<AppState>,
-    Extension(_user): Extension<AuthenticatedUser>,
+    Extension(user): Extension<AuthenticatedUser>,
     Path(instance_id): Path<String>,
 ) -> Result<Response, ApiError> {
     let instance_uuid = Uuid::parse_str(&instance_id)
         .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
 
-    tracing::info!("Admin: Restarting instance: instance_id={}", instance_uuid);
+    tracing::debug!(
+        "Restarting instance: instance_id={}, user_id={}",
+        instance_uuid,
+        user.user_id
+    );
 
     let instance = app_state
         .agent_repository
@@ -809,11 +971,17 @@ pub async fn admin_restart_instance(
         })?
         .ok_or_else(|| ApiError::not_found("Instance not found"))?;
 
+    // Verify ownership
+    if instance.user_id != user.user_id {
+        return Err(ApiError::forbidden("This instance does not belong to you"));
+    }
+
+    let encoded_instance_id = encode(&instance.instance_id);
     let (status, headers, body_stream) = app_state
         .agent_proxy_service
         .forward_request(
             &instance,
-            &format!("/v1/instances/{}/restart", instance.instance_id),
+            &format!("/v1/instances/{}/restart", encoded_instance_id),
             "POST",
             axum::http::HeaderMap::new(),
             Bytes::new(),
@@ -839,7 +1007,7 @@ pub async fn admin_restart_instance(
 #[utoipa::path(
     post,
     path = "/v1/admin/openclaw/instances/{id}/backup",
-    tag = "OpenClaw Admin",
+    tag = "Admin Agents",
     params(
         ("id" = String, Path, description = "Instance ID")
     ),
@@ -876,11 +1044,12 @@ pub async fn admin_create_backup(
         })?
         .ok_or_else(|| ApiError::not_found("Instance not found"))?;
 
+    let encoded_instance_id = encode(&instance.instance_id);
     let (status, headers, body_stream) = app_state
         .agent_proxy_service
         .forward_request(
             &instance,
-            &format!("/v1/instances/{}/backup", instance.instance_id),
+            &format!("/v1/instances/{}/backup", encoded_instance_id),
             "POST",
             axum::http::HeaderMap::new(),
             Bytes::new(),
@@ -906,7 +1075,7 @@ pub async fn admin_create_backup(
 #[utoipa::path(
     get,
     path = "/v1/admin/openclaw/instances/{id}/backups",
-    tag = "OpenClaw Admin",
+    tag = "Admin Agents",
     params(
         ("id" = String, Path, description = "Instance ID")
     ),
@@ -943,11 +1112,12 @@ pub async fn admin_list_backups(
         })?
         .ok_or_else(|| ApiError::not_found("Instance not found"))?;
 
+    let encoded_instance_id = encode(&instance.instance_id);
     let (status, headers, body_stream) = app_state
         .agent_proxy_service
         .forward_request(
             &instance,
-            &format!("/v1/instances/{}/backups", instance.instance_id),
+            &format!("/v1/instances/{}/backups", encoded_instance_id),
             "GET",
             axum::http::HeaderMap::new(),
             Bytes::new(),
@@ -973,7 +1143,7 @@ pub async fn admin_list_backups(
 #[utoipa::path(
     get,
     path = "/v1/admin/openclaw/instances/{id}/backups/{backup_id}",
-    tag = "OpenClaw Admin",
+    tag = "Admin Agents",
     params(
         ("id" = String, Path, description = "Instance ID"),
         ("backup_id" = String, Path, description = "Backup ID")
@@ -1020,13 +1190,15 @@ pub async fn admin_get_backup(
         })?
         .ok_or_else(|| ApiError::not_found("Instance not found"))?;
 
+    let encoded_instance_id = encode(&instance.instance_id);
+    let encoded_backup_id = encode(&backup_id);
     let (status, headers, body_stream) = app_state
         .agent_proxy_service
         .forward_request(
             &instance,
             &format!(
                 "/v1/instances/{}/backups/{}",
-                instance.instance_id, backup_id
+                encoded_instance_id, encoded_backup_id
             ),
             "GET",
             axum::http::HeaderMap::new(),
@@ -1050,16 +1222,18 @@ pub async fn admin_get_backup(
     Ok(response)
 }
 
-/// Create admin OpenClaw router (admin-only routes)
-pub fn create_admin_openclaw_router() -> Router<AppState> {
+/// Create admin agent router (admin-only routes)
+pub fn create_admin_agent_router() -> Router<AppState> {
     Router::new()
         .route("/instances", post(admin_create_instance))
         .route("/instances", get(admin_list_all_instances))
         .route("/instances/{id}", delete(admin_delete_instance))
-        .route("/instances/{id}/start", post(admin_start_instance))
-        .route("/instances/{id}/stop", post(admin_stop_instance))
-        .route("/instances/{id}/restart", post(admin_restart_instance))
         .route("/instances/{id}/backup", post(admin_create_backup))
         .route("/instances/{id}/backups", get(admin_list_backups))
         .route("/instances/{id}/backups/{backup_id}", get(admin_get_backup))
+        .route("/keys", post(admin_create_unbound_api_key))
+        .route(
+            "/keys/{key_id}/bind-instance",
+            post(admin_bind_api_key_to_instance),
+        )
 }
