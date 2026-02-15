@@ -1201,12 +1201,25 @@ pub async fn admin_delete_instance(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Create an unbound API key (pre-deployment key for agent setup)
+/// Request body for admin creating API key on behalf of a user
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+pub struct AdminCreateApiKeyRequest {
+    /// User ID to create the API key for
+    pub user_id: Uuid,
+    /// Human-readable key name
+    pub name: String,
+    /// Optional spend limit in nano-dollars ($1.00 = 1,000,000,000 nano-dollars)
+    pub spend_limit: Option<i64>,
+    /// Optional expiration timestamp (RFC3339)
+    pub expires_at: Option<String>,
+}
+
+/// Create an unbound API key on behalf of a user (pre-deployment key for agent setup)
 #[utoipa::path(
     post,
     path = "/v1/admin/agents/keys",
     tag = "Admin",
-    request_body = CreateApiKeyRequest,
+    request_body = AdminCreateApiKeyRequest,
     responses(
         (status = 200, description = "API key created", body = CreateApiKeyResponse),
         (status = 400, description = "Invalid request", body = crate::error::ApiErrorResponse),
@@ -1218,15 +1231,40 @@ pub async fn admin_delete_instance(
 )]
 pub async fn admin_create_unbound_api_key(
     State(app_state): State<AppState>,
-    Extension(user): Extension<AuthenticatedUser>,
-    Json(request): Json<CreateApiKeyRequest>,
+    Extension(_admin): Extension<AuthenticatedUser>,
+    Json(request): Json<AdminCreateApiKeyRequest>,
 ) -> Result<Json<CreateApiKeyResponse>, ApiError> {
-    tracing::info!("Admin: Creating unbound API key: user_id={}", user.user_id);
+    let user_id = services::UserId(request.user_id);
+    tracing::info!(
+        "Admin: Creating unbound API key on behalf of user_id={}",
+        user_id
+    );
+
+    // Verify target user exists
+    app_state
+        .user_repository
+        .get_user(user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to check user existence: user_id={}, error={}",
+                user_id,
+                e
+            );
+            ApiError::internal_server_error("Failed to verify user")
+        })?
+        .ok_or_else(|| {
+            tracing::warn!(
+                "Admin attempted to create API key for non-existent user: user_id={}",
+                user_id
+            );
+            ApiError::bad_request("User does not exist")
+        })?;
 
     let (api_key, plaintext_key) = app_state
         .agent_service
         .create_unbound_api_key(
-            user.user_id,
+            user_id,
             request.name.clone(),
             request.spend_limit,
             request.expires_at.as_ref().and_then(|s| {
@@ -1281,7 +1319,7 @@ pub async fn admin_bind_api_key_to_instance(
         .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
 
     tracing::info!(
-        "Admin: Binding API key to instance: key_id={}, instance_id={}, user_id={}",
+        "Admin: Binding API key to instance: key_id={}, instance_id={}, admin_user_id={}",
         key_uuid,
         instance_uuid,
         user.user_id

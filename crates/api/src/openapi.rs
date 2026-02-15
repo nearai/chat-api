@@ -169,6 +169,7 @@ use utoipa::OpenApi;
         // Agent models
         crate::models::InstanceResponse,
         crate::routes::admin::AdminCreateInstanceRequest,
+        crate::routes::admin::AdminCreateApiKeyRequest,
         crate::models::CreateApiKeyRequest,
         crate::models::CreateApiKeyResponse,
         crate::models::BindApiKeyRequest,
