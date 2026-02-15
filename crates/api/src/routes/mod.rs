@@ -156,8 +156,17 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         },
     };
 
-    // API routes: llm proxy (dual auth + rate limit), models proxy (dual auth), session routes
-    let api_routes = api::create_api_router(rate_limit_state, dual_auth_state, auth_state);
+    let subscription_state = crate::middleware::SubscriptionState {
+        subscription_service: app_state.subscription_service.clone(),
+    };
+
+    // API routes: llm proxy (dual auth + subscription + rate limit), models proxy (dual auth), session routes
+    let api_routes = api::create_api_router(
+        rate_limit_state,
+        dual_auth_state,
+        auth_state,
+        subscription_state,
+    );
 
     // Build the base router
     // Note: optional_auth_routes must come BEFORE api_routes since they share paths
