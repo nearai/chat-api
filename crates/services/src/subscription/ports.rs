@@ -252,4 +252,21 @@ pub trait SubscriptionService: Send + Sync {
         &self,
         user_id: UserId,
     ) -> Result<(), SubscriptionError>;
+
+    /// Admin only: Set subscription for a user directly (for testing/manual management).
+    /// If a subscription for the given plan/provider already exists, it updates it.
+    /// Otherwise, creates a new one.
+    async fn admin_set_subscription(
+        &self,
+        user_id: UserId,
+        provider: String,
+        plan: String,
+        current_period_end: DateTime<Utc>,
+    ) -> Result<SubscriptionWithPlan, SubscriptionError>;
+
+    /// Admin only: Cancel all subscriptions for a user.
+    async fn admin_cancel_user_subscriptions(
+        &self,
+        user_id: UserId,
+    ) -> Result<(), SubscriptionError>;
 }

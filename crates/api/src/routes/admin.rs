@@ -243,6 +243,109 @@ pub async fn get_user_activity(
     }))
 }
 
+/// Admin endpoint: Set subscription for a user (for testing/manual management)
+///
+/// Allows admins to directly set a user's subscription without going through Stripe.
+/// Useful for testing in production and manual subscription management.
+/// Requires admin authentication.
+#[utoipa::path(
+    post,
+    path = "/v1/admin/users/{user_id}/subscription",
+    tag = "Admin",
+    params(
+        ("user_id" = String, Path, description = "User ID")
+    ),
+    request_body = AdminSetSubscriptionRequest,
+    responses(
+        (status = 200, description = "Subscription set successfully", body = serde_json::Value),
+        (status = 400, description = "Bad request - invalid plan or date", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(("session_token" = []))
+)]
+pub async fn admin_set_user_subscription(
+    State(app_state): State<AppState>,
+    Path(user_id): Path<UserId>,
+    Json(request): Json<AdminSetSubscriptionRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    tracing::info!(
+        "Admin: Setting subscription for user_id={}, provider={}, plan={}",
+        user_id,
+        request.provider,
+        request.plan
+    );
+
+    // Parse the period end date
+    let current_period_end = chrono::DateTime::parse_from_rfc3339(&request.current_period_end)
+        .map_err(|_| ApiError::bad_request("Invalid current_period_end format (must be ISO 8601)"))?
+        .with_timezone(&chrono::Utc);
+
+    let subscription = app_state
+        .subscription_service
+        .admin_set_subscription(user_id, request.provider, request.plan, current_period_end)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to set subscription for user_id={}: {}", user_id, e);
+            match e {
+                services::subscription::ports::SubscriptionError::InvalidPlan(msg) => {
+                    ApiError::bad_request(msg)
+                }
+                services::subscription::ports::SubscriptionError::InvalidProvider(msg) => {
+                    ApiError::bad_request(msg)
+                }
+                _ => ApiError::internal_server_error("Failed to set subscription"),
+            }
+        })?;
+
+    Ok(Json(serde_json::to_value(&subscription).unwrap()))
+}
+
+/// Admin endpoint: Cancel all subscriptions for a user
+///
+/// Removes all subscriptions for a user. Useful for testing and manual management.
+/// Requires admin authentication.
+#[utoipa::path(
+    delete,
+    path = "/v1/admin/users/{user_id}/subscription",
+    tag = "Admin",
+    params(
+        ("user_id" = String, Path, description = "User ID")
+    ),
+    responses(
+        (status = 200, description = "Subscriptions cancelled successfully"),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(("session_token" = []))
+)]
+pub async fn admin_cancel_user_subscriptions(
+    State(app_state): State<AppState>,
+    Path(user_id): Path<UserId>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    tracing::info!("Admin: Canceling all subscriptions for user_id={}", user_id);
+
+    app_state
+        .subscription_service
+        .admin_cancel_user_subscriptions(user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to cancel subscriptions for user_id={}: {}",
+                user_id,
+                e
+            );
+            ApiError::internal_server_error("Failed to cancel subscriptions")
+        })?;
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "message": "All subscriptions cancelled"
+    })))
+}
+
 /// Get top active users
 ///
 /// Returns the most active users in a time period. Requires admin authentication.
@@ -916,6 +1019,10 @@ pub fn create_admin_router() -> Router<AppState> {
     Router::new()
         .route("/users", get(list_users))
         .route("/users/{user_id}/activity", get(get_user_activity))
+        .route(
+            "/users/{user_id}/subscription",
+            post(admin_set_user_subscription).delete(admin_cancel_user_subscriptions),
+        )
         .route("/models", get(list_models).patch(batch_upsert_models))
         .route("/models/{model_id}", delete(delete_model))
         .route("/vpc/revoke", post(revoke_vpc_credentials))

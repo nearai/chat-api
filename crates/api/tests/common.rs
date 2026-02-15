@@ -369,6 +369,26 @@ pub async fn insert_test_subscription(
         .expect("insert subscription");
 }
 
+/// Clean up all subscriptions for a user (by email).
+/// Useful for test isolation to ensure no leftover data from previous test runs.
+pub async fn cleanup_user_subscriptions(db: &database::Database, user_email: &str) {
+    let user = match db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .expect("get user")
+    {
+        Some(u) => u,
+        None => return, // User doesn't exist, nothing to clean
+    };
+
+    let client = db.pool().get().await.expect("get pool client");
+    client
+        .execute("DELETE FROM subscriptions WHERE user_id = $1", &[&user.id])
+        .await
+        .expect("delete subscriptions");
+}
+
 /// Set subscription_plans configuration
 /// plans should be in format: { "plan_name": { "providers": { "stripe": { "price_id": "price_xxx" } }, "private_assistant_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } } }
 pub async fn set_subscription_plans(server: &TestServer, plans: serde_json::Value) {

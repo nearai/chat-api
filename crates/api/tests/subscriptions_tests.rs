@@ -3,8 +3,9 @@ mod common;
 use api::routes::api::SUBSCRIPTION_REQUIRED_ERROR_MESSAGE;
 use chrono::Duration;
 use common::{
-    clear_subscription_plans, create_test_server, create_test_server_and_db,
-    insert_test_subscription, mock_login, set_subscription_plans, TestServerConfig,
+    cleanup_user_subscriptions, clear_subscription_plans, create_test_server,
+    create_test_server_and_db, insert_test_subscription, mock_login, set_subscription_plans,
+    TestServerConfig,
 };
 use serde_json::json;
 use serial_test::serial;
@@ -396,6 +397,8 @@ async fn test_list_subscriptions_successfully() {
     .await;
 
     let user_email = "test_list_with_sub@example.com";
+    // Clean up any leftover subscriptions from previous test runs for test isolation
+    cleanup_user_subscriptions(&db, user_email).await;
     insert_test_subscription(&server, &db, user_email, false).await;
 
     let user_token = mock_login(&server, user_email).await;
@@ -1184,5 +1187,444 @@ async fn test_responses_returns_403_without_subscription_when_plans_configured()
             || err_msg == SUBSCRIPTION_REQUIRED_ERROR_MESSAGE,
         "POST /v1/responses should return token limit or subscription error, got: {}",
         err_msg
+    );
+}
+
+// ========== ADMIN SUBSCRIPTION MANAGEMENT TESTS ==========
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_admin_set_subscription_requires_admin() {
+    let (server, _db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    // Login as regular user (non-admin)
+    let user_token = mock_login(&server, "regular_user@example.com").await;
+    let fake_user_id = "00000000-0000-0000-0000-000000000000";
+
+    let response = server
+        .post(&format!("/v1/admin/users/{}/subscription", fake_user_id))
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .json(&json!({
+            "provider": "stripe",
+            "plan": "basic",
+            "current_period_end": "2025-12-31T23:59:59Z"
+        }))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        403,
+        "Non-admin should not be able to set subscriptions"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_admin_set_subscription_requires_auth() {
+    let (server, _db) = create_test_server_and_db(TestServerConfig::default()).await;
+    let fake_user_id = "00000000-0000-0000-0000-000000000000";
+
+    // No auth header
+    let response = server
+        .post(&format!("/v1/admin/users/{}/subscription", fake_user_id))
+        .json(&json!({
+            "provider": "stripe",
+            "plan": "basic",
+            "current_period_end": "2025-12-31T23:59:59Z"
+        }))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        401,
+        "Request without auth should be rejected"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_admin_set_subscription_invalid_plan() {
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    // Configure valid plans
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } } }
+        }),
+    )
+    .await;
+
+    // Create a test user
+    let user_email = "test_admin_set_sub_user@example.com";
+    let _user_token = mock_login(&server, user_email).await;
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .expect("get user")
+        .expect("user should exist");
+    let admin_token = mock_login(&server, "test_admin@admin.org").await;
+
+    // Try to set subscription with invalid plan
+    let response = server
+        .post(&format!("/v1/admin/users/{}/subscription", user.id))
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .json(&json!({
+            "provider": "stripe",
+            "plan": "nonexistent_plan",
+            "current_period_end": "2025-12-31T23:59:59Z"
+        }))
+        .await;
+
+    assert_eq!(response.status_code(), 400, "Should reject invalid plan");
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_admin_set_subscription_success() {
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    // Configure valid plans
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "monthly_tokens": { "max": 1000000 } }
+        }),
+    )
+    .await;
+
+    // Create a test user
+    let user_email = "test_admin_set_success@example.com";
+    let _user_token = mock_login(&server, user_email).await;
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .expect("get user")
+        .expect("user should exist");
+
+    let admin_token = mock_login(&server, "test_admin_set_success@admin.org").await;
+
+    // Set subscription as admin
+    let response = server
+        .post(&format!("/v1/admin/users/{}/subscription", user.id))
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .json(&json!({
+            "provider": "stripe",
+            "plan": "basic",
+            "current_period_end": "2025-12-31T23:59:59Z"
+        }))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        200,
+        "Should successfully set subscription as admin"
+    );
+
+    let body: serde_json::Value = response.json();
+    assert_eq!(
+        body.get("plan").and_then(|v| v.as_str()),
+        Some("basic"),
+        "Response should include plan name"
+    );
+    assert!(
+        body.get("subscription_id").is_some(),
+        "Response should include subscription_id"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_admin_cancel_subscription_requires_admin() {
+    let (server, _db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    // Login as regular user (non-admin)
+    let user_token = mock_login(&server, "regular_user@example.com").await;
+    let fake_user_id = "00000000-0000-0000-0000-000000000000";
+
+    let response = server
+        .delete(&format!("/v1/admin/users/{}/subscription", fake_user_id))
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        403,
+        "Non-admin should not be able to cancel subscriptions"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_admin_cancel_subscription_requires_auth() {
+    let (server, _db) = create_test_server_and_db(TestServerConfig::default()).await;
+    let fake_user_id = "00000000-0000-0000-0000-000000000000";
+
+    // No auth header
+    let response = server
+        .delete(&format!("/v1/admin/users/{}/subscription", fake_user_id))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        401,
+        "Request without auth should be rejected"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_admin_cancel_subscription_success() {
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    // Configure valid plans
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } } }
+        }),
+    )
+    .await;
+
+    // Create a test user with a subscription
+    let user_email = "test_admin_cancel@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+    insert_test_subscription(&server, &db, user_email, false).await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .expect("get user")
+        .expect("user should exist");
+
+    let admin_token = mock_login(&server, "test_admin_cancel@admin.org").await;
+
+    // Verify subscription exists
+    let user_token = mock_login(&server, user_email).await;
+    let response = server
+        .get("/v1/subscriptions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .await;
+
+    let body: serde_json::Value = response.json();
+    let subscriptions = body
+        .get("subscriptions")
+        .and_then(|v| v.as_array())
+        .expect("subscriptions should be array");
+    assert!(
+        !subscriptions.is_empty(),
+        "User should have subscriptions before cancel"
+    );
+
+    // Cancel subscription as admin
+    let response = server
+        .delete(&format!("/v1/admin/users/{}/subscription", user.id))
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        200,
+        "Should successfully cancel subscriptions as admin"
+    );
+
+    // Verify subscription is gone
+    let response = server
+        .get("/v1/subscriptions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .await;
+
+    let body: serde_json::Value = response.json();
+    let subscriptions = body
+        .get("subscriptions")
+        .and_then(|v| v.as_array())
+        .expect("subscriptions should be array");
+    assert!(
+        subscriptions.is_empty(),
+        "User should have no subscriptions after admin cancel"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_subscription_gating_full_flow() {
+    ensure_stripe_env_for_gating();
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        rate_limit_config: Some(permissive_rate_limit_config()),
+        ..Default::default()
+    })
+    .await;
+
+    // Configure subscription plans: free plan with 0 tokens (requires subscription), and basic paid plan
+    // Users without subscription fall back to "free" plan and hit 402 Payment Required immediately
+    set_subscription_plans(
+        &server,
+        json!({
+            "free": {
+                "providers": {},
+                "monthly_tokens": { "max": 0 }
+            },
+            "basic": {
+                "providers": { "stripe": { "price_id": "price_test_basic" } },
+                "private_assistant_instances": { "max": 1 },
+                "monthly_tokens": { "max": 1000000 }
+            }
+        }),
+    )
+    .await;
+
+    // Create test user
+    let user_email = "test_subscription_gating@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+    let user_token = mock_login(&server, user_email).await;
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .expect("get user")
+        .expect("user should exist");
+
+    let admin_token = mock_login(&server, "test_gating_admin@admin.org").await;
+
+    // Step 1: Verify user CANNOT call inference without subscription
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-4",
+            "messages": [
+                { "role": "user", "content": "Hello" }
+            ]
+        }))
+        .await;
+
+    assert!(
+        response.status_code() == 402 || response.status_code() == 403,
+        "User without subscription should be blocked (402 or 403), got {}",
+        response.status_code()
+    );
+    let body: serde_json::Value = response.json();
+    let error_msg = body.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        error_msg.contains("subscription") || error_msg.contains("limit"),
+        "Error should mention subscription or limit requirement, got: {}",
+        error_msg
+    );
+
+    // Step 2: Admin sets subscription for user
+    let response = server
+        .post(&format!("/v1/admin/users/{}/subscription", user.id))
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .json(&json!({
+            "provider": "stripe",
+            "plan": "basic",
+            "current_period_end": "2099-12-31T23:59:59Z"
+        }))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        200,
+        "Admin should successfully set subscription"
+    );
+
+    // Step 3: Verify user CAN call inference with subscription
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-4",
+            "messages": [
+                { "role": "user", "content": "Hello" }
+            ]
+        }))
+        .await;
+
+    assert_ne!(
+        response.status_code(),
+        402,
+        "User with subscription should NOT get 402 (payment required)"
+    );
+    assert_ne!(
+        response.status_code(),
+        403,
+        "User with subscription should NOT get 403 (forbidden due to no subscription)"
+    );
+    // Note: Response may be 401 if model is not found, or other errors, but NOT 402/403 subscription errors
+
+    // Step 4: Admin cancels subscription
+    let response = server
+        .delete(&format!("/v1/admin/users/{}/subscription", user.id))
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        200,
+        "Admin should successfully cancel subscription"
+    );
+
+    // Step 5: Verify user CANNOT call inference after subscription is canceled
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-4",
+            "messages": [
+                { "role": "user", "content": "Hello" }
+            ]
+        }))
+        .await;
+
+    assert!(
+        response.status_code() == 402 || response.status_code() == 403,
+        "User without subscription (after cancellation) should be blocked (402 or 403), got {}",
+        response.status_code()
+    );
+    let body: serde_json::Value = response.json();
+    let error_msg = body.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        error_msg.contains("subscription") || error_msg.contains("limit"),
+        "Error should mention subscription or limit requirement, got: {}",
+        error_msg
     );
 }

@@ -916,6 +916,17 @@ fn default_limit() -> i64 {
     20
 }
 
+/// Request to set a user's subscription (admin only)
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct AdminSetSubscriptionRequest {
+    /// Payment provider (e.g., "stripe")
+    pub provider: String,
+    /// Plan name (e.g., "basic", "pro")
+    pub plan: String,
+    /// Subscription period end date (ISO 8601 format)
+    pub current_period_end: String,
+}
+
 /// Format nano-dollars as a decimal string (e.g., "0.000000001" for 1 nano-dollar)
 pub fn format_nano_dollars(nano_dollars: i64) -> String {
     // Use integer arithmetic to avoid floating point precision errors

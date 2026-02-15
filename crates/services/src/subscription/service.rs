@@ -1058,4 +1058,111 @@ impl SubscriptionService for SubscriptionServiceImpl {
         );
         Ok(())
     }
+
+    /// Admin only: Set subscription for a user directly (for testing/manual management).
+    async fn admin_set_subscription(
+        &self,
+        user_id: UserId,
+        provider: String,
+        plan: String,
+        current_period_end: chrono::DateTime<chrono::Utc>,
+    ) -> Result<SubscriptionWithPlan, SubscriptionError> {
+        tracing::info!(
+            "Admin: Setting subscription for user_id={}, provider={}, plan={}",
+            user_id,
+            provider,
+            plan
+        );
+
+        // Get available plans
+        let plans = self.get_plans_for_provider(&provider).await?;
+
+        let price_id = plans.get(&plan).ok_or_else(|| {
+            SubscriptionError::InvalidPlan(format!(
+                "Plan '{}' not found for provider '{}'",
+                plan, provider
+            ))
+        })?;
+
+        // Generate a unique subscription ID for admin-set subscriptions
+        let subscription_id = format!("admin_sub_{}", uuid::Uuid::new_v4());
+
+        // Get or create a dummy customer ID for admin subscriptions
+        let customer_id = format!("admin_{}", user_id);
+
+        let subscription = Subscription {
+            subscription_id: subscription_id.clone(),
+            user_id,
+            provider: provider.clone(),
+            customer_id,
+            price_id: price_id.clone(),
+            status: "active".to_string(),
+            current_period_end,
+            cancel_at_period_end: false,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        // Upsert subscription in transaction
+        let mut client = self
+            .db_pool
+            .get()
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+        let txn = client
+            .transaction()
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        let result = self
+            .subscription_repo
+            .upsert_subscription(&txn, subscription)
+            .await?;
+
+        txn.commit()
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        // Invalidate token limit cache
+        self.invalidate_token_limit_cache(user_id).await;
+
+        // Plan name is just the plan key from the config
+        let plan_name = plan.clone();
+
+        Ok(SubscriptionWithPlan {
+            subscription_id: result.subscription_id,
+            user_id: user_id.to_string(),
+            provider: result.provider,
+            plan: plan_name,
+            status: result.status,
+            current_period_end: result.current_period_end,
+            cancel_at_period_end: result.cancel_at_period_end,
+            created_at: result.created_at,
+            updated_at: result.updated_at,
+        })
+    }
+
+    /// Admin only: Cancel all subscriptions for a user.
+    async fn admin_cancel_user_subscriptions(
+        &self,
+        user_id: UserId,
+    ) -> Result<(), SubscriptionError> {
+        tracing::info!("Admin: Canceling all subscriptions for user_id={}", user_id);
+
+        let subscriptions = self
+            .subscription_repo
+            .get_user_subscriptions(user_id)
+            .await?;
+
+        for subscription in subscriptions {
+            self.subscription_repo
+                .delete_subscription(&subscription.subscription_id)
+                .await?;
+        }
+
+        // Invalidate token limit cache
+        self.invalidate_token_limit_cache(user_id).await;
+
+        Ok(())
+    }
 }

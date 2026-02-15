@@ -76,6 +76,8 @@ use utoipa::OpenApi;
         crate::routes::admin::get_system_configs_admin,
         crate::routes::admin::get_usage_by_user_id,
         crate::routes::admin::get_top_usage,
+        crate::routes::admin::admin_set_user_subscription,
+        crate::routes::admin::admin_cancel_user_subscriptions,
         // Configs endpoints
         crate::routes::configs::get_system_configs,
         crate::routes::users::get_user_settings,
@@ -127,6 +129,7 @@ use utoipa::OpenApi;
         // System configs models
         crate::models::SystemConfigsResponse,
         crate::models::UpsertSystemConfigsRequest,
+        crate::models::AdminSetSubscriptionRequest,
         // Admin usage models (UserUsageResponse shared with /users/me/usage)
         crate::models::UserUsageResponse,
         crate::routes::admin::TopUsageResponse,
