@@ -158,9 +158,9 @@ pub fn create_api_router(
             crate::middleware::rate_limit_middleware,
         ));
 
-    // Completion routes (chat completions, image generation) with rate limiting
+    // Completion routes (image generation) with rate limiting
+    // Note: chat/completions is handled separately to support both session token and API key auth
     let completions_router = Router::new()
-        .route("/v1/chat/completions", post(proxy_chat_completions))
         .route("/v1/images/generations", post(proxy_image_generations))
         .route("/v1/images/edits", post(proxy_image_edits))
         .layer(axum::middleware::from_fn_with_state(
@@ -3475,25 +3475,52 @@ async fn proxy_post_to_cloud_api(
         ("session_token" = [])
     )
 )]
-async fn proxy_chat_completions(
+pub async fn proxy_chat_completions(
     State(state): State<crate::state::AppState>,
-    Extension(user): Extension<AuthenticatedUser>,
+    Extension(auth): Extension<crate::middleware::ChatCompletionsAuth>,
     mut headers: HeaderMap,
     request: Request,
 ) -> Result<Response, Response> {
     const ENDPOINT_PATH: &str = "chat/completions";
     const ENDPOINT_FULL_PATH: &str = "/v1/chat/completions";
 
-    tracing::info!(
-        "proxy_chat_completions: POST {} for user_id={}, session_id={}",
-        ENDPOINT_FULL_PATH,
-        user.user_id,
-        user.session_id
-    );
+    // Extract user_id for common checks
+    let user_id = match &auth {
+        crate::middleware::ChatCompletionsAuth::User(user) => user.user_id,
+        crate::middleware::ChatCompletionsAuth::ApiKey(api_key) => api_key.api_key_info.user_id,
+    };
 
-    ensure_user_not_banned(&state, &user).await?;
-    ensure_user_has_sufficient_token_quota(&state, &user).await?;
-    spawn_near_balance_check(&state, &user);
+    // Create a temporary AuthenticatedUser for ban and subscription checks
+    let temp_user = AuthenticatedUser {
+        user_id,
+        session_id: services::SessionId(uuid::Uuid::nil()),
+    };
+
+    // Check ban status first (before subscription validation)
+    // This ensures banned users are blocked immediately
+    ensure_user_not_banned(&state, &temp_user).await?;
+
+    // Then check subscription/token limits for both auth types
+    ensure_user_has_sufficient_token_quota(&state, &temp_user).await?;
+
+    // Session-token-specific actions
+    if let crate::middleware::ChatCompletionsAuth::User(user) = &auth {
+        tracing::info!(
+            "proxy_chat_completions: POST {} for user_id={}, session_id={}",
+            ENDPOINT_FULL_PATH,
+            user.user_id,
+            user.session_id
+        );
+        spawn_near_balance_check(&state, user);
+    } else if let crate::middleware::ChatCompletionsAuth::ApiKey(api_key) = &auth {
+        tracing::info!(
+            "proxy_chat_completions: POST {} for api_key_id={}, instance_id={}, user_id={}",
+            ENDPOINT_FULL_PATH,
+            api_key.api_key_info.id,
+            api_key.instance.id,
+            api_key.api_key_info.user_id
+        );
+    }
 
     let body_bytes = extract_body_bytes(request).await?;
     tracing::debug!(
@@ -3502,7 +3529,13 @@ async fn proxy_chat_completions(
         ENDPOINT_FULL_PATH
     );
 
-    let modified_body_bytes = prepare_chat_completions_body(&state, &user, body_bytes).await?;
+    // Only modify body for session token users; API key users get raw forwarding
+    let modified_body_bytes = match &auth {
+        crate::middleware::ChatCompletionsAuth::User(user) => {
+            prepare_chat_completions_body(&state, user, body_bytes).await?
+        }
+        crate::middleware::ChatCompletionsAuth::ApiKey(_) => body_bytes,
+    };
     let content_length = HeaderValue::from_str(&modified_body_bytes.len().to_string())
         .expect("usize to string conversion always produces valid HeaderValue");
     headers.insert(CONTENT_LENGTH, content_length);
@@ -3520,7 +3553,7 @@ async fn proxy_chat_completions(
             tracing::error!(
                 "Cloud API error for POST {} (user_id={}): {}",
                 ENDPOINT_FULL_PATH,
-                user.user_id,
+                user_id,
                 e
             );
             (
@@ -3536,7 +3569,7 @@ async fn proxy_chat_completions(
         "Received response from cloud-api: status={} for POST {} (user_id={})",
         proxy_response.status,
         ENDPOINT_FULL_PATH,
-        user.user_id
+        user_id
     );
 
     let response_body = if !(200..300).contains(&proxy_response.status) {
@@ -3546,7 +3579,7 @@ async fn proxy_chat_completions(
             proxy_response.body,
             state.user_usage_service.clone(),
             state.model_pricing_cache.clone(),
-            user.user_id,
+            user_id,
         );
         Body::from_stream(usage_stream)
     } else {
@@ -3555,7 +3588,7 @@ async fn proxy_chat_completions(
             Err(e) => {
                 tracing::error!(
                     "Upstream stream error for user_id={} on {}: {}",
-                    user.user_id,
+                    user_id,
                     ENDPOINT_FULL_PATH,
                     e
                 );
@@ -3572,7 +3605,7 @@ async fn proxy_chat_completions(
             decompress_if_gzipped(&bytes, &proxy_response.headers).unwrap_or_else(|e| {
                 tracing::error!(
                     "Failed to decompress non-stream response for user_id={} on {}: {}",
-                    user.user_id,
+                    user_id,
                     ENDPOINT_FULL_PATH,
                     e
                 );
@@ -3580,7 +3613,6 @@ async fn proxy_chat_completions(
             });
         // Return the original upstream bytes so they remain consistent with any forwarded content-encoding headers.
         let state_clone = state.clone();
-        let user_id = user.user_id;
         let body = usage_bytes.clone();
         tokio::spawn(async move {
             record_chat_usage_from_body(&state_clone, user_id, &body).await;
