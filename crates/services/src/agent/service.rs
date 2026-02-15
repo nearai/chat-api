@@ -271,7 +271,7 @@ impl AgentService for AgentServiceImpl {
             .await?;
 
         tracing::info!(
-            "Instance created from OpenClaw API: instance_id={}, user_id={}",
+            "Instance created from Agent API: instance_id={}, user_id={}",
             instance.id,
             user_id
         );
@@ -286,7 +286,7 @@ impl AgentService for AgentServiceImpl {
         public_ssh_key: Option<String>,
     ) -> anyhow::Result<AgentInstance> {
         tracing::info!(
-            "Creating OpenClaw instance: user_id={}, instance_id={}",
+            "Creating agent instance: user_id={}, instance_id={}",
             user_id,
             instance_id
         );
@@ -422,8 +422,8 @@ impl AgentService for AgentServiceImpl {
             .await?
             .ok_or_else(|| anyhow!("Instance not found"))?;
 
-        // Call OpenClaw API to terminate the instance
-        // Use instance_id (the actual OpenClaw instance ID) for the deletion URL
+        // Call Agent API to terminate the instance
+        // Use instance_id (the actual agent instance ID) for the deletion URL
         let delete_url = format!(
             "{}/instances/{}",
             self.agent_api_base_url, instance.instance_id
@@ -434,11 +434,11 @@ impl AgentService for AgentServiceImpl {
             .bearer_auth(&self.agent_api_token)
             .send()
             .await
-            .map_err(|e| anyhow!("Failed to call OpenClaw API delete: {}", e))?;
+            .map_err(|e| anyhow!("Failed to call Agent API delete: {}", e))?;
 
         if !response.status().is_success() {
             return Err(anyhow!(
-                "OpenClaw API delete failed with status {}: instance_id={}",
+                "Agent API delete failed with status {}: instance_id={}",
                 response.status(),
                 instance_id
             ));

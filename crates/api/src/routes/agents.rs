@@ -136,7 +136,7 @@ pub struct AdminCreateInstanceRequest {
     pub ssh_pubkey: Option<String>,
 }
 
-/// Admin endpoint: Create an OpenClaw instance for a specific user
+/// Admin endpoint: Create an agent instance for a specific user
 #[utoipa::path(
     post,
     path = "/v1/admin/agents/instances",
@@ -157,7 +157,7 @@ pub async fn admin_create_instance(
     Json(request): Json<AdminCreateInstanceRequest>,
 ) -> Result<(StatusCode, Json<InstanceResponse>), ApiError> {
     tracing::info!(
-        "Admin: Creating OpenClaw instance for user_id={}",
+        "Admin: Creating agent instance for user_id={}",
         request.user_id
     );
 
@@ -205,7 +205,7 @@ pub async fn admin_create_instance(
     Ok((StatusCode::CREATED, Json(instance.into())))
 }
 
-/// Admin endpoint: Delete an OpenClaw instance
+/// Admin endpoint: Delete an agent instance
 #[utoipa::path(
     delete,
     path = "/v1/admin/agents/instances/{id}",
@@ -658,7 +658,7 @@ pub struct PaginationParams {
     pub offset: Option<i64>,
 }
 
-/// Admin endpoint: List all OpenClaw instances (all users' instances)
+/// Admin endpoint: List all agent instances (all users' instances)
 #[utoipa::path(
     get,
     path = "/v1/admin/agents/instances",
@@ -675,9 +675,9 @@ pub async fn admin_list_all_instances(
     State(app_state): State<AppState>,
     Extension(_user): Extension<AuthenticatedUser>,
 ) -> Result<Json<Vec<InstanceResponse>>, ApiError> {
-    tracing::info!("Admin: Listing all OpenClaw instances");
+    tracing::info!("Admin: Listing all agent instances");
 
-    // Call OpenClaw API to get all instances
+    // Call Agent API to get all instances
     let instances = app_state
         .agent_service
         .list_instances_from_agent_api(_user.user_id)
@@ -691,7 +691,7 @@ pub async fn admin_list_all_instances(
     Ok(Json(response))
 }
 
-/// OpenClaw chat completions endpoint - routes requests to OpenClaw instances
+/// Agent chat completions endpoint - routes requests to agent instances
 /// Requires agent API key authentication
 #[utoipa::path(
     post,
@@ -712,7 +712,7 @@ pub async fn agent_chat_completions(
     body: Bytes,
 ) -> Result<Response, ApiError> {
     tracing::info!(
-        "OpenClaw chat completions: user_id={}, instance_id={}, api_key_id={}",
+        "Agent chat completions: user_id={}, instance_id={}, api_key_id={}",
         api_key.api_key_info.user_id,
         api_key.instance.id,
         api_key.api_key_info.id
@@ -735,7 +735,7 @@ pub async fn agent_chat_completions(
                 api_key.instance.id,
                 e
             );
-            ApiError::internal_server_error("Failed to forward request to OpenClaw instance")
+            ApiError::internal_server_error("Failed to forward request to agent instance")
         })?;
 
     // NOTE: Usage tracking for streaming chat completions is not implemented.
@@ -1003,7 +1003,7 @@ pub async fn restart_instance(
     Ok(response)
 }
 
-/// Create a backup of an OpenClaw instance
+/// Create a backup of an agent instance
 #[utoipa::path(
     post,
     path = "/v1/admin/agents/instances/{id}/backup",
@@ -1071,7 +1071,7 @@ pub async fn admin_create_backup(
     Ok(response)
 }
 
-/// List backups for an OpenClaw instance
+/// List backups for an agent instance
 #[utoipa::path(
     get,
     path = "/v1/admin/agents/instances/{id}/backups",
@@ -1139,7 +1139,7 @@ pub async fn admin_list_backups(
     Ok(response)
 }
 
-/// Get backup details for an OpenClaw instance
+/// Get backup details for an agent instance
 #[utoipa::path(
     get,
     path = "/v1/admin/agents/instances/{id}/backups/{backup_id}",

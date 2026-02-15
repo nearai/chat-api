@@ -162,7 +162,7 @@ use utoipa::OpenApi;
         crate::models::ApiGatewayAttestation,
         crate::models::ModelAttestation,
         crate::models::CombinedAttestationReport,
-        // OpenClaw models
+        // Agent models
         crate::models::InstanceResponse,
         crate::routes::agents::AdminCreateInstanceRequest,
         crate::models::CreateApiKeyRequest,

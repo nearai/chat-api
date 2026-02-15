@@ -297,7 +297,7 @@ impl Default for NearConfig {
     }
 }
 
-/// Configuration for agent API integration (supports OpenClaw, IronClaw, etc.)
+/// Configuration for agent API integration (supports various agent types)
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct AgentConfig {
     /// Agent API base URL

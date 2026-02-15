@@ -345,14 +345,14 @@ pub async fn admin_auth_middleware(
 }
 
 /// Extract and validate Agent API key from Authorization header
-fn extract_openclaw_api_key_from_request(request: &Request) -> Result<String, ApiError> {
+fn extract_agent_api_key_from_request(request: &Request) -> Result<String, ApiError> {
     let auth_header = request
         .headers()
         .get("authorization")
         .and_then(|h| h.to_str().ok());
 
     let auth_value = auth_header.ok_or_else(|| {
-        tracing::warn!("No authorization header found for OpenClaw API key");
+        tracing::warn!("No authorization header found for Agent API key");
         ApiError::missing_auth_header()
     })?;
 
@@ -403,12 +403,12 @@ pub async fn agent_api_key_middleware(
         path
     );
 
-    let api_key = extract_openclaw_api_key_from_request(&request).map_err(|e| e.into_response())?;
+    let api_key = extract_agent_api_key_from_request(&request).map_err(|e| e.into_response())?;
 
     // Hash the API key for lookup
     let key_hash = hash_api_key(&api_key);
     tracing::debug!(
-        "OpenClaw API key hashed, hash prefix: {}...",
+        "Agent API key hashed, hash prefix: {}...",
         &key_hash.chars().take(16).collect::<String>()
     );
 
@@ -422,7 +422,7 @@ pub async fn agent_api_key_middleware(
             ApiError::internal_server_error("Failed to authenticate API key").into_response()
         })?
         .ok_or_else(|| {
-            tracing::warn!("OpenClaw API key not found or inactive");
+            tracing::warn!("Agent API key not found or inactive");
             ApiError::invalid_token().into_response()
         })?;
 
@@ -431,7 +431,7 @@ pub async fn agent_api_key_middleware(
         let now = Utc::now();
         if expires_at < now {
             tracing::warn!(
-                "OpenClaw API key expired: api_key_id={}, expired_at={}",
+                "Agent API key expired: api_key_id={}, expired_at={}",
                 api_key_info.id,
                 expires_at
             );
@@ -442,7 +442,7 @@ pub async fn agent_api_key_middleware(
     // Validate instance has required connection info
     if instance.instance_url.is_none() || instance.instance_token.is_none() {
         tracing::warn!(
-            "OpenClaw instance missing connection info: instance_id={}",
+            "Agent instance missing connection info: instance_id={}",
             instance.id
         );
         return Err(
@@ -465,7 +465,7 @@ pub async fn agent_api_key_middleware(
     }
 
     tracing::info!(
-        "OpenClaw API key authenticated: user_id={}, instance_id={}, api_key_id={}",
+        "Agent API key authenticated: user_id={}, instance_id={}, api_key_id={}",
         api_key_info.user_id,
         instance.id,
         api_key_info.id
@@ -495,7 +495,7 @@ pub async fn agent_api_key_middleware(
 
     let response = next.run(request).await;
     tracing::debug!(
-        "OpenClaw API key request completed with status: {}",
+        "Agent API key request completed with status: {}",
         response.status()
     );
     Ok(response)

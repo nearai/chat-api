@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::UserId;
 
-/// OpenClaw instance metadata
+/// Agent instance metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentInstance {
     pub id: Uuid,
@@ -81,8 +81,8 @@ impl TokenPricing {
     }
 }
 
-/// Repository trait for OpenClaw operations
-/// Parameters for creating an OpenClaw instance
+/// Repository trait for agent operations
+/// Parameters for creating an agent instance
 #[derive(Debug, Clone)]
 pub struct CreateInstanceParams {
     pub user_id: UserId,
@@ -202,7 +202,7 @@ pub trait AgentRepository: Send + Sync {
     async fn get_user_total_spending(&self, user_id: UserId) -> anyhow::Result<i64>;
 }
 
-/// Service trait for OpenClaw business logic
+/// Service trait for agent business logic
 #[async_trait]
 pub trait AgentService: Send + Sync {
     // Instance management
