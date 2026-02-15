@@ -38,6 +38,7 @@ pub struct CreateInstanceRequest {
         (status = 201, description = "Instance created", body = InstanceResponse),
         (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 402, description = "Payment required - instance limit exceeded for plan", body = crate::error::ApiErrorResponse),
         (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
     ),
     security(("session_token" = []))
@@ -48,6 +49,76 @@ pub async fn create_instance(
     Json(request): Json<CreateInstanceRequest>,
 ) -> Result<(StatusCode, Json<InstanceResponse>), ApiError> {
     tracing::info!("Creating agent instance: user_id={}", user.user_id);
+
+    // Get user's active subscriptions
+    let subscriptions = app_state
+        .subscription_service
+        .get_user_subscriptions(user.user_id, true) // active_only = true
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to fetch subscriptions: user_id={}, error={}",
+                user.user_id,
+                e
+            );
+            ApiError::internal_server_error("Failed to check subscription")
+        })?;
+
+    // Get system configs for subscription plans
+    let system_configs = app_state
+        .system_configs_service
+        .get_configs()
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to fetch system configs: user_id={}, error={}",
+                user.user_id,
+                e
+            );
+            ApiError::internal_server_error("Failed to check plan limits")
+        })?;
+
+    // Check agent instance limit from subscription plan
+    if let (Some(active_sub), Some(configs)) = (subscriptions.first(), system_configs) {
+        if let Some(plan_configs) = &configs.subscription_plans {
+            if let Some(plan_config) = plan_configs.get(&active_sub.plan) {
+                if let Some(agent_limit) = &plan_config.agent_instances {
+                    // Count user's existing instances
+                    let (instances, _) = app_state
+                        .agent_service
+                        .list_instances(user.user_id, 1000, 0) // Get all instances
+                        .await
+                        .map_err(|e| {
+                            tracing::error!(
+                                "Failed to count instances: user_id={}, error={}",
+                                user.user_id,
+                                e
+                            );
+                            ApiError::internal_server_error("Failed to check instance count")
+                        })?;
+
+                    let current_count = instances.len() as u64;
+                    if current_count >= agent_limit.max {
+                        tracing::warn!(
+                            "Agent instance limit exceeded: user_id={}, current={}, max={}, plan={}",
+                            user.user_id,
+                            current_count,
+                            agent_limit.max,
+                            active_sub.plan
+                        );
+                        return Err(ApiError::new(
+                            axum::http::StatusCode::PAYMENT_REQUIRED,
+                            "payment_required",
+                            format!(
+                                "Agent instance limit of {} reached for your plan",
+                                agent_limit.max
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+    }
 
     let instance = app_state
         .agent_service

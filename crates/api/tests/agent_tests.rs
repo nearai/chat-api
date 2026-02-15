@@ -2,6 +2,7 @@ mod common;
 
 use common::{create_test_server_and_db, mock_login};
 use serde_json::json;
+use services::agent::ports::{AgentRepository, CreateInstanceParams};
 use uuid::Uuid;
 
 /// Test creating an Agent instance (as admin or regular user)
@@ -228,5 +229,106 @@ async fn test_get_instance_usage_requires_auth() {
         response.status_code(),
         401,
         "Should require authentication to get usage"
+    );
+}
+
+/// Test agent instance limit validation with subscription plans
+/// Tests that the limit is enforced when user reaches max instances
+#[tokio::test]
+async fn test_create_instance_respects_agent_instance_limit_max_1() {
+    let (server, db) = create_test_server_and_db(Default::default()).await;
+
+    let user_email = "limit_test_user_max1@example.com";
+    let user_token = mock_login(&server, user_email).await;
+
+    // Set up subscription with agent_instances limit of 1
+    // NOTE: insert_test_subscription uses price_id "price_test_basic"
+    common::set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": {
+                    "stripe": {
+                        "price_id": "price_test_basic"
+                    }
+                },
+                "monthly_tokens": {
+                    "max": 10000000
+                },
+                "agent_instances": {
+                    "max": 1
+                }
+            }
+        }),
+    )
+    .await;
+
+    // Create a subscription for the user
+    common::insert_test_subscription(&server, &db, user_email, false).await;
+
+    // Get user to get their user_id
+    let user_response = server
+        .get("/v1/users/me")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .await;
+    let user_body: serde_json::Value = user_response.json();
+    let user_id_str: String = user_body
+        .get("user")
+        .and_then(|u| u.get("id"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .expect("User should have id");
+    let user_id = Uuid::parse_str(&user_id_str).expect("Valid user_id");
+
+    // Create first instance directly in database
+    let agent_repo = db.agent_repository();
+    let unique_id = Uuid::new_v4();
+    let first_instance = agent_repo
+        .create_instance(CreateInstanceParams {
+            user_id: services::UserId(user_id),
+            instance_id: format!("agent-test-max1-{}", unique_id),
+            name: "Test Instance 1".to_string(),
+            public_ssh_key: None,
+            instance_url: Some("http://localhost:8000".to_string()),
+            instance_token: Some("token1".to_string()),
+            gateway_port: None,
+            dashboard_url: None,
+        })
+        .await
+        .expect("Should create first instance");
+
+    tracing::info!("Created first instance: {}", first_instance.id);
+
+    // Try to create second instance via API (should be rejected with 402)
+    let response2 = server
+        .post("/v1/agents/instances")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .json(&json!({
+            "nearai_api_key": "test_api_key",
+            "name": "instance-2"
+        }))
+        .await;
+
+    assert_eq!(
+        response2.status_code(),
+        402,
+        "Second instance should be rejected with 402 Payment Required due to instance limit"
+    );
+
+    let error_body: serde_json::Value = response2.json();
+    let error_message = error_body
+        .get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    assert!(
+        error_message.contains("limit"),
+        "Error message should mention limit, got: {}",
+        error_message
     );
 }
