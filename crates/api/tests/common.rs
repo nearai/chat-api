@@ -25,6 +25,9 @@ static MIGRATIONS_INITIALIZED: OnceCell<()> = OnceCell::const_new();
 pub struct TestServerConfig {
     pub vpc_credentials: Option<VpcCredentials>,
     pub cloud_api_base_url: String,
+    /// Override for the LLM proxy's upstream base URL (e.g. WireMock for tests).
+    /// When set, proxy forwards to this URL instead of config.openai.base_url.
+    pub proxy_base_url: Option<String>,
     /// Optional override for `/v1/responses` rate limiting in tests.
     ///
     /// If not set, tests use a permissive default to avoid unrelated flakiness.
@@ -150,7 +153,11 @@ pub async fn create_test_server_and_db(
     // Initialize OpenAI proxy service
     let mut proxy_service =
         services::response::service::OpenAIProxy::new(vpc_credentials_service.clone());
-    if let Some(base_url) = config.openai.base_url.clone() {
+    let proxy_base_url = test_config
+        .proxy_base_url
+        .clone()
+        .or_else(|| config.openai.base_url.clone());
+    if let Some(base_url) = proxy_base_url {
         proxy_service = proxy_service.with_base_url(base_url);
     }
     let proxy_service = Arc::new(proxy_service);
@@ -390,7 +397,7 @@ pub async fn cleanup_user_subscriptions(db: &database::Database, user_email: &st
 }
 
 /// Set subscription_plans configuration
-/// plans should be in format: { "plan_name": { "providers": { "stripe": { "price_id": "price_xxx" } }, "private_assistant_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } } }
+/// plans should be in format: { "plan_name": { "providers": { "stripe": { "price_id": "price_xxx" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } } }
 pub async fn set_subscription_plans(server: &TestServer, plans: serde_json::Value) {
     let admin_email = "test_setup_admin@admin.org";
     let admin_token = mock_login(server, admin_email).await;

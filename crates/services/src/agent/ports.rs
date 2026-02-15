@@ -119,6 +119,13 @@ pub trait AgentRepository: Send + Sync {
         offset: i64,
     ) -> anyhow::Result<(Vec<AgentInstance>, i64)>;
 
+    /// List all instances (admin only); no user filter
+    async fn list_all_instances(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> anyhow::Result<(Vec<AgentInstance>, i64)>;
+
     async fn update_instance(
         &self,
         instance_id: Uuid,
@@ -211,6 +218,13 @@ pub trait AgentService: Send + Sync {
         user_id: UserId,
     ) -> anyhow::Result<Vec<AgentInstance>>;
 
+    /// List all instances from DB (admin only); correct user_id per instance
+    async fn list_all_instances(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> anyhow::Result<(Vec<AgentInstance>, i64)>;
+
     async fn create_instance_from_agent_api(
         &self,
         user_id: UserId,
@@ -282,6 +296,13 @@ pub trait AgentService: Send + Sync {
         api_key_id: Uuid,
         instance_id: Uuid,
         user_id: UserId,
+    ) -> anyhow::Result<AgentApiKey>;
+
+    /// Admin: Bind any unbound API key to any instance (no ownership checks).
+    async fn admin_bind_api_key_to_instance(
+        &self,
+        api_key_id: Uuid,
+        instance_id: Uuid,
     ) -> anyhow::Result<AgentApiKey>;
 
     async fn list_api_keys(

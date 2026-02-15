@@ -31,7 +31,6 @@ use services::metrics::consts::{
     METRIC_CONVERSATION_CREATED, METRIC_FILE_UPLOADED, METRIC_RESPONSE_CREATED,
 };
 use services::response::ports::ProxyResponse;
-use services::subscription::ports::SubscriptionError;
 use services::user::ports::{BanType, OAuthProvider};
 use services::UserId;
 use std::io::Read;
@@ -96,11 +95,48 @@ pub fn create_optional_auth_router() -> Router<crate::state::AppState> {
         )
 }
 
-/// Create the OpenAI API proxy router (requires authentication)
+/// Create the unified API router with all v1 proxy and API routes.
+///
+/// Route groups and their middleware:
+/// - Chat completions, images, responses: dual auth + subscription + rate limited
+/// - Model list, models, signature: dual auth only (not rate limited)
+/// - Conversations, share groups, files: session auth only
 pub fn create_api_router(
     rate_limit_state: crate::middleware::RateLimitState,
+    dual_auth_state: crate::middleware::DualAuthState,
+    auth_state: crate::middleware::AuthState,
+    subscription_state: crate::middleware::SubscriptionState,
 ) -> Router<crate::state::AppState> {
-    // Conversation routes that require authentication
+    // Dual auth + subscription + rate limited: chat completions, images, responses
+    let llm_proxy_router = Router::new()
+        .route("/v1/chat/completions", post(proxy_chat_completions))
+        .route("/v1/images/generations", post(proxy_image_generations))
+        .route("/v1/images/edits", post(proxy_image_edits))
+        .route("/v1/responses", post(proxy_responses))
+        .layer(axum::middleware::from_fn_with_state(
+            rate_limit_state.clone(),
+            crate::middleware::rate_limit_middleware,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            subscription_state,
+            crate::middleware::subscription_middleware,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            dual_auth_state.clone(),
+            crate::middleware::dual_auth_middleware,
+        ));
+
+    // Dual auth only (not rate limited): model list, models, signature
+    let models_proxy_router = Router::new()
+        .route("/v1/model/list", get(proxy_model_list))
+        .route("/v1/models", get(proxy_models))
+        .route("/v1/signature/{chat_id}", get(proxy_signature))
+        .layer(axum::middleware::from_fn_with_state(
+            dual_auth_state,
+            crate::middleware::dual_auth_middleware,
+        ));
+
+    // Session auth only: conversations, share groups, files
     let conversations_router = Router::new()
         .route(
             "/v1/conversations",
@@ -151,35 +187,19 @@ pub fn create_api_router(
         .route("/v1/files/{file_id}", get(get_file).delete(delete_file))
         .route("/v1/files/{file_id}/content", get(get_file_content));
 
-    let responses_router = Router::new()
-        .route("/v1/responses", post(proxy_responses))
-        .layer(axum::middleware::from_fn_with_state(
-            rate_limit_state.clone(),
-            crate::middleware::rate_limit_middleware,
-        ));
-
-    // Completion routes (chat completions, image generation) with rate limiting
-    let completions_router = Router::new()
-        .route("/v1/chat/completions", post(proxy_chat_completions))
-        .route("/v1/images/generations", post(proxy_image_generations))
-        .route("/v1/images/edits", post(proxy_image_edits))
-        .layer(axum::middleware::from_fn_with_state(
-            rate_limit_state,
-            crate::middleware::rate_limit_middleware,
-        ));
-
-    let proxy_router = Router::new()
-        .route("/v1/model/list", get(proxy_model_list))
-        .route("/v1/models", get(proxy_models))
-        .route("/v1/signature/{chat_id}", get(proxy_signature));
-
-    Router::new()
+    let session_auth_routes = Router::new()
         .merge(conversations_router)
         .merge(share_groups_router)
         .merge(files_router)
-        .merge(responses_router)
-        .merge(completions_router)
-        .merge(proxy_router)
+        .layer(axum::middleware::from_fn_with_state(
+            auth_state,
+            crate::middleware::auth_middleware,
+        ));
+
+    Router::new()
+        .merge(llm_proxy_router)
+        .merge(models_proxy_router)
+        .merge(session_auth_routes)
 }
 
 /// Type of resource to track in the response
@@ -2221,7 +2241,6 @@ async fn proxy_responses(
 
     // Check if user is currently banned before proceeding
     ensure_user_not_banned(&state, &user).await?;
-    ensure_user_has_sufficient_token_quota(&state, &user).await?;
 
     // Trigger an asynchronous NEAR balance check. This does NOT block the current request:
     // if the balance is too low, a ban will be created and will affect subsequent requests.
@@ -2700,66 +2719,6 @@ async fn ensure_user_not_banned(
     }
 
     Ok(())
-}
-
-/// Ensure the authenticated user has sufficient token quota in their subscription for proxy/chat access.
-/// When subscription plans are configured, users without a plan or over their monthly limit get 403.
-async fn ensure_user_has_sufficient_token_quota(
-    state: &crate::state::AppState,
-    user: &AuthenticatedUser,
-) -> Result<(), Response> {
-    match state
-        .subscription_service
-        .require_subscription_for_proxy(user.user_id)
-        .await
-    {
-        Ok(()) => Ok(()),
-        Err(SubscriptionError::NoActiveSubscription) => {
-            tracing::info!(
-                "Blocked proxy access for user_id={}: no active subscription",
-                user.user_id
-            );
-            Err((
-                StatusCode::FORBIDDEN,
-                Json(ErrorResponse {
-                    error: SUBSCRIPTION_REQUIRED_ERROR_MESSAGE.to_string(),
-                }),
-            )
-                .into_response())
-        }
-        Err(SubscriptionError::MonthlyTokenLimitExceeded { used, limit }) => {
-            tracing::info!(
-                "Blocked proxy access for user_id={}: monthly token limit exceeded (used {} of {})",
-                user.user_id,
-                used,
-                limit
-            );
-            Err((
-                StatusCode::PAYMENT_REQUIRED,
-                Json(ErrorResponse {
-                    error: format!(
-                        "{} You have used {} of {} tokens this period.",
-                        MONTHLY_TOKEN_LIMIT_EXCEEDED_MESSAGE, used, limit
-                    ),
-                }),
-            )
-                .into_response())
-        }
-        Err(e) => {
-            tracing::error!(
-                "Failed to check subscription status for user_id={}: {}",
-                user.user_id,
-                e
-            );
-            Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Failed to verify subscription status".to_string(),
-                }),
-            )
-                .into_response())
-        }
-    }
 }
 
 /// Spawn an asynchronous NEAR balance check task.
@@ -3492,7 +3451,6 @@ async fn proxy_chat_completions(
     );
 
     ensure_user_not_banned(&state, &user).await?;
-    ensure_user_has_sufficient_token_quota(&state, &user).await?;
     spawn_near_balance_check(&state, &user);
 
     let body_bytes = extract_body_bytes(request).await?;
@@ -3630,7 +3588,6 @@ async fn proxy_image_generations(
     );
 
     ensure_user_not_banned(&state, &user).await?;
-    ensure_user_has_sufficient_token_quota(&state, &user).await?;
     spawn_near_balance_check(&state, &user);
 
     let body_bytes = extract_body_bytes(request).await?;
@@ -3814,7 +3771,6 @@ async fn proxy_image_edits(
     );
 
     ensure_user_not_banned(&state, &user).await?;
-    ensure_user_has_sufficient_token_quota(&state, &user).await?;
     spawn_near_balance_check(&state, &user);
 
     // Read full multipart body as bytes (to keep original formdata for forwarding).

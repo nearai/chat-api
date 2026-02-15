@@ -33,6 +33,14 @@ pub struct AgentAuthState {
     pub agent_repository: Arc<dyn services::agent::ports::AgentRepository>,
 }
 
+/// Combined state for dual auth (session OR agent API key).
+/// Used by endpoints that accept either: chat completions, image generation/edit, responses.
+#[derive(Clone)]
+pub struct DualAuthState {
+    pub auth_state: AuthState,
+    pub agent_auth_state: AgentAuthState,
+}
+
 /// State for authentication middleware
 #[derive(Clone)]
 pub struct AuthState {
@@ -46,6 +54,26 @@ fn hash_session_token(token: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(token.as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+/// Extract raw Bearer token from Authorization header (no format validation)
+fn extract_bearer_token_raw(request: &Request) -> Result<String, ApiError> {
+    let auth_header = request
+        .headers()
+        .get("authorization")
+        .and_then(|h| h.to_str().ok());
+
+    let auth_value = auth_header.ok_or_else(|| {
+        tracing::warn!("No authorization header found");
+        ApiError::missing_auth_header()
+    })?;
+
+    let token = auth_value.strip_prefix("Bearer ").ok_or_else(|| {
+        tracing::warn!("Authorization header does not start with 'Bearer '");
+        ApiError::invalid_auth_header()
+    })?;
+
+    Ok(token.to_string())
 }
 
 /// Extract and validate token from Authorization header
@@ -388,115 +416,78 @@ fn hash_api_key(key: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-/// Agent API key authentication middleware
-pub async fn agent_api_key_middleware(
-    State(state): State<AgentAuthState>,
+/// Dual auth middleware: accepts either session token OR agent API key.
+/// Agents use Bearer ag_xxxxx; users use Bearer sess_xxxxx.
+/// Used by chat completions, image generation/edit, and responses endpoints.
+pub async fn dual_auth_middleware(
+    State(state): State<DualAuthState>,
     mut request: Request,
     next: Next,
 ) -> Result<Response, Response> {
-    let path = request.uri().path().to_string();
-    let method = request.method().clone();
+    let token = extract_bearer_token_raw(&request).map_err(|e| e.into_response())?;
 
-    tracing::info!(
-        "Agent API key auth middleware invoked for {} {}",
-        method,
-        path
-    );
+    if token.starts_with("ag_") {
+        // Agent API key auth
+        let api_key =
+            extract_agent_api_key_from_request(&request).map_err(|e| e.into_response())?;
+        let key_hash = hash_api_key(&api_key);
 
-    let api_key = extract_agent_api_key_from_request(&request).map_err(|e| e.into_response())?;
+        let (instance, api_key_info) = state
+            .agent_auth_state
+            .agent_repository
+            .get_instance_by_api_key_hash(&key_hash)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to get API key from repository: {}", e);
+                ApiError::internal_server_error("Failed to authenticate API key").into_response()
+            })?
+            .ok_or_else(|| {
+                tracing::warn!("Agent API key not found or inactive");
+                ApiError::invalid_token().into_response()
+            })?;
 
-    // Hash the API key for lookup
-    let key_hash = hash_api_key(&api_key);
-    tracing::debug!(
-        "Agent API key hashed, hash prefix: {}...",
-        &key_hash.chars().take(16).collect::<String>()
-    );
-
-    // Get instance and API key info from repository
-    let (instance, api_key_info) = state
-        .agent_repository
-        .get_instance_by_api_key_hash(&key_hash)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to get API key from repository: {}", e);
-            ApiError::internal_server_error("Failed to authenticate API key").into_response()
-        })?
-        .ok_or_else(|| {
-            tracing::warn!("Agent API key not found or inactive");
-            ApiError::invalid_token().into_response()
-        })?;
-
-    // Check if key is expired
-    if let Some(expires_at) = api_key_info.expires_at {
-        let now = Utc::now();
-        if expires_at < now {
-            tracing::warn!(
-                "Agent API key expired: api_key_id={}, expired_at={}",
-                api_key_info.id,
-                expires_at
-            );
-            return Err(ApiError::invalid_token().into_response());
+        if let Some(expires_at) = api_key_info.expires_at {
+            if expires_at < Utc::now() {
+                return Err(ApiError::invalid_token().into_response());
+            }
         }
+
+        if instance.instance_url.is_none() || instance.instance_token.is_none() {
+            return Err(
+                ApiError::internal_server_error("Instance not properly configured").into_response(),
+            );
+        }
+
+        let _ = state
+            .agent_auth_state
+            .agent_repository
+            .update_api_key_last_used(api_key_info.id)
+            .await;
+
+        let authenticated_api_key = AuthenticatedApiKey {
+            api_key_info: api_key_info.clone(),
+            instance,
+        };
+
+        let mut hasher = Sha256::new();
+        hasher.update(api_key_info.id.as_bytes());
+        let hash = hasher.finalize();
+        let mut uuid_bytes = [0u8; 16];
+        uuid_bytes.copy_from_slice(&hash[..16]);
+        let authenticated_user = AuthenticatedUser {
+            user_id: api_key_info.user_id,
+            session_id: SessionId(uuid::Uuid::from_bytes(uuid_bytes)),
+        };
+
+        request.extensions_mut().insert(authenticated_api_key);
+        request.extensions_mut().insert(authenticated_user);
+    } else {
+        // Session auth
+        let user = authenticate_token_string(token, &state.auth_state)
+            .await
+            .map_err(|e| e.into_response())?;
+        request.extensions_mut().insert(user);
     }
 
-    // Validate instance has required connection info
-    if instance.instance_url.is_none() || instance.instance_token.is_none() {
-        tracing::warn!(
-            "Agent instance missing connection info: instance_id={}",
-            instance.id
-        );
-        return Err(
-            ApiError::internal_server_error("Instance not properly configured").into_response(),
-        );
-    }
-
-    // Update last_used_at timestamp
-    if let Err(e) = state
-        .agent_repository
-        .update_api_key_last_used(api_key_info.id)
-        .await
-    {
-        tracing::error!(
-            "Failed to update API key last_used_at: api_key_id={}, error={}",
-            api_key_info.id,
-            e
-        );
-        // Continue despite this error
-    }
-
-    tracing::info!(
-        "Agent API key authenticated: user_id={}, instance_id={}, api_key_id={}",
-        api_key_info.user_id,
-        instance.id,
-        api_key_info.id
-    );
-
-    // Create authenticated API key info
-    let authenticated_api_key = AuthenticatedApiKey {
-        api_key_info: api_key_info.clone(),
-        instance,
-    };
-
-    // Also insert AuthenticatedUser for rate limiting to work.
-    // Derive a deterministic session ID from the API key ID so that
-    // requests authenticated with the same API key share a stable logical session identifier.
-    let mut hasher = Sha256::new();
-    hasher.update(api_key_info.id.as_bytes());
-    let hash = hasher.finalize();
-    let mut uuid_bytes = [0u8; 16];
-    uuid_bytes.copy_from_slice(&hash[..16]);
-    let authenticated_user = AuthenticatedUser {
-        user_id: api_key_info.user_id,
-        session_id: SessionId(uuid::Uuid::from_bytes(uuid_bytes)),
-    };
-
-    request.extensions_mut().insert(authenticated_api_key);
-    request.extensions_mut().insert(authenticated_user);
-
-    let response = next.run(request).await;
-    tracing::debug!(
-        "Agent API key request completed with status: {}",
-        response.status()
-    );
-    Ok(response)
+    Ok(next.run(request).await)
 }

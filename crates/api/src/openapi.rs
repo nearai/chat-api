@@ -88,21 +88,22 @@ use utoipa::OpenApi;
         // Agent endpoints
         crate::routes::agents::list_instances,
         crate::routes::agents::get_instance,
-        crate::routes::agents::admin_list_all_instances,
-        crate::routes::agents::admin_create_instance,
-        crate::routes::agents::admin_delete_instance,
+        crate::routes::admin::admin_list_all_instances,
+        crate::routes::admin::admin_create_instance,
+        crate::routes::admin::admin_delete_instance,
         crate::routes::agents::start_instance,
         crate::routes::agents::stop_instance,
         crate::routes::agents::restart_instance,
-        crate::routes::agents::admin_create_backup,
-        crate::routes::agents::admin_list_backups,
-        crate::routes::agents::admin_get_backup,
+        crate::routes::admin::admin_create_backup,
+        crate::routes::admin::admin_list_backups,
+        crate::routes::admin::admin_get_backup,
+        crate::routes::admin::admin_create_unbound_api_key,
+        crate::routes::admin::admin_bind_api_key_to_instance,
         crate::routes::agents::create_api_key,
         crate::routes::agents::list_api_keys,
         crate::routes::agents::revoke_api_key,
         crate::routes::agents::get_instance_usage,
         crate::routes::agents::get_instance_balance,
-        crate::routes::agents::agent_chat_completions,
     ),
     components(schemas(
         // Request/Response models
@@ -167,9 +168,11 @@ use utoipa::OpenApi;
         crate::models::CombinedAttestationReport,
         // Agent models
         crate::models::InstanceResponse,
-        crate::routes::agents::AdminCreateInstanceRequest,
+        crate::routes::admin::AdminCreateInstanceRequest,
+        crate::routes::admin::AdminCreateApiKeyRequest,
         crate::models::CreateApiKeyRequest,
         crate::models::CreateApiKeyResponse,
+        crate::models::BindApiKeyRequest,
         crate::models::ApiKeyResponse,
         crate::models::UsageResponse,
         crate::models::BalanceResponse,
@@ -185,11 +188,10 @@ use utoipa::OpenApi;
         (name = "Files", description = "File management endpoints"),
         (name = "Proxy", description = "Proxy endpoints for OpenAI-compatible APIs"),
         (name = "Subscriptions", description = "Subscription management endpoints"),
+        (name = "Agents", description = "Agent instance management endpoints"),
         (name = "Admin", description = "Admin management endpoints"),
         (name = "Configs", description = "System configuration endpoints"),
-        (name = "Agents", description = "Agent instance management endpoints"),
-        (name = "Admin Agents", description = "Admin-only agent management endpoints"),
-        (name = "attestation", description = "Attestation reporting endpoints for TEE verification")
+        (name = "Attestation", description = "Attestation reporting endpoints for TEE verification")
     )
 )]
 pub struct ApiDoc;

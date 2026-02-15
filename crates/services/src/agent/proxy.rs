@@ -159,7 +159,24 @@ impl AgentProxyService for AgentProxy {
         })?;
 
         let status = response.status();
-        let response_headers = response.headers().clone();
+        let raw_headers = response.headers().clone();
+
+        // Whitelist of safe response headers to avoid forwarding sensitive headers
+        // (e.g. Set-Cookie) from a compromised or malicious agent instance
+        const SAFE_RESPONSE_HEADERS: &[&str] = &[
+            "content-type",
+            "content-length",
+            "content-disposition",
+            "cache-control",
+            "content-encoding",
+        ];
+        let mut response_headers = HeaderMap::new();
+        for (name, value) in raw_headers.iter() {
+            let name_lower = name.as_str().to_lowercase();
+            if SAFE_RESPONSE_HEADERS.contains(&name_lower.as_str()) {
+                response_headers.insert(name.clone(), value.clone());
+            }
+        }
 
         // Create a stream of the response body
         let stream = response.bytes_stream();

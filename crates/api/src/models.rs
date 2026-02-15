@@ -641,7 +641,7 @@ pub struct UpsertSystemConfigsRequest {
     /// Rate limit configuration
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate_limit: Option<RateLimitConfig>,
-    /// Subscription plan configurations (plan name -> config with providers, private_assistant_instances, monthly_tokens)
+    /// Subscription plan configurations (plan name -> config with providers, agent_instances, monthly_tokens)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subscription_plans: Option<HashMap<String, SubscriptionPlanConfig>>,
 }
