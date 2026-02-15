@@ -107,14 +107,13 @@ pub fn create_dual_auth_proxy_router(
         .route("/v1/images/generations", post(proxy_image_generations))
         .route("/v1/images/edits", post(proxy_image_edits))
         .route("/v1/responses", post(proxy_responses))
-        // First layer added = runs first. dual_auth must run before rate_limit to set AuthenticatedUser.
-        .layer(axum::middleware::from_fn_with_state(
-            dual_auth_state,
-            crate::middleware::dual_auth_middleware,
-        ))
         .layer(axum::middleware::from_fn_with_state(
             rate_limit_state,
             crate::middleware::rate_limit_middleware,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            dual_auth_state,
+            crate::middleware::dual_auth_middleware,
         ))
 }
 
