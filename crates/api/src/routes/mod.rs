@@ -148,8 +148,6 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         crate::middleware::optional_auth_middleware,
     ));
 
-    // Dual auth proxy routes (session OR agent API key): chat completions, images, responses
-    // Must be merged before api_routes so it handles these endpoints
     let dual_auth_state = crate::middleware::DualAuthState {
         auth_state: auth_state.clone(),
         agent_auth_state: crate::middleware::AgentAuthState {
@@ -157,14 +155,9 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
             agent_repository: app_state.agent_repository.clone(),
         },
     };
-    let dual_auth_proxy_routes =
-        api::create_dual_auth_proxy_router(rate_limit_state.clone(), dual_auth_state);
 
-    // API proxy routes (requires authentication)
-    let api_routes = api::create_api_router().layer(from_fn_with_state(
-        auth_state,
-        crate::middleware::auth_middleware,
-    ));
+    // API routes: llm proxy (dual auth + rate limit), models proxy (dual auth), session routes
+    let api_routes = api::create_api_router(rate_limit_state, dual_auth_state, auth_state);
 
     // Build the base router
     // Note: optional_auth_routes must come BEFORE api_routes since they share paths
@@ -180,8 +173,7 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         .nest("/v1/agents", agent_routes) // Agent routes (requires user auth)
         .nest("/v1/admin", admin_routes)
         .merge(optional_auth_routes) // Conversation read routes (optional auth)
-        .merge(dual_auth_proxy_routes) // Chat completions, images, responses: session OR Bearer ag_<api_key>
-        .merge(api_routes) // API routes (required auth)
+        .merge(api_routes) // API routes: llm proxy, models proxy, conversations, share groups, files
         .merge(attestation_routes) // Merge attestation routes (already have /v1 prefix)
         .with_state(app_state)
         // Add static file serving as fallback (must be last)

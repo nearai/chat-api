@@ -96,30 +96,43 @@ pub fn create_optional_auth_router() -> Router<crate::state::AppState> {
         )
 }
 
-/// Create the dual auth proxy router: chat completions, image generation/edit, responses.
-/// Accepts session token OR agent API key. Must be merged before api_routes.
-pub fn create_dual_auth_proxy_router(
+/// Create the unified API router with all v1 proxy and API routes.
+///
+/// Route groups and their middleware:
+/// - Chat completions, images, responses: dual auth (session or agent API key) + rate limited
+/// - Model list, models, signature: dual auth only (not rate limited)
+/// - Conversations, share groups, files: session auth only
+pub fn create_api_router(
     rate_limit_state: crate::middleware::RateLimitState,
     dual_auth_state: crate::middleware::DualAuthState,
+    auth_state: crate::middleware::AuthState,
 ) -> Router<crate::state::AppState> {
-    Router::new()
+    // Dual auth + rate limited: chat completions, images, responses
+    let llm_proxy_router = Router::new()
         .route("/v1/chat/completions", post(proxy_chat_completions))
         .route("/v1/images/generations", post(proxy_image_generations))
         .route("/v1/images/edits", post(proxy_image_edits))
         .route("/v1/responses", post(proxy_responses))
         .layer(axum::middleware::from_fn_with_state(
-            rate_limit_state,
+            rate_limit_state.clone(),
             crate::middleware::rate_limit_middleware,
         ))
         .layer(axum::middleware::from_fn_with_state(
+            dual_auth_state.clone(),
+            crate::middleware::dual_auth_middleware,
+        ));
+
+    // Dual auth only (not rate limited): model list, models, signature
+    let models_proxy_router = Router::new()
+        .route("/v1/model/list", get(proxy_model_list))
+        .route("/v1/models", get(proxy_models))
+        .route("/v1/signature/{chat_id}", get(proxy_signature))
+        .layer(axum::middleware::from_fn_with_state(
             dual_auth_state,
             crate::middleware::dual_auth_middleware,
-        ))
-}
+        ));
 
-/// Create the OpenAI API proxy router (requires authentication)
-pub fn create_api_router() -> Router<crate::state::AppState> {
-    // Conversation routes that require authentication
+    // Session auth only: conversations, share groups, files
     let conversations_router = Router::new()
         .route(
             "/v1/conversations",
@@ -170,18 +183,19 @@ pub fn create_api_router() -> Router<crate::state::AppState> {
         .route("/v1/files/{file_id}", get(get_file).delete(delete_file))
         .route("/v1/files/{file_id}/content", get(get_file_content));
 
-    // Chat completions, images, responses are served by dual-auth proxy router in mod.rs
-
-    let proxy_router = Router::new()
-        .route("/v1/model/list", get(proxy_model_list))
-        .route("/v1/models", get(proxy_models))
-        .route("/v1/signature/{chat_id}", get(proxy_signature));
-
-    Router::new()
+    let session_auth_routes = Router::new()
         .merge(conversations_router)
         .merge(share_groups_router)
         .merge(files_router)
-        .merge(proxy_router)
+        .layer(axum::middleware::from_fn_with_state(
+            auth_state,
+            crate::middleware::auth_middleware,
+        ));
+
+    Router::new()
+        .merge(llm_proxy_router)
+        .merge(models_proxy_router)
+        .merge(session_auth_routes)
 }
 
 /// Type of resource to track in the response
