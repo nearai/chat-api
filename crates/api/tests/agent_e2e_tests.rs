@@ -1,8 +1,9 @@
 mod common;
 
-use common::{create_test_server_and_db, mock_login};
+use common::{create_test_server_and_db, mock_login, TestServerConfig};
 use serde_json::json;
 use uuid::Uuid;
+use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
 
 /// E2E test for complete Agent workflow:
 /// 1. Admin creates instance for user
@@ -13,13 +14,24 @@ use uuid::Uuid;
 /// 6. Verify usage and isolation
 #[tokio::test]
 async fn test_agent_complete_workflow() {
-    // Initialize tracing so RUST_LOG=debug shows middleware logs
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .with_test_writer()
-        .try_init();
+    // Mock LLM API so chat completions returns 200 (avoids upstream 401 with mock-api-key)
+    let mock_llm = MockServer::start().await;
+    let mock_body = json!({
+        "id": "chatcmpl-test",
+        "object": "chat.completion",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "Hi"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+    });
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(mock_body))
+        .mount(&mock_llm)
+        .await;
 
-    let (server, db) = create_test_server_and_db(Default::default()).await;
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        proxy_base_url: Some(format!("{}/v1", mock_llm.uri())),
+        ..Default::default()
+    })
+    .await;
 
     // 1. Create users: admin and regular user
     let admin_email = "admin@admin.org";
@@ -173,8 +185,8 @@ async fn test_agent_complete_workflow() {
         .expect("Should have items array");
     assert_eq!(keys.len(), 1, "Should have one API key");
 
-    // 8. Attempt chat completion with API key (agents call /v1/chat/completions with API key)
-    // Will fail because instance doesn't actually exist, but confirms auth works
+    // 8. Chat completion with API key (agents call /v1/chat/completions with API key)
+    // LLM API is mocked to return 200; verifies auth passes and request is forwarded
     let chat_response = server
         .post("/v1/chat/completions")
         .add_header(
@@ -190,10 +202,10 @@ async fn test_agent_complete_workflow() {
         }))
         .await;
 
-    assert_ne!(
+    assert_eq!(
         chat_response.status_code(),
-        401,
-        "Auth should pass with valid API key"
+        200,
+        "Auth should pass with valid API key and mocked LLM should return 200"
     );
 
     // 9. Verify API key isolation: non-owner user cannot use this key

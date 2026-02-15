@@ -113,7 +113,7 @@ pub fn create_dual_auth_proxy_router(
         ))
         .layer(axum::middleware::from_fn_with_state(
             dual_auth_state,
-            crate::middleware::dual_auth_middleware,
+            crate::middleware::llm_api_auth_middleware,
         ))
 }
 
