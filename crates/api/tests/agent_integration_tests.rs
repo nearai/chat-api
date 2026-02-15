@@ -216,10 +216,10 @@ async fn test_agent_real_api_instance_creation() {
         );
     }
 
-    // 9. Attempt chat completion with API key
+    // 9. Attempt chat completion with API key (agents call /v1/chat/completions with API key)
     println!("\n🚀 Attempting inference with API key...");
     let chat_response = server
-        .post("/v1/agents/chat/completions")
+        .post("/v1/chat/completions")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {api_key}")).unwrap(),

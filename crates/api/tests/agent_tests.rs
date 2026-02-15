@@ -105,20 +105,18 @@ async fn test_create_api_key_requires_auth() {
 // Real e2e flow tests that would demonstrate the complete user and admin flows:
 //
 // 1. Admin Creates Instance:
-//    POST /v1/agents/instances with Agent API credentials
+//    POST /v1/admin/agents/instances with user_id and Agent API credentials
 //    → Creates instance record with instance_url, instance_token, etc.
-//    → Can list instances via GET /v1/agents/instances
+//    → User lists instances via GET /v1/agents/instances
 //
 // 2. User Creates API Key:
 //    POST /v1/agents/instances/{id}/keys with name
 //    → Returns API key in ag_xxxxx format
 //    → Can revoke key via DELETE /v1/agents/keys/{key_id}
 //
-// 3. User Uses Chat Completions:
-//    POST /v1/agents/chat/completions with Bearer ag_xxxxx
-//    → Middleware validates API key, looks up instance, checks auth
-//    → Proxy forwards request to instance_url with instance_token
-//    → Response streamed back to user
+// 3. Agent Uses Chat Completions:
+//    POST /v1/chat/completions with Bearer ag_xxxxx (API key auth)
+//    → API key validated, request proxied to instance
 //    → Usage tracked in agent_usage_log
 //
 // 4. User Monitors Usage:

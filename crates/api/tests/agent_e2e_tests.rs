@@ -7,10 +7,10 @@ use uuid::Uuid;
 /// E2E test for complete Agent workflow:
 /// 1. Admin creates instance for user
 /// 2. User retrieves instance
-/// 3. Admin stops instance
-/// 4. Admin starts instance
-/// 5. User calls inference with API key
-/// 6. Verify usage is captured
+/// 3. User stops/starts instance (user-endpoints)
+/// 4. User creates API key
+/// 5. Agent calls inference via /v1/chat/completions with API key
+/// 6. Verify usage and isolation
 #[tokio::test]
 async fn test_agent_complete_workflow() {
     let (server, db) = create_test_server_and_db(Default::default()).await;
@@ -167,9 +167,10 @@ async fn test_agent_complete_workflow() {
         .expect("Should have items array");
     assert_eq!(keys.len(), 1, "Should have one API key");
 
-    // 8. Attempt chat completion with API key (will fail without mocked instance)
+    // 8. Attempt chat completion with API key (agents call /v1/chat/completions with API key)
+    // Will fail because instance doesn't actually exist, but confirms auth works
     let chat_response = server
-        .post("/v1/agents/chat/completions")
+        .post("/v1/chat/completions")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {api_key}")).unwrap(),
@@ -183,7 +184,6 @@ async fn test_agent_complete_workflow() {
         }))
         .await;
 
-    // Will fail because instance doesn't actually exist, but confirms auth works
     assert_ne!(
         chat_response.status_code(),
         401,
