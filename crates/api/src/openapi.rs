@@ -187,11 +187,10 @@ use utoipa::OpenApi;
         (name = "Files", description = "File management endpoints"),
         (name = "Proxy", description = "Proxy endpoints for OpenAI-compatible APIs"),
         (name = "Subscriptions", description = "Subscription management endpoints"),
+        (name = "Agents", description = "Agent instance management endpoints"),
         (name = "Admin", description = "Admin management endpoints"),
         (name = "Configs", description = "System configuration endpoints"),
-        (name = "Agents", description = "Agent instance management endpoints"),
-        (name = "Admin Agents", description = "Admin-only agent management endpoints"),
-        (name = "attestation", description = "Attestation reporting endpoints for TEE verification")
+        (name = "Attestation", description = "Attestation reporting endpoints for TEE verification")
     )
 )]
 pub struct ApiDoc;

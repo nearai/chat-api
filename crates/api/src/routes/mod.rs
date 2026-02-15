@@ -168,6 +168,7 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         .nest("/v1/agents", agent_routes) // Agent routes (requires user auth)
         .nest("/v1/admin", admin_routes)
         .merge(optional_auth_routes) // Conversation read routes (optional auth)
+        // Agent chat completions: use POST /v1/chat/completions with Bearer <api_key>
         .merge(api_routes) // API routes (required auth)
         .merge(attestation_routes) // Merge attestation routes (already have /v1 prefix)
         .with_state(app_state)

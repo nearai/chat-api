@@ -211,6 +211,48 @@ impl AgentRepository for PostgresAgentRepository {
         Ok((instances, total))
     }
 
+    async fn list_all_instances(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> anyhow::Result<(Vec<AgentInstance>, i64)> {
+        let client = self.pool.get().await?;
+
+        let count_row = client
+            .query_one("SELECT COUNT(*) FROM agent_instances", &[])
+            .await?;
+        let total: i64 = count_row.get(0);
+
+        let rows = client
+            .query(
+                "SELECT id, user_id, instance_id, name, public_ssh_key, instance_url, instance_token, gateway_port, dashboard_url, created_at, updated_at
+                 FROM agent_instances
+                 ORDER BY created_at DESC
+                 LIMIT $1 OFFSET $2",
+                &[&limit, &offset],
+            )
+            .await?;
+
+        let instances = rows
+            .into_iter()
+            .map(|r| AgentInstance {
+                id: r.get(0),
+                user_id: r.get(1),
+                instance_id: r.get(2),
+                name: r.get(3),
+                public_ssh_key: r.get(4),
+                instance_url: r.get(5),
+                instance_token: r.get(6),
+                gateway_port: r.get(7),
+                dashboard_url: r.get(8),
+                created_at: r.get(9),
+                updated_at: r.get(10),
+            })
+            .collect();
+
+        Ok((instances, total))
+    }
+
     async fn update_instance(
         &self,
         instance_id: Uuid,

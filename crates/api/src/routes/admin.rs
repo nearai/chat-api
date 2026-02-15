@@ -1045,9 +1045,14 @@ pub struct AdminCreateInstanceRequest {
 #[utoipa::path(
     get,
     path = "/v1/admin/agents/instances",
-    tag = "Admin Agents",
+    tag = "Admin",
+    params(
+        ("limit" = Option<i64>, Query, description = "Maximum number of items to return (default: 20, max: 100)"),
+        ("offset" = Option<i64>, Query, description = "Number of items to skip (default: 0)")
+    ),
     responses(
-        (status = 200, description = "All instances retrieved", body = Vec<InstanceResponse>),
+        (status = 200, description = "All instances retrieved", body = PaginatedResponse<InstanceResponse>),
+        (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 403, description = "Forbidden - admin only", body = crate::error::ApiErrorResponse),
         (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
@@ -1057,27 +1062,40 @@ pub struct AdminCreateInstanceRequest {
 pub async fn admin_list_all_instances(
     State(app_state): State<AppState>,
     Extension(_user): Extension<AuthenticatedUser>,
-) -> Result<Json<Vec<InstanceResponse>>, ApiError> {
-    tracing::info!("Admin: Listing all agent instances");
+    Query(params): Query<PaginationQuery>,
+) -> Result<Json<PaginatedResponse<InstanceResponse>>, ApiError> {
+    tracing::info!(
+        "Admin: Listing all agent instances with limit={}, offset={}",
+        params.limit,
+        params.offset
+    );
 
-    let instances = app_state
+    params.validate()?;
+
+    // Use DB (agent_instances) for correct user_id per instance
+    let (instances, total) = app_state
         .agent_service
-        .list_instances_from_agent_api(_user.user_id)
+        .list_all_instances(params.limit, params.offset)
         .await
         .map_err(|e| {
             tracing::error!("Failed to list all instances: error={}", e);
             ApiError::internal_server_error("Failed to list instances")
         })?;
 
-    let response: Vec<InstanceResponse> = instances.into_iter().map(Into::into).collect();
-    Ok(Json(response))
+    let items: Vec<InstanceResponse> = instances.into_iter().map(Into::into).collect();
+    Ok(Json(PaginatedResponse {
+        items,
+        limit: params.limit,
+        offset: params.offset,
+        total,
+    }))
 }
 
 /// Admin endpoint: Create an agent instance for a specific user
 #[utoipa::path(
     post,
     path = "/v1/admin/agents/instances",
-    tag = "Admin Agents",
+    tag = "Admin",
     request_body = AdminCreateInstanceRequest,
     responses(
         (status = 201, description = "Instance created for user", body = InstanceResponse),
@@ -1129,11 +1147,10 @@ pub async fn admin_create_instance(
             request.ssh_pubkey,
         )
         .await
-        .map_err(|e| {
+        .map_err(|_| {
             tracing::error!(
-                "Admin: Failed to create instance for user_id={}: error={}",
-                request.user_id,
-                e
+                "Admin: Failed to create instance for user_id={}",
+                request.user_id
             );
             ApiError::internal_server_error("Failed to create instance")
         })?;
@@ -1145,7 +1162,7 @@ pub async fn admin_create_instance(
 #[utoipa::path(
     delete,
     path = "/v1/admin/agents/instances/{id}",
-    tag = "Admin Agents",
+    tag = "Admin",
     params(
         ("id" = String, Path, description = "Instance ID")
     ),
@@ -1188,7 +1205,7 @@ pub async fn admin_delete_instance(
 #[utoipa::path(
     post,
     path = "/v1/admin/agents/keys",
-    tag = "Admin Agents",
+    tag = "Admin",
     request_body = CreateApiKeyRequest,
     responses(
         (status = 200, description = "API key created", body = CreateApiKeyResponse),
@@ -1238,7 +1255,7 @@ pub async fn admin_create_unbound_api_key(
 #[utoipa::path(
     post,
     path = "/v1/admin/agents/keys/{key_id}/bind-instance",
-    tag = "Admin Agents",
+    tag = "Admin",
     params(("key_id" = String, Path, description = "API key ID")),
     request_body = BindApiKeyRequest,
     responses(
@@ -1272,7 +1289,7 @@ pub async fn admin_bind_api_key_to_instance(
 
     let api_key = app_state
         .agent_service
-        .bind_api_key_to_instance(key_uuid, instance_uuid, user.user_id)
+        .admin_bind_api_key_to_instance(key_uuid, instance_uuid)
         .await
         .map_err(|e| {
             tracing::error!("Failed to bind API key: key_id={}, error={}", key_uuid, e);
@@ -1291,7 +1308,7 @@ pub async fn admin_bind_api_key_to_instance(
 #[utoipa::path(
     post,
     path = "/v1/admin/agents/instances/{id}/backup",
-    tag = "Admin Agents",
+    tag = "Admin",
     params(
         ("id" = String, Path, description = "Instance ID")
     ),
@@ -1359,7 +1376,7 @@ pub async fn admin_create_backup(
 #[utoipa::path(
     get,
     path = "/v1/admin/agents/instances/{id}/backups",
-    tag = "Admin Agents",
+    tag = "Admin",
     params(
         ("id" = String, Path, description = "Instance ID")
     ),
@@ -1427,7 +1444,7 @@ pub async fn admin_list_backups(
 #[utoipa::path(
     get,
     path = "/v1/admin/agents/instances/{id}/backups/{backup_id}",
-    tag = "Admin Agents",
+    tag = "Admin",
     params(
         ("id" = String, Path, description = "Instance ID"),
         ("backup_id" = String, Path, description = "Backup ID")

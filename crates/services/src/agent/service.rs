@@ -205,6 +205,14 @@ impl AgentService for AgentServiceImpl {
         Ok(instances)
     }
 
+    async fn list_all_instances(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> anyhow::Result<(Vec<AgentInstance>, i64)> {
+        self.repository.list_all_instances(limit, offset).await
+    }
+
     async fn create_instance_from_agent_api(
         &self,
         user_id: UserId,
@@ -596,6 +604,57 @@ impl AgentService for AgentServiceImpl {
 
         tracing::info!(
             "API key bound successfully: api_key_id={}, instance_id={}",
+            api_key_id,
+            instance_id
+        );
+
+        Ok(updated_key)
+    }
+
+    async fn admin_bind_api_key_to_instance(
+        &self,
+        api_key_id: Uuid,
+        instance_id: Uuid,
+    ) -> anyhow::Result<AgentApiKey> {
+        tracing::info!(
+            "Admin: Binding API key to instance (no ownership check): api_key_id={}, instance_id={}",
+            api_key_id,
+            instance_id
+        );
+
+        // Verify key exists (no ownership check)
+        let api_key = self
+            .repository
+            .get_api_key_by_id(api_key_id)
+            .await?
+            .ok_or_else(|| anyhow!("API key not found"))?;
+
+        // Verify instance exists (no ownership check)
+        let _instance = self
+            .repository
+            .get_instance(instance_id)
+            .await?
+            .ok_or_else(|| anyhow!("Instance not found"))?;
+
+        // Verify key is unbound
+        if api_key.instance_id.is_some() {
+            return Err(anyhow!("API key is already bound to an instance"));
+        }
+
+        // Bind the key
+        self.repository
+            .bind_api_key_to_instance(api_key_id, instance_id)
+            .await?;
+
+        // Fetch and return updated key
+        let updated_key = self
+            .repository
+            .get_api_key_by_id(api_key_id)
+            .await?
+            .ok_or_else(|| anyhow!("Failed to fetch updated API key"))?;
+
+        tracing::info!(
+            "Admin: API key bound successfully: api_key_id={}, instance_id={}",
             api_key_id,
             instance_id
         );
