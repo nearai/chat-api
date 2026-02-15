@@ -8,8 +8,68 @@ use axum::{
 };
 use bytes::Bytes;
 use chrono::DateTime;
+use serde::{Deserialize, Serialize};
 use urlencoding::encode;
 use uuid::Uuid;
+
+/// Request body for user creating their own instance
+#[derive(Deserialize, Serialize, utoipa::ToSchema)]
+pub struct CreateInstanceRequest {
+    /// Agent API key for authentication
+    pub nearai_api_key: String,
+    /// Image to use for the instance (optional)
+    #[serde(default)]
+    pub image: Option<String>,
+    /// Instance name (optional)
+    #[serde(default)]
+    pub name: Option<String>,
+    /// SSH public key (optional)
+    #[serde(default)]
+    pub ssh_pubkey: Option<String>,
+}
+
+/// Create a new agent instance
+#[utoipa::path(
+    post,
+    path = "/v1/agents/instances",
+    tag = "Agents",
+    request_body = CreateInstanceRequest,
+    responses(
+        (status = 201, description = "Instance created", body = InstanceResponse),
+        (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(("session_token" = []))
+)]
+pub async fn create_instance(
+    State(app_state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Json(request): Json<CreateInstanceRequest>,
+) -> Result<(StatusCode, Json<InstanceResponse>), ApiError> {
+    tracing::info!("Creating agent instance: user_id={}", user.user_id);
+
+    let instance = app_state
+        .agent_service
+        .create_instance_from_agent_api(
+            user.user_id,
+            request.nearai_api_key,
+            request.image,
+            request.name,
+            request.ssh_pubkey,
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to create instance: user_id={}, error={}",
+                user.user_id,
+                e
+            );
+            ApiError::internal_server_error("Failed to create instance")
+        })?;
+
+    Ok((StatusCode::CREATED, Json(instance.into())))
+}
 
 /// List user's agent instances
 #[utoipa::path(
@@ -423,6 +483,7 @@ pub struct PaginationParams {
 /// Create agent router with all routes (requires authentication for user routes)
 pub fn create_agent_router() -> Router<AppState> {
     Router::new()
+        .route("/instances", post(create_instance))
         .route("/instances", get(list_instances))
         .route("/instances/{id}", get(get_instance))
         .route("/instances/{id}/keys", post(create_api_key))

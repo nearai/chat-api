@@ -86,6 +86,7 @@ use utoipa::OpenApi;
         // Attestation endpoints
         crate::routes::attestation::get_attestation_report,
         // Agent endpoints
+        crate::routes::agents::create_instance,
         crate::routes::agents::list_instances,
         crate::routes::agents::get_instance,
         crate::routes::admin::admin_list_all_instances,
@@ -168,6 +169,7 @@ use utoipa::OpenApi;
         crate::models::CombinedAttestationReport,
         // Agent models
         crate::models::InstanceResponse,
+        crate::routes::agents::CreateInstanceRequest,
         crate::routes::admin::AdminCreateInstanceRequest,
         crate::routes::admin::AdminCreateApiKeyRequest,
         crate::models::CreateApiKeyRequest,
