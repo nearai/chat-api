@@ -4,19 +4,19 @@ use common::{create_test_server_and_db, mock_login};
 use serde_json::json;
 use uuid::Uuid;
 
-/// Integration test for complete OpenClaw workflow with real API calls:
-/// 1. Admin creates instance via OpenClaw API
+/// Integration test for complete Agent workflow with real API calls:
+/// 1. Admin creates instance via Agent API
 /// 2. User retrieves instance
 /// 3. User creates API key
 /// 4. List API keys
 /// 5. Get instance balance
 /// 6. Get instance usage
 ///
-/// NOTE: This test requires valid OpenClaw API credentials in .env file
+/// NOTE: This test requires valid Agent API credentials in .env file
 /// Set AGENT_API_TOKEN and AGENT_API_BASE_URL before running
 #[tokio::test]
 #[ignore]
-async fn test_openclaw_real_api_instance_creation() {
+async fn test_agent_real_api_instance_creation() {
     let (server, _db) = create_test_server_and_db(Default::default()).await;
 
     // 1. Create users: admin and regular user
@@ -49,15 +49,15 @@ async fn test_openclaw_real_api_instance_creation() {
         admin_email, user_email
     );
 
-    // 2. Admin creates instance via real OpenClaw API
+    // 2. Admin creates instance via real Agent API
     // NOTE: This requires a valid nearai_api_key. For testing, you would need:
     // - A real NEAR AI account with API credentials
-    // - Or a test account on the OpenClaw staging environment
+    // - Or a test account on the Agent staging environment
     let nearai_api_key =
         std::env::var("TEST_NEARAI_API_KEY").unwrap_or_else(|_| "test_key_for_demo".to_string());
 
     let create_instance_response = server
-        .post("/v1/admin/openclaw/instances")
+        .post("/v1/admin/agents/instances")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -76,7 +76,7 @@ async fn test_openclaw_real_api_instance_creation() {
         create_instance_response.status_code()
     );
 
-    // If the API key is invalid, the OpenClaw API will reject it
+    // If the API key is invalid, the Agent API will reject it
     // For real testing, you need a valid TEST_NEARAI_API_KEY
     if create_instance_response.status_code() != 201 {
         let error_body: serde_json::Value = create_instance_response.json();
@@ -91,7 +91,9 @@ async fn test_openclaw_real_api_instance_creation() {
         println!("\n📝 To run this test with real instance creation:");
         println!("   1. Get a valid API key from https://cloud-api.near.ai");
         println!("   2. Set: export TEST_NEARAI_API_KEY='your_api_key'");
-        println!("   3. Run: cargo test --test openclaw_integration_tests --features test -- --nocapture");
+        println!(
+            "   3. Run: cargo test --test agent_integration_tests --features test -- --nocapture"
+        );
         return;
     }
 
@@ -107,7 +109,7 @@ async fn test_openclaw_real_api_instance_creation() {
 
     // 4. User retrieves instance
     let get_instance_response = server
-        .get(&format!("/v1/openclaw/instances/{}", instance_id))
+        .get(&format!("/v1/agents/instances/{}", instance_id))
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
@@ -123,7 +125,7 @@ async fn test_openclaw_real_api_instance_creation() {
 
     // 5. User creates API key
     let api_key_response = server
-        .post(&format!("/v1/openclaw/instances/{}/keys", instance_id))
+        .post(&format!("/v1/agents/instances/{}/keys", instance_id))
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
@@ -152,7 +154,7 @@ async fn test_openclaw_real_api_instance_creation() {
 
     // 6. List API keys
     let list_keys_response = server
-        .get(&format!("/v1/openclaw/instances/{}/keys", instance_id))
+        .get(&format!("/v1/agents/instances/{}/keys", instance_id))
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
@@ -170,7 +172,7 @@ async fn test_openclaw_real_api_instance_creation() {
 
     // 7. Get instance balance
     let balance_response = server
-        .get(&format!("/v1/openclaw/instances/{}/balance", instance_id))
+        .get(&format!("/v1/agents/instances/{}/balance", instance_id))
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
@@ -193,7 +195,7 @@ async fn test_openclaw_real_api_instance_creation() {
 
     // 8. Get instance usage
     let usage_response = server
-        .get(&format!("/v1/openclaw/instances/{}/usage", instance_id))
+        .get(&format!("/v1/agents/instances/{}/usage", instance_id))
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
@@ -217,7 +219,7 @@ async fn test_openclaw_real_api_instance_creation() {
     // 9. Attempt chat completion with API key
     println!("\n🚀 Attempting inference with API key...");
     let chat_response = server
-        .post("/v1/openclaw/chat/completions")
+        .post("/v1/agents/chat/completions")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {api_key}")).unwrap(),
@@ -258,7 +260,7 @@ async fn test_openclaw_real_api_instance_creation() {
 }
 
 /// Simpler test that just verifies the instance management endpoints work
-/// without requiring a real OpenClaw instance
+/// without requiring a real Agent instance
 #[tokio::test]
 async fn test_instance_management_endpoints() {
     let (server, db) = create_test_server_and_db(Default::default()).await;
@@ -318,23 +320,23 @@ async fn test_instance_management_endpoints() {
     let operations = vec![
         (
             "start",
-            format!("/v1/admin/openclaw/instances/{}/start", instance_uuid),
+            format!("/v1/admin/agents/instances/{}/start", instance_uuid),
         ),
         (
             "stop",
-            format!("/v1/admin/openclaw/instances/{}/stop", instance_uuid),
+            format!("/v1/admin/agents/instances/{}/stop", instance_uuid),
         ),
         (
             "restart",
-            format!("/v1/admin/openclaw/instances/{}/restart", instance_uuid),
+            format!("/v1/admin/agents/instances/{}/restart", instance_uuid),
         ),
         (
             "backup",
-            format!("/v1/admin/openclaw/instances/{}/backup", instance_uuid),
+            format!("/v1/admin/agents/instances/{}/backup", instance_uuid),
         ),
         (
             "list_backups",
-            format!("/v1/admin/openclaw/instances/{}/backups", instance_uuid),
+            format!("/v1/admin/agents/instances/{}/backups", instance_uuid),
         ),
     ];
 
@@ -370,7 +372,7 @@ async fn test_instance_management_endpoints() {
     // Try to start with different user - should get 403 forbidden
     let other_user_token = mock_login(&server, "other@example.com").await;
     let non_admin_response = server
-        .post(&format!("/v1/openclaw/instances/{}/start", instance_uuid))
+        .post(&format!("/v1/agents/instances/{}/start", instance_uuid))
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {other_user_token}")).unwrap(),
@@ -386,7 +388,7 @@ async fn test_instance_management_endpoints() {
 
     // Test API key creation still works
     let api_key_response = server
-        .post(&format!("/v1/openclaw/instances/{}/keys", instance_uuid))
+        .post(&format!("/v1/agents/instances/{}/keys", instance_uuid))
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),

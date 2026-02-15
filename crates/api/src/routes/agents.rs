@@ -19,7 +19,7 @@ use uuid::Uuid;
 /// List user's agent instances
 #[utoipa::path(
     get,
-    path = "/v1/openclaw/instances",
+    path = "/v1/agents/instances",
     tag = "Agents",
     params(
         ("limit" = i64, Query, description = "Maximum items to return"),
@@ -74,7 +74,7 @@ pub async fn list_instances(
 /// Get a specific agent instance
 #[utoipa::path(
     get,
-    path = "/v1/openclaw/instances/{id}",
+    path = "/v1/agents/instances/{id}",
     tag = "Agents",
     params(
         ("id" = String, Path, description = "Instance ID")
@@ -139,7 +139,7 @@ pub struct AdminCreateInstanceRequest {
 /// Admin endpoint: Create an OpenClaw instance for a specific user
 #[utoipa::path(
     post,
-    path = "/v1/admin/openclaw/instances",
+    path = "/v1/admin/agents/instances",
     tag = "Admin Agents",
     request_body = AdminCreateInstanceRequest,
     responses(
@@ -185,7 +185,7 @@ pub async fn admin_create_instance(
 
     let instance = app_state
         .agent_service
-        .create_instance_from_openclaw(
+        .create_instance_from_agent_api(
             user_id,
             request.nearai_api_key,
             request.image,
@@ -208,7 +208,7 @@ pub async fn admin_create_instance(
 /// Admin endpoint: Delete an OpenClaw instance
 #[utoipa::path(
     delete,
-    path = "/v1/admin/openclaw/instances/{id}",
+    path = "/v1/admin/agents/instances/{id}",
     tag = "Admin Agents",
     params(
         ("id" = String, Path, description = "Instance ID")
@@ -251,7 +251,7 @@ pub async fn admin_delete_instance(
 /// Create an API key for an instance
 #[utoipa::path(
     post,
-    path = "/v1/openclaw/instances/{id}/keys",
+    path = "/v1/agents/instances/{id}/keys",
     tag = "Agents",
     request_body = CreateApiKeyRequest,
     params(
@@ -326,7 +326,7 @@ pub async fn create_api_key(
 /// List API keys for an instance
 #[utoipa::path(
     get,
-    path = "/v1/openclaw/instances/{id}/keys",
+    path = "/v1/agents/instances/{id}/keys",
     tag = "Agents",
     params(
         ("id" = String, Path, description = "Instance ID"),
@@ -377,7 +377,7 @@ pub async fn list_api_keys(
 /// Revoke an API key
 #[utoipa::path(
     delete,
-    path = "/v1/openclaw/keys/{key_id}",
+    path = "/v1/agents/keys/{key_id}",
     tag = "Agents",
     params(
         ("key_id" = String, Path, description = "API Key ID")
@@ -526,7 +526,7 @@ pub async fn admin_bind_api_key_to_instance(
 /// Get instance usage history
 #[utoipa::path(
     get,
-    path = "/v1/openclaw/instances/{id}/usage",
+    path = "/v1/agents/instances/{id}/usage",
     tag = "Agents",
     params(
         ("id" = String, Path, description = "Instance ID"),
@@ -607,7 +607,7 @@ pub async fn get_instance_usage(
 /// Get instance balance
 #[utoipa::path(
     get,
-    path = "/v1/openclaw/instances/{id}/balance",
+    path = "/v1/agents/instances/{id}/balance",
     tag = "Agents",
     params(
         ("id" = String, Path, description = "Instance ID")
@@ -661,7 +661,7 @@ pub struct PaginationParams {
 /// Admin endpoint: List all OpenClaw instances (all users' instances)
 #[utoipa::path(
     get,
-    path = "/v1/admin/openclaw/instances",
+    path = "/v1/admin/agents/instances",
     tag = "Admin Agents",
     responses(
         (status = 200, description = "All instances retrieved", body = Vec<InstanceResponse>),
@@ -680,7 +680,7 @@ pub async fn admin_list_all_instances(
     // Call OpenClaw API to get all instances
     let instances = app_state
         .agent_service
-        .list_instances_from_openclaw(_user.user_id)
+        .list_instances_from_agent_api(_user.user_id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to list all instances: error={}", e);
@@ -695,7 +695,7 @@ pub async fn admin_list_all_instances(
 /// Requires agent API key authentication
 #[utoipa::path(
     post,
-    path = "/v1/openclaw/chat/completions",
+    path = "/v1/agents/chat/completions",
     tag = "Agents",
     request_body = serde_json::Value,
     responses(
@@ -775,7 +775,7 @@ pub fn create_agent_router() -> Router<AppState> {
 /// Start an agent instance
 #[utoipa::path(
     post,
-    path = "/v1/openclaw/instances/{id}/start",
+    path = "/v1/agents/instances/{id}/start",
     tag = "Agents",
     params(
         ("id" = String, Path, description = "Instance ID")
@@ -852,7 +852,7 @@ pub async fn start_instance(
 /// Stop an agent instance
 #[utoipa::path(
     post,
-    path = "/v1/openclaw/instances/{id}/stop",
+    path = "/v1/agents/instances/{id}/stop",
     tag = "Agents",
     params(
         ("id" = String, Path, description = "Instance ID")
@@ -929,7 +929,7 @@ pub async fn stop_instance(
 /// Restart an agent instance
 #[utoipa::path(
     post,
-    path = "/v1/openclaw/instances/{id}/restart",
+    path = "/v1/agents/instances/{id}/restart",
     tag = "Agents",
     params(
         ("id" = String, Path, description = "Instance ID")
@@ -1006,7 +1006,7 @@ pub async fn restart_instance(
 /// Create a backup of an OpenClaw instance
 #[utoipa::path(
     post,
-    path = "/v1/admin/openclaw/instances/{id}/backup",
+    path = "/v1/admin/agents/instances/{id}/backup",
     tag = "Admin Agents",
     params(
         ("id" = String, Path, description = "Instance ID")
@@ -1074,7 +1074,7 @@ pub async fn admin_create_backup(
 /// List backups for an OpenClaw instance
 #[utoipa::path(
     get,
-    path = "/v1/admin/openclaw/instances/{id}/backups",
+    path = "/v1/admin/agents/instances/{id}/backups",
     tag = "Admin Agents",
     params(
         ("id" = String, Path, description = "Instance ID")
@@ -1142,7 +1142,7 @@ pub async fn admin_list_backups(
 /// Get backup details for an OpenClaw instance
 #[utoipa::path(
     get,
-    path = "/v1/admin/openclaw/instances/{id}/backups/{backup_id}",
+    path = "/v1/admin/agents/instances/{id}/backups/{backup_id}",
     tag = "Admin Agents",
     params(
         ("id" = String, Path, description = "Instance ID"),

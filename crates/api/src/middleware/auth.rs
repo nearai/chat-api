@@ -18,7 +18,7 @@ pub struct AuthenticatedUser {
     pub session_id: SessionId,
 }
 
-/// OpenClaw API key authentication info inserted into request extensions
+/// Agent API key authentication info inserted into request extensions
 /// Extract in route handlers using `Extension<AuthenticatedApiKey>`
 #[derive(Debug, Clone)]
 pub struct AuthenticatedApiKey {

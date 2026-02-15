@@ -206,12 +206,12 @@ pub trait AgentRepository: Send + Sync {
 #[async_trait]
 pub trait AgentService: Send + Sync {
     // Instance management
-    async fn list_instances_from_openclaw(
+    async fn list_instances_from_agent_api(
         &self,
         user_id: UserId,
     ) -> anyhow::Result<Vec<AgentInstance>>;
 
-    async fn create_instance_from_openclaw(
+    async fn create_instance_from_agent_api(
         &self,
         user_id: UserId,
         nearai_api_key: String,

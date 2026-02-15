@@ -15,7 +15,7 @@ async fn test_create_openclaw_instance() {
     // In real scenario, this would create via OpenClaw API
     // For now, we test the endpoint exists and requires auth
     let response = server
-        .post("/v1/openclaw/instances")
+        .post("/v1/agents/instances")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
@@ -42,7 +42,7 @@ async fn test_list_instances_requires_auth() {
     let server = create_test_server_and_db(Default::default()).await.0;
 
     // Try without auth
-    let response = server.get("/v1/openclaw/instances").await;
+    let response = server.get("/v1/agents/instances").await;
     assert_eq!(response.status_code(), 401, "Should require authentication");
 }
 
@@ -55,7 +55,7 @@ async fn test_list_instances_with_auth() {
     let user_token = mock_login(&server, user_email).await;
 
     let response = server
-        .get("/v1/openclaw/instances")
+        .get("/v1/agents/instances")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
@@ -83,7 +83,7 @@ async fn test_create_api_key_requires_auth() {
 
     // Try without auth
     let response = server
-        .post(&format!("/v1/openclaw/instances/{}/keys", fake_instance_id))
+        .post(&format!("/v1/agents/instances/{}/keys", fake_instance_id))
         .json(&json!({
             "name": "test-key"
         }))
@@ -105,25 +105,25 @@ async fn test_create_api_key_requires_auth() {
 // Real e2e flow tests that would demonstrate the complete user and admin flows:
 //
 // 1. Admin Creates Instance:
-//    POST /v1/openclaw/instances with OpenClaw API credentials
+//    POST /v1/agents/instances with OpenClaw API credentials
 //    → Creates instance record with instance_url, instance_token, etc.
-//    → Can list instances via GET /v1/openclaw/instances
+//    → Can list instances via GET /v1/agents/instances
 //
 // 2. User Creates API Key:
-//    POST /v1/openclaw/instances/{id}/keys with name
+//    POST /v1/agents/instances/{id}/keys with name
 //    → Returns API key in ag_xxxxx format
-//    → Can revoke key via DELETE /v1/openclaw/keys/{key_id}
+//    → Can revoke key via DELETE /v1/agents/keys/{key_id}
 //
 // 3. User Uses Chat Completions:
-//    POST /v1/openclaw/chat/completions with Bearer ag_xxxxx
+//    POST /v1/agents/chat/completions with Bearer ag_xxxxx
 //    → Middleware validates API key, looks up instance, checks auth
 //    → Proxy forwards request to instance_url with instance_token
 //    → Response streamed back to user
 //    → Usage tracked in agent_usage_log
 //
 // 4. User Monitors Usage:
-//    GET /v1/openclaw/instances/{id}/usage
-//    GET /v1/openclaw/instances/{id}/balance
+//    GET /v1/agents/instances/{id}/usage
+//    GET /v1/agents/instances/{id}/balance
 //    → Returns tracked tokens, costs, request counts
 //
 // To implement these tests, would need:
@@ -143,7 +143,7 @@ async fn test_api_key_isolation_between_users() {
 
     // Both users should be able to list their own instances
     let response1 = server
-        .get("/v1/openclaw/instances")
+        .get("/v1/agents/instances")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {user1_token}")).unwrap(),
@@ -151,7 +151,7 @@ async fn test_api_key_isolation_between_users() {
         .await;
 
     let response2 = server
-        .get("/v1/openclaw/instances")
+        .get("/v1/agents/instances")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {user2_token}")).unwrap(),
@@ -182,7 +182,7 @@ async fn test_list_api_keys_requires_auth() {
 
     // Try without auth
     let response = server
-        .get(&format!("/v1/openclaw/instances/{}/keys", fake_instance_id))
+        .get(&format!("/v1/agents/instances/{}/keys", fake_instance_id))
         .await;
 
     assert_eq!(
@@ -202,7 +202,7 @@ async fn test_get_instance_balance_requires_auth() {
     // Try without auth
     let response = server
         .get(&format!(
-            "/v1/openclaw/instances/{}/balance",
+            "/v1/agents/instances/{}/balance",
             fake_instance_id
         ))
         .await;
@@ -223,10 +223,7 @@ async fn test_get_instance_usage_requires_auth() {
 
     // Try without auth
     let response = server
-        .get(&format!(
-            "/v1/openclaw/instances/{}/usage",
-            fake_instance_id
-        ))
+        .get(&format!("/v1/agents/instances/{}/usage", fake_instance_id))
         .await;
 
     assert_eq!(
