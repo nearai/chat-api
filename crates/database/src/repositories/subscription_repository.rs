@@ -161,7 +161,6 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
                         current_period_end, cancel_at_period_end, created_at, updated_at
                  FROM subscriptions
                  WHERE user_id = $1 AND status IN ('active', 'trialing')
-                   AND current_period_end > NOW()
                  ORDER BY current_period_end DESC",
                 &[&user_id],
             )

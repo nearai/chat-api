@@ -28,7 +28,11 @@ pub struct CreateInstanceRequest {
     pub ssh_pubkey: Option<String>,
 }
 
-/// Create a new agent instance
+/// Create a new agent instance.
+///
+/// Agent instance limits are enforced for all users to prevent resource exhaustion:
+/// - Subscribed users: plan limit from subscription_plans config
+/// - Unsubscribed users: no instances allowed (active subscription required)
 #[utoipa::path(
     post,
     path = "/v1/agents/instances",
@@ -78,46 +82,52 @@ pub async fn create_instance(
             ApiError::internal_server_error("Failed to check plan limits")
         })?;
 
-    // Check agent instance limit from subscription plan
-    if let (Some(active_sub), Some(configs)) = (subscriptions.first(), system_configs) {
-        if let Some(plan_configs) = &configs.subscription_plans {
-            if let Some(plan_config) = plan_configs.get(&active_sub.plan) {
-                if let Some(agent_limit) = &plan_config.agent_instances {
-                    // Count user's existing instances
-                    let (instances, _) = app_state
-                        .agent_service
-                        .list_instances(user.user_id, 1000, 0) // Get all instances
-                        .await
-                        .map_err(|e| {
-                            tracing::error!(
-                                "Failed to count instances: user_id={}, error={}",
-                                user.user_id,
-                                e
-                            );
-                            ApiError::internal_server_error("Failed to check instance count")
-                        })?;
+    // Limit: plan max if subscribed, else 0 (active subscription required).
+    let max_allowed: u64 = match (subscriptions.first(), system_configs.as_ref()) {
+        (Some(sub), Some(configs)) => configs
+            .subscription_plans
+            .as_ref()
+            .and_then(|plans| plans.get(&sub.plan))
+            .map(|plan| {
+                plan.agent_instances
+                    .as_ref()
+                    .map(|l| l.max)
+                    .unwrap_or(u64::MAX)
+            })
+            .unwrap_or(0),
+        _ => 0,
+    };
 
-                    let current_count = instances.len() as u64;
-                    if current_count >= agent_limit.max {
-                        tracing::warn!(
-                            "Agent instance limit exceeded: user_id={}, current={}, max={}, plan={}",
-                            user.user_id,
-                            current_count,
-                            agent_limit.max,
-                            active_sub.plan
-                        );
-                        return Err(ApiError::new(
-                            axum::http::StatusCode::PAYMENT_REQUIRED,
-                            "payment_required",
-                            format!(
-                                "Agent instance limit of {} reached for your plan",
-                                agent_limit.max
-                            ),
-                        ));
-                    }
-                }
-            }
-        }
+    // Enforce the limit using an efficient count query (limit=1 fetches minimal rows, total comes from COUNT(*))
+    let (_, total) = app_state
+        .agent_service
+        .list_instances(user.user_id, 1, 0)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to count instances: user_id={}, error={}",
+                user.user_id,
+                e
+            );
+            ApiError::internal_server_error("Failed to check instance count")
+        })?;
+
+    let current_count = total as u64;
+    if current_count >= max_allowed {
+        tracing::warn!(
+            "Agent instance limit exceeded: user_id={}, current={}, max={}",
+            user.user_id,
+            current_count,
+            max_allowed
+        );
+        return Err(ApiError::new(
+            axum::http::StatusCode::PAYMENT_REQUIRED,
+            "payment_required",
+            format!(
+                "Agent instance limit of {} reached for your plan",
+                max_allowed
+            ),
+        ));
     }
 
     let instance = app_state

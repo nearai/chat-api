@@ -232,6 +232,62 @@ async fn test_get_instance_usage_requires_auth() {
     );
 }
 
+/// Test that users without an active subscription cannot create agent instances.
+/// Previously, users without a subscription could bypass limits and create unlimited instances.
+#[tokio::test]
+async fn test_create_instance_rejects_unsubscribed_user() {
+    let (server, db) = create_test_server_and_db(Default::default()).await;
+
+    let user_email = "no_sub_user@example.com";
+    let user_token = mock_login(&server, user_email).await;
+
+    // Ensure user has NO subscription
+    common::cleanup_user_subscriptions(&db, user_email).await;
+
+    // Set subscription plans (for subscribed users); unsubscribed users get 0 instances
+    common::set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": { "stripe": { "price_id": "price_test_basic" } },
+                "monthly_tokens": { "max": 10000000 },
+                "agent_instances": { "max": 2 }
+            }
+        }),
+    )
+    .await;
+
+    // Try to create instance - should be rejected with 402 (no instances allowed without subscription)
+    let response = server
+        .post("/v1/agents/instances")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .json(&json!({
+            "nearai_api_key": "test_api_key",
+            "name": "instance-without-sub"
+        }))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        402,
+        "Unsubscribed user should get 402 Payment Required (active subscription required)"
+    );
+
+    let error_body: serde_json::Value = response.json();
+    let error_message = error_body
+        .get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    assert!(
+        error_message.contains("limit"),
+        "Error message should mention limit, got: {}",
+        error_message
+    );
+}
+
 /// Test agent instance limit validation with subscription plans
 /// Tests that the limit is enforced when user reaches max instances
 #[tokio::test]
