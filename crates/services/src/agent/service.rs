@@ -70,22 +70,20 @@ impl AgentServiceImpl {
     async fn call_agent_api_create(
         &self,
         nearai_api_key: &str,
-        nearai_api_url: Option<&str>,
+        nearai_api_url: &str,
         image: Option<String>,
         name: Option<String>,
         ssh_pubkey: Option<String>,
     ) -> anyhow::Result<serde_json::Value> {
         let url = format!("{}/instances", self.agent_api_base_url);
 
-        let mut request_body = serde_json::json!({
+        let request_body = serde_json::json!({
             "image": image,
             "name": name,
             "nearai_api_key": nearai_api_key,
+            "nearai_api_url": nearai_api_url,
             "ssh_pubkey": ssh_pubkey,
         });
-        if let Some(url_str) = nearai_api_url {
-            request_body["nearai_api_url"] = serde_json::Value::String(url_str.to_string());
-        }
 
         let response = self
             .http_client
@@ -243,7 +241,7 @@ impl AgentService for AgentServiceImpl {
         let response = self
             .call_agent_api_create(
                 &plaintext_key,
-                Some(&self.nearai_api_url),
+                &self.nearai_api_url,
                 image,
                 name.clone(),
                 ssh_pubkey.clone(),
