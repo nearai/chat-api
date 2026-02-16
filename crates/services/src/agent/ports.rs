@@ -228,7 +228,6 @@ pub trait AgentService: Send + Sync {
     async fn create_instance_from_agent_api(
         &self,
         user_id: UserId,
-        nearai_api_key: String,
         image: Option<String>,
         name: Option<String>,
         ssh_pubkey: Option<String>,

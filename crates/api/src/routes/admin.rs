@@ -1023,13 +1023,12 @@ pub async fn get_system_configs_admin(
 
 // ========== Admin Agent Endpoints ==========
 
-/// Request body for admin creating instance for a user
+/// Request body for admin creating instance for a user.
+/// The chat-api creates an API key on behalf of the user and configures the agent to use it.
 #[derive(serde::Deserialize, utoipa::ToSchema)]
 pub struct AdminCreateInstanceRequest {
     /// User ID to create the instance for
     pub user_id: Uuid,
-    /// Agent API key for authentication
-    pub nearai_api_key: String,
     /// Image to use for the instance (optional)
     #[serde(default)]
     pub image: Option<String>,
@@ -1139,13 +1138,7 @@ pub async fn admin_create_instance(
 
     let instance = app_state
         .agent_service
-        .create_instance_from_agent_api(
-            user_id,
-            request.nearai_api_key,
-            request.image,
-            request.name,
-            request.ssh_pubkey,
-        )
+        .create_instance_from_agent_api(user_id, request.image, request.name, request.ssh_pubkey)
         .await
         .map_err(|_| {
             tracing::error!(

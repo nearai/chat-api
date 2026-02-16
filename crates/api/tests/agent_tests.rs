@@ -22,7 +22,6 @@ async fn test_create_agent_instance() {
             http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
         )
         .json(&json!({
-            "nearai_api_key": "test_api_key",
             "name": "test-instance"
         }))
         .await;
@@ -265,7 +264,6 @@ async fn test_create_instance_rejects_unsubscribed_user() {
             http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
         )
         .json(&json!({
-            "nearai_api_key": "test_api_key",
             "name": "instance-without-sub"
         }))
         .await;
@@ -366,7 +364,6 @@ async fn test_create_instance_respects_agent_instance_limit_max_1() {
             http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
         )
         .json(&json!({
-            "nearai_api_key": "test_api_key",
             "name": "instance-2"
         }))
         .await;

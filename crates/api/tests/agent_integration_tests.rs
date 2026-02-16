@@ -50,12 +50,7 @@ async fn test_agent_real_api_instance_creation() {
     );
 
     // 2. Admin creates instance via real Agent API
-    // NOTE: This requires a valid nearai_api_key. For testing, you would need:
-    // - A real NEAR AI account with API credentials
-    // - Or a test account on the Agent staging environment
-    let nearai_api_key =
-        std::env::var("TEST_NEARAI_API_KEY").unwrap_or_else(|_| "test_key_for_demo".to_string());
-
+    // The chat-api creates an API key on behalf of the user and configures the agent to use it.
     let create_instance_response = server
         .post("/v1/admin/agents/instances")
         .add_header(
@@ -64,7 +59,6 @@ async fn test_agent_real_api_instance_creation() {
         )
         .json(&json!({
             "user_id": user_id,
-            "nearai_api_key": nearai_api_key,
             "image": null,
             "name": format!("test-instance-{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap()),
             "ssh_pubkey": "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQDLh1Rv3K5Q9X4rq7Xs7X9X9X9X9X9X9X9X9X9X9X9X9X9X9X9X9X9X9X9X9X9X9X9X9X9X9X9X9X9X9X9X9X9X9X test@example.com"
@@ -76,8 +70,6 @@ async fn test_agent_real_api_instance_creation() {
         create_instance_response.status_code()
     );
 
-    // If the API key is invalid, the Agent API will reject it
-    // For real testing, you need a valid TEST_NEARAI_API_KEY
     if create_instance_response.status_code() != 201 {
         let error_body: serde_json::Value = create_instance_response.json();
         println!("ℹ Instance creation failed:");
@@ -88,11 +80,9 @@ async fn test_agent_real_api_instance_creation() {
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown")
         );
-        println!("\n📝 To run this test with real instance creation:");
-        println!("   1. Get a valid API key from https://cloud-api.near.ai");
-        println!("   2. Set: export TEST_NEARAI_API_KEY='your_api_key'");
+        println!("\n📝 Ensure AGENT_API_BASE_URL and AGENT_API_TOKEN are set for real Agent API.");
         println!(
-            "   3. Run: cargo test --test agent_integration_tests --features test -- --nocapture"
+            "   Run: cargo test --test agent_integration_tests --features test -- --ignored --nocapture"
         );
         return;
     }

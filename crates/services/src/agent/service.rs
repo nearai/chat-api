@@ -16,6 +16,8 @@ pub struct AgentServiceImpl {
     http_client: Client,
     agent_api_base_url: String,
     agent_api_token: String,
+    /// Chat-API base URL passed to the Agent API as nearai_api_url when creating instances
+    nearai_api_url: String,
 }
 
 impl AgentServiceImpl {
@@ -23,6 +25,7 @@ impl AgentServiceImpl {
         repository: Arc<dyn AgentRepository>,
         api_base_url: String,
         api_token: String,
+        nearai_api_url: String,
     ) -> Self {
         // Create HTTP client with timeout to prevent connection pool exhaustion from hung upstream services
         let http_client = Client::builder()
@@ -35,6 +38,7 @@ impl AgentServiceImpl {
             http_client,
             agent_api_base_url: api_base_url,
             agent_api_token: api_token,
+            nearai_api_url,
         }
     }
 
@@ -66,18 +70,22 @@ impl AgentServiceImpl {
     async fn call_agent_api_create(
         &self,
         nearai_api_key: &str,
+        nearai_api_url: Option<&str>,
         image: Option<String>,
         name: Option<String>,
         ssh_pubkey: Option<String>,
     ) -> anyhow::Result<serde_json::Value> {
         let url = format!("{}/instances", self.agent_api_base_url);
 
-        let request_body = serde_json::json!({
+        let mut request_body = serde_json::json!({
             "image": image,
             "name": name,
             "nearai_api_key": nearai_api_key,
             "ssh_pubkey": ssh_pubkey,
         });
+        if let Some(url_str) = nearai_api_url {
+            request_body["nearai_api_url"] = serde_json::Value::String(url_str.to_string());
+        }
 
         let response = self
             .http_client
@@ -216,16 +224,30 @@ impl AgentService for AgentServiceImpl {
     async fn create_instance_from_agent_api(
         &self,
         user_id: UserId,
-        nearai_api_key: String,
         image: Option<String>,
         name: Option<String>,
         ssh_pubkey: Option<String>,
     ) -> anyhow::Result<AgentInstance> {
         tracing::info!("Creating instance from Agent API: user_id={}", user_id);
 
-        // Call Agent API
+        // Create an unbound API key on behalf of the user; the agent will use it to authenticate to the chat-api.
+        let key_name = name
+            .as_deref()
+            .map(|n| format!("instance-{}", n))
+            .unwrap_or_else(|| "instance".to_string());
+        let (api_key, plaintext_key) = self
+            .create_unbound_api_key(user_id, key_name, None, None)
+            .await?;
+
+        // Call Agent API with our API key and the chat-api URL (agents reach us at nearai_api_url)
         let response = self
-            .call_agent_api_create(&nearai_api_key, image, name.clone(), ssh_pubkey.clone())
+            .call_agent_api_create(
+                &plaintext_key,
+                Some(&self.nearai_api_url),
+                image,
+                name.clone(),
+                ssh_pubkey.clone(),
+            )
             .await?;
 
         // Extract instance data from response
@@ -276,6 +298,10 @@ impl AgentService for AgentServiceImpl {
                 gateway_port,
                 dashboard_url,
             })
+            .await?;
+
+        // Bind the unbound API key to the new instance
+        self.bind_api_key_to_instance(api_key.id, instance.id, user_id)
             .await?;
 
         tracing::info!(

@@ -703,7 +703,8 @@ impl From<FileData> for FileGetResponse {
 // Agent Models
 // ============================================================================
 
-/// Request to create an agent instance (proxied to Agent API)
+/// Request to create an agent instance (proxied to Agent API).
+/// The chat-api creates an API key on behalf of the user and configures the agent to use it.
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateInstanceRequest {
     /// Image to use for the instance (null for default)
@@ -712,8 +713,6 @@ pub struct CreateInstanceRequest {
     /// Instance name (null for auto-generated)
     #[serde(default)]
     pub name: Option<String>,
-    /// Agent API key for authentication
-    pub nearai_api_key: String,
     /// SSH public key
     #[serde(default)]
     pub ssh_pubkey: Option<String>,

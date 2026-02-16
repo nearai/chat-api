@@ -165,6 +165,7 @@ async fn main() -> anyhow::Result<()> {
         agent_repo.clone(),
         config.agent.api_base_url.clone(),
         config.agent.api_token.clone(),
+        config.agent.nearai_api_url.clone(),
     ));
 
     // Initialize agent proxy service

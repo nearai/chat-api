@@ -297,13 +297,25 @@ impl Default for NearConfig {
     }
 }
 
+fn default_nearai_api_url() -> String {
+    std::env::var("BACKEND_URL")
+        .map(|url| url.trim_end_matches('/').to_string() + "/v1")
+        .unwrap_or_else(|_| "https://private.near.ai/v1".to_string())
+}
+
 /// Configuration for agent API integration (supports various agent types)
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct AgentConfig {
     /// Agent API base URL
+    #[serde(default)]
     pub api_base_url: String,
     /// Agent API bearer token for authentication
+    #[serde(default)]
     pub api_token: String,
+    /// Chat-API base URL that agents use to reach this service
+    /// Used as nearai_api_url when creating instances so the agent knows where to authenticate.
+    #[serde(default = "default_nearai_api_url")]
+    pub nearai_api_url: String,
 }
 
 impl Default for AgentConfig {
@@ -312,6 +324,9 @@ impl Default for AgentConfig {
             api_base_url: std::env::var("AGENT_API_BASE_URL")
                 .unwrap_or_else(|_| "https://api.agent.near.ai".to_string()),
             api_token: std::env::var("AGENT_API_TOKEN").unwrap_or_else(|_| "".to_string()),
+            nearai_api_url: std::env::var("BACKEND_URL")
+                .map(|url| url.trim_end_matches('/').to_string() + "/v1")
+                .unwrap_or_else(|_| "https://private.near.ai/v1".to_string()),
         }
     }
 }

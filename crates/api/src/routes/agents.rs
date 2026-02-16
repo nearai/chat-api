@@ -12,11 +12,10 @@ use serde::{Deserialize, Serialize};
 use urlencoding::encode;
 use uuid::Uuid;
 
-/// Request body for user creating their own instance
+/// Request body for user creating their own instance.
+/// The chat-api creates an API key on behalf of the user and configures the agent to use it.
 #[derive(Deserialize, Serialize, utoipa::ToSchema)]
 pub struct CreateInstanceRequest {
-    /// Agent API key for authentication
-    pub nearai_api_key: String,
     /// Image to use for the instance (optional)
     #[serde(default)]
     pub image: Option<String>,
@@ -134,7 +133,6 @@ pub async fn create_instance(
         .agent_service
         .create_instance_from_agent_api(
             user.user_id,
-            request.nearai_api_key,
             request.image,
             request.name,
             request.ssh_pubkey,

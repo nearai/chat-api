@@ -226,6 +226,7 @@ pub async fn create_test_server_and_db(
         agent_repo.clone(),
         config.agent.api_base_url.clone(),
         config.agent.api_token.clone(),
+        config.agent.nearai_api_url.clone(),
     ));
 
     // Create agent proxy service for testing
