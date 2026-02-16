@@ -42,9 +42,9 @@ impl AgentServiceImpl {
         }
     }
 
-    /// Generate a new API key in format: ag_{uuid}
+    /// Generate a new API key in format: sk-agent-{uuid}
     fn generate_api_key() -> String {
-        format!("ag_{}", Uuid::new_v4().to_string().replace("-", ""))
+        format!("sk-agent-{}", Uuid::new_v4().to_string().replace("-", ""))
     }
 
     /// Hash an API key for storage using SHA-256
@@ -55,9 +55,9 @@ impl AgentServiceImpl {
         format!("{:x}", hasher.finalize())
     }
 
-    /// Validate API key format (must start with "ag_" and be 35 chars total)
+    /// Validate API key format (must start with "sk-agent-" and be 41 chars total)
     fn validate_api_key_format(key: &str) -> bool {
-        key.starts_with("ag_") && key.len() == 35
+        key.starts_with("sk-agent-") && key.len() == 41
     }
 
     /// Call Agent API to create an instance

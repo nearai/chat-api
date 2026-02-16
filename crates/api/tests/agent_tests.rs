@@ -111,11 +111,11 @@ async fn test_create_api_key_requires_auth() {
 //
 // 2. User Creates API Key:
 //    POST /v1/agents/instances/{id}/keys with name
-//    → Returns API key in ag_xxxxx format
+//    → Returns API key in sk-agent-xxxxx format
 //    → Can revoke key via DELETE /v1/agents/keys/{key_id}
 //
 // 3. Agent Uses Chat Completions:
-//    POST /v1/chat/completions with Bearer ag_xxxxx (API key auth)
+//    POST /v1/chat/completions with Bearer sk-agent-xxxxx (API key auth)
 //    → API key validated, request proxied to instance
 //    → Usage tracked in agent_usage_log
 //

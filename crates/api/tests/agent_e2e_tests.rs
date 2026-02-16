@@ -169,10 +169,10 @@ async fn test_agent_complete_workflow() {
 
     // Verify API key format
     assert!(
-        api_key.starts_with("ag_"),
-        "API key should start with 'ag_'"
+        api_key.starts_with("sk-agent-"),
+        "API key should start with 'sk-agent-'"
     );
-    assert_eq!(api_key.len(), 35, "API key should be 35 chars long");
+    assert_eq!(api_key.len(), 41, "API key should be 41 chars long");
 
     // 7. List API keys for instance
     let list_keys_response = server

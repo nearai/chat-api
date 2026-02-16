@@ -392,15 +392,15 @@ fn extract_agent_api_key_from_request(request: &Request) -> Result<String, ApiEr
         ApiError::invalid_auth_header()
     })?;
 
-    // Validate API key format (should start with ag_ and be 35 chars)
-    if !token.starts_with("ag_") {
-        tracing::warn!("Invalid agent API key format: does not start with 'ag_'");
+    // Validate API key format (should start with sk-agent- and be 41 chars)
+    if !token.starts_with("sk-agent-") {
+        tracing::warn!("Invalid agent API key format: does not start with 'sk-agent-'");
         return Err(ApiError::invalid_token());
     }
 
-    if token.len() != 35 {
+    if token.len() != 41 {
         tracing::warn!(
-            "Invalid agent API key format: expected length 35, got {}",
+            "Invalid agent API key format: expected length 41, got {}",
             token.len()
         );
         return Err(ApiError::invalid_token());
@@ -417,7 +417,7 @@ fn hash_api_key(key: &str) -> String {
 }
 
 /// Dual auth middleware: accepts either session token OR agent API key.
-/// Agents use Bearer ag_xxxxx; users use Bearer sess_xxxxx.
+/// Agents use Bearer sk-agent-xxxxx; users use Bearer sess_xxxxx.
 /// Used by chat completions, image generation/edit, and responses endpoints.
 pub async fn dual_auth_middleware(
     State(state): State<DualAuthState>,
@@ -426,7 +426,7 @@ pub async fn dual_auth_middleware(
 ) -> Result<Response, Response> {
     let token = extract_bearer_token_raw(&request).map_err(|e| e.into_response())?;
 
-    if token.starts_with("ag_") {
+    if token.starts_with("sk-agent-") {
         // Agent API key auth
         let api_key =
             extract_agent_api_key_from_request(&request).map_err(|e| e.into_response())?;
