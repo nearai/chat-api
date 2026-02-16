@@ -27,7 +27,8 @@ impl AgentServiceImpl {
         api_token: String,
         nearai_api_url: String,
     ) -> Self {
-        // Create HTTP client with timeout to prevent connection pool exhaustion from hung upstream services
+        // Create HTTP client with timeout to prevent connection pool exhaustion from hung upstream services.
+        // Default 30s for most calls; instance create uses per-request timeout (see call_agent_api_create).
         let http_client = Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
@@ -91,6 +92,7 @@ impl AgentServiceImpl {
             .header("Content-Type", "application/json")
             .bearer_auth(&self.agent_api_token)
             .json(&request_body)
+            .timeout(std::time::Duration::from_secs(180)) // Instance creation can take 2-3 minutes
             .send()
             .await
             .map_err(|e| anyhow!("Failed to call Agent API: {}", e))?;
