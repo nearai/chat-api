@@ -437,7 +437,8 @@ impl AgentRepository for PostgresAgentRepository {
             .query_one(
                 "INSERT INTO agent_api_keys (instance_id, user_id, key_hash, name, spend_limit, expires_at)
                  VALUES (NULL, $1, $2, $3, $4, $5)
-                 RETURNING id, instance_id, user_id, key_hash, name, spend_limit, expires_at, last_used_at, is_active, created_at, updated_at",
+                 RETURNING id, instance_id, user_id, name, spend_limit, expires_at,
+                           last_used_at, is_active, created_at, updated_at",
                 &[&user_id, &key_hash, &name, &spend_limit, &expires_at],
             )
             .await?;
