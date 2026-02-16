@@ -286,6 +286,7 @@ impl AgentService for AgentServiceImpl {
 
         Ok(instance)
     }
+
     async fn create_instance(
         &self,
         user_id: UserId,
@@ -430,12 +431,10 @@ impl AgentService for AgentServiceImpl {
             .await?
             .ok_or_else(|| anyhow!("Instance not found"))?;
 
-        // Call Agent API to terminate the instance
-        // Use instance_id (the actual agent instance ID) for the deletion URL
-        let delete_url = format!(
-            "{}/instances/{}",
-            self.agent_api_base_url, instance.instance_id
-        );
+        // Call Agent API to terminate the instance. URL-encode instance_id to prevent path
+        // traversal (it can be derived from instance_name returned by the external Agent API).
+        let encoded_id = urlencoding::encode(&instance.instance_id);
+        let delete_url = format!("{}/instances/{}", self.agent_api_base_url, encoded_id);
         let response = self
             .http_client
             .delete(&delete_url)
