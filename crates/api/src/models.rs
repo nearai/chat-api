@@ -758,6 +758,9 @@ pub struct InstanceResponse {
     pub instance_id: String,
     pub name: String,
     pub public_ssh_key: Option<String>,
+    /// Dashboard URL to open OpenClaw (from Agent API)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dashboard_url: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -769,6 +772,7 @@ impl From<services::agent::ports::AgentInstance> for InstanceResponse {
             instance_id: inst.instance_id,
             name: inst.name,
             public_ssh_key: inst.public_ssh_key,
+            dashboard_url: inst.dashboard_url,
             created_at: inst.created_at.to_rfc3339(),
             updated_at: inst.updated_at.to_rfc3339(),
         }
