@@ -150,6 +150,30 @@ impl AgentServiceImpl {
 
         Ok(body)
     }
+
+    /// Call Agent API GET /instances/{name} to fetch instance details including status.
+    /// Returns None on 404 or any error (non-blocking; used to enrich instance responses).
+    async fn call_agent_api_get_instance(&self, name: &str) -> Option<serde_json::Value> {
+        let encoded_name = urlencoding::encode(name);
+        let url = format!("{}/instances/{}", self.agent_api_base_url, encoded_name);
+
+        let response = self
+            .http_client
+            .get(&url)
+            .bearer_auth(&self.agent_api_token)
+            .send()
+            .await
+            .ok()?;
+
+        if !response.status().is_success() {
+            if response.status().as_u16() == 404 {
+                tracing::debug!("Agent API instance not found: name={}", name);
+            }
+            return None;
+        }
+
+        response.json::<serde_json::Value>().await.ok()
+    }
 }
 
 #[async_trait]
@@ -404,6 +428,39 @@ impl AgentService for AgentServiceImpl {
             .await?;
 
         Ok((instances, total))
+    }
+
+    async fn get_instance_status_from_agent_api(&self, agent_api_name: &str) -> Option<String> {
+        let data = self.call_agent_api_get_instance(agent_api_name).await?;
+        data.get("status")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    }
+
+    async fn get_all_instance_statuses_from_agent_api(
+        &self,
+    ) -> std::collections::HashMap<String, String> {
+        let response = match self.call_agent_api_list().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("Agent API list failed, status enrichment skipped: {}", e);
+                return std::collections::HashMap::new();
+            }
+        };
+        let instances = match response.get("instances").and_then(|v| v.as_array()) {
+            Some(arr) => arr,
+            None => return std::collections::HashMap::new(),
+        };
+        let mut map = std::collections::HashMap::new();
+        for inst in instances {
+            if let (Some(name), Some(status)) = (
+                inst.get("name").and_then(|v| v.as_str()),
+                inst.get("status").and_then(|v| v.as_str()),
+            ) {
+                map.insert(name.to_string(), status.to_string());
+            }
+        }
+        map
     }
 
     async fn update_instance(

@@ -195,7 +195,18 @@ pub async fn list_instances(
             ApiError::internal_server_error("Failed to list instances")
         })?;
 
-    let paginated: Vec<InstanceResponse> = instances.into_iter().map(Into::into).collect();
+    let status_map = app_state
+        .agent_service
+        .get_all_instance_statuses_from_agent_api()
+        .await;
+
+    let paginated: Vec<InstanceResponse> = instances
+        .into_iter()
+        .map(|inst| {
+            let status = status_map.get(&inst.name).cloned();
+            crate::models::instance_response_with_status(inst, status)
+        })
+        .collect();
 
     Ok(Json(PaginatedResponse {
         items: paginated,
@@ -249,7 +260,14 @@ pub async fn get_instance(
         })?
         .ok_or_else(|| ApiError::not_found("Instance not found"))?;
 
-    Ok(Json(instance.into()))
+    let status = app_state
+        .agent_service
+        .get_instance_status_from_agent_api(&instance.name)
+        .await;
+
+    Ok(Json(crate::models::instance_response_with_status(
+        instance, status,
+    )))
 }
 
 /// Create an API key for an instance
@@ -573,6 +591,72 @@ pub fn create_agent_router() -> Router<AppState> {
         .route("/instances/{id}/start", post(start_instance))
         .route("/instances/{id}/stop", post(stop_instance))
         .route("/instances/{id}/restart", post(restart_instance))
+        .route("/instances/{id}", delete(delete_instance))
+}
+
+/// Delete an agent instance (user must own it)
+#[utoipa::path(
+    delete,
+    path = "/v1/agents/instances/{id}",
+    tag = "Agents",
+    params(
+        ("id" = String, Path, description = "Instance ID")
+    ),
+    responses(
+        (status = 204, description = "Instance deleted"),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - not your instance", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "Instance not found", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(("session_token" = []))
+)]
+pub async fn delete_instance(
+    State(app_state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(instance_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let instance_uuid = Uuid::parse_str(&instance_id)
+        .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
+
+    tracing::debug!(
+        "Deleting instance: instance_id={}, user_id={}",
+        instance_uuid,
+        user.user_id
+    );
+
+    let instance = app_state
+        .agent_repository
+        .get_instance(instance_uuid)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to fetch instance: instance_id={}, error={}",
+                instance_uuid,
+                e
+            );
+            ApiError::internal_server_error("Failed to fetch instance")
+        })?
+        .ok_or_else(|| ApiError::not_found("Instance not found"))?;
+
+    if instance.user_id != user.user_id {
+        return Err(ApiError::forbidden("This instance does not belong to you"));
+    }
+
+    app_state
+        .agent_service
+        .delete_instance(instance_uuid)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to delete instance: instance_id={}, error={}",
+                instance_uuid,
+                e
+            );
+            ApiError::internal_server_error("Failed to delete instance")
+        })?;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Start an agent instance

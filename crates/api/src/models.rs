@@ -751,6 +751,14 @@ pub struct AgentApiInstance {
     pub ssh_pubkey: Option<String>,
 }
 
+/// Instance status derived from connection info (dashboard_url indicates running instance)
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum InstanceStatus {
+    Running,
+    Stopped,
+}
+
 /// Agent instance response
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct InstanceResponse {
@@ -761,21 +769,60 @@ pub struct InstanceResponse {
     /// Dashboard URL to open OpenClaw (from Agent API)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dashboard_url: Option<String>,
+    /// Instance status: "running" when dashboard_url is present, "stopped" otherwise
+    pub status: InstanceStatus,
     pub created_at: String,
     pub updated_at: String,
 }
 
 impl From<services::agent::ports::AgentInstance> for InstanceResponse {
     fn from(inst: services::agent::ports::AgentInstance) -> Self {
+        let status = status_from_agent_api(None);
         Self {
             id: inst.id.to_string(),
             instance_id: inst.instance_id,
             name: inst.name,
             public_ssh_key: inst.public_ssh_key,
             dashboard_url: inst.dashboard_url,
+            status,
             created_at: inst.created_at.to_rfc3339(),
             updated_at: inst.updated_at.to_rfc3339(),
         }
+    }
+}
+
+/// Build InstanceResponse with status from Agent API when available.
+pub fn instance_response_with_status(
+    inst: services::agent::ports::AgentInstance,
+    agent_api_status: Option<String>,
+) -> InstanceResponse {
+    let status = status_from_agent_api(agent_api_status.as_deref());
+    InstanceResponse {
+        id: inst.id.to_string(),
+        instance_id: inst.instance_id,
+        name: inst.name,
+        public_ssh_key: inst.public_ssh_key,
+        dashboard_url: inst.dashboard_url,
+        status,
+        created_at: inst.created_at.to_rfc3339(),
+        updated_at: inst.updated_at.to_rfc3339(),
+    }
+}
+
+/// Map Agent API (compose-api) status string to InstanceStatus.
+/// Compose-api returns Docker container State: "running", "exited", "dead", "not found", "unknown".
+fn status_from_agent_api(agent_api_status: Option<&str>) -> InstanceStatus {
+    match agent_api_status {
+        Some(s) if s.eq_ignore_ascii_case("running") => InstanceStatus::Running,
+        Some(s)
+            if s.eq_ignore_ascii_case("stopped")
+                || s.eq_ignore_ascii_case("exited")
+                || s.eq_ignore_ascii_case("dead")
+                || s.eq_ignore_ascii_case("not found") =>
+        {
+            InstanceStatus::Stopped
+        }
+        _ => InstanceStatus::Stopped,
     }
 }
 
