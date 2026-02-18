@@ -1,10 +1,11 @@
 -- Generic agent instances table (supports various agent types)
--- NOTE: 'type' column was removed as it was unused - all instances default to 'openclaw' in the agent system
+-- Supports both openclaw and ironclaw agent types
 CREATE TABLE agent_instances (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     instance_id VARCHAR(255) NOT NULL UNIQUE,
     name VARCHAR(255) NOT NULL,
+    type VARCHAR(50) NOT NULL DEFAULT 'openclaw', -- openclaw, ironclaw
     public_ssh_key TEXT,
     instance_url TEXT,
     instance_token TEXT,
@@ -13,7 +14,8 @@ CREATE TABLE agent_instances (
     status VARCHAR(20) NOT NULL DEFAULT 'active', -- soft-delete support: active, stopped, deleted, provisioning, error
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT agent_instances_status_check CHECK (status IN ('active', 'stopped', 'deleted', 'provisioning', 'error'))
+    CONSTRAINT agent_instances_status_check CHECK (status IN ('active', 'stopped', 'deleted', 'provisioning', 'error')),
+    CONSTRAINT agent_instances_type_check CHECK (type IN ('openclaw', 'ironclaw'))
 );
 
 CREATE INDEX idx_agent_instances_user_id ON agent_instances(user_id);
@@ -118,6 +120,7 @@ CREATE OR REPLACE FUNCTION create_instance_with_limit(
     p_user_id UUID,
     p_instance_id VARCHAR(255),
     p_name VARCHAR(255),
+    p_type VARCHAR(50),
     p_public_ssh_key TEXT,
     p_instance_url TEXT,
     p_instance_token TEXT,
@@ -130,6 +133,7 @@ RETURNS TABLE(
     user_id UUID,
     instance_id VARCHAR(255),
     name VARCHAR(255),
+    type VARCHAR(50),
     public_ssh_key TEXT,
     instance_url TEXT,
     instance_token TEXT,
@@ -157,10 +161,10 @@ BEGIN
 
     -- Limit check passed, create the instance
     INSERT INTO agent_instances (
-        user_id, instance_id, name, public_ssh_key, instance_url,
+        user_id, instance_id, name, type, public_ssh_key, instance_url,
         instance_token, gateway_port, dashboard_url
     ) VALUES (
-        p_user_id, p_instance_id, p_name, p_public_ssh_key, p_instance_url,
+        p_user_id, p_instance_id, p_name, p_type, p_public_ssh_key, p_instance_url,
         p_instance_token, p_gateway_port, p_dashboard_url
     ) RETURNING * INTO v_new_instance;
 
@@ -170,6 +174,7 @@ BEGIN
         v_new_instance.user_id,
         v_new_instance.instance_id,
         v_new_instance.name,
+        v_new_instance.type,
         v_new_instance.public_ssh_key,
         v_new_instance.instance_url,
         v_new_instance.instance_token,
