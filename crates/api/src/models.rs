@@ -641,7 +641,7 @@ pub struct UpsertSystemConfigsRequest {
     /// Rate limit configuration
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate_limit: Option<RateLimitConfig>,
-    /// Subscription plan configurations (plan name -> config with providers, private_assistant_instances, monthly_tokens)
+    /// Subscription plan configurations (plan name -> config with providers, agent_instances, monthly_tokens)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subscription_plans: Option<HashMap<String, SubscriptionPlanConfig>>,
 }
@@ -696,5 +696,316 @@ impl From<FileData> for FileGetResponse {
             object: "file".to_string(),
             file,
         }
+    }
+}
+
+// ============================================================================
+// Agent Models
+// ============================================================================
+
+/// Request to create an agent instance (proxied to Agent API).
+/// The chat-api creates an API key on behalf of the user and configures the agent to use it.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateInstanceRequest {
+    /// Image to use for the instance (null for default)
+    #[serde(default)]
+    pub image: Option<String>,
+    /// Instance name (null for auto-generated)
+    #[serde(default)]
+    pub name: Option<String>,
+    /// SSH public key
+    #[serde(default)]
+    pub ssh_pubkey: Option<String>,
+}
+
+/// Request to update an agent instance
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateInstanceRequest {
+    /// New instance name (optional)
+    pub name: Option<String>,
+    /// New public SSH key (optional)
+    pub public_ssh_key: Option<String>,
+}
+
+/// Agent API instance response (deserialized from external Agent API)
+#[derive(Debug, Deserialize)]
+pub struct AgentApiResponse {
+    pub instance: AgentApiInstance,
+    pub message: String,
+    pub stage: String,
+}
+
+/// Agent API instance data (deserialized from external Agent API)
+#[derive(Debug, Deserialize)]
+pub struct AgentApiInstance {
+    pub dashboard_url: String,
+    pub gateway_port: i32,
+    pub image: String,
+    pub image_digest: Option<String>,
+    pub name: String,
+    pub ssh_command: String,
+    pub ssh_port: i32,
+    pub token: String,
+    pub url: String,
+    #[serde(default)]
+    pub ssh_pubkey: Option<String>,
+}
+
+/// Instance status derived from connection info (dashboard_url indicates running instance)
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum InstanceStatus {
+    Running,
+    Stopped,
+}
+
+/// Agent instance response
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct InstanceResponse {
+    pub id: String,
+    pub instance_id: String,
+    pub name: String,
+    pub public_ssh_key: Option<String>,
+    /// Dashboard URL to open OpenClaw (from Agent API)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dashboard_url: Option<String>,
+    /// Instance status from Agent API (running, stopped)
+    pub status: InstanceStatus,
+    /// SSH command to connect to the instance (from Agent API when available)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ssh_command: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl From<services::agent::ports::AgentInstance> for InstanceResponse {
+    fn from(inst: services::agent::ports::AgentInstance) -> Self {
+        let status = status_from_agent_api(None);
+        Self {
+            id: inst.id.to_string(),
+            instance_id: inst.instance_id,
+            name: inst.name,
+            public_ssh_key: inst.public_ssh_key,
+            dashboard_url: inst.dashboard_url,
+            status,
+            ssh_command: None,
+            created_at: inst.created_at.to_rfc3339(),
+            updated_at: inst.updated_at.to_rfc3339(),
+        }
+    }
+}
+
+/// Build InstanceResponse with status and ssh_command from Agent API when available.
+pub fn instance_response_with_enrichment(
+    inst: services::agent::ports::AgentInstance,
+    enrichment: Option<&services::agent::ports::AgentApiInstanceEnrichment>,
+) -> InstanceResponse {
+    let status = status_from_agent_api(enrichment.and_then(|e| e.status.as_deref()));
+    let ssh_command = enrichment.and_then(|e| e.ssh_command.clone());
+    InstanceResponse {
+        id: inst.id.to_string(),
+        instance_id: inst.instance_id,
+        name: inst.name,
+        public_ssh_key: inst.public_ssh_key,
+        dashboard_url: inst.dashboard_url,
+        status,
+        ssh_command,
+        created_at: inst.created_at.to_rfc3339(),
+        updated_at: inst.updated_at.to_rfc3339(),
+    }
+}
+
+/// Map Agent API (compose-api) status string to InstanceStatus.
+/// Compose-api returns Docker container State: "running", "exited", "dead", "not found", "unknown".
+fn status_from_agent_api(agent_api_status: Option<&str>) -> InstanceStatus {
+    match agent_api_status {
+        Some(s) if s.eq_ignore_ascii_case("running") => InstanceStatus::Running,
+        Some(s)
+            if s.eq_ignore_ascii_case("stopped")
+                || s.eq_ignore_ascii_case("exited")
+                || s.eq_ignore_ascii_case("dead")
+                || s.eq_ignore_ascii_case("not found") =>
+        {
+            InstanceStatus::Stopped
+        }
+        _ => InstanceStatus::Stopped,
+    }
+}
+
+/// Request to create an API key
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateApiKeyRequest {
+    /// Human-readable key name
+    pub name: String,
+    /// Optional spend limit in nano-dollars ($1.00 = 1,000,000,000 nano-dollars)
+    pub spend_limit: Option<i64>,
+    /// Optional expiration timestamp
+    pub expires_at: Option<String>,
+}
+
+/// Request to bind an unbound API key to an instance
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct BindApiKeyRequest {
+    /// The instance ID to bind the key to
+    pub instance_id: String,
+}
+
+/// Response when creating an API key (includes plaintext key)
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CreateApiKeyResponse {
+    pub id: String,
+    pub name: String,
+    /// The plaintext API key (only returned on creation!)
+    pub api_key: String,
+    pub spend_limit: Option<String>,
+    pub expires_at: Option<String>,
+    pub created_at: String,
+}
+
+/// API key response (no plaintext key)
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ApiKeyResponse {
+    pub id: String,
+    pub name: String,
+    pub spend_limit: Option<String>,
+    pub expires_at: Option<String>,
+    pub last_used_at: Option<String>,
+    pub is_active: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl From<services::agent::ports::AgentApiKey> for ApiKeyResponse {
+    fn from(key: services::agent::ports::AgentApiKey) -> Self {
+        Self {
+            id: key.id.to_string(),
+            name: key.name,
+            spend_limit: key.spend_limit.map(format_nano_dollars),
+            expires_at: key.expires_at.map(|e| e.to_rfc3339()),
+            last_used_at: key.last_used_at.map(|u| u.to_rfc3339()),
+            is_active: key.is_active,
+            created_at: key.created_at.to_rfc3339(),
+            updated_at: key.updated_at.to_rfc3339(),
+        }
+    }
+}
+
+/// Usage log entry response
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UsageResponse {
+    pub id: String,
+    pub api_key_name: String,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub total_tokens: i64,
+    pub input_cost: String,  // nano-dollars formatted as string
+    pub output_cost: String, // nano-dollars formatted as string
+    pub total_cost: String,  // nano-dollars formatted as string
+    pub model_id: String,
+    pub request_type: String,
+    pub created_at: String,
+}
+
+impl From<services::agent::ports::UsageLogEntry> for UsageResponse {
+    fn from(usage: services::agent::ports::UsageLogEntry) -> Self {
+        Self {
+            id: usage.id.to_string(),
+            api_key_name: usage.api_key_name,
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            total_tokens: usage.total_tokens,
+            input_cost: format_nano_dollars(usage.input_cost),
+            output_cost: format_nano_dollars(usage.output_cost),
+            total_cost: format_nano_dollars(usage.total_cost),
+            model_id: usage.model_id,
+            request_type: usage.request_type,
+            created_at: usage.created_at.to_rfc3339(),
+        }
+    }
+}
+
+/// Instance balance response
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct BalanceResponse {
+    pub total_spent: String, // formatted nano-dollars
+    pub total_requests: i64,
+    pub total_tokens: i64,
+    pub last_usage_at: Option<String>,
+    pub updated_at: String,
+}
+
+impl From<services::agent::ports::InstanceBalance> for BalanceResponse {
+    fn from(balance: services::agent::ports::InstanceBalance) -> Self {
+        Self {
+            total_spent: format_nano_dollars(balance.total_spent),
+            total_requests: balance.total_requests,
+            total_tokens: balance.total_tokens,
+            last_usage_at: balance.last_usage_at.map(|u| u.to_rfc3339()),
+            updated_at: balance.updated_at.to_rfc3339(),
+        }
+    }
+}
+
+/// Paginated list response
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct PaginatedResponse<T> {
+    pub items: Vec<T>,
+    pub limit: i64,
+    pub offset: i64,
+    pub total: i64,
+}
+
+/// Query parameters for usage listing
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UsageQueryParams {
+    /// Start date (ISO 8601 format, optional)
+    pub start_date: Option<String>,
+    /// End date (ISO 8601 format, optional)
+    pub end_date: Option<String>,
+    /// Maximum number of items to return (default 20)
+    #[serde(default = "default_limit")]
+    pub limit: i64,
+    /// Number of items to skip (default 0)
+    #[serde(default)]
+    pub offset: i64,
+}
+
+fn default_limit() -> i64 {
+    20
+}
+
+/// Request to set a user's subscription (admin only)
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct AdminSetSubscriptionRequest {
+    /// Payment provider (e.g., "stripe")
+    pub provider: String,
+    /// Plan name (e.g., "basic", "pro")
+    pub plan: String,
+    /// Subscription period end date (ISO 8601 format)
+    pub current_period_end: String,
+}
+
+/// Format nano-dollars as a decimal string (e.g., "0.000000001" for 1 nano-dollar)
+pub fn format_nano_dollars(nano_dollars: i64) -> String {
+    // Use integer arithmetic to avoid floating point precision errors
+    // Handle negative values by working with absolute value and prepending sign
+    let is_negative = nano_dollars < 0;
+    let abs_nano = nano_dollars.abs();
+    let dollars = abs_nano / 1_000_000_000;
+    let nanos = abs_nano % 1_000_000_000;
+
+    let formatted = if nanos == 0 {
+        dollars.to_string()
+    } else {
+        format!("{}.{:09}", dollars, nanos)
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string()
+    };
+
+    if is_negative && formatted != "0" {
+        format!("-{}", formatted)
+    } else {
+        formatted
     }
 }

@@ -161,7 +161,6 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
                         current_period_end, cancel_at_period_end, created_at, updated_at
                  FROM subscriptions
                  WHERE user_id = $1 AND status IN ('active', 'trialing')
-                   AND current_period_end > NOW()
                  ORDER BY current_period_end DESC",
                 &[&user_id],
             )
@@ -201,6 +200,27 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
             )
             .await?;
 
+        Ok(())
+    }
+
+    async fn deactivate_user_subscriptions(
+        &self,
+        txn: &tokio_postgres::Transaction<'_>,
+        user_id: UserId,
+    ) -> anyhow::Result<()> {
+        let n = txn
+            .execute(
+                "UPDATE subscriptions SET status = 'canceled', updated_at = NOW() WHERE user_id = $1 AND status IN ('active', 'trialing')",
+                &[&user_id],
+            )
+            .await?;
+        if n > 0 {
+            tracing::info!(
+                "Repository: Deactivated {} subscription(s) for user_id={}",
+                n,
+                user_id
+            );
+        }
         Ok(())
     }
 }

@@ -52,7 +52,7 @@ pub struct AttestationQuery {
         (status = 200, description = "Combined attestation report", body = CombinedAttestationReport),
         (status = 503, description = "Attestation service unavailable", body = crate::error::ApiErrorResponse)
     ),
-    tag = "attestation"
+    tag = "Attestation"
 )]
 pub async fn get_attestation_report(
     State(app_state): State<AppState>,

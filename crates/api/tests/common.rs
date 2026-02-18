@@ -25,6 +25,9 @@ static MIGRATIONS_INITIALIZED: OnceCell<()> = OnceCell::const_new();
 pub struct TestServerConfig {
     pub vpc_credentials: Option<VpcCredentials>,
     pub cloud_api_base_url: String,
+    /// Override for the LLM proxy's upstream base URL (e.g. WireMock for tests).
+    /// When set, proxy forwards to this URL instead of config.openai.base_url.
+    pub proxy_base_url: Option<String>,
     /// Optional override for `/v1/responses` rate limiting in tests.
     ///
     /// If not set, tests use a permissive default to avoid unrelated flakiness.
@@ -150,7 +153,11 @@ pub async fn create_test_server_and_db(
     // Initialize OpenAI proxy service
     let mut proxy_service =
         services::response::service::OpenAIProxy::new(vpc_credentials_service.clone());
-    if let Some(base_url) = config.openai.base_url.clone() {
+    let proxy_base_url = test_config
+        .proxy_base_url
+        .clone()
+        .or_else(|| config.openai.base_url.clone());
+    if let Some(base_url) = proxy_base_url {
         proxy_service = proxy_service.with_base_url(base_url);
     }
     let proxy_service = Arc::new(proxy_service);
@@ -213,6 +220,19 @@ pub async fn create_test_server_and_db(
         user_usage_service.clone(),
     );
 
+    // Create agent service for testing
+    let agent_repo = db.agent_repository();
+    let agent_service = Arc::new(services::agent::AgentServiceImpl::new(
+        agent_repo.clone(),
+        config.agent.api_base_url.clone(),
+        config.agent.api_token.clone(),
+        config.agent.nearai_api_url.clone(),
+    ));
+
+    // Create agent proxy service for testing
+    let agent_proxy_service: Arc<dyn services::agent::AgentProxyService> =
+        Arc::new(services::agent::proxy::AgentProxy::new());
+
     // Create application state
     let app_state = AppState {
         oauth_service,
@@ -228,6 +248,9 @@ pub async fn create_test_server_and_db(
         conversation_service,
         conversation_share_service,
         file_service,
+        agent_service,
+        agent_repository: agent_repo,
+        agent_proxy_service,
         redirect_uri: config.oauth.redirect_uri,
         admin_domains: Arc::new(admin_domains),
         cloud_api_base_url: test_config.cloud_api_base_url.clone(),
@@ -354,8 +377,28 @@ pub async fn insert_test_subscription(
         .expect("insert subscription");
 }
 
+/// Clean up all subscriptions for a user (by email).
+/// Useful for test isolation to ensure no leftover data from previous test runs.
+pub async fn cleanup_user_subscriptions(db: &database::Database, user_email: &str) {
+    let user = match db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .expect("get user")
+    {
+        Some(u) => u,
+        None => return, // User doesn't exist, nothing to clean
+    };
+
+    let client = db.pool().get().await.expect("get pool client");
+    client
+        .execute("DELETE FROM subscriptions WHERE user_id = $1", &[&user.id])
+        .await
+        .expect("delete subscriptions");
+}
+
 /// Set subscription_plans configuration
-/// plans should be in format: { "plan_name": { "providers": { "stripe": { "price_id": "price_xxx" } }, "private_assistant_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } } }
+/// plans should be in format: { "plan_name": { "providers": { "stripe": { "price_id": "price_xxx" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } } }
 pub async fn set_subscription_plans(server: &TestServer, plans: serde_json::Value) {
     let admin_email = "test_setup_admin@admin.org";
     let admin_token = mock_login(server, admin_email).await;

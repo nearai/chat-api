@@ -1,3 +1,4 @@
+pub mod agent_repository;
 pub mod analytics_repository;
 pub mod app_config_repository;
 pub mod conversation_repository;
@@ -15,6 +16,7 @@ pub mod user_repository;
 pub mod user_settings_repository;
 pub mod user_usage_repository;
 
+pub use agent_repository::PostgresAgentRepository;
 pub use analytics_repository::PostgresAnalyticsRepository;
 pub use app_config_repository::PostgresAppConfigRepository;
 pub use conversation_repository::PostgresConversationRepository;

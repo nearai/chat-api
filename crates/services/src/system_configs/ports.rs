@@ -80,7 +80,7 @@ pub struct PaymentProviderConfig {
     pub price_id: String,
 }
 
-/// Limit configuration for a plan (e.g. max private assistant instances, max monthly tokens)
+/// Limit configuration for a plan (e.g. max agent instances, max monthly tokens)
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanLimitConfig {
@@ -93,9 +93,9 @@ pub struct PlanLimitConfig {
 pub struct SubscriptionPlanConfig {
     /// Provider-specific configs (e.g. "stripe" -> { "price_id": "price_xxx" })
     pub providers: HashMap<String, PaymentProviderConfig>,
-    /// Private assistant instance limits (e.g. { "max": 1 })
+    /// Agent instance limits (e.g. { "max": 1 })
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub private_assistant_instances: Option<PlanLimitConfig>,
+    pub agent_instances: Option<PlanLimitConfig>,
     /// Monthly token limits (e.g. { "max": 1000000 })
     #[serde(skip_serializing_if = "Option::is_none")]
     pub monthly_tokens: Option<PlanLimitConfig>,
@@ -125,7 +125,7 @@ pub struct SystemConfigs {
     pub default_model: Option<String>,
     /// Rate limit configuration
     pub rate_limit: RateLimitConfig,
-    /// Subscription plan configurations (plan name -> config with providers, private_assistant_instances, monthly_tokens)
+    /// Subscription plan configurations (plan name -> config with providers, agent_instances, monthly_tokens)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subscription_plans: Option<HashMap<String, SubscriptionPlanConfig>>,
 }

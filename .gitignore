@@ -8,7 +8,7 @@ config/examples/production.yaml
 .env.*
 .idea
 .DS_Store
-
+.claude
 # Ignore markdown files except project docs
 *.md
 !CLAUDE.md

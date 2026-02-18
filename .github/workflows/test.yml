@@ -4,7 +4,6 @@ on:
   push:
     branches: [ main, develop ]
   pull_request:
-    branches: [ main, develop ]
 
 env:
   CARGO_TERM_COLOR: always
@@ -72,6 +71,7 @@ jobs:
         DEV: "true"
         STRIPE_SECRET_KEY: "sk_test_dummy_key_for_testing"
         STRIPE_WEBHOOK_SECRET: "whsec_test_dummy_secret_for_testing"
+        AGENT_API_TOKEN: "test_token_for_ci"
 
     - name: Build release
       run: cargo build --release

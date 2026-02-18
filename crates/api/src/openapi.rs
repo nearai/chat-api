@@ -76,6 +76,8 @@ use utoipa::OpenApi;
         crate::routes::admin::get_system_configs_admin,
         crate::routes::admin::get_usage_by_user_id,
         crate::routes::admin::get_top_usage,
+        crate::routes::admin::admin_set_user_subscription,
+        crate::routes::admin::admin_cancel_user_subscriptions,
         // Configs endpoints
         crate::routes::configs::get_system_configs,
         crate::routes::users::get_user_settings,
@@ -83,6 +85,26 @@ use utoipa::OpenApi;
         crate::routes::users::update_user_settings,
         // Attestation endpoints
         crate::routes::attestation::get_attestation_report,
+        // Agent endpoints
+        crate::routes::agents::create_instance,
+        crate::routes::agents::list_instances,
+        crate::routes::agents::get_instance,
+        crate::routes::admin::admin_list_all_instances,
+        crate::routes::admin::admin_create_instance,
+        crate::routes::admin::admin_delete_instance,
+        crate::routes::agents::start_instance,
+        crate::routes::agents::stop_instance,
+        crate::routes::agents::restart_instance,
+        crate::routes::admin::admin_create_backup,
+        crate::routes::admin::admin_list_backups,
+        crate::routes::admin::admin_get_backup,
+        crate::routes::admin::admin_create_unbound_api_key,
+        crate::routes::admin::admin_bind_api_key_to_instance,
+        crate::routes::agents::create_api_key,
+        crate::routes::agents::list_api_keys,
+        crate::routes::agents::revoke_api_key,
+        crate::routes::agents::get_instance_usage,
+        crate::routes::agents::get_instance_balance,
     ),
     components(schemas(
         // Request/Response models
@@ -109,6 +131,7 @@ use utoipa::OpenApi;
         // System configs models
         crate::models::SystemConfigsResponse,
         crate::models::UpsertSystemConfigsRequest,
+        crate::models::AdminSetSubscriptionRequest,
         // Admin usage models (UserUsageResponse shared with /users/me/usage)
         crate::models::UserUsageResponse,
         crate::routes::admin::TopUsageResponse,
@@ -144,6 +167,18 @@ use utoipa::OpenApi;
         crate::models::ApiGatewayAttestation,
         crate::models::ModelAttestation,
         crate::models::CombinedAttestationReport,
+        // Agent models
+        crate::models::InstanceResponse,
+        crate::routes::agents::CreateInstanceRequest,
+        crate::routes::admin::AdminCreateInstanceRequest,
+        crate::routes::admin::AdminCreateApiKeyRequest,
+        crate::models::CreateApiKeyRequest,
+        crate::models::CreateApiKeyResponse,
+        crate::models::BindApiKeyRequest,
+        crate::models::ApiKeyResponse,
+        crate::models::UsageResponse,
+        crate::models::BalanceResponse,
+        crate::models::UsageQueryParams,
     )),
     modifiers(&SecurityAddon),
     tags(
@@ -155,9 +190,10 @@ use utoipa::OpenApi;
         (name = "Files", description = "File management endpoints"),
         (name = "Proxy", description = "Proxy endpoints for OpenAI-compatible APIs"),
         (name = "Subscriptions", description = "Subscription management endpoints"),
+        (name = "Agents", description = "Agent instance management endpoints"),
         (name = "Admin", description = "Admin management endpoints"),
         (name = "Configs", description = "System configuration endpoints"),
-        (name = "attestation", description = "Attestation reporting endpoints for TEE verification")
+        (name = "Attestation", description = "Attestation reporting endpoints for TEE verification")
     )
 )]
 pub struct ApiDoc;

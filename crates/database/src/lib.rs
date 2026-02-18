@@ -1,4 +1,5 @@
 pub mod cluster_manager;
+pub mod encryption;
 pub mod migrations;
 pub mod patroni_discovery;
 pub mod pool;
@@ -6,12 +7,12 @@ pub mod repositories;
 
 pub use pool::DbPool;
 pub use repositories::{
-    PostgresAnalyticsRepository, PostgresAppConfigRepository, PostgresConversationRepository,
-    PostgresConversationShareRepository, PostgresFileRepository, PostgresModelRepository,
-    PostgresNearNonceRepository, PostgresOAuthRepository, PostgresPaymentWebhookRepository,
-    PostgresSessionRepository, PostgresStripeCustomerRepository, PostgresSubscriptionRepository,
-    PostgresSystemConfigsRepository, PostgresUserRepository, PostgresUserSettingsRepository,
-    PostgresUserUsageRepository,
+    PostgresAgentRepository, PostgresAnalyticsRepository, PostgresAppConfigRepository,
+    PostgresConversationRepository, PostgresConversationShareRepository, PostgresFileRepository,
+    PostgresModelRepository, PostgresNearNonceRepository, PostgresOAuthRepository,
+    PostgresPaymentWebhookRepository, PostgresSessionRepository, PostgresStripeCustomerRepository,
+    PostgresSubscriptionRepository, PostgresSystemConfigsRepository, PostgresUserRepository,
+    PostgresUserSettingsRepository, PostgresUserUsageRepository,
 };
 
 use crate::pool::create_pool_with_native_tls;
@@ -41,6 +42,7 @@ pub struct Database {
     stripe_customer_repository: Arc<PostgresStripeCustomerRepository>,
     subscription_repository: Arc<PostgresSubscriptionRepository>,
     payment_webhook_repository: Arc<PostgresPaymentWebhookRepository>,
+    agent_repository: Arc<PostgresAgentRepository>,
     cluster_manager: Option<Arc<ClusterManager>>,
 }
 
@@ -67,6 +69,7 @@ impl Database {
         let subscription_repository = Arc::new(PostgresSubscriptionRepository::new(pool.clone()));
         let payment_webhook_repository =
             Arc::new(PostgresPaymentWebhookRepository::new(pool.clone()));
+        let agent_repository = Arc::new(PostgresAgentRepository::new(pool.clone()));
 
         Self {
             pool,
@@ -86,6 +89,7 @@ impl Database {
             stripe_customer_repository,
             subscription_repository,
             payment_webhook_repository,
+            agent_repository,
             cluster_manager: None,
         }
     }
@@ -288,5 +292,10 @@ impl Database {
     /// Get the payment webhook repository
     pub fn payment_webhook_repository(&self) -> Arc<PostgresPaymentWebhookRepository> {
         self.payment_webhook_repository.clone()
+    }
+
+    /// Get the agent repository
+    pub fn agent_repository(&self) -> Arc<PostgresAgentRepository> {
+        self.agent_repository.clone()
     }
 }

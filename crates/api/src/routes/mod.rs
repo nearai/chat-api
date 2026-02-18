@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod agents;
 pub mod api;
 pub mod attestation;
 pub mod configs;
@@ -104,7 +105,7 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
     // Attestation routes (public, no auth required)
     let attestation_routes = attestation::create_attestation_router();
 
-    // Admin routes (requires admin authentication)
+    // Admin routes (requires admin authentication) - includes agent admin endpoints
     let admin_routes = admin::create_admin_router().layer(from_fn_with_state(
         auth_state.clone(),
         crate::middleware::admin_auth_middleware,
@@ -112,6 +113,12 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
 
     // User routes (requires authentication)
     let user_routes = users::create_user_router().layer(from_fn_with_state(
+        auth_state.clone(),
+        crate::middleware::auth_middleware,
+    ));
+
+    // Agent routes (requires authentication)
+    let agent_routes = agents::create_agent_router().layer(from_fn_with_state(
         auth_state.clone(),
         crate::middleware::auth_middleware,
     ));
@@ -141,11 +148,25 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         crate::middleware::optional_auth_middleware,
     ));
 
-    // API proxy routes (requires authentication)
-    let api_routes = api::create_api_router(rate_limit_state).layer(from_fn_with_state(
+    let dual_auth_state = crate::middleware::DualAuthState {
+        auth_state: auth_state.clone(),
+        agent_auth_state: crate::middleware::AgentAuthState {
+            agent_service: app_state.agent_service.clone(),
+            agent_repository: app_state.agent_repository.clone(),
+        },
+    };
+
+    let subscription_state = crate::middleware::SubscriptionState {
+        subscription_service: app_state.subscription_service.clone(),
+    };
+
+    // API routes: llm proxy (dual auth + subscription + rate limit), models proxy (dual auth), session routes
+    let api_routes = api::create_api_router(
+        rate_limit_state,
+        dual_auth_state,
         auth_state,
-        crate::middleware::auth_middleware,
-    ));
+        subscription_state,
+    );
 
     // Build the base router
     // Note: optional_auth_routes must come BEFORE api_routes since they share paths
@@ -158,9 +179,10 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         .nest("/v1/auth", auth_routes)
         .nest("/v1/auth", logout_route) // Logout route with auth middleware
         .nest("/v1/users", user_routes)
+        .nest("/v1/agents", agent_routes) // Agent routes (requires user auth)
         .nest("/v1/admin", admin_routes)
         .merge(optional_auth_routes) // Conversation read routes (optional auth)
-        .merge(api_routes) // API routes (required auth)
+        .merge(api_routes) // API routes: llm proxy, models proxy, conversations, share groups, files
         .merge(attestation_routes) // Merge attestation routes (already have /v1 prefix)
         .with_state(app_state)
         // Add static file serving as fallback (must be last)

@@ -14,6 +14,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use crate::middleware::auth::AuthenticatedApiKey;
 use services::UserId;
 
 /// Parsed usage from an OpenAI-style response (usage + model). Used for both non-stream and stream.
@@ -133,6 +134,9 @@ pub struct UsageTrackingStreamChatCompletions<S> {
     user_usage: Arc<dyn services::user_usage::UserUsageService>,
     pricing_cache: crate::model_pricing::ModelPricingCache,
     user_id: UserId,
+    // Optional agent service + API key for dual tracking
+    agent_service: Option<Arc<dyn services::agent::AgentService>>,
+    api_key_ext: Option<AuthenticatedApiKey>,
 }
 
 impl<S> UsageTrackingStreamChatCompletions<S>
@@ -152,7 +156,19 @@ where
             user_usage,
             pricing_cache,
             user_id,
+            agent_service: None,
+            api_key_ext: None,
         }
+    }
+
+    pub fn with_agent_service(
+        mut self,
+        agent_service: Arc<dyn services::agent::AgentService>,
+        api_key_ext: AuthenticatedApiKey,
+    ) -> Self {
+        self.agent_service = Some(agent_service);
+        self.api_key_ext = Some(api_key_ext);
+        self
     }
 }
 
@@ -185,10 +201,15 @@ where
             Poll::Ready(None) => {
                 record_usage_on_stream_end(
                     this.usage.take(),
-                    this.user_usage.clone(),
-                    this.pricing_cache.clone(),
-                    this.user_id,
-                    "UsageTrackingStreamChatCompletions",
+                    StreamUsageContext {
+                        user_usage: this.user_usage.clone(),
+                        pricing_cache: this.pricing_cache.clone(),
+                        user_id: this.user_id,
+                        stream_name: "UsageTrackingStreamChatCompletions",
+                        agent_service: this.agent_service.clone(),
+                        api_key_ext: this.api_key_ext.take(),
+                        request_type: "chat_completion".to_string(),
+                    },
                 );
                 Poll::Ready(None)
             }
@@ -205,6 +226,9 @@ pub struct UsageTrackingStreamResponseCompleted<S> {
     user_usage: Arc<dyn services::user_usage::UserUsageService>,
     pricing_cache: crate::model_pricing::ModelPricingCache,
     user_id: UserId,
+    // Optional agent service + API key for dual tracking
+    agent_service: Option<Arc<dyn services::agent::AgentService>>,
+    api_key_ext: Option<AuthenticatedApiKey>,
 }
 
 impl<S> UsageTrackingStreamResponseCompleted<S>
@@ -224,7 +248,19 @@ where
             user_usage,
             pricing_cache,
             user_id,
+            agent_service: None,
+            api_key_ext: None,
         }
+    }
+
+    pub fn with_agent_service(
+        mut self,
+        agent_service: Arc<dyn services::agent::AgentService>,
+        api_key_ext: AuthenticatedApiKey,
+    ) -> Self {
+        self.agent_service = Some(agent_service);
+        self.api_key_ext = Some(api_key_ext);
+        self
     }
 }
 
@@ -254,10 +290,15 @@ where
             Poll::Ready(None) => {
                 record_usage_on_stream_end(
                     this.usage.take(),
-                    this.user_usage.clone(),
-                    this.pricing_cache.clone(),
-                    this.user_id,
-                    "UsageTrackingStreamResponseCompleted",
+                    StreamUsageContext {
+                        user_usage: this.user_usage.clone(),
+                        pricing_cache: this.pricing_cache.clone(),
+                        user_id: this.user_id,
+                        stream_name: "UsageTrackingStreamResponseCompleted",
+                        agent_service: this.agent_service.clone(),
+                        api_key_ext: this.api_key_ext.take(),
+                        request_type: "response".to_string(),
+                    },
                 );
                 Poll::Ready(None)
             }
@@ -266,30 +307,38 @@ where
     }
 }
 
-fn record_usage_on_stream_end(
-    usage: Option<ParsedUsage>,
+struct StreamUsageContext {
     user_usage: Arc<dyn services::user_usage::UserUsageService>,
     pricing_cache: crate::model_pricing::ModelPricingCache,
     user_id: UserId,
     stream_name: &'static str,
-) {
+    agent_service: Option<Arc<dyn services::agent::AgentService>>,
+    api_key_ext: Option<AuthenticatedApiKey>,
+    request_type: String,
+}
+
+fn record_usage_on_stream_end(usage: Option<ParsedUsage>, ctx: StreamUsageContext) {
     if let Some(usage) = usage {
         tracing::debug!(
             "{}: parsed streaming usage for user_id={}, total_tokens={}, model={}",
-            stream_name,
-            user_id,
+            ctx.stream_name,
+            ctx.user_id,
             usage.total_tokens,
             usage.model
         );
         if usage.total_tokens > 0 {
             tokio::spawn(async move {
-                let cost_nano_usd = pricing_cache
+                let cost_nano_usd = ctx
+                    .pricing_cache
                     .get_pricing(&usage.model)
                     .await
                     .map(|p| p.cost_nano_usd(usage.input_tokens, usage.output_tokens));
-                if let Err(e) = user_usage
+
+                // ALWAYS: Record to user_usage_event
+                if let Err(e) = ctx
+                    .user_usage
                     .record_usage_event(
-                        user_id,
+                        ctx.user_id,
                         services::user_usage::METRIC_KEY_LLM_TOKENS,
                         usage.total_tokens as i64,
                         cost_nano_usd,
@@ -299,17 +348,53 @@ fn record_usage_on_stream_end(
                 {
                     tracing::warn!(
                         "Failed to record usage from stream for user_id={}: {}",
-                        user_id,
+                        ctx.user_id,
                         e
                     );
+                }
+
+                // ADDITIONALLY: Record to agent_usage_log if API key is present
+                if let (Some(agent_service), Some(api_key_ext)) =
+                    (ctx.agent_service, ctx.api_key_ext)
+                {
+                    let pricing = ctx
+                        .pricing_cache
+                        .get_pricing(&usage.model)
+                        .await
+                        .map(|p| services::agent::ports::TokenPricing {
+                            input_cost_per_million: p.input_nano_per_token * 1_000_000,
+                            output_cost_per_million: p.output_nano_per_token * 1_000_000,
+                        })
+                        .unwrap_or_else(|| services::agent::ports::TokenPricing {
+                            input_cost_per_million: 0,
+                            output_cost_per_million: 0,
+                        });
+
+                    if let Err(e) = agent_service
+                        .record_usage(
+                            &api_key_ext.api_key_info,
+                            usage.input_tokens as i64,
+                            usage.output_tokens as i64,
+                            usage.model.clone(),
+                            ctx.request_type.clone(),
+                            pricing,
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            "Failed to record agent usage for api_key_id={}: {}",
+                            api_key_ext.api_key_info.id,
+                            e
+                        );
+                    }
                 }
             });
         }
     } else {
         tracing::debug!(
             "{}: no usage parsed from streaming response for user_id={}",
-            stream_name,
-            user_id
+            ctx.stream_name,
+            ctx.user_id
         );
     }
 }

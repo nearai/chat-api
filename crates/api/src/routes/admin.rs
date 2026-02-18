@@ -1,17 +1,24 @@
-use crate::{consts::LIST_USERS_LIMIT_MAX, error::ApiError, models::*, state::AppState};
+use crate::{
+    consts::LIST_USERS_LIMIT_MAX, error::ApiError, middleware::AuthenticatedUser, models::*,
+    state::AppState,
+};
 use axum::routing::post;
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Extension, Path, Query, State},
     http::StatusCode,
+    response::Response,
     routing::{delete, get},
     Json, Router,
 };
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use services::analytics::{ActivityLogEntry, AnalyticsSummary, TopActiveUsersResponse};
 use services::model::ports::{UpdateModelParams, UpsertModelParams};
 use services::user_usage::UsageRankBy;
 use services::UserId;
+use urlencoding::encode;
+use uuid::Uuid;
 
 /// Pagination query parameters
 #[derive(Debug, Deserialize)]
@@ -241,6 +248,109 @@ pub async fn get_user_activity(
         limit: params.limit,
         offset: params.offset,
     }))
+}
+
+/// Admin endpoint: Set subscription for a user (for testing/manual management)
+///
+/// Allows admins to directly set a user's subscription without going through Stripe.
+/// Useful for testing in production and manual subscription management.
+/// Requires admin authentication.
+#[utoipa::path(
+    post,
+    path = "/v1/admin/users/{user_id}/subscription",
+    tag = "Admin",
+    params(
+        ("user_id" = String, Path, description = "User ID")
+    ),
+    request_body = AdminSetSubscriptionRequest,
+    responses(
+        (status = 200, description = "Subscription set successfully", body = serde_json::Value),
+        (status = 400, description = "Bad request - invalid plan or date", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(("session_token" = []))
+)]
+pub async fn admin_set_user_subscription(
+    State(app_state): State<AppState>,
+    Path(user_id): Path<UserId>,
+    Json(request): Json<AdminSetSubscriptionRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    tracing::info!(
+        "Admin: Setting subscription for user_id={}, provider={}, plan={}",
+        user_id,
+        request.provider,
+        request.plan
+    );
+
+    // Parse the period end date
+    let current_period_end = chrono::DateTime::parse_from_rfc3339(&request.current_period_end)
+        .map_err(|_| ApiError::bad_request("Invalid current_period_end format (must be ISO 8601)"))?
+        .with_timezone(&chrono::Utc);
+
+    let subscription = app_state
+        .subscription_service
+        .admin_set_subscription(user_id, request.provider, request.plan, current_period_end)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to set subscription for user_id={}: {}", user_id, e);
+            match e {
+                services::subscription::ports::SubscriptionError::InvalidPlan(msg) => {
+                    ApiError::bad_request(msg)
+                }
+                services::subscription::ports::SubscriptionError::InvalidProvider(msg) => {
+                    ApiError::bad_request(msg)
+                }
+                _ => ApiError::internal_server_error("Failed to set subscription"),
+            }
+        })?;
+
+    Ok(Json(serde_json::to_value(&subscription).unwrap()))
+}
+
+/// Admin endpoint: Cancel all subscriptions for a user
+///
+/// Removes all subscriptions for a user. Useful for testing and manual management.
+/// Requires admin authentication.
+#[utoipa::path(
+    delete,
+    path = "/v1/admin/users/{user_id}/subscription",
+    tag = "Admin",
+    params(
+        ("user_id" = String, Path, description = "User ID")
+    ),
+    responses(
+        (status = 200, description = "Subscriptions cancelled successfully"),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(("session_token" = []))
+)]
+pub async fn admin_cancel_user_subscriptions(
+    State(app_state): State<AppState>,
+    Path(user_id): Path<UserId>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    tracing::info!("Admin: Canceling all subscriptions for user_id={}", user_id);
+
+    app_state
+        .subscription_service
+        .admin_cancel_user_subscriptions(user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to cancel subscriptions for user_id={}: {}",
+                user_id,
+                e
+            );
+            ApiError::internal_server_error("Failed to cancel subscriptions")
+        })?;
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "message": "All subscriptions cancelled"
+    })))
 }
 
 /// Get top active users
@@ -911,11 +1021,547 @@ pub async fn get_system_configs_admin(
     Ok(Json(config.map(Into::into)))
 }
 
+// ========== Admin Agent Endpoints ==========
+
+/// Request body for admin creating instance for a user.
+/// The chat-api creates an API key on behalf of the user and configures the agent to use it.
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+pub struct AdminCreateInstanceRequest {
+    /// User ID to create the instance for
+    pub user_id: Uuid,
+    /// Image to use for the instance (optional)
+    #[serde(default)]
+    pub image: Option<String>,
+    /// Instance name (optional)
+    #[serde(default)]
+    pub name: Option<String>,
+    /// SSH public key (optional)
+    #[serde(default)]
+    pub ssh_pubkey: Option<String>,
+}
+
+/// Admin endpoint: List all agent instances (all users' instances)
+#[utoipa::path(
+    get,
+    path = "/v1/admin/agents/instances",
+    tag = "Admin",
+    params(
+        ("limit" = Option<i64>, Query, description = "Maximum number of items to return (default: 20, max: 100)"),
+        ("offset" = Option<i64>, Query, description = "Number of items to skip (default: 0)")
+    ),
+    responses(
+        (status = 200, description = "All instances retrieved", body = PaginatedResponse<InstanceResponse>),
+        (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - admin only", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(("session_token" = []))
+)]
+pub async fn admin_list_all_instances(
+    State(app_state): State<AppState>,
+    Extension(_user): Extension<AuthenticatedUser>,
+    Query(params): Query<PaginationQuery>,
+) -> Result<Json<PaginatedResponse<InstanceResponse>>, ApiError> {
+    tracing::info!(
+        "Admin: Listing all agent instances with limit={}, offset={}",
+        params.limit,
+        params.offset
+    );
+
+    params.validate()?;
+
+    // Use DB (agent_instances) for correct user_id per instance
+    let (instances, total) = app_state
+        .agent_service
+        .list_all_instances(params.limit, params.offset)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to list all instances: error={}", e);
+            ApiError::internal_server_error("Failed to list instances")
+        })?;
+
+    let items: Vec<InstanceResponse> = instances.into_iter().map(Into::into).collect();
+    Ok(Json(PaginatedResponse {
+        items,
+        limit: params.limit,
+        offset: params.offset,
+        total,
+    }))
+}
+
+/// Admin endpoint: Create an agent instance for a specific user
+#[utoipa::path(
+    post,
+    path = "/v1/admin/agents/instances",
+    tag = "Admin",
+    request_body = AdminCreateInstanceRequest,
+    responses(
+        (status = 201, description = "Instance created for user", body = InstanceResponse),
+        (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - admin only", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(("session_token" = []))
+)]
+pub async fn admin_create_instance(
+    State(app_state): State<AppState>,
+    Extension(_user): Extension<AuthenticatedUser>,
+    Json(request): Json<AdminCreateInstanceRequest>,
+) -> Result<(StatusCode, Json<InstanceResponse>), ApiError> {
+    tracing::info!(
+        "Admin: Creating agent instance for user_id={}",
+        request.user_id
+    );
+
+    let user_id = services::UserId(request.user_id);
+    app_state
+        .user_repository
+        .get_user(user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to check user existence: user_id={}, error={}",
+                user_id,
+                e
+            );
+            ApiError::internal_server_error("Failed to verify user")
+        })?
+        .ok_or_else(|| {
+            tracing::warn!(
+                "Admin attempted to create instance for non-existent user: user_id={}",
+                user_id
+            );
+            ApiError::bad_request("User does not exist")
+        })?;
+
+    let instance = app_state
+        .agent_service
+        .create_instance_from_agent_api(user_id, request.image, request.name, request.ssh_pubkey)
+        .await
+        .map_err(|_| {
+            tracing::error!(
+                "Admin: Failed to create instance for user_id={}",
+                request.user_id
+            );
+            ApiError::internal_server_error("Failed to create instance")
+        })?;
+
+    Ok((StatusCode::CREATED, Json(instance.into())))
+}
+
+/// Admin endpoint: Delete an agent instance
+#[utoipa::path(
+    delete,
+    path = "/v1/admin/agents/instances/{id}",
+    tag = "Admin",
+    params(
+        ("id" = String, Path, description = "Instance ID")
+    ),
+    responses(
+        (status = 204, description = "Instance deleted"),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - admin only", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "Instance not found", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(("session_token" = []))
+)]
+pub async fn admin_delete_instance(
+    State(app_state): State<AppState>,
+    Extension(_user): Extension<AuthenticatedUser>,
+    Path(instance_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let instance_uuid = Uuid::parse_str(&instance_id)
+        .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
+
+    tracing::info!("Admin: Deleting instance: instance_id={}", instance_uuid);
+
+    app_state
+        .agent_service
+        .delete_instance(instance_uuid)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to delete instance: instance_id={}, error={}",
+                instance_uuid,
+                e
+            );
+            ApiError::internal_server_error("Failed to delete instance")
+        })?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Request body for admin creating API key on behalf of a user
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+pub struct AdminCreateApiKeyRequest {
+    /// User ID to create the API key for
+    pub user_id: Uuid,
+    /// Human-readable key name
+    pub name: String,
+    /// Optional spend limit in nano-dollars ($1.00 = 1,000,000,000 nano-dollars)
+    pub spend_limit: Option<i64>,
+    /// Optional expiration timestamp (RFC3339)
+    pub expires_at: Option<String>,
+}
+
+/// Create an unbound API key on behalf of a user (pre-deployment key for agent setup)
+#[utoipa::path(
+    post,
+    path = "/v1/admin/agents/keys",
+    tag = "Admin",
+    request_body = AdminCreateApiKeyRequest,
+    responses(
+        (status = 200, description = "API key created", body = CreateApiKeyResponse),
+        (status = 400, description = "Invalid request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - admin only", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(("session_token" = []))
+)]
+pub async fn admin_create_unbound_api_key(
+    State(app_state): State<AppState>,
+    Extension(_admin): Extension<AuthenticatedUser>,
+    Json(request): Json<AdminCreateApiKeyRequest>,
+) -> Result<Json<CreateApiKeyResponse>, ApiError> {
+    let user_id = services::UserId(request.user_id);
+    tracing::info!(
+        "Admin: Creating unbound API key on behalf of user_id={}",
+        user_id
+    );
+
+    // Verify target user exists
+    app_state
+        .user_repository
+        .get_user(user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to check user existence: user_id={}, error={}",
+                user_id,
+                e
+            );
+            ApiError::internal_server_error("Failed to verify user")
+        })?
+        .ok_or_else(|| {
+            tracing::warn!(
+                "Admin attempted to create API key for non-existent user: user_id={}",
+                user_id
+            );
+            ApiError::bad_request("User does not exist")
+        })?;
+
+    let (api_key, plaintext_key) = app_state
+        .agent_service
+        .create_unbound_api_key(
+            user_id,
+            request.name.clone(),
+            request.spend_limit,
+            request.expires_at.as_ref().and_then(|s| {
+                chrono::DateTime::parse_from_rfc3339(s)
+                    .ok()
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+            }),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to create unbound API key: error={}", e);
+            ApiError::internal_server_error("Failed to create API key")
+        })?;
+
+    Ok(Json(CreateApiKeyResponse {
+        id: api_key.id.to_string(),
+        name: api_key.name,
+        api_key: plaintext_key,
+        spend_limit: api_key.spend_limit.map(|s| s.to_string()),
+        expires_at: api_key.expires_at.map(|dt| dt.to_rfc3339()),
+        created_at: api_key.created_at.to_rfc3339(),
+    }))
+}
+
+/// Bind an unbound API key to an instance
+#[utoipa::path(
+    post,
+    path = "/v1/admin/agents/keys/{key_id}/bind-instance",
+    tag = "Admin",
+    params(("key_id" = String, Path, description = "API key ID")),
+    request_body = BindApiKeyRequest,
+    responses(
+        (status = 200, description = "API key bound", body = ApiKeyResponse),
+        (status = 400, description = "Invalid request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - admin only", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "Key or instance not found", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(("session_token" = []))
+)]
+pub async fn admin_bind_api_key_to_instance(
+    State(app_state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(key_id): Path<String>,
+    Json(request): Json<BindApiKeyRequest>,
+) -> Result<Json<ApiKeyResponse>, ApiError> {
+    let key_uuid =
+        Uuid::parse_str(&key_id).map_err(|_| ApiError::bad_request("Invalid key ID format"))?;
+
+    let instance_uuid = Uuid::parse_str(&request.instance_id)
+        .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
+
+    tracing::info!(
+        "Admin: Binding API key to instance: key_id={}, instance_id={}, admin_user_id={}",
+        key_uuid,
+        instance_uuid,
+        user.user_id
+    );
+
+    let api_key = app_state
+        .agent_service
+        .admin_bind_api_key_to_instance(key_uuid, instance_uuid)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to bind API key: key_id={}, error={}", key_uuid, e);
+            match e.to_string().as_str() {
+                msg if msg.contains("not found") => ApiError::not_found(msg),
+                msg if msg.contains("Access denied") => ApiError::forbidden(msg),
+                msg if msg.contains("already bound") => ApiError::bad_request(msg),
+                _ => ApiError::internal_server_error("Failed to bind API key"),
+            }
+        })?;
+
+    Ok(Json(ApiKeyResponse::from(api_key)))
+}
+
+/// Create a backup of an agent instance
+#[utoipa::path(
+    post,
+    path = "/v1/admin/agents/instances/{id}/backup",
+    tag = "Admin",
+    params(
+        ("id" = String, Path, description = "Instance ID")
+    ),
+    responses(
+        (status = 200, description = "Backup created"),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - admin only", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "Instance not found", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(("session_token" = []))
+)]
+pub async fn admin_create_backup(
+    State(app_state): State<AppState>,
+    Extension(_user): Extension<AuthenticatedUser>,
+    Path(instance_id): Path<String>,
+) -> Result<Response, ApiError> {
+    let instance_uuid = Uuid::parse_str(&instance_id)
+        .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
+
+    tracing::info!("Admin: Creating backup: instance_id={}", instance_uuid);
+
+    let instance = app_state
+        .agent_repository
+        .get_instance(instance_uuid)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to fetch instance: instance_id={}, error={}",
+                instance_uuid,
+                e
+            );
+            ApiError::internal_server_error("Failed to fetch instance")
+        })?
+        .ok_or_else(|| ApiError::not_found("Instance not found"))?;
+
+    let encoded_instance_id = encode(&instance.instance_id);
+    let (status, headers, body_stream) = app_state
+        .agent_proxy_service
+        .forward_request(
+            &instance,
+            &format!("/v1/instances/{}/backup", encoded_instance_id),
+            "POST",
+            axum::http::HeaderMap::new(),
+            Bytes::new(),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to forward request: instance_id={}, error={}",
+                instance_uuid,
+                e
+            );
+            ApiError::internal_server_error("Failed to create backup")
+        })?;
+
+    let response_body = axum::body::Body::from_stream(body_stream);
+    let mut response = Response::new(response_body);
+    *response.status_mut() = status;
+    *response.headers_mut() = headers;
+    Ok(response)
+}
+
+/// List backups for an agent instance
+#[utoipa::path(
+    get,
+    path = "/v1/admin/agents/instances/{id}/backups",
+    tag = "Admin",
+    params(
+        ("id" = String, Path, description = "Instance ID")
+    ),
+    responses(
+        (status = 200, description = "Backups retrieved"),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - admin only", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "Instance not found", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(("session_token" = []))
+)]
+pub async fn admin_list_backups(
+    State(app_state): State<AppState>,
+    Extension(_user): Extension<AuthenticatedUser>,
+    Path(instance_id): Path<String>,
+) -> Result<Response, ApiError> {
+    let instance_uuid = Uuid::parse_str(&instance_id)
+        .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
+
+    tracing::info!("Admin: Listing backups: instance_id={}", instance_uuid);
+
+    let instance = app_state
+        .agent_repository
+        .get_instance(instance_uuid)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to fetch instance: instance_id={}, error={}",
+                instance_uuid,
+                e
+            );
+            ApiError::internal_server_error("Failed to fetch instance")
+        })?
+        .ok_or_else(|| ApiError::not_found("Instance not found"))?;
+
+    let encoded_instance_id = encode(&instance.instance_id);
+    let (status, headers, body_stream) = app_state
+        .agent_proxy_service
+        .forward_request(
+            &instance,
+            &format!("/v1/instances/{}/backups", encoded_instance_id),
+            "GET",
+            axum::http::HeaderMap::new(),
+            Bytes::new(),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to forward request: instance_id={}, error={}",
+                instance_uuid,
+                e
+            );
+            ApiError::internal_server_error("Failed to list backups")
+        })?;
+
+    let response_body = axum::body::Body::from_stream(body_stream);
+    let mut response = Response::new(response_body);
+    *response.status_mut() = status;
+    *response.headers_mut() = headers;
+    Ok(response)
+}
+
+/// Get backup details for an agent instance
+#[utoipa::path(
+    get,
+    path = "/v1/admin/agents/instances/{id}/backups/{backup_id}",
+    tag = "Admin",
+    params(
+        ("id" = String, Path, description = "Instance ID"),
+        ("backup_id" = String, Path, description = "Backup ID")
+    ),
+    responses(
+        (status = 200, description = "Backup details retrieved"),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - admin only", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "Instance or backup not found", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(("session_token" = []))
+)]
+pub async fn admin_get_backup(
+    State(app_state): State<AppState>,
+    Extension(_user): Extension<AuthenticatedUser>,
+    Path((instance_id, backup_id)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    let instance_uuid = Uuid::parse_str(&instance_id)
+        .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
+
+    if backup_id.contains("..") || backup_id.contains("/") || backup_id.contains("\\") {
+        return Err(ApiError::bad_request("Invalid backup ID format"));
+    }
+
+    tracing::info!(
+        "Admin: Getting backup: instance_id={}, backup_id={}",
+        instance_uuid,
+        backup_id
+    );
+
+    let instance = app_state
+        .agent_repository
+        .get_instance(instance_uuid)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to fetch instance: instance_id={}, error={}",
+                instance_uuid,
+                e
+            );
+            ApiError::internal_server_error("Failed to fetch instance")
+        })?
+        .ok_or_else(|| ApiError::not_found("Instance not found"))?;
+
+    let encoded_instance_id = encode(&instance.instance_id);
+    let encoded_backup_id = encode(&backup_id);
+    let (status, headers, body_stream) = app_state
+        .agent_proxy_service
+        .forward_request(
+            &instance,
+            &format!(
+                "/v1/instances/{}/backups/{}",
+                encoded_instance_id, encoded_backup_id
+            ),
+            "GET",
+            axum::http::HeaderMap::new(),
+            Bytes::new(),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to forward request: instance_id={}, backup_id={}, error={}",
+                instance_uuid,
+                backup_id,
+                e
+            );
+            ApiError::internal_server_error("Failed to get backup")
+        })?;
+
+    let response_body = axum::body::Body::from_stream(body_stream);
+    let mut response = Response::new(response_body);
+    *response.status_mut() = status;
+    *response.headers_mut() = headers;
+    Ok(response)
+}
+
 /// Create admin router with all admin routes (requires admin authentication)
 pub fn create_admin_router() -> Router<AppState> {
     Router::new()
         .route("/users", get(list_users))
         .route("/users/{user_id}/activity", get(get_user_activity))
+        .route(
+            "/users/{user_id}/subscription",
+            post(admin_set_user_subscription).delete(admin_cancel_user_subscriptions),
+        )
         .route("/models", get(list_models).patch(batch_upsert_models))
         .route("/models/{model_id}", delete(delete_model))
         .route("/vpc/revoke", post(revoke_vpc_credentials))
@@ -927,4 +1573,22 @@ pub fn create_admin_router() -> Router<AppState> {
         .route("/analytics/top-users", get(get_top_users))
         .route("/usage/users/{user_id}", get(get_usage_by_user_id))
         .route("/usage/top", get(get_top_usage))
+        // Admin agent routes
+        .nest(
+            "/agents",
+            Router::new()
+                .route(
+                    "/instances",
+                    get(admin_list_all_instances).post(admin_create_instance),
+                )
+                .route("/instances/{id}", delete(admin_delete_instance))
+                .route("/instances/{id}/backup", post(admin_create_backup))
+                .route("/instances/{id}/backups", get(admin_list_backups))
+                .route("/instances/{id}/backups/{backup_id}", get(admin_get_backup))
+                .route("/keys", post(admin_create_unbound_api_key))
+                .route(
+                    "/keys/{key_id}/bind-instance",
+                    post(admin_bind_api_key_to_instance),
+                ),
+        )
 }

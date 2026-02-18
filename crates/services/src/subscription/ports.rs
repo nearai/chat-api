@@ -169,6 +169,14 @@ pub trait SubscriptionRepository: Send + Sync {
 
     /// Delete a subscription record
     async fn delete_subscription(&self, subscription_id: &str) -> anyhow::Result<()>;
+
+    /// Deactivate all subscriptions for a user (set status = 'canceled').
+    /// Used when admin sets a new subscription to ensure only one active plan.
+    async fn deactivate_user_subscriptions(
+        &self,
+        txn: &tokio_postgres::Transaction<'_>,
+        user_id: UserId,
+    ) -> anyhow::Result<()>;
 }
 
 /// Repository trait for payment webhook events
@@ -190,9 +198,9 @@ pub trait PaymentWebhookRepository: Send + Sync {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubscriptionPlan {
     pub name: String,
-    /// Private assistant instance limits (e.g. { "max": 1 })
+    /// Agent instance limits (e.g. { "max": 1 })
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub private_assistant_instances: Option<PlanLimitConfig>,
+    pub agent_instances: Option<PlanLimitConfig>,
     /// Monthly token limits (e.g. { "max": 1000000 })
     #[serde(skip_serializing_if = "Option::is_none")]
     pub monthly_tokens: Option<PlanLimitConfig>,
@@ -249,6 +257,23 @@ pub trait SubscriptionService: Send + Sync {
     /// Returns Ok(()) when allowed, Err(NoActiveSubscription) when subscription required but not found.
     /// When Stripe is not configured (NotConfigured), returns Ok(()) to allow access (no gating).
     async fn require_subscription_for_proxy(
+        &self,
+        user_id: UserId,
+    ) -> Result<(), SubscriptionError>;
+
+    /// Admin only: Set subscription for a user directly (for testing/manual management).
+    /// If a subscription for the given plan/provider already exists, it updates it.
+    /// Otherwise, creates a new one.
+    async fn admin_set_subscription(
+        &self,
+        user_id: UserId,
+        provider: String,
+        plan: String,
+        current_period_end: DateTime<Utc>,
+    ) -> Result<SubscriptionWithPlan, SubscriptionError>;
+
+    /// Admin only: Cancel all subscriptions for a user.
+    async fn admin_cancel_user_subscriptions(
         &self,
         user_id: UserId,
     ) -> Result<(), SubscriptionError>;

@@ -8,6 +8,7 @@ use opentelemetry_sdk::{
     Resource,
 };
 use services::{
+    agent::proxy::AgentProxy,
     analytics::AnalyticsServiceImpl,
     auth::OAuthServiceImpl,
     conversation::service::ConversationServiceImpl,
@@ -157,6 +158,21 @@ async fn main() -> anyhow::Result<()> {
     // Initialize file service
     let file_service = Arc::new(FileServiceImpl::new(file_repo, proxy_service.clone()));
 
+    // Initialize agent service
+    tracing::info!("Initializing agent service...");
+    let agent_repo = db.agent_repository();
+    let agent_service = Arc::new(services::agent::AgentServiceImpl::new(
+        agent_repo.clone(),
+        config.agent.api_base_url.clone(),
+        config.agent.api_token.clone(),
+        config.agent.nearai_api_url.clone(),
+    ));
+
+    // Initialize agent proxy service
+    tracing::info!("Initializing agent proxy service...");
+    let agent_proxy_service: Arc<dyn services::agent::AgentProxyService> =
+        Arc::new(AgentProxy::new());
+
     // Initialize analytics and user usage services
     tracing::info!("Initializing analytics service...");
     let analytics_service = Arc::new(AnalyticsServiceImpl::new(analytics_repo.clone()));
@@ -279,6 +295,9 @@ async fn main() -> anyhow::Result<()> {
         conversation_service,
         conversation_share_service,
         file_service,
+        agent_service,
+        agent_repository: agent_repo,
+        agent_proxy_service,
         redirect_uri: config.oauth.redirect_uri,
         admin_domains: Arc::new(config.admin.admin_domains),
         user_repository: user_repo.clone(),
