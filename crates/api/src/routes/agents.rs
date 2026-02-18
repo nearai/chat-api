@@ -6,10 +6,8 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
-use bytes::Bytes;
 use chrono::DateTime;
 use serde::{Deserialize, Serialize};
-use urlencoding::encode;
 use uuid::Uuid;
 
 /// Request body for user creating their own instance.
@@ -112,7 +110,7 @@ pub async fn create_instance(
         })?;
 
     let current_count = total as u64;
-    if current_count >= max_allowed {
+    if current_count > max_allowed {
         tracing::warn!(
             "Agent instance limit exceeded: user_id={}, current={}, max={}",
             user.user_id,
@@ -123,7 +121,7 @@ pub async fn create_instance(
             axum::http::StatusCode::PAYMENT_REQUIRED,
             "payment_required",
             format!(
-                "Agent instance limit of {} reached for your plan",
+                "Agent instance limit of {} exceeded for your plan",
                 max_allowed
             ),
         ));
@@ -709,31 +707,23 @@ pub async fn start_instance(
         return Err(ApiError::forbidden("This instance does not belong to you"));
     }
 
-    let encoded_instance_id = encode(&instance.instance_id);
-    let (status, headers, body_stream) = app_state
-        .agent_proxy_service
-        .forward_request(
-            &instance,
-            &format!("/v1/instances/{}/start", encoded_instance_id),
-            "POST",
-            axum::http::HeaderMap::new(),
-            Bytes::new(),
-        )
+    app_state
+        .agent_service
+        .start_instance(instance_uuid, user.user_id)
         .await
         .map_err(|e| {
             tracing::error!(
-                "Failed to forward request: instance_id={}, error={}",
+                "Failed to start instance: instance_id={}, error={}",
                 instance_uuid,
                 e
             );
             ApiError::internal_server_error("Failed to start instance")
         })?;
 
-    let response_body = axum::body::Body::from_stream(body_stream);
-    let mut response = Response::new(response_body);
-    *response.status_mut() = status;
-    *response.headers_mut() = headers;
-    Ok(response)
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .body(axum::body::Body::empty())
+        .unwrap())
 }
 
 /// Stop an agent instance
@@ -786,31 +776,23 @@ pub async fn stop_instance(
         return Err(ApiError::forbidden("This instance does not belong to you"));
     }
 
-    let encoded_instance_id = encode(&instance.instance_id);
-    let (status, headers, body_stream) = app_state
-        .agent_proxy_service
-        .forward_request(
-            &instance,
-            &format!("/v1/instances/{}/stop", encoded_instance_id),
-            "POST",
-            axum::http::HeaderMap::new(),
-            Bytes::new(),
-        )
+    app_state
+        .agent_service
+        .stop_instance(instance_uuid, user.user_id)
         .await
         .map_err(|e| {
             tracing::error!(
-                "Failed to forward request: instance_id={}, error={}",
+                "Failed to stop instance: instance_id={}, error={}",
                 instance_uuid,
                 e
             );
             ApiError::internal_server_error("Failed to stop instance")
         })?;
 
-    let response_body = axum::body::Body::from_stream(body_stream);
-    let mut response = Response::new(response_body);
-    *response.status_mut() = status;
-    *response.headers_mut() = headers;
-    Ok(response)
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .body(axum::body::Body::empty())
+        .unwrap())
 }
 
 /// Restart an agent instance
@@ -863,29 +845,21 @@ pub async fn restart_instance(
         return Err(ApiError::forbidden("This instance does not belong to you"));
     }
 
-    let encoded_instance_id = encode(&instance.instance_id);
-    let (status, headers, body_stream) = app_state
-        .agent_proxy_service
-        .forward_request(
-            &instance,
-            &format!("/v1/instances/{}/restart", encoded_instance_id),
-            "POST",
-            axum::http::HeaderMap::new(),
-            Bytes::new(),
-        )
+    app_state
+        .agent_service
+        .restart_instance(instance_uuid, user.user_id)
         .await
         .map_err(|e| {
             tracing::error!(
-                "Failed to forward request: instance_id={}, error={}",
+                "Failed to restart instance: instance_id={}, error={}",
                 instance_uuid,
                 e
             );
             ApiError::internal_server_error("Failed to restart instance")
         })?;
 
-    let response_body = axum::body::Body::from_stream(body_stream);
-    let mut response = Response::new(response_body);
-    *response.status_mut() = status;
-    *response.headers_mut() = headers;
-    Ok(response)
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .body(axum::body::Body::empty())
+        .unwrap())
 }

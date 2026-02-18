@@ -1,5 +1,5 @@
 use crate::consts::{LIST_FILES_LIMIT_MAX, MAX_REQUEST_BODY_SIZE, MAX_RESPONSE_BODY_SIZE};
-use crate::middleware::auth::AuthenticatedUser;
+use crate::middleware::auth::{AuthenticatedApiKey, AuthenticatedUser};
 use crate::usage_parsing::{
     parse_chat_completion_usage_from_bytes, parse_response_usage_from_bytes,
     UsageTrackingStreamChatCompletions, UsageTrackingStreamResponseCompleted,
@@ -21,6 +21,7 @@ use multer::Multipart;
 use near_api::{Account, AccountId, NetworkConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use services::agent::ports::TokenPricing;
 use services::analytics::{ActivityType, RecordActivityRequest};
 use services::consts::MODEL_PUBLIC_DEFAULT;
 use services::conversation::ports::{
@@ -2230,6 +2231,7 @@ async fn get_file_content(
 async fn proxy_responses(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    api_key_ext: Option<Extension<AuthenticatedApiKey>>,
     mut headers: HeaderMap,
     request: Request,
 ) -> Result<Response, Response> {
@@ -2474,12 +2476,15 @@ async fn proxy_responses(
     let response_body = if !(200..300).contains(&proxy_response.status) {
         Body::from_stream(proxy_response.body)
     } else if is_streaming_response(&proxy_response.headers) {
-        let usage_stream = UsageTrackingStreamResponseCompleted::new(
+        let mut usage_stream = UsageTrackingStreamResponseCompleted::new(
             proxy_response.body,
             state.user_usage_service.clone(),
             state.model_pricing_cache.clone(),
             user.user_id,
         );
+        if let Some(Extension(api_key)) = api_key_ext {
+            usage_stream = usage_stream.with_agent_service(state.agent_service.clone(), api_key);
+        }
         Body::from_stream(usage_stream)
     } else {
         let bytes = match collect_stream_to_bytes(proxy_response.body).await {
@@ -2509,8 +2514,10 @@ async fn proxy_responses(
         let state_clone = state.clone();
         let user_id = user.user_id;
         let usage_bytes_clone = usage_bytes.clone();
+        let api_key_opt = api_key_ext.map(|Extension(key)| key);
         tokio::spawn(async move {
-            record_response_usage_from_body(&state_clone, user_id, &usage_bytes_clone).await;
+            record_response_usage_from_body(&state_clone, user_id, &usage_bytes_clone, api_key_opt)
+                .await;
         });
         Body::from(bytes)
     };
@@ -3437,6 +3444,7 @@ async fn proxy_post_to_cloud_api(
 async fn proxy_chat_completions(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    api_key_ext: Option<Extension<AuthenticatedApiKey>>,
     mut headers: HeaderMap,
     request: Request,
 ) -> Result<Response, Response> {
@@ -3471,7 +3479,7 @@ async fn proxy_chat_completions(
             Method::POST,
             ENDPOINT_PATH,
             headers.clone(),
-            Some(modified_body_bytes),
+            Some(modified_body_bytes.clone()),
         )
         .await
         .map_err(|e| {
@@ -3500,12 +3508,15 @@ async fn proxy_chat_completions(
     let response_body = if !(200..300).contains(&proxy_response.status) {
         Body::from_stream(proxy_response.body)
     } else if is_streaming_response(&proxy_response.headers) {
-        let usage_stream = UsageTrackingStreamChatCompletions::new(
+        let mut usage_stream = UsageTrackingStreamChatCompletions::new(
             proxy_response.body,
             state.user_usage_service.clone(),
             state.model_pricing_cache.clone(),
             user.user_id,
         );
+        if let Some(Extension(api_key)) = api_key_ext {
+            usage_stream = usage_stream.with_agent_service(state.agent_service.clone(), api_key);
+        }
         Body::from_stream(usage_stream)
     } else {
         let bytes = match collect_stream_to_bytes(proxy_response.body).await {
@@ -3539,9 +3550,18 @@ async fn proxy_chat_completions(
         // Return the original upstream bytes so they remain consistent with any forwarded content-encoding headers.
         let state_clone = state.clone();
         let user_id = user.user_id;
-        let body = usage_bytes.clone();
+        let request_body = modified_body_bytes.clone();
+        let response_body = usage_bytes.clone();
+        let api_key_opt = api_key_ext.map(|Extension(key)| key);
         tokio::spawn(async move {
-            record_chat_usage_from_body(&state_clone, user_id, &body).await;
+            record_chat_usage_from_body(
+                &state_clone,
+                user_id,
+                &request_body,
+                &response_body,
+                api_key_opt,
+            )
+            .await;
         });
         Body::from(bytes)
     };
@@ -3574,6 +3594,7 @@ async fn proxy_chat_completions(
 async fn proxy_image_generations(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    api_key_ext: Option<Extension<AuthenticatedApiKey>>,
     mut headers: HeaderMap,
     request: Request,
 ) -> Result<Response, Response> {
@@ -3722,8 +3743,17 @@ async fn proxy_image_generations(
         let model = image_request_model.clone();
         let qty = image_count as i64;
         let mk = services::user_usage::METRIC_KEY_IMAGE_GENERATE;
+        let api_key_opt = api_key_ext.map(|Extension(key)| key);
         tokio::spawn(async move {
-            record_image_usage(&state_clone, user_id, mk, qty, Some(model.as_str())).await;
+            record_image_usage(
+                &state_clone,
+                user_id,
+                mk,
+                qty,
+                Some(model.as_str()),
+                api_key_opt,
+            )
+            .await;
         });
         Body::from(bytes)
     };
@@ -3757,6 +3787,7 @@ async fn proxy_image_generations(
 async fn proxy_image_edits(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    api_key_ext: Option<Extension<AuthenticatedApiKey>>,
     headers: HeaderMap,
     request: Request,
 ) -> Result<Response, Response> {
@@ -3986,8 +4017,17 @@ async fn proxy_image_edits(
         let model = request_model.clone();
         let mk = services::user_usage::METRIC_KEY_IMAGE_EDIT;
         let qty = image_count as i64;
+        let api_key_opt = api_key_ext.map(|Extension(key)| key);
         tokio::spawn(async move {
-            record_image_usage(&state_clone, user_id, mk, qty, Some(model.as_str())).await;
+            record_image_usage(
+                &state_clone,
+                user_id,
+                mk,
+                qty,
+                Some(model.as_str()),
+                api_key_opt,
+            )
+            .await;
         });
         Body::from(bytes)
     };
@@ -4530,6 +4570,7 @@ async fn record_image_usage(
     metric_key: &str,
     quantity: i64,
     model_name: Option<&str>,
+    api_key_ext: Option<AuthenticatedApiKey>,
 ) {
     if quantity <= 0 {
         return;
@@ -4561,6 +4602,39 @@ async fn record_image_usage(
             e
         );
     }
+
+    // Record to agent_usage_log if request was made with an API key
+    if let Some(api_key) = api_key_ext {
+        let model = model_name.unwrap_or("").to_string();
+        let pricing_opt = state.model_pricing_cache.get_pricing(&model).await;
+        let pricing = pricing_opt
+            .map(|p| TokenPricing {
+                input_cost_per_million: p.input_nano_per_token * 1_000_000,
+                output_cost_per_million: p.output_nano_per_token * 1_000_000,
+            })
+            .unwrap_or_else(|| TokenPricing {
+                input_cost_per_million: 0,
+                output_cost_per_million: 0,
+            });
+        if let Err(e) = state
+            .agent_service
+            .record_usage(
+                &api_key.api_key_info,
+                0,
+                quantity,
+                model,
+                "image_generation".to_string(),
+                pricing,
+            )
+            .await
+        {
+            tracing::warn!(
+                "Failed to record image usage for api_key_id={}: {}",
+                api_key.api_key_info.id,
+                e
+            );
+        }
+    }
 }
 
 /// Record token and cost usage from parsed **chat completions** response body.
@@ -4568,17 +4642,30 @@ async fn record_image_usage(
 async fn record_chat_usage_from_body(
     state: &crate::state::AppState,
     user_id: UserId,
-    body: &[u8],
+    request_body: &[u8],
+    response_body: &[u8],
+    api_key_ext: Option<AuthenticatedApiKey>,
 ) -> bool {
-    let Some(usage) = parse_chat_completion_usage_from_bytes(body) else {
+    let Some(usage) = parse_chat_completion_usage_from_bytes(response_body) else {
         return false;
     };
     if usage.total_tokens == 0 {
         return false;
     }
+
+    // Extract request model name from request body
+    let request_model = serde_json::from_slice::<serde_json::Value>(request_body)
+        .ok()
+        .and_then(|v| {
+            v.get("model")
+                .and_then(|m| m.as_str())
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_else(|| usage.model.clone());
+
     let cost_nano_usd = state
         .model_pricing_cache
-        .get_pricing(&usage.model)
+        .get_pricing(&request_model)
         .await
         .map(|p| p.cost_nano_usd(usage.input_tokens, usage.output_tokens));
     if let Err(e) = state
@@ -4595,6 +4682,40 @@ async fn record_chat_usage_from_body(
         tracing::warn!("Failed to record usage for user_id={}: {}", user_id, e);
         return false;
     }
+
+    // Record to agent_usage_log if request was made with an API key
+    if let Some(api_key) = api_key_ext {
+        let pricing_opt = state.model_pricing_cache.get_pricing(&request_model).await;
+        let pricing = pricing_opt
+            .map(|p| TokenPricing {
+                input_cost_per_million: p.input_nano_per_token * 1_000_000,
+                output_cost_per_million: p.output_nano_per_token * 1_000_000,
+            })
+            .unwrap_or_else(|| TokenPricing {
+                input_cost_per_million: 0,
+                output_cost_per_million: 0,
+            });
+
+        if let Err(e) = state
+            .agent_service
+            .record_usage(
+                &api_key.api_key_info,
+                usage.input_tokens as i64,
+                usage.output_tokens as i64,
+                usage.model.clone(),
+                "chat_completion".to_string(),
+                pricing,
+            )
+            .await
+        {
+            tracing::warn!(
+                "Failed to record chat usage for api_key_id={}: {}",
+                api_key.api_key_info.id,
+                e
+            );
+        }
+    }
+
     true
 }
 
@@ -4604,6 +4725,7 @@ async fn record_response_usage_from_body(
     state: &crate::state::AppState,
     user_id: UserId,
     body: &[u8],
+    api_key_ext: Option<AuthenticatedApiKey>,
 ) -> bool {
     let Some(usage) = parse_response_usage_from_bytes(body) else {
         return false;
@@ -4630,6 +4752,40 @@ async fn record_response_usage_from_body(
         tracing::warn!("Failed to record usage for user_id={}: {}", user_id, e);
         return false;
     }
+
+    // Record to agent_usage_log if request was made with an API key
+    if let Some(api_key) = api_key_ext {
+        let pricing_opt = state.model_pricing_cache.get_pricing(&usage.model).await;
+        let pricing = pricing_opt
+            .map(|p| TokenPricing {
+                input_cost_per_million: p.input_nano_per_token * 1_000_000,
+                output_cost_per_million: p.output_nano_per_token * 1_000_000,
+            })
+            .unwrap_or_else(|| TokenPricing {
+                input_cost_per_million: 0,
+                output_cost_per_million: 0,
+            });
+
+        if let Err(e) = state
+            .agent_service
+            .record_usage(
+                &api_key.api_key_info,
+                usage.input_tokens as i64,
+                usage.output_tokens as i64,
+                usage.model.clone(),
+                "response".to_string(),
+                pricing,
+            )
+            .await
+        {
+            tracing::warn!(
+                "Failed to record response usage for api_key_id={}: {}",
+                api_key.api_key_info.id,
+                e
+            );
+        }
+    }
+
     true
 }
 

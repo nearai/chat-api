@@ -62,7 +62,7 @@ impl AgentRepository for PostgresAgentRepository {
             .query_opt(
                 "SELECT id, user_id, instance_id, name, public_ssh_key, instance_url, instance_token, gateway_port, dashboard_url, created_at, updated_at
                  FROM agent_instances
-                 WHERE id = $1",
+                 WHERE id = $1 AND status != 'deleted'",
                 &[&instance_id],
             )
             .await?;
@@ -92,7 +92,7 @@ impl AgentRepository for PostgresAgentRepository {
             .query_opt(
                 "SELECT id, user_id, instance_id, name, public_ssh_key, instance_url, instance_token, gateway_port, dashboard_url, created_at, updated_at
                  FROM agent_instances
-                 WHERE instance_id = $1",
+                 WHERE instance_id = $1 AND status != 'deleted'",
                 &[&instance_id],
             )
             .await?;
@@ -127,7 +127,7 @@ impl AgentRepository for PostgresAgentRepository {
                         ak.expires_at, ak.last_used_at, ak.is_active, ak.created_at, ak.updated_at
                  FROM agent_api_keys ak
                  JOIN agent_instances oi ON ak.instance_id = oi.id
-                 WHERE ak.key_hash = $1 AND ak.is_active = true",
+                 WHERE ak.key_hash = $1 AND ak.is_active = true AND oi.status != 'deleted'",
                 &[&key_hash],
             )
             .await?;
@@ -170,21 +170,21 @@ impl AgentRepository for PostgresAgentRepository {
     ) -> anyhow::Result<(Vec<AgentInstance>, i64)> {
         let client = self.pool.get().await?;
 
-        // Get total count
+        // Get total count (excluding soft-deleted instances)
         let count_row = client
             .query_one(
-                "SELECT COUNT(*) FROM agent_instances WHERE user_id = $1",
+                "SELECT COUNT(*) FROM agent_instances WHERE user_id = $1 AND status != 'deleted'",
                 &[&user_id],
             )
             .await?;
         let total: i64 = count_row.get(0);
 
-        // Get paginated results
+        // Get paginated results (excluding soft-deleted instances)
         let rows = client
             .query(
                 "SELECT id, user_id, instance_id, name, public_ssh_key, instance_url, instance_token, gateway_port, dashboard_url, created_at, updated_at
                  FROM agent_instances
-                 WHERE user_id = $1
+                 WHERE user_id = $1 AND status != 'deleted'
                  ORDER BY created_at DESC
                  LIMIT $2 OFFSET $3",
                 &[&user_id, &limit, &offset],
@@ -369,8 +369,12 @@ impl AgentRepository for PostgresAgentRepository {
     async fn delete_instance(&self, instance_id: Uuid) -> anyhow::Result<()> {
         let client = self.pool.get().await?;
 
+        // Soft-delete: set status to 'deleted' instead of permanently deleting
         client
-            .execute("DELETE FROM agent_instances WHERE id = $1", &[&instance_id])
+            .execute(
+                "UPDATE agent_instances SET status = 'deleted', updated_at = NOW() WHERE id = $1",
+                &[&instance_id],
+            )
             .await?;
 
         Ok(())
@@ -693,12 +697,13 @@ impl AgentRepository for PostgresAgentRepository {
         let rows = if let (Some(start), Some(end)) = (start_date, end_date) {
             client
                 .query(
-                    "SELECT id, user_id, instance_id, api_key_id, input_tokens, output_tokens,
-                            total_tokens, input_cost, output_cost, total_cost, model_id,
-                            request_type, created_at
-                     FROM agent_usage_log
-                     WHERE instance_id = $1 AND created_at >= $2 AND created_at <= $3
-                     ORDER BY created_at DESC
+                    "SELECT u.id, u.user_id, u.instance_id, u.api_key_id, k.name,
+                            u.input_tokens, u.output_tokens, u.total_tokens, u.input_cost,
+                            u.output_cost, u.total_cost, u.model_id, u.request_type, u.created_at
+                     FROM agent_usage_log u
+                     LEFT JOIN agent_api_keys k ON u.api_key_id = k.id
+                     WHERE u.instance_id = $1 AND u.created_at >= $2 AND u.created_at <= $3
+                     ORDER BY u.created_at DESC
                      LIMIT $4 OFFSET $5",
                     &[&instance_id, &start, &end, &limit, &offset],
                 )
@@ -706,12 +711,13 @@ impl AgentRepository for PostgresAgentRepository {
         } else if let Some(start) = start_date {
             client
                 .query(
-                    "SELECT id, user_id, instance_id, api_key_id, input_tokens, output_tokens,
-                            total_tokens, input_cost, output_cost, total_cost, model_id,
-                            request_type, created_at
-                     FROM agent_usage_log
-                     WHERE instance_id = $1 AND created_at >= $2
-                     ORDER BY created_at DESC
+                    "SELECT u.id, u.user_id, u.instance_id, u.api_key_id, k.name,
+                            u.input_tokens, u.output_tokens, u.total_tokens, u.input_cost,
+                            u.output_cost, u.total_cost, u.model_id, u.request_type, u.created_at
+                     FROM agent_usage_log u
+                     LEFT JOIN agent_api_keys k ON u.api_key_id = k.id
+                     WHERE u.instance_id = $1 AND u.created_at >= $2
+                     ORDER BY u.created_at DESC
                      LIMIT $3 OFFSET $4",
                     &[&instance_id, &start, &limit, &offset],
                 )
@@ -719,12 +725,13 @@ impl AgentRepository for PostgresAgentRepository {
         } else if let Some(end) = end_date {
             client
                 .query(
-                    "SELECT id, user_id, instance_id, api_key_id, input_tokens, output_tokens,
-                            total_tokens, input_cost, output_cost, total_cost, model_id,
-                            request_type, created_at
-                     FROM agent_usage_log
-                     WHERE instance_id = $1 AND created_at <= $2
-                     ORDER BY created_at DESC
+                    "SELECT u.id, u.user_id, u.instance_id, u.api_key_id, k.name,
+                            u.input_tokens, u.output_tokens, u.total_tokens, u.input_cost,
+                            u.output_cost, u.total_cost, u.model_id, u.request_type, u.created_at
+                     FROM agent_usage_log u
+                     LEFT JOIN agent_api_keys k ON u.api_key_id = k.id
+                     WHERE u.instance_id = $1 AND u.created_at <= $2
+                     ORDER BY u.created_at DESC
                      LIMIT $3 OFFSET $4",
                     &[&instance_id, &end, &limit, &offset],
                 )
@@ -732,12 +739,13 @@ impl AgentRepository for PostgresAgentRepository {
         } else {
             client
                 .query(
-                    "SELECT id, user_id, instance_id, api_key_id, input_tokens, output_tokens,
-                            total_tokens, input_cost, output_cost, total_cost, model_id,
-                            request_type, created_at
-                     FROM agent_usage_log
-                     WHERE instance_id = $1
-                     ORDER BY created_at DESC
+                    "SELECT u.id, u.user_id, u.instance_id, u.api_key_id, k.name,
+                            u.input_tokens, u.output_tokens, u.total_tokens, u.input_cost,
+                            u.output_cost, u.total_cost, u.model_id, u.request_type, u.created_at
+                     FROM agent_usage_log u
+                     LEFT JOIN agent_api_keys k ON u.api_key_id = k.id
+                     WHERE u.instance_id = $1
+                     ORDER BY u.created_at DESC
                      LIMIT $2 OFFSET $3",
                     &[&instance_id, &limit, &offset],
                 )
@@ -751,15 +759,16 @@ impl AgentRepository for PostgresAgentRepository {
                 user_id: r.get(1),
                 instance_id: r.get(2),
                 api_key_id: r.get(3),
-                input_tokens: r.get(4),
-                output_tokens: r.get(5),
-                total_tokens: r.get(6),
-                input_cost: r.get(7),
-                output_cost: r.get(8),
-                total_cost: r.get(9),
-                model_id: r.get(10),
-                request_type: r.get(11),
-                created_at: r.get(12),
+                api_key_name: r.get(4),
+                input_tokens: r.get(5),
+                output_tokens: r.get(6),
+                total_tokens: r.get(7),
+                input_cost: r.get(8),
+                output_cost: r.get(9),
+                total_cost: r.get(10),
+                model_id: r.get(11),
+                request_type: r.get(12),
+                created_at: r.get(13),
             })
             .collect();
 

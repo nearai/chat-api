@@ -888,6 +888,7 @@ impl From<services::agent::ports::AgentApiKey> for ApiKeyResponse {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UsageResponse {
     pub id: String,
+    pub api_key_name: String,
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub total_tokens: i64,
@@ -903,6 +904,7 @@ impl From<services::agent::ports::UsageLogEntry> for UsageResponse {
     fn from(usage: services::agent::ports::UsageLogEntry) -> Self {
         Self {
             id: usage.id.to_string(),
+            api_key_name: usage.api_key_name,
             input_tokens: usage.input_tokens,
             output_tokens: usage.output_tokens,
             total_tokens: usage.total_tokens,

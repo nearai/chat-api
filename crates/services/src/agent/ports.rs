@@ -43,6 +43,7 @@ pub struct UsageLogEntry {
     pub user_id: UserId,
     pub instance_id: Uuid,
     pub api_key_id: Uuid,
+    pub api_key_name: String,
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub total_tokens: i64,
@@ -273,6 +274,12 @@ pub trait AgentService: Send + Sync {
     ) -> anyhow::Result<AgentInstance>;
 
     async fn delete_instance(&self, instance_id: Uuid) -> anyhow::Result<()>;
+
+    async fn restart_instance(&self, instance_id: Uuid, user_id: UserId) -> anyhow::Result<()>;
+
+    async fn stop_instance(&self, instance_id: Uuid, user_id: UserId) -> anyhow::Result<()>;
+
+    async fn start_instance(&self, instance_id: Uuid, user_id: UserId) -> anyhow::Result<()>;
 
     // API key management
     /// Create an API key for a specific instance - returns (api_key_info, plaintext_key)

@@ -27,6 +27,11 @@ impl AgentServiceImpl {
         api_token: String,
         nearai_api_url: String,
     ) -> Self {
+        // Validate required configuration
+        if api_token.is_empty() {
+            panic!("AGENT_API_TOKEN environment variable must be set and non-empty");
+        }
+
         // Create HTTP client with timeout to prevent connection pool exhaustion from hung upstream services.
         // Default 30s for most calls; instance create uses per-request timeout (see call_agent_api_create).
         let http_client = Client::builder()
@@ -99,8 +104,9 @@ impl AgentServiceImpl {
 
         if !response.status().is_success() {
             let status = response.status();
-            let error_text = response.text().await.unwrap_or_default();
-            return Err(anyhow!("Agent API error: {} - {}", status, error_text));
+            // Don't expose upstream error details for security; log only status code
+            tracing::warn!("Agent API create instance failed: status={}", status);
+            return Err(anyhow!("Agent API error: {}", status));
         }
 
         let body_text = response
@@ -136,11 +142,10 @@ impl AgentServiceImpl {
             .map_err(|e| anyhow!("Failed to call Agent API: {}", e))?;
 
         if !response.status().is_success() {
-            return Err(anyhow!(
-                "Agent API error: {} - {}",
-                response.status(),
-                response.text().await.unwrap_or_default()
-            ));
+            let status = response.status();
+            // Don't expose upstream error details for security; log only status code
+            tracing::warn!("Agent API request failed: status={}", status);
+            return Err(anyhow!("Agent API error: {}", status));
         }
 
         let body = response
@@ -514,10 +519,10 @@ impl AgentService for AgentServiceImpl {
             .await?
             .ok_or_else(|| anyhow!("Instance not found"))?;
 
-        // Call Agent API to terminate the instance. URL-encode instance_id to prevent path
+        // Call Agent API to terminate the instance. URL-encode instance name to prevent path
         // traversal (it can be derived from instance_name returned by the external Agent API).
-        let encoded_id = urlencoding::encode(&instance.instance_id);
-        let delete_url = format!("{}/instances/{}", self.agent_api_base_url, encoded_id);
+        let encoded_name = urlencoding::encode(&instance.name);
+        let delete_url = format!("{}/instances/{}", self.agent_api_base_url, encoded_name);
         let response = self
             .http_client
             .delete(&delete_url)
@@ -539,6 +544,156 @@ impl AgentService for AgentServiceImpl {
 
         tracing::info!(
             "Instance deleted successfully: instance_id={}, name={}",
+            instance_id,
+            instance.name
+        );
+
+        Ok(())
+    }
+
+    async fn restart_instance(&self, instance_id: Uuid, user_id: UserId) -> anyhow::Result<()> {
+        tracing::info!(
+            "Restarting instance: instance_id={}, user_id={}",
+            instance_id,
+            user_id
+        );
+
+        // Get instance details
+        let instance = self
+            .repository
+            .get_instance(instance_id)
+            .await?
+            .ok_or_else(|| anyhow!("Instance not found"))?;
+
+        // Verify ownership
+        if instance.user_id != user_id {
+            return Err(anyhow!("Access denied"));
+        }
+
+        // Call Agent API to restart the instance
+        let encoded_name = urlencoding::encode(&instance.name);
+        let restart_url = format!(
+            "{}/instances/{}/restart",
+            self.agent_api_base_url, encoded_name
+        );
+        let response = self
+            .http_client
+            .post(&restart_url)
+            .bearer_auth(&self.agent_api_token)
+            .send()
+            .await
+            .map_err(|e| anyhow!("Failed to call Agent API restart: {}", e))?;
+
+        if !response.status().is_success() {
+            return Err(anyhow!(
+                "Agent API restart failed with status {}: instance_id={}",
+                response.status(),
+                instance_id
+            ));
+        }
+
+        tracing::info!(
+            "Instance restarted successfully: instance_id={}, name={}",
+            instance_id,
+            instance.name
+        );
+
+        Ok(())
+    }
+
+    async fn stop_instance(&self, instance_id: Uuid, user_id: UserId) -> anyhow::Result<()> {
+        tracing::info!(
+            "Stopping instance: instance_id={}, user_id={}",
+            instance_id,
+            user_id
+        );
+
+        // Get instance details
+        let instance = self
+            .repository
+            .get_instance(instance_id)
+            .await?
+            .ok_or_else(|| anyhow!("Instance not found"))?;
+
+        // Verify ownership
+        if instance.user_id != user_id {
+            return Err(anyhow!("Access denied"));
+        }
+
+        // Call Agent API to stop the instance
+        let encoded_name = urlencoding::encode(&instance.name);
+        let stop_url = format!(
+            "{}/instances/{}/stop",
+            self.agent_api_base_url, encoded_name
+        );
+        let response = self
+            .http_client
+            .post(&stop_url)
+            .bearer_auth(&self.agent_api_token)
+            .send()
+            .await
+            .map_err(|e| anyhow!("Failed to call Agent API stop: {}", e))?;
+
+        if !response.status().is_success() {
+            return Err(anyhow!(
+                "Agent API stop failed with status {}: instance_id={}",
+                response.status(),
+                instance_id
+            ));
+        }
+
+        tracing::info!(
+            "Instance stopped successfully: instance_id={}, name={}",
+            instance_id,
+            instance.name
+        );
+
+        Ok(())
+    }
+
+    async fn start_instance(&self, instance_id: Uuid, user_id: UserId) -> anyhow::Result<()> {
+        tracing::info!(
+            "Starting instance: instance_id={}, user_id={}",
+            instance_id,
+            user_id
+        );
+
+        // Get instance details
+        let instance = self
+            .repository
+            .get_instance(instance_id)
+            .await?
+            .ok_or_else(|| anyhow!("Instance not found"))?;
+
+        // Verify ownership
+        if instance.user_id != user_id {
+            return Err(anyhow!("Access denied"));
+        }
+
+        // Call Agent API to start the instance
+        let encoded_name = urlencoding::encode(&instance.name);
+        let start_url = format!(
+            "{}/instances/{}/start",
+            self.agent_api_base_url, encoded_name
+        );
+        let response = self
+            .http_client
+            .post(&start_url)
+            .bearer_auth(&self.agent_api_token)
+            .send()
+            .await
+            .map_err(|e| anyhow!("Failed to call Agent API start: {}", e))?;
+
+        if !response.status().is_success() {
+            return Err(anyhow!(
+                "Agent API start failed with status {}: instance_id={}",
+                response.status(),
+                instance_id
+            ));
+        }
+
+        tracing::info!(
+            "Instance started successfully: instance_id={}, name={}",
             instance_id,
             instance.name
         );
@@ -906,6 +1061,7 @@ impl AgentService for AgentServiceImpl {
             user_id: api_key.user_id,
             instance_id,
             api_key_id: api_key.id,
+            api_key_name: api_key.name.clone(),
             input_tokens,
             output_tokens,
             total_tokens,
