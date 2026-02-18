@@ -7,8 +7,8 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use super::ports::{
-    AgentApiKey, AgentInstance, AgentRepository, AgentService, CreateInstanceParams,
-    InstanceBalance, TokenPricing, UsageLogEntry,
+    AgentApiInstanceEnrichment, AgentApiKey, AgentInstance, AgentRepository, AgentService,
+    CreateInstanceParams, InstanceBalance, TokenPricing, UsageLogEntry,
 };
 
 pub struct AgentServiceImpl {
@@ -435,16 +435,28 @@ impl AgentService for AgentServiceImpl {
         Ok((instances, total))
     }
 
-    async fn get_instance_status_from_agent_api(&self, agent_api_name: &str) -> Option<String> {
+    async fn get_instance_enrichment_from_agent_api(
+        &self,
+        agent_api_name: &str,
+    ) -> Option<AgentApiInstanceEnrichment> {
         let data = self.call_agent_api_get_instance(agent_api_name).await?;
-        data.get("status")
+        let status = data
+            .get("status")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
+            .map(|s| s.to_string());
+        let ssh_command = data
+            .get("ssh_command")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        Some(AgentApiInstanceEnrichment {
+            status,
+            ssh_command,
+        })
     }
 
-    async fn get_all_instance_statuses_from_agent_api(
+    async fn get_all_instance_enrichments_from_agent_api(
         &self,
-    ) -> std::collections::HashMap<String, String> {
+    ) -> std::collections::HashMap<String, AgentApiInstanceEnrichment> {
         let response = match self.call_agent_api_list().await {
             Ok(r) => r,
             Err(e) => {
@@ -458,11 +470,22 @@ impl AgentService for AgentServiceImpl {
         };
         let mut map = std::collections::HashMap::new();
         for inst in instances {
-            if let (Some(name), Some(status)) = (
-                inst.get("name").and_then(|v| v.as_str()),
-                inst.get("status").and_then(|v| v.as_str()),
-            ) {
-                map.insert(name.to_string(), status.to_string());
+            if let Some(name) = inst.get("name").and_then(|v| v.as_str()) {
+                let status = inst
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let ssh_command = inst
+                    .get("ssh_command")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                map.insert(
+                    name.to_string(),
+                    AgentApiInstanceEnrichment {
+                        status,
+                        ssh_command,
+                    },
+                );
             }
         }
         map

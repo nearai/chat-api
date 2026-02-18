@@ -5,6 +5,13 @@ use uuid::Uuid;
 
 use crate::UserId;
 
+/// Enrichment data from Agent API (compose-api) for instance responses
+#[derive(Debug, Clone, Default)]
+pub struct AgentApiInstanceEnrichment {
+    pub status: Option<String>,
+    pub ssh_command: Option<String>,
+}
+
 /// Agent instance metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentInstance {
@@ -255,15 +262,18 @@ pub trait AgentService: Send + Sync {
         offset: i64,
     ) -> anyhow::Result<(Vec<AgentInstance>, i64)>;
 
-    /// Fetch instance status from Agent API GET /instances/{name}.
+    /// Fetch instance enrichment (status, ssh_command) from Agent API GET /instances/{name}.
     /// Returns None if the Agent API call fails or returns 404.
-    async fn get_instance_status_from_agent_api(&self, agent_api_name: &str) -> Option<String>;
-
-    /// Fetch all instance statuses from Agent API GET /instances (name -> status).
-    /// Returns empty map if the call fails; used to enrich list responses efficiently.
-    async fn get_all_instance_statuses_from_agent_api(
+    async fn get_instance_enrichment_from_agent_api(
         &self,
-    ) -> std::collections::HashMap<String, String>;
+        agent_api_name: &str,
+    ) -> Option<AgentApiInstanceEnrichment>;
+
+    /// Fetch all instance enrichments from Agent API GET /instances (name -> enrichment).
+    /// Returns empty map if the call fails; used to enrich list responses efficiently.
+    async fn get_all_instance_enrichments_from_agent_api(
+        &self,
+    ) -> std::collections::HashMap<String, AgentApiInstanceEnrichment>;
 
     async fn update_instance(
         &self,

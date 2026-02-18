@@ -769,8 +769,11 @@ pub struct InstanceResponse {
     /// Dashboard URL to open OpenClaw (from Agent API)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dashboard_url: Option<String>,
-    /// Instance status: "running" when dashboard_url is present, "stopped" otherwise
+    /// Instance status from Agent API (running, stopped)
     pub status: InstanceStatus,
+    /// SSH command to connect to the instance (from Agent API when available)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ssh_command: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -785,18 +788,20 @@ impl From<services::agent::ports::AgentInstance> for InstanceResponse {
             public_ssh_key: inst.public_ssh_key,
             dashboard_url: inst.dashboard_url,
             status,
+            ssh_command: None,
             created_at: inst.created_at.to_rfc3339(),
             updated_at: inst.updated_at.to_rfc3339(),
         }
     }
 }
 
-/// Build InstanceResponse with status from Agent API when available.
-pub fn instance_response_with_status(
+/// Build InstanceResponse with status and ssh_command from Agent API when available.
+pub fn instance_response_with_enrichment(
     inst: services::agent::ports::AgentInstance,
-    agent_api_status: Option<String>,
+    enrichment: Option<&services::agent::ports::AgentApiInstanceEnrichment>,
 ) -> InstanceResponse {
-    let status = status_from_agent_api(agent_api_status.as_deref());
+    let status = status_from_agent_api(enrichment.and_then(|e| e.status.as_deref()));
+    let ssh_command = enrichment.and_then(|e| e.ssh_command.clone());
     InstanceResponse {
         id: inst.id.to_string(),
         instance_id: inst.instance_id,
@@ -804,6 +809,7 @@ pub fn instance_response_with_status(
         public_ssh_key: inst.public_ssh_key,
         dashboard_url: inst.dashboard_url,
         status,
+        ssh_command,
         created_at: inst.created_at.to_rfc3339(),
         updated_at: inst.updated_at.to_rfc3339(),
     }

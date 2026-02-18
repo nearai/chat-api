@@ -193,16 +193,16 @@ pub async fn list_instances(
             ApiError::internal_server_error("Failed to list instances")
         })?;
 
-    let status_map = app_state
+    let enrichment_map = app_state
         .agent_service
-        .get_all_instance_statuses_from_agent_api()
+        .get_all_instance_enrichments_from_agent_api()
         .await;
 
     let paginated: Vec<InstanceResponse> = instances
         .into_iter()
         .map(|inst| {
-            let status = status_map.get(&inst.name).cloned();
-            crate::models::instance_response_with_status(inst, status)
+            let enrichment = enrichment_map.get(&inst.name);
+            crate::models::instance_response_with_enrichment(inst, enrichment)
         })
         .collect();
 
@@ -258,13 +258,14 @@ pub async fn get_instance(
         })?
         .ok_or_else(|| ApiError::not_found("Instance not found"))?;
 
-    let status = app_state
+    let enrichment = app_state
         .agent_service
-        .get_instance_status_from_agent_api(&instance.name)
+        .get_instance_enrichment_from_agent_api(&instance.name)
         .await;
 
-    Ok(Json(crate::models::instance_response_with_status(
-        instance, status,
+    Ok(Json(crate::models::instance_response_with_enrichment(
+        instance,
+        enrichment.as_ref(),
     )))
 }
 
