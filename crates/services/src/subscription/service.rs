@@ -1084,8 +1084,16 @@ impl SubscriptionService for SubscriptionServiceImpl {
             ))
         })?;
 
-        // Generate a unique subscription ID for admin-set subscriptions
-        let subscription_id = format!("admin_sub_{}", uuid::Uuid::new_v4());
+        // Reuse existing admin_sub_ subscription if present, otherwise create new one
+        let existing = self
+            .subscription_repo
+            .get_user_subscriptions(user_id)
+            .await?;
+        let subscription_id = existing
+            .iter()
+            .find(|s| s.subscription_id.starts_with("admin_sub_"))
+            .map(|s| s.subscription_id.clone())
+            .unwrap_or_else(|| format!("admin_sub_{}", uuid::Uuid::new_v4()));
 
         // Get or create a dummy customer ID for admin subscriptions
         let customer_id = format!("admin_{}", user_id);
@@ -1113,6 +1121,11 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .transaction()
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        // Deactivate any existing active subscriptions so the user has only one active plan
+        self.subscription_repo
+            .deactivate_user_subscriptions(&txn, user_id)
+            .await?;
 
         let result = self
             .subscription_repo

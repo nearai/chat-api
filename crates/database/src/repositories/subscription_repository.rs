@@ -202,4 +202,25 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
 
         Ok(())
     }
+
+    async fn deactivate_user_subscriptions(
+        &self,
+        txn: &tokio_postgres::Transaction<'_>,
+        user_id: UserId,
+    ) -> anyhow::Result<()> {
+        let n = txn
+            .execute(
+                "UPDATE subscriptions SET status = 'canceled', updated_at = NOW() WHERE user_id = $1 AND status IN ('active', 'trialing')",
+                &[&user_id],
+            )
+            .await?;
+        if n > 0 {
+            tracing::info!(
+                "Repository: Deactivated {} subscription(s) for user_id={}",
+                n,
+                user_id
+            );
+        }
+        Ok(())
+    }
 }

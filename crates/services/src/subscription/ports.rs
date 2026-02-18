@@ -169,6 +169,14 @@ pub trait SubscriptionRepository: Send + Sync {
 
     /// Delete a subscription record
     async fn delete_subscription(&self, subscription_id: &str) -> anyhow::Result<()>;
+
+    /// Deactivate all subscriptions for a user (set status = 'canceled').
+    /// Used when admin sets a new subscription to ensure only one active plan.
+    async fn deactivate_user_subscriptions(
+        &self,
+        txn: &tokio_postgres::Transaction<'_>,
+        user_id: UserId,
+    ) -> anyhow::Result<()>;
 }
 
 /// Repository trait for payment webhook events
