@@ -110,7 +110,7 @@ pub async fn create_instance(
         })?;
 
     let current_count = total as u64;
-    if current_count > max_allowed {
+    if current_count >= max_allowed {
         tracing::warn!(
             "Agent instance limit exceeded: user_id={}, current={}, max={}",
             user.user_id,
