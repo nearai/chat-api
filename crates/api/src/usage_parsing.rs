@@ -127,6 +127,10 @@ pub fn parse_usage_from_response_completed_sse_line(line: &str) -> Option<Parsed
 // ---------- Stream wrappers (usage tracking) ----------
 
 /// Stream wrapper for **chat/completions** SSE: parses top-level usage per chunk and accumulates; records on stream end.
+///
+/// Note: SSE protocol uses double newlines (\n\n) to separate events. However, OpenAI's streaming API
+/// sends one complete JSON object per `data:` line, so we process line-by-line. After processing,
+/// we keep any incomplete line (one without a trailing newline) for the next chunk.
 pub struct UsageTrackingStreamChatCompletions<S> {
     inner: S,
     buffer: String,
@@ -193,7 +197,7 @@ where
                         }
                     }
                     if let Some(last_newline) = this.buffer.rfind('\n') {
-                        this.buffer = this.buffer[last_newline + 1..].to_string();
+                        this.buffer.drain(..=last_newline);
                     }
                 }
                 Poll::Ready(Some(Ok(bytes)))
@@ -219,6 +223,10 @@ where
 }
 
 /// Stream wrapper for **/v1/responses** SSE: parses only `type: response.completed` and takes that single usage; records on stream end.
+///
+/// Note: SSE protocol uses double newlines (\n\n) to separate events. However, this API
+/// sends one complete JSON object per `data:` line, so we process line-by-line. After processing,
+/// we keep any incomplete line (one without a trailing newline) for the next chunk.
 pub struct UsageTrackingStreamResponseCompleted<S> {
     inner: S,
     buffer: String,
@@ -282,7 +290,7 @@ where
                         }
                     }
                     if let Some(last_newline) = this.buffer.rfind('\n') {
-                        this.buffer = this.buffer[last_newline + 1..].to_string();
+                        this.buffer.drain(..=last_newline);
                     }
                 }
                 Poll::Ready(Some(Ok(bytes)))

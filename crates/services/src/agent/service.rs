@@ -11,6 +11,11 @@ use super::ports::{
     CreateInstanceParams, InstanceBalance, TokenPricing, UsageLogEntry,
 };
 
+/// Maximum size for a single line in the Agent API stream (100 KB).
+/// This prevents denial-of-service attacks where a malicious Agent API sends
+/// extremely long lines without newlines, causing unbounded buffer growth.
+const MAX_BUFFER_SIZE: usize = 100 * 1024;
+
 pub struct AgentServiceImpl {
     repository: Arc<dyn AgentRepository>,
     http_client: Client,
@@ -126,18 +131,39 @@ impl AgentServiceImpl {
                         if let Ok(text) = std::str::from_utf8(&chunk) {
                             buffer.push_str(text);
 
+                            // Security: Prevent unbounded buffer growth from malicious Agent API
+                            if buffer.len() > MAX_BUFFER_SIZE {
+                                tracing::error!(
+                                    "Agent API stream buffer exceeded maximum size ({})",
+                                    MAX_BUFFER_SIZE
+                                );
+                                let _ = tx
+                                    .send(Err(anyhow!(
+                                        "Stream buffer too large: possible malicious Agent API"
+                                    )))
+                                    .await;
+                                break;
+                            }
+
                             // Process complete lines (SSE events end with \n\n)
                             while let Some(newline_pos) = buffer.find('\n') {
                                 let line = buffer[..newline_pos].to_string();
-                                buffer = buffer[newline_pos + 1..].to_string();
+                                buffer.drain(..=newline_pos);
 
                                 // Parse SSE format: "data: {...}\n\n"
                                 if let Some(data) = line.strip_prefix("data: ") {
-                                    if let Ok(event) =
-                                        serde_json::from_str::<serde_json::Value>(data)
-                                    {
-                                        // Send event immediately; ignore if channel is closed (client disconnected)
-                                        let _ = tx.send(Ok(event)).await;
+                                    match serde_json::from_str::<serde_json::Value>(data) {
+                                        Ok(event) => {
+                                            // Send event immediately; ignore if channel is closed (client disconnected)
+                                            let _ = tx.send(Ok(event)).await;
+                                        }
+                                        Err(e) => {
+                                            // Log malformed JSON events for debugging
+                                            tracing::debug!(
+                                                "Failed to parse Agent API SSE data as JSON: {}",
+                                                e
+                                            );
+                                        }
                                     }
                                 }
                             }
@@ -154,8 +180,17 @@ impl AgentServiceImpl {
             // Process any remaining data in buffer
             if !buffer.is_empty() {
                 if let Some(data) = buffer.strip_prefix("data: ") {
-                    if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
-                        let _ = tx.send(Ok(event)).await;
+                    match serde_json::from_str::<serde_json::Value>(data) {
+                        Ok(event) => {
+                            let _ = tx.send(Ok(event)).await;
+                        }
+                        Err(e) => {
+                            // Log malformed JSON events for debugging
+                            tracing::debug!(
+                                "Failed to parse final Agent API SSE data as JSON: {}",
+                                e
+                            );
+                        }
                     }
                 }
             }
@@ -293,6 +328,14 @@ async fn save_instance_from_event(
         .ok_or_else(|| anyhow!("Missing 'name' in Agent API instance data"))?
         .to_string();
 
+    // Try to extract instance_id from the Agent API event (for cross-system correlation)
+    // If not available, generate one from the instance name and a UUID
+    let instance_id = instance_data
+        .get("instance_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("agent-{}-{}", instance_name, Uuid::new_v4()));
+
     let instance_url = instance_data
         .get("url")
         .and_then(|v| v.as_str())
@@ -312,8 +355,6 @@ async fn save_instance_from_event(
         .get("dashboard_url")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
-
-    let instance_id = format!("agent-{}-{}", instance_name, Uuid::new_v4());
 
     let instance = repository
         .create_instance(CreateInstanceParams {
@@ -335,7 +376,7 @@ async fn save_instance_from_event(
 
     tracing::info!(
         "Instance saved from lifecycle event: instance_id={}, user_id={}",
-        instance.id,
+        instance_id,
         user_id
     );
 
@@ -538,45 +579,93 @@ impl AgentService for AgentServiceImpl {
         // Create a new channel to forward events and handle database writes
         let (tx, output_rx) = tokio::sync::mpsc::channel(10);
         let repo = Arc::clone(&self.repository);
+        let api_key_id = api_key.id;
 
         // Spawn a task to process events
         tokio::spawn(async move {
+            let mut created_event_processed = false;
+
             while let Some(event_result) = rx.recv().await {
                 match event_result {
                     Ok(event) => {
-                        // Check if this is the "created" stage event
-                        if let Some(stage) = event.get("stage").and_then(|s| s.as_str()) {
-                            if stage == "created" {
-                                // Extract and save instance data to database
-                                if let Some(instance_data) = event.get("instance") {
-                                    if let Err(e) = save_instance_from_event(
-                                        repo.as_ref(),
-                                        user_id,
-                                        instance_data,
-                                        &api_key.id,
-                                        ssh_pubkey.as_deref(),
-                                    )
-                                    .await
-                                    {
-                                        tracing::error!(
-                                            "Failed to save instance from created event: {}",
-                                            e
-                                        );
-                                        let _ =
-                                            tx.send(Err(anyhow!("Failed to save instance"))).await;
-                                        break;
+                        // Security: Only process the first "created" event to prevent duplicate instance creation
+                        if !created_event_processed {
+                            if let Some(stage) = event.get("stage").and_then(|s| s.as_str()) {
+                                if stage == "created" {
+                                    // Extract and save instance data to database
+                                    if let Some(instance_data) = event.get("instance") {
+                                        if let Err(e) = save_instance_from_event(
+                                            repo.as_ref(),
+                                            user_id,
+                                            instance_data,
+                                            &api_key_id,
+                                            ssh_pubkey.as_deref(),
+                                        )
+                                        .await
+                                        {
+                                            tracing::error!(
+                                                "Failed to save instance from created event: user_id={}, error={}",
+                                                user_id,
+                                                e
+                                            );
+                                            // Cleanup: Revoke the unbound API key if instance save fails
+                                            if let Err(cleanup_err) =
+                                                repo.revoke_api_key(api_key_id).await
+                                            {
+                                                tracing::warn!(
+                                                    "Failed to revoke API key on instance save failure: user_id={}, api_key_id={}, error={}",
+                                                    user_id,
+                                                    api_key_id,
+                                                    cleanup_err
+                                                );
+                                            }
+                                            let _ = tx
+                                                .send(Err(anyhow!("Failed to save instance")))
+                                                .await;
+                                            break;
+                                        }
                                     }
+                                    created_event_processed = true;
                                 }
+                            }
+                        } else if let Some(stage) = event.get("stage").and_then(|s| s.as_str()) {
+                            if stage == "created" {
+                                // Duplicate "created" event detected; ignore to prevent duplicate instance creation
+                                tracing::warn!(
+                                    "Ignoring duplicate 'created' event from Agent API: user_id={}",
+                                    user_id
+                                );
+                                if tx.send(Ok(event)).await.is_err() {
+                                    break;
+                                }
+                                continue;
                             }
                         }
 
                         // Forward the event
                         if tx.send(Ok(event)).await.is_err() {
                             // Channel closed, client disconnected
+                            // Note: If no "created" event was received before disconnect, the API key will be orphaned.
+                            // Consider implementing a cleanup mechanism (e.g., background job) to delete unbound keys after TTL.
                             break;
                         }
                     }
                     Err(e) => {
+                        // Only cleanup if we haven't created the instance yet
+                        if !created_event_processed {
+                            tracing::warn!(
+                                "Stream error before instance creation: user_id={}, revoking unbound API key",
+                                user_id
+                            );
+                            if let Err(cleanup_err) = repo.revoke_api_key(api_key_id).await {
+                                tracing::warn!(
+                                    "Failed to revoke API key on stream error: user_id={}, api_key_id={}, error={}",
+                                    user_id,
+                                    api_key_id,
+                                    cleanup_err
+                                );
+                            }
+                        }
                         let _ = tx.send(Err(e)).await;
                         break;
                     }

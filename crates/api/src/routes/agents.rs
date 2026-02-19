@@ -60,7 +60,9 @@ async fn create_instance_streaming_response(
             }
             Err(e) => {
                 tracing::error!("Error in instance creation stream: {}", e);
-                let error_json = serde_json::json!({"error": e.to_string()}).to_string();
+                // Send generic error to client; internal details remain in logs per CLAUDE.md security policy
+                let error_json =
+                    serde_json::json!({"error": "Instance creation failed"}).to_string();
                 Ok(axum::body::Bytes::from(format!("data: {}\n\n", error_json)))
             }
         }
@@ -68,13 +70,16 @@ async fn create_instance_streaming_response(
 
     let body = axum::body::Body::from_stream(stream);
 
-    Ok(Response::builder()
+    Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "text/event-stream")
         .header("cache-control", "no-cache")
         .header("connection", "keep-alive")
         .body(body)
-        .unwrap())
+        .map_err(|e| {
+            tracing::error!("Failed to build SSE response: {}", e);
+            ApiError::internal_server_error("Failed to construct response")
+        })
 }
 
 /// Create a new agent instance.
@@ -223,13 +228,19 @@ pub async fn create_instance(
             ApiError::internal_server_error("Failed to create instance")
         })?;
 
-    Ok(Response::builder()
+    let response_body = serde_json::to_string(&InstanceResponse::from(instance)).map_err(|e| {
+        tracing::error!("Failed to serialize instance response: {}", e);
+        ApiError::internal_server_error("Failed to serialize response")
+    })?;
+
+    Response::builder()
         .status(StatusCode::CREATED)
         .header("content-type", "application/json")
-        .body(axum::body::Body::from(
-            serde_json::to_string(&InstanceResponse::from(instance)).unwrap(),
-        ))
-        .unwrap())
+        .body(axum::body::Body::from(response_body))
+        .map_err(|e| {
+            tracing::error!("Failed to build JSON response: {}", e);
+            ApiError::internal_server_error("Failed to construct response")
+        })
 }
 
 /// List user's agent instances
@@ -805,10 +816,13 @@ pub async fn start_instance(
             ApiError::internal_server_error("Failed to start instance")
         })?;
 
-    Ok(Response::builder()
+    Response::builder()
         .status(StatusCode::OK)
         .body(axum::body::Body::empty())
-        .unwrap())
+        .map_err(|e| {
+            tracing::error!("Failed to build response: {}", e);
+            ApiError::internal_server_error("Failed to construct response")
+        })
 }
 
 /// Stop an agent instance
@@ -874,10 +888,13 @@ pub async fn stop_instance(
             ApiError::internal_server_error("Failed to stop instance")
         })?;
 
-    Ok(Response::builder()
+    Response::builder()
         .status(StatusCode::OK)
         .body(axum::body::Body::empty())
-        .unwrap())
+        .map_err(|e| {
+            tracing::error!("Failed to build response: {}", e);
+            ApiError::internal_server_error("Failed to construct response")
+        })
 }
 
 /// Restart an agent instance
@@ -943,8 +960,11 @@ pub async fn restart_instance(
             ApiError::internal_server_error("Failed to restart instance")
         })?;
 
-    Ok(Response::builder()
+    Response::builder()
         .status(StatusCode::OK)
         .body(axum::body::Body::empty())
-        .unwrap())
+        .map_err(|e| {
+            tracing::error!("Failed to build response: {}", e);
+            ApiError::internal_server_error("Failed to construct response")
+        })
 }
