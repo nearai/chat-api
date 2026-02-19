@@ -66,6 +66,104 @@ impl AgentServiceImpl {
         key.starts_with("sk-agent-") && key.len() == 41
     }
 
+    /// Call Agent API to create an instance with streaming lifecycle events
+    ///
+    /// # Security Note
+    /// This function receives a nearai_api_key credential that is passed to the Agent API
+    /// in the request body. This is a sensitive credential and MUST NOT be logged, stored,
+    /// or exposed in any error messages. Only the HTTP request/response status codes and headers
+    /// should be logged for debugging purposes, never the request/response body.
+    async fn call_agent_api_create_streaming(
+        &self,
+        nearai_api_key: &str,
+        nearai_api_url: &str,
+        image: Option<String>,
+        name: Option<String>,
+        ssh_pubkey: Option<String>,
+    ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<serde_json::Value>>> {
+        let url = format!("{}/instances", self.agent_api_base_url);
+
+        let request_body = serde_json::json!({
+            "image": image,
+            "name": name,
+            "nearai_api_key": nearai_api_key,
+            "nearai_api_url": nearai_api_url,
+            "ssh_pubkey": ssh_pubkey,
+        });
+
+        let response = self
+            .http_client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .bearer_auth(&self.agent_api_token)
+            .json(&request_body)
+            .timeout(std::time::Duration::from_secs(180)) // Instance creation can take 2-3 minutes
+            .send()
+            .await
+            .map_err(|e| anyhow!("Failed to call Agent API: {}", e))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            // Don't expose upstream error details for security; log only status code
+            tracing::warn!("Agent API create instance failed: status={}", status);
+            return Err(anyhow!("Agent API error: {}", status));
+        }
+
+        // Create channel for streaming events
+        let (tx, rx) = tokio::sync::mpsc::channel(10);
+
+        // Spawn task to stream SSE events as they arrive from Agent API
+        tokio::spawn(async move {
+            use futures::stream::StreamExt;
+
+            let mut stream = response.bytes_stream();
+            let mut buffer = String::new();
+
+            while let Some(chunk_result) = stream.next().await {
+                match chunk_result {
+                    Ok(chunk) => {
+                        // Decode chunk as UTF-8 and add to buffer
+                        if let Ok(text) = std::str::from_utf8(&chunk) {
+                            buffer.push_str(text);
+
+                            // Process complete lines (SSE events end with \n\n)
+                            while let Some(newline_pos) = buffer.find('\n') {
+                                let line = buffer[..newline_pos].to_string();
+                                buffer = buffer[newline_pos + 1..].to_string();
+
+                                // Parse SSE format: "data: {...}\n\n"
+                                if let Some(data) = line.strip_prefix("data: ") {
+                                    if let Ok(event) =
+                                        serde_json::from_str::<serde_json::Value>(data)
+                                    {
+                                        // Send event immediately; ignore if channel is closed (client disconnected)
+                                        let _ = tx.send(Ok(event)).await;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Error reading Agent API stream: {}", e);
+                        let _ = tx.send(Err(anyhow!("Stream error: {}", e))).await;
+                        break;
+                    }
+                }
+            }
+
+            // Process any remaining data in buffer
+            if !buffer.is_empty() {
+                if let Some(data) = buffer.strip_prefix("data: ") {
+                    if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                        let _ = tx.send(Ok(event)).await;
+                    }
+                }
+            }
+        });
+
+        Ok(rx)
+    }
+
     /// Call Agent API to create an instance
     ///
     /// # Security Note
@@ -179,6 +277,69 @@ impl AgentServiceImpl {
 
         response.json::<serde_json::Value>().await.ok()
     }
+}
+
+/// Helper function to save instance data from lifecycle event to database
+async fn save_instance_from_event(
+    repository: &dyn AgentRepository,
+    user_id: UserId,
+    instance_data: &serde_json::Value,
+    api_key_id: &Uuid,
+    ssh_pubkey: Option<&str>,
+) -> anyhow::Result<AgentInstance> {
+    let instance_name = instance_data
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("Missing 'name' in Agent API instance data"))?
+        .to_string();
+
+    let instance_url = instance_data
+        .get("url")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let instance_token = instance_data
+        .get("token")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let gateway_port = instance_data
+        .get("gateway_port")
+        .and_then(|v| v.as_i64())
+        .map(|p| p as i32);
+
+    let dashboard_url = instance_data
+        .get("dashboard_url")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let instance_id = format!("agent-{}-{}", instance_name, Uuid::new_v4());
+
+    let instance = repository
+        .create_instance(CreateInstanceParams {
+            user_id,
+            instance_id: instance_id.clone(),
+            name: instance_name,
+            public_ssh_key: ssh_pubkey.map(|s| s.to_string()),
+            instance_url,
+            instance_token,
+            gateway_port,
+            dashboard_url,
+        })
+        .await?;
+
+    // Bind the unbound API key to the new instance
+    repository
+        .bind_api_key_to_instance(*api_key_id, instance.id)
+        .await?;
+
+    tracing::info!(
+        "Instance saved from lifecycle event: instance_id={}, user_id={}",
+        instance.id,
+        user_id
+    );
+
+    Ok(instance)
 }
 
 #[async_trait]
@@ -340,6 +501,90 @@ impl AgentService for AgentServiceImpl {
         );
 
         Ok(instance)
+    }
+
+    async fn create_instance_from_agent_api_streaming(
+        &self,
+        user_id: UserId,
+        image: Option<String>,
+        name: Option<String>,
+        ssh_pubkey: Option<String>,
+    ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<serde_json::Value>>> {
+        tracing::info!(
+            "Creating instance from Agent API with streaming: user_id={}",
+            user_id
+        );
+
+        // Create an unbound API key on behalf of the user; the agent will use it to authenticate to the chat-api.
+        let key_name = name
+            .as_deref()
+            .map(|n| format!("instance-{}", n))
+            .unwrap_or_else(|| "instance".to_string());
+        let (api_key, plaintext_key) = self
+            .create_unbound_api_key(user_id, key_name, None, None)
+            .await?;
+
+        // Call Agent API which returns a stream of lifecycle events
+        let mut rx = self
+            .call_agent_api_create_streaming(
+                &plaintext_key,
+                &self.nearai_api_url,
+                image,
+                name.clone(),
+                ssh_pubkey.clone(),
+            )
+            .await?;
+
+        // Create a new channel to forward events and handle database writes
+        let (tx, output_rx) = tokio::sync::mpsc::channel(10);
+        let repo = Arc::clone(&self.repository);
+
+        // Spawn a task to process events
+        tokio::spawn(async move {
+            while let Some(event_result) = rx.recv().await {
+                match event_result {
+                    Ok(event) => {
+                        // Check if this is the "created" stage event
+                        if let Some(stage) = event.get("stage").and_then(|s| s.as_str()) {
+                            if stage == "created" {
+                                // Extract and save instance data to database
+                                if let Some(instance_data) = event.get("instance") {
+                                    if let Err(e) = save_instance_from_event(
+                                        repo.as_ref(),
+                                        user_id,
+                                        instance_data,
+                                        &api_key.id,
+                                        ssh_pubkey.as_deref(),
+                                    )
+                                    .await
+                                    {
+                                        tracing::error!(
+                                            "Failed to save instance from created event: {}",
+                                            e
+                                        );
+                                        let _ =
+                                            tx.send(Err(anyhow!("Failed to save instance"))).await;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Forward the event
+                        if tx.send(Ok(event)).await.is_err() {
+                            // Channel closed, client disconnected
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(e)).await;
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok(output_rx)
     }
 
     async fn create_instance(

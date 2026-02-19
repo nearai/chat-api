@@ -241,6 +241,17 @@ pub trait AgentService: Send + Sync {
         ssh_pubkey: Option<String>,
     ) -> anyhow::Result<AgentInstance>;
 
+    /// Create instance with streaming lifecycle events
+    /// Returns a receiver that yields LifecycleEvent objects as they occur during instance creation
+    /// This is useful for real-time UI updates instead of a loading bar
+    async fn create_instance_from_agent_api_streaming(
+        &self,
+        user_id: UserId,
+        image: Option<String>,
+        name: Option<String>,
+        ssh_pubkey: Option<String>,
+    ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<serde_json::Value>>>;
+
     async fn create_instance(
         &self,
         user_id: UserId,
