@@ -330,7 +330,7 @@ impl SubscriptionServiceImpl {
     }
 
     /// Stop instances that exceed the plan's agent_instances.max limit.
-    /// Keeps the oldest N instances (by created_at), stops the rest.
+    /// Keeps the newest N instances (by created_at), stops the rest.
     async fn stop_excess_instances(&self, user_id: UserId, price_id: &str) {
         let plans = match self.get_subscription_plans().await {
             Ok(p) => p,
@@ -1094,6 +1094,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
         let mut user_id_to_invalidate: Option<UserId> = None;
         // Track if we need to stop instances after commit (cancellation/payment failure)
         let mut stop_all_instances_for: Option<UserId> = None;
+        // Track if we need to stop excess instances after commit (downgrade applied)
+        let mut stop_excess_instances_for: Option<(UserId, String)> = None;
 
         if let Some((subscription_id, mut subscription)) = subscription_data {
             let user_id = subscription.user_id;
@@ -1129,25 +1131,43 @@ impl SubscriptionService for SubscriptionServiceImpl {
                             &subscription.provider,
                             &plans,
                         ) {
-                            // DOWNGRADE: defer the price change.
-                            // Use Stripe's latest current_period_end (from the incoming webhook)
-                            // rather than the DB's existing value, which may be stale if a renewal
-                            // webhook arrived concurrently.
-                            tracing::info!(
-                                "Deferring downgrade: subscription_id={}, user_id={}, old_price={}, new_price={}, effective_at={}",
-                                subscription_id, user_id,
-                                existing_sub.price_id, subscription.price_id,
-                                subscription.current_period_end
-                            );
-                            // Swap: new price → pending, old price → current (preserves old limits during grace period)
-                            subscription.pending_price_id = Some(subscription.price_id.clone());
-                            subscription.downgrade_effective_at =
-                                Some(subscription.current_period_end);
-                            subscription.price_id = existing_sub.price_id.clone();
-                            // NOTE: We intentionally do NOT call stop_excess_instances here.
-                            // During the grace period the user keeps the old plan's instance
-                            // limits. Instance enforcement happens when the downgrade applies
-                            // (in apply_pending_downgrade_if_due).
+                            if existing_sub.pending_price_id.as_deref()
+                                == Some(&subscription.price_id)
+                            {
+                                // Stripe renewed at the pending (lower) price — the grace period
+                                // has ended and Stripe is now billing at the new rate. Apply the
+                                // downgrade immediately instead of re-deferring (which would loop
+                                // indefinitely).
+                                tracing::info!(
+                                    "Applying deferred downgrade (Stripe renewed at pending price): subscription_id={}, user_id={}, new_price={}",
+                                    subscription_id, user_id, subscription.price_id
+                                );
+                                subscription.pending_price_id = None;
+                                subscription.downgrade_effective_at = None;
+                                // price_id is already the new (lower) price from Stripe
+                                stop_excess_instances_for =
+                                    Some((user_id, subscription.price_id.clone()));
+                            } else {
+                                // New downgrade target — defer the price change.
+                                // Use Stripe's latest current_period_end (from the incoming webhook)
+                                // rather than the DB's existing value, which may be stale if a renewal
+                                // webhook arrived concurrently.
+                                tracing::info!(
+                                    "Deferring downgrade: subscription_id={}, user_id={}, old_price={}, new_price={}, effective_at={}",
+                                    subscription_id, user_id,
+                                    existing_sub.price_id, subscription.price_id,
+                                    subscription.current_period_end
+                                );
+                                // Swap: new price → pending, old price → current (preserves old limits during grace period)
+                                subscription.pending_price_id = Some(subscription.price_id.clone());
+                                subscription.downgrade_effective_at =
+                                    Some(subscription.current_period_end);
+                                subscription.price_id = existing_sub.price_id.clone();
+                                // NOTE: We intentionally do NOT call stop_excess_instances here.
+                                // During the grace period the user keeps the old plan's instance
+                                // limits. Instance enforcement happens when the downgrade applies
+                                // (in apply_pending_downgrade_if_due).
+                            }
                         } else {
                             // UPGRADE: apply immediately, clear any pending downgrade
                             tracing::info!(
@@ -1174,6 +1194,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                                 // Apply the downgrade inline
                                 if let Some(ref pending) = subscription.pending_price_id {
                                     subscription.price_id = pending.clone();
+                                    stop_excess_instances_for = Some((user_id, pending.clone()));
                                 }
                                 subscription.pending_price_id = None;
                                 subscription.downgrade_effective_at = None;
@@ -1215,6 +1236,11 @@ impl SubscriptionService for SubscriptionServiceImpl {
         // After commit: stop all instances if subscription ended
         if let Some(user_id) = stop_all_instances_for {
             self.stop_all_user_instances(user_id).await;
+        }
+
+        // After commit: stop excess instances if downgrade was applied
+        if let Some((uid, ref price_id)) = stop_excess_instances_for {
+            self.stop_excess_instances(uid, price_id).await;
         }
 
         tracing::info!(
@@ -1365,6 +1391,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
                             .map(|l| l.max)
                             .unwrap_or(1_000_000);
                         let period_end = effective_sub.current_period_end;
+                        // TODO: sub_one_month_same_day assumes monthly billing. If yearly plans
+                        // are added, use Stripe's current_period_start instead.
                         let period_start = sub_one_month_same_day(period_end);
                         (max_tokens, period_start, period_end)
                     }
@@ -1578,6 +1606,7 @@ mod tests {
                 },
                 agent_instances: Some(PlanLimitConfig { max: 2 }),
                 monthly_tokens: Some(PlanLimitConfig { max: 500_000 }),
+                trial_period_days: None,
             },
         );
 
@@ -1596,6 +1625,7 @@ mod tests {
                 },
                 agent_instances: Some(PlanLimitConfig { max: 5 }),
                 monthly_tokens: Some(PlanLimitConfig { max: 5_000_000 }),
+                trial_period_days: None,
             },
         );
 
@@ -1614,6 +1644,7 @@ mod tests {
                 },
                 agent_instances: Some(PlanLimitConfig { max: 10 }),
                 monthly_tokens: Some(PlanLimitConfig { max: 50_000_000 }),
+                trial_period_days: None,
             },
         );
 
@@ -1758,6 +1789,7 @@ mod tests {
                 },
                 agent_instances: Some(PlanLimitConfig { max: 5 }),
                 monthly_tokens: Some(PlanLimitConfig { max: 1_000_000 }),
+                trial_period_days: None,
             },
         );
         plans.insert(
@@ -1776,6 +1808,7 @@ mod tests {
                 // Same tokens but fewer instances
                 agent_instances: Some(PlanLimitConfig { max: 2 }),
                 monthly_tokens: Some(PlanLimitConfig { max: 1_000_000 }),
+                trial_period_days: None,
             },
         );
 
