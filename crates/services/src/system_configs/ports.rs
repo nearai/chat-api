@@ -93,6 +93,9 @@ pub struct PlanLimitConfig {
 pub struct SubscriptionPlanConfig {
     /// Provider-specific configs (e.g. "stripe" -> { "price_id": "price_xxx" })
     pub providers: HashMap<String, PaymentProviderConfig>,
+    /// Free trial period in days before first charge (Stripe max 730)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trial_period_days: Option<u32>,
     /// Agent instance limits (e.g. { "max": 1 })
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_instances: Option<PlanLimitConfig>,
