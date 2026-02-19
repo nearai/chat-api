@@ -3119,10 +3119,35 @@ async fn prepare_chat_completions_body(
     let mut body_json: Option<serde_json::Value> = None;
     let mut model_system_prompt: Option<String> = None;
 
+    let mut auto_routed = false;
+
     if !body_bytes.is_empty() {
         match serde_json::from_slice::<serde_json::Value>(&body_bytes) {
             Ok(v) => {
                 body_json = Some(v);
+
+                // Route "auto" model to GLM-5-FP8 with recommended defaults
+                if body_json
+                    .as_ref()
+                    .and_then(|b| b.get("model"))
+                    .and_then(|v| v.as_str())
+                    == Some("auto")
+                {
+                    if let Some(body) = body_json.as_mut() {
+                        body["model"] = json!("zai-org/GLM-5-FP8");
+                        if body.get("temperature").is_none() {
+                            body["temperature"] = json!(1.0);
+                        }
+                        if body.get("top_p").is_none() {
+                            body["top_p"] = json!(0.95);
+                        }
+                        if body.get("max_tokens").is_none() {
+                            body["max_tokens"] = json!(4096);
+                        }
+                        auto_routed = true;
+                    }
+                }
+
                 if let Some(model_id) = body_json
                     .as_ref()
                     .and_then(|b| b.get("model"))
@@ -3184,7 +3209,7 @@ async fn prepare_chat_completions_body(
                 modified = true;
             }
         }
-        if modified {
+        if modified || auto_routed {
             serde_json::to_vec(&body).map(Bytes::from).map_err(|_| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
