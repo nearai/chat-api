@@ -198,6 +198,9 @@ pub trait PaymentWebhookRepository: Send + Sync {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubscriptionPlan {
     pub name: String,
+    /// Free trial period in days before first charge
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trial_period_days: Option<u32>,
     /// Agent instance limits (e.g. { "max": 1 })
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_instances: Option<PlanLimitConfig>,

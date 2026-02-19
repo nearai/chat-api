@@ -13,8 +13,9 @@ use std::sync::Arc;
 use std::time::Instant;
 use stripe::{
     BillingPortalSession, CheckoutSession, CheckoutSessionMode, Client, CreateBillingPortalSession,
-    CreateCheckoutSession, CreateCheckoutSessionLineItems, Customer, CustomerId, RequestStrategy,
-    Subscription as StripeSubscription, Webhook, WebhookError,
+    CreateCheckoutSession, CreateCheckoutSessionLineItems, CreateCheckoutSessionSubscriptionData,
+    Customer, CustomerId, RequestStrategy, Subscription as StripeSubscription, Webhook,
+    WebhookError,
 };
 use tokio::sync::RwLock;
 
@@ -375,14 +376,13 @@ impl SubscriptionService for SubscriptionServiceImpl {
         let plans: Vec<SubscriptionPlan> = stripe_plans
             .into_keys()
             .map(|name| {
-                let agent_instances = subscription_plans
-                    .get(&name)
-                    .and_then(|c| c.agent_instances.clone());
-                let monthly_tokens = subscription_plans
-                    .get(&name)
-                    .and_then(|c| c.monthly_tokens.clone());
+                let plan_config = subscription_plans.get(&name);
+                let agent_instances = plan_config.and_then(|c| c.agent_instances.clone());
+                let monthly_tokens = plan_config.and_then(|c| c.monthly_tokens.clone());
+                let trial_period_days = plan_config.and_then(|c| c.trial_period_days);
                 SubscriptionPlan {
                     name,
+                    trial_period_days,
                     agent_instances,
                     monthly_tokens,
                 }
@@ -430,6 +430,17 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .ok_or_else(|| SubscriptionError::InvalidPlan(plan.clone()))?
             .clone();
 
+        // Fetch trial_period_days from plan config (Option B: separate config fetch)
+        let trial_period_days = self
+            .system_configs_service
+            .get_configs()
+            .await
+            .map_err(|e| SubscriptionError::InternalError(e.to_string()))?
+            .and_then(|c| c.subscription_plans)
+            .and_then(|plans| plans.get(&plan).cloned())
+            .and_then(|p| p.trial_period_days)
+            .filter(|&n| n > 0);
+
         // Get or create Stripe customer
         let customer_id = self.get_or_create_stripe_customer(user_id).await?;
 
@@ -458,6 +469,14 @@ impl SubscriptionService for SubscriptionServiceImpl {
             quantity: Some(1),
             ..Default::default()
         }]);
+
+        // Set trial period when plan has trial_period_days
+        if let Some(days) = trial_period_days {
+            params.subscription_data = Some(CreateCheckoutSessionSubscriptionData {
+                trial_period_days: Some(days),
+                ..Default::default()
+            });
+        }
 
         let session = CheckoutSession::create(&client, params)
             .await
