@@ -50,6 +50,12 @@ const NEAR_BALANCE_CACHE_TTL_SECS: i64 = 5 * 60;
 /// Duration to cache model settings needed by /v1/responses in memory (in seconds)
 const MODEL_SETTINGS_CACHE_TTL_SECS: i64 = 60;
 
+/// Auto-routing: target model and default parameters for `model: "auto"` requests
+pub const AUTO_ROUTE_MODEL: &str = "zai-org/GLM-5-FP8";
+pub const AUTO_ROUTE_TEMPERATURE: f64 = 1.0;
+pub const AUTO_ROUTE_TOP_P: f64 = 0.95;
+pub const AUTO_ROUTE_MAX_TOKENS: u64 = 4096;
+
 /// Error message when a user is banned
 pub const USER_BANNED_ERROR_MESSAGE: &str =
     "Access temporarily restricted. Please try again later.";
@@ -3126,23 +3132,19 @@ async fn prepare_chat_completions_body(
             Ok(v) => {
                 body_json = Some(v);
 
-                // Route "auto" model to GLM-5-FP8 with recommended defaults
-                if body_json
-                    .as_ref()
-                    .and_then(|b| b.get("model"))
-                    .and_then(|v| v.as_str())
-                    == Some("auto")
-                {
-                    if let Some(body) = body_json.as_mut() {
-                        body["model"] = json!("zai-org/GLM-5-FP8");
-                        if body.get("temperature").is_none() {
-                            body["temperature"] = json!(1.0);
+                // Route "auto" model to the configured target with recommended defaults
+                if let Some(body) = body_json.as_mut() {
+                    if body.get("model").and_then(|v| v.as_str()) == Some("auto") {
+                        tracing::info!("Auto-routing model: user_id={}", user.user_id);
+                        body["model"] = json!(AUTO_ROUTE_MODEL);
+                        if body.get("temperature").is_none_or(|v| v.is_null()) {
+                            body["temperature"] = json!(AUTO_ROUTE_TEMPERATURE);
                         }
-                        if body.get("top_p").is_none() {
-                            body["top_p"] = json!(0.95);
+                        if body.get("top_p").is_none_or(|v| v.is_null()) {
+                            body["top_p"] = json!(AUTO_ROUTE_TOP_P);
                         }
-                        if body.get("max_tokens").is_none() {
-                            body["max_tokens"] = json!(4096);
+                        if body.get("max_tokens").is_none_or(|v| v.is_null()) {
+                            body["max_tokens"] = json!(AUTO_ROUTE_MAX_TOKENS);
                         }
                         auto_routed = true;
                     }

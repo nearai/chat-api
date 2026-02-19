@@ -1,6 +1,9 @@
 mod common;
 
-use api::routes::api::USER_BANNED_ERROR_MESSAGE;
+use api::routes::api::{
+    AUTO_ROUTE_MAX_TOKENS, AUTO_ROUTE_MODEL, AUTO_ROUTE_TEMPERATURE, AUTO_ROUTE_TOP_P,
+    USER_BANNED_ERROR_MESSAGE,
+};
 use chrono::Duration;
 use common::{
     create_test_server, create_test_server_and_db, create_test_server_with_config, mock_login,
@@ -1181,32 +1184,6 @@ async fn test_chat_completions_prepends_system_prompt_when_system_message_presen
     );
 }
 
-/// Sending `model: "auto"` should not be rejected by the visibility check (no 403).
-#[tokio::test]
-async fn test_chat_completions_auto_model_not_blocked() {
-    let server = create_test_server().await;
-    let token = mock_login(&server, "chat-completions-auto-model@example.com").await;
-
-    let response = server
-        .post("/v1/chat/completions")
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
-        )
-        .json(&json!({
-            "model": "auto",
-            "messages": [{"role": "user", "content": "Hello"}]
-        }))
-        .await;
-
-    assert_ne!(
-        response.status_code(),
-        403,
-        "model: \"auto\" should not be blocked by visibility check (status was {})",
-        response.status_code()
-    );
-}
-
 /// Sending `model: "auto"` should substitute the model to `zai-org/GLM-5-FP8` in the
 /// forwarded request and include default parameters.
 #[tokio::test]
@@ -1270,25 +1247,102 @@ async fn test_chat_completions_auto_model_forwards_with_substituted_model() {
 
     assert_eq!(
         forwarded_body.get("model").and_then(|v| v.as_str()),
-        Some("zai-org/GLM-5-FP8"),
-        "model: \"auto\" should be substituted with \"zai-org/GLM-5-FP8\""
+        Some(AUTO_ROUTE_MODEL),
+        "model: \"auto\" should be substituted with the auto-route target"
     );
 
     // Verify default parameters were injected
     assert_eq!(
         forwarded_body.get("temperature").and_then(|v| v.as_f64()),
-        Some(1.0),
-        "Default temperature should be 1.0"
+        Some(AUTO_ROUTE_TEMPERATURE),
+        "Default temperature should match AUTO_ROUTE_TEMPERATURE"
     );
     assert_eq!(
         forwarded_body.get("top_p").and_then(|v| v.as_f64()),
-        Some(0.95),
-        "Default top_p should be 0.95"
+        Some(AUTO_ROUTE_TOP_P),
+        "Default top_p should match AUTO_ROUTE_TOP_P"
     );
     assert_eq!(
         forwarded_body.get("max_tokens").and_then(|v| v.as_u64()),
-        Some(4096),
-        "Default max_tokens should be 4096"
+        Some(AUTO_ROUTE_MAX_TOKENS),
+        "Default max_tokens should match AUTO_ROUTE_MAX_TOKENS"
+    );
+}
+
+/// Sending `model: "auto"` with client-provided parameters should preserve those values
+/// instead of overwriting them with defaults.
+#[tokio::test]
+async fn test_chat_completions_auto_model_preserves_client_params() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let mock_upstream = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "zai-org/GLM-5-FP8",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Hello"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        })))
+        .expect(1)
+        .mount(&mock_upstream)
+        .await;
+
+    let server = create_test_server_with_config(TestServerConfig {
+        proxy_base_url: Some(mock_upstream.uri()),
+        ..Default::default()
+    })
+    .await;
+    let token = mock_login(&server, "chat-completions-auto-preserve@example.com").await;
+
+    // Client provides custom temperature and max_tokens, but not top_p
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
+        )
+        .json(&json!({
+            "model": "auto",
+            "temperature": 0.5,
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Hello"}]
+        }))
+        .await;
+
+    assert_eq!(response.status_code(), 200);
+
+    let received = &mock_upstream.received_requests().await.unwrap()[0];
+    let forwarded_body: serde_json::Value =
+        serde_json::from_slice(&received.body).expect("forwarded body should be valid JSON");
+
+    assert_eq!(
+        forwarded_body.get("model").and_then(|v| v.as_str()),
+        Some(AUTO_ROUTE_MODEL),
+        "Model should still be substituted"
+    );
+    assert_eq!(
+        forwarded_body.get("temperature").and_then(|v| v.as_f64()),
+        Some(0.5),
+        "Client-provided temperature should be preserved"
+    );
+    assert_eq!(
+        forwarded_body.get("max_tokens").and_then(|v| v.as_u64()),
+        Some(1024),
+        "Client-provided max_tokens should be preserved"
+    );
+    assert_eq!(
+        forwarded_body.get("top_p").and_then(|v| v.as_f64()),
+        Some(AUTO_ROUTE_TOP_P),
+        "Missing top_p should get the default value"
     );
 }
 
