@@ -2,6 +2,7 @@ use super::ports::{
     PaymentWebhookRepository, StripeCustomerRepository, Subscription, SubscriptionError,
     SubscriptionPlan, SubscriptionRepository, SubscriptionService, SubscriptionWithPlan,
 };
+use crate::agent::ports::AgentService;
 use crate::system_configs::ports::{SubscriptionPlanConfig, SystemConfigsService};
 use crate::user::ports::UserRepository;
 use crate::user_usage::ports::UserUsageRepository;
@@ -28,6 +29,7 @@ pub struct SubscriptionServiceConfig {
     pub system_configs_service: Arc<dyn SystemConfigsService>,
     pub user_repository: Arc<dyn UserRepository>,
     pub user_usage_repo: Arc<dyn UserUsageRepository>,
+    pub agent_service: Arc<dyn AgentService>,
     pub stripe_secret_key: String,
     pub stripe_webhook_secret: String,
 }
@@ -50,6 +52,7 @@ pub struct SubscriptionServiceImpl {
     system_configs_service: Arc<dyn SystemConfigsService>,
     user_repository: Arc<dyn UserRepository>,
     user_usage_repo: Arc<dyn UserUsageRepository>,
+    agent_service: Arc<dyn AgentService>,
     stripe_secret_key: String,
     stripe_webhook_secret: String,
     token_limit_cache: Arc<RwLock<HashMap<UserId, CachedTokenLimit>>>,
@@ -65,6 +68,7 @@ impl SubscriptionServiceImpl {
             system_configs_service: config.system_configs_service,
             user_repository: config.user_repository,
             user_usage_repo: config.user_usage_repo,
+            agent_service: config.agent_service,
             stripe_secret_key: config.stripe_secret_key,
             stripe_webhook_secret: config.stripe_webhook_secret,
             token_limit_cache: Arc::new(RwLock::new(HashMap::new())),
@@ -226,6 +230,225 @@ impl SubscriptionServiceImpl {
         Ok(customer.id.to_string())
     }
 
+    /// Check if switching from old_price_id to new_price_id is a downgrade.
+    /// A downgrade means the new plan has lower limits (monthly_tokens.max or agent_instances.max).
+    fn is_downgrade(
+        old_price_id: &str,
+        new_price_id: &str,
+        provider: &str,
+        plans: &HashMap<String, SubscriptionPlanConfig>,
+    ) -> bool {
+        let old_plan = resolve_plan_name_from_config(provider, old_price_id, plans);
+        let new_plan = resolve_plan_name_from_config(provider, new_price_id, plans);
+
+        let old_config = plans.get(&old_plan);
+        let new_config = plans.get(&new_plan);
+
+        let old_tokens = old_config
+            .and_then(|c| c.monthly_tokens.as_ref())
+            .map(|l| l.max)
+            .unwrap_or(0);
+        let new_tokens = new_config
+            .and_then(|c| c.monthly_tokens.as_ref())
+            .map(|l| l.max)
+            .unwrap_or(0);
+
+        let old_instances = old_config
+            .and_then(|c| c.agent_instances.as_ref())
+            .map(|l| l.max)
+            .unwrap_or(0);
+        let new_instances = new_config
+            .and_then(|c| c.agent_instances.as_ref())
+            .map(|l| l.max)
+            .unwrap_or(0);
+
+        new_tokens < old_tokens || new_instances < old_instances
+    }
+
+    /// Apply a pending downgrade if it is due (downgrade_effective_at <= now).
+    /// Called lazily from require_subscription_for_proxy as a safety net.
+    async fn apply_pending_downgrade_if_due(
+        &self,
+        subscription: &Subscription,
+    ) -> Result<Option<Subscription>, SubscriptionError> {
+        let effective_at = match subscription.downgrade_effective_at {
+            Some(dt) => dt,
+            None => return Ok(None),
+        };
+
+        if Utc::now() < effective_at {
+            return Ok(None);
+        }
+
+        tracing::info!(
+            "Applying due pending downgrade: subscription_id={}, user_id={}, effective_at={}",
+            subscription.subscription_id,
+            subscription.user_id,
+            effective_at
+        );
+
+        let mut client = self
+            .db_pool
+            .get()
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+        let txn = client
+            .transaction()
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        let updated = self
+            .subscription_repo
+            .apply_pending_downgrade(&txn, &subscription.subscription_id)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        txn.commit()
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        match updated {
+            Some(updated) => {
+                self.invalidate_token_limit_cache(subscription.user_id)
+                    .await;
+
+                // Stop excess instances for the new (lower) plan
+                self.stop_excess_instances(subscription.user_id, &updated.price_id)
+                    .await;
+
+                Ok(Some(updated))
+            }
+            None => {
+                // Another concurrent request already applied the downgrade — no-op
+                tracing::info!(
+                    "Pending downgrade already applied by another request: subscription_id={}",
+                    subscription.subscription_id
+                );
+                Ok(None)
+            }
+        }
+    }
+
+    /// Stop instances that exceed the plan's agent_instances.max limit.
+    /// Keeps the oldest N instances (by created_at), stops the rest.
+    async fn stop_excess_instances(&self, user_id: UserId, price_id: &str) {
+        let plans = match self.get_subscription_plans().await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!(
+                    "Failed to get subscription plans for instance enforcement: user_id={}, error={}",
+                    user_id, e
+                );
+                return;
+            }
+        };
+
+        let plan_name = resolve_plan_name_from_config("stripe", price_id, &plans);
+        let max_instances = plans
+            .get(&plan_name)
+            .and_then(|c| c.agent_instances.as_ref())
+            .map(|l| l.max)
+            .unwrap_or(0) as usize;
+
+        // List all user instances (use a large limit)
+        let (mut instances, total) = match self.agent_service.list_instances(user_id, 1000, 0).await
+        {
+            Ok(result) => result,
+            Err(e) => {
+                tracing::error!(
+                    "Failed to list instances for enforcement: user_id={}, error={}",
+                    user_id,
+                    e
+                );
+                return;
+            }
+        };
+
+        if total > 1000 {
+            tracing::warn!(
+                "User user_id={} has {} total instances, exceeding fetch limit of 1000. Some excess instances may not be stopped.",
+                user_id, total
+            );
+        }
+
+        if instances.len() <= max_instances {
+            return;
+        }
+
+        // Sort by created_at DESC (newest first) — keep the most recent ones
+        instances.sort_by_key(|i| std::cmp::Reverse(i.created_at));
+
+        let to_stop = &instances[max_instances..];
+        tracing::info!(
+            "Stopping {} excess instance(s) for user_id={} (plan={}, max={})",
+            to_stop.len(),
+            user_id,
+            plan_name,
+            max_instances
+        );
+
+        for instance in to_stop {
+            if let Err(e) = self.agent_service.stop_instance(instance.id, user_id).await {
+                tracing::error!(
+                    "Failed to stop excess instance: instance_id={}, user_id={}, error={}",
+                    instance.id,
+                    user_id,
+                    e
+                );
+            }
+        }
+    }
+
+    /// Stop ALL instances for a user (used when subscription ends entirely).
+    async fn stop_all_user_instances(&self, user_id: UserId) {
+        let (instances, _total) = match self.agent_service.list_instances(user_id, 1000, 0).await {
+            Ok(result) => result,
+            Err(e) => {
+                tracing::error!(
+                    "Failed to list instances for cancellation cleanup: user_id={}, error={}",
+                    user_id,
+                    e
+                );
+                return;
+            }
+        };
+
+        if instances.is_empty() {
+            return;
+        }
+
+        tracing::info!(
+            "Stopping all {} instance(s) for user_id={} (subscription ended)",
+            instances.len(),
+            user_id
+        );
+
+        for instance in &instances {
+            if let Err(e) = self.agent_service.stop_instance(instance.id, user_id).await {
+                tracing::error!(
+                    "Failed to stop instance on cancellation: instance_id={}, user_id={}, error={}",
+                    instance.id,
+                    user_id,
+                    e
+                );
+            }
+        }
+    }
+
+    /// Get subscription plans from system configs
+    async fn get_subscription_plans(
+        &self,
+    ) -> Result<HashMap<String, SubscriptionPlanConfig>, SubscriptionError> {
+        let configs = self
+            .system_configs_service
+            .get_configs()
+            .await
+            .map_err(|e| SubscriptionError::InternalError(e.to_string()))?;
+        Ok(configs
+            .and_then(|c| c.subscription_plans)
+            .unwrap_or_default())
+    }
+
     /// Supported payment providers
     const SUPPORTED_PROVIDERS: &[&str] = &["stripe"];
 
@@ -278,6 +501,8 @@ impl SubscriptionServiceImpl {
             cancel_at_period_end: stripe_sub.cancel_at_period_end,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
+            pending_price_id: None,
+            downgrade_effective_at: None,
         })
     }
 }
@@ -526,8 +751,12 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .map_err(|e| SubscriptionError::StripeError(e.to_string()))?;
 
         // Update database (with transaction)
-        let updated_model =
+        let mut updated_model =
             self.stripe_subscription_to_model(&updated_sub, user_id, &subscription.provider)?;
+        // Preserve pending downgrade fields from existing subscription
+        updated_model.pending_price_id = subscription.pending_price_id.clone();
+        updated_model.downgrade_effective_at = subscription.downgrade_effective_at;
+
         let mut db_client = self
             .db_pool
             .get()
@@ -592,8 +821,12 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .map_err(|e| SubscriptionError::StripeError(e.to_string()))?;
 
         // Update database (with transaction)
-        let updated_model =
+        let mut updated_model =
             self.stripe_subscription_to_model(&updated_sub, user_id, &subscription.provider)?;
+        // Preserve pending downgrade fields from existing subscription
+        updated_model.pending_price_id = subscription.pending_price_id.clone();
+        updated_model.downgrade_effective_at = subscription.downgrade_effective_at;
+
         let mut db_client = self
             .db_pool
             .get()
@@ -671,6 +904,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     &sub.price_id,
                     &subscription_plans,
                 );
+                let pending_plan = sub.pending_price_id.as_ref().map(|pid| {
+                    resolve_plan_name_from_config(&sub.provider, pid, &subscription_plans)
+                });
                 SubscriptionWithPlan {
                     subscription_id: sub.subscription_id,
                     user_id: sub.user_id.0.to_string(),
@@ -681,6 +917,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     cancel_at_period_end: sub.cancel_at_period_end,
                     created_at: sub.created_at,
                     updated_at: sub.updated_at,
+                    pending_plan,
+                    downgrade_effective_at: sub.downgrade_effective_at,
                 }
             })
             .collect();
@@ -852,10 +1090,99 @@ impl SubscriptionService for SubscriptionServiceImpl {
             None
         };
 
-        // Upsert subscription if we have data
-        let user_id_to_invalidate = if let Some((subscription_id, subscription)) = subscription_data
-        {
+        // Upsert subscription if we have data, with downgrade detection
+        let mut user_id_to_invalidate: Option<UserId> = None;
+        // Track if we need to stop instances after commit (cancellation/payment failure)
+        let mut stop_all_instances_for: Option<UserId> = None;
+
+        if let Some((subscription_id, mut subscription)) = subscription_data {
             let user_id = subscription.user_id;
+
+            // Check for terminal statuses that mean subscription has ended
+            let is_terminal_status = matches!(
+                subscription.status.as_str(),
+                "canceled" | "unpaid" | "incomplete_expired"
+            );
+
+            if is_terminal_status {
+                // Subscription ended — clear any pending downgrade (superseded)
+                subscription.pending_price_id = None;
+                subscription.downgrade_effective_at = None;
+                stop_all_instances_for = Some(user_id);
+            } else {
+                // Check if price_id changed (plan switch via Stripe portal)
+                // Read through the transaction to avoid TOCTOU race with concurrent webhooks
+                let existing = self
+                    .subscription_repo
+                    .get_active_subscription_in_txn(&txn, user_id)
+                    .await
+                    .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+                if let Some(ref existing_sub) = existing {
+                    if existing_sub.price_id != subscription.price_id {
+                        // Price changed — determine if it's a downgrade or upgrade
+                        let plans = self.get_subscription_plans().await?;
+
+                        if Self::is_downgrade(
+                            &existing_sub.price_id,
+                            &subscription.price_id,
+                            &subscription.provider,
+                            &plans,
+                        ) {
+                            // DOWNGRADE: defer the price change.
+                            // Use Stripe's latest current_period_end (from the incoming webhook)
+                            // rather than the DB's existing value, which may be stale if a renewal
+                            // webhook arrived concurrently.
+                            tracing::info!(
+                                "Deferring downgrade: subscription_id={}, user_id={}, old_price={}, new_price={}, effective_at={}",
+                                subscription_id, user_id,
+                                existing_sub.price_id, subscription.price_id,
+                                subscription.current_period_end
+                            );
+                            // Swap: new price → pending, old price → current (preserves old limits during grace period)
+                            subscription.pending_price_id = Some(subscription.price_id.clone());
+                            subscription.downgrade_effective_at =
+                                Some(subscription.current_period_end);
+                            subscription.price_id = existing_sub.price_id.clone();
+                            // NOTE: We intentionally do NOT call stop_excess_instances here.
+                            // During the grace period the user keeps the old plan's instance
+                            // limits. Instance enforcement happens when the downgrade applies
+                            // (in apply_pending_downgrade_if_due).
+                        } else {
+                            // UPGRADE: apply immediately, clear any pending downgrade
+                            tracing::info!(
+                                "Applying upgrade immediately: subscription_id={}, user_id={}",
+                                subscription_id,
+                                user_id
+                            );
+                            subscription.pending_price_id = None;
+                            subscription.downgrade_effective_at = None;
+                        }
+                    } else {
+                        // Same price_id (renewal, status update, etc.)
+                        // Preserve existing pending downgrade fields
+                        subscription.pending_price_id = existing_sub.pending_price_id.clone();
+                        subscription.downgrade_effective_at = existing_sub.downgrade_effective_at;
+
+                        // Check if pending downgrade is now due
+                        if let Some(effective_at) = subscription.downgrade_effective_at {
+                            if Utc::now() >= effective_at {
+                                tracing::info!(
+                                    "Pending downgrade is due during webhook: subscription_id={}, user_id={}",
+                                    subscription_id, user_id
+                                );
+                                // Apply the downgrade inline
+                                if let Some(ref pending) = subscription.pending_price_id {
+                                    subscription.price_id = pending.clone();
+                                }
+                                subscription.pending_price_id = None;
+                                subscription.downgrade_effective_at = None;
+                            }
+                        }
+                    }
+                }
+            }
+
             self.subscription_repo
                 .upsert_subscription(&txn, subscription)
                 .await
@@ -866,15 +1193,14 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 subscription_id,
                 user_id
             );
-            Some(user_id)
+            user_id_to_invalidate = Some(user_id);
         } else {
             tracing::debug!(
                 "Non-subscription webhook stored: event_id={}, type={}",
                 event_id,
                 event_type
             );
-            None
-        };
+        }
 
         // Invalidate cache before commit so no request sees stale cache after DB is updated
         if let Some(user_id) = user_id_to_invalidate {
@@ -885,6 +1211,11 @@ impl SubscriptionService for SubscriptionServiceImpl {
         txn.commit()
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        // After commit: stop all instances if subscription ended
+        if let Some(user_id) = stop_all_instances_for {
+            self.stop_all_user_instances(user_id).await;
+        }
 
         tracing::info!(
             "Webhook processed successfully: event_id={}, type={}",
@@ -1006,9 +1337,26 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
                 {
                     Some(ref sub) => {
+                        // Lazy safety net: apply pending downgrade if due
+                        let effective_sub = if sub.downgrade_effective_at.is_some() {
+                            match self.apply_pending_downgrade_if_due(sub).await {
+                                Ok(Some(updated)) => updated,
+                                Ok(None) => sub.clone(),
+                                Err(e) => {
+                                    tracing::error!(
+                                        "Failed to apply pending downgrade for user_id={}: {}",
+                                        user_id,
+                                        e
+                                    );
+                                    sub.clone()
+                                }
+                            }
+                        } else {
+                            sub.clone()
+                        };
                         let plan_name = resolve_plan_name_from_config(
                             "stripe",
-                            &sub.price_id,
+                            &effective_sub.price_id,
                             &subscription_plans,
                         );
                         let max_tokens = subscription_plans
@@ -1016,7 +1364,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                             .and_then(|c| c.monthly_tokens.as_ref())
                             .map(|l| l.max)
                             .unwrap_or(1_000_000);
-                        let period_end = sub.current_period_end;
+                        let period_end = effective_sub.current_period_end;
                         let period_start = sub_one_month_same_day(period_end);
                         (max_tokens, period_start, period_end)
                     }
@@ -1129,6 +1477,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
             cancel_at_period_end: false,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
+            pending_price_id: None,
+            downgrade_effective_at: None,
         };
 
         // Upsert subscription in transaction
@@ -1172,6 +1522,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
             cancel_at_period_end: result.cancel_at_period_end,
             created_at: result.created_at,
             updated_at: result.updated_at,
+            pending_plan: None,
+            downgrade_effective_at: None,
         })
     }
 
@@ -1197,5 +1549,299 @@ impl SubscriptionService for SubscriptionServiceImpl {
         self.invalidate_token_limit_cache(user_id).await;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::system_configs::ports::{
+        PaymentProviderConfig, PlanLimitConfig, SubscriptionPlanConfig,
+    };
+
+    /// Build a HashMap of plan configs for testing is_downgrade and resolve_plan_name_from_config.
+    fn test_plans() -> HashMap<String, SubscriptionPlanConfig> {
+        let mut plans = HashMap::new();
+
+        plans.insert(
+            "byok".to_string(),
+            SubscriptionPlanConfig {
+                providers: {
+                    let mut p = HashMap::new();
+                    p.insert(
+                        "stripe".to_string(),
+                        PaymentProviderConfig {
+                            price_id: "price_byok".to_string(),
+                        },
+                    );
+                    p
+                },
+                agent_instances: Some(PlanLimitConfig { max: 2 }),
+                monthly_tokens: Some(PlanLimitConfig { max: 500_000 }),
+            },
+        );
+
+        plans.insert(
+            "pro".to_string(),
+            SubscriptionPlanConfig {
+                providers: {
+                    let mut p = HashMap::new();
+                    p.insert(
+                        "stripe".to_string(),
+                        PaymentProviderConfig {
+                            price_id: "price_pro".to_string(),
+                        },
+                    );
+                    p
+                },
+                agent_instances: Some(PlanLimitConfig { max: 5 }),
+                monthly_tokens: Some(PlanLimitConfig { max: 5_000_000 }),
+            },
+        );
+
+        plans.insert(
+            "enterprise".to_string(),
+            SubscriptionPlanConfig {
+                providers: {
+                    let mut p = HashMap::new();
+                    p.insert(
+                        "stripe".to_string(),
+                        PaymentProviderConfig {
+                            price_id: "price_enterprise".to_string(),
+                        },
+                    );
+                    p
+                },
+                agent_instances: Some(PlanLimitConfig { max: 10 }),
+                monthly_tokens: Some(PlanLimitConfig { max: 50_000_000 }),
+            },
+        );
+
+        plans
+    }
+
+    // --- resolve_plan_name_from_config tests ---
+
+    #[test]
+    fn test_resolve_plan_name_known_price() {
+        let plans = test_plans();
+        assert_eq!(
+            resolve_plan_name_from_config("stripe", "price_pro", &plans),
+            "pro"
+        );
+        assert_eq!(
+            resolve_plan_name_from_config("stripe", "price_byok", &plans),
+            "byok"
+        );
+    }
+
+    #[test]
+    fn test_resolve_plan_name_unknown_price() {
+        let plans = test_plans();
+        assert_eq!(
+            resolve_plan_name_from_config("stripe", "price_unknown", &plans),
+            "unknown"
+        );
+    }
+
+    #[test]
+    fn test_resolve_plan_name_wrong_provider() {
+        let plans = test_plans();
+        assert_eq!(
+            resolve_plan_name_from_config("paypal", "price_pro", &plans),
+            "unknown"
+        );
+    }
+
+    // --- is_downgrade tests ---
+
+    #[test]
+    fn test_downgrade_pro_to_byok() {
+        let plans = test_plans();
+        // Pro (5 instances, 5M tokens) -> BYOK (2 instances, 500K tokens) = downgrade
+        assert!(SubscriptionServiceImpl::is_downgrade(
+            "price_pro",
+            "price_byok",
+            "stripe",
+            &plans
+        ));
+    }
+
+    #[test]
+    fn test_upgrade_byok_to_pro() {
+        let plans = test_plans();
+        // BYOK (2 instances, 500K tokens) -> Pro (5 instances, 5M tokens) = NOT downgrade
+        assert!(!SubscriptionServiceImpl::is_downgrade(
+            "price_byok",
+            "price_pro",
+            "stripe",
+            &plans
+        ));
+    }
+
+    #[test]
+    fn test_upgrade_pro_to_enterprise() {
+        let plans = test_plans();
+        // Pro -> Enterprise = NOT downgrade
+        assert!(!SubscriptionServiceImpl::is_downgrade(
+            "price_pro",
+            "price_enterprise",
+            "stripe",
+            &plans
+        ));
+    }
+
+    #[test]
+    fn test_downgrade_enterprise_to_byok() {
+        let plans = test_plans();
+        // Enterprise -> BYOK = downgrade
+        assert!(SubscriptionServiceImpl::is_downgrade(
+            "price_enterprise",
+            "price_byok",
+            "stripe",
+            &plans
+        ));
+    }
+
+    #[test]
+    fn test_same_plan_not_downgrade() {
+        let plans = test_plans();
+        // Same plan is not a downgrade
+        assert!(!SubscriptionServiceImpl::is_downgrade(
+            "price_pro",
+            "price_pro",
+            "stripe",
+            &plans
+        ));
+    }
+
+    #[test]
+    fn test_unknown_old_plan_not_downgrade() {
+        let plans = test_plans();
+        // Unknown old plan (0 defaults) -> known plan = NOT downgrade (new has higher limits)
+        assert!(!SubscriptionServiceImpl::is_downgrade(
+            "price_unknown",
+            "price_pro",
+            "stripe",
+            &plans
+        ));
+    }
+
+    #[test]
+    fn test_known_plan_to_unknown_is_downgrade() {
+        let plans = test_plans();
+        // Known plan -> unknown (0 defaults) = downgrade
+        assert!(SubscriptionServiceImpl::is_downgrade(
+            "price_pro",
+            "price_unknown",
+            "stripe",
+            &plans
+        ));
+    }
+
+    #[test]
+    fn test_downgrade_only_instances_lower() {
+        // Test case where only one dimension is lower
+        let mut plans = HashMap::new();
+        plans.insert(
+            "plan_a".to_string(),
+            SubscriptionPlanConfig {
+                providers: {
+                    let mut p = HashMap::new();
+                    p.insert(
+                        "stripe".to_string(),
+                        PaymentProviderConfig {
+                            price_id: "price_a".to_string(),
+                        },
+                    );
+                    p
+                },
+                agent_instances: Some(PlanLimitConfig { max: 5 }),
+                monthly_tokens: Some(PlanLimitConfig { max: 1_000_000 }),
+            },
+        );
+        plans.insert(
+            "plan_b".to_string(),
+            SubscriptionPlanConfig {
+                providers: {
+                    let mut p = HashMap::new();
+                    p.insert(
+                        "stripe".to_string(),
+                        PaymentProviderConfig {
+                            price_id: "price_b".to_string(),
+                        },
+                    );
+                    p
+                },
+                // Same tokens but fewer instances
+                agent_instances: Some(PlanLimitConfig { max: 2 }),
+                monthly_tokens: Some(PlanLimitConfig { max: 1_000_000 }),
+            },
+        );
+
+        // A -> B: instances decrease (5 -> 2), tokens same. This IS a downgrade.
+        assert!(SubscriptionServiceImpl::is_downgrade(
+            "price_a", "price_b", "stripe", &plans
+        ));
+    }
+
+    // --- sub_one_month_same_day tests ---
+
+    #[test]
+    fn test_sub_one_month_normal() {
+        let dt = chrono::DateTime::parse_from_rfc3339("2025-03-15T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let result = sub_one_month_same_day(dt);
+        assert_eq!(result.month(), 2);
+        assert_eq!(result.day(), 15);
+    }
+
+    #[test]
+    fn test_sub_one_month_january_wraps_to_december() {
+        let dt = chrono::DateTime::parse_from_rfc3339("2025-01-15T12:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let result = sub_one_month_same_day(dt);
+        assert_eq!(result.year(), 2024);
+        assert_eq!(result.month(), 12);
+        assert_eq!(result.day(), 15);
+    }
+
+    #[test]
+    fn test_sub_one_month_day_overflow() {
+        // March 31 -> Feb doesn't have 31 days -> should use last day of Feb
+        let dt = chrono::DateTime::parse_from_rfc3339("2025-03-31T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let result = sub_one_month_same_day(dt);
+        assert_eq!(result.month(), 2);
+        assert_eq!(result.day(), 28);
+    }
+
+    // --- current_calendar_month_period tests ---
+
+    #[test]
+    fn test_calendar_month_period_mid_month() {
+        let dt = chrono::DateTime::parse_from_rfc3339("2025-06-15T14:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let (start, end) = current_calendar_month_period(dt);
+        assert_eq!(start.month(), 6);
+        assert_eq!(start.day(), 1);
+        assert_eq!(end.month(), 7);
+        assert_eq!(end.day(), 1);
+    }
+
+    #[test]
+    fn test_calendar_month_period_december() {
+        let dt = chrono::DateTime::parse_from_rfc3339("2025-12-25T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let (start, end) = current_calendar_month_period(dt);
+        assert_eq!(start.year(), 2025);
+        assert_eq!(start.month(), 12);
+        assert_eq!(end.year(), 2026);
+        assert_eq!(end.month(), 1);
     }
 }
