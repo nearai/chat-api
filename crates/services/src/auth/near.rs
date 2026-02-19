@@ -9,10 +9,21 @@ use crate::types::UserId;
 use crate::user::ports::{OAuthProvider, UserRepository};
 
 const MAX_NONCE_AGE_MS: u64 = 5 * 60 * 1000; // 5 minutes
-const EXPECTED_MESSAGE: &str = "Sign in to NEAR AI Private Chat";
+const EXPECTED_MESSAGE: &str = "Sign in to NEAR AI";
 
-fn expected_recipient() -> String {
-    std::env::var("NEAR_EXPECTED_RECIPIENT").unwrap_or_else(|_| "private.near.ai".to_string())
+fn expected_recipients() -> Vec<String> {
+    let raw =
+        std::env::var("NEAR_EXPECTED_RECIPIENTS").unwrap_or_else(|_| "private.near.ai".to_string());
+    let recipients: Vec<String> = raw
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if recipients.is_empty() {
+        vec!["private.near.ai".to_string()]
+    } else {
+        recipients
+    }
 }
 
 /// Validates a nonce timestamp for replay protection
@@ -109,24 +120,24 @@ impl NearAuthService {
     }
 
     fn validate_recipient(recipient: &str) -> anyhow::Result<()> {
-        let expected = expected_recipient();
-        if recipient == expected {
+        let allowed = expected_recipients();
+        if allowed.contains(&recipient.to_string()) {
             Ok(())
         } else {
             Err(anyhow::anyhow!(
-                "Invalid recipient: expected {}, got {}",
-                expected,
+                "Invalid recipient: expected one of [{}], got {}",
+                allowed.join(", "),
                 recipient
             ))
         }
     }
 
     fn validate_message(message: &str) -> anyhow::Result<()> {
-        if message == EXPECTED_MESSAGE {
+        if message.starts_with(EXPECTED_MESSAGE) {
             Ok(())
         } else {
             Err(anyhow::anyhow!(
-                "Invalid message: expected '{}', got '{}'",
+                "Invalid message: expected to start with '{}', got '{}'",
                 EXPECTED_MESSAGE,
                 message
             ))

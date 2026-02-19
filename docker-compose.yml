@@ -77,7 +77,7 @@ services:
       # Redirect URIs for local development
       REDIRECT_URI: ${REDIRECT_URI:-http://localhost:8080}
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
-      NEAR_EXPECTED_RECIPIENT: ${NEAR_EXPECTED_RECIPIENT:-localhost:3000}
+      NEAR_EXPECTED_RECIPIENTS: ${NEAR_EXPECTED_RECIPIENTS:-localhost:3000}
       # OpenAI/Cloud API proxy configuration
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://cloud-api.near.ai/v1}
       OPENAI_API_KEY: ${OPENAI_API_KEY}
