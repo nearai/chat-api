@@ -133,11 +133,11 @@ impl NearAuthService {
     }
 
     fn validate_message(message: &str) -> anyhow::Result<()> {
-        if message.starts_with(EXPECTED_MESSAGE) {
+        if message == EXPECTED_MESSAGE {
             Ok(())
         } else {
             Err(anyhow::anyhow!(
-                "Invalid message: expected to start with '{}', got '{}'",
+                "Invalid message: expected '{}', got '{}'",
                 EXPECTED_MESSAGE,
                 message
             ))
