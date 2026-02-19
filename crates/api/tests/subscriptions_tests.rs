@@ -730,6 +730,80 @@ async fn test_list_plans_returns_configured_plans() {
 
 #[tokio::test]
 #[serial(subscription_tests)]
+async fn test_list_plans_includes_trial_period_days() {
+    let server = create_test_server().await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "starter": {
+                "providers": { "stripe": { "price_id": "price_starter_trial" } },
+                "trial_period_days": 14,
+                "agent_instances": { "max": 1 },
+                "monthly_tokens": { "max": 500_000 }
+            },
+            "premium": {
+                "providers": { "stripe": { "price_id": "price_premium_trial" } },
+                "trial_period_days": 7,
+                "agent_instances": { "max": 5 },
+                "monthly_tokens": { "max": 5_000_000 }
+            },
+            "no_trial": {
+                "providers": { "stripe": { "price_id": "price_no_trial" } },
+                "agent_instances": { "max": 1 },
+                "monthly_tokens": { "max": 1_000_000 }
+            }
+        }),
+    )
+    .await;
+
+    let response = server.get("/v1/subscriptions/plans").await;
+
+    assert_eq!(
+        response.status_code(),
+        200,
+        "Should return 200 when plans are configured"
+    );
+
+    let body: serde_json::Value = response.json();
+    let plans = body
+        .get("plans")
+        .expect("Should have plans field")
+        .as_array()
+        .unwrap();
+
+    let starter = plans
+        .iter()
+        .find(|p| p.get("name").and_then(|v| v.as_str()) == Some("starter"));
+    let premium = plans
+        .iter()
+        .find(|p| p.get("name").and_then(|v| v.as_str()) == Some("premium"));
+    let no_trial = plans
+        .iter()
+        .find(|p| p.get("name").and_then(|v| v.as_str()) == Some("no_trial"));
+
+    assert_eq!(
+        starter
+            .and_then(|p| p.get("trial_period_days"))
+            .and_then(|v| v.as_u64()),
+        Some(14),
+        "Starter plan should have trial_period_days 14"
+    );
+    assert_eq!(
+        premium
+            .and_then(|p| p.get("trial_period_days"))
+            .and_then(|v| v.as_u64()),
+        Some(7),
+        "Premium plan should have trial_period_days 7"
+    );
+    assert!(
+        no_trial.and_then(|p| p.get("trial_period_days")).is_none(),
+        "no_trial plan should not have trial_period_days (or be null)"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
 async fn test_list_plans_empty_configuration() {
     let server = create_test_server().await;
 
