@@ -430,7 +430,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .ok_or_else(|| SubscriptionError::InvalidPlan(plan.clone()))?
             .clone();
 
-        // Fetch trial_period_days from plan config (Option B: separate config fetch)
+        // Fetch trial_period_days from subscription plan config
         let trial_period_days = self
             .system_configs_service
             .get_configs()
@@ -439,7 +439,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .and_then(|c| c.subscription_plans)
             .and_then(|plans| plans.get(&plan).cloned())
             .and_then(|p| p.trial_period_days)
-            .filter(|&n| n > 0);
+            // Stripe supports a maximum trial period of 730 days
+            .filter(|&n| n > 0 && n <= 730);
 
         // Get or create Stripe customer
         let customer_id = self.get_or_create_stripe_customer(user_id).await?;
