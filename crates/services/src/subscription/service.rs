@@ -303,15 +303,18 @@ impl SubscriptionServiceImpl {
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
+        // Invalidate cache before commit so no request sees stale cache after DB is updated
+        if updated.is_some() {
+            self.invalidate_token_limit_cache(subscription.user_id)
+                .await;
+        }
+
         txn.commit()
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
         match updated {
             Some(updated) => {
-                self.invalidate_token_limit_cache(subscription.user_id)
-                    .await;
-
                 // Stop excess instances for the new (lower) plan
                 self.stop_excess_instances(subscription.user_id, &updated.price_id)
                     .await;
@@ -401,7 +404,7 @@ impl SubscriptionServiceImpl {
 
     /// Stop ALL instances for a user (used when subscription ends entirely).
     async fn stop_all_user_instances(&self, user_id: UserId) {
-        let (instances, _total) = match self.agent_service.list_instances(user_id, 1000, 0).await {
+        let (instances, total) = match self.agent_service.list_instances(user_id, 1000, 0).await {
             Ok(result) => result,
             Err(e) => {
                 tracing::error!(
@@ -412,6 +415,13 @@ impl SubscriptionServiceImpl {
                 return;
             }
         };
+
+        if total > 1000 {
+            tracing::warn!(
+                "User user_id={} has {} total instances, exceeding fetch limit of 1000. Some instances may not be stopped on cancellation.",
+                user_id, total
+            );
+        }
 
         if instances.is_empty() {
             return;
