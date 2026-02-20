@@ -205,6 +205,8 @@ async fn main() -> anyhow::Result<()> {
                 as Arc<dyn services::subscription::ports::SubscriptionRepository>,
             webhook_repo: db.payment_webhook_repository()
                 as Arc<dyn services::subscription::ports::PaymentWebhookRepository>,
+            credits_repo: db.credits_repository()
+                as Arc<dyn services::subscription::ports::CreditsRepository>,
             system_configs_service: system_configs_service.clone()
                 as Arc<dyn services::system_configs::ports::SystemConfigsService>,
             user_repository: user_repo.clone(),

@@ -133,6 +133,8 @@ pub async fn create_test_server_and_db(
                 as Arc<dyn services::subscription::ports::SubscriptionRepository>,
             webhook_repo: db.payment_webhook_repository()
                 as Arc<dyn services::subscription::ports::PaymentWebhookRepository>,
+            credits_repo: db.credits_repository()
+                as Arc<dyn services::subscription::ports::CreditsRepository>,
             system_configs_service: system_configs_service.clone()
                 as Arc<dyn services::system_configs::ports::SystemConfigsService>,
             user_repository: user_repo.clone(),
@@ -424,6 +426,36 @@ pub async fn set_subscription_plans(server: &TestServer, plans: serde_json::Valu
     assert!(
         response.status_code().is_success(),
         "Failed to set subscription_plans: {}",
+        response.status_code()
+    );
+}
+
+/// Set credits configuration (credit_price_id for Stripe)
+/// Must be called before tests that need credit purchase checkout.
+pub async fn set_credits_config(server: &axum_test::TestServer, credit_price_id: &str) {
+    let admin_email = "test_setup_admin@admin.org";
+    let admin_token = mock_login(server, admin_email).await;
+
+    let config_body = json!({
+        "credits": { "credit_price_id": credit_price_id }
+    });
+
+    let response = server
+        .patch("/v1/admin/configs")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&config_body)
+        .await;
+
+    assert!(
+        response.status_code().is_success(),
+        "Failed to set credits config: {}",
         response.status_code()
     );
 }

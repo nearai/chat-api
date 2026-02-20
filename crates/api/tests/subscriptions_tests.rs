@@ -88,8 +88,8 @@ async fn test_list_subscriptions_configured_returns_empty() {
     set_subscription_plans(
         &server,
         json!({
-            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } },
-            "pro": { "providers": { "stripe": { "price_id": "price_test_pro" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } }
+            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 }, "monthly_credits": { "max": 1000000 } },
+            "pro": { "providers": { "stripe": { "price_id": "price_test_pro" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 }, "monthly_credits": { "max": 1000000 } }
         }),
     )
     .await;
@@ -186,8 +186,8 @@ async fn test_create_subscription_invalid_provider() {
     set_subscription_plans(
         &server,
         json!({
-            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } },
-            "pro": { "providers": { "stripe": { "price_id": "price_test_pro" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } }
+            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 }, "monthly_credits": { "max": 1000000 } },
+            "pro": { "providers": { "stripe": { "price_id": "price_test_pro" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 }, "monthly_credits": { "max": 1000000 } }
         }),
     )
     .await;
@@ -232,8 +232,8 @@ async fn test_create_subscription_invalid_plan() {
     set_subscription_plans(
         &server,
         json!({
-            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } },
-            "pro": { "providers": { "stripe": { "price_id": "price_test_pro" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } }
+            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 }, "monthly_credits": { "max": 1000000 } },
+            "pro": { "providers": { "stripe": { "price_id": "price_test_pro" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 }, "monthly_credits": { "max": 1000000 } }
         }),
     )
     .await;
@@ -356,7 +356,7 @@ async fn test_resume_subscription_not_scheduled_for_cancellation() {
     set_subscription_plans(
         &server,
         json!({
-            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } }
+            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 }, "monthly_credits": { "max": 1000000 } }
         }),
     )
     .await;
@@ -391,7 +391,7 @@ async fn test_list_subscriptions_successfully() {
     set_subscription_plans(
         &server,
         json!({
-            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } }
+            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 }, "monthly_credits": { "max": 1000000 } }
         }),
     )
     .await;
@@ -476,8 +476,8 @@ async fn test_configure_subscription_plans_as_admin() {
     // Configure subscription plans
     let config_body = json!({
         "subscription_plans": {
-            "basic": { "providers": { "stripe": { "price_id": "price_test_basic_123" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } },
-            "pro": { "providers": { "stripe": { "price_id": "price_test_pro_456" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } }
+            "basic": { "providers": { "stripe": { "price_id": "price_test_basic_123" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 }, "monthly_credits": { "max": 1000000 } },
+            "pro": { "providers": { "stripe": { "price_id": "price_test_pro_456" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 }, "monthly_credits": { "max": 1000000 } }
         }
     });
 
@@ -1369,7 +1369,7 @@ async fn test_admin_set_subscription_success() {
     set_subscription_plans(
         &server,
         json!({
-            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "monthly_tokens": { "max": 1000000 } }
+            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "monthly_tokens": { "max": 1000000 }, "monthly_credits": { "max": 1000000 } }
         }),
     )
     .await;
@@ -1553,19 +1553,20 @@ async fn test_subscription_gating_full_flow() {
     })
     .await;
 
-    // Configure subscription plans: free plan with 0 tokens (requires subscription), and basic paid plan
+    // Configure subscription plans: free plan with 0 credits (requires subscription), and basic paid plan
     // Users without subscription fall back to "free" plan and hit 402 Payment Required immediately
     set_subscription_plans(
         &server,
         json!({
             "free": {
                 "providers": {},
-                "monthly_tokens": { "max": 0 }
+                "monthly_tokens": { "max": 0 },
+                "monthly_credits": { "max": 0 }
             },
             "basic": {
                 "providers": { "stripe": { "price_id": "price_test_basic" } },
                 "agent_instances": { "max": 1 },
-                "monthly_tokens": { "max": 1000000 }
+                "monthly_tokens": { "max": 1000000 }, "monthly_credits": { "max": 1000000 }
             }
         }),
     )

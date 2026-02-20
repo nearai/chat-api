@@ -78,6 +78,8 @@ pub enum SubscriptionError {
     NoActiveSubscription,
     /// Monthly token limit exceeded (used >= limit)
     MonthlyTokenLimitExceeded { used: i64, limit: u64 },
+    /// Monthly credit limit exceeded (used >= limit)
+    MonthlyCreditLimitExceeded { used: i64, limit: u64 },
     /// Subscription is not scheduled for cancellation (cannot resume)
     SubscriptionNotScheduledForCancellation,
     /// User has no Stripe customer record
@@ -90,6 +92,12 @@ pub enum SubscriptionError {
     WebhookVerificationFailed(String),
     /// Internal error
     InternalError(String),
+    /// Credit purchase not configured (missing credit_price_id)
+    CreditsNotConfigured,
+    /// Plan has no monthly_credits configured (required for access)
+    NoMonthlyCreditsConfigured(String),
+    /// Invalid credits amount for purchase
+    InvalidCredits(String),
 }
 
 impl fmt::Display for SubscriptionError {
@@ -109,6 +117,13 @@ impl fmt::Display for SubscriptionError {
                     used, limit
                 )
             }
+            Self::MonthlyCreditLimitExceeded { used, limit } => {
+                write!(
+                    f,
+                    "Monthly credit limit exceeded: used {} of {} credits",
+                    used, limit
+                )
+            }
             Self::SubscriptionNotScheduledForCancellation => {
                 write!(f, "Subscription is not scheduled for cancellation")
             }
@@ -119,6 +134,11 @@ impl fmt::Display for SubscriptionError {
                 write!(f, "Webhook verification failed: {}", msg)
             }
             Self::InternalError(msg) => write!(f, "Internal error: {}", msg),
+            Self::CreditsNotConfigured => write!(f, "Credit purchase is not configured"),
+            Self::NoMonthlyCreditsConfigured(plan) => {
+                write!(f, "Plan '{}' has no monthly_credits configured", plan)
+            }
+            Self::InvalidCredits(msg) => write!(f, "Invalid credits: {}", msg),
         }
     }
 }
@@ -177,6 +197,31 @@ pub trait SubscriptionRepository: Send + Sync {
         txn: &tokio_postgres::Transaction<'_>,
         user_id: UserId,
     ) -> anyhow::Result<()>;
+}
+
+/// Repository trait for user purchased credits
+#[async_trait]
+pub trait CreditsRepository: Send + Sync {
+    /// Get purchased credits balance for a user (0 if no row)
+    async fn get_balance(&self, user_id: UserId) -> anyhow::Result<i64>;
+
+    /// Add credits to user balance (upsert). Returns new balance.
+    async fn add_credits(
+        &self,
+        txn: &tokio_postgres::Transaction<'_>,
+        user_id: UserId,
+        amount: i64,
+        reference_id: Option<&str>,
+    ) -> anyhow::Result<i64>;
+
+    /// Record a credit transaction (for audit/idempotency). Returns false if duplicate.
+    async fn try_record_purchase(
+        &self,
+        txn: &tokio_postgres::Transaction<'_>,
+        user_id: UserId,
+        amount: i64,
+        reference_id: &str,
+    ) -> anyhow::Result<bool>;
 }
 
 /// Repository trait for payment webhook events
@@ -280,4 +325,25 @@ pub trait SubscriptionService: Send + Sync {
         &self,
         user_id: UserId,
     ) -> Result<(), SubscriptionError>;
+
+    /// Create checkout session for purchasing credits. Returns checkout URL.
+    async fn create_credit_purchase_checkout(
+        &self,
+        user_id: UserId,
+        credits: u64,
+        success_url: String,
+        cancel_url: String,
+    ) -> Result<String, SubscriptionError>;
+
+    /// Get user's credits: balance, used in period, effective max.
+    async fn get_credits(&self, user_id: UserId) -> Result<CreditsSummary, SubscriptionError>;
+}
+
+/// Summary of user's credits (balance, used, effective limit)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct CreditsSummary {
+    pub balance: i64,
+    pub used_credits: i64,
+    pub effective_max_credits: i64,
 }

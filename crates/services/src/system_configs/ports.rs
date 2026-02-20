@@ -102,6 +102,17 @@ pub struct SubscriptionPlanConfig {
     /// Monthly token limits (e.g. { "max": 1000000 })
     #[serde(skip_serializing_if = "Option::is_none")]
     pub monthly_tokens: Option<PlanLimitConfig>,
+    /// Monthly credit limits (e.g. { "max": 1000000 }). Used for enforcement.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub monthly_credits: Option<PlanLimitConfig>,
+}
+
+/// Configuration for credit purchase (Stripe Price ID for 1 credit)
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreditsConfig {
+    /// Stripe Price ID for 1 credit (unit amount defined in Stripe)
+    pub credit_price_id: String,
 }
 
 impl Default for RateLimitConfig {
@@ -135,6 +146,9 @@ pub struct SystemConfigs {
     /// round-robin skips it. If all managers are full, instance creation is rejected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_instances_per_manager: Option<u64>,
+    /// Credit purchase configuration (Stripe Price ID for buying credits)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credits: Option<CreditsConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -143,6 +157,7 @@ pub struct PartialSystemConfigs {
     pub rate_limit: Option<RateLimitConfig>,
     pub subscription_plans: Option<HashMap<String, SubscriptionPlanConfig>>,
     pub max_instances_per_manager: Option<u64>,
+    pub credits: Option<CreditsConfig>,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -153,6 +168,7 @@ impl Default for SystemConfigs {
             rate_limit: RateLimitConfig::default(),
             subscription_plans: None,
             max_instances_per_manager: Some(200),
+            credits: None,
         }
     }
 }
@@ -166,6 +182,7 @@ impl SystemConfigs {
             max_instances_per_manager: partial
                 .max_instances_per_manager
                 .or(self.max_instances_per_manager),
+            credits: partial.credits.or(self.credits),
         }
     }
 }

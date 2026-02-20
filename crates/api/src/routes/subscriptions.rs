@@ -212,6 +212,18 @@ pub async fn create_subscription(
                 tracing::error!("Unexpected MonthlyTokenLimitExceeded in create");
                 ApiError::internal_server_error("Failed to create subscription")
             }
+            SubscriptionError::MonthlyCreditLimitExceeded { .. } => {
+                tracing::error!("Unexpected MonthlyCreditLimitExceeded in create");
+                ApiError::internal_server_error("Failed to create subscription")
+            }
+            SubscriptionError::CreditsNotConfigured => {
+                ApiError::service_unavailable("Credit purchase is not configured")
+            }
+            SubscriptionError::NoMonthlyCreditsConfigured(_) => {
+                tracing::error!("Unexpected NoMonthlyCreditsConfigured in create");
+                ApiError::internal_server_error("Failed to create subscription")
+            }
+            SubscriptionError::InvalidCredits(msg) => ApiError::bad_request(msg),
         })?;
 
     Ok(Json(CreateSubscriptionResponse { checkout_url }))
