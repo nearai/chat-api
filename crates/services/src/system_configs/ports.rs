@@ -99,10 +99,7 @@ pub struct SubscriptionPlanConfig {
     /// Agent instance limits (e.g. { "max": 1 })
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_instances: Option<PlanLimitConfig>,
-    /// Monthly token limits (e.g. { "max": 1000000 })
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub monthly_tokens: Option<PlanLimitConfig>,
-    /// Monthly credit limits (e.g. { "max": 1000000 }). Used for enforcement.
+    /// Monthly credit limits (e.g. { "max": 1000000 }). Used for quota enforcement.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub monthly_credits: Option<PlanLimitConfig>,
 }
@@ -139,7 +136,7 @@ pub struct SystemConfigs {
     pub default_model: Option<String>,
     /// Rate limit configuration
     pub rate_limit: RateLimitConfig,
-    /// Subscription plan configurations (plan name -> config with providers, agent_instances, monthly_tokens)
+    /// Subscription plan configurations (plan name -> config with providers, agent_instances, monthly_credits)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subscription_plans: Option<HashMap<String, SubscriptionPlanConfig>>,
     /// Maximum number of agent instances per manager. When a manager reaches this limit,

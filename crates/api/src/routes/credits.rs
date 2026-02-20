@@ -120,6 +120,9 @@ pub async fn create_credit_checkout(
             SubscriptionError::CreditsNotConfigured => {
                 ApiError::service_unavailable("Credit purchase is not configured")
             }
+            SubscriptionError::NoStripeCustomer => ApiError::service_unavailable(
+                "Credit purchase requires an active subscription. Please subscribe first.",
+            ),
             SubscriptionError::InvalidCredits(msg) => ApiError::bad_request(msg),
             SubscriptionError::NotConfigured => {
                 ApiError::service_unavailable("Stripe is not configured")

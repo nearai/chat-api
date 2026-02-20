@@ -208,10 +208,6 @@ pub async fn create_subscription(
                 tracing::error!("Unexpected SubscriptionNotScheduledForCancellation in create");
                 ApiError::internal_server_error("Failed to create subscription")
             }
-            SubscriptionError::MonthlyTokenLimitExceeded { .. } => {
-                tracing::error!("Unexpected MonthlyTokenLimitExceeded in create");
-                ApiError::internal_server_error("Failed to create subscription")
-            }
             SubscriptionError::MonthlyCreditLimitExceeded { .. } => {
                 tracing::error!("Unexpected MonthlyCreditLimitExceeded in create");
                 ApiError::internal_server_error("Failed to create subscription")

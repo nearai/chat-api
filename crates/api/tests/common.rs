@@ -401,7 +401,7 @@ pub async fn cleanup_user_subscriptions(db: &database::Database, user_email: &st
 }
 
 /// Set subscription_plans configuration
-/// plans should be in format: { "plan_name": { "providers": { "stripe": { "price_id": "price_xxx" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } } }
+/// plans should be in format: { "plan_name": { "providers": { "stripe": { "price_id": "price_xxx" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } } }
 pub async fn set_subscription_plans(server: &TestServer, plans: serde_json::Value) {
     let admin_email = "test_setup_admin@admin.org";
     let admin_token = mock_login(server, admin_email).await;

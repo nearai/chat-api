@@ -382,13 +382,13 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .map(|name| {
                 let plan_config = subscription_plans.get(&name);
                 let agent_instances = plan_config.and_then(|c| c.agent_instances.clone());
-                let monthly_tokens = plan_config.and_then(|c| c.monthly_tokens.clone());
+                let monthly_credits = plan_config.and_then(|c| c.monthly_credits.clone());
                 let trial_period_days = plan_config.and_then(|c| c.trial_period_days);
                 SubscriptionPlan {
                     name,
                     trial_period_days,
                     agent_instances,
-                    monthly_tokens,
+                    monthly_credits,
                 }
             })
             .collect();

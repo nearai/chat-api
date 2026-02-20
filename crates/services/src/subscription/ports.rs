@@ -76,8 +76,6 @@ pub enum SubscriptionError {
     NotConfigured,
     /// No active subscription found for user
     NoActiveSubscription,
-    /// Monthly token limit exceeded (used >= limit)
-    MonthlyTokenLimitExceeded { used: i64, limit: u64 },
     /// Monthly credit limit exceeded (used >= limit)
     MonthlyCreditLimitExceeded { used: i64, limit: u64 },
     /// Subscription is not scheduled for cancellation (cannot resume)
@@ -110,13 +108,6 @@ impl fmt::Display for SubscriptionError {
             Self::InvalidProvider(provider) => write!(f, "Invalid provider: {}", provider),
             Self::NotConfigured => write!(f, "Stripe is not configured"),
             Self::NoActiveSubscription => write!(f, "No active subscription found"),
-            Self::MonthlyTokenLimitExceeded { used, limit } => {
-                write!(
-                    f,
-                    "Monthly token limit exceeded: used {} of {} tokens",
-                    used, limit
-                )
-            }
             Self::MonthlyCreditLimitExceeded { used, limit } => {
                 write!(
                     f,
@@ -249,9 +240,9 @@ pub struct SubscriptionPlan {
     /// Agent instance limits (e.g. { "max": 1 })
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_instances: Option<PlanLimitConfig>,
-    /// Monthly token limits (e.g. { "max": 1000000 })
+    /// Monthly credit limits (e.g. { "max": 1000000 }). Used for quota enforcement.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub monthly_tokens: Option<PlanLimitConfig>,
+    pub monthly_credits: Option<PlanLimitConfig>,
 }
 
 /// Service trait for subscription management
