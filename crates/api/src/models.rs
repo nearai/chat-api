@@ -620,6 +620,9 @@ pub struct SystemConfigsResponse {
     /// Subscription plan configurations mapping plan names to provider-specific configs
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subscription_plans: Option<HashMap<String, SubscriptionPlanConfig>>,
+    /// Maximum number of agent instances per manager (round-robin skips full managers)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_instances_per_manager: Option<u64>,
 }
 
 impl From<services::system_configs::ports::SystemConfigs> for SystemConfigsResponse {
@@ -628,6 +631,7 @@ impl From<services::system_configs::ports::SystemConfigs> for SystemConfigsRespo
             default_model: config.default_model,
             rate_limit: config.rate_limit.into(),
             subscription_plans: config.subscription_plans,
+            max_instances_per_manager: config.max_instances_per_manager,
         }
     }
 }
@@ -644,6 +648,9 @@ pub struct UpsertSystemConfigsRequest {
     /// Subscription plan configurations (plan name -> config with providers, agent_instances, monthly_tokens)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subscription_plans: Option<HashMap<String, SubscriptionPlanConfig>>,
+    /// Maximum number of agent instances per manager (round-robin skips full managers)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_instances_per_manager: Option<u64>,
 }
 
 impl TryFrom<UpsertSystemConfigsRequest> for services::system_configs::ports::PartialSystemConfigs {
@@ -660,6 +667,7 @@ impl TryFrom<UpsertSystemConfigsRequest> for services::system_configs::ports::Pa
             default_model: req.default_model,
             rate_limit,
             subscription_plans: req.subscription_plans,
+            max_instances_per_manager: req.max_instances_per_manager,
         })
     }
 }
@@ -757,31 +765,6 @@ pub struct AgentApiInstance {
 pub enum InstanceStatus {
     Running,
     Stopped,
-}
-
-/// Agent instance lifecycle event for SSE streaming
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct LifecycleEvent {
-    /// Current stage (e.g., "created", "container_starting", "healthy", "ready", "error")
-    pub stage: String,
-    /// Human-readable description of the current stage
-    pub message: String,
-    /// Instance info (only present in "created" stage)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub instance: Option<LifecycleInstanceInfo>,
-}
-
-/// Minimal instance info in lifecycle events
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct LifecycleInstanceInfo {
-    pub id: String,
-    pub instance_id: String,
-    pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub dashboard_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub public_ssh_key: Option<String>,
-    pub created_at: String,
 }
 
 /// Agent instance response

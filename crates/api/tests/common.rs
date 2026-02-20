@@ -224,9 +224,10 @@ pub async fn create_test_server_and_db(
     let agent_repo = db.agent_repository();
     let agent_service = Arc::new(services::agent::AgentServiceImpl::new(
         agent_repo.clone(),
-        config.agent.api_base_url.clone(),
-        config.agent.api_token.clone(),
+        config.agent.managers.clone(),
         config.agent.nearai_api_url.clone(),
+        system_configs_service.clone()
+            as Arc<dyn services::system_configs::ports::SystemConfigsService>,
     ));
 
     // Create agent proxy service for testing

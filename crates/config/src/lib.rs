@@ -303,27 +303,86 @@ fn default_nearai_api_url() -> String {
         .unwrap_or_else(|_| "https://private.near.ai/v1".to_string())
 }
 
+/// A single agent manager endpoint with its URL and bearer token
+#[derive(Clone, serde::Deserialize)]
+pub struct AgentManager {
+    pub url: String,
+    pub token: String,
+}
+
+// Custom Debug to redact bearer tokens from log output (CLAUDE.md: never log credentials)
+impl std::fmt::Debug for AgentManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentManager")
+            .field("url", &self.url)
+            .field("token", &"[REDACTED]")
+            .finish()
+    }
+}
+
 /// Configuration for agent API integration (supports various agent types)
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct AgentConfig {
-    /// Agent API base URL
+    /// Agent API managers (URL + token pairs). Supports multiple managers for load balancing.
+    /// Configured via comma-separated AGENT_MANAGER_URLS + AGENT_MANAGER_TOKENS,
+    /// or legacy single-manager AGENT_API_BASE_URL + AGENT_API_TOKEN.
     #[serde(default)]
-    pub api_base_url: String,
-    /// Agent API bearer token for authentication
-    #[serde(default)]
-    pub api_token: String,
+    pub managers: Vec<AgentManager>,
     /// Chat-API base URL that agents use to reach this service
     /// Used as nearai_api_url when creating instances so the agent knows where to authenticate.
     #[serde(default = "default_nearai_api_url")]
     pub nearai_api_url: String,
 }
 
+/// Split a comma-separated env var value into non-empty trimmed entries.
+fn split_csv(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 impl Default for AgentConfig {
     fn default() -> Self {
+        // Comma-separated lists: AGENT_MANAGER_URLS=url1,url2  AGENT_MANAGER_TOKENS=tok1,tok2
+        let managers = if let Ok(urls_raw) = std::env::var("AGENT_MANAGER_URLS") {
+            let urls = split_csv(&urls_raw);
+            if urls.is_empty() {
+                // AGENT_MANAGER_URLS is set but empty/blank — fall through to legacy
+                let url = std::env::var("AGENT_API_BASE_URL")
+                    .unwrap_or_else(|_| "https://api.agent.near.ai".to_string());
+                let token = std::env::var("AGENT_API_TOKEN").unwrap_or_default();
+                vec![AgentManager { url, token }]
+            } else {
+                let tokens_raw = std::env::var("AGENT_MANAGER_TOKENS").unwrap_or_default();
+                let tokens = split_csv(&tokens_raw);
+                if urls.len() != tokens.len() {
+                    panic!(
+                        "AGENT_MANAGER_URLS has {} entries but AGENT_MANAGER_TOKENS has {} — they must match",
+                        urls.len(),
+                        tokens.len()
+                    );
+                }
+                let mut mgrs: Vec<AgentManager> = urls
+                    .into_iter()
+                    .zip(tokens)
+                    .map(|(url, token)| AgentManager { url, token })
+                    .collect();
+                // Sort by URL for deterministic ordering across restarts
+                mgrs.sort_by(|a, b| a.url.cmp(&b.url));
+                mgrs
+            }
+        } else {
+            // Legacy: single AGENT_API_BASE_URL + AGENT_API_TOKEN
+            let url = std::env::var("AGENT_API_BASE_URL")
+                .unwrap_or_else(|_| "https://api.agent.near.ai".to_string());
+            let token = std::env::var("AGENT_API_TOKEN").unwrap_or_default();
+            vec![AgentManager { url, token }]
+        };
+
         Self {
-            api_base_url: std::env::var("AGENT_API_BASE_URL")
-                .unwrap_or_else(|_| "https://api.agent.near.ai".to_string()),
-            api_token: std::env::var("AGENT_API_TOKEN").unwrap_or_else(|_| "".to_string()),
+            managers,
             nearai_api_url: std::env::var("BACKEND_URL")
                 .map(|url| url.trim_end_matches('/').to_string() + "/v1")
                 .unwrap_or_else(|_| "https://private.near.ai/v1".to_string()),
@@ -496,5 +555,100 @@ mod tests {
         assert_eq!(config.exact_matches.len(), 1);
         assert_eq!(config.wildcard_suffixes.len(), 1);
         std::env::remove_var("CORS_ALLOWED_ORIGINS");
+    }
+
+    #[test]
+    #[serial]
+    fn test_agent_config_legacy_single_url() {
+        std::env::remove_var("AGENT_MANAGER_URLS");
+        std::env::remove_var("AGENT_MANAGER_TOKENS");
+        std::env::set_var("AGENT_API_BASE_URL", "https://mgr.example.com");
+        std::env::set_var("AGENT_API_TOKEN", "secret123");
+        let config = AgentConfig::default();
+        assert_eq!(config.managers.len(), 1);
+        assert_eq!(config.managers[0].url, "https://mgr.example.com");
+        assert_eq!(config.managers[0].token, "secret123");
+        std::env::remove_var("AGENT_API_BASE_URL");
+        std::env::remove_var("AGENT_API_TOKEN");
+    }
+
+    #[test]
+    #[serial]
+    fn test_agent_config_csv_multiple_managers() {
+        std::env::set_var(
+            "AGENT_MANAGER_URLS",
+            "https://mgr2.example.com,https://mgr1.example.com",
+        );
+        std::env::set_var("AGENT_MANAGER_TOKENS", "tok2,tok1");
+        let config = AgentConfig::default();
+        assert_eq!(config.managers.len(), 2);
+        // Sorted by URL for deterministic ordering
+        assert_eq!(config.managers[0].url, "https://mgr1.example.com");
+        assert_eq!(config.managers[0].token, "tok1");
+        assert_eq!(config.managers[1].url, "https://mgr2.example.com");
+        assert_eq!(config.managers[1].token, "tok2");
+        std::env::remove_var("AGENT_MANAGER_URLS");
+        std::env::remove_var("AGENT_MANAGER_TOKENS");
+    }
+
+    #[test]
+    #[serial]
+    fn test_agent_config_csv_overrides_legacy() {
+        std::env::set_var("AGENT_MANAGER_URLS", "https://csv.example.com");
+        std::env::set_var("AGENT_MANAGER_TOKENS", "csv-tok");
+        std::env::set_var("AGENT_API_BASE_URL", "https://legacy.example.com");
+        std::env::set_var("AGENT_API_TOKEN", "legacy-tok");
+        let config = AgentConfig::default();
+        // CSV format takes priority over legacy vars
+        assert_eq!(config.managers.len(), 1);
+        assert_eq!(config.managers[0].url, "https://csv.example.com");
+        assert_eq!(config.managers[0].token, "csv-tok");
+        std::env::remove_var("AGENT_MANAGER_URLS");
+        std::env::remove_var("AGENT_MANAGER_TOKENS");
+        std::env::remove_var("AGENT_API_BASE_URL");
+        std::env::remove_var("AGENT_API_TOKEN");
+    }
+
+    #[test]
+    #[serial]
+    #[should_panic(expected = "AGENT_MANAGER_URLS has 2 entries but AGENT_MANAGER_TOKENS has 1")]
+    fn test_agent_config_csv_mismatched_lengths_panics() {
+        std::env::set_var(
+            "AGENT_MANAGER_URLS",
+            "https://mgr1.example.com,https://mgr2.example.com",
+        );
+        std::env::set_var("AGENT_MANAGER_TOKENS", "tok1");
+        let _ = AgentConfig::default();
+    }
+
+    #[test]
+    #[serial]
+    fn test_agent_config_csv_whitespace_and_trailing_commas() {
+        std::env::set_var(
+            "AGENT_MANAGER_URLS",
+            " https://mgr1.example.com , https://mgr2.example.com , ",
+        );
+        std::env::set_var("AGENT_MANAGER_TOKENS", " tok1 , tok2 , ");
+        let config = AgentConfig::default();
+        assert_eq!(config.managers.len(), 2);
+        assert_eq!(config.managers[0].url, "https://mgr1.example.com");
+        assert_eq!(config.managers[0].token, "tok1");
+        assert_eq!(config.managers[1].url, "https://mgr2.example.com");
+        assert_eq!(config.managers[1].token, "tok2");
+        std::env::remove_var("AGENT_MANAGER_URLS");
+        std::env::remove_var("AGENT_MANAGER_TOKENS");
+    }
+
+    #[test]
+    #[serial]
+    fn test_agent_manager_debug_redacts_token() {
+        let mgr = AgentManager {
+            url: "https://test.com".to_string(),
+            token: "super-secret".to_string(),
+        };
+        let debug_output = format!("{:?}", mgr);
+        assert!(debug_output.contains("https://test.com"));
+        assert!(!debug_output.contains("super-secret"));
+        assert!(debug_output.contains("REDACTED"));
     }
 }

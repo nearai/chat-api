@@ -1,8 +1,11 @@
+use crate::system_configs::ports::SystemConfigsService;
 use crate::UserId;
 use anyhow::anyhow;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use config::AgentManager;
 use reqwest::Client;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -11,30 +14,34 @@ use super::ports::{
     CreateInstanceParams, InstanceBalance, TokenPricing, UsageLogEntry,
 };
 
-/// Maximum size for a single line in the Agent API stream (100 KB).
-/// This prevents denial-of-service attacks where a malicious Agent API sends
-/// extremely long lines without newlines, causing unbounded buffer growth.
-const MAX_BUFFER_SIZE: usize = 100 * 1024;
-
 pub struct AgentServiceImpl {
     repository: Arc<dyn AgentRepository>,
     http_client: Client,
-    agent_api_base_url: String,
-    agent_api_token: String,
+    /// Agent manager endpoints (URL + token pairs)
+    managers: Vec<AgentManager>,
+    /// Round-robin counter for distributing new instances across managers
+    round_robin_counter: AtomicUsize,
     /// Chat-API base URL passed to the Agent API as nearai_api_url when creating instances
     nearai_api_url: String,
+    /// System configs for reading instance limits
+    system_configs_service: Arc<dyn SystemConfigsService>,
 }
 
 impl AgentServiceImpl {
     pub fn new(
         repository: Arc<dyn AgentRepository>,
-        api_base_url: String,
-        api_token: String,
+        managers: Vec<AgentManager>,
         nearai_api_url: String,
+        system_configs_service: Arc<dyn SystemConfigsService>,
     ) -> Self {
         // Validate required configuration
-        if api_token.is_empty() {
-            panic!("AGENT_API_TOKEN environment variable must be set and non-empty");
+        if managers.is_empty() {
+            panic!("At least one agent manager must be configured");
+        }
+        for (i, mgr) in managers.iter().enumerate() {
+            if mgr.token.is_empty() {
+                panic!("Agent manager #{} ({}) has an empty API token", i, mgr.url);
+            }
         }
 
         // Create HTTP client with timeout to prevent connection pool exhaustion from hung upstream services.
@@ -47,10 +54,78 @@ impl AgentServiceImpl {
         Self {
             repository,
             http_client,
-            agent_api_base_url: api_base_url,
-            agent_api_token: api_token,
+            managers,
+            round_robin_counter: AtomicUsize::new(0),
             nearai_api_url,
+            system_configs_service,
         }
+    }
+
+    /// Pick the next manager in round-robin order for new instance creation.
+    /// Does NOT check capacity — use `next_available_manager` for capacity-aware selection.
+    fn next_manager(&self) -> &AgentManager {
+        let idx = self.round_robin_counter.fetch_add(1, Ordering::Relaxed);
+        &self.managers[idx % self.managers.len()]
+    }
+
+    /// Pick the next manager with available capacity, starting from the round-robin position.
+    /// Tries each manager once. Returns Err if all managers are at capacity.
+    ///
+    /// NOTE: This is a best-effort soft limit. Concurrent calls can both see a manager as
+    /// under capacity and both create instances there, temporarily exceeding the limit.
+    /// For a hard cap, DB-level enforcement (e.g. INSERT ... WHERE count < max) would be needed.
+    async fn next_available_manager(&self) -> anyhow::Result<AgentManager> {
+        let max = match self.get_max_instances_per_manager().await {
+            Some(limit) => limit,
+            None => return Ok(self.next_manager().clone()),
+        };
+
+        let n = self.managers.len();
+        let start = self.round_robin_counter.fetch_add(1, Ordering::Relaxed);
+
+        for i in 0..n {
+            let mgr = &self.managers[(start + i) % n];
+            let count = self.repository.count_instances_by_manager(&mgr.url).await?;
+            if (count as u64) < max {
+                return Ok(mgr.clone());
+            }
+            tracing::info!(
+                "Manager at capacity: manager_url={}, count={}, max={}",
+                mgr.url,
+                count,
+                max
+            );
+        }
+
+        Err(anyhow!(
+            "All agent managers are at capacity (max {} instances per manager)",
+            max
+        ))
+    }
+
+    /// Read the max_instances_per_manager setting from system configs
+    async fn get_max_instances_per_manager(&self) -> Option<u64> {
+        self.system_configs_service
+            .get_configs()
+            .await
+            .ok()
+            .flatten()
+            .and_then(|cfg| cfg.max_instances_per_manager)
+    }
+
+    /// Resolve the manager for an existing instance.
+    /// Uses the stored agent_api_base_url from DB, falling back to the first manager.
+    fn resolve_manager(&self, instance: &AgentInstance) -> &AgentManager {
+        if let Some(ref stored_url) = instance.agent_api_base_url {
+            if let Some(mgr) = self.managers.iter().find(|m| &m.url == stored_url) {
+                return mgr;
+            }
+            tracing::warn!(
+                "Stored agent_api_base_url not found in configured managers, using fallback: instance_id={}",
+                instance.id
+            );
+        }
+        &self.managers[0]
     }
 
     /// Generate a new API key in format: sk-agent-{uuid}
@@ -71,156 +146,7 @@ impl AgentServiceImpl {
         key.starts_with("sk-agent-") && key.len() == 41
     }
 
-    /// Call Agent API to create an instance with streaming lifecycle events
-    ///
-    /// # Security Note
-    /// This function receives a nearai_api_key credential that is passed to the Agent API
-    /// in the request body. This is a sensitive credential and MUST NOT be logged, stored,
-    /// or exposed in any error messages. Only the HTTP request/response status codes and headers
-    /// should be logged for debugging purposes, never the request/response body.
-    async fn call_agent_api_create_streaming(
-        &self,
-        nearai_api_key: &str,
-        nearai_api_url: &str,
-        image: Option<String>,
-        name: Option<String>,
-        ssh_pubkey: Option<String>,
-    ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<serde_json::Value>>> {
-        let url = format!("{}/instances", self.agent_api_base_url);
-
-        let request_body = serde_json::json!({
-            "image": image,
-            "name": name,
-            "nearai_api_key": nearai_api_key,
-            "nearai_api_url": nearai_api_url,
-            "ssh_pubkey": ssh_pubkey,
-        });
-
-        let response = self
-            .http_client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .bearer_auth(&self.agent_api_token)
-            .json(&request_body)
-            .timeout(std::time::Duration::from_secs(180)) // Instance creation can take 2-3 minutes
-            .send()
-            .await
-            .map_err(|e| anyhow!("Failed to call Agent API: {}", e))?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            // Don't expose upstream error details for security; log only status code
-            tracing::warn!("Agent API create instance failed: status={}", status);
-            return Err(anyhow!("Agent API error: {}", status));
-        }
-
-        // Create channel for streaming events
-        let (tx, rx) = tokio::sync::mpsc::channel(10);
-
-        // Spawn task to stream SSE events as they arrive from Agent API
-        tokio::spawn(async move {
-            use futures::stream::StreamExt;
-            use tokio::time::timeout;
-
-            let mut stream = response.bytes_stream();
-            let mut buffer = String::new();
-            // Idle timeout: 60 seconds with no data from Agent API indicates a stalled stream
-            const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-
-            loop {
-                let chunk_result = timeout(STREAM_IDLE_TIMEOUT, stream.next()).await;
-                let chunk_result = match chunk_result {
-                    Ok(result) => result,
-                    Err(_timeout) => {
-                        tracing::error!(
-                            "Agent API stream idle timeout: no data received for {}s",
-                            STREAM_IDLE_TIMEOUT.as_secs()
-                        );
-                        let _ = tx.send(Err(anyhow!("Agent API stream timeout"))).await;
-                        break;
-                    }
-                };
-
-                match chunk_result {
-                    Some(Ok(chunk)) => {
-                        // Decode chunk as UTF-8, replacing invalid sequences with replacement char
-                        let text = String::from_utf8_lossy(&chunk);
-
-                        // Security: Check buffer size before appending to prevent overflow
-                        if buffer.len() + text.len() > MAX_BUFFER_SIZE {
-                            tracing::error!(
-                                "Agent API stream buffer would exceed maximum size ({} bytes): current={}, incoming chunk={}",
-                                MAX_BUFFER_SIZE,
-                                buffer.len(),
-                                text.len()
-                            );
-                            let _ = tx
-                                .send(Err(anyhow!(
-                                    "Stream buffer too large: possible malicious Agent API"
-                                )))
-                                .await;
-                            break;
-                        }
-                        buffer.push_str(&text);
-
-                        // Process complete lines (SSE events end with \n\n)
-                        while let Some(newline_pos) = buffer.find('\n') {
-                            let line = buffer[..newline_pos].to_string();
-                            buffer.drain(..=newline_pos);
-
-                            // Parse SSE format: "data: {...}\n\n"
-                            if let Some(data) = line.strip_prefix("data: ") {
-                                match serde_json::from_str::<serde_json::Value>(data) {
-                                    Ok(event) => {
-                                        // Send event immediately; ignore if channel is closed (client disconnected)
-                                        let _ = tx.send(Ok(event)).await;
-                                    }
-                                    Err(e) => {
-                                        // Log malformed JSON events for debugging
-                                        tracing::debug!(
-                                            "Failed to parse Agent API SSE data as JSON: {}",
-                                            e
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Some(Err(e)) => {
-                        tracing::error!("Error reading Agent API stream: {}", e);
-                        let _ = tx.send(Err(anyhow!("Stream error: {}", e))).await;
-                        break;
-                    }
-                    None => {
-                        // Stream ended normally
-                        break;
-                    }
-                }
-            }
-
-            // Process any remaining data in buffer
-            if !buffer.is_empty() {
-                if let Some(data) = buffer.strip_prefix("data: ") {
-                    match serde_json::from_str::<serde_json::Value>(data) {
-                        Ok(event) => {
-                            let _ = tx.send(Ok(event)).await;
-                        }
-                        Err(e) => {
-                            // Log malformed JSON events for debugging
-                            tracing::debug!(
-                                "Failed to parse final Agent API SSE data as JSON: {}",
-                                e
-                            );
-                        }
-                    }
-                }
-            }
-        });
-
-        Ok(rx)
-    }
-
-    /// Call Agent API to create an instance
+    /// Call Agent API to create an instance on a specific manager
     ///
     /// # Security Note
     /// This function receives a nearai_api_key credential that is passed to the Agent API
@@ -229,13 +155,14 @@ impl AgentServiceImpl {
     /// should be logged for debugging purposes, never the request/response body.
     async fn call_agent_api_create(
         &self,
+        manager: &AgentManager,
         nearai_api_key: &str,
         nearai_api_url: &str,
         image: Option<String>,
         name: Option<String>,
         ssh_pubkey: Option<String>,
     ) -> anyhow::Result<serde_json::Value> {
-        let url = format!("{}/instances", self.agent_api_base_url);
+        let url = format!("{}/instances", manager.url);
 
         let request_body = serde_json::json!({
             "image": image,
@@ -249,7 +176,7 @@ impl AgentServiceImpl {
             .http_client
             .post(&url)
             .header("Content-Type", "application/json")
-            .bearer_auth(&self.agent_api_token)
+            .bearer_auth(&manager.token)
             .json(&request_body)
             .timeout(std::time::Duration::from_secs(180)) // Instance creation can take 2-3 minutes
             .send()
@@ -283,14 +210,17 @@ impl AgentServiceImpl {
         Ok(body)
     }
 
-    /// Call Agent API to list instances
-    async fn call_agent_api_list(&self) -> anyhow::Result<serde_json::Value> {
-        let url = format!("{}/instances", self.agent_api_base_url);
+    /// Call Agent API to list instances on a specific manager
+    async fn call_agent_api_list(
+        &self,
+        manager: &AgentManager,
+    ) -> anyhow::Result<serde_json::Value> {
+        let url = format!("{}/instances", manager.url);
 
         let response = self
             .http_client
             .get(&url)
-            .bearer_auth(&self.agent_api_token)
+            .bearer_auth(&manager.token)
             .send()
             .await
             .map_err(|e| anyhow!("Failed to call Agent API: {}", e))?;
@@ -310,16 +240,20 @@ impl AgentServiceImpl {
         Ok(body)
     }
 
-    /// Call Agent API GET /instances/{name} to fetch instance details including status.
+    /// Call Agent API GET /instances/{name} on a specific manager.
     /// Returns None on 404 or any error (non-blocking; used to enrich instance responses).
-    async fn call_agent_api_get_instance(&self, name: &str) -> Option<serde_json::Value> {
+    async fn call_agent_api_get_instance(
+        &self,
+        manager: &AgentManager,
+        name: &str,
+    ) -> Option<serde_json::Value> {
         let encoded_name = urlencoding::encode(name);
-        let url = format!("{}/instances/{}", self.agent_api_base_url, encoded_name);
+        let url = format!("{}/instances/{}", manager.url, encoded_name);
 
         let response = self
             .http_client
             .get(&url)
-            .bearer_auth(&self.agent_api_token)
+            .bearer_auth(&manager.token)
             .send()
             .await
             .ok()?;
@@ -335,168 +269,8 @@ impl AgentServiceImpl {
     }
 }
 
-/// Helper function to save instance data from lifecycle event to database
-///
-/// # Arguments
-/// * `max_allowed` - Maximum instances allowed by user's subscription plan. Used for TOCTOU re-check.
-async fn save_instance_from_event(
-    repository: &dyn AgentRepository,
-    user_id: UserId,
-    instance_data: &serde_json::Value,
-    api_key_id: &Uuid,
-    ssh_pubkey: Option<&str>,
-    max_allowed: u64,
-) -> anyhow::Result<AgentInstance> {
-    // TOCTOU mitigation: Re-check instance limit before creating.
-    // The route handler already checked this, but concurrent requests can race.
-    // This re-check happens just before the DB insert to enforce the limit.
-    let (_instances, total_count) = repository.list_user_instances(user_id, 1, 0).await?;
-    if total_count as u64 >= max_allowed {
-        tracing::error!(
-            "Instance creation rejected: subscription limit exceeded due to concurrent request. current={}, max={}, user_id={}",
-            total_count,
-            max_allowed,
-            user_id
-        );
-        return Err(anyhow!(
-            "Agent instance limit exceeded. Current: {}, Max: {}",
-            total_count,
-            max_allowed
-        ));
-    }
-
-    let instance_name = instance_data
-        .get("name")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("Missing 'name' in Agent API instance data"))?
-        .to_string();
-
-    // Try to extract instance_id from the Agent API event (for cross-system correlation)
-    // If not available, generate one from the instance name and a UUID
-    let instance_id = instance_data
-        .get("instance_id")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| format!("agent-{}-{}", instance_name, Uuid::new_v4()));
-
-    let instance_url = instance_data
-        .get("url")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-
-    let instance_token = instance_data
-        .get("token")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-
-    let gateway_port = instance_data
-        .get("gateway_port")
-        .and_then(|v| v.as_i64())
-        .map(|p| p as i32);
-
-    let dashboard_url = instance_data
-        .get("dashboard_url")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-
-    let instance = repository
-        .create_instance(CreateInstanceParams {
-            user_id,
-            instance_id: instance_id.clone(),
-            name: instance_name,
-            public_ssh_key: ssh_pubkey.map(|s| s.to_string()),
-            instance_url,
-            instance_token,
-            gateway_port,
-            dashboard_url,
-        })
-        .await?;
-
-    // Security: Verify the created instance belongs to the requesting user
-    // (This should always be true since we passed user_id to create_instance, but we assert for safety)
-    if instance.user_id != user_id {
-        return Err(anyhow!(
-            "Security violation: Created instance does not belong to requesting user. instance.user_id={}, request.user_id={}",
-            instance.user_id,
-            user_id
-        ));
-    }
-
-    // Bind the unbound API key to the new instance
-    repository
-        .bind_api_key_to_instance(*api_key_id, instance.id)
-        .await?;
-
-    tracing::info!(
-        "Instance saved from lifecycle event: instance_id={}, user_id={}",
-        instance_id,
-        user_id
-    );
-
-    Ok(instance)
-}
-
 #[async_trait]
 impl AgentService for AgentServiceImpl {
-    async fn list_instances_from_agent_api(
-        &self,
-        _user_id: UserId,
-    ) -> anyhow::Result<Vec<AgentInstance>> {
-        tracing::info!("Listing instances from Agent API (read-only, no DB sync)");
-
-        // Call Agent API
-        let response = self.call_agent_api_list().await?;
-
-        // Extract instances array from response
-        let instances_array = response
-            .get("instances")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| anyhow!("Missing or invalid 'instances' array in Agent API response"))?;
-
-        let mut instances = Vec::new();
-
-        // Process each instance from Agent API (read-only, no database sync)
-        for instance_data in instances_array {
-            let instance_name = instance_data
-                .get("name")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow!("Missing 'name' in Agent API instance data"))?
-                .to_string();
-
-            let instance_ssh_pubkey = instance_data
-                .get("ssh_pubkey")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-
-            // Generate a unique instance_id based on the Agent API name
-            let instance_id = format!("agent-{}-{}", instance_name, Uuid::new_v4());
-
-            // Create in-memory instance object (no database storage)
-            let instance = AgentInstance {
-                id: Uuid::new_v4(),
-                user_id: _user_id,
-                instance_id,
-                name: instance_name,
-                public_ssh_key: instance_ssh_pubkey,
-                instance_url: None,
-                instance_token: None,
-                gateway_port: None,
-                dashboard_url: None,
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
-            };
-
-            instances.push(instance);
-        }
-
-        tracing::info!(
-            "Listed {} instances from Agent API (read-only)",
-            instances.len()
-        );
-
-        Ok(instances)
-    }
-
     async fn list_all_instances(
         &self,
         limit: i64,
@@ -514,6 +288,9 @@ impl AgentService for AgentServiceImpl {
     ) -> anyhow::Result<AgentInstance> {
         tracing::info!("Creating instance from Agent API: user_id={}", user_id);
 
+        // Pick next manager with available capacity (round-robin, skipping full managers)
+        let manager = self.next_available_manager().await?;
+
         // Create an unbound API key on behalf of the user; the agent will use it to authenticate to the chat-api.
         let key_name = name
             .as_deref()
@@ -526,6 +303,7 @@ impl AgentService for AgentServiceImpl {
         // Call Agent API with our API key and the chat-api URL (agents reach us at nearai_api_url)
         let response = self
             .call_agent_api_create(
+                &manager,
                 &plaintext_key,
                 &self.nearai_api_url,
                 image,
@@ -569,7 +347,7 @@ impl AgentService for AgentServiceImpl {
         // Generate a unique instance_id based on the Agent API name
         let instance_id = format!("agent-{}-{}", instance_name, Uuid::new_v4());
 
-        // Store in database with connection info
+        // Store in database with connection info and the manager URL that owns it
         let instance = self
             .repository
             .create_instance(CreateInstanceParams {
@@ -581,12 +359,24 @@ impl AgentService for AgentServiceImpl {
                 instance_token,
                 gateway_port,
                 dashboard_url,
+                agent_api_base_url: Some(manager.url.clone()),
             })
             .await?;
 
-        // Bind the unbound API key to the new instance
-        self.bind_api_key_to_instance(api_key.id, instance.id, user_id)
-            .await?;
+        // Bind the unbound API key to the new instance.
+        // If binding fails, the instance and key are already created — log for manual cleanup.
+        if let Err(e) = self
+            .bind_api_key_to_instance(api_key.id, instance.id, user_id)
+            .await
+        {
+            tracing::error!(
+                "Failed to bind API key to instance (manual cleanup may be needed): instance_id={}, api_key_id={}, error={}",
+                instance.id,
+                api_key.id,
+                e
+            );
+            return Err(e);
+        }
 
         tracing::info!(
             "Instance created from Agent API: instance_id={}, user_id={}",
@@ -595,196 +385,6 @@ impl AgentService for AgentServiceImpl {
         );
 
         Ok(instance)
-    }
-
-    async fn create_instance_from_agent_api_streaming(
-        &self,
-        user_id: UserId,
-        image: Option<String>,
-        name: Option<String>,
-        ssh_pubkey: Option<String>,
-        max_allowed: u64,
-    ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<serde_json::Value>>> {
-        tracing::info!(
-            "Creating instance from Agent API with streaming: user_id={}",
-            user_id
-        );
-
-        // Create an unbound API key on behalf of the user; the agent will use it to authenticate to the chat-api.
-        let key_name = name
-            .as_deref()
-            .map(|n| format!("instance-{}", n))
-            .unwrap_or_else(|| "instance".to_string());
-        let (api_key, plaintext_key) = self
-            .create_unbound_api_key(user_id, key_name, None, None)
-            .await?;
-
-        // Call Agent API which returns a stream of lifecycle events
-        let mut rx = match self
-            .call_agent_api_create_streaming(
-                &plaintext_key,
-                &self.nearai_api_url,
-                image,
-                name.clone(),
-                ssh_pubkey.clone(),
-            )
-            .await
-        {
-            Ok(rx) => rx,
-            Err(e) => {
-                // Critical: Revoke the orphaned API key if streaming setup fails
-                tracing::error!(
-                    "Failed to start Agent API streaming: user_id={}, error={}. Revoking orphaned API key.",
-                    user_id,
-                    e
-                );
-                if let Err(cleanup_err) = self.repository.revoke_api_key(api_key.id).await {
-                    tracing::warn!(
-                        "Failed to revoke API key after streaming setup failure: user_id={}, api_key_id={}, error={}",
-                        user_id,
-                        api_key.id,
-                        cleanup_err
-                    );
-                }
-                return Err(e);
-            }
-        };
-
-        // Create a new channel to forward events and handle database writes
-        let (tx, output_rx) = tokio::sync::mpsc::channel(10);
-        let repo = Arc::clone(&self.repository);
-        let api_key_id = api_key.id;
-
-        // Spawn a task to process events
-        tokio::spawn(async move {
-            // TOCTOU mitigation: Capture max_allowed so the spawned task can enforce the subscription limit
-            let mut created_event_processed = false;
-
-            while let Some(event_result) = rx.recv().await {
-                match event_result {
-                    Ok(event) => {
-                        // Security: Only process the first "created" event to prevent duplicate instance creation
-                        if !created_event_processed {
-                            if let Some(stage) = event.get("stage").and_then(|s| s.as_str()) {
-                                if stage == "created" {
-                                    // Extract and save instance data to database
-                                    if let Some(instance_data) = event.get("instance") {
-                                        if let Err(e) = save_instance_from_event(
-                                            repo.as_ref(),
-                                            user_id,
-                                            instance_data,
-                                            &api_key_id,
-                                            ssh_pubkey.as_deref(),
-                                            max_allowed,
-                                        )
-                                        .await
-                                        {
-                                            tracing::error!(
-                                                "Failed to save instance from created event: user_id={}, error={}",
-                                                user_id,
-                                                e
-                                            );
-                                            // Cleanup: Revoke the unbound API key if instance save fails
-                                            if let Err(cleanup_err) =
-                                                repo.revoke_api_key(api_key_id).await
-                                            {
-                                                tracing::warn!(
-                                                    "Failed to revoke API key on instance save failure: user_id={}, api_key_id={}, error={}",
-                                                    user_id,
-                                                    api_key_id,
-                                                    cleanup_err
-                                                );
-                                            }
-                                            let _ = tx
-                                                .send(Err(anyhow!("Failed to save instance")))
-                                                .await;
-                                            break;
-                                        }
-                                        // Mark as processed only after successful save
-                                        created_event_processed = true;
-                                    } else {
-                                        // "created" event missing instance data - revoke key and error
-                                        tracing::error!(
-                                            "Received 'created' event without instance data: user_id={}",
-                                            user_id
-                                        );
-                                        if let Err(cleanup_err) =
-                                            repo.revoke_api_key(api_key_id).await
-                                        {
-                                            tracing::warn!(
-                                                "Failed to revoke API key on malformed event: user_id={}, api_key_id={}, error={}",
-                                                user_id,
-                                                api_key_id,
-                                                cleanup_err
-                                            );
-                                        }
-                                        let _ = tx
-                                            .send(Err(anyhow!(
-                                                "Invalid created event: missing instance data"
-                                            )))
-                                            .await;
-                                        break;
-                                    }
-                                }
-                            }
-                        } else if let Some(stage) = event.get("stage").and_then(|s| s.as_str()) {
-                            if stage == "created" {
-                                // Duplicate "created" event detected; ignore to prevent duplicate instance creation
-                                tracing::warn!(
-                                    "Ignoring duplicate 'created' event from Agent API: user_id={}",
-                                    user_id
-                                );
-                                if tx.send(Ok(event)).await.is_err() {
-                                    break;
-                                }
-                                continue;
-                            }
-                        }
-
-                        // Forward the event
-                        if tx.send(Ok(event)).await.is_err() {
-                            // Channel closed, client disconnected before instance was created
-                            if !created_event_processed {
-                                tracing::warn!(
-                                    "Client disconnected before instance creation: revoking unbound API key: user_id={}",
-                                    user_id
-                                );
-                                if let Err(cleanup_err) = repo.revoke_api_key(api_key_id).await {
-                                    tracing::warn!(
-                                        "Failed to revoke API key on client disconnect: user_id={}, api_key_id={}, error={}",
-                                        user_id,
-                                        api_key_id,
-                                        cleanup_err
-                                    );
-                                }
-                            }
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        // Only cleanup if we haven't created the instance yet
-                        if !created_event_processed {
-                            tracing::warn!(
-                                "Stream error before instance creation: user_id={}, revoking unbound API key",
-                                user_id
-                            );
-                            if let Err(cleanup_err) = repo.revoke_api_key(api_key_id).await {
-                                tracing::warn!(
-                                    "Failed to revoke API key on stream error: user_id={}, api_key_id={}, error={}",
-                                    user_id,
-                                    api_key_id,
-                                    cleanup_err
-                                );
-                            }
-                        }
-                        let _ = tx.send(Err(e)).await;
-                        break;
-                    }
-                }
-            }
-        });
-
-        Ok(output_rx)
     }
 
     async fn create_instance(
@@ -820,6 +420,7 @@ impl AgentService for AgentServiceImpl {
                 instance_token: None,
                 gateway_port: None,
                 dashboard_url: None,
+                agent_api_base_url: None,
             })
             .await?;
 
@@ -883,54 +484,128 @@ impl AgentService for AgentServiceImpl {
     async fn get_instance_enrichment_from_agent_api(
         &self,
         agent_api_name: &str,
+        agent_api_base_url: Option<&str>,
     ) -> Option<AgentApiInstanceEnrichment> {
-        let data = self.call_agent_api_get_instance(agent_api_name).await?;
-        let status = data
-            .get("status")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let ssh_command = data
-            .get("ssh_command")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        Some(AgentApiInstanceEnrichment {
-            status,
-            ssh_command,
-        })
+        // When the owning manager URL is known, query only that manager (O(1) instead of O(N))
+        let managers_to_query: Vec<&AgentManager> = if let Some(url) = agent_api_base_url {
+            if let Some(mgr) = self.managers.iter().find(|m| m.url == url) {
+                vec![mgr]
+            } else {
+                // Stored URL no longer in config; fall back to all managers
+                self.managers.iter().collect()
+            }
+        } else {
+            // Legacy instance without stored manager URL; fan-out to all
+            self.managers.iter().collect()
+        };
+
+        let futures: Vec<_> = managers_to_query
+            .iter()
+            .map(|mgr| self.call_agent_api_get_instance(mgr, agent_api_name))
+            .collect();
+
+        let results = futures::future::join_all(futures).await;
+
+        if let Some(data) = results.into_iter().flatten().next() {
+            let status = data
+                .get("status")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let ssh_command = data
+                .get("ssh_command")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            Some(AgentApiInstanceEnrichment {
+                status,
+                ssh_command,
+            })
+        } else {
+            None
+        }
     }
 
-    async fn get_all_instance_enrichments_from_agent_api(
+    async fn get_instance_enrichments(
         &self,
+        instances: &[AgentInstance],
     ) -> std::collections::HashMap<String, AgentApiInstanceEnrichment> {
-        let response = match self.call_agent_api_list().await {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!("Agent API list failed, status enrichment skipped: {}", e);
-                return std::collections::HashMap::new();
-            }
-        };
-        let instances = match response.get("instances").and_then(|v| v.as_array()) {
-            Some(arr) => arr,
-            None => return std::collections::HashMap::new(),
-        };
-        let mut map = std::collections::HashMap::new();
+        if instances.is_empty() {
+            return std::collections::HashMap::new();
+        }
+
+        // Group instances by their owning manager URL.
+        // Instances without a stored URL fall back to the first configured manager.
+        let fallback_url = &self.managers[0].url;
+        let mut by_manager: std::collections::HashMap<&str, Vec<&str>> =
+            std::collections::HashMap::new();
         for inst in instances {
-            if let Some(name) = inst.get("name").and_then(|v| v.as_str()) {
-                let status = inst
-                    .get("status")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                let ssh_command = inst
-                    .get("ssh_command")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                map.insert(
-                    name.to_string(),
-                    AgentApiInstanceEnrichment {
-                        status,
-                        ssh_command,
-                    },
-                );
+            let mgr_url = inst.agent_api_base_url.as_deref().unwrap_or(fallback_url);
+            by_manager.entry(mgr_url).or_default().push(&inst.name);
+        }
+
+        // Query only the managers that own at least one instance in the list
+        let futures: Vec<_> = by_manager
+            .keys()
+            .filter_map(|url| {
+                match self.managers.iter().find(|m| &m.url == url) {
+                    Some(mgr) => Some(self.call_agent_api_list(mgr)),
+                    None => {
+                        tracing::warn!(
+                            "Stored agent_api_base_url not found in configured managers, skipping enrichment: url={}",
+                            url
+                        );
+                        None
+                    }
+                }
+            })
+            .collect();
+
+        let results = tokio::time::timeout(
+            std::time::Duration::from_secs(35),
+            futures::future::join_all(futures),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            tracing::warn!("Instance enrichment queries timed out after 35s");
+            vec![]
+        });
+
+        // Build a set of names we care about to avoid returning enrichments for
+        // instances that weren't requested (other users' instances on the same manager)
+        let requested_names: std::collections::HashSet<&str> =
+            instances.iter().map(|i| i.name.as_str()).collect();
+
+        let mut map = std::collections::HashMap::new();
+        for result in results {
+            match result {
+                Ok(response) => {
+                    if let Some(arr) = response.get("instances").and_then(|v| v.as_array()) {
+                        for inst in arr {
+                            if let Some(name) = inst.get("name").and_then(|v| v.as_str()) {
+                                if !requested_names.contains(name) {
+                                    continue;
+                                }
+                                let status = inst
+                                    .get("status")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string());
+                                let ssh_command = inst
+                                    .get("ssh_command")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string());
+                                map.insert(
+                                    name.to_string(),
+                                    AgentApiInstanceEnrichment {
+                                        status,
+                                        ssh_command,
+                                    },
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Agent API list failed on one manager: {}", e);
+                }
             }
         }
         map
@@ -977,6 +652,11 @@ impl AgentService for AgentServiceImpl {
         Ok(updated)
     }
 
+    /// Delete an instance from both the Agent API and the local database.
+    ///
+    /// SECURITY: This method does NOT verify ownership. Callers MUST enforce
+    /// authorization before calling (e.g. the user route checks `instance.user_id`,
+    /// and the admin route requires admin privileges).
     async fn delete_instance(&self, instance_id: Uuid) -> anyhow::Result<()> {
         tracing::info!("Deleting instance: instance_id={}", instance_id);
 
@@ -987,14 +667,17 @@ impl AgentService for AgentServiceImpl {
             .await?
             .ok_or_else(|| anyhow!("Instance not found"))?;
 
+        // Route to the correct manager that owns this instance
+        let manager = self.resolve_manager(&instance);
+
         // Call Agent API to terminate the instance. URL-encode instance name to prevent path
         // traversal (it can be derived from instance_name returned by the external Agent API).
         let encoded_name = urlencoding::encode(&instance.name);
-        let delete_url = format!("{}/instances/{}", self.agent_api_base_url, encoded_name);
+        let delete_url = format!("{}/instances/{}", manager.url, encoded_name);
         let response = self
             .http_client
             .delete(&delete_url)
-            .bearer_auth(&self.agent_api_token)
+            .bearer_auth(&manager.token)
             .send()
             .await
             .map_err(|e| anyhow!("Failed to call Agent API delete: {}", e))?;
@@ -1038,16 +721,16 @@ impl AgentService for AgentServiceImpl {
             return Err(anyhow!("Access denied"));
         }
 
+        // Route to the correct manager
+        let manager = self.resolve_manager(&instance);
+
         // Call Agent API to restart the instance
         let encoded_name = urlencoding::encode(&instance.name);
-        let restart_url = format!(
-            "{}/instances/{}/restart",
-            self.agent_api_base_url, encoded_name
-        );
+        let restart_url = format!("{}/instances/{}/restart", manager.url, encoded_name);
         let response = self
             .http_client
             .post(&restart_url)
-            .bearer_auth(&self.agent_api_token)
+            .bearer_auth(&manager.token)
             .send()
             .await
             .map_err(|e| anyhow!("Failed to call Agent API restart: {}", e))?;
@@ -1088,16 +771,16 @@ impl AgentService for AgentServiceImpl {
             return Err(anyhow!("Access denied"));
         }
 
+        // Route to the correct manager
+        let manager = self.resolve_manager(&instance);
+
         // Call Agent API to stop the instance
         let encoded_name = urlencoding::encode(&instance.name);
-        let stop_url = format!(
-            "{}/instances/{}/stop",
-            self.agent_api_base_url, encoded_name
-        );
+        let stop_url = format!("{}/instances/{}/stop", manager.url, encoded_name);
         let response = self
             .http_client
             .post(&stop_url)
-            .bearer_auth(&self.agent_api_token)
+            .bearer_auth(&manager.token)
             .send()
             .await
             .map_err(|e| anyhow!("Failed to call Agent API stop: {}", e))?;
@@ -1138,16 +821,16 @@ impl AgentService for AgentServiceImpl {
             return Err(anyhow!("Access denied"));
         }
 
+        // Route to the correct manager
+        let manager = self.resolve_manager(&instance);
+
         // Call Agent API to start the instance
         let encoded_name = urlencoding::encode(&instance.name);
-        let start_url = format!(
-            "{}/instances/{}/start",
-            self.agent_api_base_url, encoded_name
-        );
+        let start_url = format!("{}/instances/{}/start", manager.url, encoded_name);
         let response = self
             .http_client
             .post(&start_url)
-            .bearer_auth(&self.agent_api_token)
+            .bearer_auth(&manager.token)
             .send()
             .await
             .map_err(|e| anyhow!("Failed to call Agent API start: {}", e))?;
@@ -1615,5 +1298,716 @@ impl AgentService for AgentServiceImpl {
         let balance = self.repository.get_instance_balance(instance_id).await?;
 
         Ok(balance)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::system_configs::ports::{PartialSystemConfigs, SystemConfigs, SystemConfigsService};
+    use chrono::Utc;
+    use config::AgentManager;
+
+    // --- Mock SystemConfigsService ---
+
+    struct MockSystemConfigsService {
+        configs: Option<SystemConfigs>,
+    }
+
+    impl MockSystemConfigsService {
+        /// No system config row exists — capacity checks are bypassed entirely.
+        fn no_config() -> Self {
+            Self { configs: None }
+        }
+
+        fn with_manager_limit(max: u64) -> Self {
+            Self {
+                configs: Some(SystemConfigs {
+                    max_instances_per_manager: Some(max),
+                    ..Default::default()
+                }),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl SystemConfigsService for MockSystemConfigsService {
+        async fn get_configs(&self) -> anyhow::Result<Option<SystemConfigs>> {
+            Ok(self.configs.clone())
+        }
+        async fn upsert_configs(&self, configs: SystemConfigs) -> anyhow::Result<SystemConfigs> {
+            Ok(configs)
+        }
+        async fn update_configs(
+            &self,
+            _configs: PartialSystemConfigs,
+        ) -> anyhow::Result<SystemConfigs> {
+            Ok(SystemConfigs::default())
+        }
+    }
+
+    use crate::agent::ports::MockAgentRepository;
+
+    /// Create a MockAgentRepository where every manager has `count` instances
+    fn mock_repo_with_manager_count(count: i64) -> MockAgentRepository {
+        let mut repo = MockAgentRepository::new();
+        repo.expect_count_instances_by_manager()
+            .returning(move |_| Ok(count));
+        repo
+    }
+
+    fn make_managers(n: usize) -> Vec<AgentManager> {
+        (0..n)
+            .map(|i| AgentManager {
+                url: format!("https://mgr{}.example.com", i),
+                token: format!("token{}", i),
+            })
+            .collect()
+    }
+
+    fn make_service(
+        managers: Vec<AgentManager>,
+        repo: Arc<dyn AgentRepository>,
+        configs: Arc<dyn SystemConfigsService>,
+    ) -> AgentServiceImpl {
+        AgentServiceImpl::new(
+            repo,
+            managers,
+            "https://nearai.test/v1".to_string(),
+            configs,
+        )
+    }
+
+    // --- Tests ---
+
+    #[test]
+    fn test_next_manager_round_robin_single() {
+        let managers = make_managers(1);
+        let svc = make_service(
+            managers.clone(),
+            Arc::new(mock_repo_with_manager_count(0)),
+            Arc::new(MockSystemConfigsService::no_config()),
+        );
+
+        for _ in 0..5 {
+            let mgr = svc.next_manager();
+            assert_eq!(mgr.url, "https://mgr0.example.com");
+        }
+    }
+
+    #[test]
+    fn test_next_manager_round_robin_multiple() {
+        let managers = make_managers(3);
+        let svc = make_service(
+            managers.clone(),
+            Arc::new(mock_repo_with_manager_count(0)),
+            Arc::new(MockSystemConfigsService::no_config()),
+        );
+
+        let urls: Vec<String> = (0..6).map(|_| svc.next_manager().url.clone()).collect();
+
+        assert_eq!(urls[0], "https://mgr0.example.com");
+        assert_eq!(urls[1], "https://mgr1.example.com");
+        assert_eq!(urls[2], "https://mgr2.example.com");
+        assert_eq!(urls[3], "https://mgr0.example.com");
+        assert_eq!(urls[4], "https://mgr1.example.com");
+        assert_eq!(urls[5], "https://mgr2.example.com");
+    }
+
+    #[test]
+    fn test_next_manager_uses_correct_token() {
+        let managers = make_managers(2);
+        let svc = make_service(
+            managers.clone(),
+            Arc::new(mock_repo_with_manager_count(0)),
+            Arc::new(MockSystemConfigsService::no_config()),
+        );
+
+        let mgr0 = svc.next_manager();
+        assert_eq!(mgr0.token, "token0");
+        let mgr1 = svc.next_manager();
+        assert_eq!(mgr1.token, "token1");
+    }
+
+    #[test]
+    fn test_resolve_manager_matches_stored_url() {
+        let managers = make_managers(3);
+        let svc = make_service(
+            managers.clone(),
+            Arc::new(mock_repo_with_manager_count(0)),
+            Arc::new(MockSystemConfigsService::no_config()),
+        );
+
+        let instance = AgentInstance {
+            id: Uuid::new_v4(),
+            user_id: UserId(Uuid::new_v4()),
+            instance_id: "test".to_string(),
+            name: "test".to_string(),
+            public_ssh_key: None,
+            instance_url: None,
+            instance_token: None,
+            gateway_port: None,
+            dashboard_url: None,
+            agent_api_base_url: Some("https://mgr2.example.com".to_string()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let mgr = svc.resolve_manager(&instance);
+        assert_eq!(mgr.url, "https://mgr2.example.com");
+        assert_eq!(mgr.token, "token2");
+    }
+
+    #[test]
+    fn test_resolve_manager_falls_back_to_first() {
+        let managers = make_managers(2);
+        let svc = make_service(
+            managers.clone(),
+            Arc::new(mock_repo_with_manager_count(0)),
+            Arc::new(MockSystemConfigsService::no_config()),
+        );
+
+        let instance = AgentInstance {
+            id: Uuid::new_v4(),
+            user_id: UserId(Uuid::new_v4()),
+            instance_id: "test".to_string(),
+            name: "test".to_string(),
+            public_ssh_key: None,
+            instance_url: None,
+            instance_token: None,
+            gateway_port: None,
+            dashboard_url: None,
+            agent_api_base_url: Some("https://unknown.example.com".to_string()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let mgr = svc.resolve_manager(&instance);
+        assert_eq!(mgr.url, "https://mgr0.example.com");
+    }
+
+    #[test]
+    fn test_resolve_manager_no_stored_url() {
+        let managers = make_managers(2);
+        let svc = make_service(
+            managers.clone(),
+            Arc::new(mock_repo_with_manager_count(0)),
+            Arc::new(MockSystemConfigsService::no_config()),
+        );
+
+        let instance = AgentInstance {
+            id: Uuid::new_v4(),
+            user_id: UserId(Uuid::new_v4()),
+            instance_id: "test".to_string(),
+            name: "test".to_string(),
+            public_ssh_key: None,
+            instance_url: None,
+            instance_token: None,
+            gateway_port: None,
+            dashboard_url: None,
+            agent_api_base_url: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let mgr = svc.resolve_manager(&instance);
+        assert_eq!(mgr.url, "https://mgr0.example.com");
+    }
+
+    #[tokio::test]
+    async fn test_next_available_manager_no_limit_configured() {
+        let svc = make_service(
+            make_managers(2),
+            Arc::new(mock_repo_with_manager_count(999)),
+            Arc::new(MockSystemConfigsService::no_config()),
+        );
+
+        // No limit → any manager is fine, uses simple round-robin
+        let mgr = svc.next_available_manager().await.unwrap();
+        assert!(mgr.url.starts_with("https://mgr"));
+    }
+
+    #[tokio::test]
+    async fn test_next_available_manager_under_limit() {
+        let svc = make_service(
+            make_managers(2),
+            Arc::new(mock_repo_with_manager_count(3)),
+            Arc::new(MockSystemConfigsService::with_manager_limit(10)),
+        );
+
+        let mgr = svc.next_available_manager().await.unwrap();
+        assert!(mgr.url.starts_with("https://mgr"));
+    }
+
+    #[tokio::test]
+    async fn test_next_available_manager_all_at_capacity() {
+        let svc = make_service(
+            make_managers(2),
+            Arc::new(mock_repo_with_manager_count(100)),
+            Arc::new(MockSystemConfigsService::with_manager_limit(100)),
+        );
+
+        let result = svc.next_available_manager().await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("capacity"));
+    }
+
+    #[tokio::test]
+    async fn test_next_available_manager_skips_full_manager() {
+        // mgr0 is full (count=10, limit=10), mgr1 has room (count=5)
+        let mut repo = MockAgentRepository::new();
+        repo.expect_count_instances_by_manager()
+            .withf(|url: &str| url.contains("mgr0"))
+            .returning(|_| Ok(10));
+        repo.expect_count_instances_by_manager()
+            .withf(|url: &str| url.contains("mgr1"))
+            .returning(|_| Ok(5));
+
+        let svc = make_service(
+            make_managers(2),
+            Arc::new(repo),
+            Arc::new(MockSystemConfigsService::with_manager_limit(10)),
+        );
+
+        let mgr = svc.next_available_manager().await.unwrap();
+        assert_eq!(mgr.url, "https://mgr1.example.com");
+    }
+
+    #[test]
+    #[should_panic(expected = "At least one agent manager must be configured")]
+    fn test_panics_on_empty_managers() {
+        make_service(
+            vec![],
+            Arc::new(mock_repo_with_manager_count(0)),
+            Arc::new(MockSystemConfigsService::no_config()),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "empty API token")]
+    fn test_panics_on_empty_token() {
+        make_service(
+            vec![AgentManager {
+                url: "https://test.com".to_string(),
+                token: "".to_string(),
+            }],
+            Arc::new(mock_repo_with_manager_count(0)),
+            Arc::new(MockSystemConfigsService::no_config()),
+        );
+    }
+
+    // --- Wiremock-based integration tests ---
+
+    mod wiremock_tests {
+        use super::*;
+        use wiremock::matchers::{bearer_token, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        async fn setup_mock_server() -> MockServer {
+            MockServer::start().await
+        }
+
+        /// Helper to create a test AgentInstance pointing at a specific manager URL
+        fn test_instance(name: &str, manager_url: Option<&str>) -> AgentInstance {
+            AgentInstance {
+                id: Uuid::new_v4(),
+                user_id: UserId(Uuid::new_v4()),
+                instance_id: format!("agent-{}", name),
+                name: name.to_string(),
+                public_ssh_key: None,
+                instance_url: None,
+                instance_token: None,
+                gateway_port: None,
+                dashboard_url: None,
+                agent_api_base_url: manager_url.map(|s| s.to_string()),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            }
+        }
+
+        #[tokio::test]
+        async fn test_get_enrichments_queries_only_relevant_managers() {
+            let server1 = setup_mock_server().await;
+            let server2 = setup_mock_server().await;
+
+            // Server 1 hosts instance-a and instance-b
+            Mock::given(method("GET"))
+                .and(path("/instances"))
+                .and(bearer_token("tok1"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "instances": [
+                        {"name": "instance-a", "status": "running"},
+                        {"name": "instance-b", "status": "stopped"}
+                    ]
+                })))
+                .expect(1)
+                .mount(&server1)
+                .await;
+
+            // Server 2 should NOT be queried (no instances belong to it)
+            Mock::given(method("GET"))
+                .and(path("/instances"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "instances": [{"name": "instance-c", "status": "running"}]
+                })))
+                .expect(0)
+                .mount(&server2)
+                .await;
+
+            let managers = vec![
+                AgentManager {
+                    url: server1.uri(),
+                    token: "tok1".to_string(),
+                },
+                AgentManager {
+                    url: server2.uri(),
+                    token: "tok2".to_string(),
+                },
+            ];
+
+            let svc = make_service(
+                managers,
+                Arc::new(mock_repo_with_manager_count(0)),
+                Arc::new(MockSystemConfigsService::no_config()),
+            );
+
+            // Only request enrichments for instances on server1
+            let instances = vec![
+                test_instance("instance-a", Some(&server1.uri())),
+                test_instance("instance-b", Some(&server1.uri())),
+            ];
+
+            let enrichments = svc.get_instance_enrichments(&instances).await;
+            assert_eq!(enrichments.len(), 2);
+            assert_eq!(enrichments["instance-a"].status.as_deref(), Some("running"));
+            assert_eq!(enrichments["instance-b"].status.as_deref(), Some("stopped"));
+            // wiremock verifies server2 was NOT called (expect(0))
+        }
+
+        #[tokio::test]
+        async fn test_get_enrichments_across_multiple_managers() {
+            let server1 = setup_mock_server().await;
+            let server2 = setup_mock_server().await;
+
+            Mock::given(method("GET"))
+                .and(path("/instances"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "instances": [{"name": "inst-a", "status": "running"}]
+                })))
+                .mount(&server1)
+                .await;
+
+            Mock::given(method("GET"))
+                .and(path("/instances"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "instances": [{"name": "inst-b", "status": "stopped"}]
+                })))
+                .mount(&server2)
+                .await;
+
+            let managers = vec![
+                AgentManager {
+                    url: server1.uri(),
+                    token: "tok".to_string(),
+                },
+                AgentManager {
+                    url: server2.uri(),
+                    token: "tok".to_string(),
+                },
+            ];
+
+            let svc = make_service(
+                managers,
+                Arc::new(mock_repo_with_manager_count(0)),
+                Arc::new(MockSystemConfigsService::no_config()),
+            );
+
+            let instances = vec![
+                test_instance("inst-a", Some(&server1.uri())),
+                test_instance("inst-b", Some(&server2.uri())),
+            ];
+
+            let enrichments = svc.get_instance_enrichments(&instances).await;
+            assert_eq!(enrichments.len(), 2);
+            assert_eq!(enrichments["inst-a"].status.as_deref(), Some("running"));
+            assert_eq!(enrichments["inst-b"].status.as_deref(), Some("stopped"));
+        }
+
+        #[tokio::test]
+        async fn test_get_enrichments_continues_on_partial_failure() {
+            let server1 = setup_mock_server().await;
+            let server2 = setup_mock_server().await;
+
+            Mock::given(method("GET"))
+                .and(path("/instances"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "instances": [{"name": "inst-a", "status": "running"}]
+                })))
+                .mount(&server1)
+                .await;
+
+            // Server 2 returns 500
+            Mock::given(method("GET"))
+                .and(path("/instances"))
+                .respond_with(ResponseTemplate::new(500))
+                .mount(&server2)
+                .await;
+
+            let managers = vec![
+                AgentManager {
+                    url: server1.uri(),
+                    token: "tok".to_string(),
+                },
+                AgentManager {
+                    url: server2.uri(),
+                    token: "tok".to_string(),
+                },
+            ];
+
+            let svc = make_service(
+                managers,
+                Arc::new(mock_repo_with_manager_count(0)),
+                Arc::new(MockSystemConfigsService::no_config()),
+            );
+
+            let instances = vec![
+                test_instance("inst-a", Some(&server1.uri())),
+                test_instance("inst-b", Some(&server2.uri())),
+            ];
+
+            let enrichments = svc.get_instance_enrichments(&instances).await;
+            // Only server1's instance is enriched; server2 failed gracefully
+            assert_eq!(enrichments.len(), 1);
+            assert_eq!(enrichments["inst-a"].status.as_deref(), Some("running"));
+        }
+
+        #[tokio::test]
+        async fn test_get_enrichments_empty_instances() {
+            let svc = make_service(
+                make_managers(2),
+                Arc::new(mock_repo_with_manager_count(0)),
+                Arc::new(MockSystemConfigsService::no_config()),
+            );
+
+            let enrichments = svc.get_instance_enrichments(&[]).await;
+            assert!(enrichments.is_empty());
+        }
+
+        #[tokio::test]
+        async fn test_get_enrichment_single_instance_uses_stored_url() {
+            let server1 = setup_mock_server().await;
+            let server2 = setup_mock_server().await;
+
+            // Server 1 should NOT be queried
+            Mock::given(method("GET"))
+                .and(path("/instances/my-instance"))
+                .respond_with(ResponseTemplate::new(404))
+                .expect(0)
+                .mount(&server1)
+                .await;
+
+            // Server 2 owns the instance
+            Mock::given(method("GET"))
+                .and(path("/instances/my-instance"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "status": "running",
+                    "ssh_command": "ssh user@host"
+                })))
+                .expect(1)
+                .mount(&server2)
+                .await;
+
+            let managers = vec![
+                AgentManager {
+                    url: server1.uri(),
+                    token: "tok".to_string(),
+                },
+                AgentManager {
+                    url: server2.uri(),
+                    token: "tok".to_string(),
+                },
+            ];
+
+            let svc = make_service(
+                managers,
+                Arc::new(mock_repo_with_manager_count(0)),
+                Arc::new(MockSystemConfigsService::no_config()),
+            );
+
+            // Pass the stored manager URL — should only hit server2
+            let enrichment = svc
+                .get_instance_enrichment_from_agent_api("my-instance", Some(&server2.uri()))
+                .await;
+            assert!(enrichment.is_some());
+            let e = enrichment.unwrap();
+            assert_eq!(e.status.as_deref(), Some("running"));
+            assert_eq!(e.ssh_command.as_deref(), Some("ssh user@host"));
+        }
+
+        #[tokio::test]
+        async fn test_get_enrichment_fallback_fan_out_when_no_url() {
+            let server1 = setup_mock_server().await;
+            let server2 = setup_mock_server().await;
+
+            // Server 1 returns 404
+            Mock::given(method("GET"))
+                .and(path("/instances/my-instance"))
+                .respond_with(ResponseTemplate::new(404))
+                .mount(&server1)
+                .await;
+
+            // Server 2 returns the instance
+            Mock::given(method("GET"))
+                .and(path("/instances/my-instance"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "status": "running",
+                    "ssh_command": "ssh user@host"
+                })))
+                .mount(&server2)
+                .await;
+
+            let managers = vec![
+                AgentManager {
+                    url: server1.uri(),
+                    token: "tok".to_string(),
+                },
+                AgentManager {
+                    url: server2.uri(),
+                    token: "tok".to_string(),
+                },
+            ];
+
+            let svc = make_service(
+                managers,
+                Arc::new(mock_repo_with_manager_count(0)),
+                Arc::new(MockSystemConfigsService::no_config()),
+            );
+
+            // No stored URL — falls back to fan-out across all managers
+            let enrichment = svc
+                .get_instance_enrichment_from_agent_api("my-instance", None)
+                .await;
+            assert!(enrichment.is_some());
+            let e = enrichment.unwrap();
+            assert_eq!(e.status.as_deref(), Some("running"));
+        }
+
+        #[tokio::test]
+        async fn test_call_agent_api_list_uses_correct_bearer_token() {
+            let server = setup_mock_server().await;
+
+            // Only respond to correct bearer token
+            Mock::given(method("GET"))
+                .and(path("/instances"))
+                .and(bearer_token("my-secret-token"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "instances": []
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let mgr = AgentManager {
+                url: server.uri(),
+                token: "my-secret-token".to_string(),
+            };
+
+            let svc = make_service(
+                vec![mgr.clone()],
+                Arc::new(mock_repo_with_manager_count(0)),
+                Arc::new(MockSystemConfigsService::no_config()),
+            );
+
+            let result = svc.call_agent_api_list(&mgr).await;
+            assert!(result.is_ok());
+        }
+
+        #[tokio::test]
+        async fn test_round_robin_create_distributes_across_managers() {
+            let server1 = setup_mock_server().await;
+            let server2 = setup_mock_server().await;
+
+            // Both servers accept create calls and track hits
+            let create_response = serde_json::json!({
+                "instance": {
+                    "name": "test-inst",
+                    "url": "http://instance:8000",
+                    "token": "inst-token",
+                    "gateway_port": 8080,
+                    "dashboard_url": "http://dashboard:3000"
+                }
+            });
+
+            // SSE format response
+            let sse_body = format!("data: {}\n\n", create_response);
+
+            Mock::given(method("POST"))
+                .and(path("/instances"))
+                .and(bearer_token("tok1"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(&sse_body))
+                .expect(1)
+                .named("server1_create")
+                .mount(&server1)
+                .await;
+
+            Mock::given(method("POST"))
+                .and(path("/instances"))
+                .and(bearer_token("tok2"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(&sse_body))
+                .expect(1)
+                .named("server2_create")
+                .mount(&server2)
+                .await;
+
+            let managers = vec![
+                AgentManager {
+                    url: server1.uri(),
+                    token: "tok1".to_string(),
+                },
+                AgentManager {
+                    url: server2.uri(),
+                    token: "tok2".to_string(),
+                },
+            ];
+
+            let svc = make_service(
+                managers,
+                Arc::new(mock_repo_with_manager_count(0)),
+                Arc::new(MockSystemConfigsService::no_config()),
+            );
+
+            // Call create twice - first should go to server1 (tok1), second to server2 (tok2)
+            let mgr1 = svc.next_manager().clone();
+            let mgr2 = svc.next_manager().clone();
+
+            assert_eq!(mgr1.token, "tok1");
+            assert_eq!(mgr2.token, "tok2");
+
+            // Verify the API calls route correctly
+            let result1 = svc
+                .call_agent_api_create(
+                    &mgr1,
+                    "key1",
+                    "https://nearai/v1",
+                    None,
+                    Some("inst1".to_string()),
+                    None,
+                )
+                .await;
+            let result2 = svc
+                .call_agent_api_create(
+                    &mgr2,
+                    "key2",
+                    "https://nearai/v1",
+                    None,
+                    Some("inst2".to_string()),
+                    None,
+                )
+                .await;
+
+            assert!(result1.is_ok());
+            assert!(result2.is_ok());
+            // wiremock will verify expect(1) on each mock when servers drop
+        }
     }
 }

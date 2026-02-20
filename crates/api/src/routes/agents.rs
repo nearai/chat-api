@@ -1,8 +1,8 @@
 use crate::{error::ApiError, middleware::AuthenticatedUser, models::*, state::AppState};
 use axum::{
     extract::{Extension, Path, Query, State},
-    http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
+    http::StatusCode,
+    response::Response,
     routing::{delete, get, post},
     Json, Router,
 };
@@ -25,78 +25,11 @@ pub struct CreateInstanceRequest {
     pub ssh_pubkey: Option<String>,
 }
 
-/// Helper to create SSE streaming response for instance creation
-async fn create_instance_streaming_response(
-    app_state: AppState,
-    user_id: services::UserId,
-    image: Option<String>,
-    name: Option<String>,
-    ssh_pubkey: Option<String>,
-    max_allowed: u64,
-) -> Result<Response, ApiError> {
-    // Start streaming instance creation
-    let rx = app_state
-        .agent_service
-        .create_instance_from_agent_api_streaming(user_id, image, name, ssh_pubkey, max_allowed)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to start instance creation stream: {}", e);
-            ApiError::internal_server_error("Failed to start instance creation")
-        })?;
-
-    // Convert mpsc receiver to stream using tokio_stream
-    use futures::stream::StreamExt;
-    use tokio_stream::wrappers::ReceiverStream;
-
-    let stream = ReceiverStream::new(rx)
-        .then(|event_result| async move {
-            match event_result {
-                Ok(event) => {
-                    if let Ok(json_str) = serde_json::to_string(&event) {
-                        Ok(axum::body::Bytes::from(format!("data: {}\n\n", json_str)))
-                    } else {
-                        Err(axum::Error::new(anyhow::anyhow!(
-                            "Failed to serialize event"
-                        )))
-                    }
-                }
-                Err(e) => {
-                    tracing::error!("Error in instance creation stream: {}", e);
-                    // Send generic error to client; internal details remain in logs per CLAUDE.md security policy
-                    let error_json =
-                        serde_json::json!({"error": "Instance creation failed"}).to_string();
-                    Ok(axum::body::Bytes::from(format!("data: {}\n\n", error_json)))
-                }
-            }
-        })
-        // Add terminal event so clients can distinguish stream end from connection drop
-        .chain(futures::stream::once(async {
-            Ok(axum::body::Bytes::from("data: [DONE]\n\n"))
-        }));
-
-    let body = axum::body::Body::from_stream(stream);
-
-    Response::builder()
-        .status(StatusCode::OK)
-        .header("content-type", "text/event-stream")
-        .header("cache-control", "no-cache")
-        .header("connection", "keep-alive")
-        .body(body)
-        .map_err(|e| {
-            tracing::error!("Failed to build SSE response: {}", e);
-            ApiError::internal_server_error("Failed to construct response")
-        })
-}
-
 /// Create a new agent instance.
 ///
 /// Agent instance limits are enforced for all users to prevent resource exhaustion:
 /// - Subscribed users: plan limit from subscription_plans config
 /// - Unsubscribed users: no instances allowed (active subscription required)
-///
-/// Supports two response modes via content negotiation:
-/// - Accept: text/event-stream → Returns SSE stream of lifecycle events (stage: created, container_starting, healthy, ready)
-/// - Accept: application/json (default) → Returns 201 with complete InstanceResponse
 #[utoipa::path(
     post,
     path = "/v1/agents/instances",
@@ -104,7 +37,6 @@ async fn create_instance_streaming_response(
     request_body = CreateInstanceRequest,
     responses(
         (status = 201, description = "Instance created", body = InstanceResponse),
-        (status = 200, description = "Instance creation stream (SSE)", body = LifecycleEvent),
         (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 402, description = "Payment required - instance limit exceeded for plan", body = crate::error::ApiErrorResponse),
@@ -115,9 +47,8 @@ async fn create_instance_streaming_response(
 pub async fn create_instance(
     State(app_state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-    headers: HeaderMap,
     Json(request): Json<CreateInstanceRequest>,
-) -> Result<Response, ApiError> {
+) -> Result<(StatusCode, Json<InstanceResponse>), ApiError> {
     tracing::info!("Creating agent instance: user_id={}", user.user_id);
 
     // Get user's active subscriptions
@@ -196,27 +127,6 @@ pub async fn create_instance(
         ));
     }
 
-    // Check Accept header for SSE streaming preference (supports multiple Accept headers or comma-delimited values)
-    let accepts_sse = headers.get_all("accept").iter().any(|v| {
-        v.to_str()
-            .map(|s| s.contains("text/event-stream"))
-            .unwrap_or(false)
-    });
-
-    if accepts_sse {
-        // Return SSE streaming response
-        return create_instance_streaming_response(
-            app_state,
-            user.user_id,
-            request.image,
-            request.name,
-            request.ssh_pubkey,
-            max_allowed,
-        )
-        .await;
-    }
-
-    // Default: Return JSON response
     let instance = app_state
         .agent_service
         .create_instance_from_agent_api(
@@ -235,8 +145,7 @@ pub async fn create_instance(
             ApiError::internal_server_error("Failed to create instance")
         })?;
 
-    // Return idiomatic axum response with automatic content-type and status handling
-    Ok((StatusCode::CREATED, Json(InstanceResponse::from(instance))).into_response())
+    Ok((StatusCode::CREATED, Json(instance.into())))
 }
 
 /// List user's agent instances
@@ -286,7 +195,7 @@ pub async fn list_instances(
 
     let enrichment_map = app_state
         .agent_service
-        .get_all_instance_enrichments_from_agent_api()
+        .get_instance_enrichments(&instances)
         .await;
 
     let paginated: Vec<InstanceResponse> = instances
@@ -351,7 +260,10 @@ pub async fn get_instance(
 
     let enrichment = app_state
         .agent_service
-        .get_instance_enrichment_from_agent_api(&instance.name)
+        .get_instance_enrichment_from_agent_api(
+            &instance.name,
+            instance.agent_api_base_url.as_deref(),
+        )
         .await;
 
     Ok(Json(crate::models::instance_response_with_enrichment(
@@ -812,13 +724,10 @@ pub async fn start_instance(
             ApiError::internal_server_error("Failed to start instance")
         })?;
 
-    Response::builder()
+    Ok(Response::builder()
         .status(StatusCode::OK)
         .body(axum::body::Body::empty())
-        .map_err(|e| {
-            tracing::error!("Failed to build response: {}", e);
-            ApiError::internal_server_error("Failed to construct response")
-        })
+        .unwrap())
 }
 
 /// Stop an agent instance
@@ -884,13 +793,10 @@ pub async fn stop_instance(
             ApiError::internal_server_error("Failed to stop instance")
         })?;
 
-    Response::builder()
+    Ok(Response::builder()
         .status(StatusCode::OK)
         .body(axum::body::Body::empty())
-        .map_err(|e| {
-            tracing::error!("Failed to build response: {}", e);
-            ApiError::internal_server_error("Failed to construct response")
-        })
+        .unwrap())
 }
 
 /// Restart an agent instance
@@ -956,11 +862,8 @@ pub async fn restart_instance(
             ApiError::internal_server_error("Failed to restart instance")
         })?;
 
-    Response::builder()
+    Ok(Response::builder()
         .status(StatusCode::OK)
         .body(axum::body::Body::empty())
-        .map_err(|e| {
-            tracing::error!("Failed to build response: {}", e);
-            ApiError::internal_server_error("Failed to construct response")
-        })
+        .unwrap())
 }
