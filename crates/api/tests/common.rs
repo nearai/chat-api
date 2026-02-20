@@ -133,6 +133,8 @@ pub async fn create_test_server_and_db(
                 as Arc<dyn services::subscription::ports::SubscriptionRepository>,
             webhook_repo: db.payment_webhook_repository()
                 as Arc<dyn services::subscription::ports::PaymentWebhookRepository>,
+            purchased_token_repo: db.purchased_token_repository()
+                as Arc<dyn services::subscription::ports::PurchasedTokenRepository>,
             system_configs_service: system_configs_service.clone()
                 as Arc<dyn services::system_configs::ports::SystemConfigsService>,
             user_repository: user_repo.clone(),

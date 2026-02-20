@@ -136,6 +136,7 @@ pub struct UsageTrackingStreamChatCompletions<S> {
     buffer: String,
     usage: Option<ParsedUsage>,
     user_usage: Arc<dyn services::user_usage::UserUsageService>,
+    subscription_service: Option<Arc<dyn services::subscription::ports::SubscriptionService>>,
     pricing_cache: crate::model_pricing::ModelPricingCache,
     user_id: UserId,
     // Optional agent service + API key for dual tracking
@@ -158,11 +159,20 @@ where
             buffer: String::new(),
             usage: None,
             user_usage,
+            subscription_service: None,
             pricing_cache,
             user_id,
             agent_service: None,
             api_key_ext: None,
         }
+    }
+
+    pub fn with_subscription_service(
+        mut self,
+        subscription_service: Arc<dyn services::subscription::ports::SubscriptionService>,
+    ) -> Self {
+        self.subscription_service = Some(subscription_service);
+        self
     }
 
     pub fn with_agent_service(
@@ -207,6 +217,7 @@ where
                     this.usage.take(),
                     StreamUsageContext {
                         user_usage: this.user_usage.clone(),
+                        subscription_service: this.subscription_service.clone(),
                         pricing_cache: this.pricing_cache.clone(),
                         user_id: this.user_id,
                         stream_name: "UsageTrackingStreamChatCompletions",
@@ -232,6 +243,7 @@ pub struct UsageTrackingStreamResponseCompleted<S> {
     buffer: String,
     usage: Option<ParsedUsage>,
     user_usage: Arc<dyn services::user_usage::UserUsageService>,
+    subscription_service: Option<Arc<dyn services::subscription::ports::SubscriptionService>>,
     pricing_cache: crate::model_pricing::ModelPricingCache,
     user_id: UserId,
     // Optional agent service + API key for dual tracking
@@ -254,11 +266,20 @@ where
             buffer: String::new(),
             usage: None,
             user_usage,
+            subscription_service: None,
             pricing_cache,
             user_id,
             agent_service: None,
             api_key_ext: None,
         }
+    }
+
+    pub fn with_subscription_service(
+        mut self,
+        subscription_service: Arc<dyn services::subscription::ports::SubscriptionService>,
+    ) -> Self {
+        self.subscription_service = Some(subscription_service);
+        self
     }
 
     pub fn with_agent_service(
@@ -300,6 +321,7 @@ where
                     this.usage.take(),
                     StreamUsageContext {
                         user_usage: this.user_usage.clone(),
+                        subscription_service: this.subscription_service.clone(),
                         pricing_cache: this.pricing_cache.clone(),
                         user_id: this.user_id,
                         stream_name: "UsageTrackingStreamResponseCompleted",
@@ -317,6 +339,7 @@ where
 
 struct StreamUsageContext {
     user_usage: Arc<dyn services::user_usage::UserUsageService>,
+    subscription_service: Option<Arc<dyn services::subscription::ports::SubscriptionService>>,
     pricing_cache: crate::model_pricing::ModelPricingCache,
     user_id: UserId,
     stream_name: &'static str,
@@ -359,6 +382,18 @@ fn record_usage_on_stream_end(usage: Option<ParsedUsage>, ctx: StreamUsageContex
                         ctx.user_id,
                         e
                     );
+                } else if let Some(ref sub) = ctx.subscription_service {
+                    // Debit purchased tokens if usage overflowed monthly limit
+                    if let Err(e) = sub
+                        .debit_purchased_tokens_after_usage(ctx.user_id, usage.total_tokens as i64)
+                        .await
+                    {
+                        tracing::warn!(
+                            "Failed to debit purchased tokens for overflow (user_id={}): {}",
+                            ctx.user_id,
+                            e
+                        );
+                    }
                 }
 
                 // ADDITIONALLY: Record to agent_usage_log if API key is present

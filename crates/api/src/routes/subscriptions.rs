@@ -110,6 +110,38 @@ pub struct ListPlansResponse {
     pub plans: Vec<SubscriptionPlan>,
 }
 
+/// Request to create a token purchase checkout
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct CreateTokenPurchaseRequest {
+    /// URL to redirect after successful checkout
+    pub success_url: String,
+    /// URL to redirect after cancelled checkout
+    pub cancel_url: String,
+}
+
+/// Response containing token purchase checkout URL
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct CreateTokenPurchaseResponse {
+    /// Stripe checkout URL for completing token purchase
+    pub checkout_url: String,
+}
+
+/// Response containing purchased token balance
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct PurchasedTokenBalanceResponse {
+    /// Current purchased token balance (spendable)
+    pub balance: i64,
+}
+
+/// Response containing token purchase info (for UI display)
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct TokensPurchaseInfoResponse {
+    /// Tokens per purchase (e.g. 1_000_000)
+    pub amount: u64,
+    /// Price per 1M tokens in USD (e.g. 1.70)
+    pub price_per_million: f64,
+}
+
 /// Request to create a customer portal session
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct CreatePortalSessionRequest {
@@ -210,6 +242,10 @@ pub async fn create_subscription(
             }
             SubscriptionError::MonthlyTokenLimitExceeded { .. } => {
                 tracing::error!("Unexpected MonthlyTokenLimitExceeded in create");
+                ApiError::internal_server_error("Failed to create subscription")
+            }
+            SubscriptionError::TokenPurchaseNotConfigured => {
+                tracing::error!("Unexpected TokenPurchaseNotConfigured in create");
                 ApiError::internal_server_error("Failed to create subscription")
             }
         })?;
@@ -483,6 +519,123 @@ pub async fn handle_stripe_webhook(
     Ok(Json(serde_json::json!({ "received": true })))
 }
 
+/// Create token purchase checkout session
+#[utoipa::path(
+    post,
+    path = "/v1/subscriptions/tokens/purchase",
+    tag = "Subscriptions",
+    request_body = CreateTokenPurchaseRequest,
+    responses(
+        (status = 200, description = "Checkout session created successfully", body = CreateTokenPurchaseResponse),
+        (status = 400, description = "Invalid request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 503, description = "Token purchase not configured", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn create_token_purchase(
+    State(app_state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Json(req): Json<CreateTokenPurchaseRequest>,
+) -> Result<Json<CreateTokenPurchaseResponse>, ApiError> {
+    tracing::info!(
+        "Creating token purchase checkout for user_id={}",
+        user.user_id
+    );
+
+    validate_redirect_url(&req.success_url, "success_url")?;
+    validate_redirect_url(&req.cancel_url, "cancel_url")?;
+
+    let checkout_url = app_state
+        .subscription_service
+        .create_token_purchase_checkout(user.user_id, req.success_url, req.cancel_url)
+        .await
+        .map_err(|e| match e {
+            SubscriptionError::TokenPurchaseNotConfigured => {
+                ApiError::service_unavailable("Token purchase is not configured")
+            }
+            SubscriptionError::NoStripeCustomer => {
+                ApiError::not_found("No Stripe customer found for this user")
+            }
+            SubscriptionError::StripeError(msg) => {
+                tracing::error!(error = ?msg, "Stripe error creating token purchase checkout");
+                ApiError::internal_server_error("Failed to create checkout")
+            }
+            _ => {
+                tracing::error!(error = ?e, "Failed to create token purchase checkout");
+                ApiError::internal_server_error("Failed to create checkout")
+            }
+        })?;
+
+    Ok(Json(CreateTokenPurchaseResponse { checkout_url }))
+}
+
+/// Get purchased token balance
+#[utoipa::path(
+    get,
+    path = "/v1/subscriptions/tokens/balance",
+    tag = "Subscriptions",
+    responses(
+        (status = 200, description = "Balance retrieved successfully", body = PurchasedTokenBalanceResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn get_purchased_token_balance(
+    State(app_state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+) -> Result<Json<PurchasedTokenBalanceResponse>, ApiError> {
+    let balance = app_state
+        .subscription_service
+        .get_purchased_token_balance(user.user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = ?e, "Failed to get purchased token balance");
+            ApiError::internal_server_error("Failed to get balance")
+        })?;
+
+    Ok(Json(PurchasedTokenBalanceResponse { balance }))
+}
+
+/// Get token purchase info (amount, price) for UI display
+#[utoipa::path(
+    get,
+    path = "/v1/subscriptions/tokens/purchase-info",
+    tag = "Subscriptions",
+    responses(
+        (status = 200, description = "Purchase info retrieved successfully", body = TokensPurchaseInfoResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "Token purchase not configured", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn get_tokens_purchase_info(
+    State(app_state): State<AppState>,
+    Extension(_user): Extension<AuthenticatedUser>,
+) -> Result<Json<TokensPurchaseInfoResponse>, ApiError> {
+    let info = app_state
+        .subscription_service
+        .get_tokens_purchase_info()
+        .await
+        .map_err(|e| {
+            tracing::error!(error = ?e, "Failed to get tokens purchase info");
+            ApiError::internal_server_error("Failed to get purchase info")
+        })?;
+
+    let info = info.ok_or_else(|| ApiError::not_found("Token purchase is not configured"))?;
+
+    Ok(Json(TokensPurchaseInfoResponse {
+        amount: info.amount,
+        price_per_million: info.price_per_million,
+    }))
+}
+
 /// Create subscription router with authenticated routes
 pub fn create_subscriptions_router() -> Router<AppState> {
     Router::new()
@@ -491,6 +644,18 @@ pub fn create_subscriptions_router() -> Router<AppState> {
         .route("/v1/subscriptions/cancel", post(cancel_subscription))
         .route("/v1/subscriptions/resume", post(resume_subscription))
         .route("/v1/subscriptions/portal", post(create_portal_session))
+        .route(
+            "/v1/subscriptions/tokens/purchase",
+            post(create_token_purchase),
+        )
+        .route(
+            "/v1/subscriptions/tokens/balance",
+            get(get_purchased_token_balance),
+        )
+        .route(
+            "/v1/subscriptions/tokens/purchase-info",
+            get(get_tokens_purchase_info),
+        )
 }
 
 /// Create public subscription router (for webhooks and plans - no auth)

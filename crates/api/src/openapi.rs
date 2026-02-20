@@ -66,6 +66,9 @@ use utoipa::OpenApi;
         crate::routes::subscriptions::resume_subscription,
         crate::routes::subscriptions::list_plans,
         crate::routes::subscriptions::list_subscriptions,
+        crate::routes::subscriptions::create_token_purchase,
+        crate::routes::subscriptions::get_purchased_token_balance,
+        crate::routes::subscriptions::get_tokens_purchase_info,
         // Admin endpoints
         crate::routes::admin::list_users,
         crate::routes::admin::list_models,
@@ -161,6 +164,10 @@ use utoipa::OpenApi;
         crate::routes::subscriptions::ResumeSubscriptionResponse,
         crate::routes::subscriptions::ListSubscriptionsResponse,
         crate::routes::subscriptions::ListPlansResponse,
+        crate::routes::subscriptions::CreateTokenPurchaseRequest,
+        crate::routes::subscriptions::CreateTokenPurchaseResponse,
+        crate::routes::subscriptions::PurchasedTokenBalanceResponse,
+        crate::routes::subscriptions::TokensPurchaseInfoResponse,
         services::subscription::ports::SubscriptionWithPlan,
         services::subscription::ports::SubscriptionPlan,
         // Attestation models
