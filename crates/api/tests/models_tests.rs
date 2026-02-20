@@ -11,8 +11,10 @@ async fn test_list_models_response_structure() {
     let admin_email = "test_admin_model_default@admin.org";
     let admin_token = mock_login(&server, admin_email).await;
 
+    // Request with the maximum limit (100) to ensure we get all models in one page
+    // This makes the test resilient to models created by other concurrent tests
     let response = server
-        .get("/v1/admin/models?limit=10&offset=0")
+        .get("/v1/admin/models?limit=100&offset=0")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
@@ -51,13 +53,11 @@ async fn test_list_models_response_structure() {
         .expect("Should have total as number");
 
     // Verify pagination structure is correct
-    assert!(
-        models.len() as i64 <= total,
-        "Models array length should not exceed total"
-    );
-    assert!(
-        models.len() as i64 <= 10, // limit is 10
-        "Models array length should not exceed limit"
+    // With a high limit (1000), models.len() should equal total (all models fit in one page)
+    assert_eq!(
+        models.len() as i64,
+        total,
+        "Models array length should equal total when limit >= total (offset=0, high limit)"
     );
 }
 

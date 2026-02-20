@@ -18,6 +18,34 @@ use super::ports::{
 /// Prevents DoS from a malicious Agent API sending extremely long lines.
 const MAX_BUFFER_SIZE: usize = 100 * 1024;
 
+/// Default service type for agent instances when not specified.
+const DEFAULT_SERVICE_TYPE: &str = "ironclaw";
+
+/// Valid service types for agent instances.
+const VALID_SERVICE_TYPES: &[&str] = &["openclaw", "ironclaw"];
+
+/// Validates that a service type is in the list of allowed values.
+fn is_valid_service_type(service_type: &str) -> bool {
+    VALID_SERVICE_TYPES.contains(&service_type)
+}
+
+/// Parameters for Agent API instance creation.
+struct AgentApiCreateParams {
+    image: Option<String>,
+    name: Option<String>,
+    ssh_pubkey: Option<String>,
+    service_type: Option<String>,
+}
+
+/// Parameters for saving instance from Agent API event.
+struct SaveInstanceParams {
+    api_key_id: Uuid,
+    ssh_pubkey: Option<String>,
+    max_allowed: u64,
+    agent_api_base_url: Option<String>,
+    service_type: Option<String>,
+}
+
 pub struct AgentServiceImpl {
     repository: Arc<dyn AgentRepository>,
     http_client: Client,
@@ -165,18 +193,21 @@ impl AgentServiceImpl {
         manager: &AgentManager,
         nearai_api_key: &str,
         nearai_api_url: &str,
-        image: Option<String>,
-        name: Option<String>,
-        ssh_pubkey: Option<String>,
+        params: AgentApiCreateParams,
     ) -> anyhow::Result<serde_json::Value> {
         let url = format!("{}/instances", manager.url);
 
+        let service_type = params
+            .service_type
+            .as_deref()
+            .unwrap_or(DEFAULT_SERVICE_TYPE);
         let request_body = serde_json::json!({
-            "image": image,
-            "name": name,
+            "image": params.image,
+            "name": params.name,
             "nearai_api_key": nearai_api_key,
             "nearai_api_url": nearai_api_url,
-            "ssh_pubkey": ssh_pubkey,
+            "ssh_pubkey": params.ssh_pubkey,
+            "service_type": service_type,
         });
 
         let response = self
@@ -284,18 +315,21 @@ impl AgentServiceImpl {
         manager: &AgentManager,
         nearai_api_key: &str,
         nearai_api_url: &str,
-        image: Option<String>,
-        name: Option<String>,
-        ssh_pubkey: Option<String>,
+        params: AgentApiCreateParams,
     ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<serde_json::Value>>> {
         let url = format!("{}/instances", manager.url);
 
+        let service_type = params
+            .service_type
+            .as_deref()
+            .unwrap_or(DEFAULT_SERVICE_TYPE);
         let request_body = serde_json::json!({
-            "image": image,
-            "name": name,
+            "image": params.image,
+            "name": params.name,
             "nearai_api_key": nearai_api_key,
             "nearai_api_url": nearai_api_url,
-            "ssh_pubkey": ssh_pubkey,
+            "ssh_pubkey": params.ssh_pubkey,
+            "service_type": service_type,
         });
 
         let response = self
@@ -405,24 +439,21 @@ async fn save_instance_from_event(
     repository: &dyn AgentRepository,
     user_id: UserId,
     instance_data: &serde_json::Value,
-    api_key_id: &Uuid,
-    ssh_pubkey: Option<&str>,
-    max_allowed: u64,
-    agent_api_base_url: Option<String>,
+    params: SaveInstanceParams,
 ) -> anyhow::Result<AgentInstance> {
     // TOCTOU mitigation: Re-check instance limit before creating
     let (_instances, total_count) = repository.list_user_instances(user_id, 1, 0).await?;
-    if total_count as u64 >= max_allowed {
+    if total_count as u64 >= params.max_allowed {
         tracing::error!(
             "Instance creation rejected: subscription limit exceeded due to concurrent request. current={}, max={}, user_id={}",
             total_count,
-            max_allowed,
+            params.max_allowed,
             user_id
         );
         return Err(anyhow!(
             "Agent instance limit exceeded. Current: {}, Max: {}",
             total_count,
-            max_allowed
+            params.max_allowed
         ));
     }
 
@@ -460,12 +491,13 @@ async fn save_instance_from_event(
             user_id,
             instance_id: instance_id.clone(),
             name: instance_name,
-            public_ssh_key: ssh_pubkey.map(|s| s.to_string()),
+            public_ssh_key: params.ssh_pubkey.clone(),
             instance_url,
             instance_token,
             gateway_port,
             dashboard_url,
-            agent_api_base_url,
+            agent_api_base_url: params.agent_api_base_url.clone(),
+            service_type: params.service_type.clone(),
         })
         .await?;
 
@@ -481,7 +513,7 @@ async fn save_instance_from_event(
     }
 
     repository
-        .bind_api_key_to_instance(*api_key_id, instance.id)
+        .bind_api_key_to_instance(params.api_key_id, instance.id)
         .await?;
 
     tracing::info!(
@@ -509,6 +541,7 @@ impl AgentService for AgentServiceImpl {
         image: Option<String>,
         name: Option<String>,
         ssh_pubkey: Option<String>,
+        service_type: Option<String>,
     ) -> anyhow::Result<AgentInstance> {
         tracing::info!("Creating instance from Agent API: user_id={}", user_id);
 
@@ -530,9 +563,12 @@ impl AgentService for AgentServiceImpl {
                 &manager,
                 &plaintext_key,
                 &self.nearai_api_url,
-                image,
-                name.clone(),
-                ssh_pubkey.clone(),
+                AgentApiCreateParams {
+                    image,
+                    name: name.clone(),
+                    ssh_pubkey: ssh_pubkey.clone(),
+                    service_type: service_type.clone(),
+                },
             )
             .await?;
 
@@ -571,6 +607,14 @@ impl AgentService for AgentServiceImpl {
         // Generate a unique instance_id based on the Agent API name
         let instance_id = format!("agent-{}-{}", instance_name, Uuid::new_v4());
 
+        // Extract service_type from instance_data only if it's a valid value, fall back to user-supplied value
+        let service_type_from_response = instance_data
+            .get("service_type")
+            .and_then(|v| v.as_str())
+            .filter(|s| is_valid_service_type(s))
+            .map(|s| s.to_string());
+        let service_type = service_type_from_response.or(service_type);
+
         // Store in database with connection info and the manager URL that owns it
         let instance = self
             .repository
@@ -584,6 +628,7 @@ impl AgentService for AgentServiceImpl {
                 gateway_port,
                 dashboard_url,
                 agent_api_base_url: Some(manager.url.clone()),
+                service_type,
             })
             .await?;
 
@@ -617,6 +662,7 @@ impl AgentService for AgentServiceImpl {
         image: Option<String>,
         name: Option<String>,
         ssh_pubkey: Option<String>,
+        service_type: Option<String>,
         max_allowed: u64,
     ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<serde_json::Value>>> {
         tracing::info!(
@@ -641,9 +687,12 @@ impl AgentService for AgentServiceImpl {
                 &manager,
                 &plaintext_key,
                 &self.nearai_api_url,
-                image,
-                name.clone(),
-                ssh_pubkey.clone(),
+                AgentApiCreateParams {
+                    image,
+                    name: name.clone(),
+                    ssh_pubkey: ssh_pubkey.clone(),
+                    service_type: service_type.clone(),
+                },
             )
             .await
         {
@@ -684,10 +733,13 @@ impl AgentService for AgentServiceImpl {
                                             repo.as_ref(),
                                             user_id,
                                             instance_data,
-                                            &api_key_id,
-                                            ssh_pubkey.as_deref(),
-                                            max_allowed,
-                                            Some(manager_url.clone()),
+                                            SaveInstanceParams {
+                                                api_key_id,
+                                                ssh_pubkey: ssh_pubkey.clone(),
+                                                max_allowed,
+                                                agent_api_base_url: Some(manager_url.clone()),
+                                                service_type: service_type.clone(),
+                                            },
                                         )
                                         .await
                                         {
@@ -826,6 +878,7 @@ impl AgentService for AgentServiceImpl {
                 gateway_port: None,
                 dashboard_url: None,
                 agent_api_base_url: None,
+                service_type: None,
             })
             .await?;
 
@@ -924,10 +977,12 @@ impl AgentService for AgentServiceImpl {
                 .get("status")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
+
             let ssh_command = data
                 .get("ssh_command")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
+
             Some(AgentApiInstanceEnrichment {
                 status,
                 ssh_command,
@@ -1862,6 +1917,7 @@ mod tests {
             gateway_port: None,
             dashboard_url: None,
             agent_api_base_url: Some("https://mgr2.example.com".to_string()),
+            service_type: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -1891,6 +1947,7 @@ mod tests {
             gateway_port: None,
             dashboard_url: None,
             agent_api_base_url: Some("https://unknown.example.com".to_string()),
+            service_type: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -1919,6 +1976,7 @@ mod tests {
             gateway_port: None,
             dashboard_url: None,
             agent_api_base_url: None,
+            service_type: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -2048,6 +2106,7 @@ mod tests {
                 gateway_port: None,
                 dashboard_url: None,
                 agent_api_base_url: manager_url.map(|s| s.to_string()),
+                service_type: None,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             }
@@ -2417,9 +2476,12 @@ mod tests {
                     &mgr1,
                     "key1",
                     "https://nearai/v1",
-                    None,
-                    Some("inst1".to_string()),
-                    None,
+                    AgentApiCreateParams {
+                        image: None,
+                        name: Some("inst1".to_string()),
+                        ssh_pubkey: None,
+                        service_type: None,
+                    },
                 )
                 .await;
             let result2 = svc
@@ -2427,9 +2489,12 @@ mod tests {
                     &mgr2,
                     "key2",
                     "https://nearai/v1",
-                    None,
-                    Some("inst2".to_string()),
-                    None,
+                    AgentApiCreateParams {
+                        image: None,
+                        name: Some("inst2".to_string()),
+                        ssh_pubkey: None,
+                        service_type: None,
+                    },
                 )
                 .await;
 

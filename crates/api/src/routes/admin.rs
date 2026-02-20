@@ -1,3 +1,4 @@
+use super::is_valid_service_type;
 use crate::{
     consts::LIST_USERS_LIMIT_MAX, error::ApiError, middleware::AuthenticatedUser, models::*,
     state::AppState,
@@ -1038,6 +1039,9 @@ pub struct AdminCreateInstanceRequest {
     /// SSH public key (optional)
     #[serde(default)]
     pub ssh_pubkey: Option<String>,
+    /// Service type preset, e.g. "ironclaw" (optional)
+    #[serde(default)]
+    pub service_type: Option<String>,
 }
 
 /// Admin endpoint: List all agent instances (all users' instances)
@@ -1136,9 +1140,26 @@ pub async fn admin_create_instance(
             ApiError::bad_request("User does not exist")
         })?;
 
+    // Validate service_type if provided
+    if let Some(service_type) = request.service_type.as_deref() {
+        if !is_valid_service_type(service_type) {
+            return Err(ApiError::new(
+                axum::http::StatusCode::BAD_REQUEST,
+                "invalid_service_type",
+                "Service type must be 'openclaw' or 'ironclaw'",
+            ));
+        }
+    }
+
     let instance = app_state
         .agent_service
-        .create_instance_from_agent_api(user_id, request.image, request.name, request.ssh_pubkey)
+        .create_instance_from_agent_api(
+            user_id,
+            request.image,
+            request.name,
+            request.ssh_pubkey,
+            request.service_type,
+        )
         .await
         .map_err(|_| {
             tracing::error!(

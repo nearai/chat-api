@@ -1,3 +1,4 @@
+use super::is_valid_service_type;
 use crate::{error::ApiError, middleware::AuthenticatedUser, models::*, state::AppState};
 use axum::{
     extract::{Extension, Path, Query, State},
@@ -23,6 +24,9 @@ pub struct CreateInstanceRequest {
     /// SSH public key (optional)
     #[serde(default)]
     pub ssh_pubkey: Option<String>,
+    /// Service type preset, e.g. "ironclaw" (optional)
+    #[serde(default)]
+    pub service_type: Option<String>,
 }
 
 /// Helper to create SSE streaming response for instance creation
@@ -32,11 +36,19 @@ async fn create_instance_streaming_response(
     image: Option<String>,
     name: Option<String>,
     ssh_pubkey: Option<String>,
+    service_type: Option<String>,
     max_allowed: u64,
 ) -> Result<Response, ApiError> {
     let rx = app_state
         .agent_service
-        .create_instance_from_agent_api_streaming(user_id, image, name, ssh_pubkey, max_allowed)
+        .create_instance_from_agent_api_streaming(
+            user_id,
+            image,
+            name,
+            ssh_pubkey,
+            service_type,
+            max_allowed,
+        )
         .await
         .map_err(|e| {
             tracing::error!("Failed to start instance creation stream: {}", e);
@@ -115,6 +127,17 @@ pub async fn create_instance(
     Json(request): Json<CreateInstanceRequest>,
 ) -> Result<Response, ApiError> {
     tracing::info!("Creating agent instance: user_id={}", user.user_id);
+
+    // Validate service_type if provided
+    if let Some(service_type) = request.service_type.as_deref() {
+        if !is_valid_service_type(service_type) {
+            return Err(ApiError::new(
+                axum::http::StatusCode::BAD_REQUEST,
+                "invalid_service_type",
+                "Service type must be 'openclaw' or 'ironclaw'",
+            ));
+        }
+    }
 
     // Get user's active subscriptions
     let subscriptions = app_state
@@ -207,6 +230,7 @@ pub async fn create_instance(
             request.image,
             request.name,
             request.ssh_pubkey,
+            request.service_type,
             max_allowed,
         )
         .await
@@ -218,6 +242,7 @@ pub async fn create_instance(
                 request.image,
                 request.name,
                 request.ssh_pubkey,
+                request.service_type,
             )
             .await
             .map_err(|e| {

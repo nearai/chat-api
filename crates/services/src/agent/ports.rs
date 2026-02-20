@@ -26,6 +26,8 @@ pub struct AgentInstance {
     pub dashboard_url: Option<String>,
     /// The agent manager URL that owns this instance (for routing operations)
     pub agent_api_base_url: Option<String>,
+    /// Service type (e.g. "openclaw", "ironclaw") selected when creating the instance
+    pub service_type: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -105,6 +107,8 @@ pub struct CreateInstanceParams {
     pub dashboard_url: Option<String>,
     /// The agent manager URL that created this instance
     pub agent_api_base_url: Option<String>,
+    /// Service type selected at creation time
+    pub service_type: Option<String>,
 }
 
 #[cfg_attr(test, mockall::automock)]
@@ -244,6 +248,7 @@ pub trait AgentService: Send + Sync {
         image: Option<String>,
         name: Option<String>,
         ssh_pubkey: Option<String>,
+        service_type: Option<String>,
     ) -> anyhow::Result<AgentInstance>;
 
     /// Create instance with streaming lifecycle events.
@@ -257,6 +262,7 @@ pub trait AgentService: Send + Sync {
         image: Option<String>,
         name: Option<String>,
         ssh_pubkey: Option<String>,
+        service_type: Option<String>,
         max_allowed: u64,
     ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<serde_json::Value>>>;
 

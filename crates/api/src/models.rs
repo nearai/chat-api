@@ -782,6 +782,9 @@ pub struct InstanceResponse {
     /// SSH command to connect to the instance (from Agent API when available)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ssh_command: Option<String>,
+    /// Service type selected when creating the instance (e.g. "openclaw", "ironclaw")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_type: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -797,6 +800,7 @@ impl From<services::agent::ports::AgentInstance> for InstanceResponse {
             dashboard_url: inst.dashboard_url,
             status,
             ssh_command: None,
+            service_type: inst.service_type,
             created_at: inst.created_at.to_rfc3339(),
             updated_at: inst.updated_at.to_rfc3339(),
         }
@@ -818,6 +822,7 @@ pub fn instance_response_with_enrichment(
         dashboard_url: inst.dashboard_url,
         status,
         ssh_command,
+        service_type: inst.service_type,
         created_at: inst.created_at.to_rfc3339(),
         updated_at: inst.updated_at.to_rfc3339(),
     }
