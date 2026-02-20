@@ -311,6 +311,11 @@ pub trait SubscriptionService: Send + Sync {
     /// Get the purchased token balance for a user.
     async fn get_purchased_token_balance(&self, user_id: UserId) -> Result<i64, SubscriptionError>;
 
+    /// Get token purchase info (amount, price) if configured. Returns None when token purchase is disabled.
+    async fn get_tokens_purchase_info(
+        &self,
+    ) -> Result<Option<crate::system_configs::ports::TokensPricingConfig>, SubscriptionError>;
+
     /// Debit purchased tokens when usage exceeds monthly limit in the period.
     /// Called after recording usage; debits min(quantity, used - monthly_max).
     async fn debit_purchased_tokens_if_overflow(
@@ -319,5 +324,13 @@ pub trait SubscriptionService: Send + Sync {
         quantity: i64,
         period_start: DateTime<Utc>,
         period_end: DateTime<Utc>,
+    ) -> Result<(), SubscriptionError>;
+
+    /// Debit purchased tokens if usage overflows monthly limit. Computes period from user's subscription (or free plan).
+    /// Call after recording usage. No-op if Stripe/subscriptions not configured.
+    async fn debit_purchased_tokens_after_usage(
+        &self,
+        user_id: UserId,
+        quantity: i64,
     ) -> Result<(), SubscriptionError>;
 }

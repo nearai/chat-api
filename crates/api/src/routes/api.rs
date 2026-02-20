@@ -2487,7 +2487,8 @@ async fn proxy_responses(
             state.user_usage_service.clone(),
             state.model_pricing_cache.clone(),
             user.user_id,
-        );
+        )
+        .with_subscription_service(state.subscription_service.clone());
         if let Some(Extension(api_key)) = api_key_ext {
             usage_stream = usage_stream.with_agent_service(state.agent_service.clone(), api_key);
         }
@@ -3540,7 +3541,8 @@ async fn proxy_chat_completions(
             state.user_usage_service.clone(),
             state.model_pricing_cache.clone(),
             user.user_id,
-        );
+        )
+        .with_subscription_service(state.subscription_service.clone());
         if let Some(Extension(api_key)) = api_key_ext {
             usage_stream = usage_stream.with_agent_service(state.agent_service.clone(), api_key);
         }
@@ -4710,6 +4712,19 @@ async fn record_chat_usage_from_body(
         return false;
     }
 
+    // Debit purchased tokens if usage overflowed monthly limit
+    if let Err(e) = state
+        .subscription_service
+        .debit_purchased_tokens_after_usage(user_id, usage.total_tokens as i64)
+        .await
+    {
+        tracing::warn!(
+            "Failed to debit purchased tokens for overflow (user_id={}): {}",
+            user_id,
+            e
+        );
+    }
+
     // Record to agent_usage_log if request was made with an API key
     if let Some(api_key) = api_key_ext {
         let pricing_opt = state.model_pricing_cache.get_pricing(&request_model).await;
@@ -4778,6 +4793,19 @@ async fn record_response_usage_from_body(
     {
         tracing::warn!("Failed to record usage for user_id={}: {}", user_id, e);
         return false;
+    }
+
+    // Debit purchased tokens if usage overflowed monthly limit
+    if let Err(e) = state
+        .subscription_service
+        .debit_purchased_tokens_after_usage(user_id, usage.total_tokens as i64)
+        .await
+    {
+        tracing::warn!(
+            "Failed to debit purchased tokens for overflow (user_id={}): {}",
+            user_id,
+            e
+        );
     }
 
     // Record to agent_usage_log if request was made with an API key

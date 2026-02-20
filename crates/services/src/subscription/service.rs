@@ -1369,6 +1369,20 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .map(|opt| opt.unwrap_or(0))
     }
 
+    async fn get_tokens_purchase_info(
+        &self,
+    ) -> Result<Option<crate::system_configs::ports::TokensPricingConfig>, SubscriptionError> {
+        if self.stripe_secret_key.is_empty() || self.stripe_webhook_secret.is_empty() {
+            return Ok(None);
+        }
+        let configs = self
+            .system_configs_service
+            .get_configs()
+            .await
+            .map_err(|e| SubscriptionError::InternalError(e.to_string()))?;
+        Ok(configs.and_then(|c| c.tokens_pricing))
+    }
+
     async fn debit_purchased_tokens_if_overflow(
         &self,
         user_id: UserId,
@@ -1436,6 +1450,40 @@ impl SubscriptionService for SubscriptionServiceImpl {
         }
 
         Ok(())
+    }
+
+    async fn debit_purchased_tokens_after_usage(
+        &self,
+        user_id: UserId,
+        quantity: i64,
+    ) -> Result<(), SubscriptionError> {
+        if quantity <= 0 {
+            return Ok(());
+        }
+        // When Stripe is not configured, no-op (no subscription gating, no purchased tokens)
+        if matches!(
+            self.get_plans_for_provider("stripe").await,
+            Err(SubscriptionError::NotConfigured)
+        ) {
+            return Ok(());
+        }
+
+        let (period_start, period_end) = match self
+            .subscription_repo
+            .get_active_subscription(user_id)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
+        {
+            Some(ref sub) => {
+                let period_end = sub.current_period_end;
+                let period_start = sub_one_month_same_day(period_end);
+                (period_start, period_end)
+            }
+            None => current_calendar_month_period(Utc::now()),
+        };
+
+        self.debit_purchased_tokens_if_overflow(user_id, quantity, period_start, period_end)
+            .await
     }
 }
 

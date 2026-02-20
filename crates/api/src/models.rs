@@ -668,6 +668,7 @@ impl TryFrom<UpsertSystemConfigsRequest> for services::system_configs::ports::Pa
             rate_limit,
             subscription_plans: req.subscription_plans,
             max_instances_per_manager: req.max_instances_per_manager,
+            ..Default::default()
         })
     }
 }
