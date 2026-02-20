@@ -351,6 +351,7 @@ async fn test_create_instance_respects_agent_instance_limit_max_1() {
             gateway_port: None,
             dashboard_url: None,
             agent_api_base_url: None,
+            service_type: None,
         })
         .await
         .expect("Should create first instance");
