@@ -19,6 +19,10 @@ pub struct Subscription {
     pub cancel_at_period_end: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Pending price_id for a deferred downgrade (applied at downgrade_effective_at)
+    pub pending_price_id: Option<String>,
+    /// When the pending downgrade should take effect (typically current_period_end at time of change)
+    pub downgrade_effective_at: Option<DateTime<Utc>>,
 }
 
 /// API response model with plan name resolved from price_id
@@ -34,6 +38,12 @@ pub struct SubscriptionWithPlan {
     pub cancel_at_period_end: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// If a downgrade is pending, the plan name the user will switch to
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_plan: Option<String>,
+    /// When the pending downgrade takes effect
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub downgrade_effective_at: Option<DateTime<Utc>>,
 }
 
 /// Stripe customer mapping data
@@ -177,6 +187,21 @@ pub trait SubscriptionRepository: Send + Sync {
         txn: &tokio_postgres::Transaction<'_>,
         user_id: UserId,
     ) -> anyhow::Result<()>;
+
+    /// Get active subscription for a user within an existing transaction (avoids TOCTOU races).
+    async fn get_active_subscription_in_txn(
+        &self,
+        txn: &tokio_postgres::Transaction<'_>,
+        user_id: UserId,
+    ) -> anyhow::Result<Option<Subscription>>;
+
+    /// Apply a pending downgrade: set price_id = pending_price_id, clear pending fields.
+    /// Returns None if no row matched (already applied by a concurrent request).
+    async fn apply_pending_downgrade(
+        &self,
+        txn: &tokio_postgres::Transaction<'_>,
+        subscription_id: &str,
+    ) -> anyhow::Result<Option<Subscription>>;
 }
 
 /// Repository trait for payment webhook events

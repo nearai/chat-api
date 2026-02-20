@@ -210,6 +210,7 @@ async fn main() -> anyhow::Result<()> {
             user_repository: user_repo.clone(),
             user_usage_repo: db.user_usage_repository()
                 as Arc<dyn services::user_usage::UserUsageRepository>,
+            agent_service: agent_service.clone() as Arc<dyn services::agent::ports::AgentService>,
             stripe_secret_key: config.stripe.secret_key.clone(),
             stripe_webhook_secret: config.stripe.webhook_secret.clone(),
         },
