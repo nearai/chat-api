@@ -7,6 +7,9 @@ pub mod oauth;
 pub mod subscriptions;
 pub mod users;
 
+// Re-export validation constants from services crate for API layer usage
+pub use services::agent::ports::{is_valid_service_type, VALID_SERVICE_TYPES};
+
 use axum::{middleware::from_fn_with_state, routing::get, Json, Router};
 use http::header::{HeaderName, ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use http::HeaderValue;
