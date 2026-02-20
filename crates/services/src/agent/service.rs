@@ -11,8 +11,7 @@ use uuid::Uuid;
 
 use super::ports::{
     is_valid_service_type, AgentApiInstanceEnrichment, AgentApiKey, AgentInstance, AgentRepository,
-    AgentService, CreateInstanceParams, InstanceBalance, TokenPricing, UsageLogEntry,
-    VALID_SERVICE_TYPES,
+    AgentService, CreateInstanceParams, InstanceBalance, UsageLogEntry, VALID_SERVICE_TYPES,
 };
 
 /// Maximum size for the Agent API SSE stream buffer (100 KB).
