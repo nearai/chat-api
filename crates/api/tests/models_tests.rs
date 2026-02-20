@@ -53,11 +53,11 @@ async fn test_list_models_response_structure() {
         .expect("Should have total as number");
 
     // Verify pagination structure is correct
-    // With a high limit (1000), models.len() should equal total (all models fit in one page)
+    // With max allowed limit (100), all models should fit in one page at offset=0
     assert_eq!(
         models.len() as i64,
         total,
-        "Models array length should equal total when limit >= total (offset=0, high limit)"
+        "Models array length should equal total when requesting all models with limit=100&offset=0"
     );
 }
 

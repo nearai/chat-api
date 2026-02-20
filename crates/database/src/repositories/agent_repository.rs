@@ -29,7 +29,7 @@ impl AgentRepository for PostgresAgentRepository {
 
         let client = self.pool.get().await?;
 
-        // Default to 'openclaw' if service_type not provided
+        // Default to 'openclaw' if service_type not provided (matches DEFAULT_SERVICE_TYPE in service layer)
         let service_type = params.service_type.as_deref().unwrap_or("openclaw");
 
         let row = client

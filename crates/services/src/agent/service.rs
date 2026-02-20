@@ -19,7 +19,7 @@ use super::ports::{
 const MAX_BUFFER_SIZE: usize = 100 * 1024;
 
 /// Default service type for agent instances when not specified.
-const DEFAULT_SERVICE_TYPE: &str = "ironclaw";
+const DEFAULT_SERVICE_TYPE: &str = "openclaw";
 
 /// Valid service types for agent instances.
 const VALID_SERVICE_TYPES: &[&str] = &["openclaw", "ironclaw"];
@@ -486,6 +486,14 @@ async fn save_instance_from_event(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
+    // Extract service_type from instance_data if present and valid, otherwise use provided value
+    let service_type_from_response = instance_data
+        .get("service_type")
+        .and_then(|v| v.as_str())
+        .filter(|s| is_valid_service_type(s))
+        .map(|s| s.to_string());
+    let final_service_type = service_type_from_response.or(params.service_type.clone());
+
     let instance = repository
         .create_instance(CreateInstanceParams {
             user_id,
@@ -497,7 +505,7 @@ async fn save_instance_from_event(
             gateway_port,
             dashboard_url,
             agent_api_base_url: params.agent_api_base_url.clone(),
-            service_type: params.service_type.clone(),
+            service_type: final_service_type,
         })
         .await?;
 
@@ -557,6 +565,11 @@ impl AgentService for AgentServiceImpl {
             .create_unbound_api_key(user_id, key_name, None, None)
             .await?;
 
+        // Apply default service type if not provided
+        let service_type_for_api = service_type
+            .clone()
+            .or_else(|| Some(DEFAULT_SERVICE_TYPE.to_string()));
+
         // Call Agent API with our API key and the chat-api URL (agents reach us at nearai_api_url)
         let response = self
             .call_agent_api_create(
@@ -567,7 +580,7 @@ impl AgentService for AgentServiceImpl {
                     image,
                     name: name.clone(),
                     ssh_pubkey: ssh_pubkey.clone(),
-                    service_type: service_type.clone(),
+                    service_type: service_type_for_api.clone(),
                 },
             )
             .await?;
@@ -607,13 +620,13 @@ impl AgentService for AgentServiceImpl {
         // Generate a unique instance_id based on the Agent API name
         let instance_id = format!("agent-{}-{}", instance_name, Uuid::new_v4());
 
-        // Extract service_type from instance_data only if it's a valid value, fall back to user-supplied value
+        // Extract service_type from instance_data only if it's a valid value, fall back to default
         let service_type_from_response = instance_data
             .get("service_type")
             .and_then(|v| v.as_str())
             .filter(|s| is_valid_service_type(s))
             .map(|s| s.to_string());
-        let service_type = service_type_from_response.or(service_type);
+        let final_service_type = service_type_from_response.or(service_type_for_api);
 
         // Store in database with connection info and the manager URL that owns it
         let instance = self
@@ -628,7 +641,7 @@ impl AgentService for AgentServiceImpl {
                 gateway_port,
                 dashboard_url,
                 agent_api_base_url: Some(manager.url.clone()),
-                service_type,
+                service_type: final_service_type,
             })
             .await?;
 
@@ -682,6 +695,11 @@ impl AgentService for AgentServiceImpl {
             .create_unbound_api_key(user_id, key_name, None, None)
             .await?;
 
+        // Apply default service type if not provided
+        let service_type_for_api = service_type
+            .clone()
+            .or_else(|| Some(DEFAULT_SERVICE_TYPE.to_string()));
+
         let mut rx = match self
             .call_agent_api_create_streaming(
                 &manager,
@@ -691,7 +709,7 @@ impl AgentService for AgentServiceImpl {
                     image,
                     name: name.clone(),
                     ssh_pubkey: ssh_pubkey.clone(),
-                    service_type: service_type.clone(),
+                    service_type: service_type_for_api.clone(),
                 },
             )
             .await
@@ -738,7 +756,7 @@ impl AgentService for AgentServiceImpl {
                                                 ssh_pubkey: ssh_pubkey.clone(),
                                                 max_allowed,
                                                 agent_api_base_url: Some(manager_url.clone()),
-                                                service_type: service_type.clone(),
+                                                service_type: service_type_for_api.clone(),
                                             },
                                         )
                                         .await
