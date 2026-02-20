@@ -759,6 +759,31 @@ pub enum InstanceStatus {
     Stopped,
 }
 
+/// Agent instance lifecycle event for SSE streaming
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct LifecycleEvent {
+    /// Current stage (e.g., "created", "container_starting", "healthy", "ready", "error")
+    pub stage: String,
+    /// Human-readable description of the current stage
+    pub message: String,
+    /// Instance info (only present in "created" stage)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instance: Option<LifecycleInstanceInfo>,
+}
+
+/// Minimal instance info in lifecycle events
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct LifecycleInstanceInfo {
+    pub id: String,
+    pub instance_id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dashboard_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub public_ssh_key: Option<String>,
+    pub created_at: String,
+}
+
 /// Agent instance response
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct InstanceResponse {

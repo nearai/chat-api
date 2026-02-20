@@ -11,6 +11,11 @@ use super::ports::{
     CreateInstanceParams, InstanceBalance, TokenPricing, UsageLogEntry,
 };
 
+/// Maximum size for a single line in the Agent API stream (100 KB).
+/// This prevents denial-of-service attacks where a malicious Agent API sends
+/// extremely long lines without newlines, causing unbounded buffer growth.
+const MAX_BUFFER_SIZE: usize = 100 * 1024;
+
 pub struct AgentServiceImpl {
     repository: Arc<dyn AgentRepository>,
     http_client: Client,
@@ -64,6 +69,155 @@ impl AgentServiceImpl {
     /// Validate API key format (must start with "sk-agent-" and be 41 chars total)
     fn validate_api_key_format(key: &str) -> bool {
         key.starts_with("sk-agent-") && key.len() == 41
+    }
+
+    /// Call Agent API to create an instance with streaming lifecycle events
+    ///
+    /// # Security Note
+    /// This function receives a nearai_api_key credential that is passed to the Agent API
+    /// in the request body. This is a sensitive credential and MUST NOT be logged, stored,
+    /// or exposed in any error messages. Only the HTTP request/response status codes and headers
+    /// should be logged for debugging purposes, never the request/response body.
+    async fn call_agent_api_create_streaming(
+        &self,
+        nearai_api_key: &str,
+        nearai_api_url: &str,
+        image: Option<String>,
+        name: Option<String>,
+        ssh_pubkey: Option<String>,
+    ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<serde_json::Value>>> {
+        let url = format!("{}/instances", self.agent_api_base_url);
+
+        let request_body = serde_json::json!({
+            "image": image,
+            "name": name,
+            "nearai_api_key": nearai_api_key,
+            "nearai_api_url": nearai_api_url,
+            "ssh_pubkey": ssh_pubkey,
+        });
+
+        let response = self
+            .http_client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .bearer_auth(&self.agent_api_token)
+            .json(&request_body)
+            .timeout(std::time::Duration::from_secs(180)) // Instance creation can take 2-3 minutes
+            .send()
+            .await
+            .map_err(|e| anyhow!("Failed to call Agent API: {}", e))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            // Don't expose upstream error details for security; log only status code
+            tracing::warn!("Agent API create instance failed: status={}", status);
+            return Err(anyhow!("Agent API error: {}", status));
+        }
+
+        // Create channel for streaming events
+        let (tx, rx) = tokio::sync::mpsc::channel(10);
+
+        // Spawn task to stream SSE events as they arrive from Agent API
+        tokio::spawn(async move {
+            use futures::stream::StreamExt;
+            use tokio::time::timeout;
+
+            let mut stream = response.bytes_stream();
+            let mut buffer = String::new();
+            // Idle timeout: 60 seconds with no data from Agent API indicates a stalled stream
+            const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+            loop {
+                let chunk_result = timeout(STREAM_IDLE_TIMEOUT, stream.next()).await;
+                let chunk_result = match chunk_result {
+                    Ok(result) => result,
+                    Err(_timeout) => {
+                        tracing::error!(
+                            "Agent API stream idle timeout: no data received for {}s",
+                            STREAM_IDLE_TIMEOUT.as_secs()
+                        );
+                        let _ = tx.send(Err(anyhow!("Agent API stream timeout"))).await;
+                        break;
+                    }
+                };
+
+                match chunk_result {
+                    Some(Ok(chunk)) => {
+                        // Decode chunk as UTF-8, replacing invalid sequences with replacement char
+                        let text = String::from_utf8_lossy(&chunk);
+
+                        // Security: Check buffer size before appending to prevent overflow
+                        if buffer.len() + text.len() > MAX_BUFFER_SIZE {
+                            tracing::error!(
+                                "Agent API stream buffer would exceed maximum size ({} bytes): current={}, incoming chunk={}",
+                                MAX_BUFFER_SIZE,
+                                buffer.len(),
+                                text.len()
+                            );
+                            let _ = tx
+                                .send(Err(anyhow!(
+                                    "Stream buffer too large: possible malicious Agent API"
+                                )))
+                                .await;
+                            break;
+                        }
+                        buffer.push_str(&text);
+
+                        // Process complete lines (SSE events end with \n\n)
+                        while let Some(newline_pos) = buffer.find('\n') {
+                            let line = buffer[..newline_pos].to_string();
+                            buffer.drain(..=newline_pos);
+
+                            // Parse SSE format: "data: {...}\n\n"
+                            if let Some(data) = line.strip_prefix("data: ") {
+                                match serde_json::from_str::<serde_json::Value>(data) {
+                                    Ok(event) => {
+                                        // Send event immediately; ignore if channel is closed (client disconnected)
+                                        let _ = tx.send(Ok(event)).await;
+                                    }
+                                    Err(e) => {
+                                        // Log malformed JSON events for debugging
+                                        tracing::debug!(
+                                            "Failed to parse Agent API SSE data as JSON: {}",
+                                            e
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Some(Err(e)) => {
+                        tracing::error!("Error reading Agent API stream: {}", e);
+                        let _ = tx.send(Err(anyhow!("Stream error: {}", e))).await;
+                        break;
+                    }
+                    None => {
+                        // Stream ended normally
+                        break;
+                    }
+                }
+            }
+
+            // Process any remaining data in buffer
+            if !buffer.is_empty() {
+                if let Some(data) = buffer.strip_prefix("data: ") {
+                    match serde_json::from_str::<serde_json::Value>(data) {
+                        Ok(event) => {
+                            let _ = tx.send(Ok(event)).await;
+                        }
+                        Err(e) => {
+                            // Log malformed JSON events for debugging
+                            tracing::debug!(
+                                "Failed to parse final Agent API SSE data as JSON: {}",
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(rx)
     }
 
     /// Call Agent API to create an instance
@@ -179,6 +333,107 @@ impl AgentServiceImpl {
 
         response.json::<serde_json::Value>().await.ok()
     }
+}
+
+/// Helper function to save instance data from lifecycle event to database
+///
+/// # Arguments
+/// * `max_allowed` - Maximum instances allowed by user's subscription plan. Used for TOCTOU re-check.
+async fn save_instance_from_event(
+    repository: &dyn AgentRepository,
+    user_id: UserId,
+    instance_data: &serde_json::Value,
+    api_key_id: &Uuid,
+    ssh_pubkey: Option<&str>,
+    max_allowed: u64,
+) -> anyhow::Result<AgentInstance> {
+    // TOCTOU mitigation: Re-check instance limit before creating.
+    // The route handler already checked this, but concurrent requests can race.
+    // This re-check happens just before the DB insert to enforce the limit.
+    let (_instances, total_count) = repository.list_user_instances(user_id, 1, 0).await?;
+    if total_count as u64 >= max_allowed {
+        tracing::error!(
+            "Instance creation rejected: subscription limit exceeded due to concurrent request. current={}, max={}, user_id={}",
+            total_count,
+            max_allowed,
+            user_id
+        );
+        return Err(anyhow!(
+            "Agent instance limit exceeded. Current: {}, Max: {}",
+            total_count,
+            max_allowed
+        ));
+    }
+
+    let instance_name = instance_data
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("Missing 'name' in Agent API instance data"))?
+        .to_string();
+
+    // Try to extract instance_id from the Agent API event (for cross-system correlation)
+    // If not available, generate one from the instance name and a UUID
+    let instance_id = instance_data
+        .get("instance_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("agent-{}-{}", instance_name, Uuid::new_v4()));
+
+    let instance_url = instance_data
+        .get("url")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let instance_token = instance_data
+        .get("token")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let gateway_port = instance_data
+        .get("gateway_port")
+        .and_then(|v| v.as_i64())
+        .map(|p| p as i32);
+
+    let dashboard_url = instance_data
+        .get("dashboard_url")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let instance = repository
+        .create_instance(CreateInstanceParams {
+            user_id,
+            instance_id: instance_id.clone(),
+            name: instance_name,
+            public_ssh_key: ssh_pubkey.map(|s| s.to_string()),
+            instance_url,
+            instance_token,
+            gateway_port,
+            dashboard_url,
+        })
+        .await?;
+
+    // Security: Verify the created instance belongs to the requesting user
+    // (This should always be true since we passed user_id to create_instance, but we assert for safety)
+    if instance.user_id != user_id {
+        return Err(anyhow!(
+            "Security violation: Created instance does not belong to requesting user. instance.user_id={}, request.user_id={}",
+            instance.user_id,
+            user_id
+        ));
+    }
+
+    // Bind the unbound API key to the new instance
+    repository
+        .bind_api_key_to_instance(*api_key_id, instance.id)
+        .await?;
+
+    tracing::info!(
+        "Instance saved from lifecycle event: instance_id={}, user_id={}",
+        instance_id,
+        user_id
+    );
+
+    Ok(instance)
 }
 
 #[async_trait]
@@ -340,6 +595,196 @@ impl AgentService for AgentServiceImpl {
         );
 
         Ok(instance)
+    }
+
+    async fn create_instance_from_agent_api_streaming(
+        &self,
+        user_id: UserId,
+        image: Option<String>,
+        name: Option<String>,
+        ssh_pubkey: Option<String>,
+        max_allowed: u64,
+    ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<serde_json::Value>>> {
+        tracing::info!(
+            "Creating instance from Agent API with streaming: user_id={}",
+            user_id
+        );
+
+        // Create an unbound API key on behalf of the user; the agent will use it to authenticate to the chat-api.
+        let key_name = name
+            .as_deref()
+            .map(|n| format!("instance-{}", n))
+            .unwrap_or_else(|| "instance".to_string());
+        let (api_key, plaintext_key) = self
+            .create_unbound_api_key(user_id, key_name, None, None)
+            .await?;
+
+        // Call Agent API which returns a stream of lifecycle events
+        let mut rx = match self
+            .call_agent_api_create_streaming(
+                &plaintext_key,
+                &self.nearai_api_url,
+                image,
+                name.clone(),
+                ssh_pubkey.clone(),
+            )
+            .await
+        {
+            Ok(rx) => rx,
+            Err(e) => {
+                // Critical: Revoke the orphaned API key if streaming setup fails
+                tracing::error!(
+                    "Failed to start Agent API streaming: user_id={}, error={}. Revoking orphaned API key.",
+                    user_id,
+                    e
+                );
+                if let Err(cleanup_err) = self.repository.revoke_api_key(api_key.id).await {
+                    tracing::warn!(
+                        "Failed to revoke API key after streaming setup failure: user_id={}, api_key_id={}, error={}",
+                        user_id,
+                        api_key.id,
+                        cleanup_err
+                    );
+                }
+                return Err(e);
+            }
+        };
+
+        // Create a new channel to forward events and handle database writes
+        let (tx, output_rx) = tokio::sync::mpsc::channel(10);
+        let repo = Arc::clone(&self.repository);
+        let api_key_id = api_key.id;
+
+        // Spawn a task to process events
+        tokio::spawn(async move {
+            // TOCTOU mitigation: Capture max_allowed so the spawned task can enforce the subscription limit
+            let mut created_event_processed = false;
+
+            while let Some(event_result) = rx.recv().await {
+                match event_result {
+                    Ok(event) => {
+                        // Security: Only process the first "created" event to prevent duplicate instance creation
+                        if !created_event_processed {
+                            if let Some(stage) = event.get("stage").and_then(|s| s.as_str()) {
+                                if stage == "created" {
+                                    // Extract and save instance data to database
+                                    if let Some(instance_data) = event.get("instance") {
+                                        if let Err(e) = save_instance_from_event(
+                                            repo.as_ref(),
+                                            user_id,
+                                            instance_data,
+                                            &api_key_id,
+                                            ssh_pubkey.as_deref(),
+                                            max_allowed,
+                                        )
+                                        .await
+                                        {
+                                            tracing::error!(
+                                                "Failed to save instance from created event: user_id={}, error={}",
+                                                user_id,
+                                                e
+                                            );
+                                            // Cleanup: Revoke the unbound API key if instance save fails
+                                            if let Err(cleanup_err) =
+                                                repo.revoke_api_key(api_key_id).await
+                                            {
+                                                tracing::warn!(
+                                                    "Failed to revoke API key on instance save failure: user_id={}, api_key_id={}, error={}",
+                                                    user_id,
+                                                    api_key_id,
+                                                    cleanup_err
+                                                );
+                                            }
+                                            let _ = tx
+                                                .send(Err(anyhow!("Failed to save instance")))
+                                                .await;
+                                            break;
+                                        }
+                                        // Mark as processed only after successful save
+                                        created_event_processed = true;
+                                    } else {
+                                        // "created" event missing instance data - revoke key and error
+                                        tracing::error!(
+                                            "Received 'created' event without instance data: user_id={}",
+                                            user_id
+                                        );
+                                        if let Err(cleanup_err) =
+                                            repo.revoke_api_key(api_key_id).await
+                                        {
+                                            tracing::warn!(
+                                                "Failed to revoke API key on malformed event: user_id={}, api_key_id={}, error={}",
+                                                user_id,
+                                                api_key_id,
+                                                cleanup_err
+                                            );
+                                        }
+                                        let _ = tx
+                                            .send(Err(anyhow!(
+                                                "Invalid created event: missing instance data"
+                                            )))
+                                            .await;
+                                        break;
+                                    }
+                                }
+                            }
+                        } else if let Some(stage) = event.get("stage").and_then(|s| s.as_str()) {
+                            if stage == "created" {
+                                // Duplicate "created" event detected; ignore to prevent duplicate instance creation
+                                tracing::warn!(
+                                    "Ignoring duplicate 'created' event from Agent API: user_id={}",
+                                    user_id
+                                );
+                                if tx.send(Ok(event)).await.is_err() {
+                                    break;
+                                }
+                                continue;
+                            }
+                        }
+
+                        // Forward the event
+                        if tx.send(Ok(event)).await.is_err() {
+                            // Channel closed, client disconnected before instance was created
+                            if !created_event_processed {
+                                tracing::warn!(
+                                    "Client disconnected before instance creation: revoking unbound API key: user_id={}",
+                                    user_id
+                                );
+                                if let Err(cleanup_err) = repo.revoke_api_key(api_key_id).await {
+                                    tracing::warn!(
+                                        "Failed to revoke API key on client disconnect: user_id={}, api_key_id={}, error={}",
+                                        user_id,
+                                        api_key_id,
+                                        cleanup_err
+                                    );
+                                }
+                            }
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        // Only cleanup if we haven't created the instance yet
+                        if !created_event_processed {
+                            tracing::warn!(
+                                "Stream error before instance creation: user_id={}, revoking unbound API key",
+                                user_id
+                            );
+                            if let Err(cleanup_err) = repo.revoke_api_key(api_key_id).await {
+                                tracing::warn!(
+                                    "Failed to revoke API key on stream error: user_id={}, api_key_id={}, error={}",
+                                    user_id,
+                                    api_key_id,
+                                    cleanup_err
+                                );
+                            }
+                        }
+                        let _ = tx.send(Err(e)).await;
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok(output_rx)
     }
 
     async fn create_instance(
