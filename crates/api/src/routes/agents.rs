@@ -1,8 +1,8 @@
 use crate::{error::ApiError, middleware::AuthenticatedUser, models::*, state::AppState};
 use axum::{
     extract::{Extension, Path, Query, State},
-    http::StatusCode,
-    response::Response,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
 };
@@ -25,17 +25,81 @@ pub struct CreateInstanceRequest {
     pub ssh_pubkey: Option<String>,
 }
 
+/// Helper to create SSE streaming response for instance creation
+async fn create_instance_streaming_response(
+    app_state: AppState,
+    user_id: services::UserId,
+    image: Option<String>,
+    name: Option<String>,
+    ssh_pubkey: Option<String>,
+    max_allowed: u64,
+) -> Result<Response, ApiError> {
+    let rx = app_state
+        .agent_service
+        .create_instance_from_agent_api_streaming(user_id, image, name, ssh_pubkey, max_allowed)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to start instance creation stream: {}", e);
+            ApiError::internal_server_error("Failed to start instance creation")
+        })?;
+
+    use futures::stream::StreamExt;
+    use tokio_stream::wrappers::ReceiverStream;
+
+    let stream = ReceiverStream::new(rx)
+        .then(|event_result| async move {
+            match event_result {
+                Ok(event) => {
+                    if let Ok(json_str) = serde_json::to_string(&event) {
+                        Ok(axum::body::Bytes::from(format!("data: {}\n\n", json_str)))
+                    } else {
+                        Err(axum::Error::new(anyhow::anyhow!(
+                            "Failed to serialize event"
+                        )))
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Error in instance creation stream: {}", e);
+                    let error_json =
+                        serde_json::json!({"error": "Instance creation failed"}).to_string();
+                    Ok(axum::body::Bytes::from(format!("data: {}\n\n", error_json)))
+                }
+            }
+        })
+        .chain(futures::stream::once(async {
+            Ok(axum::body::Bytes::from("data: [DONE]\n\n"))
+        }));
+
+    let body = axum::body::Body::from_stream(stream);
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/event-stream")
+        .header("cache-control", "no-cache")
+        .header("connection", "keep-alive")
+        .body(body)
+        .map_err(|e| {
+            tracing::error!("Failed to build SSE response: {}", e);
+            ApiError::internal_server_error("Failed to construct response")
+        })
+}
+
 /// Create a new agent instance.
 ///
 /// Agent instance limits are enforced for all users to prevent resource exhaustion:
 /// - Subscribed users: plan limit from subscription_plans config
 /// - Unsubscribed users: no instances allowed (active subscription required)
+///
+/// Supports two response modes via content negotiation:
+/// - Accept: text/event-stream → Returns SSE stream of lifecycle events
+/// - Accept: application/json (default) → Returns 201 with complete InstanceResponse
 #[utoipa::path(
     post,
     path = "/v1/agents/instances",
     tag = "Agents",
     request_body = CreateInstanceRequest,
     responses(
+        (status = 200, description = "Instance creation stream (SSE)"),
         (status = 201, description = "Instance created", body = InstanceResponse),
         (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
@@ -47,14 +111,15 @@ pub struct CreateInstanceRequest {
 pub async fn create_instance(
     State(app_state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
     Json(request): Json<CreateInstanceRequest>,
-) -> Result<(StatusCode, Json<InstanceResponse>), ApiError> {
+) -> Result<Response, ApiError> {
     tracing::info!("Creating agent instance: user_id={}", user.user_id);
 
     // Get user's active subscriptions
     let subscriptions = app_state
         .subscription_service
-        .get_user_subscriptions(user.user_id, true) // active_only = true
+        .get_user_subscriptions(user.user_id, true)
         .await
         .map_err(|e| {
             tracing::error!(
@@ -95,7 +160,7 @@ pub async fn create_instance(
         _ => 0,
     };
 
-    // Enforce the limit using an efficient count query (limit=1 fetches minimal rows, total comes from COUNT(*))
+    // Enforce the limit
     let (_, total) = app_state
         .agent_service
         .list_instances(user.user_id, 1, 0)
@@ -127,25 +192,48 @@ pub async fn create_instance(
         ));
     }
 
-    let instance = app_state
-        .agent_service
-        .create_instance_from_agent_api(
+    // Content negotiation: SSE streaming or JSON response
+    let wants_stream = headers
+        .get("accept")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.contains("text/event-stream"))
+        .unwrap_or(false);
+
+    if wants_stream {
+        create_instance_streaming_response(
+            app_state,
             user.user_id,
             request.image,
             request.name,
             request.ssh_pubkey,
+            max_allowed,
         )
         .await
-        .map_err(|e| {
-            tracing::error!(
-                "Failed to create instance: user_id={}, error={}",
+    } else {
+        let instance = app_state
+            .agent_service
+            .create_instance_from_agent_api(
                 user.user_id,
-                e
-            );
-            ApiError::internal_server_error("Failed to create instance")
-        })?;
+                request.image,
+                request.name,
+                request.ssh_pubkey,
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    "Failed to create instance: user_id={}, error={}",
+                    user.user_id,
+                    e
+                );
+                ApiError::internal_server_error("Failed to create instance")
+            })?;
 
-    Ok((StatusCode::CREATED, Json(instance.into())))
+        Ok((
+            StatusCode::CREATED,
+            Json::<InstanceResponse>(instance.into()),
+        )
+            .into_response())
+    }
 }
 
 /// List user's agent instances

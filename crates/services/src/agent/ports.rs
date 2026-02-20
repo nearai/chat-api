@@ -246,6 +246,20 @@ pub trait AgentService: Send + Sync {
         ssh_pubkey: Option<String>,
     ) -> anyhow::Result<AgentInstance>;
 
+    /// Create instance with streaming lifecycle events.
+    /// Returns a receiver that yields raw JSON events as they occur during instance creation.
+    ///
+    /// **TOCTOU Mitigation**: The `max_allowed` parameter enables re-checking the instance limit
+    /// just before instance creation in the spawned task, preventing race conditions from concurrent requests.
+    async fn create_instance_from_agent_api_streaming(
+        &self,
+        user_id: UserId,
+        image: Option<String>,
+        name: Option<String>,
+        ssh_pubkey: Option<String>,
+        max_allowed: u64,
+    ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<serde_json::Value>>>;
+
     async fn create_instance(
         &self,
         user_id: UserId,
