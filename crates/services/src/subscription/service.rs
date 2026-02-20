@@ -1296,10 +1296,12 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .map_err(|e| SubscriptionError::InternalError(e.to_string()))?
             .ok_or(SubscriptionError::TokenPurchaseNotConfigured)?;
 
-        let tokens = configs
-            .purchase_tokens_amount
+        let pricing = configs
+            .tokens_pricing
+            .as_ref()
             .ok_or(SubscriptionError::TokenPurchaseNotConfigured)?;
-        let price_per_million = configs.price_per_million_tokens.unwrap_or(1.70);
+        let tokens = pricing.amount;
+        let price_per_million = pricing.price_per_million;
 
         // Get or create Stripe customer
         let customer_id = self.get_or_create_stripe_customer(user_id).await?;

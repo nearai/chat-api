@@ -90,7 +90,7 @@ pub enum SubscriptionError {
     WebhookVerificationFailed(String),
     /// Internal error
     InternalError(String),
-    /// Token purchase not configured (purchase_tokens_amount not set or Stripe not configured)
+    /// Token purchase not configured (tokens_pricing not set or Stripe not configured)
     TokenPurchaseNotConfigured,
 }
 
