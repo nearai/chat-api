@@ -89,6 +89,7 @@ async fn create_instance_streaming_response(
         .header("content-type", "text/event-stream")
         .header("cache-control", "no-cache")
         .header("connection", "keep-alive")
+        .header("x-accel-buffering", "no")
         .body(body)
         .map_err(|e| {
             tracing::error!("Failed to build SSE response: {}", e);
