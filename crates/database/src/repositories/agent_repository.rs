@@ -660,36 +660,6 @@ impl AgentRepository for PostgresAgentRepository {
         Ok(())
     }
 
-    async fn log_usage(&self, usage: UsageLogEntry) -> anyhow::Result<()> {
-        let client = self.pool.get().await?;
-
-        client
-            .execute(
-                "INSERT INTO agent_usage_log
-                 (id, user_id, instance_id, api_key_id, input_tokens, output_tokens, total_tokens,
-                  input_cost, output_cost, total_cost, model_id, request_type, created_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
-                &[
-                    &usage.id,
-                    &usage.user_id,
-                    &usage.instance_id,
-                    &usage.api_key_id,
-                    &usage.input_tokens,
-                    &usage.output_tokens,
-                    &usage.total_tokens,
-                    &usage.input_cost,
-                    &usage.output_cost,
-                    &usage.total_cost,
-                    &usage.model_id,
-                    &usage.request_type,
-                    &usage.created_at,
-                ],
-            )
-            .await?;
-
-        Ok(())
-    }
-
     async fn get_instance_usage(
         &self,
         instance_id: Uuid,
@@ -704,7 +674,7 @@ impl AgentRepository for PostgresAgentRepository {
         let total = if let (Some(start), Some(end)) = (start_date, end_date) {
             let count_row = client
                 .query_one(
-                    "SELECT COUNT(*) FROM agent_usage_log
+                    "SELECT COUNT(*) FROM user_usage_event
                      WHERE instance_id = $1 AND created_at >= $2 AND created_at <= $3",
                     &[&instance_id, &start, &end],
                 )
@@ -713,7 +683,7 @@ impl AgentRepository for PostgresAgentRepository {
         } else if let Some(start) = start_date {
             let count_row = client
                 .query_one(
-                    "SELECT COUNT(*) FROM agent_usage_log
+                    "SELECT COUNT(*) FROM user_usage_event
                      WHERE instance_id = $1 AND created_at >= $2",
                     &[&instance_id, &start],
                 )
@@ -722,7 +692,7 @@ impl AgentRepository for PostgresAgentRepository {
         } else if let Some(end) = end_date {
             let count_row = client
                 .query_one(
-                    "SELECT COUNT(*) FROM agent_usage_log
+                    "SELECT COUNT(*) FROM user_usage_event
                      WHERE instance_id = $1 AND created_at <= $2",
                     &[&instance_id, &end],
                 )
@@ -731,21 +701,28 @@ impl AgentRepository for PostgresAgentRepository {
         } else {
             let count_row = client
                 .query_one(
-                    "SELECT COUNT(*) FROM agent_usage_log WHERE instance_id = $1",
+                    "SELECT COUNT(*) FROM user_usage_event WHERE instance_id = $1",
                     &[&instance_id],
                 )
                 .await?;
             count_row.get(0)
         };
 
-        // Get paginated results
+        // Get paginated results — extract details from JSONB
         let rows = if let (Some(start), Some(end)) = (start_date, end_date) {
             client
                 .query(
                     "SELECT u.id, u.user_id, u.instance_id, u.api_key_id, k.name,
-                            u.input_tokens, u.output_tokens, u.total_tokens, u.input_cost,
-                            u.output_cost, u.total_cost, u.model_id, u.request_type, u.created_at
-                     FROM agent_usage_log u
+                            COALESCE((u.details->>'input_tokens')::BIGINT, 0),
+                            COALESCE((u.details->>'output_tokens')::BIGINT, 0),
+                            u.quantity,
+                            COALESCE((u.details->>'input_cost')::BIGINT, 0),
+                            COALESCE((u.details->>'output_cost')::BIGINT, 0),
+                            COALESCE(u.cost_nano_usd, 0),
+                            u.model_id,
+                            COALESCE(u.details->>'request_type', ''),
+                            u.created_at
+                     FROM user_usage_event u
                      LEFT JOIN agent_api_keys k ON u.api_key_id = k.id
                      WHERE u.instance_id = $1 AND u.created_at >= $2 AND u.created_at <= $3
                      ORDER BY u.created_at DESC
@@ -757,9 +734,16 @@ impl AgentRepository for PostgresAgentRepository {
             client
                 .query(
                     "SELECT u.id, u.user_id, u.instance_id, u.api_key_id, k.name,
-                            u.input_tokens, u.output_tokens, u.total_tokens, u.input_cost,
-                            u.output_cost, u.total_cost, u.model_id, u.request_type, u.created_at
-                     FROM agent_usage_log u
+                            COALESCE((u.details->>'input_tokens')::BIGINT, 0),
+                            COALESCE((u.details->>'output_tokens')::BIGINT, 0),
+                            u.quantity,
+                            COALESCE((u.details->>'input_cost')::BIGINT, 0),
+                            COALESCE((u.details->>'output_cost')::BIGINT, 0),
+                            COALESCE(u.cost_nano_usd, 0),
+                            u.model_id,
+                            COALESCE(u.details->>'request_type', ''),
+                            u.created_at
+                     FROM user_usage_event u
                      LEFT JOIN agent_api_keys k ON u.api_key_id = k.id
                      WHERE u.instance_id = $1 AND u.created_at >= $2
                      ORDER BY u.created_at DESC
@@ -771,9 +755,16 @@ impl AgentRepository for PostgresAgentRepository {
             client
                 .query(
                     "SELECT u.id, u.user_id, u.instance_id, u.api_key_id, k.name,
-                            u.input_tokens, u.output_tokens, u.total_tokens, u.input_cost,
-                            u.output_cost, u.total_cost, u.model_id, u.request_type, u.created_at
-                     FROM agent_usage_log u
+                            COALESCE((u.details->>'input_tokens')::BIGINT, 0),
+                            COALESCE((u.details->>'output_tokens')::BIGINT, 0),
+                            u.quantity,
+                            COALESCE((u.details->>'input_cost')::BIGINT, 0),
+                            COALESCE((u.details->>'output_cost')::BIGINT, 0),
+                            COALESCE(u.cost_nano_usd, 0),
+                            u.model_id,
+                            COALESCE(u.details->>'request_type', ''),
+                            u.created_at
+                     FROM user_usage_event u
                      LEFT JOIN agent_api_keys k ON u.api_key_id = k.id
                      WHERE u.instance_id = $1 AND u.created_at <= $2
                      ORDER BY u.created_at DESC
@@ -785,9 +776,16 @@ impl AgentRepository for PostgresAgentRepository {
             client
                 .query(
                     "SELECT u.id, u.user_id, u.instance_id, u.api_key_id, k.name,
-                            u.input_tokens, u.output_tokens, u.total_tokens, u.input_cost,
-                            u.output_cost, u.total_cost, u.model_id, u.request_type, u.created_at
-                     FROM agent_usage_log u
+                            COALESCE((u.details->>'input_tokens')::BIGINT, 0),
+                            COALESCE((u.details->>'output_tokens')::BIGINT, 0),
+                            u.quantity,
+                            COALESCE((u.details->>'input_cost')::BIGINT, 0),
+                            COALESCE((u.details->>'output_cost')::BIGINT, 0),
+                            COALESCE(u.cost_nano_usd, 0),
+                            u.model_id,
+                            COALESCE(u.details->>'request_type', ''),
+                            u.created_at
+                     FROM user_usage_event u
                      LEFT JOIN agent_api_keys k ON u.api_key_id = k.id
                      WHERE u.instance_id = $1
                      ORDER BY u.created_at DESC
@@ -804,14 +802,14 @@ impl AgentRepository for PostgresAgentRepository {
                 user_id: r.get(1),
                 instance_id: r.get(2),
                 api_key_id: r.get(3),
-                api_key_name: r.get(4),
+                api_key_name: r.get::<_, Option<String>>(4).unwrap_or_default(),
                 input_tokens: r.get(5),
                 output_tokens: r.get(6),
                 total_tokens: r.get(7),
                 input_cost: r.get(8),
                 output_cost: r.get(9),
                 total_cost: r.get(10),
-                model_id: r.get(11),
+                model_id: r.get::<_, Option<String>>(11).unwrap_or_default(),
                 request_type: r.get(12),
                 created_at: r.get(13),
             })
@@ -864,57 +862,6 @@ impl AgentRepository for PostgresAgentRepository {
                 &[&total_cost, &instance_id],
             )
             .await?;
-
-        Ok(())
-    }
-
-    /// ATOMIC: Log usage and update balance in a single transaction
-    /// This ensures financial consistency - if one fails, both are rolled back
-    async fn log_usage_and_update_balance(&self, usage: UsageLogEntry) -> anyhow::Result<()> {
-        let mut client = self.pool.get().await?;
-        let transaction = client.transaction().await?;
-
-        // Log usage
-        transaction
-            .execute(
-                "INSERT INTO agent_usage_log
-                 (id, user_id, instance_id, api_key_id, input_tokens, output_tokens, total_tokens,
-                  input_cost, output_cost, total_cost, model_id, request_type, created_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
-                &[
-                    &usage.id,
-                    &usage.user_id,
-                    &usage.instance_id,
-                    &usage.api_key_id,
-                    &usage.input_tokens,
-                    &usage.output_tokens,
-                    &usage.total_tokens,
-                    &usage.input_cost,
-                    &usage.output_cost,
-                    &usage.total_cost,
-                    &usage.model_id,
-                    &usage.request_type,
-                    &usage.created_at,
-                ],
-            )
-            .await?;
-
-        // Update balance (including token tracking)
-        transaction
-            .execute(
-                "UPDATE agent_balance
-                 SET total_spent = total_spent + $1,
-                     total_requests = total_requests + 1,
-                     total_tokens = total_tokens + $2,
-                     last_usage_at = NOW(),
-                     updated_at = NOW()
-                 WHERE instance_id = $3",
-                &[&usage.total_cost, &usage.total_tokens, &usage.instance_id],
-            )
-            .await?;
-
-        // Commit transaction
-        transaction.commit().await?;
 
         Ok(())
     }

@@ -265,10 +265,16 @@ impl BiMetricsRepository for PostgresBiMetricsRepository {
             ),
             UsageGroupBy::User => ("u.user_id", "CAST(u.user_id AS TEXT) as group_key"),
             UsageGroupBy::Instance => ("u.instance_id", "CAST(u.instance_id AS TEXT) as group_key"),
-            UsageGroupBy::Model => ("u.model_id", "u.model_id as group_key"),
+            UsageGroupBy::Model => (
+                "COALESCE(u.model_id, 'unknown')",
+                "COALESCE(u.model_id, 'unknown') as group_key",
+            ),
         };
 
         let mut qb = QueryBuilder::new();
+
+        // Only include agent rows (instance_id IS NOT NULL)
+        qb.conditions.push("u.instance_id IS NOT NULL".to_string());
 
         if let Some(sd) = filter.start_date {
             qb.push("u.created_at", ">=", sd);
@@ -298,14 +304,14 @@ impl BiMetricsRepository for PostgresBiMetricsRepository {
 
         let sql = format!(
             "SELECT {select_expr},
-                    COALESCE(SUM(u.input_tokens), 0)::BIGINT,
-                    COALESCE(SUM(u.output_tokens), 0)::BIGINT,
-                    COALESCE(SUM(u.total_tokens), 0)::BIGINT,
-                    COALESCE(SUM(u.input_cost), 0)::BIGINT,
-                    COALESCE(SUM(u.output_cost), 0)::BIGINT,
-                    COALESCE(SUM(u.total_cost), 0)::BIGINT,
+                    COALESCE(SUM((u.details->>'input_tokens')::BIGINT), 0)::BIGINT,
+                    COALESCE(SUM((u.details->>'output_tokens')::BIGINT), 0)::BIGINT,
+                    COALESCE(SUM(u.quantity), 0)::BIGINT,
+                    COALESCE(SUM((u.details->>'input_cost')::BIGINT), 0)::BIGINT,
+                    COALESCE(SUM((u.details->>'output_cost')::BIGINT), 0)::BIGINT,
+                    COALESCE(SUM(u.cost_nano_usd), 0)::BIGINT,
                     COUNT(*)
-             FROM agent_usage_log u
+             FROM user_usage_event u
              {join_clause}
              {where_clause}
              GROUP BY {group_expr}
@@ -359,6 +365,9 @@ impl BiMetricsRepository for PostgresBiMetricsRepository {
 
         let mut qb = QueryBuilder::new();
 
+        // Only include agent rows (instance_id IS NOT NULL)
+        qb.conditions.push("u.instance_id IS NOT NULL".to_string());
+
         if let Some(sd) = filter.start_date {
             qb.push("u.created_at", ">=", sd);
         }
@@ -396,10 +405,10 @@ impl BiMetricsRepository for PostgresBiMetricsRepository {
         let sql = format!(
             "SELECT {id_expr} as id,
                     {type_select},
-                    COALESCE(SUM(u.total_tokens), 0)::BIGINT as total_tokens,
-                    COALESCE(SUM(u.total_cost), 0)::BIGINT as total_cost_nano,
+                    COALESCE(SUM(u.quantity), 0)::BIGINT as total_tokens,
+                    COALESCE(SUM(u.cost_nano_usd), 0)::BIGINT as total_cost_nano,
                     COUNT(*) as request_count
-             FROM agent_usage_log u
+             FROM user_usage_event u
              {join_clause}
              {where_clause}
              GROUP BY {group_col}{extra_group}

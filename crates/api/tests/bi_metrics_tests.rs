@@ -57,7 +57,7 @@ async fn seed_bi_test_data(db: &database::Database, user_id: Uuid) -> (Uuid, Uui
         .await
         .expect("insert instance 2");
 
-    // Insert usage log entries for both instances
+    // Insert usage events for both instances into user_usage_event
     for i in 0..5 {
         let input_tokens: i64 = 100 + i * 10;
         let output_tokens: i64 = 50 + i * 5;
@@ -66,30 +66,34 @@ async fn seed_bi_test_data(db: &database::Database, user_id: Uuid) -> (Uuid, Uui
         let output_cost: i64 = output_tokens * 2000;
         let total_cost: i64 = input_cost + output_cost;
 
+        let details = serde_json::json!({
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "input_cost": input_cost,
+            "output_cost": output_cost,
+            "request_type": "chat",
+        });
+
         client
             .execute(
-                "INSERT INTO agent_usage_log
-                 (user_id, instance_id, input_tokens, output_tokens, total_tokens,
-                  input_cost, output_cost, total_cost, model_id, request_type)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                "INSERT INTO user_usage_event
+                 (user_id, metric_key, quantity, cost_nano_usd, model_id,
+                  instance_id, details)
+                 VALUES ($1, 'llm.tokens', $2, $3, $4, $5, $6)",
                 &[
                     &user_id,
-                    &inst1_id,
-                    &input_tokens,
-                    &output_tokens,
                     &total_tokens,
-                    &input_cost,
-                    &output_cost,
                     &total_cost,
                     &"gpt-4",
-                    &"chat",
+                    &inst1_id,
+                    &details,
                 ],
             )
             .await
-            .expect("insert usage log for instance 1");
+            .expect("insert usage event for instance 1");
     }
 
-    // Insert usage entries for instance 2 with a different model
+    // Insert usage events for instance 2 with a different model
     for i in 0..3 {
         let input_tokens: i64 = 200 + i * 20;
         let output_tokens: i64 = 100 + i * 10;
@@ -98,27 +102,31 @@ async fn seed_bi_test_data(db: &database::Database, user_id: Uuid) -> (Uuid, Uui
         let output_cost: i64 = output_tokens * 1000;
         let total_cost: i64 = input_cost + output_cost;
 
+        let details = serde_json::json!({
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "input_cost": input_cost,
+            "output_cost": output_cost,
+            "request_type": "chat",
+        });
+
         client
             .execute(
-                "INSERT INTO agent_usage_log
-                 (user_id, instance_id, input_tokens, output_tokens, total_tokens,
-                  input_cost, output_cost, total_cost, model_id, request_type)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                "INSERT INTO user_usage_event
+                 (user_id, metric_key, quantity, cost_nano_usd, model_id,
+                  instance_id, details)
+                 VALUES ($1, 'llm.tokens', $2, $3, $4, $5, $6)",
                 &[
                     &user_id,
-                    &inst2_id,
-                    &input_tokens,
-                    &output_tokens,
                     &total_tokens,
-                    &input_cost,
-                    &output_cost,
                     &total_cost,
                     &"claude-3",
-                    &"chat",
+                    &inst2_id,
+                    &details,
                 ],
             )
             .await
-            .expect("insert usage log for instance 2");
+            .expect("insert usage event for instance 2");
     }
 
     (inst1_id, inst2_id)
@@ -129,7 +137,7 @@ async fn cleanup(db: &database::Database, inst1_id: Uuid, inst2_id: Uuid) {
     let client = db.pool().get().await.expect("get pool client");
     let _ = client
         .execute(
-            "DELETE FROM agent_usage_log WHERE instance_id IN ($1, $2)",
+            "DELETE FROM user_usage_event WHERE instance_id IN ($1, $2)",
             &[&inst1_id, &inst2_id],
         )
         .await;

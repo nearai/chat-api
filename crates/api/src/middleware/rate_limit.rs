@@ -641,6 +641,20 @@ mod tests {
                 Ok(())
             }
 
+            async fn record_usage(
+                &self,
+                _params: services::user_usage::RecordUsageParams,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+
+            async fn record_usage_and_update_balance(
+                &self,
+                _params: services::user_usage::RecordUsageParams,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+
             async fn get_token_usage_sum(
                 &self,
                 _user_id: UserId,
@@ -697,6 +711,20 @@ mod tests {
                 _quantity: i64,
                 _cost_nano_usd: Option<i64>,
                 _model_id: Option<&str>,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+
+            async fn record_usage(
+                &self,
+                _params: services::user_usage::RecordUsageParams,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+
+            async fn record_usage_and_update_balance(
+                &self,
+                _params: services::user_usage::RecordUsageParams,
             ) -> anyhow::Result<()> {
                 Ok(())
             }
