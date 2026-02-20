@@ -30,6 +30,10 @@ const SUBSCRIPTION_REQUIRED_ERROR_MESSAGE: &str =
 const MONTHLY_TOKEN_LIMIT_EXCEEDED_MESSAGE: &str =
     "Monthly token limit exceeded. Upgrade your plan or wait for the next billing period.";
 
+/// Error message when monthly credit limit is exceeded
+const MONTHLY_CREDIT_LIMIT_EXCEEDED_MESSAGE: &str =
+    "Monthly credit limit exceeded. Upgrade your plan or purchase more credits.";
+
 /// State for subscription validation middleware
 #[derive(Clone)]
 pub struct SubscriptionState {
@@ -94,6 +98,24 @@ pub async fn subscription_middleware(
                     error: format!(
                         "{} You have used {} of {} tokens this period.",
                         MONTHLY_TOKEN_LIMIT_EXCEEDED_MESSAGE, used, limit
+                    ),
+                }),
+            )
+                .into_response())
+        }
+        Err(SubscriptionError::MonthlyCreditLimitExceeded { used, limit }) => {
+            tracing::info!(
+                "Blocked proxy access for user_id={}: monthly credit limit exceeded (used {} of {})",
+                user.user_id,
+                used,
+                limit
+            );
+            Err((
+                StatusCode::PAYMENT_REQUIRED,
+                Json(SubscriptionErrorResponse {
+                    error: format!(
+                        "{} You have used {} of {} credits this period.",
+                        MONTHLY_CREDIT_LIMIT_EXCEEDED_MESSAGE, used, limit
                     ),
                 }),
             )
