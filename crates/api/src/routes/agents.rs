@@ -32,11 +32,12 @@ async fn create_instance_streaming_response(
     image: Option<String>,
     name: Option<String>,
     ssh_pubkey: Option<String>,
+    max_allowed: u64,
 ) -> Result<Response, ApiError> {
     // Start streaming instance creation
     let rx = app_state
         .agent_service
-        .create_instance_from_agent_api_streaming(user_id, image, name, ssh_pubkey)
+        .create_instance_from_agent_api_streaming(user_id, image, name, ssh_pubkey, max_allowed)
         .await
         .map_err(|e| {
             tracing::error!("Failed to start instance creation stream: {}", e);
@@ -210,6 +211,7 @@ pub async fn create_instance(
             request.image,
             request.name,
             request.ssh_pubkey,
+            max_allowed,
         )
         .await;
     }

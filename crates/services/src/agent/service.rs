@@ -336,25 +336,33 @@ impl AgentServiceImpl {
 }
 
 /// Helper function to save instance data from lifecycle event to database
+///
+/// # Arguments
+/// * `max_allowed` - Maximum instances allowed by user's subscription plan. Used for TOCTOU re-check.
 async fn save_instance_from_event(
     repository: &dyn AgentRepository,
     user_id: UserId,
     instance_data: &serde_json::Value,
     api_key_id: &Uuid,
     ssh_pubkey: Option<&str>,
+    max_allowed: u64,
 ) -> anyhow::Result<AgentInstance> {
     // TOCTOU mitigation: Re-check instance limit before creating.
     // The route handler already checked this, but concurrent requests can race.
-    // This re-check happens just before the DB insert.
+    // This re-check happens just before the DB insert to enforce the limit.
     let (_instances, total_count) = repository.list_user_instances(user_id, 1, 0).await?;
-    if total_count > 0 {
-        // Limit re-check would go here if we had access to plan limits,
-        // but for now we log the concurrent creation as a warning
-        tracing::warn!(
-            "Instance creation proceeding while {} existing instances exist: user_id={}",
+    if total_count as u64 >= max_allowed {
+        tracing::error!(
+            "Instance creation rejected: subscription limit exceeded due to concurrent request. current={}, max={}, user_id={}",
             total_count,
+            max_allowed,
             user_id
         );
+        return Err(anyhow!(
+            "Agent instance limit exceeded. Current: {}, Max: {}",
+            total_count,
+            max_allowed
+        ));
     }
 
     let instance_name = instance_data
@@ -595,6 +603,7 @@ impl AgentService for AgentServiceImpl {
         image: Option<String>,
         name: Option<String>,
         ssh_pubkey: Option<String>,
+        max_allowed: u64,
     ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<serde_json::Value>>> {
         tracing::info!(
             "Creating instance from Agent API with streaming: user_id={}",
@@ -611,7 +620,7 @@ impl AgentService for AgentServiceImpl {
             .await?;
 
         // Call Agent API which returns a stream of lifecycle events
-        let mut rx = self
+        let mut rx = match self
             .call_agent_api_create_streaming(
                 &plaintext_key,
                 &self.nearai_api_url,
@@ -619,7 +628,27 @@ impl AgentService for AgentServiceImpl {
                 name.clone(),
                 ssh_pubkey.clone(),
             )
-            .await?;
+            .await
+        {
+            Ok(rx) => rx,
+            Err(e) => {
+                // Critical: Revoke the orphaned API key if streaming setup fails
+                tracing::error!(
+                    "Failed to start Agent API streaming: user_id={}, error={}. Revoking orphaned API key.",
+                    user_id,
+                    e
+                );
+                if let Err(cleanup_err) = self.repository.revoke_api_key(api_key.id).await {
+                    tracing::warn!(
+                        "Failed to revoke API key after streaming setup failure: user_id={}, api_key_id={}, error={}",
+                        user_id,
+                        api_key.id,
+                        cleanup_err
+                    );
+                }
+                return Err(e);
+            }
+        };
 
         // Create a new channel to forward events and handle database writes
         let (tx, output_rx) = tokio::sync::mpsc::channel(10);
@@ -628,6 +657,7 @@ impl AgentService for AgentServiceImpl {
 
         // Spawn a task to process events
         tokio::spawn(async move {
+            // TOCTOU mitigation: Capture max_allowed so the spawned task can enforce the subscription limit
             let mut created_event_processed = false;
 
             while let Some(event_result) = rx.recv().await {
@@ -645,6 +675,7 @@ impl AgentService for AgentServiceImpl {
                                             instance_data,
                                             &api_key_id,
                                             ssh_pubkey.as_deref(),
+                                            max_allowed,
                                         )
                                         .await
                                         {
