@@ -135,6 +135,12 @@ pub struct SystemConfigs {
     /// round-robin skips it. If all managers are full, instance creation is rejected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_instances_per_manager: Option<u64>,
+    /// Fixed tokens per token purchase (default 1_000_000). When None, token purchase is disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purchase_tokens_amount: Option<u64>,
+    /// Price per 1M tokens in USD (default 1.70).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_per_million_tokens: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -143,6 +149,8 @@ pub struct PartialSystemConfigs {
     pub rate_limit: Option<RateLimitConfig>,
     pub subscription_plans: Option<HashMap<String, SubscriptionPlanConfig>>,
     pub max_instances_per_manager: Option<u64>,
+    pub purchase_tokens_amount: Option<u64>,
+    pub price_per_million_tokens: Option<f64>,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -153,6 +161,8 @@ impl Default for SystemConfigs {
             rate_limit: RateLimitConfig::default(),
             subscription_plans: None,
             max_instances_per_manager: Some(200),
+            purchase_tokens_amount: None,
+            price_per_million_tokens: None,
         }
     }
 }
@@ -166,6 +176,12 @@ impl SystemConfigs {
             max_instances_per_manager: partial
                 .max_instances_per_manager
                 .or(self.max_instances_per_manager),
+            purchase_tokens_amount: partial
+                .purchase_tokens_amount
+                .or(self.purchase_tokens_amount),
+            price_per_million_tokens: partial
+                .price_per_million_tokens
+                .or(self.price_per_million_tokens),
         }
     }
 }

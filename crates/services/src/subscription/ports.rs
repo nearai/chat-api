@@ -90,6 +90,8 @@ pub enum SubscriptionError {
     WebhookVerificationFailed(String),
     /// Internal error
     InternalError(String),
+    /// Token purchase not configured (purchase_tokens_amount not set or Stripe not configured)
+    TokenPurchaseNotConfigured,
 }
 
 impl fmt::Display for SubscriptionError {
@@ -119,6 +121,9 @@ impl fmt::Display for SubscriptionError {
                 write!(f, "Webhook verification failed: {}", msg)
             }
             Self::InternalError(msg) => write!(f, "Internal error: {}", msg),
+            Self::TokenPurchaseNotConfigured => {
+                write!(f, "Token purchase is not configured")
+            }
         }
     }
 }
@@ -177,6 +182,19 @@ pub trait SubscriptionRepository: Send + Sync {
         txn: &tokio_postgres::Transaction<'_>,
         user_id: UserId,
     ) -> anyhow::Result<()>;
+}
+
+/// Repository trait for purchased token balances
+#[async_trait]
+pub trait PurchasedTokenRepository: Send + Sync {
+    /// Get the purchased token balance for a user. Returns None if the user has no record (0).
+    async fn get_balance(&self, user_id: UserId) -> anyhow::Result<Option<i64>>;
+
+    /// Add tokens to a user's purchased balance. Creates row if not exists.
+    async fn credit(&self, user_id: UserId, amount: i64) -> anyhow::Result<()>;
+
+    /// Deduct tokens from a user's purchased balance. Returns false if insufficient balance.
+    async fn debit(&self, user_id: UserId, amount: i64) -> anyhow::Result<bool>;
 }
 
 /// Repository trait for payment webhook events
@@ -279,5 +297,27 @@ pub trait SubscriptionService: Send + Sync {
     async fn admin_cancel_user_subscriptions(
         &self,
         user_id: UserId,
+    ) -> Result<(), SubscriptionError>;
+
+    /// Create a token purchase checkout session. Single fixed option (1M tokens at $1.70).
+    /// Returns the Stripe checkout URL.
+    async fn create_token_purchase_checkout(
+        &self,
+        user_id: UserId,
+        success_url: String,
+        cancel_url: String,
+    ) -> Result<String, SubscriptionError>;
+
+    /// Get the purchased token balance for a user.
+    async fn get_purchased_token_balance(&self, user_id: UserId) -> Result<i64, SubscriptionError>;
+
+    /// Debit purchased tokens when usage exceeds monthly limit in the period.
+    /// Called after recording usage; debits min(quantity, used - monthly_max).
+    async fn debit_purchased_tokens_if_overflow(
+        &self,
+        user_id: UserId,
+        quantity: i64,
+        period_start: DateTime<Utc>,
+        period_end: DateTime<Utc>,
     ) -> Result<(), SubscriptionError>;
 }
