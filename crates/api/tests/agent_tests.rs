@@ -350,6 +350,7 @@ async fn test_create_instance_respects_agent_instance_limit_max_1() {
             instance_token: Some("token1".to_string()),
             gateway_port: None,
             dashboard_url: None,
+            agent_api_base_url: None,
         })
         .await
         .expect("Should create first instance");

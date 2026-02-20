@@ -31,10 +31,10 @@ impl AgentRepository for PostgresAgentRepository {
 
         let row = client
             .query_one(
-                "INSERT INTO agent_instances (user_id, instance_id, name, public_ssh_key, instance_url, instance_token, gateway_port, dashboard_url)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                 RETURNING id, user_id, instance_id, name, public_ssh_key, instance_url, instance_token, gateway_port, dashboard_url, created_at, updated_at",
-                &[&params.user_id, &params.instance_id, &params.name, &params.public_ssh_key, &params.instance_url, &params.instance_token, &params.gateway_port, &params.dashboard_url],
+                "INSERT INTO agent_instances (user_id, instance_id, name, public_ssh_key, instance_url, instance_token, gateway_port, dashboard_url, agent_api_base_url)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                 RETURNING id, user_id, instance_id, name, public_ssh_key, instance_url, instance_token, gateway_port, dashboard_url, agent_api_base_url, created_at, updated_at",
+                &[&params.user_id, &params.instance_id, &params.name, &params.public_ssh_key, &params.instance_url, &params.instance_token, &params.gateway_port, &params.dashboard_url, &params.agent_api_base_url],
             )
             .await?;
 
@@ -48,8 +48,9 @@ impl AgentRepository for PostgresAgentRepository {
             instance_token: row.get(6),
             gateway_port: row.get(7),
             dashboard_url: row.get(8),
-            created_at: row.get(9),
-            updated_at: row.get(10),
+            agent_api_base_url: row.get(9),
+            created_at: row.get(10),
+            updated_at: row.get(11),
         };
 
         Ok(instance)
@@ -60,7 +61,7 @@ impl AgentRepository for PostgresAgentRepository {
 
         let row = client
             .query_opt(
-                "SELECT id, user_id, instance_id, name, public_ssh_key, instance_url, instance_token, gateway_port, dashboard_url, created_at, updated_at
+                "SELECT id, user_id, instance_id, name, public_ssh_key, instance_url, instance_token, gateway_port, dashboard_url, agent_api_base_url, created_at, updated_at
                  FROM agent_instances
                  WHERE id = $1 AND status != 'deleted'",
                 &[&instance_id],
@@ -77,8 +78,9 @@ impl AgentRepository for PostgresAgentRepository {
             instance_token: r.get(6),
             gateway_port: r.get(7),
             dashboard_url: r.get(8),
-            created_at: r.get(9),
-            updated_at: r.get(10),
+            agent_api_base_url: r.get(9),
+            created_at: r.get(10),
+            updated_at: r.get(11),
         }))
     }
 
@@ -90,7 +92,7 @@ impl AgentRepository for PostgresAgentRepository {
 
         let row = client
             .query_opt(
-                "SELECT id, user_id, instance_id, name, public_ssh_key, instance_url, instance_token, gateway_port, dashboard_url, created_at, updated_at
+                "SELECT id, user_id, instance_id, name, public_ssh_key, instance_url, instance_token, gateway_port, dashboard_url, agent_api_base_url, created_at, updated_at
                  FROM agent_instances
                  WHERE instance_id = $1 AND status != 'deleted'",
                 &[&instance_id],
@@ -107,8 +109,9 @@ impl AgentRepository for PostgresAgentRepository {
             instance_token: r.get(6),
             gateway_port: r.get(7),
             dashboard_url: r.get(8),
-            created_at: r.get(9),
-            updated_at: r.get(10),
+            agent_api_base_url: r.get(9),
+            created_at: r.get(10),
+            updated_at: r.get(11),
         }))
     }
 
@@ -122,7 +125,7 @@ impl AgentRepository for PostgresAgentRepository {
             .query_opt(
                 "SELECT oi.id, oi.user_id, oi.instance_id, oi.name, oi.public_ssh_key,
                         oi.instance_url, oi.instance_token, oi.gateway_port, oi.dashboard_url,
-                        oi.created_at, oi.updated_at,
+                        oi.agent_api_base_url, oi.created_at, oi.updated_at,
                         ak.id, ak.instance_id, ak.user_id, ak.name, ak.spend_limit,
                         ak.expires_at, ak.last_used_at, ak.is_active, ak.created_at, ak.updated_at
                  FROM agent_api_keys ak
@@ -143,20 +146,21 @@ impl AgentRepository for PostgresAgentRepository {
                 instance_token: r.get(6),
                 gateway_port: r.get(7),
                 dashboard_url: r.get(8),
-                created_at: r.get(9),
-                updated_at: r.get(10),
+                agent_api_base_url: r.get(9),
+                created_at: r.get(10),
+                updated_at: r.get(11),
             };
             let api_key = AgentApiKey {
-                id: r.get(11),
-                instance_id: r.get(12),
-                user_id: r.get(13),
-                name: r.get(14),
-                spend_limit: r.get(15),
-                expires_at: r.get(16),
-                last_used_at: r.get(17),
-                is_active: r.get(18),
-                created_at: r.get(19),
-                updated_at: r.get(20),
+                id: r.get(12),
+                instance_id: r.get(13),
+                user_id: r.get(14),
+                name: r.get(15),
+                spend_limit: r.get(16),
+                expires_at: r.get(17),
+                last_used_at: r.get(18),
+                is_active: r.get(19),
+                created_at: r.get(20),
+                updated_at: r.get(21),
             };
             (instance, api_key)
         }))
@@ -182,7 +186,7 @@ impl AgentRepository for PostgresAgentRepository {
         // Get paginated results (excluding soft-deleted instances)
         let rows = client
             .query(
-                "SELECT id, user_id, instance_id, name, public_ssh_key, instance_url, instance_token, gateway_port, dashboard_url, created_at, updated_at
+                "SELECT id, user_id, instance_id, name, public_ssh_key, instance_url, instance_token, gateway_port, dashboard_url, agent_api_base_url, created_at, updated_at
                  FROM agent_instances
                  WHERE user_id = $1 AND status != 'deleted'
                  ORDER BY created_at DESC
@@ -203,12 +207,35 @@ impl AgentRepository for PostgresAgentRepository {
                 instance_token: r.get(6),
                 gateway_port: r.get(7),
                 dashboard_url: r.get(8),
-                created_at: r.get(9),
-                updated_at: r.get(10),
+                agent_api_base_url: r.get(9),
+                created_at: r.get(10),
+                updated_at: r.get(11),
             })
             .collect();
 
         Ok((instances, total))
+    }
+
+    async fn count_user_instances(&self, user_id: UserId) -> anyhow::Result<i64> {
+        let client = self.pool.get().await?;
+        let row = client
+            .query_one(
+                "SELECT COUNT(*) FROM agent_instances WHERE user_id = $1 AND status != 'deleted'",
+                &[&user_id],
+            )
+            .await?;
+        Ok(row.get(0))
+    }
+
+    async fn count_instances_by_manager(&self, agent_api_base_url: &str) -> anyhow::Result<i64> {
+        let client = self.pool.get().await?;
+        let row = client
+            .query_one(
+                "SELECT COUNT(*) FROM agent_instances WHERE agent_api_base_url = $1 AND status != 'deleted'",
+                &[&agent_api_base_url],
+            )
+            .await?;
+        Ok(row.get(0))
     }
 
     async fn list_all_instances(
@@ -225,7 +252,7 @@ impl AgentRepository for PostgresAgentRepository {
 
         let rows = client
             .query(
-                "SELECT id, user_id, instance_id, name, public_ssh_key, instance_url, instance_token, gateway_port, dashboard_url, created_at, updated_at
+                "SELECT id, user_id, instance_id, name, public_ssh_key, instance_url, instance_token, gateway_port, dashboard_url, agent_api_base_url, created_at, updated_at
                  FROM agent_instances
                  ORDER BY created_at DESC
                  LIMIT $1 OFFSET $2",
@@ -245,8 +272,9 @@ impl AgentRepository for PostgresAgentRepository {
                 instance_token: r.get(6),
                 gateway_port: r.get(7),
                 dashboard_url: r.get(8),
-                created_at: r.get(9),
-                updated_at: r.get(10),
+                agent_api_base_url: r.get(9),
+                created_at: r.get(10),
+                updated_at: r.get(11),
             })
             .collect();
 
@@ -269,7 +297,7 @@ impl AgentRepository for PostgresAgentRepository {
                         "UPDATE agent_instances
                          SET name = $1, public_ssh_key = $2, updated_at = NOW()
                          WHERE id = $3
-                         RETURNING id, user_id, instance_id, name, public_ssh_key, instance_url, instance_token, gateway_port, dashboard_url, created_at, updated_at",
+                         RETURNING id, user_id, instance_id, name, public_ssh_key, instance_url, instance_token, gateway_port, dashboard_url, agent_api_base_url, created_at, updated_at",
                         &[&n, &key, &instance_id],
                     )
                     .await?;
@@ -284,8 +312,9 @@ impl AgentRepository for PostgresAgentRepository {
                     instance_token: row.get(6),
                     gateway_port: row.get(7),
                     dashboard_url: row.get(8),
-                    created_at: row.get(9),
-                    updated_at: row.get(10),
+                    agent_api_base_url: row.get(9),
+                    created_at: row.get(10),
+                    updated_at: row.get(11),
                 })
             }
             (Some(n), None) => {
@@ -294,7 +323,7 @@ impl AgentRepository for PostgresAgentRepository {
                         "UPDATE agent_instances
                          SET name = $1, updated_at = NOW()
                          WHERE id = $2
-                         RETURNING id, user_id, instance_id, name, public_ssh_key, instance_url, instance_token, gateway_port, dashboard_url, created_at, updated_at",
+                         RETURNING id, user_id, instance_id, name, public_ssh_key, instance_url, instance_token, gateway_port, dashboard_url, agent_api_base_url, created_at, updated_at",
                         &[&n, &instance_id],
                     )
                     .await?;
@@ -309,8 +338,9 @@ impl AgentRepository for PostgresAgentRepository {
                     instance_token: row.get(6),
                     gateway_port: row.get(7),
                     dashboard_url: row.get(8),
-                    created_at: row.get(9),
-                    updated_at: row.get(10),
+                    agent_api_base_url: row.get(9),
+                    created_at: row.get(10),
+                    updated_at: row.get(11),
                 })
             }
             (None, Some(key)) => {
@@ -319,7 +349,7 @@ impl AgentRepository for PostgresAgentRepository {
                         "UPDATE agent_instances
                          SET public_ssh_key = $1, updated_at = NOW()
                          WHERE id = $2
-                         RETURNING id, user_id, instance_id, name, public_ssh_key, instance_url, instance_token, gateway_port, dashboard_url, created_at, updated_at",
+                         RETURNING id, user_id, instance_id, name, public_ssh_key, instance_url, instance_token, gateway_port, dashboard_url, agent_api_base_url, created_at, updated_at",
                         &[&key, &instance_id],
                     )
                     .await?;
@@ -334,15 +364,16 @@ impl AgentRepository for PostgresAgentRepository {
                     instance_token: row.get(6),
                     gateway_port: row.get(7),
                     dashboard_url: row.get(8),
-                    created_at: row.get(9),
-                    updated_at: row.get(10),
+                    agent_api_base_url: row.get(9),
+                    created_at: row.get(10),
+                    updated_at: row.get(11),
                 })
             }
             (None, None) => {
                 // No changes, just return current instance
                 let row = client
                     .query_one(
-                        "SELECT id, user_id, instance_id, name, public_ssh_key, instance_url, instance_token, gateway_port, dashboard_url, created_at, updated_at
+                        "SELECT id, user_id, instance_id, name, public_ssh_key, instance_url, instance_token, gateway_port, dashboard_url, agent_api_base_url, created_at, updated_at
                          FROM agent_instances
                          WHERE id = $1",
                         &[&instance_id],
@@ -359,8 +390,9 @@ impl AgentRepository for PostgresAgentRepository {
                     instance_token: row.get(6),
                     gateway_port: row.get(7),
                     dashboard_url: row.get(8),
-                    created_at: row.get(9),
-                    updated_at: row.get(10),
+                    agent_api_base_url: row.get(9),
+                    created_at: row.get(10),
+                    updated_at: row.get(11),
                 })
             }
         }

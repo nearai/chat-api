@@ -158,14 +158,24 @@ async fn main() -> anyhow::Result<()> {
     // Initialize file service
     let file_service = Arc::new(FileServiceImpl::new(file_repo, proxy_service.clone()));
 
+    // Initialize system configs service (needed by agent service)
+    tracing::info!("Initializing system configs service...");
+    let system_configs_service = Arc::new(
+        services::system_configs::service::SystemConfigsServiceImpl::new(
+            system_configs_repo
+                as Arc<dyn services::system_configs::ports::SystemConfigsRepository>,
+        ),
+    );
+
     // Initialize agent service
     tracing::info!("Initializing agent service...");
     let agent_repo = db.agent_repository();
     let agent_service = Arc::new(services::agent::AgentServiceImpl::new(
         agent_repo.clone(),
-        config.agent.api_base_url.clone(),
-        config.agent.api_token.clone(),
+        config.agent.managers.clone(),
         config.agent.nearai_api_url.clone(),
+        system_configs_service.clone()
+            as Arc<dyn services::system_configs::ports::SystemConfigsService>,
     ));
 
     // Initialize agent proxy service
@@ -183,15 +193,6 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(services::user_usage::UserUsageServiceImpl::new(
             user_usage_repo as Arc<dyn services::user_usage::UserUsageRepository>,
         ));
-
-    // Initialize system configs service
-    tracing::info!("Initializing system configs service...");
-    let system_configs_service = Arc::new(
-        services::system_configs::service::SystemConfigsServiceImpl::new(
-            system_configs_repo
-                as Arc<dyn services::system_configs::ports::SystemConfigsRepository>,
-        ),
-    );
 
     // Initialize subscription service
     tracing::info!("Initializing subscription service...");

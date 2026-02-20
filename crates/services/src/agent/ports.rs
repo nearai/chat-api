@@ -24,6 +24,8 @@ pub struct AgentInstance {
     pub instance_token: Option<String>,
     pub gateway_port: Option<i32>,
     pub dashboard_url: Option<String>,
+    /// The agent manager URL that owns this instance (for routing operations)
+    pub agent_api_base_url: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -101,8 +103,11 @@ pub struct CreateInstanceParams {
     pub instance_token: Option<String>,
     pub gateway_port: Option<i32>,
     pub dashboard_url: Option<String>,
+    /// The agent manager URL that created this instance
+    pub agent_api_base_url: Option<String>,
 }
 
+#[cfg_attr(test, mockall::automock)]
 #[async_trait]
 pub trait AgentRepository: Send + Sync {
     // Instance operations
@@ -126,6 +131,12 @@ pub trait AgentRepository: Send + Sync {
         limit: i64,
         offset: i64,
     ) -> anyhow::Result<(Vec<AgentInstance>, i64)>;
+
+    /// Count active (non-deleted) instances for a user
+    async fn count_user_instances(&self, user_id: UserId) -> anyhow::Result<i64>;
+
+    /// Count active (non-deleted) instances assigned to a specific agent manager URL
+    async fn count_instances_by_manager(&self, agent_api_base_url: &str) -> anyhow::Result<i64>;
 
     /// List all instances (admin only); no user filter
     async fn list_all_instances(
@@ -220,12 +231,6 @@ pub trait AgentRepository: Send + Sync {
 /// Service trait for agent business logic
 #[async_trait]
 pub trait AgentService: Send + Sync {
-    // Instance management
-    async fn list_instances_from_agent_api(
-        &self,
-        user_id: UserId,
-    ) -> anyhow::Result<Vec<AgentInstance>>;
-
     /// List all instances from DB (admin only); correct user_id per instance
     async fn list_all_instances(
         &self,
@@ -241,15 +246,8 @@ pub trait AgentService: Send + Sync {
         ssh_pubkey: Option<String>,
     ) -> anyhow::Result<AgentInstance>;
 
-    /// Create instance with streaming lifecycle events
+    /// Create instance with streaming lifecycle events.
     /// Returns a receiver that yields raw JSON events as they occur during instance creation.
-    ///
-    /// **Note**: Events are streamed as untyped `serde_json::Value` (raw JSON proxy).
-    /// The frontend is responsible for deserializing into the typed `LifecycleEvent` struct.
-    /// This design allows flexibility if the Agent API event schema changes.
-    /// If strict validation is needed, consider adding a deserialization layer before returning.
-    ///
-    /// This is useful for real-time UI updates instead of a loading bar.
     ///
     /// **TOCTOU Mitigation**: The `max_allowed` parameter enables re-checking the instance limit
     /// just before instance creation in the spawned task, preventing race conditions from concurrent requests.
@@ -284,16 +282,22 @@ pub trait AgentService: Send + Sync {
     ) -> anyhow::Result<(Vec<AgentInstance>, i64)>;
 
     /// Fetch instance enrichment (status, ssh_command) from Agent API GET /instances/{name}.
+    /// When `agent_api_base_url` is provided, queries only the owning manager (O(1)).
+    /// Falls back to fan-out across all managers when the URL is None (legacy instances).
     /// Returns None if the Agent API call fails or returns 404.
     async fn get_instance_enrichment_from_agent_api(
         &self,
         agent_api_name: &str,
+        agent_api_base_url: Option<&str>,
     ) -> Option<AgentApiInstanceEnrichment>;
 
-    /// Fetch all instance enrichments from Agent API GET /instances (name -> enrichment).
-    /// Returns empty map if the call fails; used to enrich list responses efficiently.
-    async fn get_all_instance_enrichments_from_agent_api(
+    /// Fetch instance enrichments from the Agent API for a set of instances.
+    /// Groups instances by their stored `agent_api_base_url` and queries only the
+    /// relevant managers. Returns name -> enrichment map.
+    /// Instances without a stored manager URL are queried against the first manager as fallback.
+    async fn get_instance_enrichments(
         &self,
+        instances: &[AgentInstance],
     ) -> std::collections::HashMap<String, AgentApiInstanceEnrichment>;
 
     async fn update_instance(

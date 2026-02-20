@@ -55,3 +55,6 @@ utoipa = ["dep:utoipa"]
 tokio-test = "0.4"
 async-trait = "0.1"
 futures = "0.3"
+wiremock = "0.6"
+tokio = { version = "1", features = ["full"] }
+mockall = "0.13"

@@ -131,6 +131,10 @@ pub struct SystemConfigs {
     /// Subscription plan configurations (plan name -> config with providers, agent_instances, monthly_tokens)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subscription_plans: Option<HashMap<String, SubscriptionPlanConfig>>,
+    /// Maximum number of agent instances per manager. When a manager reaches this limit,
+    /// round-robin skips it. If all managers are full, instance creation is rejected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_instances_per_manager: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -138,6 +142,7 @@ pub struct PartialSystemConfigs {
     pub default_model: Option<String>,
     pub rate_limit: Option<RateLimitConfig>,
     pub subscription_plans: Option<HashMap<String, SubscriptionPlanConfig>>,
+    pub max_instances_per_manager: Option<u64>,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -147,6 +152,7 @@ impl Default for SystemConfigs {
             default_model: None,
             rate_limit: RateLimitConfig::default(),
             subscription_plans: None,
+            max_instances_per_manager: Some(200),
         }
     }
 }
@@ -157,6 +163,9 @@ impl SystemConfigs {
             default_model: partial.default_model.or(self.default_model),
             rate_limit: partial.rate_limit.unwrap_or(self.rate_limit),
             subscription_plans: partial.subscription_plans.or(self.subscription_plans),
+            max_instances_per_manager: partial
+                .max_instances_per_manager
+                .or(self.max_instances_per_manager),
         }
     }
 }

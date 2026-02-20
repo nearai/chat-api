@@ -34,7 +34,6 @@ async fn create_instance_streaming_response(
     ssh_pubkey: Option<String>,
     max_allowed: u64,
 ) -> Result<Response, ApiError> {
-    // Start streaming instance creation
     let rx = app_state
         .agent_service
         .create_instance_from_agent_api_streaming(user_id, image, name, ssh_pubkey, max_allowed)
@@ -44,7 +43,6 @@ async fn create_instance_streaming_response(
             ApiError::internal_server_error("Failed to start instance creation")
         })?;
 
-    // Convert mpsc receiver to stream using tokio_stream
     use futures::stream::StreamExt;
     use tokio_stream::wrappers::ReceiverStream;
 
@@ -62,14 +60,12 @@ async fn create_instance_streaming_response(
                 }
                 Err(e) => {
                     tracing::error!("Error in instance creation stream: {}", e);
-                    // Send generic error to client; internal details remain in logs per CLAUDE.md security policy
                     let error_json =
                         serde_json::json!({"error": "Instance creation failed"}).to_string();
                     Ok(axum::body::Bytes::from(format!("data: {}\n\n", error_json)))
                 }
             }
         })
-        // Add terminal event so clients can distinguish stream end from connection drop
         .chain(futures::stream::once(async {
             Ok(axum::body::Bytes::from("data: [DONE]\n\n"))
         }));
@@ -95,7 +91,7 @@ async fn create_instance_streaming_response(
 /// - Unsubscribed users: no instances allowed (active subscription required)
 ///
 /// Supports two response modes via content negotiation:
-/// - Accept: text/event-stream → Returns SSE stream of lifecycle events (stage: created, container_starting, healthy, ready)
+/// - Accept: text/event-stream → Returns SSE stream of lifecycle events
 /// - Accept: application/json (default) → Returns 201 with complete InstanceResponse
 #[utoipa::path(
     post,
@@ -103,8 +99,8 @@ async fn create_instance_streaming_response(
     tag = "Agents",
     request_body = CreateInstanceRequest,
     responses(
+        (status = 200, description = "Instance creation stream (SSE)"),
         (status = 201, description = "Instance created", body = InstanceResponse),
-        (status = 200, description = "Instance creation stream (SSE)", body = LifecycleEvent),
         (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 402, description = "Payment required - instance limit exceeded for plan", body = crate::error::ApiErrorResponse),
@@ -123,7 +119,7 @@ pub async fn create_instance(
     // Get user's active subscriptions
     let subscriptions = app_state
         .subscription_service
-        .get_user_subscriptions(user.user_id, true) // active_only = true
+        .get_user_subscriptions(user.user_id, true)
         .await
         .map_err(|e| {
             tracing::error!(
@@ -164,7 +160,7 @@ pub async fn create_instance(
         _ => 0,
     };
 
-    // Enforce the limit using an efficient count query (limit=1 fetches minimal rows, total comes from COUNT(*))
+    // Enforce the limit
     let (_, total) = app_state
         .agent_service
         .list_instances(user.user_id, 1, 0)
@@ -196,16 +192,16 @@ pub async fn create_instance(
         ));
     }
 
-    // Check Accept header for SSE streaming preference (supports multiple Accept headers or comma-delimited values)
-    let accepts_sse = headers.get_all("accept").iter().any(|v| {
+    // Content negotiation: SSE streaming or JSON response
+    // Use get_all to handle multiple Accept headers per HTTP spec
+    let wants_stream = headers.get_all("accept").iter().any(|v| {
         v.to_str()
             .map(|s| s.contains("text/event-stream"))
             .unwrap_or(false)
     });
 
-    if accepts_sse {
-        // Return SSE streaming response
-        return create_instance_streaming_response(
+    if wants_stream {
+        create_instance_streaming_response(
             app_state,
             user.user_id,
             request.image,
@@ -213,30 +209,32 @@ pub async fn create_instance(
             request.ssh_pubkey,
             max_allowed,
         )
-        .await;
-    }
-
-    // Default: Return JSON response
-    let instance = app_state
-        .agent_service
-        .create_instance_from_agent_api(
-            user.user_id,
-            request.image,
-            request.name,
-            request.ssh_pubkey,
-        )
         .await
-        .map_err(|e| {
-            tracing::error!(
-                "Failed to create instance: user_id={}, error={}",
+    } else {
+        let instance = app_state
+            .agent_service
+            .create_instance_from_agent_api(
                 user.user_id,
-                e
-            );
-            ApiError::internal_server_error("Failed to create instance")
-        })?;
+                request.image,
+                request.name,
+                request.ssh_pubkey,
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    "Failed to create instance: user_id={}, error={}",
+                    user.user_id,
+                    e
+                );
+                ApiError::internal_server_error("Failed to create instance")
+            })?;
 
-    // Return idiomatic axum response with automatic content-type and status handling
-    Ok((StatusCode::CREATED, Json(InstanceResponse::from(instance))).into_response())
+        Ok((
+            StatusCode::CREATED,
+            Json::<InstanceResponse>(instance.into()),
+        )
+            .into_response())
+    }
 }
 
 /// List user's agent instances
@@ -286,7 +284,7 @@ pub async fn list_instances(
 
     let enrichment_map = app_state
         .agent_service
-        .get_all_instance_enrichments_from_agent_api()
+        .get_instance_enrichments(&instances)
         .await;
 
     let paginated: Vec<InstanceResponse> = instances
@@ -351,7 +349,10 @@ pub async fn get_instance(
 
     let enrichment = app_state
         .agent_service
-        .get_instance_enrichment_from_agent_api(&instance.name)
+        .get_instance_enrichment_from_agent_api(
+            &instance.name,
+            instance.agent_api_base_url.as_deref(),
+        )
         .await;
 
     Ok(Json(crate::models::instance_response_with_enrichment(
@@ -815,10 +816,7 @@ pub async fn start_instance(
     Response::builder()
         .status(StatusCode::OK)
         .body(axum::body::Body::empty())
-        .map_err(|e| {
-            tracing::error!("Failed to build response: {}", e);
-            ApiError::internal_server_error("Failed to construct response")
-        })
+        .map_err(|_| ApiError::internal_server_error("Failed to construct response"))
 }
 
 /// Stop an agent instance
@@ -887,10 +885,7 @@ pub async fn stop_instance(
     Response::builder()
         .status(StatusCode::OK)
         .body(axum::body::Body::empty())
-        .map_err(|e| {
-            tracing::error!("Failed to build response: {}", e);
-            ApiError::internal_server_error("Failed to construct response")
-        })
+        .map_err(|_| ApiError::internal_server_error("Failed to construct response"))
 }
 
 /// Restart an agent instance
@@ -959,8 +954,5 @@ pub async fn restart_instance(
     Response::builder()
         .status(StatusCode::OK)
         .body(axum::body::Body::empty())
-        .map_err(|e| {
-            tracing::error!("Failed to build response: {}", e);
-            ApiError::internal_server_error("Failed to construct response")
-        })
+        .map_err(|_| ApiError::internal_server_error("Failed to construct response"))
 }
