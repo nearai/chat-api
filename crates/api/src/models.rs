@@ -2,7 +2,7 @@ use crate::consts::SYSTEM_PROMPT_MAX_LEN;
 use crate::ApiError;
 use serde::{Deserialize, Serialize};
 use services::file::ports::FileData;
-use services::system_configs::ports::SubscriptionPlanConfig;
+use services::system_configs::ports::{CreditsConfig, SubscriptionPlanConfig};
 use services::UserId;
 use std::collections::HashMap;
 use utoipa::ToSchema;
@@ -645,12 +645,15 @@ pub struct UpsertSystemConfigsRequest {
     /// Rate limit configuration
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate_limit: Option<RateLimitConfig>,
-    /// Subscription plan configurations (plan name -> config with providers, agent_instances, monthly_tokens)
+    /// Subscription plan configurations (plan name -> config with providers, agent_instances, monthly_credits)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subscription_plans: Option<HashMap<String, SubscriptionPlanConfig>>,
     /// Maximum number of agent instances per manager (round-robin skips full managers)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_instances_per_manager: Option<u64>,
+    /// Credit purchase configuration (Stripe Price ID for buying credits)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credits: Option<CreditsConfig>,
 }
 
 impl TryFrom<UpsertSystemConfigsRequest> for services::system_configs::ports::PartialSystemConfigs {
@@ -668,6 +671,7 @@ impl TryFrom<UpsertSystemConfigsRequest> for services::system_configs::ports::Pa
             rate_limit,
             subscription_plans: req.subscription_plans,
             max_instances_per_manager: req.max_instances_per_manager,
+            credits: req.credits,
         })
     }
 }
