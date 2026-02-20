@@ -81,22 +81,6 @@ pub async fn subscription_middleware(
             )
                 .into_response())
         }
-        Err(SubscriptionError::NoMonthlyCreditsConfigured(plan)) => {
-            tracing::warn!(
-                "Blocked proxy access for user_id={}: plan '{}' has no monthly_credits configured",
-                user.user_id,
-                plan
-            );
-            Err((
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(SubscriptionErrorResponse {
-                    error:
-                        "Subscription plans are not properly configured. Please try again later."
-                            .to_string(),
-                }),
-            )
-                .into_response())
-        }
         Err(SubscriptionError::MonthlyCreditLimitExceeded { used, limit }) => {
             tracing::info!(
                 "Blocked proxy access for user_id={}: monthly credit limit exceeded (used {} of {})",

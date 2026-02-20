@@ -78,9 +78,6 @@ pub async fn get_credits(
             SubscriptionError::CreditsNotConfigured => {
                 ApiError::service_unavailable("Credit purchase is not configured")
             }
-            SubscriptionError::NoMonthlyCreditsConfigured(plan) => ApiError::service_unavailable(
-                format!("Plan '{}' has no monthly credits configured", plan),
-            ),
             SubscriptionError::DatabaseError(msg) => {
                 tracing::error!(error = ?msg, "Database error getting credits");
                 ApiError::internal_server_error("Failed to get credits")

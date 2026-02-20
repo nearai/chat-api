@@ -92,8 +92,6 @@ pub enum SubscriptionError {
     InternalError(String),
     /// Credit purchase not configured (missing credit_price_id)
     CreditsNotConfigured,
-    /// Plan has no monthly_credits configured (required for access)
-    NoMonthlyCreditsConfigured(String),
     /// Invalid credits amount for purchase
     InvalidCredits(String),
 }
@@ -126,9 +124,6 @@ impl fmt::Display for SubscriptionError {
             }
             Self::InternalError(msg) => write!(f, "Internal error: {}", msg),
             Self::CreditsNotConfigured => write!(f, "Credit purchase is not configured"),
-            Self::NoMonthlyCreditsConfigured(plan) => {
-                write!(f, "Plan '{}' has no monthly_credits configured", plan)
-            }
             Self::InvalidCredits(msg) => write!(f, "Invalid credits: {}", msg),
         }
     }
@@ -240,7 +235,7 @@ pub struct SubscriptionPlan {
     /// Agent instance limits (e.g. { "max": 1 })
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_instances: Option<PlanLimitConfig>,
-    /// Monthly credit limits (e.g. { "max": 1000000 }). Used for quota enforcement.
+    /// Monthly credit limits in nano-USD (e.g. { "max": 1000000000 } for $1; $1 = 1_000_000_000 nano-USD). When missing, defaults to 1_000_000_000. Used for quota enforcement.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub monthly_credits: Option<PlanLimitConfig>,
 }

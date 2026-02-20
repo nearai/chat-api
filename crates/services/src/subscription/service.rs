@@ -43,6 +43,8 @@ struct CachedCreditLimit {
 }
 
 const TTL_CACHE_SECS: u64 = 600; // 10 minutes
+/// Default monthly credits when plan has no monthly_credits config. 1 USD in nano-dollars ($1 = 1_000_000_000).
+const DEFAULT_MONTHLY_CREDITS_NANO_USD: u64 = 1_000_000_000;
 
 pub struct SubscriptionServiceImpl {
     db_pool: deadpool_postgres::Pool,
@@ -1099,9 +1101,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                             .get(&plan_name)
                             .and_then(|c| c.monthly_credits.as_ref())
                             .map(|l| l.max)
-                            .ok_or_else(|| {
-                                SubscriptionError::NoMonthlyCreditsConfigured(plan_name.clone())
-                            })?;
+                            .unwrap_or(DEFAULT_MONTHLY_CREDITS_NANO_USD);
                         let period_end = sub.current_period_end;
                         let period_start = sub_one_month_same_day(period_end);
                         (plan_credits, period_start, period_end)
@@ -1111,9 +1111,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                             .get("free")
                             .and_then(|c| c.monthly_credits.as_ref())
                             .map(|l| l.max)
-                            .ok_or_else(|| {
-                                SubscriptionError::NoMonthlyCreditsConfigured("free".to_string())
-                            })?;
+                            .unwrap_or(DEFAULT_MONTHLY_CREDITS_NANO_USD);
                         let (period_start, period_end) = current_calendar_month_period(Utc::now());
                         (plan_credits, period_start, period_end)
                     }
@@ -1142,13 +1140,13 @@ impl SubscriptionService for SubscriptionServiceImpl {
             }
         };
 
-        // 2. Get used credits (token_sum) in the period
+        // 2. Get used credits (cost_nano_usd) in the period
         let used_credits = self
             .user_usage_repo
             .get_usage_by_user_id(user_id, Some(period_start), Some(period_end))
             .await
             .map_err(|e| SubscriptionError::InternalError(e.to_string()))?
-            .map(|s| s.token_sum)
+            .map(|s| s.cost_nano_usd)
             .unwrap_or(0);
 
         // 3. Enforce limit
@@ -1386,7 +1384,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     .get(&plan_name)
                     .and_then(|c| c.monthly_credits.as_ref())
                     .map(|l| l.max)
-                    .unwrap_or(0);
+                    .unwrap_or(DEFAULT_MONTHLY_CREDITS_NANO_USD);
                 let period_end = sub.current_period_end;
                 let period_start = sub_one_month_same_day(period_end);
                 (plan_credits, period_start, period_end)
@@ -1396,7 +1394,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     .get("free")
                     .and_then(|c| c.monthly_credits.as_ref())
                     .map(|l| l.max)
-                    .unwrap_or(0);
+                    .unwrap_or(DEFAULT_MONTHLY_CREDITS_NANO_USD);
                 let (period_start, period_end) = current_calendar_month_period(Utc::now());
                 (plan_credits, period_start, period_end)
             }
@@ -1413,7 +1411,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .get_usage_by_user_id(user_id, Some(period_start), Some(period_end))
             .await
             .map_err(|e| SubscriptionError::InternalError(e.to_string()))?
-            .map(|s| s.token_sum)
+            .map(|s| s.cost_nano_usd)
             .unwrap_or(0);
 
         let effective_max_credits = plan_credits as i64 + balance;
