@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
+use uuid::Uuid;
 
 use crate::UserId;
 
@@ -25,6 +26,19 @@ pub const METRIC_KEY_LLM_TOKENS: &str = "llm.tokens";
 pub const METRIC_KEY_IMAGE_GENERATE: &str = "image.generate";
 pub const METRIC_KEY_IMAGE_EDIT: &str = "image.edit";
 
+/// Parameters for recording a usage event with optional agent-specific fields.
+#[derive(Debug, Clone)]
+pub struct RecordUsageParams {
+    pub user_id: UserId,
+    pub metric_key: String,
+    pub quantity: i64,
+    pub cost_nano_usd: Option<i64>,
+    pub model_id: Option<String>,
+    pub instance_id: Option<Uuid>,
+    pub api_key_id: Option<Uuid>,
+    pub details: Option<serde_json::Value>,
+}
+
 /// Repository interface for per-user usage events (tokens, images, cost).
 #[async_trait]
 pub trait UserUsageRepository: Send + Sync {
@@ -36,6 +50,15 @@ pub trait UserUsageRepository: Send + Sync {
         quantity: i64,
         cost_nano_usd: Option<i64>,
         model_id: Option<&str>,
+    ) -> anyhow::Result<()>;
+
+    /// Record a usage event with all fields (including agent-specific columns).
+    async fn record_usage(&self, params: RecordUsageParams) -> anyhow::Result<()>;
+
+    /// Record usage and update agent_balance atomically in a single transaction.
+    async fn record_usage_and_update_balance(
+        &self,
+        params: RecordUsageParams,
     ) -> anyhow::Result<()>;
 
     /// Sum of quantity for llm.tokens in the sliding window.
@@ -83,6 +106,15 @@ pub trait UserUsageService: Send + Sync {
         quantity: i64,
         cost_nano_usd: Option<i64>,
         model_id: Option<&str>,
+    ) -> anyhow::Result<()>;
+
+    /// Record a usage event with all fields (including agent-specific columns).
+    async fn record_usage(&self, params: RecordUsageParams) -> anyhow::Result<()>;
+
+    /// Record usage and update agent_balance atomically in a single transaction.
+    async fn record_usage_and_update_balance(
+        &self,
+        params: RecordUsageParams,
     ) -> anyhow::Result<()>;
 
     async fn get_token_usage_sum(

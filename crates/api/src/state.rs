@@ -69,4 +69,6 @@ pub struct AppState {
     pub model_pricing_cache: crate::model_pricing::ModelPricingCache,
     /// Rate limit state for hot-reloadable rate limit configuration
     pub rate_limit_state: crate::middleware::RateLimitState,
+    /// BI metrics service for deployment and usage analytics
+    pub bi_metrics_service: Arc<dyn services::bi_metrics::BiMetricsService>,
 }

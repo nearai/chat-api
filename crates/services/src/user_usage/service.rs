@@ -5,7 +5,7 @@ use chrono::{DateTime, Duration, Utc};
 
 use crate::UserId;
 
-use super::ports::{UserUsageRepository, UserUsageService};
+use super::ports::{RecordUsageParams, UserUsageRepository, UserUsageService};
 
 /// Default implementation of `UserUsageService` backed by a `UserUsageRepository`.
 ///
@@ -34,6 +34,17 @@ impl UserUsageService for UserUsageServiceImpl {
         self.repo
             .record_usage_event(user_id, metric_key, quantity, cost_nano_usd, model_id)
             .await
+    }
+
+    async fn record_usage(&self, params: RecordUsageParams) -> anyhow::Result<()> {
+        self.repo.record_usage(params).await
+    }
+
+    async fn record_usage_and_update_balance(
+        &self,
+        params: RecordUsageParams,
+    ) -> anyhow::Result<()> {
+        self.repo.record_usage_and_update_balance(params).await
     }
 
     async fn get_token_usage_sum(

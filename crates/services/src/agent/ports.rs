@@ -212,8 +212,6 @@ pub trait AgentRepository: Send + Sync {
     async fn update_api_key_last_used(&self, api_key_id: Uuid) -> anyhow::Result<()>;
 
     // Usage logging
-    async fn log_usage(&self, usage: UsageLogEntry) -> anyhow::Result<()>;
-
     async fn get_instance_usage(
         &self,
         instance_id: Uuid,
@@ -234,10 +232,6 @@ pub trait AgentRepository: Send + Sync {
         instance_id: Uuid,
         total_cost: i64,
     ) -> anyhow::Result<()>;
-
-    /// Log usage and update balance atomically in a single database transaction.
-    /// This prevents race conditions where usage is logged but balance update fails (or vice versa).
-    async fn log_usage_and_update_balance(&self, usage: UsageLogEntry) -> anyhow::Result<()>;
 
     async fn get_user_total_spending(&self, user_id: UserId) -> anyhow::Result<i64>;
 }
@@ -386,16 +380,6 @@ pub trait AgentService: Send + Sync {
     async fn validate_and_use_api_key(&self, api_key: &str) -> anyhow::Result<AgentApiKey>;
 
     // Usage tracking and balance
-    async fn record_usage(
-        &self,
-        api_key: &AgentApiKey,
-        input_tokens: i64,
-        output_tokens: i64,
-        model_id: String,
-        request_type: String,
-        pricing: TokenPricing,
-    ) -> anyhow::Result<()>;
-
     async fn get_instance_usage(
         &self,
         instance_id: Uuid,
