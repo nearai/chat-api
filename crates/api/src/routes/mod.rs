@@ -7,15 +7,8 @@ pub mod oauth;
 pub mod subscriptions;
 pub mod users;
 
-// ============ Validation Constants ============
-
-/// Valid service types for agent instances.
-pub const VALID_SERVICE_TYPES: &[&str] = &["openclaw", "ironclaw"];
-
-/// Validates that a service type is in the list of allowed values.
-pub fn is_valid_service_type(service_type: &str) -> bool {
-    VALID_SERVICE_TYPES.contains(&service_type)
-}
+// Re-export validation constants from services crate for API layer usage
+pub use services::agent::ports::{is_valid_service_type, VALID_SERVICE_TYPES};
 
 use axum::{middleware::from_fn_with_state, routing::get, Json, Router};
 use http::header::{HeaderName, ACCEPT, AUTHORIZATION, CONTENT_TYPE};

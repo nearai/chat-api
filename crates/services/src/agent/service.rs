@@ -10,8 +10,9 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use super::ports::{
-    AgentApiInstanceEnrichment, AgentApiKey, AgentInstance, AgentRepository, AgentService,
-    CreateInstanceParams, InstanceBalance, TokenPricing, UsageLogEntry,
+    is_valid_service_type, AgentApiInstanceEnrichment, AgentApiKey, AgentInstance, AgentRepository,
+    AgentService, CreateInstanceParams, InstanceBalance, TokenPricing, UsageLogEntry,
+    VALID_SERVICE_TYPES,
 };
 
 /// Maximum size for the Agent API SSE stream buffer (100 KB).
@@ -20,14 +21,6 @@ const MAX_BUFFER_SIZE: usize = 100 * 1024;
 
 /// Default service type for agent instances when not specified.
 const DEFAULT_SERVICE_TYPE: &str = "openclaw";
-
-/// Valid service types for agent instances.
-const VALID_SERVICE_TYPES: &[&str] = &["openclaw", "ironclaw"];
-
-/// Validates that a service type is in the list of allowed values.
-fn is_valid_service_type(service_type: &str) -> bool {
-    VALID_SERVICE_TYPES.contains(&service_type)
-}
 
 /// Parameters for Agent API instance creation.
 struct AgentApiCreateParams {
@@ -566,6 +559,17 @@ impl AgentService for AgentServiceImpl {
             .await?;
 
         // Apply default service type if not provided
+        // Defense-in-depth: validate service type early to prevent invalid values reaching Agent API
+        if let Some(ref st) = service_type {
+            if !is_valid_service_type(st) {
+                return Err(anyhow!(
+                    "Invalid service type '{}'. Valid types are: {}",
+                    st,
+                    VALID_SERVICE_TYPES.join(", ")
+                ));
+            }
+        }
+
         let service_type_for_api = service_type
             .clone()
             .or_else(|| Some(DEFAULT_SERVICE_TYPE.to_string()));
@@ -696,6 +700,17 @@ impl AgentService for AgentServiceImpl {
             .await?;
 
         // Apply default service type if not provided
+        // Defense-in-depth: validate service type early to prevent invalid values reaching Agent API
+        if let Some(ref st) = service_type {
+            if !is_valid_service_type(st) {
+                return Err(anyhow!(
+                    "Invalid service type '{}'. Valid types are: {}",
+                    st,
+                    VALID_SERVICE_TYPES.join(", ")
+                ));
+            }
+        }
+
         let service_type_for_api = service_type
             .clone()
             .or_else(|| Some(DEFAULT_SERVICE_TYPE.to_string()));

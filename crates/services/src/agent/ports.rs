@@ -5,6 +5,16 @@ use uuid::Uuid;
 
 use crate::UserId;
 
+// ============ Service Type Validation ============
+
+/// Valid service types for agent instances.
+pub const VALID_SERVICE_TYPES: &[&str] = &["openclaw", "ironclaw"];
+
+/// Validates that a service type is in the list of allowed values.
+pub fn is_valid_service_type(service_type: &str) -> bool {
+    VALID_SERVICE_TYPES.contains(&service_type)
+}
+
 /// Enrichment data from Agent API (compose-api) for instance responses
 #[derive(Debug, Clone, Default)]
 pub struct AgentApiInstanceEnrichment {
