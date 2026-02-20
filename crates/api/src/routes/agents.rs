@@ -2,7 +2,7 @@ use crate::{error::ApiError, middleware::AuthenticatedUser, models::*, state::Ap
 use axum::{
     extract::{Extension, Path, Query, State},
     http::{HeaderMap, StatusCode},
-    response::Response,
+    response::{IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
 };
@@ -47,26 +47,31 @@ async fn create_instance_streaming_response(
     use futures::stream::StreamExt;
     use tokio_stream::wrappers::ReceiverStream;
 
-    let stream = ReceiverStream::new(rx).then(|event_result| async move {
-        match event_result {
-            Ok(event) => {
-                if let Ok(json_str) = serde_json::to_string(&event) {
-                    Ok(axum::body::Bytes::from(format!("data: {}\n\n", json_str)))
-                } else {
-                    Err(axum::Error::new(anyhow::anyhow!(
-                        "Failed to serialize event"
-                    )))
+    let stream = ReceiverStream::new(rx)
+        .then(|event_result| async move {
+            match event_result {
+                Ok(event) => {
+                    if let Ok(json_str) = serde_json::to_string(&event) {
+                        Ok(axum::body::Bytes::from(format!("data: {}\n\n", json_str)))
+                    } else {
+                        Err(axum::Error::new(anyhow::anyhow!(
+                            "Failed to serialize event"
+                        )))
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Error in instance creation stream: {}", e);
+                    // Send generic error to client; internal details remain in logs per CLAUDE.md security policy
+                    let error_json =
+                        serde_json::json!({"error": "Instance creation failed"}).to_string();
+                    Ok(axum::body::Bytes::from(format!("data: {}\n\n", error_json)))
                 }
             }
-            Err(e) => {
-                tracing::error!("Error in instance creation stream: {}", e);
-                // Send generic error to client; internal details remain in logs per CLAUDE.md security policy
-                let error_json =
-                    serde_json::json!({"error": "Instance creation failed"}).to_string();
-                Ok(axum::body::Bytes::from(format!("data: {}\n\n", error_json)))
-            }
-        }
-    });
+        })
+        // Add terminal event so clients can distinguish stream end from connection drop
+        .chain(futures::stream::once(async {
+            Ok(axum::body::Bytes::from("data: [DONE]\n\n"))
+        }));
 
     let body = axum::body::Body::from_stream(stream);
 
@@ -190,12 +195,12 @@ pub async fn create_instance(
         ));
     }
 
-    // Check Accept header for SSE streaming preference
-    let accepts_sse = headers
-        .get("accept")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.contains("text/event-stream"))
-        .unwrap_or(false);
+    // Check Accept header for SSE streaming preference (supports multiple Accept headers or comma-delimited values)
+    let accepts_sse = headers.get_all("accept").iter().any(|v| {
+        v.to_str()
+            .map(|s| s.contains("text/event-stream"))
+            .unwrap_or(false)
+    });
 
     if accepts_sse {
         // Return SSE streaming response
@@ -228,19 +233,8 @@ pub async fn create_instance(
             ApiError::internal_server_error("Failed to create instance")
         })?;
 
-    let response_body = serde_json::to_string(&InstanceResponse::from(instance)).map_err(|e| {
-        tracing::error!("Failed to serialize instance response: {}", e);
-        ApiError::internal_server_error("Failed to serialize response")
-    })?;
-
-    Response::builder()
-        .status(StatusCode::CREATED)
-        .header("content-type", "application/json")
-        .body(axum::body::Body::from(response_body))
-        .map_err(|e| {
-            tracing::error!("Failed to build JSON response: {}", e);
-            ApiError::internal_server_error("Failed to construct response")
-        })
+    // Return idiomatic axum response with automatic content-type and status handling
+    Ok((StatusCode::CREATED, Json(InstanceResponse::from(instance))).into_response())
 }
 
 /// List user's agent instances

@@ -242,8 +242,14 @@ pub trait AgentService: Send + Sync {
     ) -> anyhow::Result<AgentInstance>;
 
     /// Create instance with streaming lifecycle events
-    /// Returns a receiver that yields LifecycleEvent objects as they occur during instance creation
-    /// This is useful for real-time UI updates instead of a loading bar
+    /// Returns a receiver that yields raw JSON events as they occur during instance creation.
+    ///
+    /// **Note**: Events are streamed as untyped `serde_json::Value` (raw JSON proxy).
+    /// The frontend is responsible for deserializing into the typed `LifecycleEvent` struct.
+    /// This design allows flexibility if the Agent API event schema changes.
+    /// If strict validation is needed, consider adding a deserialization layer before returning.
+    ///
+    /// This is useful for real-time UI updates instead of a loading bar.
     async fn create_instance_from_agent_api_streaming(
         &self,
         user_id: UserId,
