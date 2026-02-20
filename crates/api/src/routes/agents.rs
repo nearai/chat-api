@@ -193,11 +193,12 @@ pub async fn create_instance(
     }
 
     // Content negotiation: SSE streaming or JSON response
-    let wants_stream = headers
-        .get("accept")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.contains("text/event-stream"))
-        .unwrap_or(false);
+    // Use get_all to handle multiple Accept headers per HTTP spec
+    let wants_stream = headers.get_all("accept").iter().any(|v| {
+        v.to_str()
+            .map(|s| s.contains("text/event-stream"))
+            .unwrap_or(false)
+    });
 
     if wants_stream {
         create_instance_streaming_response(
@@ -812,10 +813,10 @@ pub async fn start_instance(
             ApiError::internal_server_error("Failed to start instance")
         })?;
 
-    Ok(Response::builder()
+    Response::builder()
         .status(StatusCode::OK)
         .body(axum::body::Body::empty())
-        .unwrap())
+        .map_err(|_| ApiError::internal_server_error("Failed to construct response"))
 }
 
 /// Stop an agent instance
@@ -881,10 +882,10 @@ pub async fn stop_instance(
             ApiError::internal_server_error("Failed to stop instance")
         })?;
 
-    Ok(Response::builder()
+    Response::builder()
         .status(StatusCode::OK)
         .body(axum::body::Body::empty())
-        .unwrap())
+        .map_err(|_| ApiError::internal_server_error("Failed to construct response"))
 }
 
 /// Restart an agent instance
@@ -950,8 +951,8 @@ pub async fn restart_instance(
             ApiError::internal_server_error("Failed to restart instance")
         })?;
 
-    Ok(Response::builder()
+    Response::builder()
         .status(StatusCode::OK)
         .body(axum::body::Body::empty())
-        .unwrap())
+        .map_err(|_| ApiError::internal_server_error("Failed to construct response"))
 }

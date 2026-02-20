@@ -469,6 +469,17 @@ async fn save_instance_from_event(
         })
         .await?;
 
+    // Defense-in-depth: verify the created instance belongs to the requesting user
+    if instance.user_id != user_id {
+        tracing::error!(
+            "Security violation: created instance ownership mismatch: instance_id={}, expected_user_id={}, actual_user_id={}",
+            instance.id,
+            user_id,
+            instance.user_id
+        );
+        return Err(anyhow!("Instance creation failed: ownership mismatch"));
+    }
+
     repository
         .bind_api_key_to_instance(*api_key_id, instance.id)
         .await?;
