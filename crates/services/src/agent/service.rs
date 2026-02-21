@@ -1183,15 +1183,22 @@ impl AgentService for AgentServiceImpl {
             .await
             .map_err(|e| anyhow!("Failed to call Agent API delete: {}", e))?;
 
-        if !response.status().is_success() {
-            return Err(anyhow!(
-                "Agent API delete failed with status {}: instance_id={}",
-                response.status(),
-                instance_id
-            ));
+        let status = response.status();
+        if !status.is_success() {
+            if status == reqwest::StatusCode::NOT_FOUND {
+                tracing::warn!(
+                    "Instance not found on instance manager (already removed?), proceeding with DB soft-delete: instance_id={}",
+                    instance_id
+                );
+            } else {
+                return Err(anyhow!(
+                    "Agent API delete failed with status {}: instance_id={}",
+                    status,
+                    instance_id
+                ));
+            }
         }
 
-        // Only delete from database if remote deletion was successful
         self.repository.delete_instance(instance_id).await?;
 
         tracing::info!(
