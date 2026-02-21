@@ -65,6 +65,15 @@ pub async fn create_test_server_and_db(
     // Load .env file
     dotenvy::dotenv().ok();
 
+    // Ensure AGENT_API_TOKEN is set (agent service panics without it)
+    if std::env::var("AGENT_API_TOKEN")
+        .unwrap_or_default()
+        .is_empty()
+    {
+        // SAFETY: Called before spawning threads in test setup; no concurrent env reads.
+        unsafe { std::env::set_var("AGENT_API_TOKEN", "test_dummy_token") };
+    }
+
     // Load configuration
     let config = config::Config::from_env();
 
@@ -123,6 +132,16 @@ pub async fn create_test_server_and_db(
         ),
     );
 
+    // Create agent service (needed by subscription service and app state)
+    let agent_repo = db.agent_repository();
+    let agent_service = Arc::new(services::agent::AgentServiceImpl::new(
+        agent_repo.clone(),
+        config.agent.managers.clone(),
+        config.agent.nearai_api_url.clone(),
+        system_configs_service.clone()
+            as Arc<dyn services::system_configs::ports::SystemConfigsService>,
+    ));
+
     // Initialize subscription service for testing
     let subscription_service = Arc::new(services::subscription::SubscriptionServiceImpl::new(
         services::subscription::SubscriptionServiceConfig {
@@ -138,6 +157,7 @@ pub async fn create_test_server_and_db(
             user_repository: user_repo.clone(),
             user_usage_repo: db.user_usage_repository()
                 as Arc<dyn services::user_usage::UserUsageRepository>,
+            agent_service: agent_service.clone() as Arc<dyn services::agent::ports::AgentService>,
             stripe_secret_key: config.stripe.secret_key.clone(),
             stripe_webhook_secret: config.stripe.webhook_secret.clone(),
         },
@@ -219,16 +239,6 @@ pub async fn create_test_server_and_db(
         analytics_service.clone(),
         user_usage_service.clone(),
     );
-
-    // Create agent service for testing
-    let agent_repo = db.agent_repository();
-    let agent_service = Arc::new(services::agent::AgentServiceImpl::new(
-        agent_repo.clone(),
-        config.agent.managers.clone(),
-        config.agent.nearai_api_url.clone(),
-        system_configs_service.clone()
-            as Arc<dyn services::system_configs::ports::SystemConfigsService>,
-    ));
 
     // Create agent proxy service for testing
     let agent_proxy_service: Arc<dyn services::agent::AgentProxyService> =
@@ -404,6 +414,95 @@ pub async fn cleanup_user_subscriptions(db: &database::Database, user_email: &st
         .execute("DELETE FROM subscriptions WHERE user_id = $1", &[&user.id])
         .await
         .expect("delete subscriptions");
+}
+
+/// Insert a test subscription with pending downgrade fields directly into the database.
+/// Used to test downgrade grace period behavior.
+pub async fn insert_test_subscription_with_pending_downgrade(
+    server: &TestServer,
+    db: &database::Database,
+    user_email: &str,
+    price_id: &str,
+    pending_price_id: &str,
+    downgrade_effective_at: chrono::DateTime<chrono::Utc>,
+) {
+    let _token = mock_login(server, user_email).await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .expect("get user")
+        .expect("user created by mock_login");
+
+    let period_end = chrono::Utc::now() + chrono::Duration::days(1);
+    let sub_id = format!("sub_test_{}", Uuid::new_v4());
+
+    let client = db.pool().get().await.expect("get pool client");
+    client
+        .execute(
+            "INSERT INTO subscriptions (
+                subscription_id, user_id, provider, customer_id, price_id, status,
+                current_period_end, cancel_at_period_end, pending_price_id, downgrade_effective_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ON CONFLICT (subscription_id) DO NOTHING",
+            &[
+                &sub_id,
+                &user.id,
+                &"stripe",
+                &"cus_test",
+                &price_id,
+                &"active",
+                &period_end,
+                &false,
+                &pending_price_id,
+                &downgrade_effective_at,
+            ],
+        )
+        .await
+        .expect("insert subscription with pending downgrade");
+}
+
+/// Insert a test subscription with a specific price_id (for multi-plan testing).
+pub async fn insert_test_subscription_with_price(
+    server: &TestServer,
+    db: &database::Database,
+    user_email: &str,
+    price_id: &str,
+) {
+    let _token = mock_login(server, user_email).await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .expect("get user")
+        .expect("user created by mock_login");
+
+    let period_end = chrono::Utc::now() + chrono::Duration::days(1);
+    let sub_id = format!("sub_test_{}", Uuid::new_v4());
+
+    let client = db.pool().get().await.expect("get pool client");
+    client
+        .execute(
+            "INSERT INTO subscriptions (
+                subscription_id, user_id, provider, customer_id, price_id, status,
+                current_period_end, cancel_at_period_end
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (subscription_id) DO NOTHING",
+            &[
+                &sub_id,
+                &user.id,
+                &"stripe",
+                &"cus_test",
+                &price_id,
+                &"active",
+                &period_end,
+                &false,
+            ],
+        )
+        .await
+        .expect("insert subscription with price");
 }
 
 /// Set subscription_plans configuration

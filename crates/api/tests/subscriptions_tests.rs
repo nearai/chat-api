@@ -4,7 +4,8 @@ use api::routes::api::SUBSCRIPTION_REQUIRED_ERROR_MESSAGE;
 use chrono::Duration;
 use common::{
     cleanup_user_subscriptions, clear_subscription_plans, create_test_server,
-    create_test_server_and_db, insert_test_subscription, mock_login, set_subscription_plans,
+    create_test_server_and_db, insert_test_subscription,
+    insert_test_subscription_with_pending_downgrade, mock_login, set_subscription_plans,
     TestServerConfig,
 };
 use serde_json::json;
@@ -1700,5 +1701,484 @@ async fn test_subscription_gating_full_flow() {
         error_msg.contains("subscription") || error_msg.contains("limit"),
         "Error should mention subscription or limit requirement, got: {}",
         error_msg
+    );
+}
+
+// ========== DOWNGRADE GRACE PERIOD TESTS ==========
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_list_subscriptions_shows_pending_plan() {
+    ensure_stripe_env_for_gating();
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    // Configure plans: pro (high limits) and byok (low limits)
+    set_subscription_plans(
+        &server,
+        json!({
+            "pro": {
+                "providers": {"stripe": {"price_id": "price_test_pro"}},
+                "agent_instances": {"max": 5},
+                "monthly_tokens": {"max": 5000000}
+            },
+            "byok": {
+                "providers": {"stripe": {"price_id": "price_test_byok"}},
+                "agent_instances": {"max": 2},
+                "monthly_tokens": {"max": 500000}
+            }
+        }),
+    )
+    .await;
+
+    let user_email = "test_pending_plan_display@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+
+    // Insert subscription on pro plan with pending downgrade to byok
+    let future_effective = chrono::Utc::now() + chrono::Duration::days(15);
+    insert_test_subscription_with_pending_downgrade(
+        &server,
+        &db,
+        user_email,
+        "price_test_pro",
+        "price_test_byok",
+        future_effective,
+    )
+    .await;
+
+    let user_token = mock_login(&server, user_email).await;
+
+    let response = server
+        .get("/v1/subscriptions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 200);
+
+    let body: serde_json::Value = response.json();
+    let subscriptions = body
+        .get("subscriptions")
+        .and_then(|v| v.as_array())
+        .expect("subscriptions should be array");
+
+    assert_eq!(subscriptions.len(), 1, "Should have one subscription");
+    let sub = &subscriptions[0];
+
+    // Current plan should still be pro
+    assert_eq!(
+        sub.get("plan").and_then(|v| v.as_str()),
+        Some("pro"),
+        "Current plan should be pro (not yet downgraded)"
+    );
+
+    // Pending plan should be byok
+    assert_eq!(
+        sub.get("pending_plan").and_then(|v| v.as_str()),
+        Some("byok"),
+        "Pending plan should be byok"
+    );
+
+    // downgrade_effective_at should be present
+    assert!(
+        sub.get("downgrade_effective_at").is_some(),
+        "downgrade_effective_at should be present"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_pending_downgrade_preserves_old_plan_token_limit() {
+    ensure_stripe_env_for_gating();
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        rate_limit_config: Some(permissive_rate_limit_config()),
+        ..Default::default()
+    })
+    .await;
+
+    // Configure plans: pro has 5M tokens, byok has 500K
+    set_subscription_plans(
+        &server,
+        json!({
+            "pro": {
+                "providers": {"stripe": {"price_id": "price_test_pro"}},
+                "agent_instances": {"max": 5},
+                "monthly_tokens": {"max": 5000000}
+            },
+            "byok": {
+                "providers": {"stripe": {"price_id": "price_test_byok"}},
+                "agent_instances": {"max": 2},
+                "monthly_tokens": {"max": 500000}
+            }
+        }),
+    )
+    .await;
+
+    let user_email = "test_pending_keeps_old_limit@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+
+    // Insert subscription on pro plan with pending downgrade to byok (effective in future)
+    let future_effective = chrono::Utc::now() + chrono::Duration::days(15);
+    insert_test_subscription_with_pending_downgrade(
+        &server,
+        &db,
+        user_email,
+        "price_test_pro",
+        "price_test_byok",
+        future_effective,
+    )
+    .await;
+
+    let user_token = mock_login(&server, user_email).await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .expect("get user")
+        .expect("user exists");
+
+    // Record 600K tokens — over byok limit (500K) but under pro limit (5M)
+    db.user_usage_repository()
+        .record_usage_event(user.id, METRIC_KEY_LLM_TOKENS, 600_000, Some(0), None)
+        .await
+        .expect("record usage");
+
+    // User should still be allowed (pro plan with 5M limit is active during grace period)
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}]
+        }))
+        .await;
+
+    // Should NOT get 402 (token limit exceeded) because pro plan allows 5M
+    assert_ne!(
+        response.status_code(),
+        402,
+        "User should still have pro limits during grace period (used 600K of 5M)"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_admin_set_subscription_clears_pending_downgrade() {
+    ensure_stripe_env_for_gating();
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    // Configure plans
+    set_subscription_plans(
+        &server,
+        json!({
+            "pro": {
+                "providers": {"stripe": {"price_id": "price_test_pro"}},
+                "agent_instances": {"max": 5},
+                "monthly_tokens": {"max": 5000000}
+            },
+            "byok": {
+                "providers": {"stripe": {"price_id": "price_test_byok"}},
+                "agent_instances": {"max": 2},
+                "monthly_tokens": {"max": 500000}
+            }
+        }),
+    )
+    .await;
+
+    let user_email = "test_admin_clears_pending@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+
+    // Insert subscription with pending downgrade
+    let future_effective = chrono::Utc::now() + chrono::Duration::days(15);
+    insert_test_subscription_with_pending_downgrade(
+        &server,
+        &db,
+        user_email,
+        "price_test_pro",
+        "price_test_byok",
+        future_effective,
+    )
+    .await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .expect("get user")
+        .expect("user exists");
+
+    let admin_token = mock_login(&server, "test_clear_pending_admin@admin.org").await;
+    let user_token = mock_login(&server, user_email).await;
+
+    // Verify pending_plan exists before admin action
+    let response = server
+        .get("/v1/subscriptions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .await;
+
+    let body: serde_json::Value = response.json();
+    let sub = &body["subscriptions"][0];
+    assert_eq!(
+        sub.get("pending_plan").and_then(|v| v.as_str()),
+        Some("byok"),
+        "Should have pending plan before admin override"
+    );
+
+    // Admin sets user to pro plan (should clear pending downgrade)
+    let response = server
+        .post(&format!("/v1/admin/users/{}/subscription", user.id))
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .json(&json!({
+            "provider": "stripe",
+            "plan": "pro",
+            "current_period_end": "2099-12-31T23:59:59Z"
+        }))
+        .await;
+
+    assert_eq!(response.status_code(), 200);
+    let body: serde_json::Value = response.json();
+    assert!(
+        body.get("pending_plan").is_none() || body.get("pending_plan").unwrap().is_null(),
+        "Admin-set subscription should have no pending_plan"
+    );
+    assert!(
+        body.get("downgrade_effective_at").is_none()
+            || body.get("downgrade_effective_at").unwrap().is_null(),
+        "Admin-set subscription should have no downgrade_effective_at"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_subscription_without_pending_shows_null_fields() {
+    ensure_stripe_env_for_gating();
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": {"stripe": {"price_id": "price_test_basic"}},
+                "agent_instances": {"max": 1},
+                "monthly_tokens": {"max": 1000000}
+            }
+        }),
+    )
+    .await;
+
+    let user_email = "test_no_pending_null_fields@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+    insert_test_subscription(&server, &db, user_email, false).await;
+
+    let user_token = mock_login(&server, user_email).await;
+
+    let response = server
+        .get("/v1/subscriptions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 200);
+
+    let body: serde_json::Value = response.json();
+    let sub = &body["subscriptions"][0];
+
+    // pending_plan and downgrade_effective_at should be absent (skip_serializing_if = None)
+    assert!(
+        sub.get("pending_plan").is_none() || sub.get("pending_plan").unwrap().is_null(),
+        "Subscription without pending downgrade should have no pending_plan"
+    );
+    assert!(
+        sub.get("downgrade_effective_at").is_none()
+            || sub.get("downgrade_effective_at").unwrap().is_null(),
+        "Subscription without pending downgrade should have no downgrade_effective_at"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_pending_downgrade_applied_when_due() {
+    ensure_stripe_env_for_gating();
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        rate_limit_config: Some(permissive_rate_limit_config()),
+        ..Default::default()
+    })
+    .await;
+
+    // Configure plans
+    set_subscription_plans(
+        &server,
+        json!({
+            "pro": {
+                "providers": {"stripe": {"price_id": "price_test_pro"}},
+                "agent_instances": {"max": 5},
+                "monthly_tokens": {"max": 5000000}
+            },
+            "byok": {
+                "providers": {"stripe": {"price_id": "price_test_byok"}},
+                "agent_instances": {"max": 2},
+                "monthly_tokens": {"max": 500000}
+            }
+        }),
+    )
+    .await;
+
+    let user_email = "test_pending_applied_when_due@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+
+    // Insert subscription with pending downgrade effective in the PAST (already due)
+    let past_effective = chrono::Utc::now() - chrono::Duration::hours(1);
+    insert_test_subscription_with_pending_downgrade(
+        &server,
+        &db,
+        user_email,
+        "price_test_pro",
+        "price_test_byok",
+        past_effective,
+    )
+    .await;
+
+    let user_token = mock_login(&server, user_email).await;
+
+    // Make a proxy request which triggers apply_pending_downgrade_if_due
+    let _response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}]
+        }))
+        .await;
+
+    // After the proxy call, the downgrade should have been applied
+    // Check subscription - plan should now be byok
+    let response = server
+        .get("/v1/subscriptions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 200);
+
+    let body: serde_json::Value = response.json();
+    let subscriptions = body["subscriptions"]
+        .as_array()
+        .expect("subscriptions array");
+    assert_eq!(subscriptions.len(), 1);
+
+    let sub = &subscriptions[0];
+    assert_eq!(
+        sub.get("plan").and_then(|v| v.as_str()),
+        Some("byok"),
+        "Plan should have been switched to byok after downgrade effective date passed"
+    );
+
+    // Pending fields should be cleared
+    assert!(
+        sub.get("pending_plan").is_none() || sub.get("pending_plan").unwrap().is_null(),
+        "pending_plan should be cleared after downgrade applied"
+    );
+    assert!(
+        sub.get("downgrade_effective_at").is_none()
+            || sub.get("downgrade_effective_at").unwrap().is_null(),
+        "downgrade_effective_at should be cleared after downgrade applied"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_upgrade_via_admin_clears_pending_downgrade() {
+    ensure_stripe_env_for_gating();
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    // Configure plans: byok < pro < enterprise
+    set_subscription_plans(
+        &server,
+        json!({
+            "byok": {
+                "providers": {"stripe": {"price_id": "price_test_byok"}},
+                "agent_instances": {"max": 2},
+                "monthly_tokens": {"max": 500000}
+            },
+            "pro": {
+                "providers": {"stripe": {"price_id": "price_test_pro"}},
+                "agent_instances": {"max": 5},
+                "monthly_tokens": {"max": 5000000}
+            },
+            "enterprise": {
+                "providers": {"stripe": {"price_id": "price_test_enterprise"}},
+                "agent_instances": {"max": 10},
+                "monthly_tokens": {"max": 50000000}
+            }
+        }),
+    )
+    .await;
+
+    let user_email = "test_upgrade_clears_pending@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+
+    // Insert pro plan with pending downgrade to byok
+    let future_effective = chrono::Utc::now() + chrono::Duration::days(15);
+    insert_test_subscription_with_pending_downgrade(
+        &server,
+        &db,
+        user_email,
+        "price_test_pro",
+        "price_test_byok",
+        future_effective,
+    )
+    .await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .expect("get user")
+        .expect("user exists");
+
+    let admin_token = mock_login(&server, "test_upgrade_clears@admin.org").await;
+
+    // Admin upgrades to enterprise — should clear the pending byok downgrade
+    let response = server
+        .post(&format!("/v1/admin/users/{}/subscription", user.id))
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .json(&json!({
+            "provider": "stripe",
+            "plan": "enterprise",
+            "current_period_end": "2099-12-31T23:59:59Z"
+        }))
+        .await;
+
+    assert_eq!(response.status_code(), 200);
+    let body: serde_json::Value = response.json();
+    assert_eq!(
+        body.get("plan").and_then(|v| v.as_str()),
+        Some("enterprise"),
+        "Plan should be enterprise after admin upgrade"
+    );
+    assert!(
+        body.get("pending_plan").is_none() || body.get("pending_plan").unwrap().is_null(),
+        "Pending plan should be cleared after admin upgrade"
     );
 }
