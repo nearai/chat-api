@@ -15,6 +15,14 @@ use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use services::analytics::{ActivityLogEntry, AnalyticsSummary, TopActiveUsersResponse};
+use services::bi_metrics::{
+    DeploymentFilter, DeploymentRecord, DeploymentSummary, StatusChangeRecord, TopConsumer,
+    TopConsumerFilter, TopConsumerGroupBy, UsageAggregation, UsageFilter, UsageGroupBy,
+    UsageRankBy as BiUsageRankBy,
+};
+
+/// Maximum rows for BI usage aggregation queries.
+const BI_USAGE_MAX_ROWS: i64 = 1000;
 use services::model::ports::{UpdateModelParams, UpsertModelParams};
 use services::user_usage::UsageRankBy;
 use services::UserId;
@@ -1574,6 +1582,287 @@ pub async fn admin_get_backup(
     Ok(response)
 }
 
+// =============================================================================
+// BI Metrics endpoints
+// =============================================================================
+
+/// Query parameters for BI deployment list
+#[derive(Debug, Deserialize)]
+pub struct BiDeploymentQuery {
+    #[serde(default = "default_limit")]
+    pub limit: i64,
+    #[serde(default = "default_offset")]
+    pub offset: i64,
+    #[serde(rename = "type")]
+    pub instance_type: Option<String>,
+    pub status: Option<String>,
+    pub start_date: Option<DateTime<Utc>>,
+    pub end_date: Option<DateTime<Utc>>,
+}
+
+/// Query parameters for BI deployment summary
+#[derive(Debug, Deserialize)]
+pub struct BiSummaryQuery {
+    pub start_date: Option<DateTime<Utc>>,
+    pub end_date: Option<DateTime<Utc>>,
+}
+
+/// Query parameters for BI usage aggregation
+#[derive(Debug, Deserialize)]
+pub struct BiUsageQuery {
+    pub start_date: Option<DateTime<Utc>>,
+    pub end_date: Option<DateTime<Utc>>,
+    pub user_id: Option<Uuid>,
+    pub instance_id: Option<Uuid>,
+    #[serde(rename = "type")]
+    pub instance_type: Option<String>,
+    #[serde(default = "default_group_by")]
+    pub group_by: UsageGroupBy,
+}
+
+fn default_group_by() -> UsageGroupBy {
+    UsageGroupBy::Day
+}
+
+/// Query parameters for BI top consumers
+#[derive(Debug, Deserialize)]
+pub struct BiTopConsumersQuery {
+    pub start_date: Option<DateTime<Utc>>,
+    pub end_date: Option<DateTime<Utc>>,
+    #[serde(rename = "type")]
+    pub instance_type: Option<String>,
+    #[serde(default = "default_bi_rank_by")]
+    pub rank_by: BiUsageRankBy,
+    #[serde(default = "default_top_group_by")]
+    pub group_by: TopConsumerGroupBy,
+    #[serde(default = "default_limit")]
+    pub limit: i64,
+}
+
+fn default_bi_rank_by() -> BiUsageRankBy {
+    BiUsageRankBy::Cost
+}
+
+fn default_top_group_by() -> TopConsumerGroupBy {
+    TopConsumerGroupBy::Instance
+}
+
+/// Response types for BI endpoints
+#[derive(Debug, Serialize)]
+pub struct BiDeploymentListResponse {
+    pub deployments: Vec<DeploymentRecord>,
+    pub total: i64,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BiUsageResponse {
+    pub data: Vec<UsageAggregation>,
+    pub group_by: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BiTopConsumersResponse {
+    pub consumers: Vec<TopConsumer>,
+    pub rank_by: String,
+    pub group_by: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BiStatusHistoryResponse {
+    pub instance_id: Uuid,
+    pub history: Vec<StatusChangeRecord>,
+}
+
+/// Validate optional date range: start_date must be before end_date when both are provided.
+fn validate_date_range(
+    start: Option<DateTime<Utc>>,
+    end: Option<DateTime<Utc>>,
+) -> Result<(), ApiError> {
+    if let (Some(s), Some(e)) = (start, end) {
+        if s >= e {
+            return Err(ApiError::bad_request("start_date must be before end_date"));
+        }
+    }
+    Ok(())
+}
+
+/// Validate optional string filter length to prevent memory abuse.
+const MAX_FILTER_LEN: usize = 100;
+
+fn validate_string_filter(name: &str, value: &Option<String>) -> Result<(), ApiError> {
+    if let Some(ref v) = value {
+        if v.len() > MAX_FILTER_LEN {
+            return Err(ApiError::bad_request(format!(
+                "{name} filter exceeds maximum length of {MAX_FILTER_LEN}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// List deployments with optional filters
+pub async fn bi_list_deployments(
+    State(app_state): State<AppState>,
+    Query(params): Query<BiDeploymentQuery>,
+) -> Result<Json<BiDeploymentListResponse>, ApiError> {
+    validate_string_filter("type", &params.instance_type)?;
+    validate_string_filter("status", &params.status)?;
+    validate_date_range(params.start_date, params.end_date)?;
+
+    let filter = DeploymentFilter {
+        instance_type: params.instance_type,
+        status: params.status,
+        start_date: params.start_date,
+        end_date: params.end_date,
+        limit: params.limit.clamp(1, 100),
+        offset: params.offset.max(0),
+    };
+
+    let (deployments, total) = app_state
+        .bi_metrics_service
+        .list_deployments(&filter)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to list deployments for BI: {}", e);
+            ApiError::internal_server_error("Failed to list deployments")
+        })?;
+
+    Ok(Json(BiDeploymentListResponse {
+        deployments,
+        total,
+        limit: filter.limit,
+        offset: filter.offset,
+    }))
+}
+
+/// Get deployment summary counts
+pub async fn bi_deployment_summary(
+    State(app_state): State<AppState>,
+    Query(params): Query<BiSummaryQuery>,
+) -> Result<Json<DeploymentSummary>, ApiError> {
+    validate_date_range(params.start_date, params.end_date)?;
+
+    let summary = app_state
+        .bi_metrics_service
+        .get_deployment_summary(params.start_date, params.end_date)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get deployment summary: {}", e);
+            ApiError::internal_server_error("Failed to get deployment summary")
+        })?;
+
+    Ok(Json(summary))
+}
+
+/// Query parameters for BI status history
+#[derive(Debug, Deserialize)]
+pub struct BiStatusHistoryQuery {
+    #[serde(default = "default_status_history_limit")]
+    pub limit: i64,
+}
+
+fn default_status_history_limit() -> i64 {
+    100
+}
+
+/// Get status change history for a deployment
+pub async fn bi_status_history(
+    State(app_state): State<AppState>,
+    Path(id): Path<String>,
+    Query(params): Query<BiStatusHistoryQuery>,
+) -> Result<Json<BiStatusHistoryResponse>, ApiError> {
+    let instance_uuid =
+        Uuid::parse_str(&id).map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
+
+    let limit = params.limit.clamp(1, 1000);
+
+    let history = app_state
+        .bi_metrics_service
+        .get_status_history(instance_uuid, limit)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to get status history: instance_id={}, error={}",
+                instance_uuid,
+                e
+            );
+            ApiError::internal_server_error("Failed to get status history")
+        })?;
+
+    Ok(Json(BiStatusHistoryResponse {
+        instance_id: instance_uuid,
+        history,
+    }))
+}
+
+/// Get aggregated usage data
+pub async fn bi_usage(
+    State(app_state): State<AppState>,
+    Query(params): Query<BiUsageQuery>,
+) -> Result<Json<BiUsageResponse>, ApiError> {
+    validate_string_filter("type", &params.instance_type)?;
+    validate_date_range(params.start_date, params.end_date)?;
+
+    let filter = UsageFilter {
+        start_date: params.start_date,
+        end_date: params.end_date,
+        user_id: params.user_id.map(UserId::from),
+        instance_id: params.instance_id,
+        instance_type: params.instance_type,
+        group_by: params.group_by,
+        limit: BI_USAGE_MAX_ROWS,
+    };
+
+    let data = app_state
+        .bi_metrics_service
+        .get_usage_aggregation(&filter)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get usage aggregation: {}", e);
+            ApiError::internal_server_error("Failed to get usage data")
+        })?;
+
+    Ok(Json(BiUsageResponse {
+        data,
+        group_by: filter.group_by.to_string(),
+    }))
+}
+
+/// Get top consumers ranked by tokens or cost
+pub async fn bi_top_consumers(
+    State(app_state): State<AppState>,
+    Query(params): Query<BiTopConsumersQuery>,
+) -> Result<Json<BiTopConsumersResponse>, ApiError> {
+    validate_string_filter("type", &params.instance_type)?;
+    validate_date_range(params.start_date, params.end_date)?;
+
+    let filter = TopConsumerFilter {
+        start_date: params.start_date,
+        end_date: params.end_date,
+        instance_type: params.instance_type,
+        rank_by: params.rank_by,
+        group_by: params.group_by,
+        limit: params.limit.clamp(1, 100),
+    };
+
+    let consumers = app_state
+        .bi_metrics_service
+        .get_top_consumers(&filter)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get top consumers: {}", e);
+            ApiError::internal_server_error("Failed to get top consumers")
+        })?;
+
+    Ok(Json(BiTopConsumersResponse {
+        consumers,
+        rank_by: filter.rank_by.to_string(),
+        group_by: filter.group_by.to_string(),
+    }))
+}
+
 /// Create admin router with all admin routes (requires admin authentication)
 pub fn create_admin_router() -> Router<AppState> {
     Router::new()
@@ -1611,5 +1900,15 @@ pub fn create_admin_router() -> Router<AppState> {
                     "/keys/{key_id}/bind-instance",
                     post(admin_bind_api_key_to_instance),
                 ),
+        )
+        // BI metrics routes
+        .nest(
+            "/bi",
+            Router::new()
+                .route("/deployments", get(bi_list_deployments))
+                .route("/deployments/summary", get(bi_deployment_summary))
+                .route("/deployments/{id}/status-history", get(bi_status_history))
+                .route("/usage", get(bi_usage))
+                .route("/usage/top", get(bi_top_consumers)),
         )
 }

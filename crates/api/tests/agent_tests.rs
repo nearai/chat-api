@@ -117,7 +117,7 @@ async fn test_create_api_key_requires_auth() {
 // 3. Agent Uses Chat Completions:
 //    POST /v1/chat/completions with Bearer sk-agent-xxxxx (API key auth)
 //    → API key validated, request proxied to instance
-//    → Usage tracked in agent_usage_log
+//    → Usage tracked in user_usage_event
 //
 // 4. User Monitors Usage:
 //    GET /v1/agents/instances/{id}/usage
