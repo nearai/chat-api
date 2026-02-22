@@ -307,11 +307,13 @@ pub trait SubscriptionService: Send + Sync {
         user_id: UserId,
     ) -> Result<(), SubscriptionError>;
 
-    /// Create a token purchase checkout session. Single fixed option (1M tokens at $1.70).
+    /// Create a token purchase checkout session.
+    /// Amount is user-specified; price is computed from fixed price_per_million in config.
     /// Returns the Stripe checkout URL.
     async fn create_token_purchase_checkout(
         &self,
         user_id: UserId,
+        amount: u64,
         success_url: String,
         cancel_url: String,
     ) -> Result<String, SubscriptionError>;

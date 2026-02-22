@@ -1282,10 +1282,15 @@ impl SubscriptionService for SubscriptionServiceImpl {
     async fn create_token_purchase_checkout(
         &self,
         user_id: UserId,
+        amount: u64,
         success_url: String,
         cancel_url: String,
     ) -> Result<String, SubscriptionError> {
-        tracing::info!("Creating token purchase checkout for user_id={}", user_id);
+        tracing::info!(
+            "Creating token purchase checkout for user_id={}, amount={}",
+            user_id,
+            amount
+        );
 
         // Check Stripe configuration
         if self.stripe_secret_key.is_empty() || self.stripe_webhook_secret.is_empty() {
@@ -1303,15 +1308,14 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .tokens_pricing
             .as_ref()
             .ok_or(SubscriptionError::TokenPurchaseNotConfigured)?;
-        let tokens = pricing.amount;
         let price_per_million = pricing.price_per_million;
 
         // Get or create Stripe customer
         let customer_id = self.get_or_create_stripe_customer(user_id).await?;
 
-        // Amount in cents: (tokens/1e6) * price_per_million * 100
+        // Amount in cents: (amount/1e6) * price_per_million * 100
         let amount_cents =
-            ((tokens as f64 / 1_000_000.0) * price_per_million * 100.0).round() as i64;
+            ((amount as f64 / 1_000_000.0) * price_per_million * 100.0).round() as i64;
 
         let client = self.get_stripe_client();
 
@@ -1329,7 +1333,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 currency: Currency::USD,
                 unit_amount: Some(amount_cents),
                 product_data: Some(CreateCheckoutSessionLineItemsPriceDataProductData {
-                    name: format!("{} Tokens", format_number(tokens)),
+                    name: format!("{} Tokens", format_number(amount)),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -1340,7 +1344,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
         params.metadata = Some(
             vec![
                 ("user_id".to_string(), user_id.0.to_string()),
-                ("tokens".to_string(), tokens.to_string()),
+                ("tokens".to_string(), amount.to_string()),
             ]
             .into_iter()
             .collect(),
@@ -1358,7 +1362,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
             "Token purchase checkout created: user_id={}, session_id={}, tokens={}",
             user_id,
             session.id,
-            tokens
+            amount
         );
 
         Ok(checkout_url)

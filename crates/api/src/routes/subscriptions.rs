@@ -103,6 +103,11 @@ fn default_false() -> bool {
     false
 }
 
+/// Min tokens per purchase (500k)
+const TOKEN_PURCHASE_MIN_AMOUNT: u64 = 500_000;
+/// Max tokens per purchase (10B)
+const TOKEN_PURCHASE_MAX_AMOUNT: u64 = 10_000_000_000;
+
 /// Response containing available subscription plans
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ListPlansResponse {
@@ -113,6 +118,8 @@ pub struct ListPlansResponse {
 /// Request to create a token purchase checkout
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct CreateTokenPurchaseRequest {
+    /// Number of tokens to purchase (price computed from fixed price_per_million)
+    pub amount: u64,
     /// URL to redirect after successful checkout
     pub success_url: String,
     /// URL to redirect after cancelled checkout
@@ -136,10 +143,14 @@ pub struct PurchasedTokenBalanceResponse {
 /// Response containing token purchase info (for UI display)
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct TokensPurchaseInfoResponse {
-    /// Tokens per purchase (e.g. 1_000_000)
+    /// Suggested default amount (from config; user can specify any amount in range)
     pub amount: u64,
     /// Price per 1M tokens in USD (e.g. 1.70)
     pub price_per_million: f64,
+    /// Minimum tokens allowed per purchase
+    pub min_amount: u64,
+    /// Maximum tokens allowed per purchase
+    pub max_amount: u64,
 }
 
 /// Request to create a customer portal session
@@ -545,12 +556,23 @@ pub async fn create_token_purchase(
         user.user_id
     );
 
+    if req.amount < TOKEN_PURCHASE_MIN_AMOUNT || req.amount > TOKEN_PURCHASE_MAX_AMOUNT {
+        return Err(ApiError::bad_request(format!(
+            "amount must be between {} and {} tokens",
+            TOKEN_PURCHASE_MIN_AMOUNT, TOKEN_PURCHASE_MAX_AMOUNT
+        )));
+    }
     validate_redirect_url(&req.success_url, "success_url")?;
     validate_redirect_url(&req.cancel_url, "cancel_url")?;
 
     let checkout_url = app_state
         .subscription_service
-        .create_token_purchase_checkout(user.user_id, req.success_url, req.cancel_url)
+        .create_token_purchase_checkout(
+            user.user_id,
+            req.amount,
+            req.success_url,
+            req.cancel_url,
+        )
         .await
         .map_err(|e| match e {
             SubscriptionError::TokenPurchaseNotConfigured => {
@@ -633,6 +655,8 @@ pub async fn get_tokens_purchase_info(
     Ok(Json(TokensPurchaseInfoResponse {
         amount: info.amount,
         price_per_million: info.price_per_million,
+        min_amount: TOKEN_PURCHASE_MIN_AMOUNT,
+        max_amount: TOKEN_PURCHASE_MAX_AMOUNT,
     }))
 }
 
