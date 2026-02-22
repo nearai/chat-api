@@ -1495,7 +1495,7 @@ fn format_number(n: u64) -> String {
     let len = chars.len();
     for (i, c) in chars.into_iter().enumerate() {
         result.push(c);
-        if (len - i - 1) % 3 == 0 && i != len - 1 {
+        if (len - i - 1).is_multiple_of(3) && i != len - 1 {
             result.push(',');
         }
     }
