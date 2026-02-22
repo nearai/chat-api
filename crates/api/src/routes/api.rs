@@ -2486,7 +2486,8 @@ async fn proxy_responses(
             state.user_usage_service.clone(),
             state.model_pricing_cache.clone(),
             user.user_id,
-        );
+        )
+        .with_subscription_service(state.subscription_service.clone());
         if let Some(Extension(api_key)) = &api_key_ext {
             usage_stream = usage_stream
                 .with_agent_ids(api_key.api_key_info.instance_id, api_key.api_key_info.id);
@@ -3540,7 +3541,8 @@ async fn proxy_chat_completions(
             state.user_usage_service.clone(),
             state.model_pricing_cache.clone(),
             user.user_id,
-        );
+        )
+        .with_subscription_service(state.subscription_service.clone());
         if let Some(Extension(api_key)) = &api_key_ext {
             usage_stream = usage_stream
                 .with_agent_ids(api_key.api_key_info.instance_id, api_key.api_key_info.id);
@@ -4683,6 +4685,22 @@ async fn record_chat_usage_from_body(
         .as_ref()
         .map(|p| p.cost_nano_usd(usage.input_tokens, usage.output_tokens));
 
+    // Debit purchased tokens if usage overflowed monthly limit (spawn to avoid blocking response)
+    let svc = state.subscription_service.clone();
+    let tokens = usage.total_tokens as i64;
+    tokio::spawn(async move {
+        if let Err(e) = svc
+            .debit_purchased_tokens_after_usage(user_id, tokens)
+            .await
+        {
+            tracing::warn!(
+                "Failed to debit purchased tokens (user_id={}): {}",
+                user_id,
+                e
+            );
+        }
+    });
+
     let input_cost = pricing
         .as_ref()
         .map(|p| usage.input_tokens as i64 * p.input_nano_per_token)
@@ -4752,6 +4770,22 @@ async fn record_response_usage_from_body(
     let cost_nano_usd = pricing
         .as_ref()
         .map(|p| p.cost_nano_usd(usage.input_tokens, usage.output_tokens));
+
+    // Debit purchased tokens if usage overflowed monthly limit (spawn to avoid blocking response)
+    let svc = state.subscription_service.clone();
+    let tokens = usage.total_tokens as i64;
+    tokio::spawn(async move {
+        if let Err(e) = svc
+            .debit_purchased_tokens_after_usage(user_id, tokens)
+            .await
+        {
+            tracing::warn!(
+                "Failed to debit purchased tokens (user_id={}): {}",
+                user_id,
+                e
+            );
+        }
+    });
 
     let input_cost = pricing
         .as_ref()

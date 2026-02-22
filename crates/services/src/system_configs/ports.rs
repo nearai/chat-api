@@ -87,6 +87,21 @@ pub struct PlanLimitConfig {
     pub max: u64,
 }
 
+/// Token purchase pricing. When None at top level, token purchase is disabled.
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokensPricingConfig {
+    /// Tokens per purchase (e.g. 1_000_000)
+    pub amount: u64,
+    /// Price per 1M tokens in USD (e.g. 1.70)
+    #[serde(default = "default_price_per_million")]
+    pub price_per_million: f64,
+}
+
+fn default_price_per_million() -> f64 {
+    1.70
+}
+
 /// Subscription plan configuration with provider-specific pricing and limits
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,6 +150,9 @@ pub struct SystemConfigs {
     /// round-robin skips it. If all managers are full, instance creation is rejected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_instances_per_manager: Option<u64>,
+    /// Token purchase pricing. When None, token purchase is disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_pricing: Option<TokensPricingConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -143,6 +161,7 @@ pub struct PartialSystemConfigs {
     pub rate_limit: Option<RateLimitConfig>,
     pub subscription_plans: Option<HashMap<String, SubscriptionPlanConfig>>,
     pub max_instances_per_manager: Option<u64>,
+    pub tokens_pricing: Option<TokensPricingConfig>,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -153,6 +172,7 @@ impl Default for SystemConfigs {
             rate_limit: RateLimitConfig::default(),
             subscription_plans: None,
             max_instances_per_manager: Some(200),
+            tokens_pricing: None,
         }
     }
 }
@@ -166,6 +186,7 @@ impl SystemConfigs {
             max_instances_per_manager: partial
                 .max_instances_per_manager
                 .or(self.max_instances_per_manager),
+            tokens_pricing: partial.tokens_pricing.or(self.tokens_pricing),
         }
     }
 }

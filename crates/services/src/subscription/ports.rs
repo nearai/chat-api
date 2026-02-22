@@ -90,6 +90,8 @@ pub enum SubscriptionError {
     WebhookVerificationFailed(String),
     /// Internal error
     InternalError(String),
+    /// Token purchase not configured (tokens_pricing not set or Stripe not configured)
+    TokenPurchaseNotConfigured,
 }
 
 impl fmt::Display for SubscriptionError {
@@ -119,6 +121,9 @@ impl fmt::Display for SubscriptionError {
                 write!(f, "Webhook verification failed: {}", msg)
             }
             Self::InternalError(msg) => write!(f, "Internal error: {}", msg),
+            Self::TokenPurchaseNotConfigured => {
+                write!(f, "Token purchase is not configured")
+            }
         }
     }
 }
@@ -177,6 +182,27 @@ pub trait SubscriptionRepository: Send + Sync {
         txn: &tokio_postgres::Transaction<'_>,
         user_id: UserId,
     ) -> anyhow::Result<()>;
+}
+
+/// Repository trait for purchased token balances
+#[async_trait]
+pub trait PurchasedTokenRepository: Send + Sync {
+    /// Get the purchased token balance for a user. Returns None if the user has no record (0).
+    async fn get_balance(&self, user_id: UserId) -> anyhow::Result<Option<i64>>;
+
+    /// Add tokens to a user's purchased balance. Creates row if not exists.
+    async fn credit(&self, user_id: UserId, amount: i64) -> anyhow::Result<()>;
+
+    /// Add tokens within a transaction (for webhook atomicity with webhook store).
+    async fn credit_with_txn(
+        &self,
+        txn: &tokio_postgres::Transaction<'_>,
+        user_id: UserId,
+        amount: i64,
+    ) -> anyhow::Result<()>;
+
+    /// Deduct tokens from a user's purchased balance. Returns false if insufficient balance.
+    async fn debit(&self, user_id: UserId, amount: i64) -> anyhow::Result<bool>;
 }
 
 /// Repository trait for payment webhook events
@@ -279,5 +305,42 @@ pub trait SubscriptionService: Send + Sync {
     async fn admin_cancel_user_subscriptions(
         &self,
         user_id: UserId,
+    ) -> Result<(), SubscriptionError>;
+
+    /// Create a token purchase checkout session.
+    /// Amount is user-specified; price is computed from fixed price_per_million in config.
+    /// Returns the Stripe checkout URL.
+    async fn create_token_purchase_checkout(
+        &self,
+        user_id: UserId,
+        amount: u64,
+        success_url: String,
+        cancel_url: String,
+    ) -> Result<String, SubscriptionError>;
+
+    /// Get the purchased token balance for a user.
+    async fn get_purchased_token_balance(&self, user_id: UserId) -> Result<i64, SubscriptionError>;
+
+    /// Get token purchase info (amount, price) if configured. Returns None when token purchase is disabled.
+    async fn get_tokens_purchase_info(
+        &self,
+    ) -> Result<Option<crate::system_configs::ports::TokensPricingConfig>, SubscriptionError>;
+
+    /// Debit purchased tokens when usage exceeds monthly limit in the period.
+    /// Called after recording usage; debits min(quantity, used - monthly_max).
+    async fn debit_purchased_tokens_if_overflow(
+        &self,
+        user_id: UserId,
+        quantity: i64,
+        period_start: DateTime<Utc>,
+        period_end: DateTime<Utc>,
+    ) -> Result<(), SubscriptionError>;
+
+    /// Debit purchased tokens if usage overflows monthly limit. Computes period from user's subscription (or free plan).
+    /// Call after recording usage. No-op if Stripe/subscriptions not configured.
+    async fn debit_purchased_tokens_after_usage(
+        &self,
+        user_id: UserId,
+        quantity: i64,
     ) -> Result<(), SubscriptionError>;
 }

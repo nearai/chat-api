@@ -1,6 +1,7 @@
 use super::ports::{
-    PaymentWebhookRepository, StripeCustomerRepository, Subscription, SubscriptionError,
-    SubscriptionPlan, SubscriptionRepository, SubscriptionService, SubscriptionWithPlan,
+    PaymentWebhookRepository, PurchasedTokenRepository, StripeCustomerRepository, Subscription,
+    SubscriptionError, SubscriptionPlan, SubscriptionRepository, SubscriptionService,
+    SubscriptionWithPlan,
 };
 use crate::system_configs::ports::{SubscriptionPlanConfig, SystemConfigsService};
 use crate::user::ports::UserRepository;
@@ -13,8 +14,9 @@ use std::sync::Arc;
 use std::time::Instant;
 use stripe::{
     BillingPortalSession, CheckoutSession, CheckoutSessionMode, Client, CreateBillingPortalSession,
-    CreateCheckoutSession, CreateCheckoutSessionLineItems, CreateCheckoutSessionSubscriptionData,
-    Customer, CustomerId, RequestStrategy, Subscription as StripeSubscription, Webhook,
+    CreateCheckoutSession, CreateCheckoutSessionLineItems, CreateCheckoutSessionLineItemsPriceData,
+    CreateCheckoutSessionLineItemsPriceDataProductData, CreateCheckoutSessionSubscriptionData,
+    Currency, Customer, CustomerId, RequestStrategy, Subscription as StripeSubscription, Webhook,
     WebhookError,
 };
 use tokio::sync::RwLock;
@@ -25,6 +27,7 @@ pub struct SubscriptionServiceConfig {
     pub stripe_customer_repo: Arc<dyn StripeCustomerRepository>,
     pub subscription_repo: Arc<dyn SubscriptionRepository>,
     pub webhook_repo: Arc<dyn PaymentWebhookRepository>,
+    pub purchased_token_repo: Arc<dyn PurchasedTokenRepository>,
     pub system_configs_service: Arc<dyn SystemConfigsService>,
     pub user_repository: Arc<dyn UserRepository>,
     pub user_usage_repo: Arc<dyn UserUsageRepository>,
@@ -47,6 +50,7 @@ pub struct SubscriptionServiceImpl {
     stripe_customer_repo: Arc<dyn StripeCustomerRepository>,
     subscription_repo: Arc<dyn SubscriptionRepository>,
     webhook_repo: Arc<dyn PaymentWebhookRepository>,
+    purchased_token_repo: Arc<dyn PurchasedTokenRepository>,
     system_configs_service: Arc<dyn SystemConfigsService>,
     user_repository: Arc<dyn UserRepository>,
     user_usage_repo: Arc<dyn UserUsageRepository>,
@@ -62,6 +66,7 @@ impl SubscriptionServiceImpl {
             stripe_customer_repo: config.stripe_customer_repo,
             subscription_repo: config.subscription_repo,
             webhook_repo: config.webhook_repo,
+            purchased_token_repo: config.purchased_token_repo,
             system_configs_service: config.system_configs_service,
             user_repository: config.user_repository,
             user_usage_repo: config.user_usage_repo,
@@ -744,8 +749,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
             event_type
         );
 
-        // Check if this is a subscription event
+        // Check if this is a subscription event or token purchase payment
         let is_subscription_event = event_type.starts_with("customer.subscription.");
+        let is_checkout_session_completed = event_type == "checkout.session.completed";
 
         // Start transaction early to check webhook idempotency BEFORE calling Stripe API
         // This prevents duplicate Stripe API calls on webhook retries
@@ -852,6 +858,69 @@ impl SubscriptionService for SubscriptionServiceImpl {
             None
         };
 
+        // Handle token purchase checkout.session.completed (mode=payment)
+        let token_purchase_user_id = if is_checkout_session_completed {
+            let obj = payload_json
+                .get("data")
+                .and_then(|d| d.get("object"))
+                .ok_or_else(|| {
+                    SubscriptionError::InternalError(format!(
+                        "Cannot extract object from webhook: event_id={}, type={}",
+                        event_id, event_type
+                    ))
+                })?;
+
+            let mode = obj.get("mode").and_then(|m| m.as_str());
+            if mode == Some("payment") {
+                // (#4) Skip if payment not completed
+                let payment_status = obj.get("payment_status").and_then(|v| v.as_str());
+                if payment_status != Some("paid") {
+                    tracing::debug!("Skipping token credit: payment_status={:?}", payment_status);
+                    None
+                } else {
+                    // (#3) Skip (don't error) when metadata missing - not a token purchase session
+                    let metadata = obj.get("metadata").and_then(|m| m.as_object());
+                    let user_id_str = metadata
+                        .and_then(|m| m.get("user_id"))
+                        .and_then(|v| v.as_str());
+                    let tokens_str = metadata
+                        .and_then(|m| m.get("tokens"))
+                        .and_then(|v| v.as_str());
+                    if let (Some(uid_s), Some(tok_s)) = (user_id_str, tokens_str) {
+                        if let (Ok(tokens), Ok(uuid)) =
+                            (tok_s.parse::<i64>(), uuid::Uuid::parse_str(uid_s))
+                        {
+                            if tokens > 0 {
+                                let user_id = UserId(uuid);
+                                // (#5) Credit within transaction for atomicity with webhook store
+                                self.purchased_token_repo
+                                    .credit_with_txn(&txn, user_id, tokens)
+                                    .await
+                                    .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+                                tracing::info!(
+                                    "Token purchase credited: user_id={}, tokens={}, event_id={}",
+                                    user_id,
+                                    tokens,
+                                    event_id
+                                );
+                                Some(user_id)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         // Upsert subscription if we have data
         let user_id_to_invalidate = if let Some((subscription_id, subscription)) = subscription_data
         {
@@ -866,6 +935,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 subscription_id,
                 user_id
             );
+            Some(user_id)
+        } else if let Some(user_id) = token_purchase_user_id {
             Some(user_id)
         } else {
             tracing::debug!(
@@ -1058,23 +1129,32 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .map(|s| s.token_sum)
             .unwrap_or(0);
 
-        // 3. Enforce limit
-        if used >= max_tokens as i64 {
+        // 3. Add purchased token balance to effective limit
+        let purchased_balance = self
+            .purchased_token_repo
+            .get_balance(user_id)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
+            .unwrap_or(0);
+        let effective_limit = max_tokens as i64 + purchased_balance;
+
+        // 4. Enforce limit
+        if used >= effective_limit {
             tracing::info!(
-                "Blocking proxy access for user_id={}: monthly token limit exceeded (used {} of {})",
-                user_id, used, max_tokens
+                "Blocking proxy access for user_id={}: token limit exceeded (used {} of {} incl. purchased)",
+                user_id, used, effective_limit
             );
             return Err(SubscriptionError::MonthlyTokenLimitExceeded {
                 used,
-                limit: max_tokens,
+                limit: effective_limit as u64,
             });
         }
 
         tracing::debug!(
-            "User user_id={} within token limit (used {} of {}), allowing proxy access",
+            "User user_id={} within token limit (used {} of {} incl. purchased), allowing proxy access",
             user_id,
             used,
-            max_tokens
+            effective_limit
         );
         Ok(())
     }
@@ -1197,5 +1277,252 @@ impl SubscriptionService for SubscriptionServiceImpl {
         self.invalidate_token_limit_cache(user_id).await;
 
         Ok(())
+    }
+
+    async fn create_token_purchase_checkout(
+        &self,
+        user_id: UserId,
+        amount: u64,
+        success_url: String,
+        cancel_url: String,
+    ) -> Result<String, SubscriptionError> {
+        tracing::info!(
+            "Creating token purchase checkout for user_id={}, amount={}",
+            user_id,
+            amount
+        );
+
+        // Check Stripe configuration
+        if self.stripe_secret_key.is_empty() || self.stripe_webhook_secret.is_empty() {
+            return Err(SubscriptionError::TokenPurchaseNotConfigured);
+        }
+
+        let configs = self
+            .system_configs_service
+            .get_configs()
+            .await
+            .map_err(|e| SubscriptionError::InternalError(e.to_string()))?
+            .ok_or(SubscriptionError::TokenPurchaseNotConfigured)?;
+
+        let pricing = configs
+            .tokens_pricing
+            .as_ref()
+            .ok_or(SubscriptionError::TokenPurchaseNotConfigured)?;
+        let price_per_million = pricing.price_per_million;
+
+        // Get or create Stripe customer
+        let customer_id = self.get_or_create_stripe_customer(user_id).await?;
+
+        // Amount in cents: (amount/1e6) * price_per_million * 100
+        let amount_cents =
+            ((amount as f64 / 1_000_000.0) * price_per_million * 100.0).round() as i64;
+
+        let client = self.get_stripe_client();
+
+        let mut params = CreateCheckoutSession::new();
+        params.mode = Some(CheckoutSessionMode::Payment);
+        params.customer = Some(
+            customer_id
+                .parse()
+                .map_err(|_| SubscriptionError::StripeError("Invalid customer ID".to_string()))?,
+        );
+        params.success_url = Some(&success_url);
+        params.cancel_url = Some(&cancel_url);
+        params.line_items = Some(vec![CreateCheckoutSessionLineItems {
+            price_data: Some(CreateCheckoutSessionLineItemsPriceData {
+                currency: Currency::USD,
+                unit_amount: Some(amount_cents),
+                product_data: Some(CreateCheckoutSessionLineItemsPriceDataProductData {
+                    name: format!("{} Tokens", format_number(amount)),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            quantity: Some(1),
+            ..Default::default()
+        }]);
+        params.metadata = Some(
+            vec![
+                ("user_id".to_string(), user_id.0.to_string()),
+                ("tokens".to_string(), amount.to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        );
+
+        let session = CheckoutSession::create(&client, params)
+            .await
+            .map_err(|e| SubscriptionError::StripeError(e.to_string()))?;
+
+        let checkout_url = session
+            .url
+            .ok_or_else(|| SubscriptionError::StripeError("No checkout URL returned".into()))?;
+
+        tracing::info!(
+            "Token purchase checkout created: user_id={}, session_id={}, tokens={}",
+            user_id,
+            session.id,
+            amount
+        );
+
+        Ok(checkout_url)
+    }
+
+    async fn get_purchased_token_balance(&self, user_id: UserId) -> Result<i64, SubscriptionError> {
+        self.purchased_token_repo
+            .get_balance(user_id)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))
+            .map(|opt| opt.unwrap_or(0))
+    }
+
+    async fn get_tokens_purchase_info(
+        &self,
+    ) -> Result<Option<crate::system_configs::ports::TokensPricingConfig>, SubscriptionError> {
+        if self.stripe_secret_key.is_empty() || self.stripe_webhook_secret.is_empty() {
+            return Ok(None);
+        }
+        let configs = self
+            .system_configs_service
+            .get_configs()
+            .await
+            .map_err(|e| SubscriptionError::InternalError(e.to_string()))?;
+        Ok(configs.and_then(|c| c.tokens_pricing))
+    }
+
+    async fn debit_purchased_tokens_if_overflow(
+        &self,
+        user_id: UserId,
+        quantity: i64,
+        period_start: chrono::DateTime<chrono::Utc>,
+        period_end: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), SubscriptionError> {
+        if quantity <= 0 {
+            return Ok(());
+        }
+
+        let configs = self
+            .system_configs_service
+            .get_configs()
+            .await
+            .map_err(|e| SubscriptionError::InternalError(e.to_string()))?;
+        let subscription_plans = configs
+            .and_then(|c| c.subscription_plans)
+            .unwrap_or_default();
+
+        let max_tokens = match self
+            .subscription_repo
+            .get_active_subscription(user_id)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
+        {
+            Some(ref sub) => {
+                let plan_name =
+                    resolve_plan_name_from_config("stripe", &sub.price_id, &subscription_plans);
+                subscription_plans
+                    .get(&plan_name)
+                    .and_then(|c| c.monthly_tokens.as_ref())
+                    .map(|l| l.max)
+                    .unwrap_or(1_000_000)
+            }
+            None => subscription_plans
+                .get("free")
+                .and_then(|c| c.monthly_tokens.as_ref())
+                .map(|l| l.max)
+                .unwrap_or(1_000_000),
+        };
+
+        let used = self
+            .user_usage_repo
+            .get_usage_by_user_id(user_id, Some(period_start), Some(period_end))
+            .await
+            .map_err(|e| SubscriptionError::InternalError(e.to_string()))?
+            .map(|s| s.token_sum)
+            .unwrap_or(0);
+
+        // Compute overflow attributable only to this request (race-safe under concurrency)
+        let prior_used = used - quantity;
+        let prior_overflow = (prior_used - max_tokens as i64).max(0);
+        let current_overflow = (used - max_tokens as i64).max(0);
+        let to_debit = current_overflow - prior_overflow;
+        if to_debit <= 0 {
+            return Ok(());
+        }
+        let debited = self
+            .purchased_token_repo
+            .debit(user_id, to_debit)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        if debited {
+            self.invalidate_token_limit_cache(user_id).await;
+        }
+
+        Ok(())
+    }
+
+    async fn debit_purchased_tokens_after_usage(
+        &self,
+        user_id: UserId,
+        quantity: i64,
+    ) -> Result<(), SubscriptionError> {
+        if quantity <= 0 {
+            return Ok(());
+        }
+        // When Stripe is not configured, no-op (no subscription gating, no purchased tokens)
+        if matches!(
+            self.get_plans_for_provider("stripe").await,
+            Err(SubscriptionError::NotConfigured)
+        ) {
+            return Ok(());
+        }
+
+        let (period_start, period_end) = match self
+            .subscription_repo
+            .get_active_subscription(user_id)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
+        {
+            Some(ref sub) => {
+                let period_end = sub.current_period_end;
+                let period_start = sub_one_month_same_day(period_end);
+                (period_start, period_end)
+            }
+            None => current_calendar_month_period(Utc::now()),
+        };
+
+        self.debit_purchased_tokens_if_overflow(user_id, quantity, period_start, period_end)
+            .await
+    }
+}
+
+/// Format large numbers with commas (e.g. 1_000_000 -> "1,000,000")
+fn format_number(n: u64) -> String {
+    let s = n.to_string();
+    let mut result = String::with_capacity(s.len() + (s.len() - 1) / 3);
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len();
+    for (i, c) in chars.into_iter().enumerate() {
+        result.push(c);
+        if (len - i - 1).is_multiple_of(3) && i != len - 1 {
+            result.push(',');
+        }
+    }
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn overflow_debit_math_race_safe() {
+        // prior_used=950K, quantity=100K -> used=1.05M, max=1M => to_debit=50K
+        let used = 1_050_000_i64;
+        let quantity = 100_000_i64;
+        let max_tokens = 1_000_000_i64;
+        let prior_used = used - quantity;
+        let prior_overflow = (prior_used - max_tokens).max(0);
+        let current_overflow = (used - max_tokens).max(0);
+        let to_debit = current_overflow - prior_overflow;
+        assert_eq!(to_debit, 50_000);
     }
 }
