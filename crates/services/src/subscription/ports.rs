@@ -193,6 +193,14 @@ pub trait PurchasedTokenRepository: Send + Sync {
     /// Add tokens to a user's purchased balance. Creates row if not exists.
     async fn credit(&self, user_id: UserId, amount: i64) -> anyhow::Result<()>;
 
+    /// Add tokens within a transaction (for webhook atomicity with webhook store).
+    async fn credit_with_txn(
+        &self,
+        txn: &tokio_postgres::Transaction<'_>,
+        user_id: UserId,
+        amount: i64,
+    ) -> anyhow::Result<()>;
+
     /// Deduct tokens from a user's purchased balance. Returns false if insufficient balance.
     async fn debit(&self, user_id: UserId, amount: i64) -> anyhow::Result<bool>;
 }

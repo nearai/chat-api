@@ -50,6 +50,31 @@ impl PurchasedTokenRepository for PostgresPurchasedTokenRepository {
         Ok(())
     }
 
+    async fn credit_with_txn(
+        &self,
+        txn: &tokio_postgres::Transaction<'_>,
+        user_id: UserId,
+        amount: i64,
+    ) -> anyhow::Result<()> {
+        if amount <= 0 {
+            return Ok(());
+        }
+        txn.execute(
+            r#"
+                INSERT INTO purchased_tokens (user_id, balance, total_purchased)
+                VALUES ($1, $2, $2)
+                ON CONFLICT (user_id)
+                DO UPDATE SET
+                    balance = purchased_tokens.balance + EXCLUDED.balance,
+                    total_purchased = purchased_tokens.total_purchased + EXCLUDED.total_purchased,
+                    updated_at = NOW()
+                "#,
+            &[&user_id, &amount],
+        )
+        .await?;
+        Ok(())
+    }
+
     async fn debit(&self, user_id: UserId, amount: i64) -> anyhow::Result<bool> {
         if amount <= 0 {
             return Ok(true);

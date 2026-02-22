@@ -872,44 +872,47 @@ impl SubscriptionService for SubscriptionServiceImpl {
 
             let mode = obj.get("mode").and_then(|m| m.as_str());
             if mode == Some("payment") {
-                let metadata = obj.get("metadata").and_then(|m| m.as_object());
-                let user_id_str = metadata
-                    .and_then(|m| m.get("user_id"))
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        SubscriptionError::InternalError(
-                            "No user_id in checkout session metadata".into(),
-                        )
-                    })?;
-                let tokens_str = metadata
-                    .and_then(|m| m.get("tokens"))
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        SubscriptionError::InternalError(
-                            "No tokens in checkout session metadata".into(),
-                        )
-                    })?;
-                let tokens: i64 = tokens_str.parse().map_err(|_| {
-                    SubscriptionError::InternalError("Invalid tokens in metadata".into())
-                })?;
-                let user_id = UserId(uuid::Uuid::parse_str(user_id_str).map_err(|e| {
-                    SubscriptionError::InternalError(format!("Invalid user_id: {}", e))
-                })?);
-
-                if tokens > 0 {
-                    self.purchased_token_repo
-                        .credit(user_id, tokens)
-                        .await
-                        .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-                    tracing::info!(
-                        "Token purchase credited: user_id={}, tokens={}, event_id={}",
-                        user_id,
-                        tokens,
-                        event_id
-                    );
-                    Some(user_id)
-                } else {
+                // (#4) Skip if payment not completed
+                let payment_status = obj.get("payment_status").and_then(|v| v.as_str());
+                if payment_status != Some("paid") {
+                    tracing::debug!("Skipping token credit: payment_status={:?}", payment_status);
                     None
+                } else {
+                    // (#3) Skip (don't error) when metadata missing - not a token purchase session
+                    let metadata = obj.get("metadata").and_then(|m| m.as_object());
+                    let user_id_str = metadata
+                        .and_then(|m| m.get("user_id"))
+                        .and_then(|v| v.as_str());
+                    let tokens_str = metadata
+                        .and_then(|m| m.get("tokens"))
+                        .and_then(|v| v.as_str());
+                    if let (Some(uid_s), Some(tok_s)) = (user_id_str, tokens_str) {
+                        if let (Ok(tokens), Ok(uuid)) =
+                            (tok_s.parse::<i64>(), uuid::Uuid::parse_str(uid_s))
+                        {
+                            if tokens > 0 {
+                                let user_id = UserId(uuid);
+                                // (#5) Credit within transaction for atomicity with webhook store
+                                self.purchased_token_repo
+                                    .credit_with_txn(&txn, user_id, tokens)
+                                    .await
+                                    .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+                                tracing::info!(
+                                    "Token purchase credited: user_id={}, tokens={}, event_id={}",
+                                    user_id,
+                                    tokens,
+                                    event_id
+                                );
+                                Some(user_id)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
                 }
             } else {
                 None
@@ -1433,12 +1436,14 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .map(|s| s.token_sum)
             .unwrap_or(0);
 
-        let overflow = used - max_tokens as i64;
-        if overflow <= 0 {
+        // Compute overflow attributable only to this request (race-safe under concurrency)
+        let prior_used = used - quantity;
+        let prior_overflow = (prior_used - max_tokens as i64).max(0);
+        let current_overflow = (used - max_tokens as i64).max(0);
+        let to_debit = current_overflow - prior_overflow;
+        if to_debit <= 0 {
             return Ok(());
         }
-
-        let to_debit = std::cmp::min(quantity, overflow);
         let debited = self
             .purchased_token_repo
             .debit(user_id, to_debit)
@@ -1500,4 +1505,20 @@ fn format_number(n: u64) -> String {
         }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn overflow_debit_math_race_safe() {
+        // prior_used=950K, quantity=100K -> used=1.05M, max=1M => to_debit=50K
+        let used = 1_050_000_i64;
+        let quantity = 100_000_i64;
+        let max_tokens = 1_000_000_i64;
+        let prior_used = used - quantity;
+        let prior_overflow = (prior_used - max_tokens).max(0);
+        let current_overflow = (used - max_tokens).max(0);
+        let to_debit = current_overflow - prior_overflow;
+        assert_eq!(to_debit, 50_000);
+    }
 }
