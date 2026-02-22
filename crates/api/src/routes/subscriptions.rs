@@ -84,6 +84,20 @@ pub struct ResumeSubscriptionResponse {
     pub message: String,
 }
 
+/// Request to change subscription plan
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ChangePlanRequest {
+    /// Target plan name (e.g., "starter", "basic")
+    pub plan: String,
+}
+
+/// Response for plan change
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ChangePlanResponse {
+    /// Success message
+    pub message: String,
+}
+
 /// Response containing user's subscriptions
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ListSubscriptionsResponse {
@@ -317,6 +331,74 @@ pub async fn resume_subscription(
     }))
 }
 
+/// Change the user's subscription plan
+#[utoipa::path(
+    post,
+    path = "/v1/subscriptions/change-plan",
+    tag = "Subscriptions",
+    request_body = ChangePlanRequest,
+    responses(
+        (status = 200, description = "Plan changed successfully", body = ChangePlanResponse),
+        (status = 400, description = "Invalid plan or instance limit exceeded", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "No active subscription found", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse),
+        (status = 503, description = "Stripe not configured", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn change_plan(
+    State(app_state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Json(req): Json<ChangePlanRequest>,
+) -> Result<Json<ChangePlanResponse>, ApiError> {
+    tracing::info!(
+        "Changing plan for user_id={} to plan={}",
+        user.user_id,
+        req.plan
+    );
+
+    app_state
+        .subscription_service
+        .change_plan(user.user_id, req.plan.clone())
+        .await
+        .map_err(|e| match e {
+            SubscriptionError::InstanceLimitExceeded { current, max } => {
+                ApiError::bad_request(format!(
+                    "Cannot downgrade: you have {} agent instances but this plan allows only {}. Delete excess instances to downgrade.",
+                    current, max
+                ))
+            }
+            SubscriptionError::InvalidPlan(plan) => {
+                ApiError::bad_request(format!("Invalid plan: {}", plan))
+            }
+            SubscriptionError::NoActiveSubscription => {
+                ApiError::not_found("No active subscription found")
+            }
+            SubscriptionError::NotConfigured => {
+                ApiError::service_unavailable("Stripe is not configured")
+            }
+            SubscriptionError::DatabaseError(msg) => {
+                tracing::error!(error = ?msg, "Database error changing plan");
+                ApiError::internal_server_error("Failed to change plan")
+            }
+            SubscriptionError::StripeError(msg) => {
+                tracing::error!(error = ?msg, "Stripe error changing plan");
+                ApiError::internal_server_error("Failed to change plan")
+            }
+            _ => {
+                tracing::error!(error = ?e, "Failed to change plan");
+                ApiError::internal_server_error("Failed to change plan")
+            }
+        })?;
+
+    Ok(Json(ChangePlanResponse {
+        message: "Plan changed successfully".to_string(),
+    }))
+}
+
 /// Get available subscription plans
 #[utoipa::path(
     get,
@@ -490,6 +572,7 @@ pub fn create_subscriptions_router() -> Router<AppState> {
         .route("/v1/subscriptions", get(list_subscriptions))
         .route("/v1/subscriptions/cancel", post(cancel_subscription))
         .route("/v1/subscriptions/resume", post(resume_subscription))
+        .route("/v1/subscriptions/change-plan", post(change_plan))
         .route("/v1/subscriptions/portal", post(create_portal_session))
 }
 

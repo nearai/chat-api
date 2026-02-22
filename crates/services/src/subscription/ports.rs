@@ -78,6 +78,8 @@ pub enum SubscriptionError {
     NoActiveSubscription,
     /// Monthly token limit exceeded (used >= limit)
     MonthlyTokenLimitExceeded { used: i64, limit: u64 },
+    /// Cannot downgrade: current instance count exceeds target plan's limit
+    InstanceLimitExceeded { current: u64, max: u64 },
     /// Subscription is not scheduled for cancellation (cannot resume)
     SubscriptionNotScheduledForCancellation,
     /// User has no Stripe customer record
@@ -107,6 +109,13 @@ impl fmt::Display for SubscriptionError {
                     f,
                     "Monthly token limit exceeded: used {} of {} tokens",
                     used, limit
+                )
+            }
+            Self::InstanceLimitExceeded { current, max } => {
+                write!(
+                    f,
+                    "Cannot downgrade: you have {} agent instances but this plan allows only {}",
+                    current, max
                 )
             }
             Self::SubscriptionNotScheduledForCancellation => {
@@ -232,6 +241,14 @@ pub trait SubscriptionService: Send + Sync {
 
     /// Resume a subscription that was scheduled to cancel at period end
     async fn resume_subscription(&self, user_id: UserId) -> Result<(), SubscriptionError>;
+
+    /// Change the user's subscription to a different plan.
+    /// Validates that the user's active instance count does not exceed the target plan's limit.
+    async fn change_plan(
+        &self,
+        user_id: UserId,
+        target_plan: String,
+    ) -> Result<(), SubscriptionError>;
 
     /// Get subscriptions for a user with plan names resolved
     /// If active_only is true, returns only active (not expired) subscriptions

@@ -2,6 +2,7 @@ use super::ports::{
     PaymentWebhookRepository, StripeCustomerRepository, Subscription, SubscriptionError,
     SubscriptionPlan, SubscriptionRepository, SubscriptionService, SubscriptionWithPlan,
 };
+use crate::agent::ports::AgentRepository;
 use crate::system_configs::ports::{SubscriptionPlanConfig, SystemConfigsService};
 use crate::user::ports::UserRepository;
 use crate::user_usage::ports::UserUsageRepository;
@@ -14,8 +15,8 @@ use std::time::Instant;
 use stripe::{
     BillingPortalSession, CheckoutSession, CheckoutSessionMode, Client, CreateBillingPortalSession,
     CreateCheckoutSession, CreateCheckoutSessionLineItems, CreateCheckoutSessionSubscriptionData,
-    Customer, CustomerId, RequestStrategy, Subscription as StripeSubscription, Webhook,
-    WebhookError,
+    Customer, CustomerId, RequestStrategy, Subscription as StripeSubscription,
+    UpdateSubscriptionItems, Webhook, WebhookError,
 };
 use tokio::sync::RwLock;
 
@@ -28,6 +29,7 @@ pub struct SubscriptionServiceConfig {
     pub system_configs_service: Arc<dyn SystemConfigsService>,
     pub user_repository: Arc<dyn UserRepository>,
     pub user_usage_repo: Arc<dyn UserUsageRepository>,
+    pub agent_repo: Arc<dyn AgentRepository>,
     pub stripe_secret_key: String,
     pub stripe_webhook_secret: String,
 }
@@ -50,6 +52,7 @@ pub struct SubscriptionServiceImpl {
     system_configs_service: Arc<dyn SystemConfigsService>,
     user_repository: Arc<dyn UserRepository>,
     user_usage_repo: Arc<dyn UserUsageRepository>,
+    agent_repo: Arc<dyn AgentRepository>,
     stripe_secret_key: String,
     stripe_webhook_secret: String,
     token_limit_cache: Arc<RwLock<HashMap<UserId, CachedTokenLimit>>>,
@@ -65,6 +68,7 @@ impl SubscriptionServiceImpl {
             system_configs_service: config.system_configs_service,
             user_repository: config.user_repository,
             user_usage_repo: config.user_usage_repo,
+            agent_repo: config.agent_repo,
             stripe_secret_key: config.stripe_secret_key,
             stripe_webhook_secret: config.stripe_webhook_secret,
             token_limit_cache: Arc::new(RwLock::new(HashMap::new())),
@@ -619,6 +623,136 @@ impl SubscriptionService for SubscriptionServiceImpl {
         tracing::info!(
             "Subscription resumed: user_id={}, subscription_id={}",
             user_id,
+            subscription.subscription_id
+        );
+
+        Ok(())
+    }
+
+    async fn change_plan(
+        &self,
+        user_id: UserId,
+        target_plan: String,
+    ) -> Result<(), SubscriptionError> {
+        tracing::info!(
+            "Changing plan for user_id={} to plan={}",
+            user_id,
+            target_plan
+        );
+
+        // Get provider plans (stripe)
+        let provider_plans = self.get_plans_for_provider("stripe").await?;
+        let price_id = provider_plans
+            .get(&target_plan)
+            .cloned()
+            .ok_or_else(|| SubscriptionError::InvalidPlan(target_plan.clone()))?;
+
+        // Get target plan config for agent_instances limit
+        let configs = self
+            .system_configs_service
+            .get_configs()
+            .await
+            .map_err(|e| SubscriptionError::InternalError(e.to_string()))?;
+        let plan_config = configs
+            .and_then(|c| c.subscription_plans)
+            .and_then(|plans| plans.get(&target_plan).cloned());
+        let max_instances = plan_config
+            .and_then(|c| c.agent_instances)
+            .map(|l| l.max)
+            .unwrap_or(u64::MAX);
+
+        // Validate instance count
+        let instance_count =
+            self.agent_repo
+                .count_user_instances(user_id)
+                .await
+                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))? as u64;
+        if instance_count > max_instances {
+            return Err(SubscriptionError::InstanceLimitExceeded {
+                current: instance_count,
+                max: max_instances,
+            });
+        }
+
+        // Get active subscription
+        let subscription = self
+            .subscription_repo
+            .get_active_subscription(user_id)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
+            .ok_or(SubscriptionError::NoActiveSubscription)?;
+
+        // Don't change if already on target plan
+        if subscription.price_id == price_id {
+            tracing::info!(
+                "User already on target plan: user_id={}, plan={}",
+                user_id,
+                target_plan
+            );
+            return Ok(());
+        }
+
+        // Retrieve current Stripe subscription to get subscription item ID
+        let client = self.get_stripe_client();
+        let subscription_id: stripe::SubscriptionId = subscription
+            .subscription_id
+            .parse()
+            .map_err(|_| SubscriptionError::StripeError("Invalid subscription ID".into()))?;
+
+        let stripe_sub = StripeSubscription::retrieve(&client, &subscription_id, &[])
+            .await
+            .map_err(|e| SubscriptionError::StripeError(e.to_string()))?;
+
+        let subscription_item_id = stripe_sub
+            .items
+            .data
+            .first()
+            .map(|item| item.id.to_string())
+            .ok_or_else(|| SubscriptionError::StripeError("No subscription item found".into()))?;
+
+        // Update subscription to new price
+        let update_item = UpdateSubscriptionItems {
+            id: Some(subscription_item_id),
+            price: Some(price_id.clone()),
+            ..Default::default()
+        };
+        let params = stripe::UpdateSubscription {
+            items: Some(vec![update_item]),
+            ..Default::default()
+        };
+
+        let updated_sub = StripeSubscription::update(&client, &subscription_id, params)
+            .await
+            .map_err(|e| SubscriptionError::StripeError(e.to_string()))?;
+
+        // Update database
+        let updated_model =
+            self.stripe_subscription_to_model(&updated_sub, user_id, &subscription.provider)?;
+        let mut db_client = self
+            .db_pool
+            .get()
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+        let txn = db_client
+            .transaction()
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        self.subscription_repo
+            .upsert_subscription(&txn, updated_model)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        self.invalidate_token_limit_cache(user_id).await;
+
+        txn.commit()
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        tracing::info!(
+            "Plan changed: user_id={}, target_plan={}, subscription_id={}",
+            user_id,
+            target_plan,
             subscription.subscription_id
         );
 

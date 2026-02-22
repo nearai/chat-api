@@ -123,6 +123,9 @@ pub async fn create_test_server_and_db(
         ),
     );
 
+    // Create agent repo (needed by subscription service for change_plan)
+    let agent_repo = db.agent_repository();
+
     // Initialize subscription service for testing
     let subscription_service = Arc::new(services::subscription::SubscriptionServiceImpl::new(
         services::subscription::SubscriptionServiceConfig {
@@ -138,6 +141,7 @@ pub async fn create_test_server_and_db(
             user_repository: user_repo.clone(),
             user_usage_repo: db.user_usage_repository()
                 as Arc<dyn services::user_usage::UserUsageRepository>,
+            agent_repo: agent_repo.clone() as Arc<dyn services::agent::ports::AgentRepository>,
             stripe_secret_key: config.stripe.secret_key.clone(),
             stripe_webhook_secret: config.stripe.webhook_secret.clone(),
         },
@@ -221,7 +225,6 @@ pub async fn create_test_server_and_db(
     );
 
     // Create agent service for testing
-    let agent_repo = db.agent_repository();
     let agent_service = Arc::new(services::agent::AgentServiceImpl::new(
         agent_repo.clone(),
         config.agent.managers.clone(),
