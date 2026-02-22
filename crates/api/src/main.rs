@@ -271,6 +271,14 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(MockMetricsService)
         };
 
+    // Initialize BI metrics service
+    tracing::info!("Initializing BI metrics service...");
+    let bi_metrics_repo = db.bi_metrics_repository();
+    let bi_metrics_service: Arc<dyn services::bi_metrics::BiMetricsService> =
+        Arc::new(services::bi_metrics::BiMetricsServiceImpl::new(
+            bi_metrics_repo as Arc<dyn services::bi_metrics::BiMetricsRepository>,
+        ));
+
     // Load rate limit config from system configs
     let rate_limit_config = system_configs_service
         .get_configs()
@@ -316,6 +324,7 @@ async fn main() -> anyhow::Result<()> {
             config.openai.base_url.clone().unwrap_or_default(),
         ),
         rate_limit_state,
+        bi_metrics_service,
     };
 
     // Create router with CORS support

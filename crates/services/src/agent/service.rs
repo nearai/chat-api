@@ -11,8 +11,7 @@ use uuid::Uuid;
 
 use super::ports::{
     is_valid_service_type, AgentApiInstanceEnrichment, AgentApiKey, AgentInstance, AgentRepository,
-    AgentService, CreateInstanceParams, InstanceBalance, TokenPricing, UsageLogEntry,
-    VALID_SERVICE_TYPES,
+    AgentService, CreateInstanceParams, InstanceBalance, UsageLogEntry, VALID_SERVICE_TYPES,
 };
 
 /// Maximum size for the Agent API SSE stream buffer (100 KB).
@@ -1183,15 +1182,22 @@ impl AgentService for AgentServiceImpl {
             .await
             .map_err(|e| anyhow!("Failed to call Agent API delete: {}", e))?;
 
-        if !response.status().is_success() {
-            return Err(anyhow!(
-                "Agent API delete failed with status {}: instance_id={}",
-                response.status(),
-                instance_id
-            ));
+        let status = response.status();
+        if !status.is_success() {
+            if status == reqwest::StatusCode::NOT_FOUND {
+                tracing::warn!(
+                    "Instance not found on instance manager (already removed?), proceeding with DB soft-delete: instance_id={}",
+                    instance_id
+                );
+            } else {
+                return Err(anyhow!(
+                    "Agent API delete failed with status {}: instance_id={}",
+                    status,
+                    instance_id
+                ));
+            }
         }
 
-        // Only delete from database if remote deletion was successful
         self.repository.delete_instance(instance_id).await?;
 
         tracing::info!(
@@ -1663,79 +1669,6 @@ impl AgentService for AgentServiceImpl {
         );
 
         Ok(api_key_info)
-    }
-
-    async fn record_usage(
-        &self,
-        api_key: &AgentApiKey,
-        input_tokens: i64,
-        output_tokens: i64,
-        model_id: String,
-        request_type: String,
-        pricing: TokenPricing,
-    ) -> anyhow::Result<()> {
-        tracing::debug!(
-            "Recording usage: api_key_id={}, input_tokens={}, output_tokens={}",
-            api_key.id,
-            input_tokens,
-            output_tokens
-        );
-
-        // Verify API key is bound to an instance
-        let instance_id = api_key
-            .instance_id
-            .ok_or_else(|| anyhow!("API key is not bound to an instance"))?;
-
-        let total_tokens = input_tokens + output_tokens;
-
-        // Calculate costs
-        let (input_cost, output_cost, total_cost) =
-            pricing.calculate_cost(input_tokens, output_tokens);
-
-        // Check spend limit
-        if let Some(limit) = api_key.spend_limit {
-            if let Ok(Some(balance)) = self.repository.get_instance_balance(instance_id).await {
-                if balance.total_spent + total_cost > limit {
-                    tracing::warn!(
-                        "Spend limit exceeded: api_key_id={}, current={}, limit={}",
-                        api_key.id,
-                        balance.total_spent,
-                        limit
-                    );
-                    return Err(anyhow!("Spend limit exceeded"));
-                }
-            }
-        }
-
-        // Create usage log entry
-        let usage = UsageLogEntry {
-            id: Uuid::new_v4(),
-            user_id: api_key.user_id,
-            instance_id,
-            api_key_id: api_key.id,
-            api_key_name: api_key.name.clone(),
-            input_tokens,
-            output_tokens,
-            total_tokens,
-            input_cost,
-            output_cost,
-            total_cost,
-            model_id,
-            request_type,
-            created_at: Utc::now(),
-        };
-
-        // Log usage and update balance atomically in database transaction
-        // This ensures both operations commit together or both rollback
-        self.repository.log_usage_and_update_balance(usage).await?;
-
-        tracing::info!(
-            "Usage recorded successfully: api_key_id={}, total_cost={}",
-            api_key.id,
-            total_cost
-        );
-
-        Ok(())
     }
 
     async fn get_instance_usage(

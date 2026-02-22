@@ -3,7 +3,7 @@
 use crate::pool::DbPool;
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
-use services::user_usage::{UsageRankBy, UserUsageRepository, UserUsageSummary};
+use services::user_usage::{RecordUsageParams, UsageRankBy, UserUsageRepository, UserUsageSummary};
 use services::UserId;
 
 pub struct PostgresUserUsageRepository {
@@ -36,6 +36,86 @@ impl UserUsageRepository for PostgresUserUsageRepository {
                 &[&user_id, &metric_key, &quantity, &cost_nano_usd, &model_id],
             )
             .await?;
+        Ok(())
+    }
+
+    async fn record_usage(&self, params: RecordUsageParams) -> anyhow::Result<()> {
+        let client = self.pool.get().await?;
+        client
+            .execute(
+                r#"
+                INSERT INTO user_usage_event
+                    (user_id, metric_key, quantity, cost_nano_usd, model_id,
+                     instance_id, api_key_id, details)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                "#,
+                &[
+                    &params.user_id,
+                    &params.metric_key,
+                    &params.quantity,
+                    &params.cost_nano_usd,
+                    &params.model_id,
+                    &params.instance_id,
+                    &params.api_key_id,
+                    &params.details,
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn record_usage_and_update_balance(
+        &self,
+        params: RecordUsageParams,
+    ) -> anyhow::Result<()> {
+        let instance_id = params
+            .instance_id
+            .ok_or_else(|| anyhow::anyhow!("instance_id required for balance update"))?;
+        let total_tokens = params.quantity;
+        let total_cost = params.cost_nano_usd.unwrap_or(0);
+
+        let mut client = self.pool.get().await?;
+        let transaction = client.transaction().await?;
+
+        // Insert usage event
+        transaction
+            .execute(
+                r#"
+                INSERT INTO user_usage_event
+                    (user_id, metric_key, quantity, cost_nano_usd, model_id,
+                     instance_id, api_key_id, details)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                "#,
+                &[
+                    &params.user_id,
+                    &params.metric_key,
+                    &params.quantity,
+                    &params.cost_nano_usd,
+                    &params.model_id,
+                    &params.instance_id,
+                    &params.api_key_id,
+                    &params.details,
+                ],
+            )
+            .await?;
+
+        // Update agent_balance
+        transaction
+            .execute(
+                r#"
+                UPDATE agent_balance
+                SET total_spent = total_spent + $1,
+                    total_requests = total_requests + 1,
+                    total_tokens = total_tokens + $2,
+                    last_usage_at = NOW(),
+                    updated_at = NOW()
+                WHERE instance_id = $3
+                "#,
+                &[&total_cost, &total_tokens, &instance_id],
+            )
+            .await?;
+
+        transaction.commit().await?;
         Ok(())
     }
 

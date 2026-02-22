@@ -8,12 +8,12 @@ pub mod repositories;
 pub use pool::DbPool;
 pub use repositories::{
     PostgresAgentRepository, PostgresAnalyticsRepository, PostgresAppConfigRepository,
-    PostgresConversationRepository, PostgresConversationShareRepository, PostgresFileRepository,
-    PostgresModelRepository, PostgresNearNonceRepository, PostgresOAuthRepository,
-    PostgresPaymentWebhookRepository, PostgresPurchasedTokenRepository, PostgresSessionRepository,
-    PostgresStripeCustomerRepository, PostgresSubscriptionRepository,
-    PostgresSystemConfigsRepository, PostgresUserRepository, PostgresUserSettingsRepository,
-    PostgresUserUsageRepository,
+    PostgresBiMetricsRepository, PostgresConversationRepository,
+    PostgresConversationShareRepository, PostgresFileRepository, PostgresModelRepository,
+    PostgresNearNonceRepository, PostgresOAuthRepository, PostgresPaymentWebhookRepository,
+    PostgresPurchasedTokenRepository, PostgresSessionRepository, PostgresStripeCustomerRepository,
+    PostgresSubscriptionRepository, PostgresSystemConfigsRepository, PostgresUserRepository,
+    PostgresUserSettingsRepository, PostgresUserUsageRepository,
 };
 
 use crate::pool::create_pool_with_native_tls;
@@ -45,6 +45,7 @@ pub struct Database {
     payment_webhook_repository: Arc<PostgresPaymentWebhookRepository>,
     purchased_token_repository: Arc<PostgresPurchasedTokenRepository>,
     agent_repository: Arc<PostgresAgentRepository>,
+    bi_metrics_repository: Arc<PostgresBiMetricsRepository>,
     cluster_manager: Option<Arc<ClusterManager>>,
 }
 
@@ -74,6 +75,7 @@ impl Database {
         let purchased_token_repository =
             Arc::new(PostgresPurchasedTokenRepository::new(pool.clone()));
         let agent_repository = Arc::new(PostgresAgentRepository::new(pool.clone()));
+        let bi_metrics_repository = Arc::new(PostgresBiMetricsRepository::new(pool.clone()));
 
         Self {
             pool,
@@ -95,6 +97,7 @@ impl Database {
             payment_webhook_repository,
             purchased_token_repository,
             agent_repository,
+            bi_metrics_repository,
             cluster_manager: None,
         }
     }
@@ -307,5 +310,10 @@ impl Database {
     /// Get the agent repository
     pub fn agent_repository(&self) -> Arc<PostgresAgentRepository> {
         self.agent_repository.clone()
+    }
+
+    /// Get the BI metrics repository
+    pub fn bi_metrics_repository(&self) -> Arc<PostgresBiMetricsRepository> {
+        self.bi_metrics_repository.clone()
     }
 }

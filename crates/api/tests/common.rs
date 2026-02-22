@@ -236,6 +236,13 @@ pub async fn create_test_server_and_db(
     let agent_proxy_service: Arc<dyn services::agent::AgentProxyService> =
         Arc::new(services::agent::proxy::AgentProxy::new());
 
+    // Create BI metrics service
+    let bi_metrics_repo = db.bi_metrics_repository();
+    let bi_metrics_service: Arc<dyn services::bi_metrics::BiMetricsService> =
+        Arc::new(services::bi_metrics::BiMetricsServiceImpl::new(
+            bi_metrics_repo as Arc<dyn services::bi_metrics::BiMetricsRepository>,
+        ));
+
     // Create application state
     let app_state = AppState {
         oauth_service,
@@ -267,6 +274,7 @@ pub async fn create_test_server_and_db(
             test_config.cloud_api_base_url.clone(),
         ),
         rate_limit_state,
+        bi_metrics_service,
     };
 
     // Create router
