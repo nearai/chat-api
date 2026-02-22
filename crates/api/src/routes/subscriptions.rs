@@ -567,12 +567,7 @@ pub async fn create_token_purchase(
 
     let checkout_url = app_state
         .subscription_service
-        .create_token_purchase_checkout(
-            user.user_id,
-            req.amount,
-            req.success_url,
-            req.cancel_url,
-        )
+        .create_token_purchase_checkout(user.user_id, req.amount, req.success_url, req.cancel_url)
         .await
         .map_err(|e| match e {
             SubscriptionError::TokenPurchaseNotConfigured => {
