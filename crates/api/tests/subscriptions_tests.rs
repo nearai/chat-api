@@ -285,9 +285,9 @@ async fn test_create_subscription_instance_limit_exceeded() {
 
     // User had Pro (5 instances), cancelled; instances remain. Resubscribing to Starter (max 1).
     let user_email = "test_create_instance_limit@example.com";
+    let user_token = mock_login(&server, user_email).await;
     cleanup_user_subscriptions(&db, user_email).await;
     insert_test_agent_instances(&db, user_email, 3).await;
-    let user_token = mock_login(&server, user_email).await;
 
     let request_body = json!({
         "plan": "starter",
