@@ -2,7 +2,7 @@ use crate::consts::SYSTEM_PROMPT_MAX_LEN;
 use crate::ApiError;
 use serde::{Deserialize, Serialize};
 use services::file::ports::FileData;
-use services::system_configs::ports::SubscriptionPlanConfig;
+use services::system_configs::ports::{AutoRouteConfig, SubscriptionPlanConfig};
 use services::UserId;
 use std::collections::HashMap;
 use utoipa::ToSchema;
@@ -599,12 +599,16 @@ pub struct PublicSystemConfigsResponse {
     /// Default model identifier to use when not specified
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
+    /// Auto-routing configuration for `model: "auto"` requests
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_route: Option<AutoRouteConfig>,
 }
 
 impl From<services::system_configs::ports::SystemConfigs> for PublicSystemConfigsResponse {
     fn from(config: services::system_configs::ports::SystemConfigs) -> Self {
         Self {
             default_model: config.default_model,
+            auto_route: config.auto_route,
         }
     }
 }
@@ -623,6 +627,9 @@ pub struct SystemConfigsResponse {
     /// Maximum number of agent instances per manager (round-robin skips full managers)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_instances_per_manager: Option<u64>,
+    /// Auto-routing configuration for `model: "auto"` requests
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_route: Option<AutoRouteConfig>,
 }
 
 impl From<services::system_configs::ports::SystemConfigs> for SystemConfigsResponse {
@@ -632,6 +639,7 @@ impl From<services::system_configs::ports::SystemConfigs> for SystemConfigsRespo
             rate_limit: config.rate_limit.into(),
             subscription_plans: config.subscription_plans,
             max_instances_per_manager: config.max_instances_per_manager,
+            auto_route: config.auto_route,
         }
     }
 }
@@ -651,6 +659,9 @@ pub struct UpsertSystemConfigsRequest {
     /// Maximum number of agent instances per manager (round-robin skips full managers)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_instances_per_manager: Option<u64>,
+    /// Auto-routing configuration for `model: "auto"` requests
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_route: Option<AutoRouteConfig>,
 }
 
 impl TryFrom<UpsertSystemConfigsRequest> for services::system_configs::ports::PartialSystemConfigs {
@@ -668,6 +679,7 @@ impl TryFrom<UpsertSystemConfigsRequest> for services::system_configs::ports::Pa
             rate_limit,
             subscription_plans: req.subscription_plans,
             max_instances_per_manager: req.max_instances_per_manager,
+            auto_route: req.auto_route,
         })
     }
 }
