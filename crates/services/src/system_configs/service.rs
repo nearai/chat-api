@@ -18,7 +18,7 @@ impl SystemConfigsServiceImpl {
 #[async_trait]
 impl SystemConfigsService for SystemConfigsServiceImpl {
     async fn get_configs(&self) -> anyhow::Result<Option<SystemConfigs>> {
-        tracing::info!("Getting system configs");
+        tracing::debug!("Getting system configs");
 
         self.repository.get_configs().await
     }

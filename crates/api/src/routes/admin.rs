@@ -1025,6 +1025,12 @@ pub async fn upsert_system_configs(
         .update_config(updated.rate_limit.clone())
         .await;
 
+    // Invalidate system configs cache so auto-route picks up changes immediately
+    {
+        let mut cache = app_state.system_configs_cache.write().await;
+        *cache = None;
+    }
+
     Ok(Json(updated.into()))
 }
 
