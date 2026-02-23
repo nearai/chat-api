@@ -144,12 +144,48 @@ pub struct ModelAttestation {
     pub info: Option<serde_json::Value>,
 }
 
+/// Agent attestation from agent instance
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AgentAttestation {
+    /// Agent instance name
+    pub name: String,
+
+    /// Container image digest
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_digest: Option<String>,
+
+    /// TDX event log
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_log: Option<String>,
+
+    /// Additional TDX/tappd info (structured JSON)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub info: Option<serde_json::Value>,
+
+    /// Intel TDX quote in hex format
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intel_quote: Option<String>,
+
+    /// Request nonce
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_nonce: Option<String>,
+
+    /// TLS certificate
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls_certificate: Option<String>,
+
+    /// TLS certificate fingerprint
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls_certificate_fingerprint: Option<String>,
+}
+
 /// Complete attestation report combining all layers
 ///
 /// This report proves the entire trust chain:
 /// 1. This chat-api service runs in a TEE (your_gateway_attestation)
-/// 2. The cloud-api dependency runs in a TEE (cloud_api_gateway_attestation)  
+/// 2. The cloud-api dependency runs in a TEE (cloud_api_gateway_attestation)
 /// 3. The model inference providers run on trusted hardware (model_attestations)
+/// 4. Optional agent instance attestations when agent parameter is provided
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CombinedAttestationReport {
     /// This chat-api's own CPU attestation (proves this service runs in a TEE)
@@ -161,6 +197,10 @@ pub struct CombinedAttestationReport {
     /// Model provider attestations (can be multiple when routing to different models)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_attestations: Option<Vec<ModelAttestation>>,
+
+    /// Agent instance attestations (included when agent query parameter is provided)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_attestations: Option<Vec<AgentAttestation>>,
 }
 
 /// Attestation report structure from proxy_service
