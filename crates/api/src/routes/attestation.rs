@@ -12,6 +12,7 @@ use axum::{
 };
 use futures::TryStreamExt;
 use http::Method;
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use services::vpc::load_vpc_info;
 
@@ -275,34 +276,40 @@ fn validate_instance_name(name: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
-/// Helper function to handle HTTP response from proxy service (DRY)
-async fn handle_proxy_response(
-    response: services::response::ports::ProxyResponse,
+/// Build full URL for agent manager request (handles base URL with/without trailing slash)
+fn build_manager_url(base_url: &str, path: &str) -> Result<String, ApiError> {
+    let base = url::Url::parse(base_url).map_err(|e| {
+        tracing::error!("Invalid agent manager URL {}: {}", base_url, e);
+        ApiError::internal_server_error("Invalid agent manager URL")
+    })?;
+    let full = base.join(path).map_err(|e| {
+        tracing::error!("Failed to build manager URL: {}", e);
+        ApiError::internal_server_error("Failed to build manager URL")
+    })?;
+    Ok(full.to_string())
+}
+
+/// Helper to handle HTTP response from agent manager (status check + body)
+async fn handle_manager_response(
+    response: reqwest::Response,
     context: &str,
 ) -> Result<bytes::Bytes, ApiError> {
-    if response.status < 200 || response.status >= 300 {
+    let status = response.status();
+    if !status.is_success() {
         tracing::error!(
-            "Proxy service returned error status {} for {}",
-            response.status,
+            "Agent manager returned error status {} for {}",
+            status,
             context
         );
         return Err(ApiError::service_unavailable(format!(
             "{} service returned error: {}",
-            context, response.status
+            context, status
         )));
     }
-
-    Ok(response
-        .body
-        .try_collect::<Vec<_>>()
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to read {} response: {}", context, e);
-            ApiError::internal_server_error(format!("Failed to read {} response", context))
-        })?
-        .into_iter()
-        .flatten()
-        .collect())
+    response.bytes().await.map_err(|e| {
+        tracing::error!("Failed to read {} response: {}", context, e);
+        ApiError::internal_server_error(format!("Failed to read {} response", context))
+    })
 }
 
 async fn fetch_agent_attestations(
@@ -338,43 +345,55 @@ async fn fetch_agent_attestations(
     // Security: Validate instance name to prevent path traversal attacks
     validate_instance_name(&agent_instance.name)?;
 
-    let instance_name = &agent_instance.name;
+    // Get the agent manager URL - each instance is hosted on a specific manager
+    let manager_base_url = agent_instance
+        .agent_api_base_url
+        .as_deref()
+        .ok_or_else(|| {
+            tracing::warn!("Agent instance has no agent_api_base_url: {}", agent_id);
+            ApiError::bad_gateway("Agent instance has no manager URL; cannot fetch attestation")
+        })?;
 
+    let instance_name = &agent_instance.name;
     // URL-encode instance name for safe URL construction
     let encoded_instance_name = urlencoding::encode(instance_name);
 
-    // Build paths for both requests
+    // Build URLs for the manager that hosts this instance
     // NOTE: Nonce is critical for replay protection - bind the quote to the client's nonce
-    let attestation_path = format!("attestation/report?nonce={}", request_nonce);
-    let instance_attestation_path = format!("instances/{}/attestation", encoded_instance_name);
+    let attestation_url = build_manager_url(
+        manager_base_url,
+        &format!("attestation/report?nonce={}", request_nonce),
+    )?;
+    let instance_attestation_url = build_manager_url(
+        manager_base_url,
+        &format!("instances/{}/attestation", encoded_instance_name),
+    )?;
 
-    // Fetch both attestations concurrently to minimize latency
+    // Fetch both attestations concurrently from the corresponding agent manager
+    let http_client = Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| {
+            tracing::error!("Failed to create HTTP client: {}", e);
+            ApiError::internal_server_error("Failed to create HTTP client")
+        })?;
+
     let (attestation_response, instance_response) = tokio::join!(
-        app_state.proxy_service.forward_request(
-            Method::GET,
-            &attestation_path,
-            http::HeaderMap::new(),
-            None
-        ),
-        app_state.proxy_service.forward_request(
-            Method::GET,
-            &instance_attestation_path,
-            http::HeaderMap::new(),
-            None,
-        )
+        http_client.get(&attestation_url).send(),
+        http_client.get(&instance_attestation_url).send(),
     );
 
-    // Handle responses
     let attestation_response = attestation_response.map_err(|e| {
         tracing::error!(
-            "Failed to fetch agent attestation report from compose-api: {}",
+            "Failed to fetch agent attestation from manager {}: {}",
+            manager_base_url,
             e
         );
         ApiError::bad_gateway(format!("Failed to fetch agent attestation: {}", e))
     })?;
 
     let attestation_bytes =
-        handle_proxy_response(attestation_response, "Agent attestation").await?;
+        handle_manager_response(attestation_response, "Agent attestation").await?;
 
     let attestation_data: AgentAttestationResponse = serde_json::from_slice(&attestation_bytes)
         .map_err(|e| {
@@ -384,13 +403,14 @@ async fn fetch_agent_attestations(
 
     let instance_response = instance_response.map_err(|e| {
         tracing::error!(
-            "Failed to fetch agent instance attestation from compose-api: {}",
+            "Failed to fetch instance attestation from manager {}: {}",
+            manager_base_url,
             e
         );
         ApiError::bad_gateway(format!("Failed to fetch instance attestation: {}", e))
     })?;
 
-    let instance_bytes = handle_proxy_response(instance_response, "Instance attestation").await?;
+    let instance_bytes = handle_manager_response(instance_response, "Instance attestation").await?;
 
     let instance_data: AgentInstanceAttestationResponse = serde_json::from_slice(&instance_bytes)
         .map_err(|e| {
