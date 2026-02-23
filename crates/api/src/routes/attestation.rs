@@ -5,7 +5,7 @@ use crate::{
     ApiError,
 };
 use axum::{
-    extract::{Extension, Query, State},
+    extract::{Query, State},
     response::Json,
     routing::get,
     Router,
@@ -67,7 +67,6 @@ pub struct AttestationQuery {
 pub async fn get_attestation_report(
     State(app_state): State<AppState>,
     Query(params): Query<AttestationQuery>,
-    Extension(user): Extension<crate::middleware::AuthenticatedUser>,
 ) -> Result<Json<CombinedAttestationReport>, ApiError> {
     // Exclude agent parameter from cloud-api query since it's not relevant there
     let mut cloud_api_params = params.clone();
@@ -187,9 +186,9 @@ pub async fn get_attestation_report(
 
     let model_attestations = proxy_report.model_attestations;
 
-    // Fetch agent attestations if agent parameter is provided
+    // Fetch agent attestations if agent parameter is provided (no user auth required)
     let agent_attestations = if let Some(agent_id) = &params.agent {
-        match fetch_agent_attestations(&app_state, agent_id, &request_nonce, user.user_id).await {
+        match fetch_agent_attestations(&app_state, agent_id, &request_nonce).await {
             Ok(attestations) => Some(attestations),
             Err(e) => {
                 tracing::warn!("Failed to fetch agent attestations: {:?}", e);
@@ -310,7 +309,6 @@ async fn fetch_agent_attestations(
     app_state: &AppState,
     agent_id: &str,
     request_nonce: &str,
-    user_id: services::UserId,
 ) -> Result<Vec<crate::models::AgentAttestation>, ApiError> {
     use uuid::Uuid;
 
@@ -323,7 +321,7 @@ async fn fetch_agent_attestations(
         ApiError::bad_request(format!("Invalid agent ID format: {}", e))
     })?;
 
-    // Fetch and authorize: Get the agent instance from database
+    // Fetch the agent instance from database (no user_id check - attestation is public)
     let agent_instance = app_state
         .agent_repository
         .get_instance(agent_uuid)
@@ -336,19 +334,6 @@ async fn fetch_agent_attestations(
             tracing::warn!("Agent instance not found: {}", agent_id);
             ApiError::not_found("Agent instance not found")
         })?;
-
-    // Security: IDOR check - verify user owns the agent instance
-    if agent_instance.user_id != user_id {
-        tracing::warn!(
-            "Unauthorized access attempt: user {} tried to access agent {} owned by {}",
-            user_id,
-            agent_id,
-            agent_instance.user_id
-        );
-        return Err(ApiError::forbidden(
-            "You do not have permission to access this agent instance",
-        ));
-    }
 
     // Security: Validate instance name to prevent path traversal attacks
     validate_instance_name(&agent_instance.name)?;
