@@ -939,7 +939,7 @@ pub async fn upsert_system_configs(
 
     #[cfg(not(feature = "test"))]
     if let Some(ref model_id) = request.default_model {
-        ensure_proxy_model_exists(app_state.proxy_service, model_id).await?;
+        ensure_proxy_model_exists(app_state.proxy_service.clone(), model_id).await?;
     }
 
     // Validate rate limit config if provided
@@ -954,6 +954,8 @@ pub async fn upsert_system_configs(
                 "auto_route.model must not be empty".to_string(),
             ));
         }
+        #[cfg(not(feature = "test"))]
+        ensure_proxy_model_exists(app_state.proxy_service.clone(), &auto_route.model).await?;
         if let Some(t) = auto_route.temperature {
             if t < 0.0 {
                 return Err(ApiError::bad_request(
