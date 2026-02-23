@@ -226,6 +226,12 @@ pub async fn create_subscription(
                 tracing::error!("Unexpected MonthlyTokenLimitExceeded in create");
                 ApiError::internal_server_error("Failed to create subscription")
             }
+            SubscriptionError::InstanceLimitExceeded { current, max } => {
+                ApiError::bad_request(format!(
+                    "Cannot subscribe: current instance count ({}) exceeds plan limit ({})",
+                    current, max
+                ))
+            }
         })?;
 
     Ok(Json(CreateSubscriptionResponse { checkout_url }))
