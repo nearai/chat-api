@@ -718,6 +718,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
         };
         let params = stripe::UpdateSubscription {
             items: Some(vec![update_item]),
+            proration_behavior: Some(
+                stripe::generated::billing::subscription::SubscriptionProrationBehavior::CreateProrations,
+            ),
             ..Default::default()
         };
 
