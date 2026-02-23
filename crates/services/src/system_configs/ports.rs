@@ -120,6 +120,23 @@ impl Default for RateLimitConfig {
     }
 }
 
+/// Auto-routing configuration for `model: "auto"` chat completion requests
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoRouteConfig {
+    /// Target model to substitute for "auto"
+    pub model: String,
+    /// Default temperature (injected when client doesn't provide one; omitted if None)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    /// Default top_p (injected when client doesn't provide one; omitted if None)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f64>,
+    /// Default max_tokens (injected when client doesn't provide one; omitted if None)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u64>,
+}
+
 /// Application-wide configuration stored in `system_configs` table
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemConfigs {
@@ -135,6 +152,9 @@ pub struct SystemConfigs {
     /// round-robin skips it. If all managers are full, instance creation is rejected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_instances_per_manager: Option<u64>,
+    /// Auto-routing configuration for `model: "auto"` requests
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_route: Option<AutoRouteConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -143,6 +163,7 @@ pub struct PartialSystemConfigs {
     pub rate_limit: Option<RateLimitConfig>,
     pub subscription_plans: Option<HashMap<String, SubscriptionPlanConfig>>,
     pub max_instances_per_manager: Option<u64>,
+    pub auto_route: Option<AutoRouteConfig>,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -153,6 +174,7 @@ impl Default for SystemConfigs {
             rate_limit: RateLimitConfig::default(),
             subscription_plans: None,
             max_instances_per_manager: Some(200),
+            auto_route: None,
         }
     }
 }
@@ -166,6 +188,7 @@ impl SystemConfigs {
             max_instances_per_manager: partial
                 .max_instances_per_manager
                 .or(self.max_instances_per_manager),
+            auto_route: partial.auto_route.or(self.auto_route),
         }
     }
 }
