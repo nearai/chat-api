@@ -158,9 +158,9 @@ pub struct AgentAttestation {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub event_log: Option<String>,
 
-    /// Additional TDX/tappd info
+    /// Additional TDX/tappd info (structured JSON)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub info: Option<String>,
+    pub info: Option<serde_json::Value>,
 
     /// Intel TDX quote in hex format
     #[serde(skip_serializing_if = "Option::is_none")]

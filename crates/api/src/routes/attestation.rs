@@ -4,7 +4,12 @@ use crate::{
     state::AppState,
     ApiError,
 };
-use axum::{extract::Query, extract::State, response::Json, routing::get, Router};
+use axum::{
+    extract::{Extension, Query, State},
+    response::Json,
+    routing::get,
+    Router,
+};
 use futures::TryStreamExt;
 use http::Method;
 use serde::{Deserialize, Serialize};
@@ -62,6 +67,7 @@ pub struct AttestationQuery {
 pub async fn get_attestation_report(
     State(app_state): State<AppState>,
     Query(params): Query<AttestationQuery>,
+    Extension(user): Extension<crate::middleware::AuthenticatedUser>,
 ) -> Result<Json<CombinedAttestationReport>, ApiError> {
     // Exclude agent parameter from cloud-api query since it's not relevant there
     let mut cloud_api_params = params.clone();
@@ -183,7 +189,7 @@ pub async fn get_attestation_report(
 
     // Fetch agent attestations if agent parameter is provided
     let agent_attestations = if let Some(agent_id) = &params.agent {
-        match fetch_agent_attestations(&app_state, agent_id, &request_nonce).await {
+        match fetch_agent_attestations(&app_state, agent_id, &request_nonce, user.user_id).await {
             Ok(attestations) => Some(attestations),
             Err(e) => {
                 tracing::warn!("Failed to fetch agent attestations: {:?}", e);
@@ -210,7 +216,8 @@ pub async fn get_attestation_report(
 struct AgentAttestationResponse {
     event_log: Option<String>,
     quote: Option<String>,
-    info: Option<String>,
+    #[serde(default)]
+    info: Option<serde_json::Value>,
     tls_certificate: Option<String>,
     tls_certificate_fingerprint: Option<String>,
 }
@@ -221,12 +228,94 @@ struct AgentInstanceAttestationResponse {
     name: String,
 }
 
+/// Validate nonce is properly formatted and reasonable length (replay protection)
+fn validate_nonce(nonce: &str) -> Result<(), ApiError> {
+    // Nonce should be a valid hex string of reasonable length (64 chars = 32 bytes)
+    const EXPECTED_NONCE_LEN: usize = 64;
+    const MAX_NONCE_LEN: usize = 256;
+
+    if nonce.len() > MAX_NONCE_LEN {
+        tracing::warn!("Nonce exceeds maximum length: {}", nonce.len());
+        return Err(ApiError::bad_request("Nonce is too long"));
+    }
+
+    if !nonce.chars().all(|c| c.is_ascii_hexdigit()) {
+        tracing::warn!("Nonce contains non-hex characters");
+        return Err(ApiError::bad_request("Nonce must be a valid hex string"));
+    }
+
+    if nonce.len() != EXPECTED_NONCE_LEN {
+        tracing::warn!(
+            "Nonce has unexpected length: {} (expected {})",
+            nonce.len(),
+            EXPECTED_NONCE_LEN
+        );
+        return Err(ApiError::bad_request(format!(
+            "Nonce must be exactly {} characters",
+            EXPECTED_NONCE_LEN
+        )));
+    }
+
+    Ok(())
+}
+
+/// Validate instance name doesn't contain path traversal sequences
+fn validate_instance_name(name: &str) -> Result<(), ApiError> {
+    // Reject names containing path traversal sequences
+    if name.contains("..") || name.contains("/") || name.contains("\\") {
+        tracing::warn!("Instance name contains invalid characters: {}", name);
+        return Err(ApiError::bad_request(
+            "Instance name contains invalid characters",
+        ));
+    }
+
+    if name.is_empty() {
+        return Err(ApiError::bad_request("Instance name cannot be empty"));
+    }
+
+    Ok(())
+}
+
+/// Helper function to handle HTTP response from proxy service (DRY)
+async fn handle_proxy_response(
+    response: services::response::ports::ProxyResponse,
+    context: &str,
+) -> Result<bytes::Bytes, ApiError> {
+    if response.status < 200 || response.status >= 300 {
+        tracing::error!(
+            "Proxy service returned error status {} for {}",
+            response.status,
+            context
+        );
+        return Err(ApiError::service_unavailable(format!(
+            "{} service returned error: {}",
+            context, response.status
+        )));
+    }
+
+    Ok(response
+        .body
+        .try_collect::<Vec<_>>()
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to read {} response: {}", context, e);
+            ApiError::internal_server_error(format!("Failed to read {} response", context))
+        })?
+        .into_iter()
+        .flatten()
+        .collect())
+}
+
 async fn fetch_agent_attestations(
     app_state: &AppState,
     agent_id: &str,
     request_nonce: &str,
+    user_id: services::UserId,
 ) -> Result<Vec<crate::models::AgentAttestation>, ApiError> {
     use uuid::Uuid;
+
+    // Security: Validate nonce to prevent panic/DoS from malformed input
+    validate_nonce(request_nonce)?;
 
     // Parse the agent_id as UUID
     let agent_uuid = Uuid::parse_str(agent_id).map_err(|e| {
@@ -234,7 +323,7 @@ async fn fetch_agent_attestations(
         ApiError::bad_request(format!("Invalid agent ID format: {}", e))
     })?;
 
-    // Get the agent instance from database
+    // Fetch and authorize: Get the agent instance from database
     let agent_instance = app_state
         .agent_repository
         .get_instance(agent_uuid)
@@ -248,44 +337,59 @@ async fn fetch_agent_attestations(
             ApiError::not_found("Agent instance not found")
         })?;
 
-    let instance_name = &agent_instance.name;
-
-    // Fetch agent attestation report
-    let attestation_path = "attestation/report";
-    let attestation_response = app_state
-        .proxy_service
-        .forward_request(Method::GET, attestation_path, http::HeaderMap::new(), None)
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                "Failed to fetch agent attestation report from compose-api: {}",
-                e
-            );
-            ApiError::bad_gateway(format!("Failed to fetch agent attestation: {}", e))
-        })?;
-
-    if attestation_response.status < 200 || attestation_response.status >= 300 {
-        tracing::error!(
-            "compose-api attestation/report returned error status {}",
-            attestation_response.status
+    // Security: IDOR check - verify user owns the agent instance
+    if agent_instance.user_id != user_id {
+        tracing::warn!(
+            "Unauthorized access attempt: user {} tried to access agent {} owned by {}",
+            user_id,
+            agent_id,
+            agent_instance.user_id
         );
-        return Err(ApiError::service_unavailable(format!(
-            "Agent attestation service returned error: {}",
-            attestation_response.status
-        )));
+        return Err(ApiError::forbidden(
+            "You do not have permission to access this agent instance",
+        ));
     }
 
-    let attestation_bytes: bytes::Bytes = attestation_response
-        .body
-        .try_collect::<Vec<_>>()
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to read agent attestation response: {}", e);
-            ApiError::internal_server_error("Failed to read agent attestation")
-        })?
-        .into_iter()
-        .flatten()
-        .collect();
+    // Security: Validate instance name to prevent path traversal attacks
+    validate_instance_name(&agent_instance.name)?;
+
+    let instance_name = &agent_instance.name;
+
+    // URL-encode instance name for safe URL construction
+    let encoded_instance_name = urlencoding::encode(instance_name);
+
+    // Build paths for both requests
+    // NOTE: Nonce is critical for replay protection - bind the quote to the client's nonce
+    let attestation_path = format!("attestation/report?nonce={}", request_nonce);
+    let instance_attestation_path = format!("instances/{}/attestation", encoded_instance_name);
+
+    // Fetch both attestations concurrently to minimize latency
+    let (attestation_response, instance_response) = tokio::join!(
+        app_state.proxy_service.forward_request(
+            Method::GET,
+            &attestation_path,
+            http::HeaderMap::new(),
+            None
+        ),
+        app_state.proxy_service.forward_request(
+            Method::GET,
+            &instance_attestation_path,
+            http::HeaderMap::new(),
+            None,
+        )
+    );
+
+    // Handle responses
+    let attestation_response = attestation_response.map_err(|e| {
+        tracing::error!(
+            "Failed to fetch agent attestation report from compose-api: {}",
+            e
+        );
+        ApiError::bad_gateway(format!("Failed to fetch agent attestation: {}", e))
+    })?;
+
+    let attestation_bytes =
+        handle_proxy_response(attestation_response, "Agent attestation").await?;
 
     let attestation_data: AgentAttestationResponse = serde_json::from_slice(&attestation_bytes)
         .map_err(|e| {
@@ -293,47 +397,15 @@ async fn fetch_agent_attestations(
             ApiError::internal_server_error("Failed to parse agent attestation")
         })?;
 
-    // Fetch instance-specific attestation
-    let instance_attestation_path = format!("instances/{}/attestation", instance_name);
-    let instance_response = app_state
-        .proxy_service
-        .forward_request(
-            Method::GET,
-            &instance_attestation_path,
-            http::HeaderMap::new(),
-            None,
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                "Failed to fetch agent instance attestation from compose-api: {}",
-                e
-            );
-            ApiError::bad_gateway(format!("Failed to fetch instance attestation: {}", e))
-        })?;
-
-    if instance_response.status < 200 || instance_response.status >= 300 {
+    let instance_response = instance_response.map_err(|e| {
         tracing::error!(
-            "compose-api instances attestation returned error status {}",
-            instance_response.status
+            "Failed to fetch agent instance attestation from compose-api: {}",
+            e
         );
-        return Err(ApiError::service_unavailable(format!(
-            "Instance attestation service returned error: {}",
-            instance_response.status
-        )));
-    }
+        ApiError::bad_gateway(format!("Failed to fetch instance attestation: {}", e))
+    })?;
 
-    let instance_bytes: bytes::Bytes = instance_response
-        .body
-        .try_collect::<Vec<_>>()
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to read instance attestation response: {}", e);
-            ApiError::internal_server_error("Failed to read instance attestation")
-        })?
-        .into_iter()
-        .flatten()
-        .collect();
+    let instance_bytes = handle_proxy_response(instance_response, "Instance attestation").await?;
 
     let instance_data: AgentInstanceAttestationResponse = serde_json::from_slice(&instance_bytes)
         .map_err(|e| {
