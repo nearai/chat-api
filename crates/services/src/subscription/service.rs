@@ -434,12 +434,35 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .ok_or_else(|| SubscriptionError::InvalidPlan(plan.clone()))?
             .clone();
 
-        // Fetch trial_period_days from subscription plan config
-        let trial_period_days = self
+        // Validate instance count: user may have leftover instances from a prior higher-tier plan.
+        // Fail before checkout to avoid subscribing to a lower-tier plan they cannot use.
+        let configs = self
             .system_configs_service
             .get_configs()
             .await
-            .map_err(|e| SubscriptionError::InternalError(e.to_string()))?
+            .map_err(|e| SubscriptionError::InternalError(e.to_string()))?;
+        let plan_config = configs
+            .and_then(|c| c.subscription_plans)
+            .and_then(|plans| plans.get(&plan).cloned());
+        let max_instances = plan_config
+            .and_then(|c| c.agent_instances)
+            .map(|l| l.max)
+            .unwrap_or(u64::MAX);
+
+        let instance_count =
+            self.agent_repo
+                .count_user_instances(user_id)
+                .await
+                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))? as u64;
+        if instance_count > max_instances {
+            return Err(SubscriptionError::InstanceLimitExceeded {
+                current: instance_count,
+                max: max_instances,
+            });
+        }
+
+        // Fetch trial_period_days from subscription plan config (reuse configs from instance check)
+        let trial_period_days = configs
             .and_then(|c| c.subscription_plans)
             .and_then(|plans| plans.get(&plan).cloned())
             .and_then(|p| p.trial_period_days)

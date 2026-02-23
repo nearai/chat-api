@@ -270,6 +270,65 @@ async fn test_create_subscription_invalid_plan() {
 
 #[tokio::test]
 #[serial(subscription_tests)]
+async fn test_create_subscription_instance_limit_exceeded() {
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+    ensure_stripe_env_for_gating();
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "starter": { "providers": { "stripe": { "price_id": "price_test_starter" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } },
+            "pro": { "providers": { "stripe": { "price_id": "price_test_pro" } }, "agent_instances": { "max": 5 }, "monthly_tokens": { "max": 1000000 } }
+        }),
+    )
+    .await;
+
+    // User had Pro (5 instances), cancelled; instances remain. Resubscribing to Starter (max 1).
+    let user_email = "test_create_instance_limit@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+    insert_test_agent_instances(&db, user_email, 3).await;
+    let user_token = mock_login(&server, user_email).await;
+
+    let request_body = json!({
+        "plan": "starter",
+        "success_url": "https://example.com/success",
+        "cancel_url": "https://example.com/cancel"
+    });
+
+    let response = server
+        .post("/v1/subscriptions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&request_body)
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        400,
+        "Should return 400 when instance count exceeds plan limit before checkout"
+    );
+
+    let body: serde_json::Value = response.json();
+    let message = body
+        .get("message")
+        .and_then(|v| v.as_str())
+        .or_else(|| body.get("detail").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    assert!(
+        message.contains("3") && message.contains("1"),
+        "Error message should include current (3) and max (1) instance counts, got: {}",
+        message
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
 async fn test_cancel_subscription_requires_auth() {
     let server = create_test_server().await;
 
