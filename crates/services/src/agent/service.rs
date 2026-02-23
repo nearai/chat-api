@@ -1259,6 +1259,102 @@ impl AgentService for AgentServiceImpl {
         Ok(())
     }
 
+    async fn upgrade_instance(&self, instance_id: Uuid, user_id: UserId) -> anyhow::Result<()> {
+        tracing::info!(
+            "Upgrading instance: instance_id={}, user_id={}",
+            instance_id,
+            user_id
+        );
+
+        let instance = self
+            .repository
+            .get_instance(instance_id)
+            .await?
+            .ok_or_else(|| anyhow!("Instance not found"))?;
+
+        if instance.user_id != user_id {
+            return Err(anyhow!("Access denied"));
+        }
+
+        let manager = self.resolve_manager(&instance);
+
+        // Fetch latest images from compose-api
+        let version_url = format!("{}/version", manager.url);
+        let version_resp = self
+            .http_client
+            .get(&version_url)
+            .bearer_auth(&manager.token)
+            .send()
+            .await
+            .map_err(|e| anyhow!("Failed to fetch compose-api version: {}", e))?;
+
+        if !version_resp.status().is_success() {
+            return Err(anyhow!(
+                "Failed to fetch compose-api version: status={}",
+                version_resp.status()
+            ));
+        }
+
+        #[derive(serde::Deserialize)]
+        struct VersionResponse {
+            images: std::collections::HashMap<String, String>,
+        }
+
+        let version: VersionResponse = version_resp
+            .json()
+            .await
+            .map_err(|e| anyhow!("Failed to parse compose-api version response: {}", e))?;
+
+        // Map service_type to image key in the version response
+        let service_type = instance.service_type.as_deref().unwrap_or("openclaw");
+        let image_key = match service_type {
+            "ironclaw" => "ironclaw",
+            _ => "worker",
+        };
+
+        let image = version
+            .images
+            .get(image_key)
+            .ok_or_else(|| anyhow!("No image found for service type '{}' (key '{}')", service_type, image_key))?;
+
+        // Restart with the latest image
+        let encoded_name = urlencoding::encode(&instance.name);
+        let restart_url = format!("{}/instances/{}/restart", manager.url, encoded_name);
+
+        #[derive(serde::Serialize)]
+        struct RestartBody {
+            image: String,
+        }
+
+        let response = self
+            .http_client
+            .post(&restart_url)
+            .bearer_auth(&manager.token)
+            .json(&RestartBody {
+                image: image.clone(),
+            })
+            .send()
+            .await
+            .map_err(|e| anyhow!("Failed to call Agent API restart: {}", e))?;
+
+        if !response.status().is_success() {
+            return Err(anyhow!(
+                "Agent API upgrade-restart failed with status {}: instance_id={}",
+                response.status(),
+                instance_id
+            ));
+        }
+
+        tracing::info!(
+            "Instance upgraded successfully: instance_id={}, name={}, image={}",
+            instance_id,
+            instance.name,
+            image_key
+        );
+
+        Ok(())
+    }
+
     async fn stop_instance(&self, instance_id: Uuid, user_id: UserId) -> anyhow::Result<()> {
         tracing::info!(
             "Stopping instance: instance_id={}, user_id={}",

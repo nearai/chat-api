@@ -322,6 +322,10 @@ pub trait AgentService: Send + Sync {
 
     async fn restart_instance(&self, instance_id: Uuid, user_id: UserId) -> anyhow::Result<()>;
 
+    /// Upgrade instance to the latest image for its service type.
+    /// Fetches current images from the owning compose-api, then restarts with the latest digest.
+    async fn upgrade_instance(&self, instance_id: Uuid, user_id: UserId) -> anyhow::Result<()>;
+
     async fn stop_instance(&self, instance_id: Uuid, user_id: UserId) -> anyhow::Result<()>;
 
     async fn start_instance(&self, instance_id: Uuid, user_id: UserId) -> anyhow::Result<()>;

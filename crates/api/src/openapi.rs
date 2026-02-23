@@ -95,6 +95,7 @@ use utoipa::OpenApi;
         crate::routes::agents::start_instance,
         crate::routes::agents::stop_instance,
         crate::routes::agents::restart_instance,
+        crate::routes::agents::upgrade_instance,
         crate::routes::admin::admin_create_backup,
         crate::routes::admin::admin_list_backups,
         crate::routes::admin::admin_get_backup,
