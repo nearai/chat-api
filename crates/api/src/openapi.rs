@@ -64,6 +64,7 @@ use utoipa::OpenApi;
         crate::routes::subscriptions::create_portal_session,
         crate::routes::subscriptions::cancel_subscription,
         crate::routes::subscriptions::resume_subscription,
+        crate::routes::subscriptions::change_plan,
         crate::routes::subscriptions::list_plans,
         crate::routes::subscriptions::list_subscriptions,
         // Admin endpoints
@@ -159,6 +160,8 @@ use utoipa::OpenApi;
         crate::routes::subscriptions::CreatePortalSessionResponse,
         crate::routes::subscriptions::CancelSubscriptionResponse,
         crate::routes::subscriptions::ResumeSubscriptionResponse,
+        crate::routes::subscriptions::ChangePlanRequest,
+        crate::routes::subscriptions::ChangePlanResponse,
         crate::routes::subscriptions::ListSubscriptionsResponse,
         crate::routes::subscriptions::ListPlansResponse,
         services::subscription::ports::SubscriptionWithPlan,
