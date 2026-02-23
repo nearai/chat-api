@@ -340,7 +340,7 @@ pub async fn resume_subscription(
 /// Change the user's subscription plan
 #[utoipa::path(
     post,
-    path = "/v1/subscriptions/change-plan",
+    path = "/v1/subscriptions/change",
     tag = "Subscriptions",
     request_body = ChangePlanRequest,
     responses(
@@ -373,7 +373,7 @@ pub async fn change_plan(
         .map_err(|e| match e {
             SubscriptionError::InstanceLimitExceeded { current, max } => {
                 ApiError::bad_request(format!(
-                    "Cannot downgrade: you have {} agent instances but this plan allows only {}. Delete excess instances to downgrade.",
+                    "Cannot switch to this plan: you have {} agent instances but this plan allows only {}. Delete excess instances to switch plans.",
                     current, max
                 ))
             }
@@ -578,7 +578,7 @@ pub fn create_subscriptions_router() -> Router<AppState> {
         .route("/v1/subscriptions", get(list_subscriptions))
         .route("/v1/subscriptions/cancel", post(cancel_subscription))
         .route("/v1/subscriptions/resume", post(resume_subscription))
-        .route("/v1/subscriptions/change-plan", post(change_plan))
+        .route("/v1/subscriptions/change", post(change_plan))
         .route("/v1/subscriptions/portal", post(create_portal_session))
 }
 

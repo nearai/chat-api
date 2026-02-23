@@ -78,7 +78,7 @@ pub enum SubscriptionError {
     NoActiveSubscription,
     /// Monthly token limit exceeded (used >= limit)
     MonthlyTokenLimitExceeded { used: i64, limit: u64 },
-    /// Cannot downgrade: current instance count exceeds target plan's limit
+    /// Cannot switch to plan: current instance count exceeds target plan's limit
     InstanceLimitExceeded { current: u64, max: u64 },
     /// Subscription is not scheduled for cancellation (cannot resume)
     SubscriptionNotScheduledForCancellation,
@@ -114,7 +114,7 @@ impl fmt::Display for SubscriptionError {
             Self::InstanceLimitExceeded { current, max } => {
                 write!(
                     f,
-                    "Cannot downgrade: you have {} agent instances but this plan allows only {}",
+                    "Cannot switch to this plan: you have {} agent instances but this plan allows only {}",
                     current, max
                 )
             }

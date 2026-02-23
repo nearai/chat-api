@@ -647,6 +647,24 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .cloned()
             .ok_or_else(|| SubscriptionError::InvalidPlan(target_plan.clone()))?;
 
+        // Get active subscription first (fail fast before instance count validation)
+        let subscription = self
+            .subscription_repo
+            .get_active_subscription(user_id)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
+            .ok_or(SubscriptionError::NoActiveSubscription)?;
+
+        // Don't change if already on target plan
+        if subscription.price_id == price_id {
+            tracing::info!(
+                "User already on target plan: user_id={}, plan={}",
+                user_id,
+                target_plan
+            );
+            return Ok(());
+        }
+
         // Get target plan config for agent_instances limit
         let configs = self
             .system_configs_service
@@ -672,24 +690,6 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 current: instance_count,
                 max: max_instances,
             });
-        }
-
-        // Get active subscription
-        let subscription = self
-            .subscription_repo
-            .get_active_subscription(user_id)
-            .await
-            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
-            .ok_or(SubscriptionError::NoActiveSubscription)?;
-
-        // Don't change if already on target plan
-        if subscription.price_id == price_id {
-            tracing::info!(
-                "User already on target plan: user_id={}, plan={}",
-                user_id,
-                target_plan
-            );
-            return Ok(());
         }
 
         // Retrieve current Stripe subscription to get subscription item ID
