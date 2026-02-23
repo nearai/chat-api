@@ -445,7 +445,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .and_then(|c| c.subscription_plans)
             .and_then(|plans| plans.get(&plan).cloned());
         let max_instances = plan_config
-            .and_then(|c| c.agent_instances)
+            .as_ref()
+            .and_then(|c| c.agent_instances.as_ref())
             .map(|l| l.max)
             .unwrap_or(u64::MAX);
 
@@ -461,10 +462,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
             });
         }
 
-        // Fetch trial_period_days from subscription plan config (reuse configs from instance check)
-        let trial_period_days = configs
-            .and_then(|c| c.subscription_plans)
-            .and_then(|plans| plans.get(&plan).cloned())
+        // Fetch trial_period_days from subscription plan config (reuse plan_config from instance check)
+        let trial_period_days = plan_config
             .and_then(|p| p.trial_period_days)
             // Stripe supports a maximum trial period of 730 days
             .filter(|&n| n > 0 && n <= 730);
