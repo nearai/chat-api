@@ -528,11 +528,15 @@ async fn test_change_plan_instance_limit_exceeded() {
     );
 
     let body: serde_json::Value = response.json();
-    let detail = body.get("detail").and_then(|v| v.as_str()).unwrap_or("");
+    let message = body
+        .get("message")
+        .and_then(|v| v.as_str())
+        .or_else(|| body.get("detail").and_then(|v| v.as_str()))
+        .unwrap_or("");
     assert!(
-        detail.contains("2") && detail.contains("1"),
+        message.contains("2") && message.contains("1"),
         "Error message should include current (2) and max (1) instance counts, got: {}",
-        detail
+        message
     );
 }
 
