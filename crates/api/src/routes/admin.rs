@@ -939,12 +939,44 @@ pub async fn upsert_system_configs(
 
     #[cfg(not(feature = "test"))]
     if let Some(ref model_id) = request.default_model {
-        ensure_proxy_model_exists(app_state.proxy_service, model_id).await?;
+        ensure_proxy_model_exists(app_state.proxy_service.clone(), model_id).await?;
     }
 
     // Validate rate limit config if provided
     if let Some(ref rate_limit) = request.rate_limit {
         rate_limit.validate()?;
+    }
+
+    // Validate auto_route config if provided
+    if let Some(ref auto_route) = request.auto_route {
+        if auto_route.model.trim().is_empty() {
+            return Err(ApiError::bad_request(
+                "auto_route.model must not be empty".to_string(),
+            ));
+        }
+        #[cfg(not(feature = "test"))]
+        ensure_proxy_model_exists(app_state.proxy_service.clone(), &auto_route.model).await?;
+        if let Some(t) = auto_route.temperature {
+            if t < 0.0 {
+                return Err(ApiError::bad_request(
+                    "auto_route.temperature must be >= 0".to_string(),
+                ));
+            }
+        }
+        if let Some(p) = auto_route.top_p {
+            if !(0.0..=1.0).contains(&p) {
+                return Err(ApiError::bad_request(
+                    "auto_route.top_p must be between 0 and 1".to_string(),
+                ));
+            }
+        }
+        if let Some(m) = auto_route.max_tokens {
+            if m == 0 {
+                return Err(ApiError::bad_request(
+                    "auto_route.max_tokens must be > 0".to_string(),
+                ));
+            }
+        }
     }
 
     let partial: services::system_configs::ports::PartialSystemConfigs =
@@ -994,6 +1026,12 @@ pub async fn upsert_system_configs(
         .rate_limit_state
         .update_config(updated.rate_limit.clone())
         .await;
+
+    // Invalidate system configs cache so auto-route picks up changes immediately
+    {
+        let mut cache = app_state.system_configs_cache.write().await;
+        *cache = None;
+    }
 
     Ok(Json(updated.into()))
 }
