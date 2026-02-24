@@ -8,7 +8,8 @@ use crate::UserId;
 
 /// A single deployment record for BI reporting.
 /// Note: `name` is intentionally excluded to avoid exposing user-provided labels (per privacy policy).
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct DeploymentRecord {
     pub id: Uuid,
     pub user_id: UserId,
