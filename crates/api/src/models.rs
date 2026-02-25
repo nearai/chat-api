@@ -859,6 +859,25 @@ impl From<services::agent::ports::AgentInstance> for InstanceResponse {
     }
 }
 
+/// Build InstanceResponse for admin list endpoint, omitting dashboard_url to avoid leaking agent access.
+pub fn instance_response_for_admin(
+    inst: services::agent::ports::AgentInstance,
+) -> InstanceResponse {
+    let status = status_from_db(&inst.status);
+    InstanceResponse {
+        id: inst.id.to_string(),
+        instance_id: inst.instance_id,
+        name: inst.name,
+        public_ssh_key: inst.public_ssh_key,
+        dashboard_url: None, // Omitted in admin context to avoid leaking agent access
+        status,
+        ssh_command: None,
+        service_type: inst.service_type,
+        created_at: inst.created_at.to_rfc3339(),
+        updated_at: inst.updated_at.to_rfc3339(),
+    }
+}
+
 /// Build InstanceResponse with status and ssh_command from Agent API when available.
 /// Prefers Agent API live status when enrichment is present; otherwise uses DB status.
 pub fn instance_response_with_enrichment(
