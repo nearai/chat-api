@@ -815,8 +815,9 @@ pub struct AgentApiInstance {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum InstanceStatus {
-    Running,
+    Active,
     Stopped,
+    Deleted,
 }
 
 /// Agent instance response
@@ -829,7 +830,7 @@ pub struct InstanceResponse {
     /// Dashboard URL to open OpenClaw (from Agent API)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dashboard_url: Option<String>,
-    /// Instance status from Agent API (running, stopped)
+    /// Instance status (active, stopped, deleted)
     pub status: InstanceStatus,
     /// SSH command to connect to the instance (from Agent API when available)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -917,9 +918,13 @@ pub fn instance_response_with_enrichment(
 }
 
 /// Map DB status (agent_instances.status) to InstanceStatus.
+/// DB statuses: active, stopped, deleted, provisioning, error.
 fn status_from_db(db_status: &str) -> InstanceStatus {
-    if db_status.eq_ignore_ascii_case("active") {
-        InstanceStatus::Running
+    let s = db_status.trim();
+    if s.eq_ignore_ascii_case("active") {
+        InstanceStatus::Active
+    } else if s.eq_ignore_ascii_case("deleted") {
+        InstanceStatus::Deleted
     } else {
         InstanceStatus::Stopped
     }
@@ -929,7 +934,7 @@ fn status_from_db(db_status: &str) -> InstanceStatus {
 /// Compose-api returns Docker container State: "running", "exited", "dead", "not found", "unknown".
 fn status_from_agent_api(agent_api_status: &str) -> InstanceStatus {
     if agent_api_status.eq_ignore_ascii_case("running") {
-        InstanceStatus::Running
+        InstanceStatus::Active
     } else {
         InstanceStatus::Stopped
     }
