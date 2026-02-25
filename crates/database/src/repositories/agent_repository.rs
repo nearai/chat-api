@@ -428,13 +428,22 @@ impl AgentRepository for PostgresAgentRepository {
     ) -> anyhow::Result<()> {
         let client = self.pool.get().await?;
 
-        // Trigger records change to agent_instance_status_history automatically
-        client
+        // Exclude soft-deleted instances to avoid resurrecting them. Trigger records change to
+        // agent_instance_status_history automatically.
+        let rows = client
             .execute(
-                "UPDATE agent_instances SET status = $1, updated_at = NOW() WHERE id = $2",
+                "UPDATE agent_instances SET status = $1, updated_at = NOW()
+                 WHERE id = $2 AND status != 'deleted'",
                 &[&new_status, &instance_id],
             )
             .await?;
+
+        if rows == 0 {
+            anyhow::bail!(
+                "agent instance not found or already deleted: instance_id={}",
+                instance_id
+            );
+        }
 
         Ok(())
     }
