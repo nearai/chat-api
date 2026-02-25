@@ -1216,6 +1216,10 @@ impl AgentService for AgentServiceImpl {
             user_id
         );
 
+        // Restart is valid for any non-deleted status (active, stopped, error, etc.). We do not
+        // reject when status is 'active' — restarting a running instance is a common use case.
+        // The Agent API restart endpoint handles the current state appropriately.
+
         // Get instance details
         let instance = self
             .repository
