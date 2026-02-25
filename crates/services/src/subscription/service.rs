@@ -164,6 +164,7 @@ impl SubscriptionServiceImpl {
     async fn get_or_create_stripe_customer(
         &self,
         user_id: UserId,
+        test_clock_id: Option<String>,
     ) -> Result<String, SubscriptionError> {
         // Check if customer already exists
         if let Some(customer_id) = self
@@ -209,6 +210,7 @@ impl SubscriptionServiceImpl {
                         .into_iter()
                         .collect(),
                 ),
+                test_clock: test_clock_id.as_deref(),
                 ..Default::default()
             },
         )
@@ -403,6 +405,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
         plan: String,
         success_url: String,
         cancel_url: String,
+        test_clock_id: Option<String>,
     ) -> Result<String, SubscriptionError> {
         tracing::info!(
             "Creating subscription checkout for user_id={}, provider={}, plan={}",
@@ -469,7 +472,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .filter(|&n| n > 0 && n <= 730);
 
         // Get or create Stripe customer
-        let customer_id = self.get_or_create_stripe_customer(user_id).await?;
+        let customer_id = self
+            .get_or_create_stripe_customer(user_id, test_clock_id)
+            .await?;
 
         // Create Stripe checkout session
         let base_client = self.get_stripe_client();

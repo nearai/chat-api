@@ -250,6 +250,8 @@ pub struct StripeConfig {
     pub secret_key: String,
     /// Stripe webhook secret for verifying webhook signatures
     pub webhook_secret: String,
+    /// Enable Stripe test clock functionality for testing subscription billing
+    pub test_clock_enabled: bool,
 }
 
 impl Default for StripeConfig {
@@ -276,6 +278,10 @@ impl Default for StripeConfig {
             } else {
                 std::env::var("STRIPE_WEBHOOK_SECRET").unwrap_or_default()
             },
+            test_clock_enabled: std::env::var("STRIPE_TEST_CLOCK_ENABLED")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(false),
         }
     }
 }

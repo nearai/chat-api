@@ -227,6 +227,7 @@ pub trait SubscriptionService: Send + Sync {
     /// Create a subscription checkout session for a user
     /// Returns the checkout URL
     /// provider: payment provider name (e.g. "stripe")
+    /// test_clock_id: optional test clock ID to bind customer to (requires STRIPE_TEST_CLOCK_ENABLED)
     async fn create_subscription(
         &self,
         user_id: UserId,
@@ -234,6 +235,7 @@ pub trait SubscriptionService: Send + Sync {
         plan: String,
         success_url: String,
         cancel_url: String,
+        test_clock_id: Option<String>,
     ) -> Result<String, SubscriptionError>;
 
     /// Cancel a user's active subscription (at period end)

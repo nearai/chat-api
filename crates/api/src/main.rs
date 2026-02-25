@@ -312,6 +312,7 @@ async fn main() -> anyhow::Result<()> {
         admin_domains: Arc::new(config.admin.admin_domains),
         user_repository: user_repo.clone(),
         vpc_credentials_service,
+        stripe_test_clock_enabled: config.stripe.test_clock_enabled,
         cloud_api_base_url: config.openai.base_url.clone().unwrap_or_default(),
         metrics_service,
         analytics_service,

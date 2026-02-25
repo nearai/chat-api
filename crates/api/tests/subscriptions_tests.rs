@@ -1965,3 +1965,110 @@ async fn test_subscription_gating_full_flow() {
         error_msg
     );
 }
+
+// Test clock tests
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_create_subscription_with_test_clock_disabled() {
+    let server = create_test_server().await;
+
+    // Ensure STRIPE_TEST_CLOCK_ENABLED is not set (defaults to false)
+    std::env::remove_var("STRIPE_TEST_CLOCK_ENABLED");
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } }
+        }),
+    )
+    .await;
+
+    let user_email = "test_clock_disabled@example.com";
+    let user_token = mock_login(&server, user_email).await;
+
+    let request_body = json!({
+        "provider": "stripe",
+        "plan": "basic",
+        "success_url": "https://example.com/success",
+        "cancel_url": "https://example.com/cancel",
+        "test_clock_id": "clock_test_12345"
+    });
+
+    let response = server
+        .post("/v1/subscriptions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&request_body)
+        .await;
+
+    // Should return 400 Bad Request when test_clock_id provided but feature disabled
+    assert_eq!(
+        response.status_code(),
+        400,
+        "Should return 400 when test_clock_id provided but STRIPE_TEST_CLOCK_ENABLED is false"
+    );
+
+    let body: serde_json::Value = response.json();
+    let error_msg = body.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        error_msg.contains("Test clock feature is not enabled"),
+        "Error should mention test clock not enabled, got: {}",
+        error_msg
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_create_subscription_without_test_clock() {
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    // Ensure test clock feature is disabled
+    std::env::remove_var("STRIPE_TEST_CLOCK_ENABLED");
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } }
+        }),
+    )
+    .await;
+
+    let user_email = "test_no_clock@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+    let user_token = mock_login(&server, user_email).await;
+
+    // Request WITHOUT test_clock_id should work normally
+    let request_body = json!({
+        "provider": "stripe",
+        "plan": "basic",
+        "success_url": "https://example.com/success",
+        "cancel_url": "https://example.com/cancel"
+    });
+
+    let response = server
+        .post("/v1/subscriptions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&request_body)
+        .await;
+
+    // Should succeed (200) or fail at Stripe with fake credentials (500), but not 400
+    let status = response.status_code();
+    assert!(
+        status == 200 || status == 500,
+        "Should not return 400 when test_clock_id is omitted, got {}",
+        status
+    );
+}
