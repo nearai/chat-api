@@ -212,11 +212,6 @@ async fn test_admin_agents_instances_sanitizes_dashboard_url() {
         .and_then(|v| v.as_str());
     assert!(url1.is_some(), "Instance 1 should have dashboard_url");
     let url1 = url1.unwrap();
-    assert!(
-        !url1.contains('?'),
-        "Dashboard URL must not expose query params: {}",
-        url1
-    );
     assert_eq!(url1, "https://internal-agent.example.com/dashboard");
 
     // Instance 2: no userinfo, no fragment
@@ -228,16 +223,6 @@ async fn test_admin_agents_instances_sanitizes_dashboard_url() {
         .and_then(|v| v.as_str());
     assert!(url2.is_some(), "Instance 2 should have dashboard_url");
     let url2 = url2.unwrap();
-    assert!(
-        !url2.contains("admin:secret@"),
-        "Dashboard URL must not expose userinfo (credentials): {}",
-        url2
-    );
-    assert!(
-        !url2.contains('#'),
-        "Dashboard URL must not expose fragment: {}",
-        url2
-    );
     assert_eq!(url2, "https://internal-agent.example.com/dashboard");
 
     // Cleanup
