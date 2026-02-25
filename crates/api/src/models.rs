@@ -859,7 +859,17 @@ impl From<services::agent::ports::AgentInstance> for InstanceResponse {
     }
 }
 
-/// Build InstanceResponse for admin list endpoint, omitting dashboard_url to avoid leaking agent access.
+/// Strip query parameters and fragment from URL to avoid leaking token info. Keeps scheme + host + path.
+fn sanitize_dashboard_url(url: Option<String>) -> Option<String> {
+    let s = url.as_deref()?;
+    url::Url::parse(s).ok().map(|mut u| {
+        u.set_query(None);
+        u.set_fragment(None);
+        u.to_string()
+    })
+}
+
+/// Build InstanceResponse for admin list endpoint. Dashboard URL is sanitized (query/fragment stripped) to avoid leaking token info.
 pub fn instance_response_for_admin(
     inst: services::agent::ports::AgentInstance,
 ) -> InstanceResponse {
@@ -869,7 +879,7 @@ pub fn instance_response_for_admin(
         instance_id: inst.instance_id,
         name: inst.name,
         public_ssh_key: inst.public_ssh_key,
-        dashboard_url: None, // Omitted in admin context to avoid leaking agent access
+        dashboard_url: sanitize_dashboard_url(inst.dashboard_url),
         status,
         ssh_command: None,
         service_type: inst.service_type,
