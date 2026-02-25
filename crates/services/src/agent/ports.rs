@@ -5,6 +5,16 @@ use uuid::Uuid;
 
 use crate::UserId;
 
+/// Result of sync_all_instance_statuses
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SyncStatusResult {
+    pub synced: u32,
+    pub updated: u32,
+    pub skipped: u32,
+    pub not_found: u32,
+    pub errors: Vec<String>,
+}
+
 // ============ Service Type Validation ============
 
 /// Valid service types for agent instances.
@@ -334,6 +344,11 @@ pub trait AgentService: Send + Sync {
     async fn stop_instance(&self, instance_id: Uuid, user_id: UserId) -> anyhow::Result<()>;
 
     async fn start_instance(&self, instance_id: Uuid, user_id: UserId) -> anyhow::Result<()>;
+
+    /// Sync instance status from all Agent API managers into the database.
+    /// Fetches live status via GET /instances per manager, maps "running" -> "active", others -> "stopped".
+    /// Skips deleted instances; only updates when status differs.
+    async fn sync_all_instance_statuses(&self) -> anyhow::Result<SyncStatusResult>;
 
     // API key management
     /// Create an API key for a specific instance - returns (api_key_info, plaintext_key)

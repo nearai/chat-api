@@ -233,3 +233,75 @@ async fn test_admin_agents_instances_sanitizes_dashboard_url() {
         .execute("DELETE FROM agent_instances WHERE id = $1", &[&inst2_id])
         .await;
 }
+
+#[tokio::test]
+async fn test_admin_sync_agent_status_with_admin_account() {
+    let server = create_test_server().await;
+
+    let admin_email = "test_admin_sync@admin.org";
+    let admin_token = mock_login(&server, admin_email).await;
+
+    let response = server
+        .post("/v1/admin/agents/instances/sync-status")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .await;
+
+    let status = response.status_code();
+    assert_eq!(
+        status,
+        200,
+        "Admin should be able to sync agent status: body={:?}",
+        response.text()
+    );
+
+    let body: serde_json::Value = response.json();
+    assert!(
+        body.get("synced").is_some(),
+        "Response should have synced field"
+    );
+    assert!(
+        body.get("updated").is_some(),
+        "Response should have updated field"
+    );
+    assert!(
+        body.get("skipped").is_some(),
+        "Response should have skipped field"
+    );
+    assert!(
+        body.get("not_found").is_some(),
+        "Response should have not_found field"
+    );
+    assert!(
+        body.get("errors").is_some(),
+        "Response should have errors field"
+    );
+}
+
+#[tokio::test]
+async fn test_admin_sync_agent_status_requires_admin() {
+    let server = create_test_server().await;
+
+    let non_admin_email = "test_user_sync@no-admin.org";
+    let non_admin_token = mock_login(&server, non_admin_email).await;
+
+    let response = server
+        .post("/v1/admin/agents/instances/sync-status")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {non_admin_token}")).unwrap(),
+        )
+        .await;
+
+    let status = response.status_code();
+    assert_eq!(
+        status, 403,
+        "Non-admin should receive 403 Forbidden when trying to sync agent status"
+    );
+
+    let body: serde_json::Value = response.json();
+    let error = body.get("message").and_then(|v| v.as_str());
+    assert_eq!(error, Some("Admin access required"));
+}
