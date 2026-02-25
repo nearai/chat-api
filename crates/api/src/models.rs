@@ -859,17 +859,21 @@ impl From<services::agent::ports::AgentInstance> for InstanceResponse {
     }
 }
 
-/// Strip query parameters and fragment from URL to avoid leaking token info. Keeps scheme + host + path.
+/// Strip credentials, query parameters, and fragment from URL to avoid leaking access tokens or
+/// userinfo (e.g. user:pass@). Keeps scheme + host + port + path only. Returns None when the URL
+/// cannot be parsed, since we cannot safely sanitize malformed URLs.
 fn sanitize_dashboard_url(url: Option<String>) -> Option<String> {
     let s = url.as_deref()?;
-    url::Url::parse(s).ok().map(|mut u| {
-        u.set_query(None);
-        u.set_fragment(None);
-        u.to_string()
-    })
+    let mut u = url::Url::parse(s).ok()?;
+    u.set_query(None);
+    u.set_fragment(None);
+    // Clear userinfo to avoid leaking credentials (e.g. https://user:pass@host/...)
+    let _ = u.set_username("");
+    let _ = u.set_password(None);
+    Some(u.to_string())
 }
 
-/// Build InstanceResponse for admin list endpoint. Dashboard URL is sanitized (query/fragment stripped) to avoid leaking token info.
+/// Build InstanceResponse for admin list endpoint. Dashboard URL is sanitized (userinfo, query, and fragment stripped) to avoid leaking credentials.
 pub fn instance_response_for_admin(
     inst: services::agent::ports::AgentInstance,
 ) -> InstanceResponse {
