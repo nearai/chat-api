@@ -815,8 +815,9 @@ pub struct AgentApiInstance {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum InstanceStatus {
-    Running,
+    Active,
     Stopped,
+    Deleted,
 }
 
 /// Agent instance response
@@ -829,7 +830,7 @@ pub struct InstanceResponse {
     /// Dashboard URL to open OpenClaw (from Agent API)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dashboard_url: Option<String>,
-    /// Instance status from Agent API (running, stopped)
+    /// Instance status (active, stopped, deleted)
     pub status: InstanceStatus,
     /// SSH command to connect to the instance (from Agent API when available)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -843,7 +844,7 @@ pub struct InstanceResponse {
 
 impl From<services::agent::ports::AgentInstance> for InstanceResponse {
     fn from(inst: services::agent::ports::AgentInstance) -> Self {
-        let status = status_from_agent_api(None);
+        let status = status_from_db(&inst.status);
         Self {
             id: inst.id.to_string(),
             instance_id: inst.instance_id,
@@ -859,12 +860,48 @@ impl From<services::agent::ports::AgentInstance> for InstanceResponse {
     }
 }
 
+/// Strip credentials, query parameters, and fragment from URL to avoid leaking access tokens or
+/// userinfo (e.g. user:pass@). Keeps scheme + host + port + path only. Returns None when the URL
+/// cannot be parsed, since we cannot safely sanitize malformed URLs.
+fn sanitize_dashboard_url(url: Option<String>) -> Option<String> {
+    let s = url.as_deref()?;
+    let mut u = url::Url::parse(s).ok()?;
+    u.set_query(None);
+    u.set_fragment(None);
+    // Clear userinfo to avoid leaking credentials (e.g. https://user:pass@host/...)
+    let _ = u.set_username("");
+    let _ = u.set_password(None);
+    Some(u.to_string())
+}
+
+/// Build InstanceResponse for admin list endpoint. Dashboard URL is sanitized (userinfo, query, and fragment stripped) to avoid leaking credentials.
+pub fn instance_response_for_admin(
+    inst: services::agent::ports::AgentInstance,
+) -> InstanceResponse {
+    let status = status_from_db(&inst.status);
+    InstanceResponse {
+        id: inst.id.to_string(),
+        instance_id: inst.instance_id,
+        name: inst.name,
+        public_ssh_key: inst.public_ssh_key,
+        dashboard_url: sanitize_dashboard_url(inst.dashboard_url),
+        status,
+        ssh_command: None,
+        service_type: inst.service_type,
+        created_at: inst.created_at.to_rfc3339(),
+        updated_at: inst.updated_at.to_rfc3339(),
+    }
+}
+
 /// Build InstanceResponse with status and ssh_command from Agent API when available.
+/// Prefers Agent API live status when enrichment is present; otherwise uses DB status.
 pub fn instance_response_with_enrichment(
     inst: services::agent::ports::AgentInstance,
     enrichment: Option<&services::agent::ports::AgentApiInstanceEnrichment>,
 ) -> InstanceResponse {
-    let status = status_from_agent_api(enrichment.and_then(|e| e.status.as_deref()));
+    let status = enrichment
+        .and_then(|e| e.status.as_deref())
+        .map_or_else(|| status_from_db(&inst.status), status_from_agent_api);
     let ssh_command = enrichment.and_then(|e| e.ssh_command.clone());
     InstanceResponse {
         id: inst.id.to_string(),
@@ -880,20 +917,26 @@ pub fn instance_response_with_enrichment(
     }
 }
 
+/// Map DB status (agent_instances.status) to InstanceStatus.
+/// DB statuses: active, stopped, deleted, provisioning, error.
+fn status_from_db(db_status: &str) -> InstanceStatus {
+    let s = db_status.trim();
+    if s.eq_ignore_ascii_case("active") {
+        InstanceStatus::Active
+    } else if s.eq_ignore_ascii_case("deleted") {
+        InstanceStatus::Deleted
+    } else {
+        InstanceStatus::Stopped
+    }
+}
+
 /// Map Agent API (compose-api) status string to InstanceStatus.
 /// Compose-api returns Docker container State: "running", "exited", "dead", "not found", "unknown".
-fn status_from_agent_api(agent_api_status: Option<&str>) -> InstanceStatus {
-    match agent_api_status {
-        Some(s) if s.eq_ignore_ascii_case("running") => InstanceStatus::Running,
-        Some(s)
-            if s.eq_ignore_ascii_case("stopped")
-                || s.eq_ignore_ascii_case("exited")
-                || s.eq_ignore_ascii_case("dead")
-                || s.eq_ignore_ascii_case("not found") =>
-        {
-            InstanceStatus::Stopped
-        }
-        _ => InstanceStatus::Stopped,
+fn status_from_agent_api(agent_api_status: &str) -> InstanceStatus {
+    if agent_api_status.eq_ignore_ascii_case("running") {
+        InstanceStatus::Active
+    } else {
+        InstanceStatus::Stopped
     }
 }
 

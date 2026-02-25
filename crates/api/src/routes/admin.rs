@@ -1131,7 +1131,10 @@ pub async fn admin_list_all_instances(
             ApiError::internal_server_error("Failed to list instances")
         })?;
 
-    let items: Vec<InstanceResponse> = instances.into_iter().map(Into::into).collect();
+    let items: Vec<InstanceResponse> = instances
+        .into_iter()
+        .map(crate::models::instance_response_for_admin)
+        .collect();
     Ok(Json(PaginatedResponse {
         items,
         limit: params.limit,

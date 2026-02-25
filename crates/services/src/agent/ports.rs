@@ -38,6 +38,8 @@ pub struct AgentInstance {
     pub agent_api_base_url: Option<String>,
     /// Service type (e.g. "openclaw", "ironclaw") selected when creating the instance
     pub service_type: Option<String>,
+    /// DB-tracked status: active, stopped, deleted, provisioning, error
+    pub status: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -165,6 +167,13 @@ pub trait AgentRepository: Send + Sync {
         name: Option<String>,
         public_ssh_key: Option<String>,
     ) -> anyhow::Result<AgentInstance>;
+
+    /// Update instance status in DB (triggers status_history audit via trigger).
+    async fn update_instance_status(
+        &self,
+        instance_id: Uuid,
+        new_status: &str,
+    ) -> anyhow::Result<()>;
 
     async fn delete_instance(&self, instance_id: Uuid) -> anyhow::Result<()>;
 
