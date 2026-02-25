@@ -1250,6 +1250,11 @@ impl AgentService for AgentServiceImpl {
             ));
         }
 
+        // Update DB status to active (end state after restart)
+        self.repository
+            .update_instance_status(instance_id, "active")
+            .await?;
+
         tracing::info!(
             "Instance restarted successfully: instance_id={}, name={}",
             instance_id,
@@ -1300,6 +1305,11 @@ impl AgentService for AgentServiceImpl {
             ));
         }
 
+        // Update DB status (trigger records to agent_instance_status_history)
+        self.repository
+            .update_instance_status(instance_id, "stopped")
+            .await?;
+
         tracing::info!(
             "Instance stopped successfully: instance_id={}, name={}",
             instance_id,
@@ -1349,6 +1359,11 @@ impl AgentService for AgentServiceImpl {
                 instance_id
             ));
         }
+
+        // Update DB status (trigger records to agent_instance_status_history)
+        self.repository
+            .update_instance_status(instance_id, "active")
+            .await?;
 
         tracing::info!(
             "Instance started successfully: instance_id={}, name={}",
@@ -1884,6 +1899,7 @@ mod tests {
             dashboard_url: None,
             agent_api_base_url: Some("https://mgr2.example.com".to_string()),
             service_type: None,
+            status: "active".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -1914,6 +1930,7 @@ mod tests {
             dashboard_url: None,
             agent_api_base_url: Some("https://unknown.example.com".to_string()),
             service_type: None,
+            status: "active".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -1943,6 +1960,7 @@ mod tests {
             dashboard_url: None,
             agent_api_base_url: None,
             service_type: None,
+            status: "active".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -2073,6 +2091,7 @@ mod tests {
                 dashboard_url: None,
                 agent_api_base_url: manager_url.map(|s| s.to_string()),
                 service_type: None,
+                status: "active".to_string(),
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             }

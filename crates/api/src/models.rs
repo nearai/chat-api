@@ -843,7 +843,7 @@ pub struct InstanceResponse {
 
 impl From<services::agent::ports::AgentInstance> for InstanceResponse {
     fn from(inst: services::agent::ports::AgentInstance) -> Self {
-        let status = status_from_agent_api(None);
+        let status = status_from_db(&inst.status);
         Self {
             id: inst.id.to_string(),
             instance_id: inst.instance_id,
@@ -860,11 +860,14 @@ impl From<services::agent::ports::AgentInstance> for InstanceResponse {
 }
 
 /// Build InstanceResponse with status and ssh_command from Agent API when available.
+/// Prefers Agent API live status when enrichment is present; otherwise uses DB status.
 pub fn instance_response_with_enrichment(
     inst: services::agent::ports::AgentInstance,
     enrichment: Option<&services::agent::ports::AgentApiInstanceEnrichment>,
 ) -> InstanceResponse {
-    let status = status_from_agent_api(enrichment.and_then(|e| e.status.as_deref()));
+    let status = enrichment
+        .and_then(|e| e.status.as_deref())
+        .map_or_else(|| status_from_db(&inst.status), status_from_agent_api);
     let ssh_command = enrichment.and_then(|e| e.ssh_command.clone());
     InstanceResponse {
         id: inst.id.to_string(),
@@ -880,20 +883,22 @@ pub fn instance_response_with_enrichment(
     }
 }
 
+/// Map DB status (agent_instances.status) to InstanceStatus.
+fn status_from_db(db_status: &str) -> InstanceStatus {
+    if db_status.eq_ignore_ascii_case("active") {
+        InstanceStatus::Running
+    } else {
+        InstanceStatus::Stopped
+    }
+}
+
 /// Map Agent API (compose-api) status string to InstanceStatus.
 /// Compose-api returns Docker container State: "running", "exited", "dead", "not found", "unknown".
-fn status_from_agent_api(agent_api_status: Option<&str>) -> InstanceStatus {
-    match agent_api_status {
-        Some(s) if s.eq_ignore_ascii_case("running") => InstanceStatus::Running,
-        Some(s)
-            if s.eq_ignore_ascii_case("stopped")
-                || s.eq_ignore_ascii_case("exited")
-                || s.eq_ignore_ascii_case("dead")
-                || s.eq_ignore_ascii_case("not found") =>
-        {
-            InstanceStatus::Stopped
-        }
-        _ => InstanceStatus::Stopped,
+fn status_from_agent_api(agent_api_status: &str) -> InstanceStatus {
+    if agent_api_status.eq_ignore_ascii_case("running") {
+        InstanceStatus::Running
+    } else {
+        InstanceStatus::Stopped
     }
 }
 
