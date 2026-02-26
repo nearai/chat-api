@@ -1965,3 +1965,60 @@ async fn test_subscription_gating_full_flow() {
         error_msg
     );
 }
+
+// Test clock tests
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_create_subscription_with_test_clock_disabled() {
+    // Set to "false" BEFORE creating server - dotenvy won't overwrite existing vars
+    std::env::set_var("STRIPE_TEST_CLOCK_ENABLED", "false");
+
+    let server = create_test_server().await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } }
+        }),
+    )
+    .await;
+
+    let user_email = "test_clock_disabled@example.com";
+    let user_token = mock_login(&server, user_email).await;
+
+    let request_body = json!({
+        "provider": "stripe",
+        "plan": "basic",
+        "success_url": "https://example.com/success",
+        "cancel_url": "https://example.com/cancel",
+        "test_clock_id": "clock_test_12345"
+    });
+
+    let response = server
+        .post("/v1/subscriptions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&request_body)
+        .await;
+
+    // Should return 400 Bad Request when test_clock_id provided but feature disabled
+    assert_eq!(
+        response.status_code(),
+        400,
+        "Should return 400 when test_clock_id provided but STRIPE_TEST_CLOCK_ENABLED is false"
+    );
+
+    let body: serde_json::Value = response.json();
+    let error_msg = body.get("message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        error_msg.contains("Test clock feature is not enabled"),
+        "Error should mention test clock not enabled, got: {}",
+        error_msg
+    );
+}

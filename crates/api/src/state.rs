@@ -61,6 +61,8 @@ pub struct AppState {
     pub redirect_uri: String,
     pub admin_domains: Arc<Vec<String>>,
     pub vpc_credentials_service: Arc<dyn services::vpc::VpcCredentialsService>,
+    /// Whether Stripe test clock feature is enabled
+    pub stripe_test_clock_enabled: bool,
     /// Base URL for Cloud API calls (same as OpenAI base URL when using VPC)
     pub cloud_api_base_url: String,
     /// Metrics service for recording usage metrics
