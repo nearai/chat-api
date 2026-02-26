@@ -1,8 +1,9 @@
 mod common;
 
 use common::{
-    cleanup_user_subscriptions, create_test_server, create_test_server_and_db,
-    insert_test_subscription_with_price, mock_login, set_subscription_plans, TestServerConfig,
+    cleanup_user_subscriptions, clear_default_allowed_models, create_test_server,
+    create_test_server_and_db, insert_test_subscription_with_price, mock_login,
+    set_subscription_plans, TestServerConfig,
 };
 use serde_json::json;
 use serial_test::serial;
@@ -29,8 +30,12 @@ async fn test_no_subscription_default_allowed_models_allows_listed_model() {
     ensure_stripe_env_for_gating();
     let server = create_test_server().await;
 
-    // Configure subscription plans with default_allowed_models (admin auth required)
+    // Clear any existing default_allowed_models from previous test runs
+    clear_default_allowed_models(&server).await;
+
     let admin_token = mock_login(&server, "test_admin_model_allowlist@admin.org").await;
+
+    // Configure subscription plans with default_allowed_models
     let response = server
         .patch("/v1/admin/configs")
         .add_header(
@@ -76,6 +81,9 @@ async fn test_no_subscription_default_allowed_models_allows_listed_model() {
         403,
         "User should be allowed to use model in default_allowed_models"
     );
+
+    // Cleanup: clear default_allowed_models for subsequent tests
+    clear_default_allowed_models(&server).await;
 }
 
 #[tokio::test]
@@ -133,6 +141,9 @@ async fn test_no_subscription_default_allowed_models_blocks_unlisted_model() {
         body.contains("gpt-4o") && body.contains("not available"),
         "Error message should mention the model and that it's not available"
     );
+
+    // Cleanup: clear default_allowed_models for subsequent tests
+    clear_default_allowed_models(&server).await;
 }
 
 // ============================================================================
@@ -464,6 +475,9 @@ async fn test_admin_config_returns_allowed_models_fields() {
                 .contains_key("allowed_models"),
         "pro plan should not have allowed_models field"
     );
+
+    // Cleanup: clear default_allowed_models for subsequent tests
+    clear_default_allowed_models(&server).await;
 }
 
 // ============================================================================

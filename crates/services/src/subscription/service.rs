@@ -1352,6 +1352,15 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 );
                 Ok(())
             }
+            Some(allowed_list) if allowed_list.is_empty() => {
+                // Empty allowlist - treat as allow all models
+                tracing::debug!(
+                    "Model access allowed: user_id={}, model_id={} (empty allowlist = allow all)",
+                    user_id,
+                    model_id
+                );
+                Ok(())
+            }
             Some(allowed_list) => {
                 if allowed_list.contains(&model_id.to_string()) {
                     // Model is in the allowlist
