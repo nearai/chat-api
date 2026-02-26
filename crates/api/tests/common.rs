@@ -352,6 +352,25 @@ pub async fn insert_test_subscription(
     user_email: &str,
     cancel_at_period_end: bool,
 ) {
+    insert_test_subscription_with_price(
+        server,
+        db,
+        user_email,
+        "price_test_basic",
+        cancel_at_period_end,
+    )
+    .await;
+}
+
+/// Insert a test subscription with custom price_id for a user.
+/// This is useful for testing different subscription plans.
+pub async fn insert_test_subscription_with_price(
+    server: &TestServer,
+    db: &database::Database,
+    user_email: &str,
+    price_id: &str,
+    cancel_at_period_end: bool,
+) {
     let _token = mock_login(server, user_email).await;
 
     let user = db
@@ -380,7 +399,7 @@ pub async fn insert_test_subscription(
                 &user.id,
                 &"stripe",
                 &"cus_test",
-                &"price_test_basic",
+                &price_id,
                 &"active",
                 &period_end,
                 &cancel_at_period_end,

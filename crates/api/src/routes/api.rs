@@ -2306,6 +2306,27 @@ async fn proxy_responses(
         }
     }
 
+    // Check model access based on subscription plan
+    if let Some(ref body) = body_json {
+        if let Some(model_id) = body.get("model").and_then(|v| v.as_str()) {
+            if let Err(e) = state
+                .subscription_service
+                .check_model_access(user.user_id, model_id)
+                .await
+            {
+                tracing::info!(
+                    "Model access denied: user_id={}, model_id={}",
+                    user.user_id,
+                    model_id
+                );
+                return Err(Response::builder()
+                    .status(StatusCode::FORBIDDEN)
+                    .body(Body::from(e.to_string()))
+                    .unwrap());
+            }
+        }
+    }
+
     // Enforce model-level visibility based on settings if a model is specified
     if let Some(ref body) = body_json {
         if let Some(model_id) = body.get("model").and_then(|v| v.as_str()) {
@@ -3222,6 +3243,29 @@ async fn prepare_chat_completions_body(
                             }
                         }
                         auto_routed = true;
+                    }
+                }
+
+                // Check model access based on subscription plan
+                if let Some(model_id) = body_json
+                    .as_ref()
+                    .and_then(|b| b.get("model"))
+                    .and_then(|v| v.as_str())
+                {
+                    if let Err(e) = state
+                        .subscription_service
+                        .check_model_access(user.user_id, model_id)
+                        .await
+                    {
+                        tracing::info!(
+                            "Model access denied: user_id={}, model_id={}",
+                            user.user_id,
+                            model_id
+                        );
+                        return Err(Response::builder()
+                            .status(StatusCode::FORBIDDEN)
+                            .body(Body::from(e.to_string()))
+                            .unwrap());
                     }
                 }
 

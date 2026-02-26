@@ -384,11 +384,13 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 let agent_instances = plan_config.and_then(|c| c.agent_instances.clone());
                 let monthly_tokens = plan_config.and_then(|c| c.monthly_tokens.clone());
                 let trial_period_days = plan_config.and_then(|c| c.trial_period_days);
+                let allowed_models = plan_config.and_then(|c| c.allowed_models.clone());
                 SubscriptionPlan {
                     name,
                     trial_period_days,
                     agent_instances,
                     monthly_tokens,
+                    allowed_models,
                 }
             })
             .collect();
@@ -1236,6 +1238,110 @@ impl SubscriptionService for SubscriptionServiceImpl {
             max_tokens
         );
         Ok(())
+    }
+
+    async fn check_model_access(
+        &self,
+        user_id: UserId,
+        model_id: &str,
+    ) -> Result<(), SubscriptionError> {
+        // Get system configs
+        let configs = self
+            .system_configs_service
+            .get_configs()
+            .await
+            .map_err(|e| SubscriptionError::InternalError(e.to_string()))?;
+
+        // Extract subscription plans and default allowed models
+        let (subscription_plans, default_allowed_models) = match configs {
+            Some(ref c) => (
+                c.subscription_plans.as_ref(),
+                c.default_allowed_models.as_ref(),
+            ),
+            None => (None, None),
+        };
+
+        // Try to get user's active subscription
+        let active_subscription = self
+            .subscription_repo
+            .get_active_subscription(user_id)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        // Determine which allowlist to use
+        let allowed_models = match active_subscription {
+            Some(ref sub) => {
+                // User has an active subscription - use plan's allowlist
+                if let Some(plans) = subscription_plans {
+                    let plan_name = resolve_plan_name_from_config(
+                        "stripe",
+                        &sub.price_id,
+                        &plans.clone().into_iter().collect(),
+                    );
+                    plans
+                        .get(&plan_name)
+                        .and_then(|config| config.allowed_models.as_ref())
+                } else {
+                    None
+                }
+            }
+            None => {
+                // User has no active subscription - use default allowlist
+                default_allowed_models
+            }
+        };
+
+        // Check if model is allowed
+        match allowed_models {
+            None => {
+                // No allowlist configured - allow all models
+                tracing::debug!(
+                    "Model access allowed: user_id={}, model_id={} (no allowlist configured)",
+                    user_id,
+                    model_id
+                );
+                Ok(())
+            }
+            Some(allowed_list) => {
+                if allowed_list.contains(&model_id.to_string()) {
+                    // Model is in the allowlist
+                    tracing::debug!(
+                        "Model access allowed: user_id={}, model_id={}",
+                        user_id,
+                        model_id
+                    );
+                    Ok(())
+                } else {
+                    // Model is not in the allowlist
+                    let plan_name = match active_subscription {
+                        Some(ref sub) => {
+                            if let Some(plans) = subscription_plans {
+                                resolve_plan_name_from_config(
+                                    "stripe",
+                                    &sub.price_id,
+                                    &plans.clone().into_iter().collect(),
+                                )
+                            } else {
+                                "unknown".to_string()
+                            }
+                        }
+                        None => "default".to_string(),
+                    };
+
+                    tracing::info!(
+                        "Model access denied: user_id={}, model_id={}, plan={}",
+                        user_id,
+                        model_id,
+                        plan_name
+                    );
+
+                    Err(SubscriptionError::ModelNotAllowedInPlan {
+                        model: model_id.to_string(),
+                        plan: plan_name,
+                    })
+                }
+            }
+        }
     }
 
     /// Admin only: Set subscription for a user directly (for testing/manual management).
