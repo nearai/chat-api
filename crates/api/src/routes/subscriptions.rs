@@ -241,6 +241,9 @@ pub async fn create_subscription(
                     current, max
                 ))
             }
+            SubscriptionError::TestClockNotAllowedForExistingCustomer => ApiError::bad_request(
+                "Cannot associate test clock with existing Stripe customer".to_string(),
+            ),
         })?;
 
     Ok(Json(CreateSubscriptionResponse { checkout_url }))

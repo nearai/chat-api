@@ -92,6 +92,8 @@ pub enum SubscriptionError {
     WebhookVerificationFailed(String),
     /// Internal error
     InternalError(String),
+    /// Cannot associate test clock with existing Stripe customer
+    TestClockNotAllowedForExistingCustomer,
 }
 
 impl fmt::Display for SubscriptionError {
@@ -128,6 +130,12 @@ impl fmt::Display for SubscriptionError {
                 write!(f, "Webhook verification failed: {}", msg)
             }
             Self::InternalError(msg) => write!(f, "Internal error: {}", msg),
+            Self::TestClockNotAllowedForExistingCustomer => {
+                write!(
+                    f,
+                    "Cannot associate test clock with existing Stripe customer"
+                )
+            }
         }
     }
 }

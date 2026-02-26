@@ -175,9 +175,7 @@ impl SubscriptionServiceImpl {
         {
             // Reject test_clock_id for existing customers - Stripe doesn't support retroactive association
             if test_clock_id.is_some() {
-                return Err(SubscriptionError::InternalError(
-                    "Cannot associate test clock with existing Stripe customer".to_string(),
-                ));
+                return Err(SubscriptionError::TestClockNotAllowedForExistingCustomer);
             }
 
             tracing::debug!(
