@@ -1,6 +1,6 @@
 mod common;
 
-use common::{create_test_server, mock_login};
+use common::{clear_default_allowed_models, create_test_server, mock_login};
 use serde_json::json;
 
 #[tokio::test]
@@ -147,6 +147,19 @@ async fn test_model_batch_update_and_list() {
         settings.get("public"),
         Some(&json!(true)),
         "Public should remain true when listed"
+    );
+
+    // Cleanup: delete the test model
+    let response = server
+        .delete(&format!("/v1/admin/models/{}", test_model_id))
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .await;
+    assert!(
+        response.status_code() == 200 || response.status_code() == 204,
+        "Should cleanup test model"
     );
 }
 
@@ -313,6 +326,9 @@ async fn test_delete_model_requires_admin() {
 async fn test_responses_block_non_public_model() {
     let server = create_test_server().await;
 
+    // Clear any model allowlist config from previous tests
+    clear_default_allowed_models(&server).await;
+
     // Use an admin account to configure model settings
     let admin_email = "visibility-non-public-admin@admin.org";
     let admin_token = mock_login(&server, admin_email).await;
@@ -380,6 +396,9 @@ async fn test_responses_block_non_public_model() {
 async fn test_responses_allow_public_model() {
     let server = create_test_server().await;
 
+    // Clear any model allowlist config from previous tests
+    clear_default_allowed_models(&server).await;
+
     // Use an admin account to configure model settings
     let admin_email = "visibility-public-admin@admin.org";
     let admin_token = mock_login(&server, admin_email).await;
@@ -442,6 +461,9 @@ async fn test_responses_allow_public_model() {
 #[tokio::test]
 async fn test_responses_injects_system_prompt_when_instructions_missing() {
     let server = create_test_server().await;
+
+    // Clear any model allowlist config from previous tests
+    clear_default_allowed_models(&server).await;
 
     // Use an admin account to configure model settings (public + system_prompt)
     let admin_email = "system-prompt-no-instructions-admin@admin.org";
@@ -511,6 +533,9 @@ async fn test_responses_injects_system_prompt_when_instructions_missing() {
 #[tokio::test]
 async fn test_responses_prepends_system_prompt_when_instructions_present() {
     let server = create_test_server().await;
+
+    // Clear any model allowlist config from previous tests
+    clear_default_allowed_models(&server).await;
 
     // Use an admin account to configure model settings (public + system_prompt)
     let admin_email = "system-prompt-with-instructions-admin@admin.org";
