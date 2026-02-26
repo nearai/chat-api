@@ -1,6 +1,6 @@
 mod common;
 
-use common::{create_test_server_and_db, mock_login, TestServerConfig};
+use common::{create_test_server_and_db, insert_test_subscription, mock_login, TestServerConfig};
 use serde_json::json;
 use uuid::Uuid;
 use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
@@ -45,6 +45,9 @@ async fn test_agent_complete_workflow() {
 
     let _admin_token = mock_login(&server, admin_email).await;
     let user_token = mock_login(&server, user_email).await;
+
+    // Set up a test subscription for the user to avoid 402 errors
+    insert_test_subscription(&server, &db, user_email, false).await;
 
     // Get user_id for the regular user (needed for instance creation)
     let user_response = server

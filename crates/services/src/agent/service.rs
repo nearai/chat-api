@@ -1457,9 +1457,8 @@ impl AgentService for AgentServiceImpl {
         // This handles cases where instance is not yet fully provisioned or synced
         if instance_resp.status() == reqwest::StatusCode::NOT_FOUND {
             tracing::warn!(
-                "Instance not found on Agent Manager: instance_id={}, instance_name={}. Blocking upgrade until instance is synced.",
-                instance_id,
-                instance.name
+                "Instance not found on Agent Manager: instance_id={}. Blocking upgrade until instance is synced.",
+                instance_id
             );
             return Ok(UpgradeAvailability {
                 has_upgrade: false,
