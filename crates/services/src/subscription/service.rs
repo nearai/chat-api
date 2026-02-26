@@ -173,6 +173,13 @@ impl SubscriptionServiceImpl {
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
         {
+            // Reject test_clock_id for existing customers - Stripe doesn't support retroactive association
+            if test_clock_id.is_some() {
+                return Err(SubscriptionError::InternalError(
+                    "Cannot associate test clock with existing Stripe customer".to_string(),
+                ));
+            }
+
             tracing::debug!(
                 "Stripe customer already exists: user_id={}, customer_id={}",
                 user_id,
