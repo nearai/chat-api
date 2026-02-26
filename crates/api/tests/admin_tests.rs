@@ -275,6 +275,10 @@ async fn test_admin_sync_agent_status_with_admin_account() {
         "Response should have not_found field"
     );
     assert!(
+        body.get("error_skipped").is_some(),
+        "Response should have error_skipped field"
+    );
+    assert!(
         body.get("errors").is_some(),
         "Response should have errors field"
     );

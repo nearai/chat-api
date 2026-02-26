@@ -1439,6 +1439,7 @@ pub async fn admin_sync_agent_status(
         updated: result.updated,
         skipped: result.skipped,
         not_found: result.not_found,
+        error_skipped: result.error_skipped,
         errors: result.errors,
     }))
 }
@@ -1450,6 +1451,8 @@ pub struct SyncAgentStatusResponse {
     pub updated: u32,
     pub skipped: u32,
     pub not_found: u32,
+    /// Instances skipped because their manager API call failed
+    pub error_skipped: u32,
     pub errors: Vec<String>,
 }
 

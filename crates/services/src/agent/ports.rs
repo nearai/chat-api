@@ -5,13 +5,22 @@ use uuid::Uuid;
 
 use crate::UserId;
 
-/// Result of sync_all_instance_statuses
+/// Result of sync_all_instance_statuses.
+///
+/// Counter semantics:
+/// - `synced`: instances found in the Agent API response (updated + skipped)
+/// - `updated`: instances whose DB status was changed
+/// - `skipped`: instances found in API but already had the correct status
+/// - `not_found`: instances missing from the API response (API succeeded but instance absent)
+/// - `error_skipped`: instances skipped because their manager API call failed
+/// - `errors`: human-readable error descriptions (no internal URLs)
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SyncStatusResult {
     pub synced: u32,
     pub updated: u32,
     pub skipped: u32,
     pub not_found: u32,
+    pub error_skipped: u32,
     pub errors: Vec<String>,
 }
 
