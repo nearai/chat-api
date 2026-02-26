@@ -224,6 +224,9 @@ pub async fn create_subscription(
                 tracing::error!("Unexpected NoPendingDowngrade in create");
                 ApiError::internal_server_error("Failed to create subscription")
             }
+            SubscriptionError::ModelNotAllowedInPlan { model, plan } => ApiError::forbidden(
+                format!("Model '{}' is not available in your plan '{}'", model, plan),
+            ),
         })?;
 
     Ok(Json(CreateSubscriptionResponse { checkout_url }))
