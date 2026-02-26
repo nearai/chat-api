@@ -1270,11 +1270,7 @@ impl AgentService for AgentServiceImpl {
     }
 
     async fn upgrade_instance(&self, instance_id: Uuid, user_id: UserId) -> anyhow::Result<()> {
-        tracing::info!(
-            "Upgrading instance: instance_id={}, user_id={}",
-            instance_id,
-            user_id
-        );
+        tracing::info!("Upgrading instance: instance_id={}", instance_id,);
 
         let instance = self
             .repository
@@ -1282,6 +1278,8 @@ impl AgentService for AgentServiceImpl {
             .await?
             .ok_or_else(|| anyhow!("Instance not found"))?;
 
+        // Ownership check is performed at the route handler level (agents.rs)
+        // This layer trusts the caller has already verified the user owns this instance
         if instance.user_id != user_id {
             return Err(anyhow!("Access denied"));
         }
@@ -1294,6 +1292,7 @@ impl AgentService for AgentServiceImpl {
             .http_client
             .get(&version_url)
             .bearer_auth(&manager.token)
+            .timeout(std::time::Duration::from_secs(30))
             .send()
             .await
             .map_err(|e| anyhow!("Failed to fetch compose-api version: {}", e))?;
@@ -1316,7 +1315,10 @@ impl AgentService for AgentServiceImpl {
             .map_err(|e| anyhow!("Failed to parse compose-api version response: {}", e))?;
 
         // Map service_type to image key in the version response
-        let service_type = instance.service_type.as_deref().unwrap_or("openclaw");
+        let service_type = instance
+            .service_type
+            .as_deref()
+            .unwrap_or(DEFAULT_SERVICE_TYPE);
         let image_key = match service_type {
             "ironclaw" => "ironclaw",
             _ => "worker",
@@ -1346,6 +1348,7 @@ impl AgentService for AgentServiceImpl {
             .json(&RestartBody {
                 image: image.clone(),
             })
+            .timeout(std::time::Duration::from_secs(30))
             .send()
             .await
             .map_err(|e| anyhow!("Failed to call Agent API restart: {}", e))?;
@@ -1359,10 +1362,9 @@ impl AgentService for AgentServiceImpl {
         }
 
         tracing::info!(
-            "Instance upgraded successfully: instance_id={}, name={}, image={}",
+            "Instance upgraded successfully: instance_id={}, image={}",
             instance_id,
-            instance.name,
-            image_key
+            image
         );
 
         Ok(())
@@ -1419,7 +1421,10 @@ impl AgentService for AgentServiceImpl {
             .map_err(|e| anyhow!("Failed to parse compose-api version response: {}", e))?;
 
         // Map service_type to image key in the version response
-        let service_type = instance.service_type.as_deref().unwrap_or("openclaw");
+        let service_type = instance
+            .service_type
+            .as_deref()
+            .unwrap_or(DEFAULT_SERVICE_TYPE);
         let image_key = match service_type {
             "ironclaw" => "ironclaw",
             _ => "worker",
