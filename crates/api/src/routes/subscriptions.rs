@@ -244,6 +244,9 @@ pub async fn create_subscription(
             SubscriptionError::TestClockNotAllowedForExistingCustomer => ApiError::bad_request(
                 "Cannot associate test clock with existing Stripe customer".to_string(),
             ),
+            SubscriptionError::ModelNotAllowedInPlan { model, plan } => ApiError::forbidden(
+                format!("Model '{}' is not available in your plan '{}'", model, plan),
+            ),
         })?;
 
     Ok(Json(CreateSubscriptionResponse { checkout_url }))

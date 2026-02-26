@@ -351,12 +351,12 @@ pub async fn insert_test_subscription(
     user_email: &str,
     cancel_at_period_end: bool,
 ) {
-    insert_test_subscription_with_price_id_internal(
+    insert_test_subscription_with_price(
         server,
         db,
         user_email,
-        cancel_at_period_end,
         "price_test_basic",
+        cancel_at_period_end,
     )
     .await;
 }
@@ -369,23 +369,24 @@ pub async fn insert_test_subscription_with_price_id(
     cancel_at_period_end: bool,
     price_id: &str,
 ) {
-    insert_test_subscription_with_price_id_internal(
+    insert_test_subscription_with_price(
         server,
         db,
         user_email,
-        cancel_at_period_end,
         price_id,
+        cancel_at_period_end,
     )
     .await;
 }
 
-/// Internal helper that contains the common upsert logic for test subscriptions.
-async fn insert_test_subscription_with_price_id_internal(
+/// Insert a test subscription with custom price_id for a user.
+/// This is useful for testing different subscription plans.
+pub async fn insert_test_subscription_with_price(
     server: &TestServer,
     db: &database::Database,
     user_email: &str,
-    cancel_at_period_end: bool,
     price_id: &str,
+    cancel_at_period_end: bool,
 ) {
     let _token = mock_login(server, user_email).await;
 

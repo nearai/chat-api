@@ -105,6 +105,10 @@ pub struct SubscriptionPlanConfig {
     /// Monthly token limits (e.g. { "max": 1000000 })
     #[serde(skip_serializing_if = "Option::is_none")]
     pub monthly_tokens: Option<PlanLimitConfig>,
+    /// List of model IDs allowed for this plan (e.g. ["gpt-3.5-turbo", "gpt-4o"])
+    /// None = allow all models (default); Some(vec) = only allow models in the list
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allowed_models: Option<Vec<String>>,
 }
 
 impl Default for RateLimitConfig {
@@ -162,6 +166,10 @@ pub struct SystemConfigs {
     /// Auto-routing configuration for `model: "auto"` requests
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_route: Option<AutoRouteConfig>,
+    /// Default model allowlist for users without active subscription
+    /// None = allow all models (default); Some(vec) = only allow models in the list
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_allowed_models: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -172,6 +180,7 @@ pub struct PartialSystemConfigs {
     pub max_instances_per_manager: Option<u64>,
     pub max_instances_by_manager_url: Option<HashMap<String, u64>>,
     pub auto_route: Option<AutoRouteConfig>,
+    pub default_allowed_models: Option<Vec<String>>,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -184,6 +193,7 @@ impl Default for SystemConfigs {
             max_instances_per_manager: Some(200),
             max_instances_by_manager_url: None,
             auto_route: None,
+            default_allowed_models: None,
         }
     }
 }
@@ -201,6 +211,9 @@ impl SystemConfigs {
                 .max_instances_by_manager_url
                 .or(self.max_instances_by_manager_url),
             auto_route: partial.auto_route.or(self.auto_route),
+            default_allowed_models: partial
+                .default_allowed_models
+                .or(self.default_allowed_models),
         }
     }
 
