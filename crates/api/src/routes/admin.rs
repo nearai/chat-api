@@ -939,12 +939,44 @@ pub async fn upsert_system_configs(
 
     #[cfg(not(feature = "test"))]
     if let Some(ref model_id) = request.default_model {
-        ensure_proxy_model_exists(app_state.proxy_service, model_id).await?;
+        ensure_proxy_model_exists(app_state.proxy_service.clone(), model_id).await?;
     }
 
     // Validate rate limit config if provided
     if let Some(ref rate_limit) = request.rate_limit {
         rate_limit.validate()?;
+    }
+
+    // Validate auto_route config if provided
+    if let Some(ref auto_route) = request.auto_route {
+        if auto_route.model.trim().is_empty() {
+            return Err(ApiError::bad_request(
+                "auto_route.model must not be empty".to_string(),
+            ));
+        }
+        #[cfg(not(feature = "test"))]
+        ensure_proxy_model_exists(app_state.proxy_service.clone(), &auto_route.model).await?;
+        if let Some(t) = auto_route.temperature {
+            if t < 0.0 {
+                return Err(ApiError::bad_request(
+                    "auto_route.temperature must be >= 0".to_string(),
+                ));
+            }
+        }
+        if let Some(p) = auto_route.top_p {
+            if !(0.0..=1.0).contains(&p) {
+                return Err(ApiError::bad_request(
+                    "auto_route.top_p must be between 0 and 1".to_string(),
+                ));
+            }
+        }
+        if let Some(m) = auto_route.max_tokens {
+            if m == 0 {
+                return Err(ApiError::bad_request(
+                    "auto_route.max_tokens must be > 0".to_string(),
+                ));
+            }
+        }
     }
 
     let partial: services::system_configs::ports::PartialSystemConfigs =
@@ -994,6 +1026,12 @@ pub async fn upsert_system_configs(
         .rate_limit_state
         .update_config(updated.rate_limit.clone())
         .await;
+
+    // Invalidate system configs cache so auto-route picks up changes immediately
+    {
+        let mut cache = app_state.system_configs_cache.write().await;
+        *cache = None;
+    }
 
     Ok(Json(updated.into()))
 }
@@ -1093,7 +1131,10 @@ pub async fn admin_list_all_instances(
             ApiError::internal_server_error("Failed to list instances")
         })?;
 
-    let items: Vec<InstanceResponse> = instances.into_iter().map(Into::into).collect();
+    let items: Vec<InstanceResponse> = instances
+        .into_iter()
+        .map(crate::models::instance_response_for_admin)
+        .collect();
     Ok(Json(PaginatedResponse {
         items,
         limit: params.limit,
@@ -1587,7 +1628,7 @@ pub async fn admin_get_backup(
 // =============================================================================
 
 /// Query parameters for BI deployment list
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams, utoipa::ToSchema)]
 pub struct BiDeploymentQuery {
     #[serde(default = "default_limit")]
     pub limit: i64,
@@ -1601,14 +1642,14 @@ pub struct BiDeploymentQuery {
 }
 
 /// Query parameters for BI deployment summary
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams, utoipa::ToSchema)]
 pub struct BiSummaryQuery {
     pub start_date: Option<DateTime<Utc>>,
     pub end_date: Option<DateTime<Utc>>,
 }
 
 /// Query parameters for BI usage aggregation
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams, utoipa::ToSchema)]
 pub struct BiUsageQuery {
     pub start_date: Option<DateTime<Utc>>,
     pub end_date: Option<DateTime<Utc>>,
@@ -1625,7 +1666,7 @@ fn default_group_by() -> UsageGroupBy {
 }
 
 /// Query parameters for BI top consumers
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams, utoipa::ToSchema)]
 pub struct BiTopConsumersQuery {
     pub start_date: Option<DateTime<Utc>>,
     pub end_date: Option<DateTime<Utc>>,
@@ -1648,7 +1689,7 @@ fn default_top_group_by() -> TopConsumerGroupBy {
 }
 
 /// Response types for BI endpoints
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct BiDeploymentListResponse {
     pub deployments: Vec<DeploymentRecord>,
     pub total: i64,
@@ -1656,20 +1697,20 @@ pub struct BiDeploymentListResponse {
     pub offset: i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct BiUsageResponse {
     pub data: Vec<UsageAggregation>,
     pub group_by: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct BiTopConsumersResponse {
     pub consumers: Vec<TopConsumer>,
     pub rank_by: String,
     pub group_by: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct BiStatusHistoryResponse {
     pub instance_id: Uuid,
     pub history: Vec<StatusChangeRecord>,
@@ -1702,7 +1743,23 @@ fn validate_string_filter(name: &str, value: &Option<String>) -> Result<(), ApiE
     Ok(())
 }
 
-/// List deployments with optional filters
+/// List deployments with optional filters (BI). Requires admin authentication.
+#[utoipa::path(
+    get,
+    path = "/v1/admin/bi/deployments",
+    tag = "Admin",
+    params(BiDeploymentQuery),
+    responses(
+        (status = 200, description = "Deployment list", body = BiDeploymentListResponse),
+        (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 pub async fn bi_list_deployments(
     State(app_state): State<AppState>,
     Query(params): Query<BiDeploymentQuery>,
@@ -1737,7 +1794,23 @@ pub async fn bi_list_deployments(
     }))
 }
 
-/// Get deployment summary counts
+/// Get deployment summary counts (BI). Requires admin authentication.
+#[utoipa::path(
+    get,
+    path = "/v1/admin/bi/deployments/summary",
+    tag = "Admin",
+    params(BiSummaryQuery),
+    responses(
+        (status = 200, description = "Deployment summary", body = DeploymentSummary),
+        (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 pub async fn bi_deployment_summary(
     State(app_state): State<AppState>,
     Query(params): Query<BiSummaryQuery>,
@@ -1757,7 +1830,7 @@ pub async fn bi_deployment_summary(
 }
 
 /// Query parameters for BI status history
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams, utoipa::ToSchema)]
 pub struct BiStatusHistoryQuery {
     #[serde(default = "default_status_history_limit")]
     pub limit: i64,
@@ -1767,7 +1840,26 @@ fn default_status_history_limit() -> i64 {
     100
 }
 
-/// Get status change history for a deployment
+/// Get status change history for a deployment (BI). Requires admin authentication.
+#[utoipa::path(
+    get,
+    path = "/v1/admin/bi/deployments/{id}/status-history",
+    tag = "Admin",
+    params(
+        ("id" = String, Path, description = "Instance ID (UUID)"),
+        BiStatusHistoryQuery
+    ),
+    responses(
+        (status = 200, description = "Status change history", body = BiStatusHistoryResponse),
+        (status = 400, description = "Bad request - invalid instance ID", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 pub async fn bi_status_history(
     State(app_state): State<AppState>,
     Path(id): Path<String>,
@@ -1797,7 +1889,23 @@ pub async fn bi_status_history(
     }))
 }
 
-/// Get aggregated usage data
+/// Get aggregated usage data (BI). Requires admin authentication.
+#[utoipa::path(
+    get,
+    path = "/v1/admin/bi/usage",
+    tag = "Admin",
+    params(BiUsageQuery),
+    responses(
+        (status = 200, description = "Aggregated usage data", body = BiUsageResponse),
+        (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 pub async fn bi_usage(
     State(app_state): State<AppState>,
     Query(params): Query<BiUsageQuery>,
@@ -1830,7 +1938,23 @@ pub async fn bi_usage(
     }))
 }
 
-/// Get top consumers ranked by tokens or cost
+/// Get top consumers ranked by tokens or cost (BI). Requires admin authentication.
+#[utoipa::path(
+    get,
+    path = "/v1/admin/bi/usage/top",
+    tag = "Admin",
+    params(BiTopConsumersQuery),
+    responses(
+        (status = 200, description = "Top consumers", body = BiTopConsumersResponse),
+        (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 pub async fn bi_top_consumers(
     State(app_state): State<AppState>,
     Query(params): Query<BiTopConsumersQuery>,

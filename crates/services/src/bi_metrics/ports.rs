@@ -9,6 +9,7 @@ use crate::UserId;
 /// A single deployment record for BI reporting.
 /// Note: `name` is intentionally excluded to avoid exposing user-provided labels (per privacy policy).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct DeploymentRecord {
     pub id: Uuid,
     pub user_id: UserId,
@@ -21,6 +22,7 @@ pub struct DeploymentRecord {
 
 /// Aggregate deployment counts grouped by type and status
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct DeploymentStatusCount {
     pub instance_type: String,
     pub status: String,
@@ -29,6 +31,7 @@ pub struct DeploymentStatusCount {
 
 /// Summary of deployments over a time range
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct DeploymentSummary {
     pub total_deployments: i64,
     pub counts_by_type_status: Vec<DeploymentStatusCount>,
@@ -38,6 +41,7 @@ pub struct DeploymentSummary {
 
 /// A single status change event from the audit trail
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct StatusChangeRecord {
     pub id: Uuid,
     pub instance_id: Uuid,
@@ -48,6 +52,7 @@ pub struct StatusChangeRecord {
 
 /// Grouping dimension for usage aggregation
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum UsageGroupBy {
     Day,
@@ -69,6 +74,7 @@ impl fmt::Display for UsageGroupBy {
 
 /// A single row of aggregated usage data
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct UsageAggregation {
     /// The grouping key value (date string, user_id, instance_id, or model_id)
     pub group_key: String,
@@ -83,6 +89,7 @@ pub struct UsageAggregation {
 
 /// Ranking dimension for top consumers
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum UsageRankBy {
     Tokens,
@@ -100,6 +107,7 @@ impl fmt::Display for UsageRankBy {
 
 /// Grouping dimension for top consumers
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum TopConsumerGroupBy {
     User,
@@ -117,6 +125,7 @@ impl fmt::Display for TopConsumerGroupBy {
 
 /// A top consumer entry
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct TopConsumer {
     /// user_id or instance_id depending on group_by
     pub id: String,

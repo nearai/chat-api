@@ -210,6 +210,7 @@ async fn main() -> anyhow::Result<()> {
             user_repository: user_repo.clone(),
             user_usage_repo: db.user_usage_repository()
                 as Arc<dyn services::user_usage::UserUsageRepository>,
+            agent_repo: agent_repo.clone() as Arc<dyn services::agent::ports::AgentRepository>,
             stripe_secret_key: config.stripe.secret_key.clone(),
             stripe_webhook_secret: config.stripe.webhook_secret.clone(),
         },
@@ -311,6 +312,7 @@ async fn main() -> anyhow::Result<()> {
         admin_domains: Arc::new(config.admin.admin_domains),
         user_repository: user_repo.clone(),
         vpc_credentials_service,
+        stripe_test_clock_enabled: config.stripe.test_clock_enabled,
         cloud_api_base_url: config.openai.base_url.clone().unwrap_or_default(),
         metrics_service,
         analytics_service,
@@ -321,6 +323,7 @@ async fn main() -> anyhow::Result<()> {
         model_pricing_cache: api::model_pricing::ModelPricingCache::new(
             config.openai.base_url.clone().unwrap_or_default(),
         ),
+        system_configs_cache: Arc::new(tokio::sync::RwLock::new(None)),
         rate_limit_state,
         bi_metrics_service,
     };

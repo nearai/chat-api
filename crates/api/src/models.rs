@@ -2,7 +2,7 @@ use crate::consts::SYSTEM_PROMPT_MAX_LEN;
 use crate::ApiError;
 use serde::{Deserialize, Serialize};
 use services::file::ports::FileData;
-use services::system_configs::ports::SubscriptionPlanConfig;
+use services::system_configs::ports::{AutoRouteConfig, SubscriptionPlanConfig};
 use services::UserId;
 use std::collections::HashMap;
 use utoipa::ToSchema;
@@ -144,12 +144,48 @@ pub struct ModelAttestation {
     pub info: Option<serde_json::Value>,
 }
 
+/// Agent attestation from agent instance
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AgentAttestation {
+    /// Agent instance name
+    pub name: String,
+
+    /// Container image digest
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_digest: Option<String>,
+
+    /// TDX event log
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_log: Option<String>,
+
+    /// Additional TDX/tappd info (structured JSON)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub info: Option<serde_json::Value>,
+
+    /// Intel TDX quote in hex format
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intel_quote: Option<String>,
+
+    /// Request nonce
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_nonce: Option<String>,
+
+    /// TLS certificate
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls_certificate: Option<String>,
+
+    /// TLS certificate fingerprint
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls_certificate_fingerprint: Option<String>,
+}
+
 /// Complete attestation report combining all layers
 ///
 /// This report proves the entire trust chain:
 /// 1. This chat-api service runs in a TEE (your_gateway_attestation)
-/// 2. The cloud-api dependency runs in a TEE (cloud_api_gateway_attestation)  
+/// 2. The cloud-api dependency runs in a TEE (cloud_api_gateway_attestation)
 /// 3. The model inference providers run on trusted hardware (model_attestations)
+/// 4. Optional agent instance attestations when agent parameter is provided
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CombinedAttestationReport {
     /// This chat-api's own CPU attestation (proves this service runs in a TEE)
@@ -161,6 +197,10 @@ pub struct CombinedAttestationReport {
     /// Model provider attestations (can be multiple when routing to different models)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_attestations: Option<Vec<ModelAttestation>>,
+
+    /// Agent instance attestations (included when agent query parameter is provided)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_attestations: Option<Vec<AgentAttestation>>,
 }
 
 /// Attestation report structure from proxy_service
@@ -599,12 +639,16 @@ pub struct PublicSystemConfigsResponse {
     /// Default model identifier to use when not specified
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
+    /// Auto-routing configuration for `model: "auto"` requests
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_route: Option<AutoRouteConfig>,
 }
 
 impl From<services::system_configs::ports::SystemConfigs> for PublicSystemConfigsResponse {
     fn from(config: services::system_configs::ports::SystemConfigs) -> Self {
         Self {
             default_model: config.default_model,
+            auto_route: config.auto_route,
         }
     }
 }
@@ -623,6 +667,9 @@ pub struct SystemConfigsResponse {
     /// Maximum number of agent instances per manager (round-robin skips full managers)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_instances_per_manager: Option<u64>,
+    /// Auto-routing configuration for `model: "auto"` requests
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_route: Option<AutoRouteConfig>,
 }
 
 impl From<services::system_configs::ports::SystemConfigs> for SystemConfigsResponse {
@@ -632,6 +679,7 @@ impl From<services::system_configs::ports::SystemConfigs> for SystemConfigsRespo
             rate_limit: config.rate_limit.into(),
             subscription_plans: config.subscription_plans,
             max_instances_per_manager: config.max_instances_per_manager,
+            auto_route: config.auto_route,
         }
     }
 }
@@ -651,6 +699,9 @@ pub struct UpsertSystemConfigsRequest {
     /// Maximum number of agent instances per manager (round-robin skips full managers)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_instances_per_manager: Option<u64>,
+    /// Auto-routing configuration for `model: "auto"` requests
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_route: Option<AutoRouteConfig>,
 }
 
 impl TryFrom<UpsertSystemConfigsRequest> for services::system_configs::ports::PartialSystemConfigs {
@@ -668,6 +719,7 @@ impl TryFrom<UpsertSystemConfigsRequest> for services::system_configs::ports::Pa
             rate_limit,
             subscription_plans: req.subscription_plans,
             max_instances_per_manager: req.max_instances_per_manager,
+            auto_route: req.auto_route,
         })
     }
 }
@@ -763,8 +815,9 @@ pub struct AgentApiInstance {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum InstanceStatus {
-    Running,
+    Active,
     Stopped,
+    Deleted,
 }
 
 /// Agent instance response
@@ -777,7 +830,7 @@ pub struct InstanceResponse {
     /// Dashboard URL to open OpenClaw (from Agent API)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dashboard_url: Option<String>,
-    /// Instance status from Agent API (running, stopped)
+    /// Instance status (active, stopped, deleted)
     pub status: InstanceStatus,
     /// SSH command to connect to the instance (from Agent API when available)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -791,7 +844,7 @@ pub struct InstanceResponse {
 
 impl From<services::agent::ports::AgentInstance> for InstanceResponse {
     fn from(inst: services::agent::ports::AgentInstance) -> Self {
-        let status = status_from_agent_api(None);
+        let status = status_from_db(&inst.status);
         Self {
             id: inst.id.to_string(),
             instance_id: inst.instance_id,
@@ -807,12 +860,48 @@ impl From<services::agent::ports::AgentInstance> for InstanceResponse {
     }
 }
 
+/// Strip credentials, query parameters, and fragment from URL to avoid leaking access tokens or
+/// userinfo (e.g. user:pass@). Keeps scheme + host + port + path only. Returns None when the URL
+/// cannot be parsed, since we cannot safely sanitize malformed URLs.
+fn sanitize_dashboard_url(url: Option<String>) -> Option<String> {
+    let s = url.as_deref()?;
+    let mut u = url::Url::parse(s).ok()?;
+    u.set_query(None);
+    u.set_fragment(None);
+    // Clear userinfo to avoid leaking credentials (e.g. https://user:pass@host/...)
+    let _ = u.set_username("");
+    let _ = u.set_password(None);
+    Some(u.to_string())
+}
+
+/// Build InstanceResponse for admin list endpoint. Dashboard URL is sanitized (userinfo, query, and fragment stripped) to avoid leaking credentials.
+pub fn instance_response_for_admin(
+    inst: services::agent::ports::AgentInstance,
+) -> InstanceResponse {
+    let status = status_from_db(&inst.status);
+    InstanceResponse {
+        id: inst.id.to_string(),
+        instance_id: inst.instance_id,
+        name: inst.name,
+        public_ssh_key: inst.public_ssh_key,
+        dashboard_url: sanitize_dashboard_url(inst.dashboard_url),
+        status,
+        ssh_command: None,
+        service_type: inst.service_type,
+        created_at: inst.created_at.to_rfc3339(),
+        updated_at: inst.updated_at.to_rfc3339(),
+    }
+}
+
 /// Build InstanceResponse with status and ssh_command from Agent API when available.
+/// Prefers Agent API live status when enrichment is present; otherwise uses DB status.
 pub fn instance_response_with_enrichment(
     inst: services::agent::ports::AgentInstance,
     enrichment: Option<&services::agent::ports::AgentApiInstanceEnrichment>,
 ) -> InstanceResponse {
-    let status = status_from_agent_api(enrichment.and_then(|e| e.status.as_deref()));
+    let status = enrichment
+        .and_then(|e| e.status.as_deref())
+        .map_or_else(|| status_from_db(&inst.status), status_from_agent_api);
     let ssh_command = enrichment.and_then(|e| e.ssh_command.clone());
     InstanceResponse {
         id: inst.id.to_string(),
@@ -828,20 +917,26 @@ pub fn instance_response_with_enrichment(
     }
 }
 
+/// Map DB status (agent_instances.status) to InstanceStatus.
+/// DB statuses: active, stopped, deleted, provisioning, error.
+fn status_from_db(db_status: &str) -> InstanceStatus {
+    let s = db_status.trim();
+    if s.eq_ignore_ascii_case("active") {
+        InstanceStatus::Active
+    } else if s.eq_ignore_ascii_case("deleted") {
+        InstanceStatus::Deleted
+    } else {
+        InstanceStatus::Stopped
+    }
+}
+
 /// Map Agent API (compose-api) status string to InstanceStatus.
 /// Compose-api returns Docker container State: "running", "exited", "dead", "not found", "unknown".
-fn status_from_agent_api(agent_api_status: Option<&str>) -> InstanceStatus {
-    match agent_api_status {
-        Some(s) if s.eq_ignore_ascii_case("running") => InstanceStatus::Running,
-        Some(s)
-            if s.eq_ignore_ascii_case("stopped")
-                || s.eq_ignore_ascii_case("exited")
-                || s.eq_ignore_ascii_case("dead")
-                || s.eq_ignore_ascii_case("not found") =>
-        {
-            InstanceStatus::Stopped
-        }
-        _ => InstanceStatus::Stopped,
+fn status_from_agent_api(agent_api_status: &str) -> InstanceStatus {
+    if agent_api_status.eq_ignore_ascii_case("running") {
+        InstanceStatus::Active
+    } else {
+        InstanceStatus::Stopped
     }
 }
 

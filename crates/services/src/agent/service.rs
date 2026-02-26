@@ -1216,6 +1216,10 @@ impl AgentService for AgentServiceImpl {
             user_id
         );
 
+        // Restart is valid for any non-deleted status (active, stopped, error, etc.). We do not
+        // reject when status is 'active' — restarting a running instance is a common use case.
+        // The Agent API restart endpoint handles the current state appropriately.
+
         // Get instance details
         let instance = self
             .repository
@@ -1249,6 +1253,11 @@ impl AgentService for AgentServiceImpl {
                 instance_id
             ));
         }
+
+        // Update DB status to active (end state after restart)
+        self.repository
+            .update_instance_status(instance_id, "active")
+            .await?;
 
         tracing::info!(
             "Instance restarted successfully: instance_id={}, name={}",
@@ -1396,6 +1405,11 @@ impl AgentService for AgentServiceImpl {
             ));
         }
 
+        // Update DB status (trigger records to agent_instance_status_history)
+        self.repository
+            .update_instance_status(instance_id, "stopped")
+            .await?;
+
         tracing::info!(
             "Instance stopped successfully: instance_id={}, name={}",
             instance_id,
@@ -1445,6 +1459,11 @@ impl AgentService for AgentServiceImpl {
                 instance_id
             ));
         }
+
+        // Update DB status (trigger records to agent_instance_status_history)
+        self.repository
+            .update_instance_status(instance_id, "active")
+            .await?;
 
         tracing::info!(
             "Instance started successfully: instance_id={}, name={}",
@@ -1980,6 +1999,7 @@ mod tests {
             dashboard_url: None,
             agent_api_base_url: Some("https://mgr2.example.com".to_string()),
             service_type: None,
+            status: "active".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -2010,6 +2030,7 @@ mod tests {
             dashboard_url: None,
             agent_api_base_url: Some("https://unknown.example.com".to_string()),
             service_type: None,
+            status: "active".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -2039,6 +2060,7 @@ mod tests {
             dashboard_url: None,
             agent_api_base_url: None,
             service_type: None,
+            status: "active".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -2148,7 +2170,8 @@ mod tests {
 
     mod wiremock_tests {
         use super::*;
-        use wiremock::matchers::{bearer_token, method, path};
+        use mockall::predicate::eq;
+        use wiremock::matchers::{bearer_token, method, path, path_regex};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         async fn setup_mock_server() -> MockServer {
@@ -2169,6 +2192,7 @@ mod tests {
                 dashboard_url: None,
                 agent_api_base_url: manager_url.map(|s| s.to_string()),
                 service_type: None,
+                status: "active".to_string(),
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             }
@@ -2563,6 +2587,265 @@ mod tests {
             assert!(result1.is_ok());
             assert!(result2.is_ok());
             // wiremock will verify expect(1) on each mock when servers drop
+        }
+
+        // --- start/stop/restart: update_instance_status invoked on success, not on failure ---
+
+        const STATUS_TEST_INSTANCE_NAME: &str = "status-test-inst";
+
+        fn status_test_instance(id: Uuid, user_id: UserId, manager_url: &str) -> AgentInstance {
+            AgentInstance {
+                id,
+                user_id,
+                instance_id: format!("agent-{}", STATUS_TEST_INSTANCE_NAME),
+                name: STATUS_TEST_INSTANCE_NAME.to_string(),
+                public_ssh_key: None,
+                instance_url: None,
+                instance_token: None,
+                gateway_port: None,
+                dashboard_url: None,
+                agent_api_base_url: Some(manager_url.to_string()),
+                service_type: None,
+                status: "stopped".to_string(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            }
+        }
+
+        #[tokio::test]
+        async fn test_start_instance_updates_status_on_success() {
+            let server = setup_mock_server().await;
+            let inst_id = Uuid::new_v4();
+            let user_id = UserId(Uuid::new_v4());
+            let instance = status_test_instance(inst_id, user_id, &server.uri());
+
+            Mock::given(method("POST"))
+                .and(path_regex(r"/instances/.*/start"))
+                .and(bearer_token("tok"))
+                .respond_with(ResponseTemplate::new(200))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let mut repo = MockAgentRepository::new();
+            repo.expect_get_instance()
+                .with(eq(inst_id))
+                .returning(move |_| Ok(Some(instance.clone())));
+            repo.expect_update_instance_status()
+                .with(eq(inst_id), eq("active"))
+                .times(1)
+                .returning(|_, _| Ok(()));
+
+            let svc = make_service(
+                vec![AgentManager {
+                    url: server.uri(),
+                    token: "tok".to_string(),
+                }],
+                Arc::new(repo),
+                Arc::new(MockSystemConfigsService::no_config()),
+            );
+
+            let result = svc.start_instance(inst_id, user_id).await;
+            assert!(
+                result.is_ok(),
+                "start_instance should succeed: {:?}",
+                result
+            );
+        }
+
+        #[tokio::test]
+        async fn test_start_instance_does_not_update_status_on_failure() {
+            let server = setup_mock_server().await;
+            let inst_id = Uuid::new_v4();
+            let user_id = UserId(Uuid::new_v4());
+            let instance = status_test_instance(inst_id, user_id, &server.uri());
+
+            Mock::given(method("POST"))
+                .and(path_regex(r"/instances/.*/start"))
+                .and(bearer_token("tok"))
+                .respond_with(ResponseTemplate::new(500))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let mut repo = MockAgentRepository::new();
+            repo.expect_get_instance()
+                .with(eq(inst_id))
+                .returning(move |_| Ok(Some(instance.clone())));
+            repo.expect_update_instance_status()
+                .times(0)
+                .returning(|_, _| Ok(()));
+
+            let svc = make_service(
+                vec![AgentManager {
+                    url: server.uri(),
+                    token: "tok".to_string(),
+                }],
+                Arc::new(repo),
+                Arc::new(MockSystemConfigsService::no_config()),
+            );
+
+            let result = svc.start_instance(inst_id, user_id).await;
+            assert!(
+                result.is_err(),
+                "start_instance should fail when API returns 500"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_stop_instance_updates_status_on_success() {
+            let server = setup_mock_server().await;
+            let inst_id = Uuid::new_v4();
+            let user_id = UserId(Uuid::new_v4());
+            let instance = status_test_instance(inst_id, user_id, &server.uri());
+
+            Mock::given(method("POST"))
+                .and(path_regex(r"/instances/.*/stop"))
+                .and(bearer_token("tok"))
+                .respond_with(ResponseTemplate::new(200))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let mut repo = MockAgentRepository::new();
+            repo.expect_get_instance()
+                .with(eq(inst_id))
+                .returning(move |_| Ok(Some(instance.clone())));
+            repo.expect_update_instance_status()
+                .with(eq(inst_id), eq("stopped"))
+                .times(1)
+                .returning(|_, _| Ok(()));
+
+            let svc = make_service(
+                vec![AgentManager {
+                    url: server.uri(),
+                    token: "tok".to_string(),
+                }],
+                Arc::new(repo),
+                Arc::new(MockSystemConfigsService::no_config()),
+            );
+
+            let result = svc.stop_instance(inst_id, user_id).await;
+            assert!(result.is_ok(), "stop_instance should succeed: {:?}", result);
+        }
+
+        #[tokio::test]
+        async fn test_stop_instance_does_not_update_status_on_failure() {
+            let server = setup_mock_server().await;
+            let inst_id = Uuid::new_v4();
+            let user_id = UserId(Uuid::new_v4());
+            let instance = status_test_instance(inst_id, user_id, &server.uri());
+
+            Mock::given(method("POST"))
+                .and(path_regex(r"/instances/.*/stop"))
+                .and(bearer_token("tok"))
+                .respond_with(ResponseTemplate::new(500))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let mut repo = MockAgentRepository::new();
+            repo.expect_get_instance()
+                .with(eq(inst_id))
+                .returning(move |_| Ok(Some(instance.clone())));
+            repo.expect_update_instance_status()
+                .times(0)
+                .returning(|_, _| Ok(()));
+
+            let svc = make_service(
+                vec![AgentManager {
+                    url: server.uri(),
+                    token: "tok".to_string(),
+                }],
+                Arc::new(repo),
+                Arc::new(MockSystemConfigsService::no_config()),
+            );
+
+            let result = svc.stop_instance(inst_id, user_id).await;
+            assert!(
+                result.is_err(),
+                "stop_instance should fail when API returns 500"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_restart_instance_updates_status_on_success() {
+            let server = setup_mock_server().await;
+            let inst_id = Uuid::new_v4();
+            let user_id = UserId(Uuid::new_v4());
+            let instance = status_test_instance(inst_id, user_id, &server.uri());
+
+            Mock::given(method("POST"))
+                .and(path_regex(r"/instances/.*/restart"))
+                .and(bearer_token("tok"))
+                .respond_with(ResponseTemplate::new(200))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let mut repo = MockAgentRepository::new();
+            repo.expect_get_instance()
+                .with(eq(inst_id))
+                .returning(move |_| Ok(Some(instance.clone())));
+            repo.expect_update_instance_status()
+                .with(eq(inst_id), eq("active"))
+                .times(1)
+                .returning(|_, _| Ok(()));
+
+            let svc = make_service(
+                vec![AgentManager {
+                    url: server.uri(),
+                    token: "tok".to_string(),
+                }],
+                Arc::new(repo),
+                Arc::new(MockSystemConfigsService::no_config()),
+            );
+
+            let result = svc.restart_instance(inst_id, user_id).await;
+            assert!(
+                result.is_ok(),
+                "restart_instance should succeed: {:?}",
+                result
+            );
+        }
+
+        #[tokio::test]
+        async fn test_restart_instance_does_not_update_status_on_failure() {
+            let server = setup_mock_server().await;
+            let inst_id = Uuid::new_v4();
+            let user_id = UserId(Uuid::new_v4());
+            let instance = status_test_instance(inst_id, user_id, &server.uri());
+
+            Mock::given(method("POST"))
+                .and(path_regex(r"/instances/.*/restart"))
+                .and(bearer_token("tok"))
+                .respond_with(ResponseTemplate::new(500))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let mut repo = MockAgentRepository::new();
+            repo.expect_get_instance()
+                .with(eq(inst_id))
+                .returning(move |_| Ok(Some(instance.clone())));
+            repo.expect_update_instance_status()
+                .times(0)
+                .returning(|_, _| Ok(()));
+
+            let svc = make_service(
+                vec![AgentManager {
+                    url: server.uri(),
+                    token: "tok".to_string(),
+                }],
+                Arc::new(repo),
+                Arc::new(MockSystemConfigsService::no_config()),
+            );
+
+            let result = svc.restart_instance(inst_id, user_id).await;
+            assert!(
+                result.is_err(),
+                "restart_instance should fail when API returns 500"
+            );
         }
     }
 }
