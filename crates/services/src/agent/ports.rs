@@ -22,6 +22,14 @@ pub struct AgentApiInstanceEnrichment {
     pub ssh_command: Option<String>,
 }
 
+/// Upgrade availability information for an instance
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpgradeAvailability {
+    pub has_upgrade: bool,
+    pub current_image: Option<String>,
+    pub latest_image: String,
+}
+
 /// Agent instance metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentInstance {
@@ -334,6 +342,14 @@ pub trait AgentService: Send + Sync {
     /// Upgrade instance to the latest image for its service type.
     /// Fetches current images from the owning compose-api, then restarts with the latest digest.
     async fn upgrade_instance(&self, instance_id: Uuid, user_id: UserId) -> anyhow::Result<()>;
+
+    /// Check if an upgrade is available for the instance.
+    /// Compares the current deployed image with the latest available version.
+    async fn check_upgrade_available(
+        &self,
+        instance_id: Uuid,
+        user_id: UserId,
+    ) -> anyhow::Result<UpgradeAvailability>;
 
     async fn stop_instance(&self, instance_id: Uuid, user_id: UserId) -> anyhow::Result<()>;
 
