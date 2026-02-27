@@ -358,9 +358,14 @@ pub trait AgentService: Send + Sync {
 
     async fn restart_instance(&self, instance_id: Uuid, user_id: UserId) -> anyhow::Result<()>;
 
-    /// Upgrade instance to the latest image for its service type.
-    /// Fetches current images from the owning compose-api, then restarts with the latest digest.
-    async fn upgrade_instance(&self, instance_id: Uuid, user_id: UserId) -> anyhow::Result<()>;
+    /// Upgrade instance with streaming SSE progress.
+    /// Returns a receiver that yields SSE chunks from the compose-api restart stream.
+    /// Uses a 5-minute timeout to allow the full upgrade to complete.
+    async fn upgrade_instance_stream(
+        &self,
+        instance_id: Uuid,
+        user_id: UserId,
+    ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<bytes::Bytes>>>;
 
     /// Check if an upgrade is available for the instance.
     /// Compares the current deployed image with the latest available version.

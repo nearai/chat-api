@@ -997,7 +997,7 @@ pub async fn restart_instance(
         ("id" = String, Path, description = "Instance ID")
     ),
     responses(
-        (status = 200, description = "Instance upgraded"),
+        (status = 200, description = "SSE stream of upgrade progress"),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 403, description = "Forbidden - not your instance", body = crate::error::ApiErrorResponse),
         (status = 404, description = "Instance not found", body = crate::error::ApiErrorResponse),
@@ -1037,22 +1037,46 @@ pub async fn upgrade_instance(
         return Err(ApiError::forbidden("This instance does not belong to you"));
     }
 
-    app_state
+    let rx = app_state
         .agent_service
-        .upgrade_instance(instance_uuid, user.user_id)
+        .upgrade_instance_stream(instance_uuid, user.user_id)
         .await
         .map_err(|e| {
             tracing::error!(
-                "Failed to upgrade instance: instance_id={}, error={}",
+                "Failed to start upgrade stream: instance_id={}, error={}",
                 instance_uuid,
                 e
             );
             ApiError::internal_server_error("Failed to upgrade instance")
         })?;
 
+    use futures::stream::StreamExt;
+    use tokio_stream::wrappers::ReceiverStream;
+
+    let stream = ReceiverStream::new(rx).then(|chunk_result| async move {
+        match chunk_result {
+            Ok(bytes) => Ok::<_, anyhow::Error>(bytes),
+            Err(e) => {
+                tracing::error!("Error in upgrade stream: {}", e);
+                let error_json = serde_json::json!({
+                    "error": "Upgrade failed",
+                    "code": "UPGRADE_STREAM_ERROR"
+                })
+                .to_string();
+                Ok(axum::body::Bytes::from(format!("data: {}\n\n", error_json)))
+            }
+        }
+    });
+
+    let body = axum::body::Body::from_stream(stream);
+
     Response::builder()
         .status(StatusCode::OK)
-        .body(axum::body::Body::empty())
+        .header("content-type", "text/event-stream")
+        .header("cache-control", "no-cache")
+        .header("connection", "keep-alive")
+        .header("x-accel-buffering", "no")
+        .body(body)
         .map_err(|_| ApiError::internal_server_error("Failed to construct response"))
 }
 

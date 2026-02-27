@@ -2,6 +2,7 @@ mod common;
 
 use common::{create_test_server_and_db, mock_login};
 use serde_json::json;
+use serial_test::serial;
 use services::agent::ports::{AgentRepository, CreateInstanceParams};
 use uuid::Uuid;
 
@@ -256,6 +257,7 @@ async fn test_get_instance_usage_requires_auth() {
 /// Test that users without an active subscription cannot create agent instances.
 /// Previously, users without a subscription could bypass limits and create unlimited instances.
 #[tokio::test]
+#[serial(subscription_tests)]
 async fn test_create_instance_rejects_unsubscribed_user() {
     let (server, db) = create_test_server_and_db(Default::default()).await;
 
@@ -312,6 +314,7 @@ async fn test_create_instance_rejects_unsubscribed_user() {
 /// Test agent instance limit validation with subscription plans
 /// Tests that the limit is enforced when user reaches max instances
 #[tokio::test]
+#[serial(subscription_tests)]
 async fn test_create_instance_respects_agent_instance_limit_max_1() {
     let (server, db) = create_test_server_and_db(Default::default()).await;
 

@@ -1269,17 +1269,25 @@ impl AgentService for AgentServiceImpl {
         Ok(())
     }
 
-    async fn upgrade_instance(&self, instance_id: Uuid, user_id: UserId) -> anyhow::Result<()> {
-        tracing::info!("Upgrading instance: instance_id={}", instance_id,);
+    async fn upgrade_instance_stream(
+        &self,
+        instance_id: Uuid,
+        user_id: UserId,
+    ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<bytes::Bytes>>> {
+        use futures::stream::StreamExt;
 
+        tracing::info!(
+            "Upgrading instance (streaming): instance_id={}",
+            instance_id
+        );
+
+        // Ownership check is performed at the route handler level (agents.rs)
         let instance = self
             .repository
             .get_instance(instance_id)
             .await?
             .ok_or_else(|| anyhow!("Instance not found"))?;
 
-        // Ownership check is performed at the route handler level (agents.rs)
-        // This layer trusts the caller has already verified the user owns this instance
         if instance.user_id != user_id {
             return Err(anyhow!("Access denied"));
         }
@@ -1324,7 +1332,7 @@ impl AgentService for AgentServiceImpl {
             _ => "worker",
         };
 
-        let image = version.images.get(image_key).ok_or_else(|| {
+        let image = version.images.get(image_key).cloned().ok_or_else(|| {
             anyhow!(
                 "No image found for service type '{}' (key '{}')",
                 service_type,
@@ -1332,7 +1340,7 @@ impl AgentService for AgentServiceImpl {
             )
         })?;
 
-        // Restart with the latest image
+        // Restart with the latest image (5-minute timeout; compose-api yields SSE stream)
         let encoded_name = urlencoding::encode(&instance.name);
         let restart_url = format!("{}/instances/{}/restart", manager.url, encoded_name);
 
@@ -1341,33 +1349,66 @@ impl AgentService for AgentServiceImpl {
             image: String,
         }
 
-        let response = self
-            .http_client
-            .post(&restart_url)
-            .bearer_auth(&manager.token)
-            .json(&RestartBody {
-                image: image.clone(),
-            })
-            .timeout(std::time::Duration::from_secs(30))
-            .send()
-            .await
-            .map_err(|e| anyhow!("Failed to call Agent API restart: {}", e))?;
+        // Spawn task to proxy compose-api SSE stream to channel
+        let (tx, rx) = tokio::sync::mpsc::channel::<anyhow::Result<bytes::Bytes>>(32);
 
-        if !response.status().is_success() {
-            return Err(anyhow!(
-                "Agent API upgrade-restart failed with status {}: instance_id={}",
-                response.status(),
-                instance_id
-            ));
-        }
+        let http_client = self.http_client.clone();
+        let token = manager.token.clone();
+        let instance_name = instance.name.clone();
 
-        tracing::info!(
-            "Instance upgraded successfully: instance_id={}, image={}",
-            instance_id,
-            image
-        );
+        tokio::spawn(async move {
+            let response = match http_client
+                .post(&restart_url)
+                .bearer_auth(&token)
+                .json(&RestartBody {
+                    image: image.clone(),
+                })
+                .timeout(std::time::Duration::from_secs(300))
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = tx.send(Err(anyhow!("Failed to call restart: {}", e))).await;
+                    return;
+                }
+            };
 
-        Ok(())
+            if !response.status().is_success() {
+                tracing::error!(
+                    "Compose-api upgrade failed: instance_id={}, instance_name={}, image={}, restart_url={}, status={}",
+                    instance_id,
+                    instance_name,
+                    image,
+                    restart_url,
+                    response.status()
+                );
+                let _ = tx
+                    .send(Err(anyhow!(
+                        "Upgrade failed with status {}",
+                        response.status()
+                    )))
+                    .await;
+                return;
+            }
+
+            let mut stream = response.bytes_stream();
+            while let Some(chunk_result) = stream.next().await {
+                match chunk_result {
+                    Ok(bytes) => {
+                        if tx.send(Ok(bytes)).await.is_err() {
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(anyhow!("Stream error: {}", e))).await;
+                        return;
+                    }
+                }
+            }
+        });
+
+        Ok(rx)
     }
 
     async fn check_upgrade_available(
