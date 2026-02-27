@@ -13,6 +13,12 @@ use crate::UserId;
 pub struct DeploymentRecord {
     pub id: Uuid,
     pub user_id: UserId,
+    /// User email from users table (for display in admin UI)
+    pub user_email: Option<String>,
+    /// User name from users table (for display in admin UI)
+    pub user_name: Option<String>,
+    /// User avatar URL from users table (for display in admin UI)
+    pub user_avatar_url: Option<String>,
     pub instance_id: String,
     pub instance_type: String, // openclaw | ironclaw
     pub status: String,
@@ -78,6 +84,12 @@ impl fmt::Display for UsageGroupBy {
 pub struct UsageAggregation {
     /// The grouping key value (date string, user_id, instance_id, or model_id)
     pub group_key: String,
+    /// User email when group_by is user (from users table)
+    pub user_email: Option<String>,
+    /// User name when group_by is user (from users table)
+    pub user_name: Option<String>,
+    /// User avatar URL when group_by is user (from users table)
+    pub user_avatar_url: Option<String>,
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub total_tokens: i64,
@@ -130,6 +142,12 @@ pub struct TopConsumer {
     /// user_id or instance_id depending on group_by
     pub id: String,
     pub instance_type: Option<String>,
+    /// User email when group_by is user, or instance owner when group_by is instance
+    pub user_email: Option<String>,
+    /// User name when group_by is user, or instance owner when group_by is instance
+    pub user_name: Option<String>,
+    /// User avatar URL when group_by is user, or instance owner when group_by is instance
+    pub user_avatar_url: Option<String>,
     pub total_tokens: i64,
     pub total_cost_nano: i64,
     pub request_count: i64,
