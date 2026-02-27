@@ -218,10 +218,17 @@ pub async fn list_users(
         params.sort_by,
         params.sort_order
     );
+    list_users_impl(&app_state, params).await
+}
 
+/// Shared implementation for list_users and bi_list_users.
+async fn list_users_impl(
+    app_state: &AppState,
+    params: ListUsersQuery,
+) -> Result<Json<AdminUserListResponse>, ApiError> {
     params.validate()?;
 
-    let price_to_plan = build_price_id_to_plan_name(&app_state).await?;
+    let price_to_plan = build_price_id_to_plan_name(app_state).await?;
     // Build plan_name (lowercase for case-insensitive lookup) -> price_ids
     let plan_to_prices: std::collections::HashMap<String, Vec<String>> =
         price_to_plan
@@ -315,7 +322,7 @@ pub async fn list_users(
             ApiError::internal_server_error("Failed to list users")
         })?;
 
-    let price_to_plan = build_price_id_to_plan_name(&app_state).await?;
+    let price_to_plan = build_price_id_to_plan_name(app_state).await?;
 
     let users: Vec<_> = users
         .into_iter()
@@ -2037,6 +2044,40 @@ fn validate_string_filter(name: &str, value: &Option<String>) -> Result<(), ApiE
         }
     }
     Ok(())
+}
+
+/// List users with BI stats (BI). Same response as /v1/admin/users. Requires admin authentication.
+#[utoipa::path(
+    get,
+    path = "/v1/admin/bi/users",
+    tag = "Admin",
+    params(ListUsersQuery),
+    responses(
+        (status = 200, description = "User list with stats", body = AdminUserListResponse),
+        (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn bi_list_users(
+    State(app_state): State<AppState>,
+    Query(params): Query<ListUsersQuery>,
+) -> Result<Json<AdminUserListResponse>, ApiError> {
+    tracing::info!(
+        "BI: Listing users with limit={}, offset={}, filter_by={:?}, filter_value={:?}, q={:?}, sort_by={}, sort_order={}",
+        params.limit,
+        params.offset,
+        params.filter_by,
+        params.filter_value,
+        params.q,
+        params.sort_by,
+        params.sort_order
+    );
+    list_users_impl(&app_state, params).await
 }
 
 /// List deployments with optional filters (BI). Requires admin authentication.
