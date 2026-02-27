@@ -1612,6 +1612,156 @@ impl AgentService for AgentServiceImpl {
         Ok(())
     }
 
+    /// NOTE: This method is not concurrency-safe. If two sync operations run
+    /// simultaneously they may race on status updates. Callers should ensure
+    /// only one sync runs at a time (e.g. via a distributed lock or single
+    /// scheduled job).
+    async fn sync_all_instance_statuses(
+        &self,
+    ) -> anyhow::Result<crate::agent::ports::SyncStatusResult> {
+        use crate::agent::ports::SyncStatusResult;
+        use std::collections::HashMap;
+
+        let mut result = SyncStatusResult::default();
+
+        const PAGE_SIZE: i64 = 10_000;
+        let (all_instances, total) = self.repository.list_all_instances(PAGE_SIZE, 0).await?;
+
+        if total > PAGE_SIZE {
+            tracing::warn!(
+                "sync_all_instance_statuses: fetched {PAGE_SIZE}/{total} instances, sync may be incomplete"
+            );
+        }
+
+        let instances: Vec<_> = all_instances
+            .into_iter()
+            .filter(|i| i.status != "deleted")
+            .collect();
+
+        let filtered_count = total as usize - instances.len();
+        if filtered_count > 0 {
+            tracing::debug!(
+                "sync_all_instance_statuses: filtered out {} deleted instances",
+                filtered_count
+            );
+        }
+
+        if instances.is_empty() {
+            return Ok(result);
+        }
+
+        if self.managers.is_empty() && instances.iter().any(|i| i.agent_api_base_url.is_none()) {
+            return Err(anyhow!(
+                "No agent managers configured and at least one instance has no agent_api_base_url"
+            ));
+        }
+
+        let fallback_url = self.managers.first().map(|m| m.url.as_str()).unwrap_or("");
+        let mut by_manager: HashMap<&str, Vec<&AgentInstance>> = HashMap::new();
+        for inst in &instances {
+            let mgr_url = inst.agent_api_base_url.as_deref().unwrap_or(fallback_url);
+            by_manager.entry(mgr_url).or_default().push(inst);
+        }
+
+        let mut status_map: HashMap<(String, String), String> = HashMap::new();
+        let mut failed_managers: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+
+        for mgr_url in by_manager.keys() {
+            let mgr = match self
+                .managers
+                .iter()
+                .find(|m| m.url.as_str().trim_end_matches('/') == mgr_url.trim_end_matches('/'))
+            {
+                Some(m) => m,
+                None => {
+                    result
+                        .errors
+                        .push("Manager not configured for some instances".to_string());
+                    failed_managers.insert(mgr_url.to_string());
+                    continue;
+                }
+            };
+
+            match self.call_agent_api_list(mgr).await {
+                Ok(response) => {
+                    if let Some(arr) = response.get("instances").and_then(|v| v.as_array()) {
+                        for inst in arr {
+                            if let Some(name) = inst.get("name").and_then(|v| v.as_str()) {
+                                let status = inst
+                                    .get("status")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("unknown")
+                                    .to_string();
+                                status_map.insert((mgr.url.clone(), name.to_string()), status);
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("sync_all_instance_statuses: failed to query manager: {}", e);
+                    result
+                        .errors
+                        .push(format!("Failed to query agent manager: {}", e));
+                    failed_managers.insert(mgr_url.to_string());
+                }
+            }
+        }
+
+        for inst in &instances {
+            let inst_mgr_url = inst.agent_api_base_url.as_deref().unwrap_or(fallback_url);
+            let trimmed = inst_mgr_url.trim_end_matches('/');
+
+            if failed_managers
+                .iter()
+                .any(|f| f.trim_end_matches('/') == trimmed)
+            {
+                result.error_skipped += 1;
+                continue;
+            }
+
+            let canon_url = self
+                .managers
+                .iter()
+                .find(|m| m.url.as_str().trim_end_matches('/') == trimmed)
+                .map(|m| m.url.clone())
+                .unwrap_or_else(|| trimmed.to_string());
+
+            let api_status = status_map.get(&(canon_url, inst.name.clone()));
+
+            let new_status = match api_status {
+                Some(s) if s.as_str() == "running" => "active",
+                Some(_) => "stopped",
+                None => {
+                    result.not_found += 1;
+                    continue;
+                }
+            };
+
+            result.synced += 1;
+
+            if inst.status == new_status {
+                result.skipped += 1;
+                continue;
+            }
+
+            match self
+                .repository
+                .update_instance_status(inst.id, new_status)
+                .await
+            {
+                Ok(()) => result.updated += 1,
+                Err(e) => {
+                    result
+                        .errors
+                        .push(format!("Failed to update instance status: {}", e));
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
     async fn create_api_key(
         &self,
         instance_id: Uuid,
@@ -2984,6 +3134,395 @@ mod tests {
                 result.is_err(),
                 "restart_instance should fail when API returns 500"
             );
+        }
+
+        // --- sync_all_instance_statuses tests ---
+
+        #[tokio::test]
+        async fn test_sync_updates_stopped_to_active_when_api_returns_running() {
+            let server = setup_mock_server().await;
+            let inst_id = Uuid::new_v4();
+            let server_uri = server.uri();
+            let instance = test_instance("sync-inst-a", Some(&server_uri));
+            let instance = AgentInstance {
+                id: inst_id,
+                status: "stopped".to_string(),
+                ..instance
+            };
+
+            Mock::given(method("GET"))
+                .and(path("/instances"))
+                .and(bearer_token("tok"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "instances": [{"name": "sync-inst-a", "status": "running"}]
+                })))
+                .mount(&server)
+                .await;
+
+            let mut repo = MockAgentRepository::new();
+            repo.expect_list_all_instances()
+                .returning(move |_, _| Ok((vec![instance.clone()], 1)));
+            repo.expect_update_instance_status()
+                .with(eq(inst_id), eq("active"))
+                .times(1)
+                .returning(|_, _| Ok(()));
+
+            let svc = make_service(
+                vec![AgentManager {
+                    url: server.uri(),
+                    token: "tok".to_string(),
+                }],
+                Arc::new(repo),
+                Arc::new(MockSystemConfigsService::no_config()),
+            );
+
+            let result = svc.sync_all_instance_statuses().await;
+            assert!(result.is_ok(), "sync should succeed: {:?}", result);
+            let r = result.unwrap();
+            assert_eq!(r.synced, 1);
+            assert_eq!(r.updated, 1);
+            assert_eq!(r.skipped, 0);
+            assert_eq!(r.not_found, 0);
+        }
+
+        #[tokio::test]
+        async fn test_sync_updates_active_to_stopped_when_api_returns_exited() {
+            let server = setup_mock_server().await;
+            let inst_id = Uuid::new_v4();
+            let instance = test_instance("sync-inst-b", Some(&server.uri()));
+            let instance = AgentInstance {
+                id: inst_id,
+                status: "active".to_string(),
+                ..instance
+            };
+
+            Mock::given(method("GET"))
+                .and(path("/instances"))
+                .and(bearer_token("tok"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "instances": [{"name": "sync-inst-b", "status": "exited"}]
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let mut repo = MockAgentRepository::new();
+            repo.expect_list_all_instances()
+                .returning(move |_, _| Ok((vec![instance.clone()], 1)));
+            repo.expect_update_instance_status()
+                .with(eq(inst_id), eq("stopped"))
+                .times(1)
+                .returning(|_, _| Ok(()));
+
+            let svc = make_service(
+                vec![AgentManager {
+                    url: server.uri(),
+                    token: "tok".to_string(),
+                }],
+                Arc::new(repo),
+                Arc::new(MockSystemConfigsService::no_config()),
+            );
+
+            let result = svc.sync_all_instance_statuses().await;
+            assert!(result.is_ok(), "sync should succeed: {:?}", result);
+            let r = result.unwrap();
+            assert_eq!(r.updated, 1);
+            assert_eq!(r.skipped, 0);
+        }
+
+        #[tokio::test]
+        async fn test_sync_skips_when_status_unchanged() {
+            let server = setup_mock_server().await;
+            let inst_id = Uuid::new_v4();
+            let instance = test_instance("sync-inst-c", Some(&server.uri()));
+            let instance = AgentInstance {
+                id: inst_id,
+                status: "active".to_string(),
+                ..instance
+            };
+
+            Mock::given(method("GET"))
+                .and(path("/instances"))
+                .and(bearer_token("tok"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "instances": [{"name": "sync-inst-c", "status": "running"}]
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let mut repo = MockAgentRepository::new();
+            repo.expect_list_all_instances()
+                .returning(move |_, _| Ok((vec![instance.clone()], 1)));
+            repo.expect_update_instance_status()
+                .times(0)
+                .returning(|_, _| Ok(()));
+
+            let svc = make_service(
+                vec![AgentManager {
+                    url: server.uri(),
+                    token: "tok".to_string(),
+                }],
+                Arc::new(repo),
+                Arc::new(MockSystemConfigsService::no_config()),
+            );
+
+            let result = svc.sync_all_instance_statuses().await;
+            assert!(result.is_ok(), "sync should succeed: {:?}", result);
+            let r = result.unwrap();
+            assert_eq!(r.synced, 1);
+            assert_eq!(r.skipped, 1);
+            assert_eq!(r.updated, 0);
+        }
+
+        #[tokio::test]
+        async fn test_sync_skips_deleted_instances() {
+            let server = setup_mock_server().await;
+            let instance = test_instance("deleted-inst", Some(&server.uri()));
+            let instance = AgentInstance {
+                status: "deleted".to_string(),
+                ..instance
+            };
+
+            let mut repo = MockAgentRepository::new();
+            repo.expect_list_all_instances()
+                .returning(move |_, _| Ok((vec![instance.clone()], 1)));
+            repo.expect_update_instance_status()
+                .times(0)
+                .returning(|_, _| Ok(()));
+
+            let svc = make_service(
+                vec![AgentManager {
+                    url: server.uri(),
+                    token: "tok".to_string(),
+                }],
+                Arc::new(repo),
+                Arc::new(MockSystemConfigsService::no_config()),
+            );
+
+            let result = svc.sync_all_instance_statuses().await;
+            assert!(result.is_ok(), "sync should succeed: {:?}", result);
+            let r = result.unwrap();
+            assert_eq!(r.synced, 0);
+            assert_eq!(r.updated, 0);
+            // WireMock: no /instances call expected since we filter out deleted before querying
+            // (actually we do query managers for instances that exist in by_manager - but deleted
+            // instances are filtered out before building by_manager, so no manager has them.
+            // So we never call the Agent API. Server gets 0 requests.)
+        }
+
+        #[tokio::test]
+        async fn test_sync_counts_not_found() {
+            let server = setup_mock_server().await;
+            let instance = test_instance("missing-in-api", Some(&server.uri()));
+
+            // API returns empty list - instance not found
+            Mock::given(method("GET"))
+                .and(path("/instances"))
+                .and(bearer_token("tok"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "instances": []
+                })))
+                .mount(&server)
+                .await;
+
+            let mut repo = MockAgentRepository::new();
+            repo.expect_list_all_instances()
+                .returning(move |_, _| Ok((vec![instance.clone()], 1)));
+            repo.expect_update_instance_status()
+                .times(0)
+                .returning(|_, _| Ok(()));
+
+            let svc = make_service(
+                vec![AgentManager {
+                    url: server.uri(),
+                    token: "tok".to_string(),
+                }],
+                Arc::new(repo),
+                Arc::new(MockSystemConfigsService::no_config()),
+            );
+
+            let result = svc.sync_all_instance_statuses().await;
+            assert!(result.is_ok(), "sync should succeed: {:?}", result);
+            let r = result.unwrap();
+            assert_eq!(r.not_found, 1);
+            assert_eq!(r.synced, 0);
+            assert_eq!(r.updated, 0);
+        }
+
+        #[tokio::test]
+        async fn test_sync_handles_api_failure_with_error_skipped() {
+            let server = setup_mock_server().await;
+            let instance = test_instance("api-fail-inst", Some(&server.uri()));
+
+            Mock::given(method("GET"))
+                .and(path("/instances"))
+                .and(bearer_token("tok"))
+                .respond_with(ResponseTemplate::new(500))
+                .mount(&server)
+                .await;
+
+            let mut repo = MockAgentRepository::new();
+            repo.expect_list_all_instances()
+                .returning(move |_, _| Ok((vec![instance.clone()], 1)));
+            repo.expect_update_instance_status()
+                .times(0)
+                .returning(|_, _| Ok(()));
+
+            let svc = make_service(
+                vec![AgentManager {
+                    url: server.uri(),
+                    token: "tok".to_string(),
+                }],
+                Arc::new(repo),
+                Arc::new(MockSystemConfigsService::no_config()),
+            );
+
+            let result = svc.sync_all_instance_statuses().await;
+            assert!(
+                result.is_ok(),
+                "sync should not panic on API failure: {:?}",
+                result
+            );
+            let r = result.unwrap();
+            assert_eq!(r.error_skipped, 1);
+            assert_eq!(r.not_found, 0);
+            assert!(!r.errors.is_empty());
+        }
+
+        #[tokio::test]
+        async fn test_sync_handles_db_update_failure() {
+            let server = setup_mock_server().await;
+            let inst_id = Uuid::new_v4();
+            let instance = test_instance("db-fail-inst", Some(&server.uri()));
+            let instance = AgentInstance {
+                id: inst_id,
+                status: "stopped".to_string(),
+                ..instance
+            };
+
+            Mock::given(method("GET"))
+                .and(path("/instances"))
+                .and(bearer_token("tok"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "instances": [{"name": "db-fail-inst", "status": "running"}]
+                })))
+                .mount(&server)
+                .await;
+
+            let mut repo = MockAgentRepository::new();
+            repo.expect_list_all_instances()
+                .returning(move |_, _| Ok((vec![instance.clone()], 1)));
+            repo.expect_update_instance_status()
+                .returning(|_, _| Err(anyhow!("DB connection lost")));
+
+            let svc = make_service(
+                vec![AgentManager {
+                    url: server.uri(),
+                    token: "tok".to_string(),
+                }],
+                Arc::new(repo),
+                Arc::new(MockSystemConfigsService::no_config()),
+            );
+
+            let result = svc.sync_all_instance_statuses().await;
+            assert!(
+                result.is_ok(),
+                "sync should handle DB errors gracefully: {:?}",
+                result
+            );
+            let r = result.unwrap();
+            assert_eq!(r.synced, 1);
+            assert_eq!(r.updated, 0);
+            assert!(!r.errors.is_empty());
+        }
+
+        #[tokio::test]
+        async fn test_sync_mixed_found_and_not_found() {
+            let server = setup_mock_server().await;
+            let found_id = Uuid::new_v4();
+            let inst_found = AgentInstance {
+                id: found_id,
+                status: "stopped".to_string(),
+                ..test_instance("mixed-found", Some(&server.uri()))
+            };
+            let inst_missing = test_instance("mixed-missing", Some(&server.uri()));
+
+            Mock::given(method("GET"))
+                .and(path("/instances"))
+                .and(bearer_token("tok"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "instances": [{"name": "mixed-found", "status": "running"}]
+                })))
+                .mount(&server)
+                .await;
+
+            let mut repo = MockAgentRepository::new();
+            let inst_found_c = inst_found.clone();
+            let inst_missing_c = inst_missing.clone();
+            repo.expect_list_all_instances()
+                .returning(move |_, _| Ok((vec![inst_found_c.clone(), inst_missing_c.clone()], 2)));
+            repo.expect_update_instance_status()
+                .with(eq(found_id), eq("active"))
+                .times(1)
+                .returning(|_, _| Ok(()));
+
+            let svc = make_service(
+                vec![AgentManager {
+                    url: server.uri(),
+                    token: "tok".to_string(),
+                }],
+                Arc::new(repo),
+                Arc::new(MockSystemConfigsService::no_config()),
+            );
+
+            let result = svc.sync_all_instance_statuses().await;
+            assert!(result.is_ok(), "sync should succeed: {:?}", result);
+            let r = result.unwrap();
+            assert_eq!(r.synced, 1);
+            assert_eq!(r.updated, 1);
+            assert_eq!(r.not_found, 1);
+        }
+
+        #[tokio::test]
+        async fn test_sync_manager_not_configured_for_instance() {
+            let server = setup_mock_server().await;
+            let instance = test_instance("orphan-inst", Some("http://unknown-manager:9999"));
+
+            Mock::given(method("GET"))
+                .and(path("/instances"))
+                .and(bearer_token("tok"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "instances": []
+                })))
+                .mount(&server)
+                .await;
+
+            let mut repo = MockAgentRepository::new();
+            repo.expect_list_all_instances()
+                .returning(move |_, _| Ok((vec![instance.clone()], 1)));
+            repo.expect_update_instance_status()
+                .times(0)
+                .returning(|_, _| Ok(()));
+
+            let svc = make_service(
+                vec![AgentManager {
+                    url: server.uri(),
+                    token: "tok".to_string(),
+                }],
+                Arc::new(repo),
+                Arc::new(MockSystemConfigsService::no_config()),
+            );
+
+            let result = svc.sync_all_instance_statuses().await;
+            assert!(
+                result.is_ok(),
+                "sync should handle unconfigured manager: {:?}",
+                result
+            );
+            let r = result.unwrap();
+            assert_eq!(r.error_skipped, 1);
+            assert!(!r.errors.is_empty());
         }
     }
 }

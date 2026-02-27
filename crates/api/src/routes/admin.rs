@@ -1405,6 +1405,57 @@ pub async fn admin_bind_api_key_to_instance(
     Ok(Json(ApiKeyResponse::from(api_key)))
 }
 
+/// TEMPORARY: Admin-only endpoint to sync instance status from Agent API.
+/// Remove when automated sync is in place.
+#[utoipa::path(
+    post,
+    path = "/v1/admin/agents/instances/sync-status",
+    tag = "Admin",
+    responses(
+        (status = 200, description = "Sync completed", body = SyncAgentStatusResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - admin only", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(("session_token" = []))
+)]
+pub async fn admin_sync_agent_status(
+    State(app_state): State<AppState>,
+    Extension(_user): Extension<AuthenticatedUser>,
+) -> Result<Json<SyncAgentStatusResponse>, ApiError> {
+    tracing::info!("Admin: Syncing agent instance status from Agent API");
+
+    let result = app_state
+        .agent_service
+        .sync_all_instance_statuses()
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to sync agent instance status: {}", e);
+            ApiError::internal_server_error("Failed to sync instance status")
+        })?;
+
+    Ok(Json(SyncAgentStatusResponse {
+        synced: result.synced,
+        updated: result.updated,
+        skipped: result.skipped,
+        not_found: result.not_found,
+        error_skipped: result.error_skipped,
+        errors: result.errors,
+    }))
+}
+
+/// Response for sync agent status endpoint
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct SyncAgentStatusResponse {
+    pub synced: u32,
+    pub updated: u32,
+    pub skipped: u32,
+    pub not_found: u32,
+    /// Instances skipped because their manager API call failed
+    pub error_skipped: u32,
+    pub errors: Vec<String>,
+}
+
 /// Create a backup of an agent instance
 #[utoipa::path(
     post,
@@ -2015,6 +2066,7 @@ pub fn create_admin_router() -> Router<AppState> {
                     "/instances",
                     get(admin_list_all_instances).post(admin_create_instance),
                 )
+                .route("/instances/sync-status", post(admin_sync_agent_status))
                 .route("/instances/{id}", delete(admin_delete_instance))
                 .route("/instances/{id}/backup", post(admin_create_backup))
                 .route("/instances/{id}/backups", get(admin_list_backups))
