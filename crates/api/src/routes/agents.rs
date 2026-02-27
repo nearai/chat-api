@@ -708,6 +708,11 @@ pub fn create_agent_router() -> Router<AppState> {
         .route("/instances/{id}/start", post(start_instance))
         .route("/instances/{id}/stop", post(stop_instance))
         .route("/instances/{id}/restart", post(restart_instance))
+        .route("/instances/{id}/upgrade", post(upgrade_instance))
+        .route(
+            "/instances/{id}/upgrade-available",
+            get(check_upgrade_available),
+        )
         .route("/instances/{id}", delete(delete_instance))
 }
 
@@ -981,4 +986,155 @@ pub async fn restart_instance(
         .status(StatusCode::OK)
         .body(axum::body::Body::empty())
         .map_err(|_| ApiError::internal_server_error("Failed to construct response"))
+}
+
+/// Upgrade an agent instance to the latest image
+#[utoipa::path(
+    post,
+    path = "/v1/agents/instances/{id}/upgrade",
+    tag = "Agents",
+    params(
+        ("id" = String, Path, description = "Instance ID")
+    ),
+    responses(
+        (status = 200, description = "Instance upgraded"),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - not your instance", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "Instance not found", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(("session_token" = []))
+)]
+pub async fn upgrade_instance(
+    State(app_state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(instance_id): Path<String>,
+) -> Result<Response, ApiError> {
+    let instance_uuid = Uuid::parse_str(&instance_id)
+        .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
+
+    tracing::debug!(
+        "Upgrading instance: instance_id={}, user_id={}",
+        instance_uuid,
+        user.user_id
+    );
+
+    let instance = app_state
+        .agent_repository
+        .get_instance(instance_uuid)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to fetch instance: instance_id={}, error={}",
+                instance_uuid,
+                e
+            );
+            ApiError::internal_server_error("Failed to fetch instance")
+        })?
+        .ok_or_else(|| ApiError::not_found("Instance not found"))?;
+
+    if instance.user_id != user.user_id {
+        return Err(ApiError::forbidden("This instance does not belong to you"));
+    }
+
+    app_state
+        .agent_service
+        .upgrade_instance(instance_uuid, user.user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to upgrade instance: instance_id={}, error={}",
+                instance_uuid,
+                e
+            );
+            ApiError::internal_server_error("Failed to upgrade instance")
+        })?;
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .body(axum::body::Body::empty())
+        .map_err(|_| ApiError::internal_server_error("Failed to construct response"))
+}
+
+/// Check if an upgrade is available for an agent instance
+#[utoipa::path(
+    get,
+    path = "/v1/agents/instances/{id}/upgrade-available",
+    tag = "Agents",
+    params(
+        ("id" = String, Path, description = "Instance ID")
+    ),
+    responses(
+        (status = 200, description = "Upgrade availability info", body = crate::routes::agents::UpgradeAvailabilityResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - not your instance", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "Instance not found", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(("session_token" = []))
+)]
+pub async fn check_upgrade_available(
+    State(app_state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(instance_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let instance_uuid = Uuid::parse_str(&instance_id)
+        .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
+
+    tracing::debug!(
+        "Checking upgrade availability: instance_id={}, user_id={}",
+        instance_uuid,
+        user.user_id
+    );
+
+    let instance = app_state
+        .agent_repository
+        .get_instance(instance_uuid)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to fetch instance: instance_id={}, error={}",
+                instance_uuid,
+                e
+            );
+            ApiError::internal_server_error("Failed to fetch instance")
+        })?
+        .ok_or_else(|| ApiError::not_found("Instance not found"))?;
+
+    if instance.user_id != user.user_id {
+        return Err(ApiError::forbidden("This instance does not belong to you"));
+    }
+
+    let upgrade_info = app_state
+        .agent_service
+        .check_upgrade_available(instance_uuid, user.user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to check upgrade availability: instance_id={}, error={}",
+                instance_uuid,
+                e
+            );
+            ApiError::internal_server_error("Failed to check upgrade availability")
+        })?;
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            serde_json::to_string(&UpgradeAvailabilityResponse {
+                has_upgrade: upgrade_info.has_upgrade,
+                current_image: upgrade_info.current_image,
+                latest_image: upgrade_info.latest_image,
+            })
+            .map_err(|_| ApiError::internal_server_error("Failed to serialize response"))?,
+        ))
+        .map_err(|_| ApiError::internal_server_error("Failed to construct response"))
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct UpgradeAvailabilityResponse {
+    pub has_upgrade: bool,
+    pub current_image: Option<String>,
+    pub latest_image: String,
 }

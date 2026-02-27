@@ -11,7 +11,8 @@ use uuid::Uuid;
 
 use super::ports::{
     is_valid_service_type, AgentApiInstanceEnrichment, AgentApiKey, AgentInstance, AgentRepository,
-    AgentService, CreateInstanceParams, InstanceBalance, UsageLogEntry, VALID_SERVICE_TYPES,
+    AgentService, CreateInstanceParams, InstanceBalance, UpgradeAvailability, UsageLogEntry,
+    VALID_SERVICE_TYPES,
 };
 
 /// Maximum size for the Agent API SSE stream buffer (100 KB).
@@ -1266,6 +1267,239 @@ impl AgentService for AgentServiceImpl {
         );
 
         Ok(())
+    }
+
+    async fn upgrade_instance(&self, instance_id: Uuid, user_id: UserId) -> anyhow::Result<()> {
+        tracing::info!("Upgrading instance: instance_id={}", instance_id,);
+
+        let instance = self
+            .repository
+            .get_instance(instance_id)
+            .await?
+            .ok_or_else(|| anyhow!("Instance not found"))?;
+
+        // Ownership check is performed at the route handler level (agents.rs)
+        // This layer trusts the caller has already verified the user owns this instance
+        if instance.user_id != user_id {
+            return Err(anyhow!("Access denied"));
+        }
+
+        let manager = self.resolve_manager(&instance);
+
+        // Fetch latest images from compose-api
+        let version_url = format!("{}/version", manager.url);
+        let version_resp = self
+            .http_client
+            .get(&version_url)
+            .bearer_auth(&manager.token)
+            .timeout(std::time::Duration::from_secs(30))
+            .send()
+            .await
+            .map_err(|e| anyhow!("Failed to fetch compose-api version: {}", e))?;
+
+        if !version_resp.status().is_success() {
+            return Err(anyhow!(
+                "Failed to fetch compose-api version: status={}",
+                version_resp.status()
+            ));
+        }
+
+        #[derive(serde::Deserialize)]
+        struct VersionResponse {
+            images: std::collections::HashMap<String, String>,
+        }
+
+        let version: VersionResponse = version_resp
+            .json()
+            .await
+            .map_err(|e| anyhow!("Failed to parse compose-api version response: {}", e))?;
+
+        // Map service_type to image key in the version response
+        let service_type = instance
+            .service_type
+            .as_deref()
+            .unwrap_or(DEFAULT_SERVICE_TYPE);
+        let image_key = match service_type {
+            "ironclaw" => "ironclaw",
+            _ => "worker",
+        };
+
+        let image = version.images.get(image_key).ok_or_else(|| {
+            anyhow!(
+                "No image found for service type '{}' (key '{}')",
+                service_type,
+                image_key
+            )
+        })?;
+
+        // Restart with the latest image
+        let encoded_name = urlencoding::encode(&instance.name);
+        let restart_url = format!("{}/instances/{}/restart", manager.url, encoded_name);
+
+        #[derive(serde::Serialize)]
+        struct RestartBody {
+            image: String,
+        }
+
+        let response = self
+            .http_client
+            .post(&restart_url)
+            .bearer_auth(&manager.token)
+            .json(&RestartBody {
+                image: image.clone(),
+            })
+            .timeout(std::time::Duration::from_secs(30))
+            .send()
+            .await
+            .map_err(|e| anyhow!("Failed to call Agent API restart: {}", e))?;
+
+        if !response.status().is_success() {
+            return Err(anyhow!(
+                "Agent API upgrade-restart failed with status {}: instance_id={}",
+                response.status(),
+                instance_id
+            ));
+        }
+
+        tracing::info!(
+            "Instance upgraded successfully: instance_id={}, image={}",
+            instance_id,
+            image
+        );
+
+        Ok(())
+    }
+
+    async fn check_upgrade_available(
+        &self,
+        instance_id: Uuid,
+        user_id: UserId,
+    ) -> anyhow::Result<UpgradeAvailability> {
+        tracing::info!(
+            "Checking upgrade availability: instance_id={}, user_id={}",
+            instance_id,
+            user_id
+        );
+
+        let instance = self
+            .repository
+            .get_instance(instance_id)
+            .await?
+            .ok_or_else(|| anyhow!("Instance not found"))?;
+
+        if instance.user_id != user_id {
+            return Err(anyhow!("Access denied"));
+        }
+
+        let manager = self.resolve_manager(&instance);
+
+        // Fetch latest versions from compose-api
+        let version_url = format!("{}/version", manager.url);
+        let version_resp = self
+            .http_client
+            .get(&version_url)
+            .bearer_auth(&manager.token)
+            .send()
+            .await
+            .map_err(|e| anyhow!("Failed to fetch compose-api version: {}", e))?;
+
+        if !version_resp.status().is_success() {
+            return Err(anyhow!(
+                "Failed to fetch compose-api version: status={}",
+                version_resp.status()
+            ));
+        }
+
+        #[derive(serde::Deserialize)]
+        struct VersionResponse {
+            images: std::collections::HashMap<String, String>,
+        }
+
+        let version: VersionResponse = version_resp
+            .json()
+            .await
+            .map_err(|e| anyhow!("Failed to parse compose-api version response: {}", e))?;
+
+        // Map service_type to image key in the version response
+        let service_type = instance
+            .service_type
+            .as_deref()
+            .unwrap_or(DEFAULT_SERVICE_TYPE);
+        let image_key = match service_type {
+            "ironclaw" => "ironclaw",
+            _ => "worker",
+        };
+
+        let latest_image = version
+            .images
+            .get(image_key)
+            .ok_or_else(|| {
+                anyhow!(
+                    "No image found for service type '{}' (key '{}')",
+                    service_type,
+                    image_key
+                )
+            })?
+            .clone();
+
+        // Fetch current instance status from compose-api
+        let encoded_name = urlencoding::encode(&instance.name);
+        let instance_url = format!("{}/instances/{}", manager.url, encoded_name);
+        let instance_resp = self
+            .http_client
+            .get(&instance_url)
+            .bearer_auth(&manager.token)
+            .send()
+            .await
+            .map_err(|e| anyhow!("Failed to fetch instance status: {}", e))?;
+
+        // If instance not found (404), block upgrade until instance is synced
+        // This handles cases where instance is not yet fully provisioned or synced
+        if instance_resp.status() == reqwest::StatusCode::NOT_FOUND {
+            tracing::warn!(
+                "Instance not found on Agent Manager: instance_id={}. Blocking upgrade until instance is synced.",
+                instance_id
+            );
+            return Ok(UpgradeAvailability {
+                has_upgrade: false,
+                current_image: None,
+                latest_image,
+            });
+        }
+
+        if !instance_resp.status().is_success() {
+            return Err(anyhow!(
+                "Failed to fetch instance status: status={}",
+                instance_resp.status()
+            ));
+        }
+
+        #[derive(serde::Deserialize)]
+        struct InstanceResponse {
+            image: String,
+        }
+
+        let instance_status: InstanceResponse = instance_resp
+            .json()
+            .await
+            .map_err(|e| anyhow!("Failed to parse instance response: {}", e))?;
+
+        let current_image = instance_status.image;
+        let has_upgrade = current_image != latest_image;
+
+        tracing::info!(
+            "Upgrade check completed: instance_id={}, current_image={}, latest_image={}, has_upgrade={}",
+            instance_id,
+            current_image,
+            latest_image,
+            has_upgrade
+        );
+
+        Ok(UpgradeAvailability {
+            has_upgrade,
+            current_image: Some(current_image),
+            latest_image,
+        })
     }
 
     async fn stop_instance(&self, instance_id: Uuid, user_id: UserId) -> anyhow::Result<()> {
