@@ -1168,7 +1168,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 {
                     Some(ref sub) => {
                         let plan_name = resolve_plan_name_from_config(
-                            "stripe",
+                            &sub.provider,
                             &sub.price_id,
                             &subscription_plans,
                         );
@@ -1268,26 +1268,30 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
-        // Determine which allowlist to use
-        let allowed_models = match active_subscription {
+        // Determine which allowlist to use and resolve plan name for error messages
+        let (allowed_models, plan_name) = match active_subscription {
             Some(ref sub) => {
                 // User has an active subscription - use plan's allowlist
-                if let Some(plans) = subscription_plans {
-                    let plan_name = resolve_plan_name_from_config(
-                        "stripe",
-                        &sub.price_id,
-                        &plans.clone().into_iter().collect(),
-                    );
-                    plans
-                        .get(&plan_name)
-                        .and_then(|config| config.allowed_models.as_ref())
+                let plan_name = subscription_plans
+                    .map(|plans| resolve_plan_name_from_config(&sub.provider, &sub.price_id, plans))
+                    .unwrap_or_else(|| "unknown".to_string());
+
+                let allowed = subscription_plans
+                    .and_then(|plans| plans.get(&plan_name))
+                    .and_then(|config| config.allowed_models.as_ref());
+
+                // If plan is unknown, fall back to default_allowed_models for security
+                let allowed = if plan_name == "unknown" {
+                    default_allowed_models
                 } else {
-                    None
-                }
+                    allowed
+                };
+
+                (allowed, plan_name)
             }
             None => {
                 // User has no active subscription - use default allowlist
-                default_allowed_models
+                (default_allowed_models, "default".to_string())
             }
         };
 
@@ -1322,21 +1326,6 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     Ok(())
                 } else {
                     // Model is not in the allowlist
-                    let plan_name = match active_subscription {
-                        Some(ref sub) => {
-                            if let Some(plans) = subscription_plans {
-                                resolve_plan_name_from_config(
-                                    "stripe",
-                                    &sub.price_id,
-                                    &plans.clone().into_iter().collect(),
-                                )
-                            } else {
-                                "unknown".to_string()
-                            }
-                        }
-                        None => "default".to_string(),
-                    };
-
                     tracing::info!(
                         "Model access denied: user_id={}, model_id={}, plan={}",
                         user_id,

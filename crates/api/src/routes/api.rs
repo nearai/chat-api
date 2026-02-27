@@ -2219,6 +2219,28 @@ async fn get_file_content(
     .await
 }
 
+async fn check_model_access(
+    state: &crate::state::AppState,
+    user_id: services::types::UserId,
+    model_id: &str,
+) -> Result<(), Response> {
+    state
+        .subscription_service
+        .check_model_access(user_id, model_id)
+        .await
+        .map_err(|e| {
+            Response::builder()
+                .status(StatusCode::FORBIDDEN)
+                .body(Body::from(e.to_string()))
+                .unwrap_or_else(|_| {
+                    Response::builder()
+                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                        .body(Body::from("Failed to build response"))
+                        .unwrap()
+                })
+        })
+}
+
 /// Proxy responses endpoint - forwards to OpenAI with model settings and author metadata injection
 #[utoipa::path(
     post,
@@ -2309,21 +2331,7 @@ async fn proxy_responses(
     // Check model access based on subscription plan
     if let Some(ref body) = body_json {
         if let Some(model_id) = body.get("model").and_then(|v| v.as_str()) {
-            if let Err(e) = state
-                .subscription_service
-                .check_model_access(user.user_id, model_id)
-                .await
-            {
-                tracing::info!(
-                    "Model access denied: user_id={}, model_id={}",
-                    user.user_id,
-                    model_id
-                );
-                return Err(Response::builder()
-                    .status(StatusCode::FORBIDDEN)
-                    .body(Body::from(e.to_string()))
-                    .unwrap());
-            }
+            check_model_access(&state, user.user_id, model_id).await?;
         }
     }
 
@@ -3252,21 +3260,7 @@ async fn prepare_chat_completions_body(
                     .and_then(|b| b.get("model"))
                     .and_then(|v| v.as_str())
                 {
-                    if let Err(e) = state
-                        .subscription_service
-                        .check_model_access(user.user_id, model_id)
-                        .await
-                    {
-                        tracing::info!(
-                            "Model access denied: user_id={}, model_id={}",
-                            user.user_id,
-                            model_id
-                        );
-                        return Err(Response::builder()
-                            .status(StatusCode::FORBIDDEN)
-                            .body(Body::from(e.to_string()))
-                            .unwrap());
-                    }
+                    check_model_access(state, user.user_id, model_id).await?;
                 }
 
                 if let Some(model_id) = body_json
