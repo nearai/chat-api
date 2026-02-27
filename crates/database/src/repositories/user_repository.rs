@@ -384,7 +384,11 @@ impl UserRepository for PostgresUserRepository {
         }
 
         if let Some(ref search) = filter.search {
-            let pattern = format!("%{search}%");
+            let escaped = search
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
+            let pattern = format!("%{escaped}%");
             filter_clauses.push(format!(
                 "(enriched.email ILIKE ${param_idx} OR COALESCE(enriched.name, '') ILIKE ${param_idx})"
             ));
@@ -402,9 +406,24 @@ impl UserRepository for PostgresUserRepository {
         let limit_param = param_idx;
         let offset_param = param_idx + 1;
 
-        // Build full query - params: [filter_params..., limit, offset]
         let base_query = r#"
-WITH enriched AS (
+WITH agent_counts AS (
+    SELECT user_id, COUNT(*)::bigint AS agent_count
+    FROM agent_instances
+    WHERE status != 'deleted'
+    GROUP BY user_id
+),
+usage_stats AS (
+    SELECT
+        user_id,
+        (COALESCE(SUM(cost_nano_usd), 0))::bigint AS total_spent_nano,
+        (COALESCE(SUM(CASE WHEN instance_id IS NOT NULL THEN cost_nano_usd ELSE 0 END), 0))::bigint AS agent_spent_nano,
+        (COALESCE(SUM(CASE WHEN instance_id IS NOT NULL AND metric_key = 'llm.tokens' THEN quantity ELSE 0 END), 0))::bigint AS agent_token_usage,
+        MAX(created_at) AS last_usage_at
+    FROM user_usage_event
+    GROUP BY user_id
+),
+enriched AS (
     SELECT
         u.id,
         u.email,
@@ -414,11 +433,11 @@ WITH enriched AS (
         u.updated_at,
         sub.status AS subscription_status,
         sub.price_id AS subscription_price_id,
-        (SELECT COUNT(*)::bigint FROM agent_instances ai WHERE ai.user_id = u.id AND ai.status != 'deleted') AS agent_count,
-        (SELECT (COALESCE(SUM(ue.cost_nano_usd), 0))::bigint FROM user_usage_event ue WHERE ue.user_id = u.id) AS total_spent_nano,
-        (SELECT (COALESCE(SUM(ue.cost_nano_usd), 0))::bigint FROM user_usage_event ue WHERE ue.user_id = u.id AND ue.instance_id IS NOT NULL) AS agent_spent_nano,
-        (SELECT (COALESCE(SUM(ue.quantity), 0))::bigint FROM user_usage_event ue WHERE ue.user_id = u.id AND ue.instance_id IS NOT NULL AND ue.metric_key = 'llm.tokens') AS agent_token_usage,
-        (SELECT COALESCE(MAX(ue.created_at), u.updated_at) FROM user_usage_event ue WHERE ue.user_id = u.id) AS last_activity_at
+        COALESCE(ac.agent_count, 0) AS agent_count,
+        COALESCE(us.total_spent_nano, 0) AS total_spent_nano,
+        COALESCE(us.agent_spent_nano, 0) AS agent_spent_nano,
+        COALESCE(us.agent_token_usage, 0) AS agent_token_usage,
+        COALESCE(us.last_usage_at, u.updated_at) AS last_activity_at
     FROM users u
     LEFT JOIN LATERAL (
         SELECT status, price_id FROM subscriptions s
@@ -426,6 +445,8 @@ WITH enriched AS (
         ORDER BY s.updated_at DESC
         LIMIT 1
     ) sub ON true
+    LEFT JOIN agent_counts ac ON u.id = ac.user_id
+    LEFT JOIN usage_stats us ON u.id = us.user_id
 )
 SELECT id, email, name, avatar_url, created_at, updated_at,
        subscription_status, subscription_price_id, agent_count, total_spent_nano, agent_spent_nano,

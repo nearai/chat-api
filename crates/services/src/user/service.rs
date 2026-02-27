@@ -125,9 +125,26 @@ impl UserService for UserServiceImpl {
         filter: &AdminListUsersFilter,
         sort: &AdminListUsersSort,
     ) -> anyhow::Result<(Vec<AdminUserWithStats>, u64)> {
-        self.user_repository
+        tracing::info!(
+            "Listing users with stats: limit={}, offset={}, sort_by={:?}, sort_order={:?}",
+            limit,
+            offset,
+            sort.sort_by,
+            sort.sort_order
+        );
+
+        let (users, total_count) = self
+            .user_repository
             .list_users_with_stats(limit, offset, filter, sort)
-            .await
+            .await?;
+
+        tracing::info!(
+            "Retrieved {} user(s) with stats (total: {})",
+            users.len(),
+            total_count
+        );
+
+        Ok((users, total_count))
     }
 
     async fn has_active_ban(&self, user_id: UserId) -> anyhow::Result<bool> {

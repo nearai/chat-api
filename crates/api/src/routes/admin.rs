@@ -81,7 +81,7 @@ pub struct ListUsersQuery {
     pub offset: i64,
     /// Filter type: "subscription_status" or "subscription_plan"
     pub filter_by: Option<String>,
-    /// Filter value. For subscription_status: active, canceled, past_due, none. For subscription_plan: plan name or none
+    /// Filter value. For subscription_status: active, canceled, past_due, trialing, unpaid, none. For subscription_plan: plan name or none
     pub filter_value: Option<String>,
     /// Substring search on email and name (case-insensitive)
     pub q: Option<String>,
@@ -109,41 +109,57 @@ impl ListUsersQuery {
         }
         .validate()?;
 
-        if let (Some(ref fb), Some(ref fv)) = (&self.filter_by, &self.filter_value) {
-            let fb = fb.trim();
-            let fv = fv.trim();
-            if !fb.is_empty() && !fv.is_empty() {
-                match fb {
-                    "subscription_status" => {
-                        if ![
-                            "active", "canceled", "past_due", "trialing", "unpaid", "none",
-                        ]
-                        .contains(&fv)
-                        {
+        match (&self.filter_by, &self.filter_value) {
+            (Some(fb), Some(fv)) => {
+                let fb = fb.trim();
+                let fv = fv.trim();
+                if !fb.is_empty() && !fv.is_empty() {
+                    match fb {
+                        "subscription_status" => {
+                            if ![
+                                "active", "canceled", "past_due", "trialing", "unpaid", "none",
+                            ]
+                            .contains(&fv)
+                            {
+                                return Err(ApiError::bad_request(format!(
+                                    "invalid filter_value for subscription_status: {}",
+                                    fv
+                                )));
+                            }
+                        }
+                        "subscription_plan" => {
+                            // Any non-empty value is ok (plan name or "none")
+                        }
+                        _ => {
                             return Err(ApiError::bad_request(format!(
-                                "invalid filter_value for subscription_status: {}",
-                                fv
+                                "invalid filter_by: {}, must be subscription_status or subscription_plan",
+                                fb
                             )));
                         }
                     }
-                    "subscription_plan" => {
-                        // Any non-empty value is ok (plan name or "none")
-                    }
-                    _ => {
-                        return Err(ApiError::bad_request(format!(
-                            "invalid filter_by: {}, must be subscription_status or subscription_plan",
-                            fb
-                        )));
-                    }
                 }
             }
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(ApiError::bad_request(
+                    "filter_by and filter_value must both be provided together",
+                ));
+            }
+            _ => {}
         }
 
         if let Some(ref q) = self.q {
-            if !q.trim().is_empty() && q.len() > 200 {
-                return Err(ApiError::bad_request(
-                    "search query exceeds maximum length of 200",
-                ));
+            let q_trimmed = q.trim();
+            if !q_trimmed.is_empty() {
+                if q_trimmed.len() > 200 {
+                    return Err(ApiError::bad_request(
+                        "search query exceeds maximum length of 200",
+                    ));
+                }
+                if q_trimmed.matches('%').count() > 5 {
+                    return Err(ApiError::bad_request(
+                        "search query contains too many wildcard characters",
+                    ));
+                }
             }
         }
 
@@ -235,11 +251,10 @@ async fn list_users_bi_impl(
     params.validate()?;
 
     let price_to_plan = build_price_id_to_plan_name(app_state).await?;
-    // Build plan_name (lowercase for case-insensitive lookup) -> price_ids
-    let plan_to_prices: std::collections::HashMap<String, Vec<String>> =
+    let plan_to_prices: HashMap<String, Vec<String>> =
         price_to_plan
             .iter()
-            .fold(std::collections::HashMap::new(), |mut acc, (pid, name)| {
+            .fold(HashMap::new(), |mut acc, (pid, name)| {
                 acc.entry(name.to_lowercase())
                     .or_default()
                     .push(pid.clone());
@@ -327,8 +342,6 @@ async fn list_users_bi_impl(
             tracing::error!("Failed to list users: {}", e);
             ApiError::internal_server_error("Failed to list users")
         })?;
-
-    let price_to_plan = build_price_id_to_plan_name(app_state).await?;
 
     let users: Vec<_> = users
         .into_iter()
@@ -2082,12 +2095,10 @@ pub async fn bi_list_users(
     Query(params): Query<ListUsersQuery>,
 ) -> Result<Json<AdminUserListResponse>, ApiError> {
     tracing::info!(
-        "BI: Listing users with limit={}, offset={}, filter_by={:?}, filter_value={:?}, q={:?}, sort_by={}, sort_order={}",
+        "BI: Listing users with limit={}, offset={}, filter_by={:?}, sort_by={}, sort_order={}",
         params.limit,
         params.offset,
         params.filter_by,
-        params.filter_value,
-        params.q,
         params.sort_by,
         params.sort_order
     );
