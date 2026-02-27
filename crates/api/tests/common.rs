@@ -313,6 +313,35 @@ pub async fn mock_login(server: &TestServer, email: &str) -> String {
 
 /// Clear subscription_plans configuration from system_configs
 /// Sets subscription_plans to an empty map, which is treated as "not configured"
+/// Clear default_allowed_models by setting it to empty array (treated as allow-all)
+pub async fn clear_default_allowed_models(server: &TestServer) {
+    let admin_email = "test_cleanup_admin@admin.org";
+    let admin_token = mock_login(server, admin_email).await;
+
+    let config_body = json!({
+        "default_allowed_models": []
+    });
+
+    let response = server
+        .patch("/v1/admin/configs")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&config_body)
+        .await;
+
+    assert!(
+        response.status_code().is_success(),
+        "Failed to clear default_allowed_models: status={}",
+        response.status_code()
+    );
+}
+
 pub async fn clear_subscription_plans(server: &TestServer) {
     let admin_email = "test_cleanup_admin@admin.org";
     let admin_token = mock_login(server, admin_email).await;
@@ -353,6 +382,25 @@ pub async fn insert_test_subscription(
     user_email: &str,
     cancel_at_period_end: bool,
 ) {
+    insert_test_subscription_with_price(
+        server,
+        db,
+        user_email,
+        "price_test_basic",
+        cancel_at_period_end,
+    )
+    .await;
+}
+
+/// Insert a test subscription with custom price_id for a user.
+/// This is useful for testing different subscription plans.
+pub async fn insert_test_subscription_with_price(
+    server: &TestServer,
+    db: &database::Database,
+    user_email: &str,
+    price_id: &str,
+    cancel_at_period_end: bool,
+) {
     let _token = mock_login(server, user_email).await;
 
     let user = db
@@ -381,7 +429,7 @@ pub async fn insert_test_subscription(
                 &user.id,
                 &"stripe",
                 &"cus_test",
-                &"price_test_basic",
+                &price_id,
                 &"active",
                 &period_end,
                 &cancel_at_period_end,

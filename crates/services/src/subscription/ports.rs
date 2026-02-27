@@ -90,6 +90,8 @@ pub enum SubscriptionError {
     DatabaseError(String),
     /// Webhook verification failed
     WebhookVerificationFailed(String),
+    /// Model not allowed in user's subscription plan
+    ModelNotAllowedInPlan { model: String, plan: String },
     /// Internal error
     InternalError(String),
     /// Cannot associate test clock with existing Stripe customer
@@ -128,6 +130,13 @@ impl fmt::Display for SubscriptionError {
             Self::DatabaseError(msg) => write!(f, "Database error: {}", msg),
             Self::WebhookVerificationFailed(msg) => {
                 write!(f, "Webhook verification failed: {}", msg)
+            }
+            Self::ModelNotAllowedInPlan { model, plan } => {
+                write!(
+                    f,
+                    "Model '{}' is not available in your plan '{}'",
+                    model, plan
+                )
             }
             Self::InternalError(msg) => write!(f, "Internal error: {}", msg),
             Self::TestClockNotAllowedForExistingCustomer => {
@@ -224,6 +233,10 @@ pub struct SubscriptionPlan {
     /// Monthly token limits (e.g. { "max": 1000000 })
     #[serde(skip_serializing_if = "Option::is_none")]
     pub monthly_tokens: Option<PlanLimitConfig>,
+    /// List of model IDs allowed for this plan (e.g. ["gpt-3.5-turbo", "gpt-4o"])
+    /// None = allow all models (default); Some(vec) = only allow models in the list
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allowed_models: Option<Vec<String>>,
 }
 
 /// Service trait for subscription management
@@ -289,6 +302,16 @@ pub trait SubscriptionService: Send + Sync {
     async fn require_subscription_for_proxy(
         &self,
         user_id: UserId,
+    ) -> Result<(), SubscriptionError>;
+
+    /// Check if the user has access to the specified model based on their subscription plan.
+    /// Returns Ok(()) if allowed, Err(ModelNotAllowedInPlan) if the model is not in the plan's allowlist.
+    /// If the plan has no allowlist (None), all models are allowed.
+    /// If the user has no active subscription, uses system-level default_allowed_models config.
+    async fn check_model_access(
+        &self,
+        user_id: UserId,
+        model_id: &str,
     ) -> Result<(), SubscriptionError>;
 
     /// Admin only: Set subscription for a user directly (for testing/manual management).

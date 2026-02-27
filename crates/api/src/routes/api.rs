@@ -2219,6 +2219,28 @@ async fn get_file_content(
     .await
 }
 
+async fn check_model_access(
+    state: &crate::state::AppState,
+    user_id: services::types::UserId,
+    model_id: &str,
+) -> Result<(), Response> {
+    state
+        .subscription_service
+        .check_model_access(user_id, model_id)
+        .await
+        .map_err(|e| {
+            Response::builder()
+                .status(StatusCode::FORBIDDEN)
+                .body(Body::from(e.to_string()))
+                .unwrap_or_else(|_| {
+                    Response::builder()
+                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                        .body(Body::from("Failed to build response"))
+                        .unwrap()
+                })
+        })
+}
+
 /// Proxy responses endpoint - forwards to OpenAI with model settings and author metadata injection
 #[utoipa::path(
     post,
@@ -2303,6 +2325,13 @@ async fn proxy_responses(
         {
             validate_user_conversation(&state, &user, conversation_id, SharePermission::Write)
                 .await?;
+        }
+    }
+
+    // Check model access based on subscription plan
+    if let Some(ref body) = body_json {
+        if let Some(model_id) = body.get("model").and_then(|v| v.as_str()) {
+            check_model_access(&state, user.user_id, model_id).await?;
         }
     }
 
@@ -3223,6 +3252,15 @@ async fn prepare_chat_completions_body(
                         }
                         auto_routed = true;
                     }
+                }
+
+                // Check model access based on subscription plan
+                if let Some(model_id) = body_json
+                    .as_ref()
+                    .and_then(|b| b.get("model"))
+                    .and_then(|v| v.as_str())
+                {
+                    check_model_access(state, user.user_id, model_id).await?;
                 }
 
                 if let Some(model_id) = body_json
