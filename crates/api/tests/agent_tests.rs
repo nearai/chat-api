@@ -262,6 +262,9 @@ async fn test_create_instance_rejects_unsubscribed_user() {
     let user_email = "no_sub_user@example.com";
     let user_token = mock_login(&server, user_email).await;
 
+    // Clean up any leftover subscription plans from other tests
+    common::clear_subscription_plans(&server).await;
+
     // Ensure user has NO subscription
     common::cleanup_user_subscriptions(&db, user_email).await;
 
@@ -306,6 +309,9 @@ async fn test_create_instance_rejects_unsubscribed_user() {
         "Error message should mention limit, got: {}",
         error_message
     );
+
+    // Clean up: clear subscription plans to avoid polluting other tests
+    common::clear_subscription_plans(&server).await;
 }
 
 /// Test agent instance limit validation with subscription plans
@@ -316,6 +322,9 @@ async fn test_create_instance_respects_agent_instance_limit_max_1() {
 
     let user_email = "limit_test_user_max1@example.com";
     let user_token = mock_login(&server, user_email).await;
+
+    // Clean up any leftover subscription plans from other tests
+    common::clear_subscription_plans(&server).await;
 
     // Set up subscription with agent_instances limit of 1
     // NOTE: insert_test_subscription uses price_id "price_test_basic"
@@ -408,4 +417,7 @@ async fn test_create_instance_respects_agent_instance_limit_max_1() {
         "Error message should mention limit, got: {}",
         error_message
     );
+
+    // Clean up: clear subscription plans to avoid polluting other tests
+    common::clear_subscription_plans(&server).await;
 }
