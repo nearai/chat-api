@@ -94,6 +94,7 @@ use utoipa::OpenApi;
         crate::routes::admin::admin_create_instance,
         crate::routes::admin::admin_delete_instance,
         crate::routes::admin::admin_sync_agent_status,
+        crate::routes::admin::bi_list_users,
         crate::routes::admin::bi_list_deployments,
         crate::routes::admin::bi_deployment_summary,
         crate::routes::admin::bi_status_history,

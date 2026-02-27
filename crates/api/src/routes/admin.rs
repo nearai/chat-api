@@ -177,24 +177,18 @@ impl ListUsersQuery {
 
 /// List users
 ///
-/// Returns a paginated list of users with admin stats (subscription, agent count, spending, etc.).
-/// Supports filter by subscription status and sort by various fields.
-/// Requires admin authentication.
+/// Returns a paginated list of users. Requires admin authentication.
+/// For user stats (subscription, agent count, spending, etc.) use /v1/admin/bi/users.
 #[utoipa::path(
     get,
     path = "/v1/admin/users",
     tag = "Admin",
     params(
         ("limit" = Option<i64>, Query, description = "Maximum number of items to return (default: 20, max: 100)"),
-        ("offset" = Option<i64>, Query, description = "Number of items to skip (default: 0)"),
-        ("filter_by" = Option<String>, Query, description = "Filter type: subscription_status or subscription_plan"),
-        ("filter_value" = Option<String>, Query, description = "Filter value. For subscription_status: active, canceled, past_due, none. For subscription_plan: plan name or none"),
-        ("q" = Option<String>, Query, description = "Substring search on email and name (case-insensitive)"),
-        ("sort_by" = Option<String>, Query, description = "Sort by: created_at, total_spent_nano, agent_spent_nano, agent_token_usage, last_activity_at, agent_count, email, name"),
-        ("sort_order" = Option<String>, Query, description = "Sort order: asc or desc")
+        ("offset" = Option<i64>, Query, description = "Number of items to skip (default: 0)")
     ),
     responses(
-        (status = 200, description = "User list retrieved", body = AdminUserListResponse),
+        (status = 200, description = "User list retrieved", body = UserListResponse),
         (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
@@ -206,23 +200,35 @@ impl ListUsersQuery {
 )]
 pub async fn list_users(
     State(app_state): State<AppState>,
-    Query(params): Query<ListUsersQuery>,
-) -> Result<Json<AdminUserListResponse>, ApiError> {
+    Query(params): Query<PaginationQuery>,
+) -> Result<Json<UserListResponse>, ApiError> {
     tracing::info!(
-        "Listing users with limit={}, offset={}, filter_by={:?}, filter_value={:?}, q={:?}, sort_by={}, sort_order={}",
+        "Listing users with limit={}, offset={}",
         params.limit,
-        params.offset,
-        params.filter_by,
-        params.filter_value,
-        params.q,
-        params.sort_by,
-        params.sort_order
+        params.offset
     );
-    list_users_impl(&app_state, params).await
+
+    params.validate()?;
+
+    let (users, total) = app_state
+        .user_service
+        .list_users(params.limit, params.offset)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to list users: {}", e);
+            ApiError::internal_server_error("Failed to list users")
+        })?;
+
+    Ok(Json(UserListResponse {
+        users: users.into_iter().map(Into::into).collect(),
+        limit: params.limit,
+        offset: params.offset,
+        total,
+    }))
 }
 
-/// Shared implementation for list_users and bi_list_users.
-async fn list_users_impl(
+/// Implementation used by bi_list_users only (BI endpoint).
+async fn list_users_bi_impl(
     app_state: &AppState,
     params: ListUsersQuery,
 ) -> Result<Json<AdminUserListResponse>, ApiError> {
@@ -2051,7 +2057,15 @@ fn validate_string_filter(name: &str, value: &Option<String>) -> Result<(), ApiE
     get,
     path = "/v1/admin/bi/users",
     tag = "Admin",
-    params(ListUsersQuery),
+    params(
+        ("limit" = Option<i64>, Query, description = "Maximum number of items to return (default: 20, max: 100)"),
+        ("offset" = Option<i64>, Query, description = "Number of items to skip (default: 0)"),
+        ("filter_by" = Option<String>, Query, description = "Filter type: subscription_status or subscription_plan"),
+        ("filter_value" = Option<String>, Query, description = "Filter value. For subscription_status: active, canceled, past_due, none. For subscription_plan: plan name or none"),
+        ("q" = Option<String>, Query, description = "Substring search on email and name (case-insensitive)"),
+        ("sort_by" = Option<String>, Query, description = "Sort by: created_at, total_spent_nano, agent_spent_nano, agent_token_usage, last_activity_at, agent_count, email, name"),
+        ("sort_order" = Option<String>, Query, description = "Sort order: asc or desc")
+    ),
     responses(
         (status = 200, description = "User list with stats", body = AdminUserListResponse),
         (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
@@ -2077,7 +2091,7 @@ pub async fn bi_list_users(
         params.sort_by,
         params.sort_order
     );
-    list_users_impl(&app_state, params).await
+    list_users_bi_impl(&app_state, params).await
 }
 
 /// List deployments with optional filters (BI). Requires admin authentication.
@@ -2367,6 +2381,7 @@ pub fn create_admin_router() -> Router<AppState> {
         .nest(
             "/bi",
             Router::new()
+                .route("/users", get(bi_list_users))
                 .route("/deployments", get(bi_list_deployments))
                 .route("/deployments/summary", get(bi_deployment_summary))
                 .route("/deployments/{id}/status-history", get(bi_status_history))
