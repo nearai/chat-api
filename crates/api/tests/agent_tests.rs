@@ -96,6 +96,28 @@ async fn test_create_api_key_requires_auth() {
     );
 }
 
+/// Test check upgrade available requires authentication
+#[tokio::test]
+async fn test_check_upgrade_available_requires_auth() {
+    let server = create_test_server_and_db(Default::default()).await.0;
+
+    let fake_instance_id = Uuid::new_v4().to_string();
+
+    // Try without auth
+    let response = server
+        .get(&format!(
+            "/v1/agents/instances/{}/upgrade-available",
+            fake_instance_id
+        ))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        401,
+        "Should require authentication to check upgrade"
+    );
+}
+
 // Note: Chat completions endpoint tests require actual Agent instances with proper
 // connection information (instance_url, instance_token). These are integration tests
 // that would need mock/stub Agent infrastructure. See INTEGRATION_TESTS section below.
@@ -244,6 +266,7 @@ async fn test_create_instance_rejects_unsubscribed_user() {
     common::cleanup_user_subscriptions(&db, user_email).await;
 
     // Set subscription plans (for subscribed users); unsubscribed users get 0 instances
+    // Note: set_subscription_plans overwrites any existing plans, so no need to clear first
     common::set_subscription_plans(
         &server,
         json!({
@@ -297,6 +320,8 @@ async fn test_create_instance_respects_agent_instance_limit_max_1() {
 
     // Set up subscription with agent_instances limit of 1
     // NOTE: insert_test_subscription uses price_id "price_test_basic"
+    // Note: set_subscription_plans overwrites any existing plans, so no need to clear first
+    tracing::info!("Setting up subscription plans");
     common::set_subscription_plans(
         &server,
         json!({

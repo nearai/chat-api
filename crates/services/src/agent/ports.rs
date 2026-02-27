@@ -5,6 +5,25 @@ use uuid::Uuid;
 
 use crate::UserId;
 
+/// Result of sync_all_instance_statuses.
+///
+/// Counter semantics:
+/// - `synced`: instances found in the Agent API response (updated + skipped)
+/// - `updated`: instances whose DB status was changed
+/// - `skipped`: instances found in API but already had the correct status
+/// - `not_found`: instances missing from the API response (API succeeded but instance absent)
+/// - `error_skipped`: instances skipped because their manager API call failed
+/// - `errors`: human-readable error descriptions (no internal URLs)
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SyncStatusResult {
+    pub synced: u32,
+    pub updated: u32,
+    pub skipped: u32,
+    pub not_found: u32,
+    pub error_skipped: u32,
+    pub errors: Vec<String>,
+}
+
 // ============ Service Type Validation ============
 
 /// Valid service types for agent instances.
@@ -20,6 +39,14 @@ pub fn is_valid_service_type(service_type: &str) -> bool {
 pub struct AgentApiInstanceEnrichment {
     pub status: Option<String>,
     pub ssh_command: Option<String>,
+}
+
+/// Upgrade availability information for an instance
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpgradeAvailability {
+    pub has_upgrade: bool,
+    pub current_image: Option<String>,
+    pub latest_image: String,
 }
 
 /// Agent instance metadata
@@ -331,9 +358,26 @@ pub trait AgentService: Send + Sync {
 
     async fn restart_instance(&self, instance_id: Uuid, user_id: UserId) -> anyhow::Result<()>;
 
+    /// Upgrade instance to the latest image for its service type.
+    /// Fetches current images from the owning compose-api, then restarts with the latest digest.
+    async fn upgrade_instance(&self, instance_id: Uuid, user_id: UserId) -> anyhow::Result<()>;
+
+    /// Check if an upgrade is available for the instance.
+    /// Compares the current deployed image with the latest available version.
+    async fn check_upgrade_available(
+        &self,
+        instance_id: Uuid,
+        user_id: UserId,
+    ) -> anyhow::Result<UpgradeAvailability>;
+
     async fn stop_instance(&self, instance_id: Uuid, user_id: UserId) -> anyhow::Result<()>;
 
     async fn start_instance(&self, instance_id: Uuid, user_id: UserId) -> anyhow::Result<()>;
+
+    /// Sync instance status from all Agent API managers into the database.
+    /// Fetches live status via GET /instances per manager, maps "running" -> "active", others -> "stopped".
+    /// Skips deleted instances; only updates when status differs.
+    async fn sync_all_instance_statuses(&self) -> anyhow::Result<SyncStatusResult>;
 
     // API key management
     /// Create an API key for a specific instance - returns (api_key_info, plaintext_key)

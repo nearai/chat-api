@@ -264,6 +264,7 @@ pub async fn create_test_server_and_db(
         agent_proxy_service,
         redirect_uri: config.oauth.redirect_uri,
         admin_domains: Arc::new(admin_domains),
+        stripe_test_clock_enabled: config.stripe.test_clock_enabled,
         cloud_api_base_url: test_config.cloud_api_base_url.clone(),
         metrics_service,
         analytics_service,
