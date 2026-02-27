@@ -1666,6 +1666,7 @@ impl AgentService for AgentServiceImpl {
         let mut status_map: HashMap<(String, String), String> = HashMap::new();
         let mut failed_managers: std::collections::HashSet<String> =
             std::collections::HashSet::new();
+        let mut unconfigured_manager_urls: Vec<String> = Vec::new();
 
         for mgr_url in by_manager.keys() {
             let mgr = match self
@@ -1675,9 +1676,7 @@ impl AgentService for AgentServiceImpl {
             {
                 Some(m) => m,
                 None => {
-                    result
-                        .errors
-                        .push("Manager not configured for some instances".to_string());
+                    unconfigured_manager_urls.push(mgr_url.to_string());
                     failed_managers.insert(mgr_url.to_string());
                     continue;
                 }
@@ -1699,13 +1698,24 @@ impl AgentService for AgentServiceImpl {
                     }
                 }
                 Err(e) => {
-                    tracing::error!("sync_all_instance_statuses: failed to query manager: {}", e);
+                    tracing::error!(
+                        "sync_all_instance_statuses: failed to query manager {}: {}",
+                        mgr_url,
+                        e
+                    );
                     result
                         .errors
-                        .push(format!("Failed to query agent manager: {}", e));
+                        .push(format!("Failed to query agent manager {}: {}", mgr_url, e));
                     failed_managers.insert(mgr_url.to_string());
                 }
             }
+        }
+
+        if !unconfigured_manager_urls.is_empty() {
+            result.errors.push(format!(
+                "Manager not configured for some instances: {}",
+                unconfigured_manager_urls.join(", ")
+            ));
         }
 
         for inst in &instances {
@@ -1716,6 +1726,12 @@ impl AgentService for AgentServiceImpl {
                 .iter()
                 .any(|f| f.trim_end_matches('/') == trimmed)
             {
+                tracing::warn!(
+                    "sync_all_instance_statuses: error_skipped instance_id={} name={} agent_api_base_url={:?} — manager not configured or query failed",
+                    inst.id,
+                    inst.name,
+                    inst.agent_api_base_url
+                );
                 result.error_skipped += 1;
                 continue;
             }
@@ -1733,6 +1749,12 @@ impl AgentService for AgentServiceImpl {
                 Some(s) if s.as_str() == "running" => "active",
                 Some(_) => "stopped",
                 None => {
+                    tracing::warn!(
+                        "sync_all_instance_statuses: not_found instance_id={} name={} agent_api_base_url={:?} — instance not in manager response",
+                        inst.id,
+                        inst.name,
+                        inst.agent_api_base_url
+                    );
                     result.not_found += 1;
                     continue;
                 }
