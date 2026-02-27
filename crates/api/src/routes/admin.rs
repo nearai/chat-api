@@ -359,7 +359,7 @@ async fn build_price_id_to_plan_name(
     let mut map = HashMap::new();
     if let Some(ref plans) = config.and_then(|c| c.subscription_plans) {
         for (plan_name, plan_config) in plans {
-            for (_provider, provider_config) in &plan_config.providers {
+            for provider_config in plan_config.providers.values() {
                 map.insert(provider_config.price_id.clone(), plan_name.clone());
             }
         }

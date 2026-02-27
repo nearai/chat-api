@@ -13,6 +13,12 @@ use crate::UserId;
 pub struct DeploymentRecord {
     pub id: Uuid,
     pub user_id: UserId,
+    /// User email from users table (for display in admin UI)
+    pub user_email: Option<String>,
+    /// User name from users table (for display in admin UI)
+    pub user_name: Option<String>,
+    /// User avatar URL from users table (for display in admin UI)
+    pub user_avatar_url: Option<String>,
     pub instance_id: String,
     pub instance_type: String, // openclaw | ironclaw
     pub status: String,

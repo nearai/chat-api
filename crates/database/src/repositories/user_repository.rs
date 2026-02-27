@@ -353,12 +353,12 @@ impl UserRepository for PostgresUserRepository {
         let mut params: Vec<Box<dyn tokio_postgres::types::ToSql + Send + Sync>> = Vec::new();
         let mut param_idx = 1u32;
 
-        if let Some(ref s) = filter.subscription_status.as_ref() {
+        if let Some(s) = filter.subscription_status.as_ref() {
             match s.as_str() {
                 "none" => filter_clauses.push("enriched.subscription_status IS NULL".to_string()),
                 "active" | "canceled" | "past_due" | "trialing" | "unpaid" => {
                     filter_clauses.push(format!("enriched.subscription_status = ${param_idx}"));
-                    params.push(Box::new((*s).to_string()));
+                    params.push(Box::new(s.to_string()));
                     param_idx += 1;
                 }
                 _ => {}

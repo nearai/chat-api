@@ -79,29 +79,31 @@ impl BiMetricsRepository for PostgresBiMetricsRepository {
         let mut qb = QueryBuilder::new();
 
         if let Some(ref t) = filter.instance_type {
-            qb.push("type", "=", t.clone());
+            qb.push("ai.type", "=", t.clone());
         }
         if let Some(ref s) = filter.status {
-            qb.push("status", "=", s.clone());
+            qb.push("ai.status", "=", s.clone());
         }
         if let Some(sd) = filter.start_date {
-            qb.push("created_at", ">=", sd);
+            qb.push("ai.created_at", ">=", sd);
         }
         if let Some(ed) = filter.end_date {
-            qb.push("created_at", "<=", ed);
+            qb.push("ai.created_at", "<=", ed);
         }
 
         let where_clause = qb.where_clause();
 
         // Use COUNT(*) OVER() window function to get total in a single query
+        // LEFT JOIN users to get user_email and user_name for admin display
         let limit_idx = qb.next_param_idx();
         let offset_idx = limit_idx + 1;
         let data_sql = format!(
-            "SELECT id, user_id, instance_id, type, status, created_at, updated_at,
+            "SELECT ai.id, ai.user_id, u.email, u.name, u.avatar_url, ai.instance_id, ai.type, ai.status, ai.created_at, ai.updated_at,
                     COUNT(*) OVER() as total_count
-             FROM agent_instances
+             FROM agent_instances ai
+             LEFT JOIN users u ON ai.user_id = u.id
              {where_clause}
-             ORDER BY created_at DESC
+             ORDER BY ai.created_at DESC
              LIMIT ${limit_idx} OFFSET ${offset_idx}"
         );
         qb.params.push(Box::new(filter.limit));
@@ -109,18 +111,21 @@ impl BiMetricsRepository for PostgresBiMetricsRepository {
 
         let rows = client.query(&data_sql, &qb.param_refs()).await?;
 
-        let total: i64 = rows.first().map(|r| r.get(7)).unwrap_or(0);
+        let total: i64 = rows.first().map(|r| r.get(10)).unwrap_or(0);
 
         let records = rows
             .into_iter()
             .map(|r| DeploymentRecord {
                 id: r.get(0),
                 user_id: r.get(1),
-                instance_id: r.get(2),
-                instance_type: r.get(3),
-                status: r.get(4),
-                created_at: r.get(5),
-                updated_at: r.get(6),
+                user_email: r.get(2),
+                user_name: r.get(3),
+                user_avatar_url: r.get(4),
+                instance_id: r.get(5),
+                instance_type: r.get(6),
+                status: r.get(7),
+                created_at: r.get(8),
+                updated_at: r.get(9),
             })
             .collect();
 
