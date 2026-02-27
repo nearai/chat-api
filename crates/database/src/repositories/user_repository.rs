@@ -1,10 +1,11 @@
 use crate::pool::DbPool;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use services::{
-    user::ports::{BanType, LinkedOAuthAccount, OAuthProvider, User, UserRepository},
-    UserId,
+use services::user::ports::{
+    AdminListUsersFilter, AdminListUsersSort, AdminUserWithStats, AdminUsersSortBy,
+    AdminUsersSortOrder, BanType, LinkedOAuthAccount, OAuthProvider, User, UserRepository,
 };
+use services::UserId;
 
 pub struct PostgresUserRepository {
     pool: DbPool,
@@ -14,6 +15,29 @@ impl PostgresUserRepository {
     pub fn new(pool: DbPool) -> Self {
         Self { pool }
     }
+}
+
+fn order_clause(sort: &AdminListUsersSort) -> String {
+    let col = match sort.sort_by {
+        AdminUsersSortBy::CreatedAt => "enriched.created_at",
+        AdminUsersSortBy::TotalSpentNano => "enriched.total_spent_nano",
+        AdminUsersSortBy::AgentSpentNano => "enriched.agent_spent_nano",
+        AdminUsersSortBy::AgentTokenUsage => "enriched.agent_token_usage",
+        AdminUsersSortBy::LastActivityAt => "enriched.last_activity_at",
+        AdminUsersSortBy::AgentCount => "enriched.agent_count",
+        AdminUsersSortBy::Email => "enriched.email",
+        AdminUsersSortBy::Name => "enriched.name",
+    };
+    let order = match sort.sort_order {
+        AdminUsersSortOrder::Asc => "ASC",
+        AdminUsersSortOrder::Desc => "DESC",
+    };
+    // NULLS LAST for nullable columns so nulls don't dominate
+    let nulls = match sort.sort_by {
+        AdminUsersSortBy::LastActivityAt | AdminUsersSortBy::Name => " NULLS LAST",
+        _ => "",
+    };
+    format!("{col} {order}{nulls}")
 }
 
 #[async_trait]
@@ -310,6 +334,158 @@ impl UserRepository for PostgresUserRepository {
                 avatar_url: r.get("avatar_url"),
                 created_at: r.get("created_at"),
                 updated_at: r.get("updated_at"),
+            })
+            .collect();
+
+        Ok((users, total_count as u64))
+    }
+
+    async fn list_users_with_stats(
+        &self,
+        limit: i64,
+        offset: i64,
+        filter: &AdminListUsersFilter,
+        sort: &AdminListUsersSort,
+    ) -> anyhow::Result<(Vec<AdminUserWithStats>, u64)> {
+        let client = self.pool.get().await?;
+
+        let mut filter_clauses = Vec::new();
+        let mut params: Vec<Box<dyn tokio_postgres::types::ToSql + Send + Sync>> = Vec::new();
+        let mut param_idx = 1u32;
+
+        if let Some(ref s) = filter.subscription_status.as_ref() {
+            match s.as_str() {
+                "none" => filter_clauses.push("enriched.subscription_status IS NULL".to_string()),
+                "active" | "canceled" | "past_due" | "trialing" | "unpaid" => {
+                    filter_clauses.push(format!("enriched.subscription_status = ${param_idx}"));
+                    params.push(Box::new((*s).to_string()));
+                    param_idx += 1;
+                }
+                _ => {}
+            }
+        }
+
+        if filter.subscription_plan_none {
+            filter_clauses.push("enriched.subscription_price_id IS NULL".to_string());
+        }
+
+        if let Some(ref price_ids) = filter.subscription_plan_price_ids {
+            if price_ids.is_empty() {
+                // Plan requested but not found in config → return no users
+                filter_clauses.push("1 = 0".to_string());
+            } else {
+                // Explicit ::text[] cast for PostgreSQL array binding
+                filter_clauses.push(format!(
+                    "enriched.subscription_price_id = ANY(${param_idx}::text[])"
+                ));
+                params.push(Box::new(price_ids.clone()));
+                param_idx += 1;
+            }
+        }
+
+        if let Some(ref search) = filter.search {
+            let pattern = format!("%{search}%");
+            filter_clauses.push(format!(
+                "(enriched.email ILIKE ${param_idx} OR COALESCE(enriched.name, '') ILIKE ${param_idx})"
+            ));
+            params.push(Box::new(pattern));
+            param_idx += 1;
+        }
+
+        let filter_sql = if filter_clauses.is_empty() {
+            String::new()
+        } else {
+            " AND ".to_string() + &filter_clauses.join(" AND ")
+        };
+
+        let order_sql = order_clause(sort);
+        let limit_param = param_idx;
+        let offset_param = param_idx + 1;
+
+        // Build full query - params: [filter_params..., limit, offset]
+        let base_query = r#"
+WITH enriched AS (
+    SELECT
+        u.id,
+        u.email,
+        u.name,
+        u.avatar_url,
+        u.created_at,
+        u.updated_at,
+        sub.status AS subscription_status,
+        sub.price_id AS subscription_price_id,
+        (SELECT COUNT(*)::bigint FROM agent_instances ai WHERE ai.user_id = u.id AND ai.status != 'deleted') AS agent_count,
+        (SELECT (COALESCE(SUM(ue.cost_nano_usd), 0))::bigint FROM user_usage_event ue WHERE ue.user_id = u.id) AS total_spent_nano,
+        (SELECT (COALESCE(SUM(ue.cost_nano_usd), 0))::bigint FROM user_usage_event ue WHERE ue.user_id = u.id AND ue.instance_id IS NOT NULL) AS agent_spent_nano,
+        (SELECT (COALESCE(SUM(ue.quantity), 0))::bigint FROM user_usage_event ue WHERE ue.user_id = u.id AND ue.instance_id IS NOT NULL AND ue.metric_key = 'llm.tokens') AS agent_token_usage,
+        (SELECT COALESCE(MAX(ue.created_at), u.updated_at) FROM user_usage_event ue WHERE ue.user_id = u.id) AS last_activity_at
+    FROM users u
+    LEFT JOIN LATERAL (
+        SELECT status, price_id FROM subscriptions s
+        WHERE s.user_id = u.id
+        ORDER BY s.updated_at DESC
+        LIMIT 1
+    ) sub ON true
+)
+SELECT id, email, name, avatar_url, created_at, updated_at,
+       subscription_status, subscription_price_id, agent_count, total_spent_nano, agent_spent_nano,
+       agent_token_usage, last_activity_at,
+       COUNT(*) OVER() AS total_count
+FROM enriched
+WHERE 1=1
+"#;
+
+        let query = format!(
+            "{} {} ORDER BY {} LIMIT ${} OFFSET ${}",
+            base_query, filter_sql, order_sql, limit_param, offset_param,
+        );
+
+        let mut query_params: Vec<Box<dyn tokio_postgres::types::ToSql + Send + Sync>> = params;
+        query_params.push(Box::new(limit));
+        query_params.push(Box::new(offset));
+
+        let rows = client
+            .query(
+                &query,
+                &query_params
+                    .iter()
+                    .map(|b| b.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
+                    .collect::<Vec<_>>(),
+            )
+            .await?;
+
+        let total_count: i64 = if rows.is_empty() {
+            0
+        } else {
+            rows[0].get("total_count")
+        };
+
+        let users = rows
+            .into_iter()
+            .map(|r| {
+                let id: UserId = r.get("id");
+                let email: String = r.get("email");
+                let name: Option<String> = r.get("name");
+                let avatar_url: Option<String> = r.get("avatar_url");
+                let created_at: DateTime<Utc> = r.get("created_at");
+                let updated_at: DateTime<Utc> = r.get("updated_at");
+                AdminUserWithStats {
+                    user: User {
+                        id,
+                        email,
+                        name,
+                        avatar_url,
+                        created_at,
+                        updated_at,
+                    },
+                    subscription_status: r.get("subscription_status"),
+                    subscription_price_id: r.get("subscription_price_id"),
+                    agent_count: r.get::<_, i64>("agent_count"),
+                    total_spent_nano: r.get::<_, i64>("total_spent_nano"),
+                    agent_spent_nano: r.get::<_, i64>("agent_spent_nano"),
+                    agent_token_usage: r.get::<_, i64>("agent_token_usage"),
+                    last_activity_at: r.get("last_activity_at"),
+                }
             })
             .collect();
 

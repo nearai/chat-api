@@ -454,6 +454,63 @@ pub struct UserListResponse {
     pub total: u64,
 }
 
+/// Admin user response with stats (subscription, agents, spending, etc.)
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct AdminUserResponse {
+    pub id: UserId,
+    pub email: String,
+    pub name: Option<String>,
+    pub avatar_url: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub subscription_status: Option<String>,
+    /// Resolved plan name from system config (e.g. "Pro", "Starter") or None if no subscription
+    pub subscription_plan_name: Option<String>,
+    pub agent_count: i64,
+    pub total_spent_nano: i64,
+    pub agent_spent_nano: i64,
+    pub agent_token_usage: i64,
+    pub last_activity_at: Option<String>,
+}
+
+/// Paginated admin user list response
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct AdminUserListResponse {
+    pub users: Vec<AdminUserResponse>,
+    pub limit: i64,
+    pub offset: i64,
+    pub total: u64,
+}
+
+impl AdminUserResponse {
+    pub fn from_stats(
+        u: services::user::ports::AdminUserWithStats,
+        subscription_plan_name: Option<String>,
+    ) -> Self {
+        Self {
+            id: u.user.id,
+            email: u.user.email,
+            name: u.user.name,
+            avatar_url: u.user.avatar_url,
+            created_at: u.user.created_at.to_rfc3339(),
+            updated_at: u.user.updated_at.to_rfc3339(),
+            subscription_status: u.subscription_status,
+            subscription_plan_name,
+            agent_count: u.agent_count,
+            total_spent_nano: u.total_spent_nano,
+            agent_spent_nano: u.agent_spent_nano,
+            agent_token_usage: u.agent_token_usage,
+            last_activity_at: u.last_activity_at.map(|t| t.to_rfc3339()),
+        }
+    }
+}
+
+impl From<services::user::ports::AdminUserWithStats> for AdminUserResponse {
+    fn from(u: services::user::ports::AdminUserWithStats) -> Self {
+        Self::from_stats(u, None)
+    }
+}
+
 /// Rate limit configuration (API model)
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct RateLimitConfig {

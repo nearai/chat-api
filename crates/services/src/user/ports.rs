@@ -61,6 +61,67 @@ pub struct UserProfile {
     pub linked_accounts: Vec<LinkedOAuthAccount>,
 }
 
+/// User with admin dashboard stats (subscription, agent count, spending, etc.)
+#[derive(Debug, Clone)]
+pub struct AdminUserWithStats {
+    pub user: User,
+    pub subscription_status: Option<String>,
+    pub subscription_price_id: Option<String>,
+    pub agent_count: i64,
+    pub total_spent_nano: i64,
+    pub agent_spent_nano: i64,
+    pub agent_token_usage: i64,
+    pub last_activity_at: Option<DateTime<Utc>>,
+}
+
+/// Filter for admin user list
+#[derive(Debug, Clone, Default)]
+pub struct AdminListUsersFilter {
+    /// Filter by subscription status: "active", "canceled", "past_due", or "none" for no subscription
+    pub subscription_status: Option<String>,
+    /// Filter by subscription plan name (e.g. "Pro", "Starter") or "none" for no subscription.
+    /// Requires price_ids resolved from system config.
+    pub subscription_plan_price_ids: Option<Vec<String>>,
+    /// Filter by subscription plan = none (no subscription)
+    pub subscription_plan_none: bool,
+    /// Substring search on email and name (case-insensitive)
+    pub search: Option<String>,
+}
+
+/// Sort options for admin user list
+#[derive(Debug, Clone)]
+pub struct AdminListUsersSort {
+    pub sort_by: AdminUsersSortBy,
+    pub sort_order: AdminUsersSortOrder,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdminUsersSortBy {
+    CreatedAt,
+    TotalSpentNano,
+    AgentSpentNano,
+    AgentTokenUsage,
+    LastActivityAt,
+    AgentCount,
+    Email,
+    Name,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdminUsersSortOrder {
+    Asc,
+    Desc,
+}
+
+impl Default for AdminListUsersSort {
+    fn default() -> Self {
+        Self {
+            sort_by: AdminUsersSortBy::CreatedAt,
+            sort_order: AdminUsersSortOrder::Desc,
+        }
+    }
+}
+
 /// Repository trait for user-related data operations
 #[async_trait]
 pub trait UserRepository: Send + Sync {
@@ -111,6 +172,15 @@ pub trait UserRepository: Send + Sync {
     /// List users with pagination
     async fn list_users(&self, limit: i64, offset: i64) -> anyhow::Result<(Vec<User>, u64)>;
 
+    /// List users with admin stats, filter and sort
+    async fn list_users_with_stats(
+        &self,
+        limit: i64,
+        offset: i64,
+        filter: &AdminListUsersFilter,
+        sort: &AdminListUsersSort,
+    ) -> anyhow::Result<(Vec<AdminUserWithStats>, u64)>;
+
     /// Check if the user currently has an active ban
     async fn has_active_ban(&self, user_id: UserId) -> anyhow::Result<bool>;
 
@@ -143,6 +213,15 @@ pub trait UserService: Send + Sync {
 
     /// List users with pagination
     async fn list_users(&self, limit: i64, offset: i64) -> anyhow::Result<(Vec<User>, u64)>;
+
+    /// List users with admin stats, filter and sort
+    async fn list_users_with_stats(
+        &self,
+        limit: i64,
+        offset: i64,
+        filter: &AdminListUsersFilter,
+        sort: &AdminListUsersSort,
+    ) -> anyhow::Result<(Vec<AdminUserWithStats>, u64)>;
 
     /// Check if the user currently has an active ban
     async fn has_active_ban(&self, user_id: UserId) -> anyhow::Result<bool>;

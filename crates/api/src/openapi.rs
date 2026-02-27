@@ -120,6 +120,8 @@ use utoipa::OpenApi;
         crate::routes::HealthResponse,
         crate::models::UserResponse,
         crate::models::UserListResponse,
+        crate::models::AdminUserResponse,
+        crate::models::AdminUserListResponse,
         crate::models::LinkedAccountResponse,
         crate::models::UserProfileResponse,
         crate::models::AuthResponse,

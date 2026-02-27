@@ -2,7 +2,10 @@ use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use std::sync::Arc;
 
-use super::ports::{BanType, User, UserProfile, UserRepository, UserService};
+use super::ports::{
+    AdminListUsersFilter, AdminListUsersSort, AdminUserWithStats, BanType, User, UserProfile,
+    UserRepository, UserService,
+};
 use crate::types::UserId;
 
 pub struct UserServiceImpl {
@@ -113,6 +116,18 @@ impl UserService for UserServiceImpl {
         );
 
         Ok((users, total_count))
+    }
+
+    async fn list_users_with_stats(
+        &self,
+        limit: i64,
+        offset: i64,
+        filter: &AdminListUsersFilter,
+        sort: &AdminListUsersSort,
+    ) -> anyhow::Result<(Vec<AdminUserWithStats>, u64)> {
+        self.user_repository
+            .list_users_with_stats(limit, offset, filter, sort)
+            .await
     }
 
     async fn has_active_ban(&self, user_id: UserId) -> anyhow::Result<bool> {

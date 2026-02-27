@@ -26,6 +26,7 @@ const BI_USAGE_MAX_ROWS: i64 = 1000;
 use services::model::ports::{UpdateModelParams, UpsertModelParams};
 use services::user_usage::UsageRankBy;
 use services::UserId;
+use std::collections::HashMap;
 use urlencoding::encode;
 use uuid::Uuid;
 
@@ -71,19 +72,129 @@ fn default_offset() -> i64 {
     0
 }
 
+/// Query parameters for admin list users (with filter and sort)
+#[derive(Debug, Deserialize)]
+pub struct ListUsersQuery {
+    #[serde(default = "default_limit")]
+    pub limit: i64,
+    #[serde(default = "default_offset")]
+    pub offset: i64,
+    /// Filter type: "subscription_status" or "subscription_plan"
+    pub filter_by: Option<String>,
+    /// Filter value. For subscription_status: active, canceled, past_due, none. For subscription_plan: plan name or none
+    pub filter_value: Option<String>,
+    /// Substring search on email and name (case-insensitive)
+    pub q: Option<String>,
+    /// Sort by: created_at, total_spent_nano, agent_spent_nano, agent_token_usage, last_activity_at, agent_count, email, name
+    #[serde(default = "default_sort_by")]
+    pub sort_by: String,
+    /// Sort order: asc or desc
+    #[serde(default = "default_sort_order")]
+    pub sort_order: String,
+}
+
+fn default_sort_by() -> String {
+    "created_at".to_string()
+}
+
+fn default_sort_order() -> String {
+    "desc".to_string()
+}
+
+impl ListUsersQuery {
+    pub fn validate(&self) -> Result<(), ApiError> {
+        PaginationQuery {
+            limit: self.limit,
+            offset: self.offset,
+        }
+        .validate()?;
+
+        if let (Some(ref fb), Some(ref fv)) = (&self.filter_by, &self.filter_value) {
+            let fb = fb.trim();
+            let fv = fv.trim();
+            if !fb.is_empty() && !fv.is_empty() {
+                match fb {
+                    "subscription_status" => {
+                        if ![
+                            "active", "canceled", "past_due", "trialing", "unpaid", "none",
+                        ]
+                        .contains(&fv)
+                        {
+                            return Err(ApiError::bad_request(format!(
+                                "invalid filter_value for subscription_status: {}",
+                                fv
+                            )));
+                        }
+                    }
+                    "subscription_plan" => {
+                        // Any non-empty value is ok (plan name or "none")
+                    }
+                    _ => {
+                        return Err(ApiError::bad_request(format!(
+                            "invalid filter_by: {}, must be subscription_status or subscription_plan",
+                            fb
+                        )));
+                    }
+                }
+            }
+        }
+
+        if let Some(ref q) = self.q {
+            if !q.trim().is_empty() && q.len() > 200 {
+                return Err(ApiError::bad_request(
+                    "search query exceeds maximum length of 200",
+                ));
+            }
+        }
+
+        let valid_sort_by = [
+            "created_at",
+            "total_spent_nano",
+            "agent_spent_nano",
+            "agent_token_usage",
+            "last_activity_at",
+            "agent_count",
+            "email",
+            "name",
+        ];
+        if !valid_sort_by.contains(&self.sort_by.as_str()) {
+            return Err(ApiError::bad_request(format!(
+                "invalid sort_by: {}, must be one of {:?}",
+                self.sort_by, valid_sort_by
+            )));
+        }
+
+        if self.sort_order != "asc" && self.sort_order != "desc" {
+            return Err(ApiError::bad_request(format!(
+                "invalid sort_order: {}, must be asc or desc",
+                self.sort_order
+            )));
+        }
+
+        Ok(())
+    }
+}
+
 /// List users
 ///
-/// Returns a paginated list of users. Requires admin authentication.
+/// Returns a paginated list of users with admin stats (subscription, agent count, spending, etc.).
+/// Supports filter by subscription status and sort by various fields.
+/// Requires admin authentication.
 #[utoipa::path(
     get,
     path = "/v1/admin/users",
     tag = "Admin",
     params(
         ("limit" = Option<i64>, Query, description = "Maximum number of items to return (default: 20, max: 100)"),
-        ("offset" = Option<i64>, Query, description = "Number of items to skip (default: 0)")
+        ("offset" = Option<i64>, Query, description = "Number of items to skip (default: 0)"),
+        ("filter_by" = Option<String>, Query, description = "Filter type: subscription_status or subscription_plan"),
+        ("filter_value" = Option<String>, Query, description = "Filter value. For subscription_status: active, canceled, past_due, none. For subscription_plan: plan name or none"),
+        ("q" = Option<String>, Query, description = "Substring search on email and name (case-insensitive)"),
+        ("sort_by" = Option<String>, Query, description = "Sort by: created_at, total_spent_nano, agent_spent_nano, agent_token_usage, last_activity_at, agent_count, email, name"),
+        ("sort_order" = Option<String>, Query, description = "Sort order: asc or desc")
     ),
     responses(
-        (status = 200, description = "User list retrieved", body = UserListResponse),
+        (status = 200, description = "User list retrieved", body = AdminUserListResponse),
         (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
@@ -95,31 +206,165 @@ fn default_offset() -> i64 {
 )]
 pub async fn list_users(
     State(app_state): State<AppState>,
-    Query(params): Query<PaginationQuery>,
-) -> Result<Json<UserListResponse>, ApiError> {
+    Query(params): Query<ListUsersQuery>,
+) -> Result<Json<AdminUserListResponse>, ApiError> {
     tracing::info!(
-        "Listing users with limit={}, offset={}",
+        "Listing users with limit={}, offset={}, filter_by={:?}, filter_value={:?}, q={:?}, sort_by={}, sort_order={}",
         params.limit,
-        params.offset
+        params.offset,
+        params.filter_by,
+        params.filter_value,
+        params.q,
+        params.sort_by,
+        params.sort_order
     );
 
     params.validate()?;
 
+    let price_to_plan = build_price_id_to_plan_name(&app_state).await?;
+    // Build plan_name (lowercase for case-insensitive lookup) -> price_ids
+    let plan_to_prices: std::collections::HashMap<String, Vec<String>> =
+        price_to_plan
+            .iter()
+            .fold(std::collections::HashMap::new(), |mut acc, (pid, name)| {
+                acc.entry(name.to_lowercase())
+                    .or_default()
+                    .push(pid.clone());
+                acc
+            });
+
+    let (subscription_plan_price_ids, subscription_plan_none, subscription_status) = params
+        .filter_by
+        .as_ref()
+        .zip(params.filter_value.as_ref())
+        .map(|(fb, fv)| (fb.trim(), fv.trim()))
+        .filter(|(fb, fv)| !fb.is_empty() && !fv.is_empty())
+        .map(|(fb, fv)| {
+            if fb.eq_ignore_ascii_case("subscription_status") {
+                (None, false, Some(fv.to_string()))
+            } else if fb.eq_ignore_ascii_case("subscription_plan") {
+                if fv.eq_ignore_ascii_case("none") {
+                    tracing::debug!("filter: subscription_plan=none (no subscription)");
+                    (None, true, None)
+                } else {
+                    let price_ids = plan_to_prices
+                        .get(&fv.to_lowercase())
+                        .cloned()
+                        .unwrap_or_default();
+                    if price_ids.is_empty() {
+                        tracing::warn!(
+                            "filter: plan {:?} not found in system config (available: {:?}). Returning no users.",
+                            fv,
+                            plan_to_prices.keys().collect::<Vec<_>>()
+                        );
+                    } else {
+                        tracing::debug!(
+                            "filter: subscription_plan={:?} -> {} price_id(s): {:?}",
+                            fv,
+                            price_ids.len(),
+                            price_ids
+                        );
+                    }
+                    (Some(price_ids), false, None)
+                }
+            } else {
+                (None, false, None)
+            }
+        })
+        .unwrap_or((None, false, None));
+
+    let filter = services::user::ports::AdminListUsersFilter {
+        subscription_status,
+        subscription_plan_price_ids,
+        subscription_plan_none,
+        search: params.q.as_ref().and_then(|q| {
+            let t = q.trim();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            }
+        }),
+    };
+
+    let sort = services::user::ports::AdminListUsersSort {
+        sort_by: match params.sort_by.as_str() {
+            "created_at" => services::user::ports::AdminUsersSortBy::CreatedAt,
+            "total_spent_nano" => services::user::ports::AdminUsersSortBy::TotalSpentNano,
+            "agent_spent_nano" => services::user::ports::AdminUsersSortBy::AgentSpentNano,
+            "agent_token_usage" => services::user::ports::AdminUsersSortBy::AgentTokenUsage,
+            "last_activity_at" => services::user::ports::AdminUsersSortBy::LastActivityAt,
+            "agent_count" => services::user::ports::AdminUsersSortBy::AgentCount,
+            "email" => services::user::ports::AdminUsersSortBy::Email,
+            "name" => services::user::ports::AdminUsersSortBy::Name,
+            _ => services::user::ports::AdminUsersSortBy::CreatedAt,
+        },
+        sort_order: if params.sort_order == "asc" {
+            services::user::ports::AdminUsersSortOrder::Asc
+        } else {
+            services::user::ports::AdminUsersSortOrder::Desc
+        },
+    };
+
     let (users, total) = app_state
         .user_service
-        .list_users(params.limit, params.offset)
+        .list_users_with_stats(params.limit, params.offset, &filter, &sort)
         .await
         .map_err(|e| {
             tracing::error!("Failed to list users: {}", e);
             ApiError::internal_server_error("Failed to list users")
         })?;
 
-    Ok(Json(UserListResponse {
-        users: users.into_iter().map(Into::into).collect(),
+    let price_to_plan = build_price_id_to_plan_name(&app_state).await?;
+
+    let users: Vec<_> = users
+        .into_iter()
+        .map(|u| {
+            let plan_name = u
+                .subscription_price_id
+                .as_ref()
+                .and_then(|pid| price_to_plan.get(pid.as_str()).cloned())
+                .or_else(|| {
+                    if u.subscription_status.is_some() {
+                        Some("Unknown".to_string())
+                    } else {
+                        None
+                    }
+                });
+            AdminUserResponse::from_stats(u, plan_name)
+        })
+        .collect();
+
+    Ok(Json(AdminUserListResponse {
+        users,
         limit: params.limit,
         offset: params.offset,
         total,
     }))
+}
+
+/// Build price_id -> plan_name map from system config subscription_plans
+async fn build_price_id_to_plan_name(
+    app_state: &AppState,
+) -> Result<HashMap<String, String>, ApiError> {
+    let config = app_state
+        .system_configs_service
+        .get_configs()
+        .await
+        .map_err(|e| {
+            tracing::error!(error = ?e, "Failed to get system configs for plan resolution");
+            ApiError::internal_server_error("Failed to resolve subscription plans")
+        })?;
+
+    let mut map = HashMap::new();
+    if let Some(ref plans) = config.and_then(|c| c.subscription_plans) {
+        for (plan_name, plan_config) in plans {
+            for (_provider, provider_config) in &plan_config.providers {
+                map.insert(provider_config.price_id.clone(), plan_name.clone());
+            }
+        }
+    }
+    Ok(map)
 }
 
 /// Query parameters for analytics endpoint
