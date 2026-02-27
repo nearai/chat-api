@@ -152,6 +152,10 @@ pub struct SystemConfigs {
     /// round-robin skips it. If all managers are full, instance creation is rejected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_instances_per_manager: Option<u64>,
+    /// Per-manager URL limits (agent manager URL -> max instances). Overrides max_instances_per_manager
+    /// when set for a specific URL. Use normalized URLs matching AGENT_MANAGER_URLS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_instances_by_manager_url: Option<HashMap<String, u64>>,
     /// Auto-routing configuration for `model: "auto"` requests
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_route: Option<AutoRouteConfig>,
@@ -163,6 +167,7 @@ pub struct PartialSystemConfigs {
     pub rate_limit: Option<RateLimitConfig>,
     pub subscription_plans: Option<HashMap<String, SubscriptionPlanConfig>>,
     pub max_instances_per_manager: Option<u64>,
+    pub max_instances_by_manager_url: Option<HashMap<String, u64>>,
     pub auto_route: Option<AutoRouteConfig>,
 }
 
@@ -174,6 +179,7 @@ impl Default for SystemConfigs {
             rate_limit: RateLimitConfig::default(),
             subscription_plans: None,
             max_instances_per_manager: Some(200),
+            max_instances_by_manager_url: None,
             auto_route: None,
         }
     }
@@ -188,8 +194,26 @@ impl SystemConfigs {
             max_instances_per_manager: partial
                 .max_instances_per_manager
                 .or(self.max_instances_per_manager),
+            max_instances_by_manager_url: partial
+                .max_instances_by_manager_url
+                .or(self.max_instances_by_manager_url),
             auto_route: partial.auto_route.or(self.auto_route),
         }
+    }
+
+    /// Returns the max instances limit for a given agent manager URL.
+    /// Checks URL-specific limits first (match by exact or normalized URL without trailing slash),
+    /// then falls back to the global max_instances_per_manager.
+    pub fn max_instances_for_manager(&self, manager_url: &str) -> Option<u64> {
+        if let Some(ref per_url) = self.max_instances_by_manager_url {
+            let needle = manager_url.trim_end_matches('/');
+            for (k, &v) in per_url {
+                if k.trim_end_matches('/') == needle {
+                    return Some(v);
+                }
+            }
+        }
+        self.max_instances_per_manager
     }
 }
 

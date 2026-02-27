@@ -88,6 +88,7 @@ impl AgentServiceImpl {
 
     /// Pick the next manager in round-robin order for new instance creation.
     /// Does NOT check capacity — use `next_available_manager` for capacity-aware selection.
+    #[allow(dead_code)] // used by tests
     fn next_manager(&self) -> &AgentManager {
         let idx = self.round_robin_counter.fetch_add(1, Ordering::Relaxed);
         &self.managers[idx % self.managers.len()]
@@ -100,16 +101,24 @@ impl AgentServiceImpl {
     /// under capacity and both create instances there, temporarily exceeding the limit.
     /// For a hard cap, DB-level enforcement (e.g. INSERT ... WHERE count < max) would be needed.
     async fn next_available_manager(&self) -> anyhow::Result<AgentManager> {
-        let max = match self.get_max_instances_per_manager().await {
-            Some(limit) => limit,
-            None => return Ok(self.next_manager().clone()),
-        };
+        let configs = self
+            .system_configs_service
+            .get_configs()
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
 
         let n = self.managers.len();
         let start = self.round_robin_counter.fetch_add(1, Ordering::Relaxed);
 
         for i in 0..n {
             let mgr = &self.managers[(start + i) % n];
+            let max = configs.max_instances_for_manager(&mgr.url);
+            let max = match max {
+                Some(limit) => limit,
+                None => return Ok(mgr.clone()),
+            };
             let count = self.repository.count_instances_by_manager(&mgr.url).await?;
             if (count as u64) < max {
                 return Ok(mgr.clone());
@@ -122,23 +131,7 @@ impl AgentServiceImpl {
             );
         }
 
-        Err(anyhow!(
-            "All agent managers are at capacity (max {} instances per manager)",
-            max
-        ))
-    }
-
-    /// Read the max_instances_per_manager setting from system configs.
-    /// Falls back to SystemConfigs::default() when no DB config row exists (fresh deployment).
-    async fn get_max_instances_per_manager(&self) -> Option<u64> {
-        let configs = self
-            .system_configs_service
-            .get_configs()
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_default();
-        configs.max_instances_per_manager
+        Err(anyhow!("All agent managers are at capacity"))
     }
 
     /// Resolve the manager for an existing instance.
@@ -2221,6 +2214,21 @@ mod tests {
                 }),
             }
         }
+
+        /// Per-URL limits: mgr0 gets 5, mgr1 gets 15. Used to test max_instances_by_manager_url.
+        fn with_per_url_limits() -> Self {
+            use std::collections::HashMap;
+            let mut per_url = HashMap::new();
+            per_url.insert("https://mgr0.example.com".to_string(), 5);
+            per_url.insert("https://mgr1.example.com".to_string(), 15);
+            Self {
+                configs: Some(SystemConfigs {
+                    max_instances_per_manager: Some(200),
+                    max_instances_by_manager_url: Some(per_url),
+                    ..Default::default()
+                }),
+            }
+        }
     }
 
     #[async_trait]
@@ -2481,6 +2489,27 @@ mod tests {
             make_managers(2),
             Arc::new(repo),
             Arc::new(MockSystemConfigsService::with_manager_limit(10)),
+        );
+
+        let mgr = svc.next_available_manager().await.unwrap();
+        assert_eq!(mgr.url, "https://mgr1.example.com");
+    }
+
+    #[tokio::test]
+    async fn test_next_available_manager_respects_per_url_limits() {
+        // Per-URL limits: mgr0 max=5, mgr1 max=15. mgr0 has 5 (full), mgr1 has 10 (room)
+        let mut repo = MockAgentRepository::new();
+        repo.expect_count_instances_by_manager()
+            .withf(|url: &str| url.contains("mgr0"))
+            .returning(|_| Ok(5));
+        repo.expect_count_instances_by_manager()
+            .withf(|url: &str| url.contains("mgr1"))
+            .returning(|_| Ok(10));
+
+        let svc = make_service(
+            make_managers(2),
+            Arc::new(repo),
+            Arc::new(MockSystemConfigsService::with_per_url_limits()),
         );
 
         let mgr = svc.next_available_manager().await.unwrap();

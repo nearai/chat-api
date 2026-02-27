@@ -724,6 +724,9 @@ pub struct SystemConfigsResponse {
     /// Maximum number of agent instances per manager (round-robin skips full managers)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_instances_per_manager: Option<u64>,
+    /// Per-manager URL limits (agent manager URL -> max instances). Overrides max_instances_per_manager for specific URLs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_instances_by_manager_url: Option<HashMap<String, u64>>,
     /// Auto-routing configuration for `model: "auto"` requests
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_route: Option<AutoRouteConfig>,
@@ -736,6 +739,7 @@ impl From<services::system_configs::ports::SystemConfigs> for SystemConfigsRespo
             rate_limit: config.rate_limit.into(),
             subscription_plans: config.subscription_plans,
             max_instances_per_manager: config.max_instances_per_manager,
+            max_instances_by_manager_url: config.max_instances_by_manager_url,
             auto_route: config.auto_route,
         }
     }
@@ -756,6 +760,9 @@ pub struct UpsertSystemConfigsRequest {
     /// Maximum number of agent instances per manager (round-robin skips full managers)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_instances_per_manager: Option<u64>,
+    /// Per-manager URL limits (agent manager URL -> max instances). Overrides max_instances_per_manager for specific URLs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_instances_by_manager_url: Option<HashMap<String, u64>>,
     /// Auto-routing configuration for `model: "auto"` requests
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_route: Option<AutoRouteConfig>,
@@ -776,6 +783,7 @@ impl TryFrom<UpsertSystemConfigsRequest> for services::system_configs::ports::Pa
             rate_limit,
             subscription_plans: req.subscription_plans,
             max_instances_per_manager: req.max_instances_per_manager,
+            max_instances_by_manager_url: req.max_instances_by_manager_url,
             auto_route: req.auto_route,
         })
     }
