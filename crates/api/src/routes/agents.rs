@@ -1058,7 +1058,11 @@ pub async fn upgrade_instance(
             Ok(bytes) => Ok::<_, anyhow::Error>(bytes),
             Err(e) => {
                 tracing::error!("Error in upgrade stream: {}", e);
-                let error_json = serde_json::json!({"error": e.to_string()}).to_string();
+                let error_json = serde_json::json!({
+                    "error": "Upgrade failed",
+                    "code": "UPGRADE_STREAM_ERROR"
+                })
+                .to_string();
                 Ok(axum::body::Bytes::from(format!("data: {}\n\n", error_json)))
             }
         }

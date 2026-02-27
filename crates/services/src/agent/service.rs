@@ -1332,7 +1332,7 @@ impl AgentService for AgentServiceImpl {
             _ => "worker",
         };
 
-        let image = version.images.get(image_key).ok_or_else(|| {
+        let image = version.images.get(image_key).cloned().ok_or_else(|| {
             anyhow!(
                 "No image found for service type '{}' (key '{}')",
                 service_type,
@@ -1354,7 +1354,7 @@ impl AgentService for AgentServiceImpl {
 
         let http_client = self.http_client.clone();
         let token = manager.token.clone();
-        let image = image.clone();
+        let instance_name = instance.name.clone();
 
         tokio::spawn(async move {
             let response = match http_client
@@ -1375,9 +1375,17 @@ impl AgentService for AgentServiceImpl {
             };
 
             if !response.status().is_success() {
+                tracing::error!(
+                    "Compose-api upgrade failed: instance_id={}, instance_name={}, image={}, restart_url={}, status={}",
+                    instance_id,
+                    instance_name,
+                    image,
+                    restart_url,
+                    response.status()
+                );
                 let _ = tx
                     .send(Err(anyhow!(
-                        "Restart failed with status {}",
+                        "Upgrade failed with status {}",
                         response.status()
                     )))
                     .await;
