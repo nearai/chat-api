@@ -102,6 +102,8 @@ use utoipa::OpenApi;
         crate::routes::agents::start_instance,
         crate::routes::agents::stop_instance,
         crate::routes::agents::restart_instance,
+        crate::routes::agents::upgrade_instance,
+        crate::routes::agents::check_upgrade_available,
         crate::routes::admin::admin_create_backup,
         crate::routes::admin::admin_list_backups,
         crate::routes::admin::admin_get_backup,
@@ -189,6 +191,7 @@ use utoipa::OpenApi;
         crate::models::UsageResponse,
         crate::models::BalanceResponse,
         crate::models::UsageQueryParams,
+        crate::routes::agents::UpgradeAvailabilityResponse,
         // BI metrics (admin)
         crate::routes::admin::BiDeploymentQuery,
         crate::routes::admin::BiSummaryQuery,

@@ -92,6 +92,8 @@ pub enum SubscriptionError {
     WebhookVerificationFailed(String),
     /// Internal error
     InternalError(String),
+    /// Cannot associate test clock with existing Stripe customer
+    TestClockNotAllowedForExistingCustomer,
 }
 
 impl fmt::Display for SubscriptionError {
@@ -128,6 +130,12 @@ impl fmt::Display for SubscriptionError {
                 write!(f, "Webhook verification failed: {}", msg)
             }
             Self::InternalError(msg) => write!(f, "Internal error: {}", msg),
+            Self::TestClockNotAllowedForExistingCustomer => {
+                write!(
+                    f,
+                    "Cannot associate test clock with existing Stripe customer"
+                )
+            }
         }
     }
 }
@@ -227,6 +235,7 @@ pub trait SubscriptionService: Send + Sync {
     /// Create a subscription checkout session for a user
     /// Returns the checkout URL
     /// provider: payment provider name (e.g. "stripe")
+    /// test_clock_id: optional test clock ID to bind customer to (requires STRIPE_TEST_CLOCK_ENABLED)
     async fn create_subscription(
         &self,
         user_id: UserId,
@@ -234,6 +243,7 @@ pub trait SubscriptionService: Send + Sync {
         plan: String,
         success_url: String,
         cancel_url: String,
+        test_clock_id: Option<String>,
     ) -> Result<String, SubscriptionError>;
 
     /// Cancel a user's active subscription (at period end)

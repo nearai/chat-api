@@ -24,6 +24,9 @@ pub struct CreateSubscriptionRequest {
     pub success_url: String,
     /// URL to redirect after cancelled checkout
     pub cancel_url: String,
+    /// Optional test clock ID to bind customer to (requires STRIPE_TEST_CLOCK_ENABLED)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub test_clock_id: Option<String>,
 }
 
 fn default_provider() -> String {
@@ -171,6 +174,11 @@ pub async fn create_subscription(
     validate_redirect_url(&req.success_url, "success_url")?;
     validate_redirect_url(&req.cancel_url, "cancel_url")?;
 
+    // Validate test clock usage
+    if req.test_clock_id.is_some() && !app_state.stripe_test_clock_enabled {
+        return Err(ApiError::bad_request("Test clock feature is not enabled"));
+    }
+
     let checkout_url = app_state
         .subscription_service
         .create_subscription(
@@ -179,6 +187,7 @@ pub async fn create_subscription(
             req.plan,
             req.success_url,
             req.cancel_url,
+            req.test_clock_id,
         )
         .await
         .map_err(|e| match e {
@@ -232,6 +241,9 @@ pub async fn create_subscription(
                     current, max
                 ))
             }
+            SubscriptionError::TestClockNotAllowedForExistingCustomer => ApiError::bad_request(
+                "Cannot associate test clock with existing Stripe customer".to_string(),
+            ),
         })?;
 
     Ok(Json(CreateSubscriptionResponse { checkout_url }))
