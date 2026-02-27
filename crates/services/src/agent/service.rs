@@ -1281,6 +1281,7 @@ impl AgentService for AgentServiceImpl {
             instance_id
         );
 
+        // Ownership check is performed at the route handler level (agents.rs)
         let instance = self
             .repository
             .get_instance(instance_id)
@@ -1293,6 +1294,7 @@ impl AgentService for AgentServiceImpl {
 
         let manager = self.resolve_manager(&instance);
 
+        // Fetch latest images from compose-api
         let version_url = format!("{}/version", manager.url);
         let version_resp = self
             .http_client
@@ -1320,6 +1322,7 @@ impl AgentService for AgentServiceImpl {
             .await
             .map_err(|e| anyhow!("Failed to parse compose-api version response: {}", e))?;
 
+        // Map service_type to image key in the version response
         let service_type = instance
             .service_type
             .as_deref()
@@ -1337,6 +1340,7 @@ impl AgentService for AgentServiceImpl {
             )
         })?;
 
+        // Restart with the latest image (5-minute timeout; compose-api yields SSE stream)
         let encoded_name = urlencoding::encode(&instance.name);
         let restart_url = format!("{}/instances/{}/restart", manager.url, encoded_name);
 
@@ -1345,6 +1349,7 @@ impl AgentService for AgentServiceImpl {
             image: String,
         }
 
+        // Spawn task to proxy compose-api SSE stream to channel
         let (tx, rx) = tokio::sync::mpsc::channel::<anyhow::Result<bytes::Bytes>>(32);
 
         let http_client = self.http_client.clone();
