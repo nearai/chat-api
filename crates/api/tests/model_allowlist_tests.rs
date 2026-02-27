@@ -467,12 +467,12 @@ async fn test_admin_config_returns_allowed_models_fields() {
     );
 
     // Verify pro plan has no allowed_models field (or null)
+    let pro_plan = body["subscription_plans"]["pro"];
     assert!(
-        body["subscription_plans"]["pro"]["allowed_models"].is_null()
-            || !body["subscription_plans"]["pro"]
+        pro_plan["allowed_models"].is_null()
+            || pro_plan
                 .as_object()
-                .unwrap()
-                .contains_key("allowed_models"),
+                .map_or(false, |obj| !obj.contains_key("allowed_models")),
         "pro plan should not have allowed_models field"
     );
 
@@ -541,7 +541,9 @@ async fn test_get_subscription_plans_includes_allowed_models() {
 
     assert!(
         pro_plan["allowed_models"].is_null()
-            || !pro_plan.as_object().unwrap().contains_key("allowed_models"),
+            || pro_plan
+                .as_object()
+                .map_or(false, |obj| !obj.contains_key("allowed_models")),
         "pro plan should not have allowed_models field or it should be null"
     );
 }
