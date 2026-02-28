@@ -1,3 +1,4 @@
+use super::is_valid_service_type;
 use crate::{
     consts::LIST_USERS_LIMIT_MAX, error::ApiError, middleware::AuthenticatedUser, models::*,
     state::AppState,
@@ -14,9 +15,18 @@ use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use services::analytics::{ActivityLogEntry, AnalyticsSummary, TopActiveUsersResponse};
+use services::bi_metrics::{
+    DeploymentFilter, DeploymentRecord, DeploymentSummary, StatusChangeRecord, TopConsumer,
+    TopConsumerFilter, TopConsumerGroupBy, UsageAggregation, UsageFilter, UsageGroupBy,
+    UsageRankBy as BiUsageRankBy,
+};
+
+/// Maximum rows for BI usage aggregation queries.
+const BI_USAGE_MAX_ROWS: i64 = 1000;
 use services::model::ports::{UpdateModelParams, UpsertModelParams};
 use services::user_usage::UsageRankBy;
 use services::UserId;
+use std::collections::HashMap;
 use urlencoding::encode;
 use uuid::Uuid;
 
@@ -62,9 +72,129 @@ fn default_offset() -> i64 {
     0
 }
 
+/// Query parameters for admin list users (with filter and sort)
+#[derive(Debug, Deserialize)]
+pub struct ListUsersQuery {
+    #[serde(default = "default_limit")]
+    pub limit: i64,
+    #[serde(default = "default_offset")]
+    pub offset: i64,
+    /// Filter type: "subscription_status" or "subscription_plan"
+    pub filter_by: Option<String>,
+    /// Filter value. For subscription_status: active, canceled, past_due, trialing, unpaid, none. For subscription_plan: plan name or none
+    pub filter_value: Option<String>,
+    /// Substring search on email and name (case-insensitive)
+    pub q: Option<String>,
+    /// Sort by: created_at, total_spent_nano, agent_spent_nano, agent_token_usage, last_activity_at, agent_count, email, name
+    #[serde(default = "default_sort_by")]
+    pub sort_by: String,
+    /// Sort order: asc or desc
+    #[serde(default = "default_sort_order")]
+    pub sort_order: String,
+}
+
+fn default_sort_by() -> String {
+    "created_at".to_string()
+}
+
+fn default_sort_order() -> String {
+    "desc".to_string()
+}
+
+impl ListUsersQuery {
+    pub fn validate(&self) -> Result<(), ApiError> {
+        PaginationQuery {
+            limit: self.limit,
+            offset: self.offset,
+        }
+        .validate()?;
+
+        match (&self.filter_by, &self.filter_value) {
+            (Some(fb), Some(fv)) => {
+                let fb = fb.trim();
+                let fv = fv.trim();
+                if !fb.is_empty() && !fv.is_empty() {
+                    match fb {
+                        "subscription_status" => {
+                            if ![
+                                "active", "canceled", "past_due", "trialing", "unpaid", "none",
+                            ]
+                            .contains(&fv)
+                            {
+                                return Err(ApiError::bad_request(format!(
+                                    "invalid filter_value for subscription_status: {}",
+                                    fv
+                                )));
+                            }
+                        }
+                        "subscription_plan" => {
+                            // Any non-empty value is ok (plan name or "none")
+                        }
+                        _ => {
+                            return Err(ApiError::bad_request(format!(
+                                "invalid filter_by: {}, must be subscription_status or subscription_plan",
+                                fb
+                            )));
+                        }
+                    }
+                }
+            }
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(ApiError::bad_request(
+                    "filter_by and filter_value must both be provided together",
+                ));
+            }
+            _ => {}
+        }
+
+        if let Some(ref q) = self.q {
+            let q_trimmed = q.trim();
+            if !q_trimmed.is_empty() {
+                if q_trimmed.len() > 200 {
+                    return Err(ApiError::bad_request(
+                        "search query exceeds maximum length of 200",
+                    ));
+                }
+                if q_trimmed.matches('%').count() > 5 {
+                    return Err(ApiError::bad_request(
+                        "search query contains too many wildcard characters",
+                    ));
+                }
+            }
+        }
+
+        let valid_sort_by = [
+            "created_at",
+            "total_spent_nano",
+            "agent_spent_nano",
+            "agent_token_usage",
+            "last_activity_at",
+            "agent_count",
+            "email",
+            "name",
+        ];
+        if !valid_sort_by.contains(&self.sort_by.as_str()) {
+            return Err(ApiError::bad_request(format!(
+                "invalid sort_by: {}, must be one of {:?}",
+                self.sort_by, valid_sort_by
+            )));
+        }
+
+        if self.sort_order != "asc" && self.sort_order != "desc" {
+            return Err(ApiError::bad_request(format!(
+                "invalid sort_order: {}, must be asc or desc",
+                self.sort_order
+            )));
+        }
+
+        Ok(())
+    }
+}
+
 /// List users
 ///
 /// Returns a paginated list of users. Requires admin authentication.
+/// For user stats (subscription, agent count, spending, etc.) use /v1/admin/bi/users.
 #[utoipa::path(
     get,
     path = "/v1/admin/users",
@@ -111,6 +241,156 @@ pub async fn list_users(
         offset: params.offset,
         total,
     }))
+}
+
+/// Implementation used by bi_list_users only (BI endpoint).
+async fn list_users_bi_impl(
+    app_state: &AppState,
+    params: ListUsersQuery,
+) -> Result<Json<AdminUserListResponse>, ApiError> {
+    params.validate()?;
+
+    let price_to_plan = build_price_id_to_plan_name(app_state).await?;
+    let plan_to_prices: HashMap<String, Vec<String>> =
+        price_to_plan
+            .iter()
+            .fold(HashMap::new(), |mut acc, (pid, name)| {
+                acc.entry(name.to_lowercase())
+                    .or_default()
+                    .push(pid.clone());
+                acc
+            });
+
+    let (subscription_plan_price_ids, subscription_plan_none, subscription_status) = params
+        .filter_by
+        .as_ref()
+        .zip(params.filter_value.as_ref())
+        .map(|(fb, fv)| (fb.trim(), fv.trim()))
+        .filter(|(fb, fv)| !fb.is_empty() && !fv.is_empty())
+        .map(|(fb, fv)| {
+            if fb.eq_ignore_ascii_case("subscription_status") {
+                (None, false, Some(fv.to_string()))
+            } else if fb.eq_ignore_ascii_case("subscription_plan") {
+                if fv.eq_ignore_ascii_case("none") {
+                    tracing::debug!("filter: subscription_plan=none (no subscription)");
+                    (None, true, None)
+                } else {
+                    let price_ids = plan_to_prices
+                        .get(&fv.to_lowercase())
+                        .cloned()
+                        .unwrap_or_default();
+                    if price_ids.is_empty() {
+                        tracing::warn!(
+                            "filter: plan {:?} not found in system config (available: {:?}). Returning no users.",
+                            fv,
+                            plan_to_prices.keys().collect::<Vec<_>>()
+                        );
+                    } else {
+                        tracing::debug!(
+                            "filter: subscription_plan={:?} -> {} price_id(s): {:?}",
+                            fv,
+                            price_ids.len(),
+                            price_ids
+                        );
+                    }
+                    (Some(price_ids), false, None)
+                }
+            } else {
+                (None, false, None)
+            }
+        })
+        .unwrap_or((None, false, None));
+
+    let filter = services::user::ports::AdminListUsersFilter {
+        subscription_status,
+        subscription_plan_price_ids,
+        subscription_plan_none,
+        search: params.q.as_ref().and_then(|q| {
+            let t = q.trim();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            }
+        }),
+    };
+
+    let sort = services::user::ports::AdminListUsersSort {
+        sort_by: match params.sort_by.as_str() {
+            "created_at" => services::user::ports::AdminUsersSortBy::CreatedAt,
+            "total_spent_nano" => services::user::ports::AdminUsersSortBy::TotalSpentNano,
+            "agent_spent_nano" => services::user::ports::AdminUsersSortBy::AgentSpentNano,
+            "agent_token_usage" => services::user::ports::AdminUsersSortBy::AgentTokenUsage,
+            "last_activity_at" => services::user::ports::AdminUsersSortBy::LastActivityAt,
+            "agent_count" => services::user::ports::AdminUsersSortBy::AgentCount,
+            "email" => services::user::ports::AdminUsersSortBy::Email,
+            "name" => services::user::ports::AdminUsersSortBy::Name,
+            _ => services::user::ports::AdminUsersSortBy::CreatedAt,
+        },
+        sort_order: if params.sort_order == "asc" {
+            services::user::ports::AdminUsersSortOrder::Asc
+        } else {
+            services::user::ports::AdminUsersSortOrder::Desc
+        },
+    };
+
+    let (users, total) = app_state
+        .user_service
+        .list_users_with_stats(params.limit, params.offset, &filter, &sort)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to list users: {}", e);
+            ApiError::internal_server_error("Failed to list users")
+        })?;
+
+    let users: Vec<_> = users
+        .into_iter()
+        .map(|u| {
+            let plan_name = u
+                .subscription_price_id
+                .as_ref()
+                .and_then(|pid| price_to_plan.get(pid.as_str()).cloned())
+                .or_else(|| {
+                    if u.subscription_status.is_some() {
+                        Some("Unknown".to_string())
+                    } else {
+                        None
+                    }
+                });
+            AdminUserResponse::from_stats(u, plan_name)
+        })
+        .collect();
+
+    Ok(Json(AdminUserListResponse {
+        users,
+        limit: params.limit,
+        offset: params.offset,
+        total,
+    }))
+}
+
+/// Build price_id -> plan_name map from system config subscription_plans
+async fn build_price_id_to_plan_name(
+    app_state: &AppState,
+) -> Result<HashMap<String, String>, ApiError> {
+    let config = app_state
+        .system_configs_service
+        .get_configs()
+        .await
+        .map_err(|e| {
+            tracing::error!(error = ?e, "Failed to get system configs for plan resolution");
+            ApiError::internal_server_error("Failed to resolve subscription plans")
+        })?;
+
+    let mut map = HashMap::new();
+    if let Some(ref plans) = config.and_then(|c| c.subscription_plans) {
+        for (plan_name, plan_config) in plans {
+            for provider_config in plan_config.providers.values() {
+                map.insert(provider_config.price_id.clone(), plan_name.clone());
+            }
+        }
+    }
+    Ok(map)
 }
 
 /// Query parameters for analytics endpoint
@@ -930,12 +1210,44 @@ pub async fn upsert_system_configs(
 
     #[cfg(not(feature = "test"))]
     if let Some(ref model_id) = request.default_model {
-        ensure_proxy_model_exists(app_state.proxy_service, model_id).await?;
+        ensure_proxy_model_exists(app_state.proxy_service.clone(), model_id).await?;
     }
 
     // Validate rate limit config if provided
     if let Some(ref rate_limit) = request.rate_limit {
         rate_limit.validate()?;
+    }
+
+    // Validate auto_route config if provided
+    if let Some(ref auto_route) = request.auto_route {
+        if auto_route.model.trim().is_empty() {
+            return Err(ApiError::bad_request(
+                "auto_route.model must not be empty".to_string(),
+            ));
+        }
+        #[cfg(not(feature = "test"))]
+        ensure_proxy_model_exists(app_state.proxy_service.clone(), &auto_route.model).await?;
+        if let Some(t) = auto_route.temperature {
+            if t < 0.0 {
+                return Err(ApiError::bad_request(
+                    "auto_route.temperature must be >= 0".to_string(),
+                ));
+            }
+        }
+        if let Some(p) = auto_route.top_p {
+            if !(0.0..=1.0).contains(&p) {
+                return Err(ApiError::bad_request(
+                    "auto_route.top_p must be between 0 and 1".to_string(),
+                ));
+            }
+        }
+        if let Some(m) = auto_route.max_tokens {
+            if m == 0 {
+                return Err(ApiError::bad_request(
+                    "auto_route.max_tokens must be > 0".to_string(),
+                ));
+            }
+        }
     }
 
     let partial: services::system_configs::ports::PartialSystemConfigs =
@@ -985,6 +1297,12 @@ pub async fn upsert_system_configs(
         .rate_limit_state
         .update_config(updated.rate_limit.clone())
         .await;
+
+    // Invalidate system configs cache so auto-route picks up changes immediately
+    {
+        let mut cache = app_state.system_configs_cache.write().await;
+        *cache = None;
+    }
 
     Ok(Json(updated.into()))
 }
@@ -1038,6 +1356,9 @@ pub struct AdminCreateInstanceRequest {
     /// SSH public key (optional)
     #[serde(default)]
     pub ssh_pubkey: Option<String>,
+    /// Service type preset, e.g. "ironclaw" (optional)
+    #[serde(default)]
+    pub service_type: Option<String>,
 }
 
 /// Admin endpoint: List all agent instances (all users' instances)
@@ -1081,7 +1402,10 @@ pub async fn admin_list_all_instances(
             ApiError::internal_server_error("Failed to list instances")
         })?;
 
-    let items: Vec<InstanceResponse> = instances.into_iter().map(Into::into).collect();
+    let items: Vec<InstanceResponse> = instances
+        .into_iter()
+        .map(crate::models::instance_response_for_admin)
+        .collect();
     Ok(Json(PaginatedResponse {
         items,
         limit: params.limit,
@@ -1136,9 +1460,26 @@ pub async fn admin_create_instance(
             ApiError::bad_request("User does not exist")
         })?;
 
+    // Validate service_type if provided
+    if let Some(service_type) = request.service_type.as_deref() {
+        if !is_valid_service_type(service_type) {
+            return Err(ApiError::new(
+                axum::http::StatusCode::BAD_REQUEST,
+                "invalid_service_type",
+                "Service type must be 'openclaw' or 'ironclaw'",
+            ));
+        }
+    }
+
     let instance = app_state
         .agent_service
-        .create_instance_from_agent_api(user_id, request.image, request.name, request.ssh_pubkey)
+        .create_instance_from_agent_api(
+            user_id,
+            request.image,
+            request.name,
+            request.ssh_pubkey,
+            request.service_type,
+        )
         .await
         .map_err(|_| {
             tracing::error!(
@@ -1333,6 +1674,57 @@ pub async fn admin_bind_api_key_to_instance(
         })?;
 
     Ok(Json(ApiKeyResponse::from(api_key)))
+}
+
+/// TEMPORARY: Admin-only endpoint to sync instance status from Agent API.
+/// Remove when automated sync is in place.
+#[utoipa::path(
+    post,
+    path = "/v1/admin/agents/instances/sync-status",
+    tag = "Admin",
+    responses(
+        (status = 200, description = "Sync completed", body = SyncAgentStatusResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - admin only", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(("session_token" = []))
+)]
+pub async fn admin_sync_agent_status(
+    State(app_state): State<AppState>,
+    Extension(_user): Extension<AuthenticatedUser>,
+) -> Result<Json<SyncAgentStatusResponse>, ApiError> {
+    tracing::info!("Admin: Syncing agent instance status from Agent API");
+
+    let result = app_state
+        .agent_service
+        .sync_all_instance_statuses()
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to sync agent instance status: {}", e);
+            ApiError::internal_server_error("Failed to sync instance status")
+        })?;
+
+    Ok(Json(SyncAgentStatusResponse {
+        synced: result.synced,
+        updated: result.updated,
+        skipped: result.skipped,
+        not_found: result.not_found,
+        error_skipped: result.error_skipped,
+        errors: result.errors,
+    }))
+}
+
+/// Response for sync agent status endpoint
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct SyncAgentStatusResponse {
+    pub synced: u32,
+    pub updated: u32,
+    pub skipped: u32,
+    pub not_found: u32,
+    /// Instances skipped because their manager API call failed
+    pub error_skipped: u32,
+    pub errors: Vec<String>,
 }
 
 /// Create a backup of an agent instance
@@ -1553,6 +1945,410 @@ pub async fn admin_get_backup(
     Ok(response)
 }
 
+// =============================================================================
+// BI Metrics endpoints
+// =============================================================================
+
+/// Query parameters for BI deployment list
+#[derive(Debug, Deserialize, utoipa::IntoParams, utoipa::ToSchema)]
+pub struct BiDeploymentQuery {
+    #[serde(default = "default_limit")]
+    pub limit: i64,
+    #[serde(default = "default_offset")]
+    pub offset: i64,
+    #[serde(rename = "type")]
+    pub instance_type: Option<String>,
+    pub status: Option<String>,
+    pub start_date: Option<DateTime<Utc>>,
+    pub end_date: Option<DateTime<Utc>>,
+}
+
+/// Query parameters for BI deployment summary
+#[derive(Debug, Deserialize, utoipa::IntoParams, utoipa::ToSchema)]
+pub struct BiSummaryQuery {
+    pub start_date: Option<DateTime<Utc>>,
+    pub end_date: Option<DateTime<Utc>>,
+}
+
+/// Query parameters for BI usage aggregation
+#[derive(Debug, Deserialize, utoipa::IntoParams, utoipa::ToSchema)]
+pub struct BiUsageQuery {
+    pub start_date: Option<DateTime<Utc>>,
+    pub end_date: Option<DateTime<Utc>>,
+    pub user_id: Option<Uuid>,
+    pub instance_id: Option<Uuid>,
+    #[serde(rename = "type")]
+    pub instance_type: Option<String>,
+    #[serde(default = "default_group_by")]
+    pub group_by: UsageGroupBy,
+}
+
+fn default_group_by() -> UsageGroupBy {
+    UsageGroupBy::Day
+}
+
+/// Query parameters for BI top consumers
+#[derive(Debug, Deserialize, utoipa::IntoParams, utoipa::ToSchema)]
+pub struct BiTopConsumersQuery {
+    pub start_date: Option<DateTime<Utc>>,
+    pub end_date: Option<DateTime<Utc>>,
+    #[serde(rename = "type")]
+    pub instance_type: Option<String>,
+    #[serde(default = "default_bi_rank_by")]
+    pub rank_by: BiUsageRankBy,
+    #[serde(default = "default_top_group_by")]
+    pub group_by: TopConsumerGroupBy,
+    #[serde(default = "default_limit")]
+    pub limit: i64,
+}
+
+fn default_bi_rank_by() -> BiUsageRankBy {
+    BiUsageRankBy::Cost
+}
+
+fn default_top_group_by() -> TopConsumerGroupBy {
+    TopConsumerGroupBy::Instance
+}
+
+/// Response types for BI endpoints
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct BiDeploymentListResponse {
+    pub deployments: Vec<DeploymentRecord>,
+    pub total: i64,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct BiUsageResponse {
+    pub data: Vec<UsageAggregation>,
+    pub group_by: String,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct BiTopConsumersResponse {
+    pub consumers: Vec<TopConsumer>,
+    pub rank_by: String,
+    pub group_by: String,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct BiStatusHistoryResponse {
+    pub instance_id: Uuid,
+    pub history: Vec<StatusChangeRecord>,
+}
+
+/// Validate optional date range: start_date must be before end_date when both are provided.
+fn validate_date_range(
+    start: Option<DateTime<Utc>>,
+    end: Option<DateTime<Utc>>,
+) -> Result<(), ApiError> {
+    if let (Some(s), Some(e)) = (start, end) {
+        if s >= e {
+            return Err(ApiError::bad_request("start_date must be before end_date"));
+        }
+    }
+    Ok(())
+}
+
+/// Validate optional string filter length to prevent memory abuse.
+const MAX_FILTER_LEN: usize = 100;
+
+fn validate_string_filter(name: &str, value: &Option<String>) -> Result<(), ApiError> {
+    if let Some(ref v) = value {
+        if v.len() > MAX_FILTER_LEN {
+            return Err(ApiError::bad_request(format!(
+                "{name} filter exceeds maximum length of {MAX_FILTER_LEN}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// List users with BI stats (BI). Same response as /v1/admin/users. Requires admin authentication.
+#[utoipa::path(
+    get,
+    path = "/v1/admin/bi/users",
+    tag = "Admin",
+    params(
+        ("limit" = Option<i64>, Query, description = "Maximum number of items to return (default: 20, max: 100)"),
+        ("offset" = Option<i64>, Query, description = "Number of items to skip (default: 0)"),
+        ("filter_by" = Option<String>, Query, description = "Filter type: subscription_status or subscription_plan"),
+        ("filter_value" = Option<String>, Query, description = "Filter value. For subscription_status: active, canceled, past_due, none. For subscription_plan: plan name or none"),
+        ("q" = Option<String>, Query, description = "Substring search on email and name (case-insensitive)"),
+        ("sort_by" = Option<String>, Query, description = "Sort by: created_at, total_spent_nano, agent_spent_nano, agent_token_usage, last_activity_at, agent_count, email, name"),
+        ("sort_order" = Option<String>, Query, description = "Sort order: asc or desc")
+    ),
+    responses(
+        (status = 200, description = "User list with stats", body = AdminUserListResponse),
+        (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn bi_list_users(
+    State(app_state): State<AppState>,
+    Query(params): Query<ListUsersQuery>,
+) -> Result<Json<AdminUserListResponse>, ApiError> {
+    tracing::info!(
+        "BI: Listing users with limit={}, offset={}, filter_by={:?}, sort_by={}, sort_order={}",
+        params.limit,
+        params.offset,
+        params.filter_by,
+        params.sort_by,
+        params.sort_order
+    );
+    list_users_bi_impl(&app_state, params).await
+}
+
+/// List deployments with optional filters (BI). Requires admin authentication.
+#[utoipa::path(
+    get,
+    path = "/v1/admin/bi/deployments",
+    tag = "Admin",
+    params(BiDeploymentQuery),
+    responses(
+        (status = 200, description = "Deployment list", body = BiDeploymentListResponse),
+        (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn bi_list_deployments(
+    State(app_state): State<AppState>,
+    Query(params): Query<BiDeploymentQuery>,
+) -> Result<Json<BiDeploymentListResponse>, ApiError> {
+    validate_string_filter("type", &params.instance_type)?;
+    validate_string_filter("status", &params.status)?;
+    validate_date_range(params.start_date, params.end_date)?;
+
+    let filter = DeploymentFilter {
+        instance_type: params.instance_type,
+        status: params.status,
+        start_date: params.start_date,
+        end_date: params.end_date,
+        limit: params.limit.clamp(1, 100),
+        offset: params.offset.max(0),
+    };
+
+    let (deployments, total) = app_state
+        .bi_metrics_service
+        .list_deployments(&filter)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to list deployments for BI: {}", e);
+            ApiError::internal_server_error("Failed to list deployments")
+        })?;
+
+    Ok(Json(BiDeploymentListResponse {
+        deployments,
+        total,
+        limit: filter.limit,
+        offset: filter.offset,
+    }))
+}
+
+/// Get deployment summary counts (BI). Requires admin authentication.
+#[utoipa::path(
+    get,
+    path = "/v1/admin/bi/deployments/summary",
+    tag = "Admin",
+    params(BiSummaryQuery),
+    responses(
+        (status = 200, description = "Deployment summary", body = DeploymentSummary),
+        (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn bi_deployment_summary(
+    State(app_state): State<AppState>,
+    Query(params): Query<BiSummaryQuery>,
+) -> Result<Json<DeploymentSummary>, ApiError> {
+    validate_date_range(params.start_date, params.end_date)?;
+
+    let summary = app_state
+        .bi_metrics_service
+        .get_deployment_summary(params.start_date, params.end_date)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get deployment summary: {}", e);
+            ApiError::internal_server_error("Failed to get deployment summary")
+        })?;
+
+    Ok(Json(summary))
+}
+
+/// Query parameters for BI status history
+#[derive(Debug, Deserialize, utoipa::IntoParams, utoipa::ToSchema)]
+pub struct BiStatusHistoryQuery {
+    #[serde(default = "default_status_history_limit")]
+    pub limit: i64,
+}
+
+fn default_status_history_limit() -> i64 {
+    100
+}
+
+/// Get status change history for a deployment (BI). Requires admin authentication.
+#[utoipa::path(
+    get,
+    path = "/v1/admin/bi/deployments/{id}/status-history",
+    tag = "Admin",
+    params(
+        ("id" = String, Path, description = "Instance ID (UUID)"),
+        BiStatusHistoryQuery
+    ),
+    responses(
+        (status = 200, description = "Status change history", body = BiStatusHistoryResponse),
+        (status = 400, description = "Bad request - invalid instance ID", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn bi_status_history(
+    State(app_state): State<AppState>,
+    Path(id): Path<String>,
+    Query(params): Query<BiStatusHistoryQuery>,
+) -> Result<Json<BiStatusHistoryResponse>, ApiError> {
+    let instance_uuid =
+        Uuid::parse_str(&id).map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
+
+    let limit = params.limit.clamp(1, 1000);
+
+    let history = app_state
+        .bi_metrics_service
+        .get_status_history(instance_uuid, limit)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to get status history: instance_id={}, error={}",
+                instance_uuid,
+                e
+            );
+            ApiError::internal_server_error("Failed to get status history")
+        })?;
+
+    Ok(Json(BiStatusHistoryResponse {
+        instance_id: instance_uuid,
+        history,
+    }))
+}
+
+/// Get aggregated usage data (BI). Requires admin authentication.
+#[utoipa::path(
+    get,
+    path = "/v1/admin/bi/usage",
+    tag = "Admin",
+    params(BiUsageQuery),
+    responses(
+        (status = 200, description = "Aggregated usage data", body = BiUsageResponse),
+        (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn bi_usage(
+    State(app_state): State<AppState>,
+    Query(params): Query<BiUsageQuery>,
+) -> Result<Json<BiUsageResponse>, ApiError> {
+    validate_string_filter("type", &params.instance_type)?;
+    validate_date_range(params.start_date, params.end_date)?;
+
+    let filter = UsageFilter {
+        start_date: params.start_date,
+        end_date: params.end_date,
+        user_id: params.user_id.map(UserId::from),
+        instance_id: params.instance_id,
+        instance_type: params.instance_type,
+        group_by: params.group_by,
+        limit: BI_USAGE_MAX_ROWS,
+    };
+
+    let data = app_state
+        .bi_metrics_service
+        .get_usage_aggregation(&filter)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get usage aggregation: {}", e);
+            ApiError::internal_server_error("Failed to get usage data")
+        })?;
+
+    Ok(Json(BiUsageResponse {
+        data,
+        group_by: filter.group_by.to_string(),
+    }))
+}
+
+/// Get top consumers ranked by tokens or cost (BI). Requires admin authentication.
+#[utoipa::path(
+    get,
+    path = "/v1/admin/bi/usage/top",
+    tag = "Admin",
+    params(BiTopConsumersQuery),
+    responses(
+        (status = 200, description = "Top consumers", body = BiTopConsumersResponse),
+        (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn bi_top_consumers(
+    State(app_state): State<AppState>,
+    Query(params): Query<BiTopConsumersQuery>,
+) -> Result<Json<BiTopConsumersResponse>, ApiError> {
+    validate_string_filter("type", &params.instance_type)?;
+    validate_date_range(params.start_date, params.end_date)?;
+
+    let filter = TopConsumerFilter {
+        start_date: params.start_date,
+        end_date: params.end_date,
+        instance_type: params.instance_type,
+        rank_by: params.rank_by,
+        group_by: params.group_by,
+        limit: params.limit.clamp(1, 100),
+    };
+
+    let consumers = app_state
+        .bi_metrics_service
+        .get_top_consumers(&filter)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get top consumers: {}", e);
+            ApiError::internal_server_error("Failed to get top consumers")
+        })?;
+
+    Ok(Json(BiTopConsumersResponse {
+        consumers,
+        rank_by: filter.rank_by.to_string(),
+        group_by: filter.group_by.to_string(),
+    }))
+}
+
 /// Create admin router with all admin routes (requires admin authentication)
 pub fn create_admin_router() -> Router<AppState> {
     Router::new()
@@ -1581,6 +2377,7 @@ pub fn create_admin_router() -> Router<AppState> {
                     "/instances",
                     get(admin_list_all_instances).post(admin_create_instance),
                 )
+                .route("/instances/sync-status", post(admin_sync_agent_status))
                 .route("/instances/{id}", delete(admin_delete_instance))
                 .route("/instances/{id}/backup", post(admin_create_backup))
                 .route("/instances/{id}/backups", get(admin_list_backups))
@@ -1590,5 +2387,16 @@ pub fn create_admin_router() -> Router<AppState> {
                     "/keys/{key_id}/bind-instance",
                     post(admin_bind_api_key_to_instance),
                 ),
+        )
+        // BI metrics routes
+        .nest(
+            "/bi",
+            Router::new()
+                .route("/users", get(bi_list_users))
+                .route("/deployments", get(bi_list_deployments))
+                .route("/deployments/summary", get(bi_deployment_summary))
+                .route("/deployments/{id}/status-history", get(bi_status_history))
+                .route("/usage", get(bi_usage))
+                .route("/usage/top", get(bi_top_consumers)),
         )
 }

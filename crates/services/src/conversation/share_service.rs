@@ -977,6 +977,16 @@ mod tests {
             Ok((Vec::new(), 0))
         }
 
+        async fn list_users_with_stats(
+            &self,
+            _limit: i64,
+            _offset: i64,
+            _filter: &crate::user::ports::AdminListUsersFilter,
+            _sort: &crate::user::ports::AdminListUsersSort,
+        ) -> anyhow::Result<(Vec<crate::user::ports::AdminUserWithStats>, u64)> {
+            Ok((Vec::new(), 0))
+        }
+
         async fn has_active_ban(&self, _user_id: UserId) -> anyhow::Result<bool> {
             Ok(false)
         }
@@ -1015,6 +1025,16 @@ mod tests {
         }
 
         async fn list_users(&self, _limit: i64, _offset: i64) -> anyhow::Result<(Vec<User>, u64)> {
+            Ok((Vec::new(), 0))
+        }
+
+        async fn list_users_with_stats(
+            &self,
+            _limit: i64,
+            _offset: i64,
+            _filter: &crate::user::ports::AdminListUsersFilter,
+            _sort: &crate::user::ports::AdminListUsersSort,
+        ) -> anyhow::Result<(Vec<crate::user::ports::AdminUserWithStats>, u64)> {
             Ok((Vec::new(), 0))
         }
 

@@ -4,8 +4,8 @@ use api::routes::api::SUBSCRIPTION_REQUIRED_ERROR_MESSAGE;
 use chrono::Duration;
 use common::{
     cleanup_user_subscriptions, clear_subscription_plans, create_test_server,
-    create_test_server_and_db, insert_test_subscription, mock_login, set_subscription_plans,
-    TestServerConfig,
+    create_test_server_and_db, insert_test_agent_instances, insert_test_subscription, mock_login,
+    set_subscription_plans, TestServerConfig,
 };
 use serde_json::json;
 use serial_test::serial;
@@ -270,6 +270,65 @@ async fn test_create_subscription_invalid_plan() {
 
 #[tokio::test]
 #[serial(subscription_tests)]
+async fn test_create_subscription_instance_limit_exceeded() {
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+    ensure_stripe_env_for_gating();
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "starter": { "providers": { "stripe": { "price_id": "price_test_starter" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } },
+            "pro": { "providers": { "stripe": { "price_id": "price_test_pro" } }, "agent_instances": { "max": 5 }, "monthly_tokens": { "max": 1000000 } }
+        }),
+    )
+    .await;
+
+    // User had Pro (5 instances), cancelled; instances remain. Resubscribing to Starter (max 1).
+    let user_email = "test_create_instance_limit@example.com";
+    let user_token = mock_login(&server, user_email).await;
+    cleanup_user_subscriptions(&db, user_email).await;
+    insert_test_agent_instances(&db, user_email, 3).await;
+
+    let request_body = json!({
+        "plan": "starter",
+        "success_url": "https://example.com/success",
+        "cancel_url": "https://example.com/cancel"
+    });
+
+    let response = server
+        .post("/v1/subscriptions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&request_body)
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        400,
+        "Should return 400 when instance count exceeds plan limit before checkout"
+    );
+
+    let body: serde_json::Value = response.json();
+    let message = body
+        .get("message")
+        .and_then(|v| v.as_str())
+        .or_else(|| body.get("detail").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    assert!(
+        message.contains("3") && message.contains("1"),
+        "Error message should include current (3) and max (1) instance counts, got: {}",
+        message
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
 async fn test_cancel_subscription_requires_auth() {
     let server = create_test_server().await;
 
@@ -380,6 +439,210 @@ async fn test_resume_subscription_not_scheduled_for_cancellation() {
         response.status_code(),
         400,
         "Should return 400 when subscription is not scheduled for cancellation"
+    );
+}
+
+// --- Change plan tests ---
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_change_plan_requires_auth() {
+    let server = create_test_server().await;
+
+    let request_body = json!({ "plan": "pro" });
+
+    // POST /v1/subscriptions/change without authentication should return 401
+    let response = server
+        .post("/v1/subscriptions/change")
+        .json(&request_body)
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        401,
+        "POST /v1/subscriptions/change should require authentication"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_change_plan_no_active_subscription() {
+    let server = create_test_server().await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } },
+            "pro": { "providers": { "stripe": { "price_id": "price_test_pro" } }, "agent_instances": { "max": 5 }, "monthly_tokens": { "max": 1000000 } }
+        }),
+    )
+    .await;
+
+    let user_email = "test_change_plan_no_sub@example.com";
+    let user_token = mock_login(&server, user_email).await;
+
+    let request_body = json!({ "plan": "pro" });
+
+    let response = server
+        .post("/v1/subscriptions/change")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&request_body)
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        404,
+        "Should return 404 when no active subscription exists"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_change_plan_invalid_plan() {
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } },
+            "pro": { "providers": { "stripe": { "price_id": "price_test_pro" } }, "agent_instances": { "max": 5 }, "monthly_tokens": { "max": 1000000 } }
+        }),
+    )
+    .await;
+
+    let user_email = "test_change_plan_invalid@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+    insert_test_subscription(&server, &db, user_email, false).await;
+    let user_token = mock_login(&server, user_email).await;
+
+    let request_body = json!({ "plan": "nonexistent_plan" });
+
+    let response = server
+        .post("/v1/subscriptions/change")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&request_body)
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        400,
+        "Should return 400 for invalid plan"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_change_plan_instance_limit_exceeded() {
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "agent_instances": { "max": 5 }, "monthly_tokens": { "max": 1000000 } },
+            "starter": { "providers": { "stripe": { "price_id": "price_test_starter" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } }
+        }),
+    )
+    .await;
+
+    let user_email = "test_change_plan_instance_limit@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+    insert_test_subscription(&server, &db, user_email, false).await;
+    insert_test_agent_instances(&db, user_email, 2).await;
+    let user_token = mock_login(&server, user_email).await;
+
+    // User has 2 instances and basic plan (max 5); trying to switch to starter (max 1)
+    let request_body = json!({ "plan": "starter" });
+
+    let response = server
+        .post("/v1/subscriptions/change")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&request_body)
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        400,
+        "Should return 400 when instance count exceeds target plan limit"
+    );
+
+    let body: serde_json::Value = response.json();
+    let message = body
+        .get("message")
+        .and_then(|v| v.as_str())
+        .or_else(|| body.get("detail").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    assert!(
+        message.contains("2") && message.contains("1"),
+        "Error message should include current (2) and max (1) instance counts, got: {}",
+        message
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_change_plan_success_validates_before_stripe() {
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    // User on basic (price_test_basic), changing to pro (price_test_pro)
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "agent_instances": { "max": 5 }, "monthly_tokens": { "max": 1000000 } },
+            "pro": { "providers": { "stripe": { "price_id": "price_test_pro" } }, "agent_instances": { "max": 5 }, "monthly_tokens": { "max": 1000000 } }
+        }),
+    )
+    .await;
+
+    let user_email = "test_change_plan_success@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+    insert_test_subscription(&server, &db, user_email, false).await;
+    // 0 instances - under both plans' limits
+    let user_token = mock_login(&server, user_email).await;
+
+    let request_body = json!({ "plan": "pro" });
+
+    let response = server
+        .post("/v1/subscriptions/change")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&request_body)
+        .await;
+
+    // Validation passes (auth, subscription, valid plan, instance limit).
+    // Stripe API call fails with fake sub_test_* ID -> 500.
+    // This confirms we reach the Stripe update step; full success would need Stripe mocking.
+    let status = response.status_code();
+    assert!(
+        status == 200 || status == 500,
+        "Should pass validation (200) or fail at Stripe (500), got {}",
+        status
     );
 }
 
@@ -1702,6 +1965,63 @@ async fn test_subscription_gating_full_flow() {
     assert!(
         error_msg.contains("subscription") || error_msg.contains("limit"),
         "Error should mention subscription or limit requirement, got: {}",
+        error_msg
+    );
+}
+
+// Test clock tests
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_create_subscription_with_test_clock_disabled() {
+    // Set to "false" BEFORE creating server - dotenvy won't overwrite existing vars
+    std::env::set_var("STRIPE_TEST_CLOCK_ENABLED", "false");
+
+    let server = create_test_server().await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } }
+        }),
+    )
+    .await;
+
+    let user_email = "test_clock_disabled@example.com";
+    let user_token = mock_login(&server, user_email).await;
+
+    let request_body = json!({
+        "provider": "stripe",
+        "plan": "basic",
+        "success_url": "https://example.com/success",
+        "cancel_url": "https://example.com/cancel",
+        "test_clock_id": "clock_test_12345"
+    });
+
+    let response = server
+        .post("/v1/subscriptions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&request_body)
+        .await;
+
+    // Should return 400 Bad Request when test_clock_id provided but feature disabled
+    assert_eq!(
+        response.status_code(),
+        400,
+        "Should return 400 when test_clock_id provided but STRIPE_TEST_CLOCK_ENABLED is false"
+    );
+
+    let body: serde_json::Value = response.json();
+    let error_msg = body.get("message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        error_msg.contains("Test clock feature is not enabled"),
+        "Error should mention test clock not enabled, got: {}",
         error_msg
     );
 }

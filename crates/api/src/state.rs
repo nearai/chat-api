@@ -29,6 +29,16 @@ pub struct ModelSettingsCacheEntry {
 /// Type alias for model settings cache (per-model)
 pub type ModelSettingsCache = Arc<RwLock<HashMap<String, ModelSettingsCacheEntry>>>;
 
+/// Cached system configs entry (single global value)
+#[derive(Debug, Clone)]
+pub struct SystemConfigsCacheEntry {
+    pub last_checked_at: DateTime<Utc>,
+    pub configs: Option<services::system_configs::ports::SystemConfigs>,
+}
+
+/// Type alias for system configs cache
+pub type SystemConfigsCache = Arc<RwLock<Option<SystemConfigsCacheEntry>>>;
+
 /// Application state shared across all handlers
 #[derive(Clone)]
 pub struct AppState {
@@ -51,6 +61,8 @@ pub struct AppState {
     pub redirect_uri: String,
     pub admin_domains: Arc<Vec<String>>,
     pub vpc_credentials_service: Arc<dyn services::vpc::VpcCredentialsService>,
+    /// Whether Stripe test clock feature is enabled
+    pub stripe_test_clock_enabled: bool,
     /// Base URL for Cloud API calls (same as OpenAI base URL when using VPC)
     pub cloud_api_base_url: String,
     /// Metrics service for recording usage metrics
@@ -67,6 +79,10 @@ pub struct AppState {
     pub model_settings_cache: ModelSettingsCache,
     /// In-memory cache for model pricing (input/output nano per token) from cloud-api for cost calculation
     pub model_pricing_cache: crate::model_pricing::ModelPricingCache,
+    /// In-memory cache for system configs (single entry with TTL)
+    pub system_configs_cache: SystemConfigsCache,
     /// Rate limit state for hot-reloadable rate limit configuration
     pub rate_limit_state: crate::middleware::RateLimitState,
+    /// BI metrics service for deployment and usage analytics
+    pub bi_metrics_service: Arc<dyn services::bi_metrics::BiMetricsService>,
 }

@@ -123,6 +123,9 @@ pub async fn create_test_server_and_db(
         ),
     );
 
+    // Create agent repo (needed by subscription service for change_plan)
+    let agent_repo = db.agent_repository();
+
     // Initialize subscription service for testing
     let subscription_service = Arc::new(services::subscription::SubscriptionServiceImpl::new(
         services::subscription::SubscriptionServiceConfig {
@@ -140,6 +143,7 @@ pub async fn create_test_server_and_db(
             user_repository: user_repo.clone(),
             user_usage_repo: db.user_usage_repository()
                 as Arc<dyn services::user_usage::UserUsageRepository>,
+            agent_repo: agent_repo.clone() as Arc<dyn services::agent::ports::AgentRepository>,
             stripe_secret_key: config.stripe.secret_key.clone(),
             stripe_webhook_secret: config.stripe.webhook_secret.clone(),
         },
@@ -223,7 +227,6 @@ pub async fn create_test_server_and_db(
     );
 
     // Create agent service for testing
-    let agent_repo = db.agent_repository();
     let agent_service = Arc::new(services::agent::AgentServiceImpl::new(
         agent_repo.clone(),
         config.agent.managers.clone(),
@@ -235,6 +238,13 @@ pub async fn create_test_server_and_db(
     // Create agent proxy service for testing
     let agent_proxy_service: Arc<dyn services::agent::AgentProxyService> =
         Arc::new(services::agent::proxy::AgentProxy::new());
+
+    // Create BI metrics service
+    let bi_metrics_repo = db.bi_metrics_repository();
+    let bi_metrics_service: Arc<dyn services::bi_metrics::BiMetricsService> =
+        Arc::new(services::bi_metrics::BiMetricsServiceImpl::new(
+            bi_metrics_repo as Arc<dyn services::bi_metrics::BiMetricsRepository>,
+        ));
 
     // Create application state
     let app_state = AppState {
@@ -256,6 +266,7 @@ pub async fn create_test_server_and_db(
         agent_proxy_service,
         redirect_uri: config.oauth.redirect_uri,
         admin_domains: Arc::new(admin_domains),
+        stripe_test_clock_enabled: config.stripe.test_clock_enabled,
         cloud_api_base_url: test_config.cloud_api_base_url.clone(),
         metrics_service,
         analytics_service,
@@ -266,7 +277,9 @@ pub async fn create_test_server_and_db(
         model_pricing_cache: api::model_pricing::ModelPricingCache::new(
             test_config.cloud_api_base_url.clone(),
         ),
+        system_configs_cache: Arc::new(tokio::sync::RwLock::new(None)),
         rate_limit_state,
+        bi_metrics_service,
     };
 
     // Create router
@@ -378,6 +391,29 @@ pub async fn insert_test_subscription(
         )
         .await
         .expect("insert subscription");
+}
+
+/// Insert agent instances for a user (for testing instance limit validation).
+/// Count is used by count_user_instances; instances must have status != 'deleted'.
+pub async fn insert_test_agent_instances(db: &database::Database, user_email: &str, count: usize) {
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .expect("get user")
+        .expect("user must exist");
+
+    let client = db.pool().get().await.expect("get pool client");
+    for i in 0..count {
+        let instance_id = format!("inst_test_{}_{}", Uuid::new_v4(), i);
+        client
+            .execute(
+                "INSERT INTO agent_instances (user_id, instance_id, name, type) VALUES ($1, $2, $3, $4)",
+                &[&user.id, &instance_id, &format!("Test Instance {}", i), &"openclaw"],
+            )
+            .await
+            .expect("insert agent instance");
+    }
 }
 
 /// Clean up all subscriptions for a user (by email).

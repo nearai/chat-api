@@ -212,6 +212,7 @@ async fn main() -> anyhow::Result<()> {
             user_repository: user_repo.clone(),
             user_usage_repo: db.user_usage_repository()
                 as Arc<dyn services::user_usage::UserUsageRepository>,
+            agent_repo: agent_repo.clone() as Arc<dyn services::agent::ports::AgentRepository>,
             stripe_secret_key: config.stripe.secret_key.clone(),
             stripe_webhook_secret: config.stripe.webhook_secret.clone(),
         },
@@ -271,6 +272,14 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(MockMetricsService)
         };
 
+    // Initialize BI metrics service
+    tracing::info!("Initializing BI metrics service...");
+    let bi_metrics_repo = db.bi_metrics_repository();
+    let bi_metrics_service: Arc<dyn services::bi_metrics::BiMetricsService> =
+        Arc::new(services::bi_metrics::BiMetricsServiceImpl::new(
+            bi_metrics_repo as Arc<dyn services::bi_metrics::BiMetricsRepository>,
+        ));
+
     // Load rate limit config from system configs
     let rate_limit_config = system_configs_service
         .get_configs()
@@ -305,6 +314,7 @@ async fn main() -> anyhow::Result<()> {
         admin_domains: Arc::new(config.admin.admin_domains),
         user_repository: user_repo.clone(),
         vpc_credentials_service,
+        stripe_test_clock_enabled: config.stripe.test_clock_enabled,
         cloud_api_base_url: config.openai.base_url.clone().unwrap_or_default(),
         metrics_service,
         analytics_service,
@@ -315,7 +325,9 @@ async fn main() -> anyhow::Result<()> {
         model_pricing_cache: api::model_pricing::ModelPricingCache::new(
             config.openai.base_url.clone().unwrap_or_default(),
         ),
+        system_configs_cache: Arc::new(tokio::sync::RwLock::new(None)),
         rate_limit_state,
+        bi_metrics_service,
     };
 
     // Create router with CORS support

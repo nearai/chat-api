@@ -21,7 +21,6 @@ use multer::Multipart;
 use near_api::{Account, AccountId, NetworkConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use services::agent::ports::TokenPricing;
 use services::analytics::{ActivityType, RecordActivityRequest};
 use services::consts::MODEL_PUBLIC_DEFAULT;
 use services::conversation::ports::{
@@ -50,7 +49,10 @@ const NEAR_BALANCE_CACHE_TTL_SECS: i64 = 5 * 60;
 /// Duration to cache model settings needed by /v1/responses in memory (in seconds)
 const MODEL_SETTINGS_CACHE_TTL_SECS: i64 = 60;
 
-/// Auto-routing: target model and default parameters for `model: "auto"` requests
+/// Duration to cache system configs in memory (in seconds)
+const SYSTEM_CONFIGS_CACHE_TTL_SECS: i64 = 60;
+
+/// Fallback defaults for `model: "auto"` routing when no `auto_route` system config is set
 pub const AUTO_ROUTE_MODEL: &str = "zai-org/GLM-5-FP8";
 pub const AUTO_ROUTE_TEMPERATURE: f64 = 1.0;
 pub const AUTO_ROUTE_TOP_P: f64 = 0.95;
@@ -2488,8 +2490,9 @@ async fn proxy_responses(
             state.model_pricing_cache.clone(),
             user.user_id,
         );
-        if let Some(Extension(api_key)) = api_key_ext {
-            usage_stream = usage_stream.with_agent_service(state.agent_service.clone(), api_key);
+        if let Some(Extension(api_key)) = &api_key_ext {
+            usage_stream = usage_stream
+                .with_agent_ids(api_key.api_key_info.instance_id, api_key.api_key_info.id);
         }
         Body::from_stream(usage_stream)
     } else {
@@ -3007,6 +3010,45 @@ async fn proxy_signature(
     .await
 }
 
+/// Get system configs with in-memory TTL caching.
+/// Returns `None` when no configs exist or on DB error (graceful degradation).
+async fn get_system_configs_cached(
+    state: &crate::state::AppState,
+) -> Option<services::system_configs::ports::SystemConfigs> {
+    // 1) Try cache first
+    {
+        let cache = state.system_configs_cache.read().await;
+        if let Some(entry) = cache.as_ref() {
+            let age = Utc::now().signed_duration_since(entry.last_checked_at);
+            if age.num_seconds() >= 0 && age.num_seconds() < SYSTEM_CONFIGS_CACHE_TTL_SECS {
+                return entry.configs.clone();
+            }
+        }
+    }
+
+    // 2) Cache miss or expired: fetch from DB and populate cache
+    let configs = state
+        .system_configs_service
+        .get_configs()
+        .await
+        .map_err(|e| {
+            tracing::warn!("Failed to load system configs, using defaults: {e}");
+            e
+        })
+        .ok()
+        .flatten();
+
+    {
+        let mut cache = state.system_configs_cache.write().await;
+        *cache = Some(crate::state::SystemConfigsCacheEntry {
+            last_checked_at: Utc::now(),
+            configs: configs.clone(),
+        });
+    }
+
+    configs
+}
+
 /// Helper function to get model settings with caching support.
 /// Returns (system_prompt, cache_hit) if model is found and public.
 /// Validates model visibility and populates cache if needed.
@@ -3136,15 +3178,48 @@ async fn prepare_chat_completions_body(
                 if let Some(body) = body_json.as_mut() {
                     if body.get("model").and_then(|v| v.as_str()) == Some("auto") {
                         tracing::info!("Auto-routing model: user_id={}", user.user_id);
-                        body["model"] = json!(AUTO_ROUTE_MODEL);
-                        if body.get("temperature").is_none_or(|v| v.is_null()) {
-                            body["temperature"] = json!(AUTO_ROUTE_TEMPERATURE);
-                        }
-                        if body.get("top_p").is_none_or(|v| v.is_null()) {
-                            body["top_p"] = json!(AUTO_ROUTE_TOP_P);
-                        }
-                        if body.get("max_tokens").is_none_or(|v| v.is_null()) {
-                            body["max_tokens"] = json!(AUTO_ROUTE_MAX_TOKENS);
+
+                        // Load auto-route config from system configs (cached with TTL)
+                        let auto_config = get_system_configs_cached(state)
+                            .await
+                            .and_then(|c| c.auto_route);
+
+                        let route_model = auto_config
+                            .as_ref()
+                            .map(|c| c.model.as_str())
+                            .unwrap_or(AUTO_ROUTE_MODEL);
+
+                        body["model"] = json!(route_model);
+
+                        // When config exists, only inject params explicitly set in it.
+                        // When no config exists, use hardcoded fallback defaults.
+                        if let Some(ref cfg) = auto_config {
+                            if let Some(t) = cfg.temperature {
+                                if body.get("temperature").is_none_or(|v| v.is_null()) {
+                                    body["temperature"] = json!(t);
+                                }
+                            }
+                            if let Some(p) = cfg.top_p {
+                                if body.get("top_p").is_none_or(|v| v.is_null()) {
+                                    body["top_p"] = json!(p);
+                                }
+                            }
+                            if let Some(m) = cfg.max_tokens {
+                                if body.get("max_tokens").is_none_or(|v| v.is_null()) {
+                                    body["max_tokens"] = json!(m);
+                                }
+                            }
+                        } else {
+                            // No auto_route config set — use hardcoded fallback defaults
+                            if body.get("temperature").is_none_or(|v| v.is_null()) {
+                                body["temperature"] = json!(AUTO_ROUTE_TEMPERATURE);
+                            }
+                            if body.get("top_p").is_none_or(|v| v.is_null()) {
+                                body["top_p"] = json!(AUTO_ROUTE_TOP_P);
+                            }
+                            if body.get("max_tokens").is_none_or(|v| v.is_null()) {
+                                body["max_tokens"] = json!(AUTO_ROUTE_MAX_TOKENS);
+                            }
                         }
                         auto_routed = true;
                     }
@@ -3541,8 +3616,9 @@ async fn proxy_chat_completions(
             state.model_pricing_cache.clone(),
             user.user_id,
         );
-        if let Some(Extension(api_key)) = api_key_ext {
-            usage_stream = usage_stream.with_agent_service(state.agent_service.clone(), api_key);
+        if let Some(Extension(api_key)) = &api_key_ext {
+            usage_stream = usage_stream
+                .with_agent_ids(api_key.api_key_info.instance_id, api_key.api_key_info.id);
         }
         Body::from_stream(usage_stream)
     } else {
@@ -4612,55 +4688,42 @@ async fn record_image_usage(
     } else {
         0
     };
-    if let Err(e) = state
-        .user_usage_service
-        .record_usage_event(
-            user_id,
-            metric_key,
-            quantity,
-            Some(cost_nano_usd),
-            model_name,
-        )
-        .await
-    {
+
+    let (instance_id, api_key_id) = api_key_ext
+        .as_ref()
+        .map(|ak| (ak.api_key_info.instance_id, Some(ak.api_key_info.id)))
+        .unwrap_or((None, None));
+
+    let details = serde_json::json!({
+        "request_type": "image_generation",
+    });
+
+    let params = services::user_usage::RecordUsageParams {
+        user_id,
+        metric_key: metric_key.to_string(),
+        quantity,
+        cost_nano_usd: Some(cost_nano_usd),
+        model_id: model_name.map(|s| s.to_string()),
+        instance_id,
+        api_key_id,
+        details: Some(details),
+    };
+
+    let result = if instance_id.is_some() {
+        state
+            .user_usage_service
+            .record_usage_and_update_balance(params)
+            .await
+    } else {
+        state.user_usage_service.record_usage(params).await
+    };
+
+    if let Err(e) = result {
         tracing::warn!(
             "Failed to record image usage for user_id={}: {}",
             user_id,
             e
         );
-    }
-
-    // Record to agent_usage_log if request was made with an API key
-    if let Some(api_key) = api_key_ext {
-        let model = model_name.unwrap_or("").to_string();
-        let pricing_opt = state.model_pricing_cache.get_pricing(&model).await;
-        let pricing = pricing_opt
-            .map(|p| TokenPricing {
-                input_cost_per_million: p.input_nano_per_token * 1_000_000,
-                output_cost_per_million: p.output_nano_per_token * 1_000_000,
-            })
-            .unwrap_or_else(|| TokenPricing {
-                input_cost_per_million: 0,
-                output_cost_per_million: 0,
-            });
-        if let Err(e) = state
-            .agent_service
-            .record_usage(
-                &api_key.api_key_info,
-                0,
-                quantity,
-                model,
-                "image_generation".to_string(),
-                pricing,
-            )
-            .await
-        {
-            tracing::warn!(
-                "Failed to record image usage for api_key_id={}: {}",
-                api_key.api_key_info.id,
-                e
-            );
-        }
     }
 }
 
@@ -4690,57 +4753,56 @@ async fn record_chat_usage_from_body(
         })
         .unwrap_or_else(|| usage.model.clone());
 
-    let cost_nano_usd = state
-        .model_pricing_cache
-        .get_pricing(&request_model)
-        .await
+    let pricing = state.model_pricing_cache.get_pricing(&request_model).await;
+    let cost_nano_usd = pricing
+        .as_ref()
         .map(|p| p.cost_nano_usd(usage.input_tokens, usage.output_tokens));
-    if let Err(e) = state
-        .user_usage_service
-        .record_usage_event(
-            user_id,
-            services::user_usage::METRIC_KEY_LLM_TOKENS,
-            usage.total_tokens as i64,
-            cost_nano_usd,
-            Some(usage.model.as_str()),
-        )
-        .await
-    {
+
+    let input_cost = pricing
+        .as_ref()
+        .map(|p| usage.input_tokens as i64 * p.input_nano_per_token)
+        .unwrap_or(0);
+    let output_cost = pricing
+        .as_ref()
+        .map(|p| usage.output_tokens as i64 * p.output_nano_per_token)
+        .unwrap_or(0);
+
+    let (instance_id, api_key_id) = api_key_ext
+        .as_ref()
+        .map(|ak| (ak.api_key_info.instance_id, Some(ak.api_key_info.id)))
+        .unwrap_or((None, None));
+
+    let details = serde_json::json!({
+        "input_tokens": usage.input_tokens as i64,
+        "output_tokens": usage.output_tokens as i64,
+        "input_cost": input_cost,
+        "output_cost": output_cost,
+        "request_type": "chat_completion",
+    });
+
+    let params = services::user_usage::RecordUsageParams {
+        user_id,
+        metric_key: services::user_usage::METRIC_KEY_LLM_TOKENS.to_string(),
+        quantity: usage.total_tokens as i64,
+        cost_nano_usd,
+        model_id: Some(usage.model.clone()),
+        instance_id,
+        api_key_id,
+        details: Some(details),
+    };
+
+    let result = if instance_id.is_some() {
+        state
+            .user_usage_service
+            .record_usage_and_update_balance(params)
+            .await
+    } else {
+        state.user_usage_service.record_usage(params).await
+    };
+
+    if let Err(e) = result {
         tracing::warn!("Failed to record usage for user_id={}: {}", user_id, e);
         return false;
-    }
-
-    // Record to agent_usage_log if request was made with an API key
-    if let Some(api_key) = api_key_ext {
-        let pricing_opt = state.model_pricing_cache.get_pricing(&request_model).await;
-        let pricing = pricing_opt
-            .map(|p| TokenPricing {
-                input_cost_per_million: p.input_nano_per_token * 1_000_000,
-                output_cost_per_million: p.output_nano_per_token * 1_000_000,
-            })
-            .unwrap_or_else(|| TokenPricing {
-                input_cost_per_million: 0,
-                output_cost_per_million: 0,
-            });
-
-        if let Err(e) = state
-            .agent_service
-            .record_usage(
-                &api_key.api_key_info,
-                usage.input_tokens as i64,
-                usage.output_tokens as i64,
-                usage.model.clone(),
-                "chat_completion".to_string(),
-                pricing,
-            )
-            .await
-        {
-            tracing::warn!(
-                "Failed to record chat usage for api_key_id={}: {}",
-                api_key.api_key_info.id,
-                e
-            );
-        }
     }
 
     true
@@ -4760,57 +4822,57 @@ async fn record_response_usage_from_body(
     if usage.total_tokens == 0 {
         return false;
     }
-    let cost_nano_usd = state
-        .model_pricing_cache
-        .get_pricing(&usage.model)
-        .await
+
+    let pricing = state.model_pricing_cache.get_pricing(&usage.model).await;
+    let cost_nano_usd = pricing
+        .as_ref()
         .map(|p| p.cost_nano_usd(usage.input_tokens, usage.output_tokens));
-    if let Err(e) = state
-        .user_usage_service
-        .record_usage_event(
-            user_id,
-            services::user_usage::METRIC_KEY_LLM_TOKENS,
-            usage.total_tokens as i64,
-            cost_nano_usd,
-            Some(usage.model.as_str()),
-        )
-        .await
-    {
+
+    let input_cost = pricing
+        .as_ref()
+        .map(|p| usage.input_tokens as i64 * p.input_nano_per_token)
+        .unwrap_or(0);
+    let output_cost = pricing
+        .as_ref()
+        .map(|p| usage.output_tokens as i64 * p.output_nano_per_token)
+        .unwrap_or(0);
+
+    let (instance_id, api_key_id) = api_key_ext
+        .as_ref()
+        .map(|ak| (ak.api_key_info.instance_id, Some(ak.api_key_info.id)))
+        .unwrap_or((None, None));
+
+    let details = serde_json::json!({
+        "input_tokens": usage.input_tokens as i64,
+        "output_tokens": usage.output_tokens as i64,
+        "input_cost": input_cost,
+        "output_cost": output_cost,
+        "request_type": "response",
+    });
+
+    let params = services::user_usage::RecordUsageParams {
+        user_id,
+        metric_key: services::user_usage::METRIC_KEY_LLM_TOKENS.to_string(),
+        quantity: usage.total_tokens as i64,
+        cost_nano_usd,
+        model_id: Some(usage.model.clone()),
+        instance_id,
+        api_key_id,
+        details: Some(details),
+    };
+
+    let result = if instance_id.is_some() {
+        state
+            .user_usage_service
+            .record_usage_and_update_balance(params)
+            .await
+    } else {
+        state.user_usage_service.record_usage(params).await
+    };
+
+    if let Err(e) = result {
         tracing::warn!("Failed to record usage for user_id={}: {}", user_id, e);
         return false;
-    }
-
-    // Record to agent_usage_log if request was made with an API key
-    if let Some(api_key) = api_key_ext {
-        let pricing_opt = state.model_pricing_cache.get_pricing(&usage.model).await;
-        let pricing = pricing_opt
-            .map(|p| TokenPricing {
-                input_cost_per_million: p.input_nano_per_token * 1_000_000,
-                output_cost_per_million: p.output_nano_per_token * 1_000_000,
-            })
-            .unwrap_or_else(|| TokenPricing {
-                input_cost_per_million: 0,
-                output_cost_per_million: 0,
-            });
-
-        if let Err(e) = state
-            .agent_service
-            .record_usage(
-                &api_key.api_key_info,
-                usage.input_tokens as i64,
-                usage.output_tokens as i64,
-                usage.model.clone(),
-                "response".to_string(),
-                pricing,
-            )
-            .await
-        {
-            tracing::warn!(
-                "Failed to record response usage for api_key_id={}: {}",
-                api_key.api_key_info.id,
-                e
-            );
-        }
     }
 
     true

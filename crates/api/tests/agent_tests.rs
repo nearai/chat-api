@@ -2,6 +2,7 @@ mod common;
 
 use common::{create_test_server_and_db, mock_login};
 use serde_json::json;
+use serial_test::serial;
 use services::agent::ports::{AgentRepository, CreateInstanceParams};
 use uuid::Uuid;
 
@@ -96,6 +97,28 @@ async fn test_create_api_key_requires_auth() {
     );
 }
 
+/// Test check upgrade available requires authentication
+#[tokio::test]
+async fn test_check_upgrade_available_requires_auth() {
+    let server = create_test_server_and_db(Default::default()).await.0;
+
+    let fake_instance_id = Uuid::new_v4().to_string();
+
+    // Try without auth
+    let response = server
+        .get(&format!(
+            "/v1/agents/instances/{}/upgrade-available",
+            fake_instance_id
+        ))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        401,
+        "Should require authentication to check upgrade"
+    );
+}
+
 // Note: Chat completions endpoint tests require actual Agent instances with proper
 // connection information (instance_url, instance_token). These are integration tests
 // that would need mock/stub Agent infrastructure. See INTEGRATION_TESTS section below.
@@ -117,7 +140,7 @@ async fn test_create_api_key_requires_auth() {
 // 3. Agent Uses Chat Completions:
 //    POST /v1/chat/completions with Bearer sk-agent-xxxxx (API key auth)
 //    → API key validated, request proxied to instance
-//    → Usage tracked in agent_usage_log
+//    → Usage tracked in user_usage_event
 //
 // 4. User Monitors Usage:
 //    GET /v1/agents/instances/{id}/usage
@@ -234,6 +257,7 @@ async fn test_get_instance_usage_requires_auth() {
 /// Test that users without an active subscription cannot create agent instances.
 /// Previously, users without a subscription could bypass limits and create unlimited instances.
 #[tokio::test]
+#[serial(subscription_tests)]
 async fn test_create_instance_rejects_unsubscribed_user() {
     let (server, db) = create_test_server_and_db(Default::default()).await;
 
@@ -244,6 +268,7 @@ async fn test_create_instance_rejects_unsubscribed_user() {
     common::cleanup_user_subscriptions(&db, user_email).await;
 
     // Set subscription plans (for subscribed users); unsubscribed users get 0 instances
+    // Note: set_subscription_plans overwrites any existing plans, so no need to clear first
     common::set_subscription_plans(
         &server,
         json!({
@@ -289,6 +314,7 @@ async fn test_create_instance_rejects_unsubscribed_user() {
 /// Test agent instance limit validation with subscription plans
 /// Tests that the limit is enforced when user reaches max instances
 #[tokio::test]
+#[serial(subscription_tests)]
 async fn test_create_instance_respects_agent_instance_limit_max_1() {
     let (server, db) = create_test_server_and_db(Default::default()).await;
 
@@ -297,6 +323,8 @@ async fn test_create_instance_respects_agent_instance_limit_max_1() {
 
     // Set up subscription with agent_instances limit of 1
     // NOTE: insert_test_subscription uses price_id "price_test_basic"
+    // Note: set_subscription_plans overwrites any existing plans, so no need to clear first
+    tracing::info!("Setting up subscription plans");
     common::set_subscription_plans(
         &server,
         json!({
@@ -351,6 +379,7 @@ async fn test_create_instance_respects_agent_instance_limit_max_1() {
             gateway_port: None,
             dashboard_url: None,
             agent_api_base_url: None,
+            service_type: None,
         })
         .await
         .expect("Should create first instance");

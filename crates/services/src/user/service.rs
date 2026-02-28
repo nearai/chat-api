@@ -2,7 +2,10 @@ use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use std::sync::Arc;
 
-use super::ports::{BanType, User, UserProfile, UserRepository, UserService};
+use super::ports::{
+    AdminListUsersFilter, AdminListUsersSort, AdminUserWithStats, BanType, User, UserProfile,
+    UserRepository, UserService,
+};
 use crate::types::UserId;
 
 pub struct UserServiceImpl {
@@ -110,6 +113,35 @@ impl UserService for UserServiceImpl {
             total_count,
             limit,
             offset
+        );
+
+        Ok((users, total_count))
+    }
+
+    async fn list_users_with_stats(
+        &self,
+        limit: i64,
+        offset: i64,
+        filter: &AdminListUsersFilter,
+        sort: &AdminListUsersSort,
+    ) -> anyhow::Result<(Vec<AdminUserWithStats>, u64)> {
+        tracing::info!(
+            "Listing users with stats: limit={}, offset={}, sort_by={:?}, sort_order={:?}",
+            limit,
+            offset,
+            sort.sort_by,
+            sort.sort_order
+        );
+
+        let (users, total_count) = self
+            .user_repository
+            .list_users_with_stats(limit, offset, filter, sort)
+            .await?;
+
+        tracing::info!(
+            "Retrieved {} user(s) with stats (total: {})",
+            users.len(),
+            total_count
         );
 
         Ok((users, total_count))

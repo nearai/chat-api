@@ -5,11 +5,48 @@ use uuid::Uuid;
 
 use crate::UserId;
 
+/// Result of sync_all_instance_statuses.
+///
+/// Counter semantics:
+/// - `synced`: instances found in the Agent API response (updated + skipped)
+/// - `updated`: instances whose DB status was changed
+/// - `skipped`: instances found in API but already had the correct status
+/// - `not_found`: instances missing from the API response (API succeeded but instance absent)
+/// - `error_skipped`: instances skipped because their manager API call failed
+/// - `errors`: human-readable error descriptions (no internal URLs)
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SyncStatusResult {
+    pub synced: u32,
+    pub updated: u32,
+    pub skipped: u32,
+    pub not_found: u32,
+    pub error_skipped: u32,
+    pub errors: Vec<String>,
+}
+
+// ============ Service Type Validation ============
+
+/// Valid service types for agent instances.
+pub const VALID_SERVICE_TYPES: &[&str] = &["openclaw", "ironclaw"];
+
+/// Validates that a service type is in the list of allowed values.
+pub fn is_valid_service_type(service_type: &str) -> bool {
+    VALID_SERVICE_TYPES.contains(&service_type)
+}
+
 /// Enrichment data from Agent API (compose-api) for instance responses
 #[derive(Debug, Clone, Default)]
 pub struct AgentApiInstanceEnrichment {
     pub status: Option<String>,
     pub ssh_command: Option<String>,
+}
+
+/// Upgrade availability information for an instance
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpgradeAvailability {
+    pub has_upgrade: bool,
+    pub current_image: Option<String>,
+    pub latest_image: String,
 }
 
 /// Agent instance metadata
@@ -26,6 +63,10 @@ pub struct AgentInstance {
     pub dashboard_url: Option<String>,
     /// The agent manager URL that owns this instance (for routing operations)
     pub agent_api_base_url: Option<String>,
+    /// Service type (e.g. "openclaw", "ironclaw") selected when creating the instance
+    pub service_type: Option<String>,
+    /// DB-tracked status: active, stopped, deleted, provisioning, error
+    pub status: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -105,6 +146,8 @@ pub struct CreateInstanceParams {
     pub dashboard_url: Option<String>,
     /// The agent manager URL that created this instance
     pub agent_api_base_url: Option<String>,
+    /// Service type selected at creation time
+    pub service_type: Option<String>,
 }
 
 #[cfg_attr(test, mockall::automock)]
@@ -152,6 +195,13 @@ pub trait AgentRepository: Send + Sync {
         public_ssh_key: Option<String>,
     ) -> anyhow::Result<AgentInstance>;
 
+    /// Update instance status in DB (triggers status_history audit via trigger).
+    async fn update_instance_status(
+        &self,
+        instance_id: Uuid,
+        new_status: &str,
+    ) -> anyhow::Result<()>;
+
     async fn delete_instance(&self, instance_id: Uuid) -> anyhow::Result<()>;
 
     // API Key operations
@@ -198,8 +248,6 @@ pub trait AgentRepository: Send + Sync {
     async fn update_api_key_last_used(&self, api_key_id: Uuid) -> anyhow::Result<()>;
 
     // Usage logging
-    async fn log_usage(&self, usage: UsageLogEntry) -> anyhow::Result<()>;
-
     async fn get_instance_usage(
         &self,
         instance_id: Uuid,
@@ -221,10 +269,6 @@ pub trait AgentRepository: Send + Sync {
         total_cost: i64,
     ) -> anyhow::Result<()>;
 
-    /// Log usage and update balance atomically in a single database transaction.
-    /// This prevents race conditions where usage is logged but balance update fails (or vice versa).
-    async fn log_usage_and_update_balance(&self, usage: UsageLogEntry) -> anyhow::Result<()>;
-
     async fn get_user_total_spending(&self, user_id: UserId) -> anyhow::Result<i64>;
 }
 
@@ -244,6 +288,7 @@ pub trait AgentService: Send + Sync {
         image: Option<String>,
         name: Option<String>,
         ssh_pubkey: Option<String>,
+        service_type: Option<String>,
     ) -> anyhow::Result<AgentInstance>;
 
     /// Create instance with streaming lifecycle events.
@@ -257,6 +302,7 @@ pub trait AgentService: Send + Sync {
         image: Option<String>,
         name: Option<String>,
         ssh_pubkey: Option<String>,
+        service_type: Option<String>,
         max_allowed: u64,
     ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<serde_json::Value>>>;
 
@@ -312,9 +358,31 @@ pub trait AgentService: Send + Sync {
 
     async fn restart_instance(&self, instance_id: Uuid, user_id: UserId) -> anyhow::Result<()>;
 
+    /// Upgrade instance with streaming SSE progress.
+    /// Returns a receiver that yields SSE chunks from the compose-api restart stream.
+    /// Uses a 5-minute timeout to allow the full upgrade to complete.
+    async fn upgrade_instance_stream(
+        &self,
+        instance_id: Uuid,
+        user_id: UserId,
+    ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<bytes::Bytes>>>;
+
+    /// Check if an upgrade is available for the instance.
+    /// Compares the current deployed image with the latest available version.
+    async fn check_upgrade_available(
+        &self,
+        instance_id: Uuid,
+        user_id: UserId,
+    ) -> anyhow::Result<UpgradeAvailability>;
+
     async fn stop_instance(&self, instance_id: Uuid, user_id: UserId) -> anyhow::Result<()>;
 
     async fn start_instance(&self, instance_id: Uuid, user_id: UserId) -> anyhow::Result<()>;
+
+    /// Sync instance status from all Agent API managers into the database.
+    /// Fetches live status via GET /instances per manager, maps "running" -> "active", others -> "stopped".
+    /// Skips deleted instances; only updates when status differs.
+    async fn sync_all_instance_statuses(&self) -> anyhow::Result<SyncStatusResult>;
 
     // API key management
     /// Create an API key for a specific instance - returns (api_key_info, plaintext_key)
@@ -370,16 +438,6 @@ pub trait AgentService: Send + Sync {
     async fn validate_and_use_api_key(&self, api_key: &str) -> anyhow::Result<AgentApiKey>;
 
     // Usage tracking and balance
-    async fn record_usage(
-        &self,
-        api_key: &AgentApiKey,
-        input_tokens: i64,
-        output_tokens: i64,
-        model_id: String,
-        request_type: String,
-        pricing: TokenPricing,
-    ) -> anyhow::Result<()>;
-
     async fn get_instance_usage(
         &self,
         instance_id: Uuid,

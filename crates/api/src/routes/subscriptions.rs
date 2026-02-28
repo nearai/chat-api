@@ -24,6 +24,9 @@ pub struct CreateSubscriptionRequest {
     pub success_url: String,
     /// URL to redirect after cancelled checkout
     pub cancel_url: String,
+    /// Optional test clock ID to bind customer to (requires STRIPE_TEST_CLOCK_ENABLED)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub test_clock_id: Option<String>,
 }
 
 fn default_provider() -> String {
@@ -80,6 +83,20 @@ pub struct CancelSubscriptionResponse {
 /// Response for subscription resume
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ResumeSubscriptionResponse {
+    /// Success message
+    pub message: String,
+}
+
+/// Request to change subscription plan
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ChangePlanRequest {
+    /// Target plan name (e.g., "starter", "basic")
+    pub plan: String,
+}
+
+/// Response for plan change
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ChangePlanResponse {
     /// Success message
     pub message: String,
 }
@@ -157,6 +174,11 @@ pub async fn create_subscription(
     validate_redirect_url(&req.success_url, "success_url")?;
     validate_redirect_url(&req.cancel_url, "cancel_url")?;
 
+    // Validate test clock usage
+    if req.test_clock_id.is_some() && !app_state.stripe_test_clock_enabled {
+        return Err(ApiError::bad_request("Test clock feature is not enabled"));
+    }
+
     let checkout_url = app_state
         .subscription_service
         .create_subscription(
@@ -165,6 +187,7 @@ pub async fn create_subscription(
             req.plan,
             req.success_url,
             req.cancel_url,
+            req.test_clock_id,
         )
         .await
         .map_err(|e| match e {
@@ -216,6 +239,19 @@ pub async fn create_subscription(
                 ApiError::service_unavailable("Credit purchase is not configured")
             }
             SubscriptionError::InvalidCredits(msg) => ApiError::bad_request(msg),
+            SubscriptionError::MonthlyTokenLimitExceeded { .. } => {
+                tracing::error!("Unexpected MonthlyTokenLimitExceeded in create");
+                ApiError::internal_server_error("Failed to create subscription")
+            }
+            SubscriptionError::InstanceLimitExceeded { current, max } => {
+                ApiError::bad_request(format!(
+                    "Cannot subscribe: current instance count ({}) exceeds plan limit ({})",
+                    current, max
+                ))
+            }
+            SubscriptionError::TestClockNotAllowedForExistingCustomer => ApiError::bad_request(
+                "Cannot associate test clock with existing Stripe customer".to_string(),
+            ),
         })?;
 
     Ok(Json(CreateSubscriptionResponse { checkout_url }))
@@ -318,6 +354,74 @@ pub async fn resume_subscription(
 
     Ok(Json(ResumeSubscriptionResponse {
         message: "Subscription resumed successfully".to_string(),
+    }))
+}
+
+/// Change the user's subscription plan
+#[utoipa::path(
+    post,
+    path = "/v1/subscriptions/change",
+    tag = "Subscriptions",
+    request_body = ChangePlanRequest,
+    responses(
+        (status = 200, description = "Plan changed successfully", body = ChangePlanResponse),
+        (status = 400, description = "Invalid plan or instance limit exceeded", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "No active subscription found", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse),
+        (status = 503, description = "Stripe not configured", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn change_plan(
+    State(app_state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Json(req): Json<ChangePlanRequest>,
+) -> Result<Json<ChangePlanResponse>, ApiError> {
+    tracing::info!(
+        "Changing plan for user_id={} to plan={}",
+        user.user_id,
+        req.plan
+    );
+
+    app_state
+        .subscription_service
+        .change_plan(user.user_id, req.plan.clone())
+        .await
+        .map_err(|e| match e {
+            SubscriptionError::InstanceLimitExceeded { current, max } => {
+                ApiError::bad_request(format!(
+                    "Cannot switch to this plan: you have {} agent instances but this plan allows only {}. Delete excess instances to switch plans.",
+                    current, max
+                ))
+            }
+            SubscriptionError::InvalidPlan(plan) => {
+                ApiError::bad_request(format!("Invalid plan: {}", plan))
+            }
+            SubscriptionError::NoActiveSubscription => {
+                ApiError::not_found("No active subscription found")
+            }
+            SubscriptionError::NotConfigured => {
+                ApiError::service_unavailable("Stripe is not configured")
+            }
+            SubscriptionError::DatabaseError(msg) => {
+                tracing::error!(error = ?msg, "Database error changing plan");
+                ApiError::internal_server_error("Failed to change plan")
+            }
+            SubscriptionError::StripeError(msg) => {
+                tracing::error!(error = ?msg, "Stripe error changing plan");
+                ApiError::internal_server_error("Failed to change plan")
+            }
+            _ => {
+                tracing::error!(error = ?e, "Failed to change plan");
+                ApiError::internal_server_error("Failed to change plan")
+            }
+        })?;
+
+    Ok(Json(ChangePlanResponse {
+        message: "Plan changed successfully".to_string(),
     }))
 }
 
@@ -494,6 +598,7 @@ pub fn create_subscriptions_router() -> Router<AppState> {
         .route("/v1/subscriptions", get(list_subscriptions))
         .route("/v1/subscriptions/cancel", post(cancel_subscription))
         .route("/v1/subscriptions/resume", post(resume_subscription))
+        .route("/v1/subscriptions/change", post(change_plan))
         .route("/v1/subscriptions/portal", post(create_portal_session))
 }
 

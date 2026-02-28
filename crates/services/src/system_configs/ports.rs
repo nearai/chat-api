@@ -128,6 +128,23 @@ impl Default for RateLimitConfig {
     }
 }
 
+/// Auto-routing configuration for `model: "auto"` chat completion requests
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoRouteConfig {
+    /// Target model to substitute for "auto"
+    pub model: String,
+    /// Default temperature (injected when client doesn't provide one; omitted if None)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    /// Default top_p (injected when client doesn't provide one; omitted if None)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f64>,
+    /// Default max_tokens (injected when client doesn't provide one; omitted if None)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u64>,
+}
+
 /// Application-wide configuration stored in `system_configs` table
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemConfigs {
@@ -146,6 +163,13 @@ pub struct SystemConfigs {
     /// Credit purchase configuration (Stripe Price ID for buying credits)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credits: Option<CreditsConfig>,
+    /// Per-manager URL limits (agent manager URL -> max instances). Overrides max_instances_per_manager
+    /// when set for a specific URL. Use normalized URLs matching AGENT_MANAGER_URLS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_instances_by_manager_url: Option<HashMap<String, u64>>,
+    /// Auto-routing configuration for `model: "auto"` requests
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_route: Option<AutoRouteConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -155,6 +179,8 @@ pub struct PartialSystemConfigs {
     pub subscription_plans: Option<HashMap<String, SubscriptionPlanConfig>>,
     pub max_instances_per_manager: Option<u64>,
     pub credits: Option<CreditsConfig>,
+    pub max_instances_by_manager_url: Option<HashMap<String, u64>>,
+    pub auto_route: Option<AutoRouteConfig>,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -166,6 +192,8 @@ impl Default for SystemConfigs {
             subscription_plans: None,
             max_instances_per_manager: Some(200),
             credits: None,
+            max_instances_by_manager_url: None,
+            auto_route: None,
         }
     }
 }
@@ -180,7 +208,35 @@ impl SystemConfigs {
                 .max_instances_per_manager
                 .or(self.max_instances_per_manager),
             credits: partial.credits.or(self.credits),
+            max_instances_by_manager_url: partial
+                .max_instances_by_manager_url
+                .or(self.max_instances_by_manager_url),
+            auto_route: partial.auto_route.or(self.auto_route),
         }
+    }
+
+    /// Returns the max instances limit for a given agent manager URL.
+    /// Checks URL-specific limits first (match by exact or normalized URL without trailing slash),
+    /// then falls back to the global max_instances_per_manager.
+    pub fn max_instances_for_manager(&self, manager_url: &str) -> Option<u64> {
+        if let Some(ref per_url) = self.max_instances_by_manager_url {
+            if let Some(&v) = per_url.get(manager_url) {
+                return Some(v);
+            }
+
+            let normalized = manager_url.trim_end_matches('/');
+            if normalized != manager_url {
+                if let Some(&v) = per_url.get(normalized) {
+                    return Some(v);
+                }
+            } else {
+                let with_slash = format!("{}/", manager_url);
+                if let Some(&v) = per_url.get(&with_slash) {
+                    return Some(v);
+                }
+            }
+        }
+        self.max_instances_per_manager
     }
 }
 
@@ -208,4 +264,76 @@ pub trait SystemConfigsService: Send + Sync {
 
     /// Partially update system configs
     async fn update_configs(&self, configs: PartialSystemConfigs) -> anyhow::Result<SystemConfigs>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn configs_with_per_url(entries: Vec<(&str, u64)>, global: Option<u64>) -> SystemConfigs {
+        let mut per_url = std::collections::HashMap::new();
+        for (url, limit) in entries {
+            per_url.insert(url.to_string(), limit);
+        }
+        SystemConfigs {
+            max_instances_per_manager: global,
+            max_instances_by_manager_url: Some(per_url),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_max_instances_exact_match() {
+        let c = configs_with_per_url(vec![("https://mgr.example.com", 10)], Some(200));
+        assert_eq!(
+            c.max_instances_for_manager("https://mgr.example.com"),
+            Some(10)
+        );
+    }
+
+    #[test]
+    fn test_max_instances_trailing_slash_in_query() {
+        let c = configs_with_per_url(vec![("https://mgr.example.com", 10)], Some(200));
+        assert_eq!(
+            c.max_instances_for_manager("https://mgr.example.com/"),
+            Some(10)
+        );
+    }
+
+    #[test]
+    fn test_max_instances_trailing_slash_in_config() {
+        let c = configs_with_per_url(vec![("https://mgr.example.com/", 10)], Some(200));
+        assert_eq!(
+            c.max_instances_for_manager("https://mgr.example.com"),
+            Some(10)
+        );
+    }
+
+    #[test]
+    fn test_max_instances_falls_back_to_global() {
+        let c = configs_with_per_url(vec![("https://other.example.com", 10)], Some(200));
+        assert_eq!(
+            c.max_instances_for_manager("https://mgr.example.com"),
+            Some(200)
+        );
+    }
+
+    #[test]
+    fn test_max_instances_falls_back_to_global_default() {
+        let c = SystemConfigs::default();
+        assert_eq!(
+            c.max_instances_for_manager("https://mgr.example.com"),
+            Some(200)
+        );
+    }
+
+    #[test]
+    fn test_max_instances_no_global_no_per_url() {
+        let c = SystemConfigs {
+            max_instances_per_manager: None,
+            max_instances_by_manager_url: None,
+            ..Default::default()
+        };
+        assert_eq!(c.max_instances_for_manager("https://mgr.example.com"), None);
+    }
 }

@@ -1,6 +1,7 @@
 pub mod agent_repository;
 pub mod analytics_repository;
 pub mod app_config_repository;
+pub mod bi_metrics_repository;
 pub mod conversation_repository;
 pub mod conversation_share_repository;
 pub mod credits_repository;
@@ -20,6 +21,7 @@ pub mod user_usage_repository;
 pub use agent_repository::PostgresAgentRepository;
 pub use analytics_repository::PostgresAnalyticsRepository;
 pub use app_config_repository::PostgresAppConfigRepository;
+pub use bi_metrics_repository::PostgresBiMetricsRepository;
 pub use conversation_repository::PostgresConversationRepository;
 pub use conversation_share_repository::PostgresConversationShareRepository;
 pub use credits_repository::PostgresCreditsRepository;

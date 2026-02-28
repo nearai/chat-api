@@ -1,3 +1,4 @@
+use super::is_valid_service_type;
 use crate::{error::ApiError, middleware::AuthenticatedUser, models::*, state::AppState};
 use axum::{
     extract::{Extension, Path, Query, State},
@@ -23,6 +24,9 @@ pub struct CreateInstanceRequest {
     /// SSH public key (optional)
     #[serde(default)]
     pub ssh_pubkey: Option<String>,
+    /// Service type preset, e.g. "ironclaw" (optional)
+    #[serde(default)]
+    pub service_type: Option<String>,
 }
 
 /// Helper to create SSE streaming response for instance creation
@@ -32,11 +36,19 @@ async fn create_instance_streaming_response(
     image: Option<String>,
     name: Option<String>,
     ssh_pubkey: Option<String>,
+    service_type: Option<String>,
     max_allowed: u64,
 ) -> Result<Response, ApiError> {
     let rx = app_state
         .agent_service
-        .create_instance_from_agent_api_streaming(user_id, image, name, ssh_pubkey, max_allowed)
+        .create_instance_from_agent_api_streaming(
+            user_id,
+            image,
+            name,
+            ssh_pubkey,
+            service_type,
+            max_allowed,
+        )
         .await
         .map_err(|e| {
             tracing::error!("Failed to start instance creation stream: {}", e);
@@ -77,6 +89,7 @@ async fn create_instance_streaming_response(
         .header("content-type", "text/event-stream")
         .header("cache-control", "no-cache")
         .header("connection", "keep-alive")
+        .header("x-accel-buffering", "no")
         .body(body)
         .map_err(|e| {
             tracing::error!("Failed to build SSE response: {}", e);
@@ -115,6 +128,17 @@ pub async fn create_instance(
     Json(request): Json<CreateInstanceRequest>,
 ) -> Result<Response, ApiError> {
     tracing::info!("Creating agent instance: user_id={}", user.user_id);
+
+    // Validate service_type if provided
+    if let Some(service_type) = request.service_type.as_deref() {
+        if !is_valid_service_type(service_type) {
+            return Err(ApiError::new(
+                axum::http::StatusCode::BAD_REQUEST,
+                "invalid_service_type",
+                "Service type must be 'openclaw' or 'ironclaw'",
+            ));
+        }
+    }
 
     // Get user's active subscriptions
     let subscriptions = app_state
@@ -207,6 +231,7 @@ pub async fn create_instance(
             request.image,
             request.name,
             request.ssh_pubkey,
+            request.service_type,
             max_allowed,
         )
         .await
@@ -218,6 +243,7 @@ pub async fn create_instance(
                 request.image,
                 request.name,
                 request.ssh_pubkey,
+                request.service_type,
             )
             .await
             .map_err(|e| {
@@ -682,6 +708,11 @@ pub fn create_agent_router() -> Router<AppState> {
         .route("/instances/{id}/start", post(start_instance))
         .route("/instances/{id}/stop", post(stop_instance))
         .route("/instances/{id}/restart", post(restart_instance))
+        .route("/instances/{id}/upgrade", post(upgrade_instance))
+        .route(
+            "/instances/{id}/upgrade-available",
+            get(check_upgrade_available),
+        )
         .route("/instances/{id}", delete(delete_instance))
 }
 
@@ -955,4 +986,179 @@ pub async fn restart_instance(
         .status(StatusCode::OK)
         .body(axum::body::Body::empty())
         .map_err(|_| ApiError::internal_server_error("Failed to construct response"))
+}
+
+/// Upgrade an agent instance to the latest image
+#[utoipa::path(
+    post,
+    path = "/v1/agents/instances/{id}/upgrade",
+    tag = "Agents",
+    params(
+        ("id" = String, Path, description = "Instance ID")
+    ),
+    responses(
+        (status = 200, description = "SSE stream of upgrade progress"),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - not your instance", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "Instance not found", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(("session_token" = []))
+)]
+pub async fn upgrade_instance(
+    State(app_state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(instance_id): Path<String>,
+) -> Result<Response, ApiError> {
+    let instance_uuid = Uuid::parse_str(&instance_id)
+        .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
+
+    tracing::debug!(
+        "Upgrading instance: instance_id={}, user_id={}",
+        instance_uuid,
+        user.user_id
+    );
+
+    let instance = app_state
+        .agent_repository
+        .get_instance(instance_uuid)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to fetch instance: instance_id={}, error={}",
+                instance_uuid,
+                e
+            );
+            ApiError::internal_server_error("Failed to fetch instance")
+        })?
+        .ok_or_else(|| ApiError::not_found("Instance not found"))?;
+
+    if instance.user_id != user.user_id {
+        return Err(ApiError::forbidden("This instance does not belong to you"));
+    }
+
+    let rx = app_state
+        .agent_service
+        .upgrade_instance_stream(instance_uuid, user.user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to start upgrade stream: instance_id={}, error={}",
+                instance_uuid,
+                e
+            );
+            ApiError::internal_server_error("Failed to upgrade instance")
+        })?;
+
+    use futures::stream::StreamExt;
+    use tokio_stream::wrappers::ReceiverStream;
+
+    let stream = ReceiverStream::new(rx).then(|chunk_result| async move {
+        match chunk_result {
+            Ok(bytes) => Ok::<_, anyhow::Error>(bytes),
+            Err(e) => {
+                tracing::error!("Error in upgrade stream: {}", e);
+                let error_json = serde_json::json!({
+                    "error": "Upgrade failed",
+                    "code": "UPGRADE_STREAM_ERROR"
+                })
+                .to_string();
+                Ok(axum::body::Bytes::from(format!("data: {}\n\n", error_json)))
+            }
+        }
+    });
+
+    let body = axum::body::Body::from_stream(stream);
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/event-stream")
+        .header("cache-control", "no-cache")
+        .header("connection", "keep-alive")
+        .header("x-accel-buffering", "no")
+        .body(body)
+        .map_err(|_| ApiError::internal_server_error("Failed to construct response"))
+}
+
+/// Check if an upgrade is available for an agent instance
+#[utoipa::path(
+    get,
+    path = "/v1/agents/instances/{id}/upgrade-available",
+    tag = "Agents",
+    params(
+        ("id" = String, Path, description = "Instance ID")
+    ),
+    responses(
+        (status = 200, description = "Upgrade availability info", body = crate::routes::agents::UpgradeAvailabilityResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - not your instance", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "Instance not found", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(("session_token" = []))
+)]
+pub async fn check_upgrade_available(
+    State(app_state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(instance_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let instance_uuid = Uuid::parse_str(&instance_id)
+        .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
+
+    tracing::debug!(
+        "Checking upgrade availability: instance_id={}, user_id={}",
+        instance_uuid,
+        user.user_id
+    );
+
+    let instance = app_state
+        .agent_repository
+        .get_instance(instance_uuid)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to fetch instance: instance_id={}, error={}",
+                instance_uuid,
+                e
+            );
+            ApiError::internal_server_error("Failed to fetch instance")
+        })?
+        .ok_or_else(|| ApiError::not_found("Instance not found"))?;
+
+    if instance.user_id != user.user_id {
+        return Err(ApiError::forbidden("This instance does not belong to you"));
+    }
+
+    let upgrade_info = app_state
+        .agent_service
+        .check_upgrade_available(instance_uuid, user.user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to check upgrade availability: instance_id={}, error={}",
+                instance_uuid,
+                e
+            );
+            ApiError::internal_server_error("Failed to check upgrade availability")
+        })?;
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            serde_json::to_string(&UpgradeAvailabilityResponse {
+                has_upgrade: upgrade_info.has_upgrade,
+                current_image: upgrade_info.current_image,
+                latest_image: upgrade_info.latest_image,
+            })
+            .map_err(|_| ApiError::internal_server_error("Failed to serialize response"))?,
+        ))
+        .map_err(|_| ApiError::internal_server_error("Failed to construct response"))
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct UpgradeAvailabilityResponse {
+    pub has_upgrade: bool,
+    pub current_image: Option<String>,
+    pub latest_image: String,
 }
