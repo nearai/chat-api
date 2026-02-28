@@ -33,7 +33,6 @@ impl CreditsRepository for PostgresCreditsRepository {
         txn: &tokio_postgres::Transaction<'_>,
         user_id: UserId,
         amount: i64,
-        _reference_id: Option<&str>,
     ) -> anyhow::Result<i64> {
         let row = txn
             .query_one(
@@ -70,9 +69,10 @@ impl CreditsRepository for PostgresCreditsRepository {
         match result {
             Ok(n) => Ok(n == 1),
             Err(e) => {
-                let msg = e.to_string();
-                if msg.contains("23505") || msg.contains("duplicate key") {
-                    return Ok(false);
+                if let Some(db_err) = e.code() {
+                    if *db_err == tokio_postgres::error::SqlState::UNIQUE_VIOLATION {
+                        return Ok(false);
+                    }
                 }
                 Err(e.into())
             }

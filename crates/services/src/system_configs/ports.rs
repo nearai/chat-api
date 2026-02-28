@@ -99,7 +99,11 @@ pub struct SubscriptionPlanConfig {
     /// Agent instance limits (e.g. { "max": 1 })
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_instances: Option<PlanLimitConfig>,
-    /// Monthly credit limits (e.g. { "max": 1000000 }). Used for quota enforcement.
+    /// Monthly token limits (e.g. { "max": 1000000 }). Kept for backward compatibility.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub monthly_tokens: Option<PlanLimitConfig>,
+    /// Monthly credit limits in nano-USD (e.g. { "max": 1000000000 } = $1). Used for quota enforcement.
+    /// When set, takes precedence over monthly_tokens.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub monthly_credits: Option<PlanLimitConfig>,
 }

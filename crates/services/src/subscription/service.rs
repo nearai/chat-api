@@ -972,67 +972,81 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 .and_then(|o| o.get("mode"))
                 .and_then(|m| m.as_str());
             if mode == Some("payment") {
-                let metadata = obj
+                let payment_status = obj
                     .as_ref()
-                    .and_then(|o| o.get("metadata"))
-                    .and_then(|m| m.as_object());
-                let session_id = obj
-                    .as_ref()
-                    .and_then(|o| o.get("id"))
+                    .and_then(|o| o.get("payment_status"))
                     .and_then(|v| v.as_str());
-                if let (Some(meta), Some(sid)) = (metadata, session_id) {
-                    let user_id_str = meta.get("user_id").and_then(|v| v.as_str());
-                    let credits_str = meta.get("credits").and_then(|v| v.as_str());
-                    if let (Some(uid), Some(cr)) = (user_id_str, credits_str) {
-                        match (uuid::Uuid::parse_str(uid), cr.parse::<i64>()) {
-                            (Ok(uuid), Ok(credits)) if credits > 0 => {
-                                let user_id = UserId(uuid);
-                                let inserted = self
-                                    .credits_repo
-                                    .try_record_purchase(&txn, user_id, credits, sid)
-                                    .await
-                                    .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-                                if inserted {
-                                    self.credits_repo
-                                        .add_credits(&txn, user_id, credits, Some(sid))
+                if payment_status != Some("paid") {
+                    tracing::warn!(
+                        "Skipping credit purchase: payment_status={:?} (expected 'paid')",
+                        payment_status
+                    );
+                    None
+                } else {
+                    let metadata = obj
+                        .as_ref()
+                        .and_then(|o| o.get("metadata"))
+                        .and_then(|m| m.as_object());
+                    let session_id = obj
+                        .as_ref()
+                        .and_then(|o| o.get("id"))
+                        .and_then(|v| v.as_str());
+                    if let (Some(meta), Some(sid)) = (metadata, session_id) {
+                        let user_id_str = meta.get("user_id").and_then(|v| v.as_str());
+                        let credits_str = meta.get("credits").and_then(|v| v.as_str());
+                        if let (Some(uid), Some(cr)) = (user_id_str, credits_str) {
+                            match (uuid::Uuid::parse_str(uid), cr.parse::<i64>()) {
+                                (Ok(uuid), Ok(credits)) if credits > 0 => {
+                                    let user_id = UserId(uuid);
+                                    let inserted = self
+                                        .credits_repo
+                                        .try_record_purchase(&txn, user_id, credits, sid)
                                         .await
                                         .map_err(|e| {
                                             SubscriptionError::DatabaseError(e.to_string())
                                         })?;
-                                    tracing::info!(
-                                        "Credits added for user_id={}, amount={}",
-                                        user_id,
-                                        credits
-                                    );
-                                    Some(user_id)
-                                } else {
-                                    tracing::info!(
+                                    if inserted {
+                                        self.credits_repo
+                                            .add_credits(&txn, user_id, credits)
+                                            .await
+                                            .map_err(|e| {
+                                                SubscriptionError::DatabaseError(e.to_string())
+                                            })?;
+                                        tracing::info!(
+                                            "Credits added for user_id={}, amount={}",
+                                            user_id,
+                                            credits
+                                        );
+                                        Some(user_id)
+                                    } else {
+                                        tracing::info!(
                                         "Credit purchase already processed (duplicate): session_id={}",
                                         sid
                                     );
-                                    None
+                                        None
+                                    }
                                 }
-                            }
-                            _ => {
-                                tracing::warn!(
+                                _ => {
+                                    tracing::warn!(
                                     "Invalid user_id or credits in checkout.session.completed: user_id={:?}, credits={:?}",
                                     user_id_str, credits_str
                                 );
-                                None
+                                    None
+                                }
                             }
+                        } else {
+                            tracing::warn!(
+                            "Missing user_id or credits in checkout.session.completed payment metadata"
+                        );
+                            None
                         }
                     } else {
                         tracing::warn!(
-                            "Missing user_id or credits in checkout.session.completed payment metadata"
+                            "Missing metadata or id in checkout.session.completed payment event"
                         );
                         None
                     }
-                } else {
-                    tracing::warn!(
-                        "Missing metadata or id in checkout.session.completed payment event"
-                    );
-                    None
-                }
+                } // close payment_status == "paid" else block
             } else {
                 None
             }
@@ -1291,7 +1305,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     .get_balance(user_id)
                     .await
                     .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-                let max_credits = plan_credits + purchased as u64;
+                let max_credits = plan_credits.saturating_add(purchased.max(0) as u64);
 
                 {
                     let mut cache_guard = self.credit_limit_cache.write().await;
@@ -1465,10 +1479,17 @@ impl SubscriptionService for SubscriptionServiceImpl {
         success_url: String,
         cancel_url: String,
     ) -> Result<String, SubscriptionError> {
+        const MAX_CREDITS_PER_PURCHASE: u64 = 1_000_000_000;
         if credits == 0 {
             return Err(SubscriptionError::InvalidCredits(
                 "credits must be positive".to_string(),
             ));
+        }
+        if credits > MAX_CREDITS_PER_PURCHASE {
+            return Err(SubscriptionError::InvalidCredits(format!(
+                "credits exceeds maximum of {} per purchase",
+                MAX_CREDITS_PER_PURCHASE
+            )));
         }
 
         let configs = self
@@ -1583,7 +1604,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .map(|s| s.cost_nano_usd)
             .unwrap_or(0);
 
-        let effective_max_credits = plan_credits as i64 + balance;
+        let effective_max_credits = (plan_credits as i64).saturating_add(balance);
 
         Ok(CreditsSummary {
             balance,

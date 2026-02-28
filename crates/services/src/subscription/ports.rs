@@ -223,7 +223,6 @@ pub trait CreditsRepository: Send + Sync {
         txn: &tokio_postgres::Transaction<'_>,
         user_id: UserId,
         amount: i64,
-        reference_id: Option<&str>,
     ) -> anyhow::Result<i64>;
 
     /// Record a credit transaction (for audit/idempotency). Returns false if duplicate.

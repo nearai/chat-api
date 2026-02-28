@@ -99,6 +99,24 @@ pub async fn subscription_middleware(
             )
                 .into_response())
         }
+        Err(SubscriptionError::MonthlyTokenLimitExceeded { used, limit }) => {
+            tracing::info!(
+                "Blocked proxy access for user_id={}: monthly token limit exceeded (used {} of {})",
+                user.user_id,
+                used,
+                limit
+            );
+            Err((
+                StatusCode::PAYMENT_REQUIRED,
+                Json(SubscriptionErrorResponse {
+                    error: format!(
+                        "{} You have used {} of {} tokens this period.",
+                        MONTHLY_CREDIT_LIMIT_EXCEEDED_MESSAGE, used, limit
+                    ),
+                }),
+            )
+                .into_response())
+        }
         Err(e) => {
             tracing::error!(
                 "Failed to check subscription status for user_id={}: {}",

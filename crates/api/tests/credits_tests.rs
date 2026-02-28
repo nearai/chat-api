@@ -1,19 +1,23 @@
 mod common;
 
-use common::{create_test_server, mock_login, set_credits_config, set_subscription_plans};
+use common::{
+    clear_credits_config, create_test_server, create_test_server_and_db, mock_login,
+    set_credits_config, set_subscription_plans, TestServerConfig,
+};
 use serde_json::json;
 use serial_test::serial;
 
 /// Ensure Stripe env vars are set (needed for subscription/credits service to not return NotConfigured).
 fn ensure_stripe_env() {
-    std::env::set_var(
-        "STRIPE_SECRET_KEY",
-        std::env::var("STRIPE_SECRET_KEY").unwrap_or_else(|_| "sk_test_dummy".to_string()),
-    );
-    std::env::set_var(
-        "STRIPE_WEBHOOK_SECRET",
-        std::env::var("STRIPE_WEBHOOK_SECRET").unwrap_or_else(|_| "whsec_dummy".to_string()),
-    );
+    if std::env::var("STRIPE_SECRET_KEY").is_err() {
+        std::env::set_var("STRIPE_SECRET_KEY", "sk_test_dummy");
+    }
+    if std::env::var("STRIPE_WEBHOOK_SECRET").is_err() {
+        std::env::set_var("STRIPE_WEBHOOK_SECRET", "whsec_dummy");
+    }
+    if std::env::var("AGENT_API_TOKEN").is_err() {
+        std::env::set_var("AGENT_API_TOKEN", "test_token");
+    }
 }
 
 #[tokio::test]
@@ -100,7 +104,8 @@ async fn test_post_credits_checkout_requires_auth() {
 #[serial(credits_tests)]
 async fn test_post_credits_checkout_01_not_configured() {
     ensure_stripe_env();
-    let server = create_test_server().await;
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+    clear_credits_config(&db).await;
 
     let user_email = "test_credits_not_configured@example.com";
     let user_token = mock_login(&server, user_email).await;
@@ -122,10 +127,12 @@ async fn test_post_credits_checkout_01_not_configured() {
         }))
         .await;
 
+    let status = response.status_code();
+    let body = response.text();
     assert_eq!(
-        response.status_code(),
-        503,
-        "POST /v1/credits should return 503 when credits not configured"
+        status, 503,
+        "POST /v1/credits should return 503 when credits not configured, body: {}",
+        body
     );
 }
 

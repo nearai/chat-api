@@ -25,3 +25,6 @@ CREATE TABLE credit_transactions (
 -- Partial unique index: prevents double-credit on webhook retries for purchases
 CREATE UNIQUE INDEX idx_credit_transactions_purchase_ref
     ON credit_transactions(reference_id) WHERE type = 'purchase' AND reference_id IS NOT NULL;
+
+-- Index for querying transactions by user
+CREATE INDEX idx_credit_transactions_user_id ON credit_transactions(user_id);

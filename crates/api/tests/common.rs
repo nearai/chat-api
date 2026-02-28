@@ -466,6 +466,17 @@ pub async fn set_subscription_plans(server: &TestServer, plans: serde_json::Valu
     );
 }
 
+pub async fn clear_credits_config(db: &database::Database) {
+    let client = db.pool().get().await.expect("DB pool");
+    client
+        .execute(
+            "UPDATE system_configs SET value = value - 'credits' WHERE key = 'config'",
+            &[],
+        )
+        .await
+        .ok();
+}
+
 /// Set credits configuration (credit_price_id for Stripe)
 /// Must be called before tests that need credit purchase checkout.
 pub async fn set_credits_config(server: &axum_test::TestServer, credit_price_id: &str) {

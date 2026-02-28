@@ -1672,7 +1672,7 @@ impl AgentService for AgentServiceImpl {
             .filter(|i| i.status != "deleted")
             .collect();
 
-        let filtered_count = total as usize - instances.len();
+        let filtered_count = (total as usize).saturating_sub(instances.len());
         if filtered_count > 0 {
             tracing::debug!(
                 "sync_all_instance_statuses: filtered out {} deleted instances",

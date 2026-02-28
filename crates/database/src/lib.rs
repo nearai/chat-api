@@ -11,10 +11,9 @@ pub use repositories::{
     PostgresBiMetricsRepository, PostgresConversationRepository,
     PostgresConversationShareRepository, PostgresCreditsRepository, PostgresFileRepository,
     PostgresModelRepository, PostgresNearNonceRepository, PostgresOAuthRepository,
-    PostgresPaymentWebhookRepository, PostgresSessionRepository,
-    PostgresStripeCustomerRepository, PostgresSubscriptionRepository,
-    PostgresSystemConfigsRepository, PostgresUserRepository, PostgresUserSettingsRepository,
-    PostgresUserUsageRepository,
+    PostgresPaymentWebhookRepository, PostgresSessionRepository, PostgresStripeCustomerRepository,
+    PostgresSubscriptionRepository, PostgresSystemConfigsRepository, PostgresUserRepository,
+    PostgresUserSettingsRepository, PostgresUserUsageRepository,
 };
 
 use crate::pool::create_pool_with_native_tls;
