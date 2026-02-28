@@ -88,7 +88,7 @@ impl AgentServiceImpl {
 
     /// Pick the next manager in round-robin order for new instance creation.
     /// Does NOT check capacity — use `next_available_manager` for capacity-aware selection.
-    #[allow(dead_code)] // used by tests
+    #[cfg(test)]
     fn next_manager(&self) -> &AgentManager {
         let idx = self.round_robin_counter.fetch_add(1, Ordering::Relaxed);
         &self.managers[idx % self.managers.len()]
@@ -131,7 +131,7 @@ impl AgentServiceImpl {
             );
         }
 
-        Err(anyhow!("All agent managers are at capacity"))
+        Err(anyhow!("All {} agent manager(s) are at capacity", n))
     }
 
     /// Resolve the manager for an existing instance.

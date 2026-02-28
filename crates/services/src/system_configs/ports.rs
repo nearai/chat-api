@@ -206,9 +206,18 @@ impl SystemConfigs {
     /// then falls back to the global max_instances_per_manager.
     pub fn max_instances_for_manager(&self, manager_url: &str) -> Option<u64> {
         if let Some(ref per_url) = self.max_instances_by_manager_url {
-            let needle = manager_url.trim_end_matches('/');
-            for (k, &v) in per_url {
-                if k.trim_end_matches('/') == needle {
+            if let Some(&v) = per_url.get(manager_url) {
+                return Some(v);
+            }
+
+            let normalized = manager_url.trim_end_matches('/');
+            if normalized != manager_url {
+                if let Some(&v) = per_url.get(normalized) {
+                    return Some(v);
+                }
+            } else {
+                let with_slash = format!("{}/", manager_url);
+                if let Some(&v) = per_url.get(&with_slash) {
                     return Some(v);
                 }
             }
@@ -241,4 +250,76 @@ pub trait SystemConfigsService: Send + Sync {
 
     /// Partially update system configs
     async fn update_configs(&self, configs: PartialSystemConfigs) -> anyhow::Result<SystemConfigs>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn configs_with_per_url(entries: Vec<(&str, u64)>, global: Option<u64>) -> SystemConfigs {
+        let mut per_url = std::collections::HashMap::new();
+        for (url, limit) in entries {
+            per_url.insert(url.to_string(), limit);
+        }
+        SystemConfigs {
+            max_instances_per_manager: global,
+            max_instances_by_manager_url: Some(per_url),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_max_instances_exact_match() {
+        let c = configs_with_per_url(vec![("https://mgr.example.com", 10)], Some(200));
+        assert_eq!(
+            c.max_instances_for_manager("https://mgr.example.com"),
+            Some(10)
+        );
+    }
+
+    #[test]
+    fn test_max_instances_trailing_slash_in_query() {
+        let c = configs_with_per_url(vec![("https://mgr.example.com", 10)], Some(200));
+        assert_eq!(
+            c.max_instances_for_manager("https://mgr.example.com/"),
+            Some(10)
+        );
+    }
+
+    #[test]
+    fn test_max_instances_trailing_slash_in_config() {
+        let c = configs_with_per_url(vec![("https://mgr.example.com/", 10)], Some(200));
+        assert_eq!(
+            c.max_instances_for_manager("https://mgr.example.com"),
+            Some(10)
+        );
+    }
+
+    #[test]
+    fn test_max_instances_falls_back_to_global() {
+        let c = configs_with_per_url(vec![("https://other.example.com", 10)], Some(200));
+        assert_eq!(
+            c.max_instances_for_manager("https://mgr.example.com"),
+            Some(200)
+        );
+    }
+
+    #[test]
+    fn test_max_instances_falls_back_to_global_default() {
+        let c = SystemConfigs::default();
+        assert_eq!(
+            c.max_instances_for_manager("https://mgr.example.com"),
+            Some(200)
+        );
+    }
+
+    #[test]
+    fn test_max_instances_no_global_no_per_url() {
+        let c = SystemConfigs {
+            max_instances_per_manager: None,
+            max_instances_by_manager_url: None,
+            ..Default::default()
+        };
+        assert_eq!(c.max_instances_for_manager("https://mgr.example.com"), None);
+    }
 }
