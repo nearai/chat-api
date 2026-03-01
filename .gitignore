@@ -21,3 +21,4 @@ crates/api/frontend/
 # Reproducible build artifacts
 .GIT_REV
 oci.tar
+false/

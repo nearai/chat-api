@@ -6,8 +6,8 @@ use api::routes::api::{
 };
 use chrono::Duration;
 use common::{
-    create_test_server, create_test_server_and_db, create_test_server_with_config, mock_login,
-    restrictive_rate_limit_config, TestServerConfig,
+    clear_subscription_plans, create_test_server, create_test_server_and_db,
+    create_test_server_with_config, mock_login, restrictive_rate_limit_config, TestServerConfig,
 };
 use futures::future::join_all;
 use serde_json::json;
@@ -386,7 +386,18 @@ async fn test_chat_completions_near_balance_allows_rich_account() {
 /// Test NEAR balance blocks poor account for /v1/chat/completions
 #[tokio::test]
 async fn test_chat_completions_near_balance_blocks_poor_account() {
-    let server = create_test_server().await;
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+    clear_subscription_plans(&server).await;
+
+    // Clear any leftover bans from previous test runs
+    let client = db.pool().get().await.expect("DB pool");
+    client
+        .execute(
+            "UPDATE user_bans SET revoked_at = NOW() WHERE revoked_at IS NULL AND ban_type = 'near_balance_low'",
+            &[],
+        )
+        .await
+        .ok();
 
     // Use a different account than near_balance_tests to avoid conflicts
     // Real account in mainnet with zero balance

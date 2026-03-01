@@ -1,6 +1,7 @@
 use super::ports::{
-    PaymentWebhookRepository, StripeCustomerRepository, Subscription, SubscriptionError,
-    SubscriptionPlan, SubscriptionRepository, SubscriptionService, SubscriptionWithPlan,
+    CreditsRepository, CreditsSummary, PaymentWebhookRepository, StripeCustomerRepository,
+    Subscription, SubscriptionError, SubscriptionPlan, SubscriptionRepository, SubscriptionService,
+    SubscriptionWithPlan,
 };
 use crate::agent::ports::AgentRepository;
 use crate::system_configs::ports::{SubscriptionPlanConfig, SystemConfigsService};
@@ -26,6 +27,7 @@ pub struct SubscriptionServiceConfig {
     pub stripe_customer_repo: Arc<dyn StripeCustomerRepository>,
     pub subscription_repo: Arc<dyn SubscriptionRepository>,
     pub webhook_repo: Arc<dyn PaymentWebhookRepository>,
+    pub credits_repo: Arc<dyn CreditsRepository>,
     pub system_configs_service: Arc<dyn SystemConfigsService>,
     pub user_repository: Arc<dyn UserRepository>,
     pub user_usage_repo: Arc<dyn UserUsageRepository>,
@@ -34,28 +36,31 @@ pub struct SubscriptionServiceConfig {
     pub stripe_webhook_secret: String,
 }
 
-/// Cached token limit for a user. Invalid after TTL_CACHE_SECS (10 mins) or when plan changes.
-struct CachedTokenLimit {
-    max_tokens: u64,
+/// Cached credit limit for a user. Invalid after TTL_CACHE_SECS (10 mins) or when plan/credits change.
+struct CachedCreditLimit {
+    max_credits: u64, // plan_monthly_credits + purchased_balance
     period_start: chrono::DateTime<Utc>,
     period_end: chrono::DateTime<Utc>,
     cached_at: Instant,
 }
 
 const TTL_CACHE_SECS: u64 = 600; // 10 minutes
+/// Default monthly credits when plan has no monthly_credits config. 1 USD in nano-dollars ($1 = 1_000_000_000).
+const DEFAULT_MONTHLY_CREDITS_NANO_USD: u64 = 1_000_000_000;
 
 pub struct SubscriptionServiceImpl {
     db_pool: deadpool_postgres::Pool,
     stripe_customer_repo: Arc<dyn StripeCustomerRepository>,
     subscription_repo: Arc<dyn SubscriptionRepository>,
     webhook_repo: Arc<dyn PaymentWebhookRepository>,
+    credits_repo: Arc<dyn CreditsRepository>,
     system_configs_service: Arc<dyn SystemConfigsService>,
     user_repository: Arc<dyn UserRepository>,
     user_usage_repo: Arc<dyn UserUsageRepository>,
     agent_repo: Arc<dyn AgentRepository>,
     stripe_secret_key: String,
     stripe_webhook_secret: String,
-    token_limit_cache: Arc<RwLock<HashMap<UserId, CachedTokenLimit>>>,
+    credit_limit_cache: Arc<RwLock<HashMap<UserId, CachedCreditLimit>>>,
 }
 
 impl SubscriptionServiceImpl {
@@ -65,21 +70,22 @@ impl SubscriptionServiceImpl {
             stripe_customer_repo: config.stripe_customer_repo,
             subscription_repo: config.subscription_repo,
             webhook_repo: config.webhook_repo,
+            credits_repo: config.credits_repo,
             system_configs_service: config.system_configs_service,
             user_repository: config.user_repository,
             user_usage_repo: config.user_usage_repo,
             agent_repo: config.agent_repo,
             stripe_secret_key: config.stripe_secret_key,
             stripe_webhook_secret: config.stripe_webhook_secret,
-            token_limit_cache: Arc::new(RwLock::new(HashMap::new())),
+            credit_limit_cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    /// Invalidate token limit cache for a user (e.g. when plan changes via webhook or cancel/resume).
-    async fn invalidate_token_limit_cache(&self, user_id: UserId) {
-        let mut guard = self.token_limit_cache.write().await;
+    /// Invalidate credit limit cache for a user (e.g. when plan/credits change via webhook).
+    async fn invalidate_credit_limit_cache(&self, user_id: UserId) {
+        let mut guard = self.credit_limit_cache.write().await;
         guard.remove(&user_id);
-        tracing::debug!("Invalidated token limit cache for user_id={}", user_id);
+        tracing::debug!("Invalidated credit limit cache for user_id={}", user_id);
     }
 
     /// Get subscription plans for a provider from system configs (lazy loading)
@@ -389,13 +395,13 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .map(|name| {
                 let plan_config = subscription_plans.get(&name);
                 let agent_instances = plan_config.and_then(|c| c.agent_instances.clone());
-                let monthly_tokens = plan_config.and_then(|c| c.monthly_tokens.clone());
+                let monthly_credits = plan_config.and_then(|c| c.monthly_credits.clone());
                 let trial_period_days = plan_config.and_then(|c| c.trial_period_days);
                 SubscriptionPlan {
                     name,
                     trial_period_days,
                     agent_instances,
-                    monthly_tokens,
+                    monthly_credits,
                 }
             })
             .collect();
@@ -580,7 +586,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
         // Invalidate cache before commit so no request sees stale cache after DB is updated
-        self.invalidate_token_limit_cache(user_id).await;
+        self.invalidate_credit_limit_cache(user_id).await;
 
         txn.commit()
             .await
@@ -646,7 +652,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
         // Invalidate cache before commit so no request sees stale cache after DB is updated
-        self.invalidate_token_limit_cache(user_id).await;
+        self.invalidate_credit_limit_cache(user_id).await;
 
         txn.commit()
             .await
@@ -778,7 +784,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
-        self.invalidate_token_limit_cache(user_id).await;
+        self.invalidate_credit_limit_cache(user_id).await;
 
         txn.commit()
             .await
@@ -955,6 +961,99 @@ impl SubscriptionService for SubscriptionServiceImpl {
             return Ok(());
         }
 
+        // For checkout.session.completed with mode=payment: process credit purchase (no Stripe API call)
+        let credit_purchase_user_id = if event_type == "checkout.session.completed" {
+            let obj = payload_json
+                .get("data")
+                .and_then(|d| d.get("object"))
+                .and_then(|o| o.as_object());
+            let mode = obj
+                .as_ref()
+                .and_then(|o| o.get("mode"))
+                .and_then(|m| m.as_str());
+            if mode == Some("payment") {
+                let payment_status = obj
+                    .as_ref()
+                    .and_then(|o| o.get("payment_status"))
+                    .and_then(|v| v.as_str());
+                if payment_status != Some("paid") {
+                    tracing::warn!(
+                        "Skipping credit purchase: payment_status={:?} (expected 'paid')",
+                        payment_status
+                    );
+                    None
+                } else {
+                    let metadata = obj
+                        .as_ref()
+                        .and_then(|o| o.get("metadata"))
+                        .and_then(|m| m.as_object());
+                    let session_id = obj
+                        .as_ref()
+                        .and_then(|o| o.get("id"))
+                        .and_then(|v| v.as_str());
+                    if let (Some(meta), Some(sid)) = (metadata, session_id) {
+                        let user_id_str = meta.get("user_id").and_then(|v| v.as_str());
+                        let credits_str = meta.get("credits").and_then(|v| v.as_str());
+                        if let (Some(uid), Some(cr)) = (user_id_str, credits_str) {
+                            match (uuid::Uuid::parse_str(uid), cr.parse::<i64>()) {
+                                (Ok(uuid), Ok(credits)) if credits > 0 => {
+                                    let user_id = UserId(uuid);
+                                    let inserted = self
+                                        .credits_repo
+                                        .try_record_purchase(&txn, user_id, credits, sid)
+                                        .await
+                                        .map_err(|e| {
+                                            SubscriptionError::DatabaseError(e.to_string())
+                                        })?;
+                                    if inserted {
+                                        self.credits_repo
+                                            .add_credits(&txn, user_id, credits)
+                                            .await
+                                            .map_err(|e| {
+                                                SubscriptionError::DatabaseError(e.to_string())
+                                            })?;
+                                        tracing::info!(
+                                            "Credits added for user_id={}, amount={}",
+                                            user_id,
+                                            credits
+                                        );
+                                        Some(user_id)
+                                    } else {
+                                        tracing::info!(
+                                        "Credit purchase already processed (duplicate): session_id={}",
+                                        sid
+                                    );
+                                        None
+                                    }
+                                }
+                                _ => {
+                                    tracing::warn!(
+                                    "Invalid user_id or credits in checkout.session.completed: user_id={:?}, credits={:?}",
+                                    user_id_str, credits_str
+                                );
+                                    None
+                                }
+                            }
+                        } else {
+                            tracing::warn!(
+                            "Missing user_id or credits in checkout.session.completed payment metadata"
+                        );
+                            None
+                        }
+                    } else {
+                        tracing::warn!(
+                            "Missing metadata or id in checkout.session.completed payment event"
+                        );
+                        None
+                    }
+                } // close payment_status == "paid" else block
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         // For subscription events, fetch data from Stripe API (after idempotency check)
         let subscription_data = if is_subscription_event {
             // Extract subscription_id from JSON: data.object.id
@@ -1022,7 +1121,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
         };
 
         // Upsert subscription if we have data
-        let user_id_to_invalidate = if let Some((subscription_id, subscription)) = subscription_data
+        let subscription_user_id = if let Some((subscription_id, subscription)) = subscription_data
         {
             let user_id = subscription.user_id;
             self.subscription_repo
@@ -1045,9 +1144,11 @@ impl SubscriptionService for SubscriptionServiceImpl {
             None
         };
 
+        let user_id_to_invalidate = subscription_user_id.or(credit_purchase_user_id);
+
         // Invalidate cache before commit so no request sees stale cache after DB is updated
         if let Some(user_id) = user_id_to_invalidate {
-            self.invalidate_token_limit_cache(user_id).await;
+            self.invalidate_credit_limit_cache(user_id).await;
         }
 
         // Commit transaction
@@ -1135,18 +1236,18 @@ impl SubscriptionService for SubscriptionServiceImpl {
             Ok(_) => {}
         }
 
-        // 1. Determine max token limit (with 10-min cache unless plan changed)
+        // 1. Determine max credits (plan monthly_credits + purchased). Cache 10 mins.
         let cached_limit = {
-            let cache_guard = self.token_limit_cache.read().await;
+            let cache_guard = self.credit_limit_cache.read().await;
             if let Some(cached) = cache_guard.get(&user_id) {
                 if cached.cached_at.elapsed().as_secs() < TTL_CACHE_SECS {
                     tracing::debug!(
-                        "Using cached token limit for user_id={} (max={}, age_secs={})",
+                        "Using cached credit limit for user_id={} (max={}, age_secs={})",
                         user_id,
-                        cached.max_tokens,
+                        cached.max_credits,
                         cached.cached_at.elapsed().as_secs()
                     );
-                    Some((cached.max_tokens, cached.period_start, cached.period_end))
+                    Some((cached.max_credits, cached.period_start, cached.period_end))
                 } else {
                     None
                 }
@@ -1155,10 +1256,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
             }
         };
 
-        let (max_tokens, period_start, period_end) = match cached_limit {
+        let (max_credits, period_start, period_end) = match cached_limit {
             Some((max, start, end)) => (max, start, end),
             None => {
-                // Cache miss or expired: compute and store
                 let configs = self
                     .system_configs_service
                     .get_configs()
@@ -1168,7 +1268,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     .and_then(|c| c.subscription_plans)
                     .unwrap_or_default();
 
-                let computed = match self
+                let (plan_credits, period_start, period_end) = match self
                     .subscription_repo
                     .get_active_subscription(user_id)
                     .await
@@ -1180,70 +1280,75 @@ impl SubscriptionService for SubscriptionServiceImpl {
                             &sub.price_id,
                             &subscription_plans,
                         );
-                        let max_tokens = subscription_plans
+                        let plan_credits = subscription_plans
                             .get(&plan_name)
-                            .and_then(|c| c.monthly_tokens.as_ref())
+                            .and_then(|c| c.monthly_credits.as_ref())
                             .map(|l| l.max)
-                            .unwrap_or(1_000_000);
+                            .unwrap_or(DEFAULT_MONTHLY_CREDITS_NANO_USD);
                         let period_end = sub.current_period_end;
                         let period_start = sub_one_month_same_day(period_end);
-                        (max_tokens, period_start, period_end)
+                        (plan_credits, period_start, period_end)
                     }
                     None => {
-                        let max_tokens = subscription_plans
+                        let plan_credits = subscription_plans
                             .get("free")
-                            .and_then(|c| c.monthly_tokens.as_ref())
+                            .and_then(|c| c.monthly_credits.as_ref())
                             .map(|l| l.max)
-                            .unwrap_or(1_000_000);
-                        // Free users: calendar month — 00:00 on 1st through 24:00 on last day
+                            .unwrap_or(DEFAULT_MONTHLY_CREDITS_NANO_USD);
                         let (period_start, period_end) = current_calendar_month_period(Utc::now());
-                        (max_tokens, period_start, period_end)
+                        (plan_credits, period_start, period_end)
                     }
                 };
 
-                // Store in cache
+                let purchased = self
+                    .credits_repo
+                    .get_balance(user_id)
+                    .await
+                    .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+                let max_credits = plan_credits.saturating_add(purchased.max(0) as u64);
+
                 {
-                    let mut cache_guard = self.token_limit_cache.write().await;
+                    let mut cache_guard = self.credit_limit_cache.write().await;
                     cache_guard.insert(
                         user_id,
-                        CachedTokenLimit {
-                            max_tokens: computed.0,
-                            period_start: computed.1,
-                            period_end: computed.2,
+                        CachedCreditLimit {
+                            max_credits,
+                            period_start,
+                            period_end,
                             cached_at: Instant::now(),
                         },
                     );
                 }
-                computed
+                (max_credits, period_start, period_end)
             }
         };
 
-        // 2. Get used tokens in the period
-        let used = self
+        // 2. Get used credits (cost_nano_usd) in the period
+        let used_credits = self
             .user_usage_repo
             .get_usage_by_user_id(user_id, Some(period_start), Some(period_end))
             .await
             .map_err(|e| SubscriptionError::InternalError(e.to_string()))?
-            .map(|s| s.token_sum)
+            .map(|s| s.cost_nano_usd)
             .unwrap_or(0);
 
         // 3. Enforce limit
-        if used >= max_tokens as i64 {
+        if used_credits >= max_credits as i64 {
             tracing::info!(
-                "Blocking proxy access for user_id={}: monthly token limit exceeded (used {} of {})",
-                user_id, used, max_tokens
+                "Blocking proxy access for user_id={}: monthly credit limit exceeded (used {} of {})",
+                user_id, used_credits, max_credits
             );
-            return Err(SubscriptionError::MonthlyTokenLimitExceeded {
-                used,
-                limit: max_tokens,
+            return Err(SubscriptionError::MonthlyCreditLimitExceeded {
+                used: used_credits,
+                limit: max_credits,
             });
         }
 
         tracing::debug!(
-            "User user_id={} within token limit (used {} of {}), allowing proxy access",
+            "User user_id={} within credit limit (used {} of {}), allowing proxy access",
             user_id,
-            used,
-            max_tokens
+            used_credits,
+            max_credits
         );
         Ok(())
     }
@@ -1326,7 +1431,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
         // Invalidate token limit cache
-        self.invalidate_token_limit_cache(user_id).await;
+        self.invalidate_credit_limit_cache(user_id).await;
 
         // Plan name is just the plan key from the config
         let plan_name = plan.clone();
@@ -1362,9 +1467,149 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 .await?;
         }
 
-        // Invalidate token limit cache
-        self.invalidate_token_limit_cache(user_id).await;
+        self.invalidate_credit_limit_cache(user_id).await;
 
         Ok(())
+    }
+
+    async fn create_credit_purchase_checkout(
+        &self,
+        user_id: UserId,
+        credits: u64,
+        success_url: String,
+        cancel_url: String,
+    ) -> Result<String, SubscriptionError> {
+        const MAX_CREDITS_PER_PURCHASE: u64 = 1_000_000_000;
+        if credits == 0 {
+            return Err(SubscriptionError::InvalidCredits(
+                "credits must be positive".to_string(),
+            ));
+        }
+        if credits > MAX_CREDITS_PER_PURCHASE {
+            return Err(SubscriptionError::InvalidCredits(format!(
+                "credits exceeds maximum of {} per purchase",
+                MAX_CREDITS_PER_PURCHASE
+            )));
+        }
+
+        let configs = self
+            .system_configs_service
+            .get_configs()
+            .await
+            .map_err(|e| SubscriptionError::InternalError(e.to_string()))?;
+        let credit_price_id = configs
+            .and_then(|c| c.credits)
+            .map(|c| c.credit_price_id)
+            .ok_or(SubscriptionError::CreditsNotConfigured)?;
+
+        let customer_id = self.get_or_create_stripe_customer(user_id, None).await?;
+
+        let base_client = self.get_stripe_client();
+        let idempotency_key = format!(
+            "credit_checkout_{}_{}_{}",
+            user_id,
+            credits,
+            chrono::Utc::now().format("%Y%m%d%H")
+        );
+        let client = base_client
+            .clone()
+            .with_strategy(RequestStrategy::Idempotent(idempotency_key));
+
+        let mut params = CreateCheckoutSession::new();
+        params.mode = Some(CheckoutSessionMode::Payment);
+        params.customer = Some(
+            customer_id
+                .parse()
+                .map_err(|_| SubscriptionError::StripeError("Invalid customer ID".to_string()))?,
+        );
+        params.success_url = Some(&success_url);
+        params.cancel_url = Some(&cancel_url);
+        params.line_items = Some(vec![CreateCheckoutSessionLineItems {
+            price: Some(credit_price_id),
+            quantity: Some(credits),
+            ..Default::default()
+        }]);
+        let mut metadata = HashMap::new();
+        metadata.insert("user_id".to_string(), user_id.to_string());
+        metadata.insert("credits".to_string(), credits.to_string());
+        params.metadata = Some(metadata);
+
+        let session = CheckoutSession::create(&client, params)
+            .await
+            .map_err(|e| SubscriptionError::StripeError(e.to_string()))?;
+
+        let checkout_url = session
+            .url
+            .ok_or_else(|| SubscriptionError::StripeError("No checkout URL returned".into()))?;
+
+        tracing::info!(
+            "Credit checkout session created: user_id={}, credits={}",
+            user_id,
+            credits
+        );
+
+        Ok(checkout_url)
+    }
+
+    async fn get_credits(&self, user_id: UserId) -> Result<CreditsSummary, SubscriptionError> {
+        let configs = self
+            .system_configs_service
+            .get_configs()
+            .await
+            .map_err(|e| SubscriptionError::InternalError(e.to_string()))?;
+        let subscription_plans = configs
+            .and_then(|c| c.subscription_plans)
+            .unwrap_or_default();
+
+        let (plan_credits, period_start, period_end) = match self
+            .subscription_repo
+            .get_active_subscription(user_id)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
+        {
+            Some(ref sub) => {
+                let plan_name =
+                    resolve_plan_name_from_config("stripe", &sub.price_id, &subscription_plans);
+                let plan_credits = subscription_plans
+                    .get(&plan_name)
+                    .and_then(|c| c.monthly_credits.as_ref())
+                    .map(|l| l.max)
+                    .unwrap_or(DEFAULT_MONTHLY_CREDITS_NANO_USD);
+                let period_end = sub.current_period_end;
+                let period_start = sub_one_month_same_day(period_end);
+                (plan_credits, period_start, period_end)
+            }
+            None => {
+                let plan_credits = subscription_plans
+                    .get("free")
+                    .and_then(|c| c.monthly_credits.as_ref())
+                    .map(|l| l.max)
+                    .unwrap_or(DEFAULT_MONTHLY_CREDITS_NANO_USD);
+                let (period_start, period_end) = current_calendar_month_period(Utc::now());
+                (plan_credits, period_start, period_end)
+            }
+        };
+
+        let balance = self
+            .credits_repo
+            .get_balance(user_id)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        let used_credits = self
+            .user_usage_repo
+            .get_usage_by_user_id(user_id, Some(period_start), Some(period_end))
+            .await
+            .map_err(|e| SubscriptionError::InternalError(e.to_string()))?
+            .map(|s| s.cost_nano_usd)
+            .unwrap_or(0);
+
+        let effective_max_credits = (plan_credits as i64).saturating_add(balance);
+
+        Ok(CreditsSummary {
+            balance,
+            used_credits,
+            effective_max_credits,
+        })
     }
 }

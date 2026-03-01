@@ -1,6 +1,9 @@
 mod common;
 
-use common::{create_test_server_and_db, insert_test_subscription, mock_login, TestServerConfig};
+use common::{
+    create_test_server_and_db, insert_test_subscription, mock_login, set_subscription_plans,
+    TestServerConfig,
+};
 use serde_json::json;
 use uuid::Uuid;
 use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
@@ -37,6 +40,13 @@ async fn test_agent_complete_workflow() {
         proxy_base_url: Some(format!("{}/v1", mock_llm.uri())),
         ..Default::default()
     })
+    .await;
+
+    // Subscription gating: set free plan with monthly_credits so users without subscription can use proxy
+    set_subscription_plans(
+        &server,
+        json!({ "free": { "providers": {}, "monthly_credits": { "max": 1_000_000 } } }),
+    )
     .await;
 
     // 1. Create users: admin and regular user

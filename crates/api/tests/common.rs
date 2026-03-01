@@ -136,6 +136,8 @@ pub async fn create_test_server_and_db(
                 as Arc<dyn services::subscription::ports::SubscriptionRepository>,
             webhook_repo: db.payment_webhook_repository()
                 as Arc<dyn services::subscription::ports::PaymentWebhookRepository>,
+            credits_repo: db.credits_repository()
+                as Arc<dyn services::subscription::ports::CreditsRepository>,
             system_configs_service: system_configs_service.clone()
                 as Arc<dyn services::system_configs::ports::SystemConfigsService>,
             user_repository: user_repo.clone(),
@@ -414,6 +416,42 @@ pub async fn insert_test_agent_instances(db: &database::Database, user_email: &s
     }
 }
 
+/// Clean up all agent instances for a user (by email).
+pub async fn cleanup_user_agent_instances(db: &database::Database, user_email: &str) {
+    let user = match db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .expect("get user")
+    {
+        Some(u) => u,
+        None => return,
+    };
+
+    let client = db.pool().get().await.expect("get pool client");
+    client
+        .execute(
+            "DELETE FROM agent_balance WHERE instance_id IN (SELECT id FROM agent_instances WHERE user_id = $1)",
+            &[&user.id],
+        )
+        .await
+        .expect("delete agent balances");
+    client
+        .execute(
+            "DELETE FROM agent_api_keys WHERE instance_id IN (SELECT id FROM agent_instances WHERE user_id = $1)",
+            &[&user.id],
+        )
+        .await
+        .ok();
+    client
+        .execute(
+            "DELETE FROM agent_instances WHERE user_id = $1",
+            &[&user.id],
+        )
+        .await
+        .expect("delete agent instances");
+}
+
 /// Clean up all subscriptions for a user (by email).
 /// Useful for test isolation to ensure no leftover data from previous test runs.
 pub async fn cleanup_user_subscriptions(db: &database::Database, user_email: &str) {
@@ -435,7 +473,7 @@ pub async fn cleanup_user_subscriptions(db: &database::Database, user_email: &st
 }
 
 /// Set subscription_plans configuration
-/// plans should be in format: { "plan_name": { "providers": { "stripe": { "price_id": "price_xxx" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } } }
+/// plans should be in format: { "plan_name": { "providers": { "stripe": { "price_id": "price_xxx" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } } }
 pub async fn set_subscription_plans(server: &TestServer, plans: serde_json::Value) {
     let admin_email = "test_setup_admin@admin.org";
     let admin_token = mock_login(server, admin_email).await;
@@ -460,6 +498,47 @@ pub async fn set_subscription_plans(server: &TestServer, plans: serde_json::Valu
     assert!(
         response.status_code().is_success(),
         "Failed to set subscription_plans: {}",
+        response.status_code()
+    );
+}
+
+pub async fn clear_credits_config(db: &database::Database) {
+    let client = db.pool().get().await.expect("DB pool");
+    client
+        .execute(
+            "UPDATE system_configs SET value = value - 'credits' WHERE key = 'config'",
+            &[],
+        )
+        .await
+        .ok();
+}
+
+/// Set credits configuration (credit_price_id for Stripe)
+/// Must be called before tests that need credit purchase checkout.
+pub async fn set_credits_config(server: &axum_test::TestServer, credit_price_id: &str) {
+    let admin_email = "test_setup_admin@admin.org";
+    let admin_token = mock_login(server, admin_email).await;
+
+    let config_body = json!({
+        "credits": { "credit_price_id": credit_price_id }
+    });
+
+    let response = server
+        .patch("/v1/admin/configs")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&config_body)
+        .await;
+
+    assert!(
+        response.status_code().is_success(),
+        "Failed to set credits config: {}",
         response.status_code()
     );
 }
