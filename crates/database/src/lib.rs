@@ -9,11 +9,11 @@ pub use pool::DbPool;
 pub use repositories::{
     PostgresAgentRepository, PostgresAnalyticsRepository, PostgresAppConfigRepository,
     PostgresBiMetricsRepository, PostgresConversationRepository,
-    PostgresConversationShareRepository, PostgresFileRepository, PostgresModelRepository,
-    PostgresNearNonceRepository, PostgresOAuthRepository, PostgresPaymentWebhookRepository,
-    PostgresSessionRepository, PostgresStripeCustomerRepository, PostgresSubscriptionRepository,
-    PostgresSystemConfigsRepository, PostgresUserRepository, PostgresUserSettingsRepository,
-    PostgresUserUsageRepository,
+    PostgresConversationShareRepository, PostgresCreditsRepository, PostgresFileRepository,
+    PostgresModelRepository, PostgresNearNonceRepository, PostgresOAuthRepository,
+    PostgresPaymentWebhookRepository, PostgresSessionRepository, PostgresStripeCustomerRepository,
+    PostgresSubscriptionRepository, PostgresSystemConfigsRepository, PostgresUserRepository,
+    PostgresUserSettingsRepository, PostgresUserUsageRepository,
 };
 
 use crate::pool::create_pool_with_native_tls;
@@ -40,6 +40,7 @@ pub struct Database {
     analytics_repository: Arc<PostgresAnalyticsRepository>,
     user_usage_repository: Arc<PostgresUserUsageRepository>,
     model_repository: Arc<PostgresModelRepository>,
+    credits_repository: Arc<PostgresCreditsRepository>,
     stripe_customer_repository: Arc<PostgresStripeCustomerRepository>,
     subscription_repository: Arc<PostgresSubscriptionRepository>,
     payment_webhook_repository: Arc<PostgresPaymentWebhookRepository>,
@@ -66,6 +67,7 @@ impl Database {
         let analytics_repository = Arc::new(PostgresAnalyticsRepository::new(pool.clone()));
         let user_usage_repository = Arc::new(PostgresUserUsageRepository::new(pool.clone()));
         let model_repository = Arc::new(PostgresModelRepository::new(pool.clone()));
+        let credits_repository = Arc::new(PostgresCreditsRepository::new(pool.clone()));
         let stripe_customer_repository =
             Arc::new(PostgresStripeCustomerRepository::new(pool.clone()));
         let subscription_repository = Arc::new(PostgresSubscriptionRepository::new(pool.clone()));
@@ -89,6 +91,7 @@ impl Database {
             analytics_repository,
             user_usage_repository,
             model_repository,
+            credits_repository,
             stripe_customer_repository,
             subscription_repository,
             payment_webhook_repository,
@@ -276,6 +279,11 @@ impl Database {
     /// Get the model settings repository
     pub fn model_repository(&self) -> Arc<PostgresModelRepository> {
         self.model_repository.clone()
+    }
+
+    /// Get the credits repository
+    pub fn credits_repository(&self) -> Arc<PostgresCreditsRepository> {
+        self.credits_repository.clone()
     }
 
     /// Get the system configs repository

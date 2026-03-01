@@ -3,9 +3,9 @@ mod common;
 use api::routes::api::SUBSCRIPTION_REQUIRED_ERROR_MESSAGE;
 use chrono::Duration;
 use common::{
-    cleanup_user_subscriptions, clear_subscription_plans, create_test_server,
-    create_test_server_and_db, insert_test_agent_instances, insert_test_subscription, mock_login,
-    set_subscription_plans, TestServerConfig,
+    cleanup_user_agent_instances, cleanup_user_subscriptions, clear_subscription_plans,
+    create_test_server, create_test_server_and_db, insert_test_agent_instances,
+    insert_test_subscription, mock_login, set_subscription_plans, TestServerConfig,
 };
 use serde_json::json;
 use serial_test::serial;
@@ -88,8 +88,8 @@ async fn test_list_subscriptions_configured_returns_empty() {
     set_subscription_plans(
         &server,
         json!({
-            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } },
-            "pro": { "providers": { "stripe": { "price_id": "price_test_pro" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } }
+            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } },
+            "pro": { "providers": { "stripe": { "price_id": "price_test_pro" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } }
         }),
     )
     .await;
@@ -186,8 +186,8 @@ async fn test_create_subscription_invalid_provider() {
     set_subscription_plans(
         &server,
         json!({
-            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } },
-            "pro": { "providers": { "stripe": { "price_id": "price_test_pro" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } }
+            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } },
+            "pro": { "providers": { "stripe": { "price_id": "price_test_pro" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } }
         }),
     )
     .await;
@@ -232,8 +232,8 @@ async fn test_create_subscription_invalid_plan() {
     set_subscription_plans(
         &server,
         json!({
-            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } },
-            "pro": { "providers": { "stripe": { "price_id": "price_test_pro" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } }
+            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } },
+            "pro": { "providers": { "stripe": { "price_id": "price_test_pro" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } }
         }),
     )
     .await;
@@ -287,6 +287,7 @@ async fn test_create_subscription_instance_limit_exceeded() {
     let user_email = "test_create_instance_limit@example.com";
     let user_token = mock_login(&server, user_email).await;
     cleanup_user_subscriptions(&db, user_email).await;
+    cleanup_user_agent_instances(&db, user_email).await;
     insert_test_agent_instances(&db, user_email, 3).await;
 
     let request_body = json!({
@@ -415,7 +416,7 @@ async fn test_resume_subscription_not_scheduled_for_cancellation() {
     set_subscription_plans(
         &server,
         json!({
-            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } }
+            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } }
         }),
     )
     .await;
@@ -560,6 +561,7 @@ async fn test_change_plan_instance_limit_exceeded() {
 
     let user_email = "test_change_plan_instance_limit@example.com";
     cleanup_user_subscriptions(&db, user_email).await;
+    cleanup_user_agent_instances(&db, user_email).await;
     insert_test_subscription(&server, &db, user_email, false).await;
     insert_test_agent_instances(&db, user_email, 2).await;
     let user_token = mock_login(&server, user_email).await;
@@ -654,7 +656,7 @@ async fn test_list_subscriptions_successfully() {
     set_subscription_plans(
         &server,
         json!({
-            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } }
+            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } }
         }),
     )
     .await;
@@ -739,8 +741,8 @@ async fn test_configure_subscription_plans_as_admin() {
     // Configure subscription plans
     let config_body = json!({
         "subscription_plans": {
-            "basic": { "providers": { "stripe": { "price_id": "price_test_basic_123" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } },
-            "pro": { "providers": { "stripe": { "price_id": "price_test_pro_456" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } }
+            "basic": { "providers": { "stripe": { "price_id": "price_test_basic_123" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } },
+            "pro": { "providers": { "stripe": { "price_id": "price_test_pro_456" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } }
         }
     });
 
@@ -886,18 +888,18 @@ async fn test_list_plans_returns_configured_plans() {
     let admin_email = "test_list_plans@admin.org";
     let admin_token = mock_login(&server, admin_email).await;
 
-    // Configure subscription plans with private_assistant_instances and monthly_tokens
+    // Configure subscription plans with age and monthly_credits
     let config_body = json!({
         "subscription_plans": {
             "starter": {
                 "providers": { "stripe": { "price_id": "price_starter_789" } },
                 "agent_instances": { "max": 1 },
-                "monthly_tokens": { "max": 500_000 }
+                "monthly_credits": { "max": 500_000 }
             },
             "premium": {
                 "providers": { "stripe": { "price_id": "price_premium_012" } },
                 "agent_instances": { "max": 5 },
-                "monthly_tokens": { "max": 5_000_000 }
+                "monthly_credits": { "max": 5_000_000 }
             }
         }
     });
@@ -949,7 +951,7 @@ async fn test_list_plans_returns_configured_plans() {
         "Should have premium plan"
     );
 
-    // Verify private_assistant_instances and monthly_tokens structure for each plan
+    // Verify agent_instances and monthly_credits structure for each plan
     for plan in plans_array {
         assert!(plan.get("name").is_some(), "Each plan should have name");
         let name = plan.get("name").unwrap().as_str().unwrap();
@@ -960,14 +962,14 @@ async fn test_list_plans_returns_configured_plans() {
                         .and_then(|d| d.get("max"))
                         .and_then(|m| m.as_u64()),
                     Some(1),
-                    "Starter plan should have private_assistant_instances.max = 1"
+                    "Starter plan should have agent_instances.max = 1"
                 );
                 assert_eq!(
-                    plan.get("monthly_tokens")
+                    plan.get("monthly_credits")
                         .and_then(|t| t.get("max"))
                         .and_then(|m| m.as_u64()),
                     Some(500_000),
-                    "Starter plan should have monthly_tokens.max = 500000"
+                    "Starter plan should have monthly_credits.max = 500000"
                 );
             }
             "premium" => {
@@ -976,14 +978,14 @@ async fn test_list_plans_returns_configured_plans() {
                         .and_then(|d| d.get("max"))
                         .and_then(|m| m.as_u64()),
                     Some(5),
-                    "Premium plan should have private_assistant_instances.max = 5"
+                    "Premium plan should have agent_instances.max = 5"
                 );
                 assert_eq!(
-                    plan.get("monthly_tokens")
+                    plan.get("monthly_credits")
                         .and_then(|t| t.get("max"))
                         .and_then(|m| m.as_u64()),
                     Some(5_000_000),
-                    "Premium plan should have monthly_tokens.max = 5000000"
+                    "Premium plan should have monthly_credits.max = 5000000"
                 );
             }
             _ => {}
@@ -1003,18 +1005,18 @@ async fn test_list_plans_includes_trial_period_days() {
                 "providers": { "stripe": { "price_id": "price_starter_trial" } },
                 "trial_period_days": 14,
                 "agent_instances": { "max": 1 },
-                "monthly_tokens": { "max": 500_000 }
+                "monthly_credits": { "max": 500_000 }
             },
             "premium": {
                 "providers": { "stripe": { "price_id": "price_premium_trial" } },
                 "trial_period_days": 7,
                 "agent_instances": { "max": 5 },
-                "monthly_tokens": { "max": 5_000_000 }
+                "monthly_credits": { "max": 5_000_000 }
             },
             "no_trial": {
                 "providers": { "stripe": { "price_id": "price_no_trial" } },
                 "agent_instances": { "max": 1 },
-                "monthly_tokens": { "max": 1_000_000 }
+                "monthly_credits": { "max": 1_000_000 }
             }
         }),
     )
@@ -1134,7 +1136,7 @@ async fn test_portal_session_no_stripe_customer() {
             "basic": {
                 "providers": {"stripe": {"price_id": "price_test_basic"}},
                 "agent_instances": {"max": 1},
-                "monthly_tokens": {"max": 1000000}
+                "monthly_credits": {"max": 1000000}
             }
         }),
     )
@@ -1177,12 +1179,12 @@ async fn test_proxy_returns_403_without_subscription_when_plans_configured() {
         json!({
             "free": {
                 "providers": {},
-                "monthly_tokens": {"max": 0}
+                "monthly_credits": {"max": 0}
             },
             "basic": {
                 "providers": {"stripe": {"price_id": "price_test_basic"}},
                 "agent_instances": {"max": 1},
-                "monthly_tokens": {"max": 1000000}
+                "monthly_credits": {"max": 1000000}
             }
         }),
     )
@@ -1237,7 +1239,8 @@ async fn test_proxy_returns_403_without_subscription_when_plans_configured() {
         let body_res: serde_json::Value = response.json();
         let err_msg = body_res.get("error").and_then(|v| v.as_str()).unwrap_or("");
         assert!(
-            err_msg.contains("Monthly token limit exceeded")
+            err_msg.contains("Monthly credit limit exceeded")
+                || err_msg.contains("Monthly token limit exceeded")
                 || err_msg == SUBSCRIPTION_REQUIRED_ERROR_MESSAGE,
             "POST {} should return token limit or subscription error, got: {}",
             path,
@@ -1257,7 +1260,7 @@ async fn test_proxy_allows_with_subscription() {
             "basic": {
                 "providers": {"stripe": {"price_id": "price_test_basic"}},
                 "agent_instances": {"max": 1},
-                "monthly_tokens": {"max": 1000000}
+                "monthly_credits": {"max": 1000000}
             }
         }),
     )
@@ -1388,13 +1391,13 @@ async fn test_proxy_blocks_when_monthly_token_limit_exceeded() {
             "basic": {
                 "providers": {"stripe": {"price_id": "price_test_basic"}},
                 "agent_instances": {"max": 1},
-                "monthly_tokens": {"max": 100}
+                "monthly_credits": {"max": 100}
             }
         }),
     )
     .await;
 
-    let user_email = "test_proxy_token_limit@example.com";
+    let user_email = "test_proxy_credit_limit@example.com";
     insert_test_subscription(&server, &db, user_email, false).await;
     let user_token = mock_login(&server, user_email).await;
 
@@ -1405,13 +1408,13 @@ async fn test_proxy_blocks_when_monthly_token_limit_exceeded() {
         .expect("get user")
         .expect("user exists");
 
-    // Record 150 tokens (exceeds limit of 100)
+    // Record usage with cost exceeding the credit limit of 100
     db.user_usage_repository()
-        .record_usage_event(user.id, METRIC_KEY_LLM_TOKENS, 150, Some(0), None)
+        .record_usage_event(user.id, METRIC_KEY_LLM_TOKENS, 150, Some(150), None)
         .await
         .expect("record usage");
 
-    // Proxy should return 402 Payment Required when monthly token limit exceeded
+    // Proxy should return 402 Payment Required when monthly credit limit exceeded
     let response = server
         .post("/v1/chat/completions")
         .add_header(
@@ -1427,13 +1430,13 @@ async fn test_proxy_blocks_when_monthly_token_limit_exceeded() {
     assert_eq!(
         response.status_code(),
         402,
-        "Proxy should return 402 when monthly token limit exceeded"
+        "Proxy should return 402 when monthly credit limit exceeded"
     );
     let body_res: serde_json::Value = response.json();
     let err_msg = body_res.get("error").and_then(|v| v.as_str()).unwrap_or("");
     assert!(
-        err_msg.contains("Monthly token limit exceeded"),
-        "Error should mention token limit, got: {}",
+        err_msg.contains("Monthly credit limit exceeded"),
+        "Error should mention credit limit, got: {}",
         err_msg
     );
     assert!(
@@ -1458,13 +1461,13 @@ async fn test_proxy_blocks_when_monthly_token_limit_exceeded() {
     assert_eq!(
         response.status_code(),
         402,
-        "POST /v1/responses should return 402 when monthly token limit exceeded"
+        "POST /v1/responses should return 402 when monthly credit limit exceeded"
     );
     let body_res: serde_json::Value = response.json();
     let err_msg = body_res.get("error").and_then(|v| v.as_str()).unwrap_or("");
     assert!(
-        err_msg.contains("Monthly token limit exceeded") && err_msg.contains("100"),
-        "POST /v1/responses error should mention token limit, got: {}",
+        err_msg.contains("Monthly credit limit exceeded") && err_msg.contains("100"),
+        "POST /v1/responses error should mention credit limit, got: {}",
         err_msg
     );
 }
@@ -1483,12 +1486,12 @@ async fn test_responses_returns_403_without_subscription_when_plans_configured()
         json!({
             "free": {
                 "providers": {},
-                "monthly_tokens": {"max": 0}
+                "monthly_credits": {"max": 0}
             },
             "basic": {
                 "providers": {"stripe": {"price_id": "price_test_basic"}},
                 "agent_instances": {"max": 1},
-                "monthly_tokens": {"max": 1000000}
+                "monthly_credits": {"max": 1000000}
             }
         }),
     )
@@ -1520,7 +1523,8 @@ async fn test_responses_returns_403_without_subscription_when_plans_configured()
     let body_res: serde_json::Value = response.json();
     let err_msg = body_res.get("error").and_then(|v| v.as_str()).unwrap_or("");
     assert!(
-        err_msg.contains("Monthly token limit exceeded")
+        err_msg.contains("Monthly credit limit exceeded")
+            || err_msg.contains("Monthly token limit exceeded")
             || err_msg == SUBSCRIPTION_REQUIRED_ERROR_MESSAGE,
         "POST /v1/responses should return token limit or subscription error, got: {}",
         err_msg
@@ -1632,7 +1636,7 @@ async fn test_admin_set_subscription_success() {
     set_subscription_plans(
         &server,
         json!({
-            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "monthly_tokens": { "max": 1000000 } }
+            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "monthly_credits": { "max": 1000000 }, "monthly_credits": { "max": 1000000 } }
         }),
     )
     .await;
@@ -1816,19 +1820,20 @@ async fn test_subscription_gating_full_flow() {
     })
     .await;
 
-    // Configure subscription plans: free plan with 0 tokens (requires subscription), and basic paid plan
+    // Configure subscription plans: free plan with 0 credits (requires subscription), and basic paid plan
     // Users without subscription fall back to "free" plan and hit 402 Payment Required immediately
     set_subscription_plans(
         &server,
         json!({
             "free": {
                 "providers": {},
-                "monthly_tokens": { "max": 0 }
+                "monthly_credits": { "max": 0 },
+                "monthly_credits": { "max": 0 }
             },
             "basic": {
                 "providers": { "stripe": { "price_id": "price_test_basic" } },
                 "agent_instances": { "max": 1 },
-                "monthly_tokens": { "max": 1000000 }
+                "monthly_credits": { "max": 1000000 }, "monthly_credits": { "max": 1000000 }
             }
         }),
     )
