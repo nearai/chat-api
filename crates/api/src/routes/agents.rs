@@ -308,18 +308,7 @@ pub async fn list_instances(
             ApiError::internal_server_error("Failed to list instances")
         })?;
 
-    let enrichment_map = app_state
-        .agent_service
-        .get_instance_enrichments(&instances)
-        .await;
-
-    let paginated: Vec<InstanceResponse> = instances
-        .into_iter()
-        .map(|inst| {
-            let enrichment = enrichment_map.get(&inst.name);
-            crate::models::instance_response_with_enrichment(inst, enrichment)
-        })
-        .collect();
+    let paginated: Vec<InstanceResponse> = instances.into_iter().map(InstanceResponse::from).collect();
 
     Ok(Json(PaginatedResponse {
         items: paginated,
