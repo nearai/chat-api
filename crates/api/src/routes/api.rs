@@ -2536,10 +2536,20 @@ async fn proxy_responses(
 
 /// Ensure that if the authenticated user logged in with NEAR (has a NEAR-linked account),
 /// their on-chain balance is at least 1 NEAR before allowing expensive /v1/responses calls.
+/// Paid users skip this check
 async fn ensure_near_balance_for_near_user(
     state: &crate::state::AppState,
     user: &AuthenticatedUser,
 ) -> Result<(), Response> {
+    // Skip NEAR balance check for paid users only
+    if let Ok(true) = state
+        .subscription_service
+        .has_paid_subscription(user.user_id)
+        .await
+    {
+        return Ok(());
+    }
+
     // Fetch user profile to inspect linked OAuth accounts
     let profile = state
         .user_service
