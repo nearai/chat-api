@@ -1143,9 +1143,17 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 .map(|_| plan)
         });
 
-        let is_paid = match plan_config.and_then(|p| p.price) {
-            None => true, // Legacy config without price: treated as paid
-            Some(price) => price > 0,
+        // Use plan-level price to determine paid:
+        // - No matching plan        => NOT paid (defensive: do NEAR balance check)
+        // - price = None            => legacy config, treated as paid
+        // - price = Some(0)         => free plan, NOT paid (do NEAR balance check)
+        // - price = Some(>0)        => paid plan
+        let is_paid = match plan_config {
+            None => false,
+            Some(plan) => match plan.price {
+                None => true,
+                Some(price) => price > 0,
+            },
         };
         Ok(is_paid)
     }
