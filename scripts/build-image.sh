@@ -22,9 +22,18 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
-# Check if buildkit_20 already exists before creating it
-if ! docker buildx inspect buildkit_20 &>/dev/null; then
-    docker buildx create --use --driver-opt image=moby/buildkit:v0.20.2 --name buildkit_20
+# When DOCKER_BUILD_CACHE=gha (e.g. in CI), use default builder and GHA cache; otherwise use buildkit_20 with no cache
+if [ "${DOCKER_BUILD_CACHE}" = "gha" ]; then
+    BUILDX_BUILDER=""
+    BUILDX_CACHE_FROM="--cache-from type=gha"
+    BUILDX_CACHE_TO="--cache-to type=gha,mode=max"
+else
+    if ! docker buildx inspect buildkit_20 &>/dev/null; then
+        docker buildx create --use --driver-opt image=moby/buildkit:v0.20.2 --name buildkit_20
+    fi
+    BUILDX_BUILDER="--builder buildkit_20 --no-cache"
+    BUILDX_CACHE_FROM=""
+    BUILDX_CACHE_TO=""
 fi
 
 touch scripts/pinned-packages-frontend-builder.txt scripts/pinned-packages-backend-builder.txt scripts/pinned-packages-runtime.txt
@@ -54,7 +63,7 @@ GIT_COMMIT_TIMESTAMP=$(git log -1 --format=%ct)
 echo "Using git commit timestamp: ${GIT_COMMIT_TIMESTAMP}"
 
 TEMP_TAG="private-chat-temp:$(date +%s)"
-docker buildx build --builder buildkit_20 --no-cache --platform linux/amd64 \
+docker buildx build ${BUILDX_BUILDER} ${BUILDX_CACHE_FROM} ${BUILDX_CACHE_TO} --platform linux/amd64 \
     --build-arg SOURCE_DATE_EPOCH="${GIT_COMMIT_TIMESTAMP}" \
     --build-arg PRIVATE_CHAT_FRONTEND_VERSION="${PRIVATE_CHAT_FRONTEND_VERSION}" \
     --build-arg POSTHOG_KEY="${POSTHOG_KEY}" \
