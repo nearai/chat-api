@@ -344,55 +344,43 @@ pub async fn clear_subscription_plans(server: &TestServer) {
 }
 
 /// Insert a test subscription directly into the database for testing.
-/// Requires the user to exist (call mock_login first). The subscription uses a fake Stripe
-/// subscription_id; cancel/resume will fail at the Stripe API call, but list and
-/// "not scheduled for cancellation" checks work.
+/// Convenience wrapper that uses a default price_id ("price_test_basic").
 pub async fn insert_test_subscription(
     server: &TestServer,
     db: &database::Database,
     user_email: &str,
     cancel_at_period_end: bool,
 ) {
-    let _token = mock_login(server, user_email).await;
-
-    let user = db
-        .user_repository()
-        .get_user_by_email(user_email)
-        .await
-        .expect("get user")
-        .expect("user created by mock_login");
-
-    // Use now+1day so "now" falls within [period_start, period_end) for usage queries.
-    let period_end = chrono::Utc::now() + chrono::Duration::days(1);
-    let sub_id = format!("sub_test_{}", Uuid::new_v4());
-
-    let client = db.pool().get().await.expect("get pool client");
-    client
-        .execute(
-            "INSERT INTO subscriptions (
-                subscription_id, user_id, provider, customer_id, price_id, status,
-                current_period_end, cancel_at_period_end
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            ON CONFLICT (subscription_id) DO UPDATE SET
-                cancel_at_period_end = EXCLUDED.cancel_at_period_end,
-                updated_at = NOW()",
-            &[
-                &sub_id,
-                &user.id,
-                &"stripe",
-                &"cus_test",
-                &"price_test_basic",
-                &"active",
-                &period_end,
-                &cancel_at_period_end,
-            ],
-        )
-        .await
-        .expect("insert subscription");
+    insert_test_subscription_with_price_id_internal(
+        server,
+        db,
+        user_email,
+        cancel_at_period_end,
+        "price_test_basic",
+    )
+    .await;
 }
 
 /// Insert a test subscription with custom price_id (for testing plan-specific behavior).
 pub async fn insert_test_subscription_with_price_id(
+    server: &TestServer,
+    db: &database::Database,
+    user_email: &str,
+    cancel_at_period_end: bool,
+    price_id: &str,
+) {
+    insert_test_subscription_with_price_id_internal(
+        server,
+        db,
+        user_email,
+        cancel_at_period_end,
+        price_id,
+    )
+    .await;
+}
+
+/// Internal helper that contains the common upsert logic for test subscriptions.
+async fn insert_test_subscription_with_price_id_internal(
     server: &TestServer,
     db: &database::Database,
     user_email: &str,
@@ -408,6 +396,7 @@ pub async fn insert_test_subscription_with_price_id(
         .expect("get user")
         .expect("user created by mock_login");
 
+    // Use now+1day so "now" falls within [period_start, period_end) for usage queries.
     let period_end = chrono::Utc::now() + chrono::Duration::days(1);
     let sub_id = format!("sub_test_{}", Uuid::new_v4());
 
