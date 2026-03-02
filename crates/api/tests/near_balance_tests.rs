@@ -245,7 +245,7 @@ async fn test_near_balance_check_applied_for_free_plan_subscription() {
     )
     .await;
 
-    let poor_account = "zero-balance.near";
+    let poor_account = "zero-balance-3.near";
     let user_email = format!("{}@near", poor_account);
     cleanup_user_subscriptions(&db, &user_email).await;
 
@@ -325,7 +325,7 @@ async fn test_near_balance_check_applied_for_unknown_price_id() {
     )
     .await;
 
-    let poor_account = "zero-balance-2.near";
+    let poor_account = "zero-balance-4.near";
     let user_email = format!("{}@near", poor_account);
     cleanup_user_subscriptions(&db, &user_email).await;
 
