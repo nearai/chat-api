@@ -1135,19 +1135,17 @@ impl SubscriptionService for SubscriptionServiceImpl {
         let subscription_plans = configs
             .and_then(|c| c.subscription_plans)
             .unwrap_or_default();
-        let provider_config = subscription_plans.iter().find_map(|(_, plan_config)| {
-            plan_config
-                .providers
+        // Find the plan whose provider config matches this subscription's provider + price_id
+        let plan_config = subscription_plans.iter().find_map(|(_, plan)| {
+            plan.providers
                 .get(&sub.provider)
                 .filter(|p| p.price_id == sub.price_id)
+                .map(|_| plan)
         });
 
-        let is_paid = match provider_config {
-            None => false, // Unknown subscription: not treated as paid, do NEAR balance check
-            Some(p) => match p.price {
-                None => true, // Legacy config without price: treated as paid
-                Some(price) => price > 0,
-            },
+        let is_paid = match plan_config.and_then(|p| p.price) {
+            None => true, // Legacy config without price: treated as paid
+            Some(price) => price > 0,
         };
         Ok(is_paid)
     }

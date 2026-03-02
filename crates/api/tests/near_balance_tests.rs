@@ -180,7 +180,8 @@ async fn test_near_balance_skipped_for_paid_subscription() {
         &server,
         json!({
             "basic": {
-                "providers": { "stripe": { "price_id": "price_test_basic", "price": 999 } },
+                "providers": { "stripe": { "price_id": "price_test_basic" } },
+                "price": 999,
                 "monthly_tokens": { "max": 1000000 }
             }
         }),
@@ -238,7 +239,8 @@ async fn test_near_balance_check_applied_for_free_plan_subscription() {
         &server,
         json!({
             "free": {
-                "providers": { "stripe": { "price_id": "price_test_free", "price": 0 } },
+                "providers": { "stripe": { "price_id": "price_test_free" } },
+                "price": 0,
                 "monthly_tokens": { "max": 1000000 }
             }
         }),
@@ -318,7 +320,8 @@ async fn test_near_balance_check_applied_for_unknown_price_id() {
         &server,
         json!({
             "basic": {
-                "providers": { "stripe": { "price_id": "price_test_basic", "price": 999 } },
+                "providers": { "stripe": { "price_id": "price_test_basic" } },
+                "price": 999,
                 "monthly_tokens": { "max": 1000000 }
             }
         }),

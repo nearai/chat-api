@@ -78,9 +78,6 @@ pub struct RateLimitConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaymentProviderConfig {
     pub price_id: String,
-    /// Price in cents (e.g. 999 for $9.99, 0 for free)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub price: Option<i64>,
 }
 
 /// Limit configuration for a plan (e.g. max agent instances, max monthly tokens)
@@ -94,8 +91,11 @@ pub struct PlanLimitConfig {
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubscriptionPlanConfig {
-    /// Provider-specific configs (e.g. "stripe" -> { "price_id": "price_xxx", "price": 999 })
+    /// Provider-specific configs (e.g. "stripe" -> { "price_id": "price_xxx" })
     pub providers: HashMap<String, PaymentProviderConfig>,
+    /// Plan price in cents (e.g. 999 for $9.99, 0 for free). None = unknown/legacy, treated as paid for NEAR balance skip.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub price: Option<i64>,
     /// Free trial period in days before first charge (Stripe max 730)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trial_period_days: Option<u32>,
