@@ -1,9 +1,13 @@
 # Test-only workflow: build image with cache, no push/attestation.
-# Use "Run workflow" in Actions to verify build and cache behavior.
+# Runs on push to any branch (so it appears when testing on feature branches) and can be triggered manually.
 name: Build Test
 
 on:
   workflow_dispatch:
+  push:
+    # Run on push to any branch so the workflow appears when testing on feature branches
+    branches-ignore:
+      - main
 
 jobs:
   build:
