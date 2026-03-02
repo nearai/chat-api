@@ -59,6 +59,9 @@ use utoipa::OpenApi;
         crate::routes::api::proxy_models,
         crate::routes::api::proxy_model_list,
         crate::routes::api::proxy_signature,
+        // Credits endpoints
+        crate::routes::credits::get_credits,
+        crate::routes::credits::create_credit_checkout,
         // Subscription endpoints
         crate::routes::subscriptions::create_subscription,
         crate::routes::subscriptions::create_portal_session,
@@ -164,6 +167,10 @@ use utoipa::OpenApi;
         crate::models::FileListResponse,
         crate::models::FileGetResponse,
         crate::routes::api::ListFilesParams,
+        // Credits models
+        crate::routes::credits::CreateCreditCheckoutRequest,
+        crate::routes::credits::CreateCreditCheckoutResponse,
+        services::subscription::ports::CreditsSummary,
         // Subscription models
         crate::routes::subscriptions::CreateSubscriptionRequest,
         crate::routes::subscriptions::CreateSubscriptionResponse,
@@ -224,6 +231,7 @@ use utoipa::OpenApi;
         (name = "Share Groups", description = "Share group management endpoints"),
         (name = "Files", description = "File management endpoints"),
         (name = "Proxy", description = "Proxy endpoints for OpenAI-compatible APIs"),
+        (name = "Credits", description = "Credit purchase and balance endpoints"),
         (name = "Subscriptions", description = "Subscription management endpoints"),
         (name = "Agents", description = "Agent instance management endpoints"),
         (name = "Admin", description = "Admin management endpoints"),

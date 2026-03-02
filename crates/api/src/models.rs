@@ -2,7 +2,7 @@ use crate::consts::SYSTEM_PROMPT_MAX_LEN;
 use crate::ApiError;
 use serde::{Deserialize, Serialize};
 use services::file::ports::FileData;
-use services::system_configs::ports::{AutoRouteConfig, SubscriptionPlanConfig};
+use services::system_configs::ports::{AutoRouteConfig, CreditsConfig, SubscriptionPlanConfig};
 use services::UserId;
 use std::collections::HashMap;
 use utoipa::ToSchema;
@@ -724,6 +724,9 @@ pub struct SystemConfigsResponse {
     /// Maximum number of agent instances per manager (round-robin skips full managers)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_instances_per_manager: Option<u64>,
+    /// Credit purchase configuration (Stripe Price ID for buying credits)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credits: Option<CreditsConfig>,
     /// Per-manager URL limits (agent manager URL -> max instances). Overrides max_instances_per_manager for specific URLs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_instances_by_manager_url: Option<HashMap<String, u64>>,
@@ -739,6 +742,7 @@ impl From<services::system_configs::ports::SystemConfigs> for SystemConfigsRespo
             rate_limit: config.rate_limit.into(),
             subscription_plans: config.subscription_plans,
             max_instances_per_manager: config.max_instances_per_manager,
+            credits: config.credits,
             max_instances_by_manager_url: config.max_instances_by_manager_url,
             auto_route: config.auto_route,
         }
@@ -754,12 +758,15 @@ pub struct UpsertSystemConfigsRequest {
     /// Rate limit configuration
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate_limit: Option<RateLimitConfig>,
-    /// Subscription plan configurations (plan name -> config with providers, agent_instances, monthly_tokens)
+    /// Subscription plan configurations (plan name -> config with providers, agent_instances, monthly_credits)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subscription_plans: Option<HashMap<String, SubscriptionPlanConfig>>,
     /// Maximum number of agent instances per manager (round-robin skips full managers)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_instances_per_manager: Option<u64>,
+    /// Credit purchase configuration (Stripe Price ID for buying credits)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credits: Option<CreditsConfig>,
     /// Per-manager URL limits (agent manager URL -> max instances). Overrides max_instances_per_manager for specific URLs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_instances_by_manager_url: Option<HashMap<String, u64>>,
@@ -783,6 +790,7 @@ impl TryFrom<UpsertSystemConfigsRequest> for services::system_configs::ports::Pa
             rate_limit,
             subscription_plans: req.subscription_plans,
             max_instances_per_manager: req.max_instances_per_manager,
+            credits: req.credits,
             max_instances_by_manager_url: req.max_instances_by_manager_url,
             auto_route: req.auto_route,
         })
