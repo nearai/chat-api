@@ -1,0 +1,28 @@
+# Test-only workflow: build image with cache, no push/attestation.
+# Use "Run workflow" in Actions to verify build and cache behavior.
+name: Build Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build image (no push)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y skopeo jq
+
+      - name: Build image
+        env:
+          DOCKER_BUILD_CACHE: gha
+        run: |
+          ./scripts/build-image.sh
