@@ -34,10 +34,7 @@ impl ParsedUsage {
     /// latest snapshot and simply replace the current values instead of
     /// accumulating.
     pub fn merge(&mut self, other: &ParsedUsage) {
-        self.input_tokens = other.input_tokens;
-        self.output_tokens = other.output_tokens;
-        self.total_tokens = other.total_tokens;
-        self.model = other.model.clone();
+        *self = other.clone();
     }
 }
 
@@ -393,6 +390,7 @@ mod tests {
     use super::{
         parse_chat_completion_usage_from_bytes, parse_response_usage_from_bytes,
         parse_usage_from_chat_completion_sse_line, parse_usage_from_response_completed_sse_line,
+        ParsedUsage,
     };
 
     #[test]
@@ -448,5 +446,29 @@ mod tests {
     fn sse_response_completed_missing_type_returns_none() {
         let line = r#"data: {"response":{"model":"gpt-test","usage":{"total_tokens":8,"input_tokens":3,"output_tokens":5}}}"#;
         assert!(parse_usage_from_response_completed_sse_line(line).is_none());
+    }
+
+    #[test]
+    fn parsed_usage_merge_replaces_instead_of_accumulating() {
+        let mut acc = ParsedUsage {
+            input_tokens: 10,
+            output_tokens: 20,
+            total_tokens: 30,
+            model: "old-model".to_string(),
+        };
+        let latest = ParsedUsage {
+            input_tokens: 1,
+            output_tokens: 2,
+            total_tokens: 3,
+            model: "new-model".to_string(),
+        };
+
+        acc.merge(&latest);
+
+        // Ensure we did not add (10+1, 20+2, 30+3), but fully replaced with latest snapshot.
+        assert_eq!(acc.input_tokens, 1);
+        assert_eq!(acc.output_tokens, 2);
+        assert_eq!(acc.total_tokens, 3);
+        assert_eq!(acc.model, "new-model");
     }
 }
