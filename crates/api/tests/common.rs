@@ -344,14 +344,48 @@ pub async fn clear_subscription_plans(server: &TestServer) {
 }
 
 /// Insert a test subscription directly into the database for testing.
-/// Requires the user to exist (call mock_login first). The subscription uses a fake Stripe
-/// subscription_id; cancel/resume will fail at the Stripe API call, but list and
-/// "not scheduled for cancellation" checks work.
+/// Convenience wrapper that uses a default price_id ("price_test_basic").
 pub async fn insert_test_subscription(
     server: &TestServer,
     db: &database::Database,
     user_email: &str,
     cancel_at_period_end: bool,
+) {
+    insert_test_subscription_with_price_id_internal(
+        server,
+        db,
+        user_email,
+        cancel_at_period_end,
+        "price_test_basic",
+    )
+    .await;
+}
+
+/// Insert a test subscription with custom price_id (for testing plan-specific behavior).
+pub async fn insert_test_subscription_with_price_id(
+    server: &TestServer,
+    db: &database::Database,
+    user_email: &str,
+    cancel_at_period_end: bool,
+    price_id: &str,
+) {
+    insert_test_subscription_with_price_id_internal(
+        server,
+        db,
+        user_email,
+        cancel_at_period_end,
+        price_id,
+    )
+    .await;
+}
+
+/// Internal helper that contains the common upsert logic for test subscriptions.
+async fn insert_test_subscription_with_price_id_internal(
+    server: &TestServer,
+    db: &database::Database,
+    user_email: &str,
+    cancel_at_period_end: bool,
+    price_id: &str,
 ) {
     let _token = mock_login(server, user_email).await;
 
@@ -374,6 +408,7 @@ pub async fn insert_test_subscription(
                 current_period_end, cancel_at_period_end
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             ON CONFLICT (subscription_id) DO UPDATE SET
+                price_id = EXCLUDED.price_id,
                 cancel_at_period_end = EXCLUDED.cancel_at_period_end,
                 updated_at = NOW()",
             &[
@@ -381,7 +416,7 @@ pub async fn insert_test_subscription(
                 &user.id,
                 &"stripe",
                 &"cus_test",
-                &"price_test_basic",
+                &price_id,
                 &"active",
                 &period_end,
                 &cancel_at_period_end,

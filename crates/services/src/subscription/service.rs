@@ -1118,6 +1118,46 @@ impl SubscriptionService for SubscriptionServiceImpl {
         Ok(session.url)
     }
 
+    async fn has_paid_subscription(&self, user_id: UserId) -> Result<bool, SubscriptionError> {
+        let sub = self
+            .subscription_repo
+            .get_active_subscription(user_id)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+        let Some(ref sub) = sub else {
+            return Ok(false);
+        };
+        let configs = self
+            .system_configs_service
+            .get_configs()
+            .await
+            .map_err(|e| SubscriptionError::InternalError(e.to_string()))?;
+        let subscription_plans = configs
+            .and_then(|c| c.subscription_plans)
+            .unwrap_or_default();
+        // Find the plan whose provider config matches this subscription's provider + price_id
+        let plan_config = subscription_plans.iter().find_map(|(_, plan)| {
+            plan.providers
+                .get(&sub.provider)
+                .filter(|p| p.price_id == sub.price_id)
+                .map(|_| plan)
+        });
+
+        // Use plan-level price to determine paid:
+        // - No matching plan        => NOT paid (defensive: do NEAR balance check)
+        // - price = None            => legacy config, treated as paid
+        // - price = Some(0)         => free plan, NOT paid (do NEAR balance check)
+        // - price = Some(>0)        => paid plan
+        let is_paid = match plan_config {
+            None => false,
+            Some(plan) => match plan.price {
+                None => true,
+                Some(price) => price > 0,
+            },
+        };
+        Ok(is_paid)
+    }
+
     async fn require_subscription_for_proxy(
         &self,
         user_id: UserId,

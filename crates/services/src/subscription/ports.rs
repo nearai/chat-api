@@ -283,6 +283,10 @@ pub trait SubscriptionService: Send + Sync {
         return_url: String,
     ) -> Result<String, SubscriptionError>;
 
+    /// Check if user has a paid subscription (active subscription, plan is not "free").
+    /// Used to skip NEAR balance checks for paid users only; free plan subscribers still get the check.
+    async fn has_paid_subscription(&self, user_id: UserId) -> Result<bool, SubscriptionError>;
+
     /// Check that user has an active subscription for proxy/chat access.
     /// Returns Ok(()) when allowed, Err(NoActiveSubscription) when subscription required but not found.
     /// When Stripe is not configured (NotConfigured), returns Ok(()) to allow access (no gating).
