@@ -467,7 +467,7 @@ async fn test_admin_config_returns_allowed_models_fields() {
     );
 
     // Verify pro plan has no allowed_models field (or null)
-    let pro_plan = body["subscription_plans"]["pro"];
+    let pro_plan = &body["subscription_plans"]["pro"];
     assert!(
         pro_plan["allowed_models"].is_null()
             || pro_plan
