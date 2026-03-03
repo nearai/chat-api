@@ -27,11 +27,16 @@ pub struct ParsedUsage {
 }
 
 impl ParsedUsage {
-    /// Merges another chunk's usage into this one (accumulation). Model is taken from `other`.
+    /// Merges another chunk's usage into this one.
+    ///
+    /// For chat/completions streaming, upstream already returns **cumulative**
+    /// usage per chunk. To avoid double-counting, we treat `other` as the
+    /// latest snapshot and simply replace the current values instead of
+    /// accumulating.
     pub fn merge(&mut self, other: &ParsedUsage) {
-        self.input_tokens += other.input_tokens;
-        self.output_tokens += other.output_tokens;
-        self.total_tokens += other.total_tokens;
+        self.input_tokens = other.input_tokens;
+        self.output_tokens = other.output_tokens;
+        self.total_tokens = other.total_tokens;
         self.model = other.model.clone();
     }
 }
