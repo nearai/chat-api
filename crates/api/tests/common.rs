@@ -398,14 +398,8 @@ pub async fn insert_test_subscription_with_price_id(
     cancel_at_period_end: bool,
     price_id: &str,
 ) {
-    insert_test_subscription_with_price(
-        server,
-        db,
-        user_email,
-        price_id,
-        cancel_at_period_end,
-    )
-    .await;
+    insert_test_subscription_with_price(server, db, user_email, price_id, cancel_at_period_end)
+        .await;
 }
 
 /// Insert a test subscription with custom price_id for a user.
