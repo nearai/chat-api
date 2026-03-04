@@ -1,7 +1,28 @@
 use crate::pool::DbPool;
 use async_trait::async_trait;
-use services::subscription::ports::{Subscription, SubscriptionRepository};
+use services::subscription::ports::{DowngradeIntentStatus, Subscription, SubscriptionRepository};
 use services::UserId;
+
+fn row_to_subscription(row: &tokio_postgres::Row) -> Subscription {
+    Subscription {
+        subscription_id: row.get("subscription_id"),
+        user_id: row.get("user_id"),
+        provider: row.get("provider"),
+        customer_id: row.get("customer_id"),
+        price_id: row.get("price_id"),
+        status: row.get("status"),
+        current_period_end: row.get("current_period_end"),
+        cancel_at_period_end: row.get("cancel_at_period_end"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+        pending_downgrade_target_price_id: row.get("pending_downgrade_target_price_id"),
+        pending_downgrade_from_price_id: row.get("pending_downgrade_from_price_id"),
+        pending_downgrade_expected_period_end: row.get("pending_downgrade_expected_period_end"),
+        pending_downgrade_status: row
+            .get::<_, Option<String>>("pending_downgrade_status")
+            .and_then(|v| v.parse::<DowngradeIntentStatus>().ok()),
+    }
+}
 
 pub struct PostgresSubscriptionRepository {
     pool: DbPool,
@@ -26,13 +47,20 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
             subscription.user_id
         );
 
+        let pending_downgrade_status = subscription
+            .pending_downgrade_status
+            .map(DowngradeIntentStatus::as_str);
+
         let row = txn
             .query_one(
                 "INSERT INTO subscriptions (
                     subscription_id, user_id, provider, customer_id, price_id,
-                    status, current_period_end, cancel_at_period_end
+                    status, current_period_end, cancel_at_period_end,
+                    pending_downgrade_target_price_id, pending_downgrade_from_price_id,
+                    pending_downgrade_expected_period_end, pending_downgrade_status,
+                    pending_downgrade_updated_at
                  )
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
                  ON CONFLICT (subscription_id)
                  DO UPDATE SET
                      user_id = EXCLUDED.user_id,
@@ -42,9 +70,35 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
                      status = EXCLUDED.status,
                      current_period_end = EXCLUDED.current_period_end,
                      cancel_at_period_end = EXCLUDED.cancel_at_period_end,
+                     pending_downgrade_target_price_id = CASE
+                         WHEN EXCLUDED.pending_downgrade_status IS NULL
+                             THEN subscriptions.pending_downgrade_target_price_id
+                         ELSE EXCLUDED.pending_downgrade_target_price_id
+                     END,
+                     pending_downgrade_from_price_id = CASE
+                         WHEN EXCLUDED.pending_downgrade_status IS NULL
+                             THEN subscriptions.pending_downgrade_from_price_id
+                         ELSE EXCLUDED.pending_downgrade_from_price_id
+                     END,
+                     pending_downgrade_expected_period_end = CASE
+                         WHEN EXCLUDED.pending_downgrade_status IS NULL
+                             THEN subscriptions.pending_downgrade_expected_period_end
+                         ELSE EXCLUDED.pending_downgrade_expected_period_end
+                     END,
+                     pending_downgrade_status = COALESCE(
+                         EXCLUDED.pending_downgrade_status,
+                         subscriptions.pending_downgrade_status
+                     ),
+                     pending_downgrade_updated_at = CASE
+                         WHEN EXCLUDED.pending_downgrade_status IS NULL
+                             THEN subscriptions.pending_downgrade_updated_at
+                         ELSE NOW()
+                     END,
                      updated_at = NOW()
                  RETURNING subscription_id, user_id, provider, customer_id, price_id, status,
-                           current_period_end, cancel_at_period_end, created_at, updated_at",
+                           current_period_end, cancel_at_period_end, created_at, updated_at,
+                           pending_downgrade_target_price_id, pending_downgrade_from_price_id,
+                           pending_downgrade_expected_period_end, pending_downgrade_status",
                 &[
                     &subscription.subscription_id,
                     &subscription.user_id,
@@ -54,22 +108,15 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
                     &subscription.status,
                     &subscription.current_period_end,
                     &subscription.cancel_at_period_end,
+                    &subscription.pending_downgrade_target_price_id,
+                    &subscription.pending_downgrade_from_price_id,
+                    &subscription.pending_downgrade_expected_period_end,
+                    &pending_downgrade_status,
                 ],
             )
             .await?;
 
-        Ok(Subscription {
-            subscription_id: row.get("subscription_id"),
-            user_id: row.get("user_id"),
-            provider: row.get("provider"),
-            customer_id: row.get("customer_id"),
-            price_id: row.get("price_id"),
-            status: row.get("status"),
-            current_period_end: row.get("current_period_end"),
-            cancel_at_period_end: row.get("cancel_at_period_end"),
-            created_at: row.get("created_at"),
-            updated_at: row.get("updated_at"),
-        })
+        Ok(row_to_subscription(&row))
     }
 
     async fn get_user_subscriptions(&self, user_id: UserId) -> anyhow::Result<Vec<Subscription>> {
@@ -83,7 +130,9 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
         let rows = client
             .query(
                 "SELECT subscription_id, user_id, provider, customer_id, price_id, status,
-                        current_period_end, cancel_at_period_end, created_at, updated_at
+                        current_period_end, cancel_at_period_end, created_at, updated_at,
+                        pending_downgrade_target_price_id, pending_downgrade_from_price_id,
+                        pending_downgrade_expected_period_end, pending_downgrade_status
                  FROM subscriptions
                  WHERE user_id = $1
                  ORDER BY created_at DESC",
@@ -91,23 +140,7 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
             )
             .await?;
 
-        let subscriptions = rows
-            .into_iter()
-            .map(|row| Subscription {
-                subscription_id: row.get("subscription_id"),
-                user_id: row.get("user_id"),
-                provider: row.get("provider"),
-                customer_id: row.get("customer_id"),
-                price_id: row.get("price_id"),
-                status: row.get("status"),
-                current_period_end: row.get("current_period_end"),
-                cancel_at_period_end: row.get("cancel_at_period_end"),
-                created_at: row.get("created_at"),
-                updated_at: row.get("updated_at"),
-            })
-            .collect();
-
-        Ok(subscriptions)
+        Ok(rows.iter().map(row_to_subscription).collect())
     }
 
     async fn get_active_subscription(
@@ -124,7 +157,9 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
         let row = client
             .query_opt(
                 "SELECT subscription_id, user_id, provider, customer_id, price_id, status,
-                        current_period_end, cancel_at_period_end, created_at, updated_at
+                        current_period_end, cancel_at_period_end, created_at, updated_at,
+                        pending_downgrade_target_price_id, pending_downgrade_from_price_id,
+                        pending_downgrade_expected_period_end, pending_downgrade_status
                  FROM subscriptions
                  WHERE user_id = $1 AND status IN ('active', 'trialing')
                  ORDER BY created_at DESC
@@ -133,18 +168,7 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
             )
             .await?;
 
-        Ok(row.map(|row| Subscription {
-            subscription_id: row.get("subscription_id"),
-            user_id: row.get("user_id"),
-            provider: row.get("provider"),
-            customer_id: row.get("customer_id"),
-            price_id: row.get("price_id"),
-            status: row.get("status"),
-            current_period_end: row.get("current_period_end"),
-            cancel_at_period_end: row.get("cancel_at_period_end"),
-            created_at: row.get("created_at"),
-            updated_at: row.get("updated_at"),
-        }))
+        Ok(row.as_ref().map(row_to_subscription))
     }
 
     async fn get_active_subscriptions(&self, user_id: UserId) -> anyhow::Result<Vec<Subscription>> {
@@ -158,7 +182,9 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
         let rows = client
             .query(
                 "SELECT subscription_id, user_id, provider, customer_id, price_id, status,
-                        current_period_end, cancel_at_period_end, created_at, updated_at
+                        current_period_end, cancel_at_period_end, created_at, updated_at,
+                        pending_downgrade_target_price_id, pending_downgrade_from_price_id,
+                        pending_downgrade_expected_period_end, pending_downgrade_status
                  FROM subscriptions
                  WHERE user_id = $1 AND status IN ('active', 'trialing')
                  ORDER BY current_period_end DESC",
@@ -166,23 +192,7 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
             )
             .await?;
 
-        let subscriptions = rows
-            .into_iter()
-            .map(|row| Subscription {
-                subscription_id: row.get("subscription_id"),
-                user_id: row.get("user_id"),
-                provider: row.get("provider"),
-                customer_id: row.get("customer_id"),
-                price_id: row.get("price_id"),
-                status: row.get("status"),
-                current_period_end: row.get("current_period_end"),
-                cancel_at_period_end: row.get("cancel_at_period_end"),
-                created_at: row.get("created_at"),
-                updated_at: row.get("updated_at"),
-            })
-            .collect();
-
-        Ok(subscriptions)
+        Ok(rows.iter().map(row_to_subscription).collect())
     }
 
     async fn delete_subscription(&self, subscription_id: &str) -> anyhow::Result<()> {
@@ -222,5 +232,29 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
             );
         }
         Ok(())
+    }
+
+    async fn get_pending_downgrade_for_update_skip_locked(
+        &self,
+        txn: &tokio_postgres::Transaction<'_>,
+        subscription_id: &str,
+    ) -> anyhow::Result<Option<Subscription>> {
+        let pending_status = DowngradeIntentStatus::Pending.as_str();
+        let row = txn
+            .query_opt(
+                "SELECT subscription_id, user_id, provider, customer_id, price_id, status,
+                        current_period_end, cancel_at_period_end, created_at, updated_at,
+                        pending_downgrade_target_price_id, pending_downgrade_from_price_id,
+                        pending_downgrade_expected_period_end, pending_downgrade_status
+                 FROM subscriptions
+                 WHERE subscription_id = $1
+                   AND status IN ('active', 'trialing')
+                   AND pending_downgrade_status = $2
+                 FOR UPDATE SKIP LOCKED",
+                &[&subscription_id, &pending_status],
+            )
+            .await?;
+
+        Ok(row.as_ref().map(row_to_subscription))
     }
 }

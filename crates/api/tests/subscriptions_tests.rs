@@ -546,7 +546,7 @@ async fn test_change_plan_invalid_plan() {
 
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn test_change_plan_instance_limit_exceeded() {
+async fn test_change_plan_downgrade_schedules_even_if_instance_limit_exceeded() {
     let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
 
     set_subscription_plans(
@@ -582,20 +582,52 @@ async fn test_change_plan_instance_limit_exceeded() {
 
     assert_eq!(
         response.status_code(),
-        400,
-        "Should return 400 when instance count exceeds target plan limit"
+        200,
+        "Should return 200 when downgrade is scheduled"
     );
 
     let body: serde_json::Value = response.json();
-    let message = body
-        .get("message")
-        .and_then(|v| v.as_str())
-        .or_else(|| body.get("detail").and_then(|v| v.as_str()))
-        .unwrap_or("");
-    assert!(
-        message.contains("2") && message.contains("1"),
-        "Error message should include current (2) and max (1) instance counts, got: {}",
-        message
+    let result = body.get("result").and_then(|v| v.as_str()).unwrap_or("");
+    assert_eq!(
+        result, "scheduled_for_period_end",
+        "Should return scheduled_for_period_end for downgrade scheduling"
+    );
+
+    // Verify pending downgrade intent persisted
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .expect("get user")
+        .expect("user exists");
+    let client = db.pool().get().await.expect("get pool client");
+    let row = client
+        .query_one(
+            "SELECT pending_downgrade_target_price_id, pending_downgrade_from_price_id,
+                    pending_downgrade_expected_period_end, pending_downgrade_status, current_period_end
+             FROM subscriptions
+             WHERE user_id = $1 AND status IN ('active', 'trialing')
+             ORDER BY created_at DESC
+             LIMIT 1",
+            &[&user.id],
+        )
+        .await
+        .expect("select subscription");
+
+    let target: Option<String> = row.get("pending_downgrade_target_price_id");
+    let from: Option<String> = row.get("pending_downgrade_from_price_id");
+    let expected_end: Option<chrono::DateTime<chrono::Utc>> =
+        row.get("pending_downgrade_expected_period_end");
+    let status: Option<String> = row.get("pending_downgrade_status");
+    let current_end: chrono::DateTime<chrono::Utc> = row.get("current_period_end");
+
+    assert_eq!(target.as_deref(), Some("price_test_starter"));
+    assert_eq!(from.as_deref(), Some("price_test_basic"));
+    assert_eq!(status.as_deref(), Some("pending"));
+    assert_eq!(
+        expected_end,
+        Some(current_end),
+        "Expected period end snapshot should match current period end"
     );
 }
 
@@ -644,6 +676,14 @@ async fn test_change_plan_success_validates_before_stripe() {
         "Should pass validation (200) or fail at Stripe (500), got {}",
         status
     );
+    if status == 200 {
+        let body: serde_json::Value = response.json();
+        let result = body.get("result").and_then(|v| v.as_str()).unwrap_or("");
+        assert_eq!(
+            result, "changed_immediately",
+            "Successful upgrade should return changed_immediately"
+        );
+    }
 }
 
 #[tokio::test]
