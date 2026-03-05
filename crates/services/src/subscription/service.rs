@@ -1299,12 +1299,19 @@ impl SubscriptionService for SubscriptionServiceImpl {
         }
 
         if is_invoice_event {
-            if let Some(subscription_id) = payload_json
-                .get("data")
-                .and_then(|d| d.get("object"))
+            let invoice_obj = payload_json.get("data").and_then(|d| d.get("object"));
+            let subscription_id = invoice_obj
                 .and_then(|o| o.get("subscription"))
                 .and_then(|s| s.as_str())
-            {
+                .or_else(|| {
+                    // invoice.upcoming stores subscription under parent.subscription_details.subscription
+                    invoice_obj
+                        .and_then(|o| o.get("parent"))
+                        .and_then(|p| p.get("subscription_details"))
+                        .and_then(|sd| sd.get("subscription"))
+                        .and_then(|s| s.as_str())
+                });
+            if let Some(subscription_id) = subscription_id {
                 if let Some(updated) = self
                     .try_apply_pending_downgrade_in_txn(&txn, subscription_id)
                     .await?
