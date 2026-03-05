@@ -80,7 +80,7 @@ impl ModelsRepository for PostgresModelRepository {
 
         let mut total: i64 = 0;
         let mut models = Vec::new();
-        for row in rows {
+        for row in &rows {
             total = row.get("total_count");
             let settings_json: serde_json::Value = row.get("settings");
 
@@ -95,6 +95,15 @@ impl ModelsRepository for PostgresModelRepository {
                 created_at: row.get("created_at"),
                 updated_at: row.get("updated_at"),
             });
+        }
+
+        // When offset is beyond the last row, the window function returns no rows and total stays 0.
+        // Fall back to a separate count query to get the correct total.
+        if rows.is_empty() {
+            let count_row = client
+                .query_one("SELECT COUNT(*) as total_count FROM models", &[])
+                .await?;
+            total = count_row.get("total_count");
         }
 
         Ok((models, total))

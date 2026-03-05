@@ -311,8 +311,6 @@ pub async fn mock_login(server: &TestServer, email: &str) -> String {
         .expect("Response should contain token")
 }
 
-/// Clear subscription_plans configuration from system_configs
-/// Sets subscription_plans to an empty map, which is treated as "not configured"
 /// Clear default_allowed_models by setting it to empty array (treated as allow-all)
 pub async fn clear_default_allowed_models(server: &TestServer) {
     let admin_email = "test_cleanup_admin@admin.org";

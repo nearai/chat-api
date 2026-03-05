@@ -2224,20 +2224,46 @@ async fn check_model_access(
     user_id: services::types::UserId,
     model_id: &str,
 ) -> Result<(), Response> {
+    use services::subscription::ports::SubscriptionError;
     state
         .subscription_service
         .check_model_access(user_id, model_id)
         .await
-        .map_err(|e| {
-            Response::builder()
+        .map_err(|e| match e {
+            SubscriptionError::ModelNotAllowedInPlan { model, plan } => Response::builder()
                 .status(StatusCode::FORBIDDEN)
-                .body(Body::from(e.to_string()))
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "error": format!("Model '{}' is not available in your plan '{}'", model, plan)
+                    })
+                    .to_string(),
+                ))
                 .unwrap_or_else(|_| {
                     Response::builder()
                         .status(StatusCode::INTERNAL_SERVER_ERROR)
                         .body(Body::from("Failed to build response"))
                         .unwrap()
-                })
+                }),
+            _ => {
+                tracing::error!(
+                    "Failed to check model access for user_id={}: {}",
+                    user_id,
+                    e
+                );
+                Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "error": "Failed to verify model access" }).to_string(),
+                    ))
+                    .unwrap_or_else(|_| {
+                        Response::builder()
+                            .status(StatusCode::INTERNAL_SERVER_ERROR)
+                            .body(Body::from("Failed to build response"))
+                            .unwrap()
+                    })
+            }
         })
 }
 
