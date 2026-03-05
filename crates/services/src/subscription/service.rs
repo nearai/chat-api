@@ -388,12 +388,14 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .into_keys()
             .map(|name| {
                 let plan_config = subscription_plans.get(&name);
+                let price = plan_config.and_then(|c| c.price);
                 let agent_instances = plan_config.and_then(|c| c.agent_instances.clone());
                 let monthly_tokens = plan_config.and_then(|c| c.monthly_tokens.clone());
                 let trial_period_days = plan_config.and_then(|c| c.trial_period_days);
                 let allowed_models = plan_config.and_then(|c| c.allowed_models.clone());
                 SubscriptionPlan {
                     name,
+                    price,
                     trial_period_days,
                     agent_instances,
                     monthly_tokens,
