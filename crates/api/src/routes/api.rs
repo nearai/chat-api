@@ -2225,6 +2225,54 @@ async fn get_file_content(
     .await
 }
 
+async fn check_model_access(
+    state: &crate::state::AppState,
+    user_id: services::types::UserId,
+    model_id: &str,
+) -> Result<(), Response> {
+    use services::subscription::ports::SubscriptionError;
+    state
+        .subscription_service
+        .check_model_access(user_id, model_id)
+        .await
+        .map_err(|e| match e {
+            SubscriptionError::ModelNotAllowedInPlan { model, plan } => Response::builder()
+                .status(StatusCode::FORBIDDEN)
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "error": format!("Model '{}' is not available in your plan '{}'", model, plan)
+                    })
+                    .to_string(),
+                ))
+                .unwrap_or_else(|_| {
+                    Response::builder()
+                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                        .body(Body::from("Failed to build response"))
+                        .unwrap()
+                }),
+            _ => {
+                tracing::error!(
+                    "Failed to check model access for user_id={}: {}",
+                    user_id,
+                    e
+                );
+                Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "error": "Failed to verify model access" }).to_string(),
+                    ))
+                    .unwrap_or_else(|_| {
+                        Response::builder()
+                            .status(StatusCode::INTERNAL_SERVER_ERROR)
+                            .body(Body::from("Failed to build response"))
+                            .unwrap()
+                    })
+            }
+        })
+}
+
 /// Proxy responses endpoint - forwards to OpenAI with model settings and author metadata injection
 #[utoipa::path(
     post,

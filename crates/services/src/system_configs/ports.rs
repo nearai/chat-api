@@ -111,7 +111,7 @@ pub struct SubscriptionPlanConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub monthly_credits: Option<PlanLimitConfig>,
     /// List of model IDs allowed for this plan (e.g. ["gpt-3.5-turbo", "gpt-4o"])
-    /// None = allow all models (default); Some(vec) = only allow models in the list
+    /// None or Some([]) = allow all models (default); Some(non-empty vec) = only allow those models
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allowed_models: Option<Vec<String>>,
 }
@@ -204,7 +204,7 @@ pub struct SystemConfigs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_route: Option<AutoRouteConfig>,
     /// Default model allowlist for users without active subscription
-    /// None = allow all models (default); Some(vec) = only allow models in the list
+    /// None or Some([]) = allow all models (default); Some(non-empty vec) = only allow those models
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_allowed_models: Option<Vec<String>>,
 }
