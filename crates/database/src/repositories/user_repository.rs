@@ -441,8 +441,8 @@ enriched AS (
     FROM users u
     LEFT JOIN LATERAL (
         SELECT status, price_id FROM subscriptions s
-        WHERE s.user_id = u.id
-        ORDER BY s.updated_at DESC
+        WHERE s.user_id = u.id AND s.status IN ('active', 'trialing')
+        ORDER BY s.current_period_end DESC
         LIMIT 1
     ) sub ON true
     LEFT JOIN agent_counts ac ON u.id = ac.user_id
