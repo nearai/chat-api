@@ -23,6 +23,9 @@ use services::bi_metrics::{
 
 /// Maximum rows for BI usage aggregation queries.
 const BI_USAGE_MAX_ROWS: i64 = 1000;
+
+/// Maximum date range (days) for daily active agents time series.
+const MAX_DAILY_ACTIVE_AGENTS_RANGE_DAYS: i64 = 365;
 use services::model::ports::{UpdateModelParams, UpsertModelParams};
 use services::user_usage::UsageRankBy;
 use services::UserId;
@@ -2399,6 +2402,15 @@ pub async fn bi_daily_active_agents(
     Query(params): Query<BiSummaryQuery>,
 ) -> Result<Json<Vec<DailyActiveAgentsPoint>>, ApiError> {
     validate_date_range(params.start_date, params.end_date)?;
+
+    if let (Some(s), Some(e)) = (params.start_date, params.end_date) {
+        if (e - s).num_days() > MAX_DAILY_ACTIVE_AGENTS_RANGE_DAYS {
+            return Err(ApiError::bad_request(format!(
+                "Date range must not exceed {} days",
+                MAX_DAILY_ACTIVE_AGENTS_RANGE_DAYS
+            )));
+        }
+    }
 
     let points = app_state
         .bi_metrics_service

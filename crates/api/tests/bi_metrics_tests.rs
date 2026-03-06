@@ -801,11 +801,13 @@ async fn test_bi_daily_active_agents_with_data() {
     );
 
     // Breakdown by instance type: we seeded one openclaw and one ironclaw with usage
+    let binding = vec![];
     let by_type = today_point
         .unwrap()
         .get("by_instance_type")
         .and_then(|v| v.as_array())
-        .unwrap_or(&vec![]);
+        .map(|v| v.as_slice())
+        .unwrap_or(&binding);
     let openclaw_count = by_type
         .iter()
         .find(|e| e.get("instance_type").and_then(|v| v.as_str()) == Some("openclaw"))

@@ -28,8 +28,8 @@ impl BiMetricsServiceImpl {
         config: &Option<crate::system_configs::ports::SystemConfigs>,
     ) -> HashMap<String, String> {
         let mut map = HashMap::new();
-        if let Some(ref config) = config {
-            if let Some(ref plans) = config.subscription_plans {
+        if let Some(config) = config.as_ref() {
+            if let Some(plans) = config.subscription_plans.as_ref() {
                 for (plan_name, plan_config) in plans {
                     for provider_config in plan_config.providers.values() {
                         map.insert(provider_config.price_id.clone(), plan_name.clone());
@@ -89,9 +89,13 @@ impl BiMetricsService for BiMetricsServiceImpl {
         let by_subscription_plan: Vec<UserSummaryPlanCount> = by_price_id
             .into_iter()
             .map(|(price_id_opt, user_count)| {
-                let plan = price_id_opt
-                    .and_then(|id| price_to_plan.get(&id).cloned())
-                    .unwrap_or_else(|| "none".to_string());
+                let plan = match price_id_opt {
+                    None => "none".to_string(),
+                    Some(id) => price_to_plan
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_else(|| "unknown".to_string()),
+                };
                 UserSummaryPlanCount { plan, user_count }
             })
             .collect();

@@ -25,7 +25,7 @@ pub struct UserWithStats {
 /// Filter for BI user list
 #[derive(Debug, Clone, Default)]
 pub struct ListUsersFilter {
-    /// Filter by subscription status: "active", "canceled", "past_due", or "none" for no subscription
+    /// Filter by subscription status: "active", "trialing", or "none" for no subscription
     pub subscription_status: Option<String>,
     /// Filter by subscription plan name (e.g. "Pro", "Starter") or "none" for no subscription.
     /// Requires price_ids resolved from system config.
