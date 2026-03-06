@@ -4,7 +4,73 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use uuid::Uuid;
 
+use crate::user::ports::User;
 use crate::UserId;
+
+// ---- BI user list types (used only by GET /v1/admin/bi/users) ----
+
+/// User with BI stats (subscription, agent count, spending, etc.)
+#[derive(Debug, Clone)]
+pub struct UserWithStats {
+    pub user: User,
+    pub subscription_status: Option<String>,
+    pub subscription_price_id: Option<String>,
+    pub agent_count: i64,
+    pub total_spent_nano: i64,
+    pub agent_spent_nano: i64,
+    pub agent_token_usage: i64,
+    pub last_activity_at: Option<DateTime<Utc>>,
+}
+
+/// Filter for BI user list
+#[derive(Debug, Clone, Default)]
+pub struct ListUsersFilter {
+    /// Filter by subscription status: "active", "trialing", or "none" for no subscription
+    pub subscription_status: Option<String>,
+    /// Filter by subscription plan name (e.g. "Pro", "Starter") or "none" for no subscription.
+    /// Requires price_ids resolved from system config.
+    pub subscription_plan_price_ids: Option<Vec<String>>,
+    /// Filter by subscription plan = none (no subscription)
+    pub subscription_plan_none: bool,
+    /// Substring search on email and name (case-insensitive)
+    pub search: Option<String>,
+}
+
+/// Sort options for BI user list
+#[derive(Debug, Clone)]
+pub struct ListUsersSort {
+    pub sort_by: UsersSortBy,
+    pub sort_order: UsersSortOrder,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsersSortBy {
+    CreatedAt,
+    TotalSpentNano,
+    AgentSpentNano,
+    AgentTokenUsage,
+    LastActivityAt,
+    AgentCount,
+    Email,
+    Name,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsersSortOrder {
+    Asc,
+    Desc,
+}
+
+impl Default for ListUsersSort {
+    fn default() -> Self {
+        Self {
+            sort_by: UsersSortBy::CreatedAt,
+            sort_order: UsersSortOrder::Desc,
+        }
+    }
+}
+
+// ---- BI metrics types ----
 
 /// A single deployment record for BI reporting.
 /// Note: `name` is intentionally excluded to avoid exposing user-provided labels (per privacy policy).
@@ -43,6 +109,53 @@ pub struct DeploymentSummary {
     pub counts_by_type_status: Vec<DeploymentStatusCount>,
     pub new_deployments_in_range: i64,
     pub deleted_in_range: i64,
+}
+
+/// User count per subscription plan (plan name from system config, or "none")
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct UserSummaryPlanCount {
+    pub plan: String,
+    pub user_count: i64,
+}
+
+/// User count per agent count bucket (deployed agents = non-deleted instances)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct UserSummaryAgentCountBucket {
+    pub agent_count: i64,
+    pub user_count: i64,
+}
+
+/// User distribution summary: counts by subscription plan and by deployed agent count
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct UserSummary {
+    pub by_subscription_plan: Vec<UserSummaryPlanCount>,
+    pub by_agent_count: Vec<UserSummaryAgentCountBucket>,
+}
+
+/// Count of daily active agents for a single instance type (e.g. openclaw, ironclaw).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct DailyActiveAgentsByType {
+    /// Agent type: openclaw, ironclaw, etc.
+    pub instance_type: String,
+    /// Number of distinct instances of this type with usage > 0 on this day
+    pub active_agents_count: i64,
+}
+
+/// One point in the daily active agents time series (UTC date, count of distinct agents with usage > 0 that day).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct DailyActiveAgentsPoint {
+    /// ISO date string (YYYY-MM-DD), UTC
+    pub date: String,
+    /// Number of distinct agent instances that had at least one usage event with quantity > 0 or cost > 0 on this day
+    pub active_agents_count: i64,
+    /// Breakdown by instance type (openclaw, ironclaw). Empty if none.
+    #[serde(default)]
+    pub by_instance_type: Vec<DailyActiveAgentsByType>,
 }
 
 /// A single status change event from the audit trail
@@ -84,12 +197,14 @@ impl fmt::Display for UsageGroupBy {
 pub struct UsageAggregation {
     /// The grouping key value (date string, user_id, instance_id, or model_id)
     pub group_key: String,
-    /// User email when group_by is user (from users table)
+    /// User email when group_by is user or instance (from users table)
     pub user_email: Option<String>,
-    /// User name when group_by is user (from users table)
+    /// User name when group_by is user or instance (from users table)
     pub user_name: Option<String>,
-    /// User avatar URL when group_by is user (from users table)
+    /// User avatar URL when group_by is user or instance (from users table)
     pub user_avatar_url: Option<String>,
+    /// Agent type (openclaw/ironclaw) when group_by is instance
+    pub instance_type: Option<String>,
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub total_tokens: i64,
@@ -221,6 +336,27 @@ pub trait BiMetricsRepository: Send + Sync {
         &self,
         filter: &TopConsumerFilter,
     ) -> anyhow::Result<Vec<TopConsumer>>;
+
+    /// User summary: counts by subscription_price_id and by agent_count (raw, no plan name resolution)
+    async fn get_user_summary(
+        &self,
+    ) -> anyhow::Result<(Vec<(Option<String>, i64)>, Vec<(i64, i64)>)>;
+
+    /// List users with BI stats (subscription, agent count, spending). Used by GET /v1/admin/bi/users.
+    async fn list_users_with_stats(
+        &self,
+        limit: i64,
+        offset: i64,
+        filter: &ListUsersFilter,
+        sort: &ListUsersSort,
+    ) -> anyhow::Result<(Vec<UserWithStats>, u64)>;
+
+    /// Daily active agents (with usage > 0): one row per day in range with count of distinct instance_id.
+    async fn get_daily_active_agents(
+        &self,
+        start_date: Option<DateTime<Utc>>,
+        end_date: Option<DateTime<Utc>>,
+    ) -> anyhow::Result<Vec<DailyActiveAgentsPoint>>;
 }
 
 /// Service trait for BI metrics
@@ -252,4 +388,23 @@ pub trait BiMetricsService: Send + Sync {
         &self,
         filter: &TopConsumerFilter,
     ) -> anyhow::Result<Vec<TopConsumer>>;
+
+    /// User distribution by subscription plan and by deployed agent count
+    async fn get_user_summary(&self) -> anyhow::Result<UserSummary>;
+
+    /// List users with BI stats. Used by GET /v1/admin/bi/users.
+    async fn list_users_with_stats(
+        &self,
+        limit: i64,
+        offset: i64,
+        filter: &ListUsersFilter,
+        sort: &ListUsersSort,
+    ) -> anyhow::Result<(Vec<UserWithStats>, u64)>;
+
+    /// Daily active agents (with usage > 0) time series for the given date range.
+    async fn get_daily_active_agents(
+        &self,
+        start_date: Option<DateTime<Utc>>,
+        end_date: Option<DateTime<Utc>>,
+    ) -> anyhow::Result<Vec<DailyActiveAgentsPoint>>;
 }

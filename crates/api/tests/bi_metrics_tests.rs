@@ -1,5 +1,6 @@
 mod common;
 
+use chrono::{Duration, Utc};
 use common::{create_test_server_and_db, mock_login, TestServerConfig};
 use services::user::ports::UserRepository;
 use uuid::Uuid;
@@ -227,10 +228,22 @@ async fn test_bi_list_deployments_with_data() {
         "Deployments array should not be empty"
     );
 
-    // Verify response fields are present on each deployment
+    // Verify response fields are present on each deployment (including user info for admin UI)
     for d in deployments {
         assert!(d.get("id").is_some());
         assert!(d.get("user_id").is_some());
+        assert!(
+            d.get("user_email").is_some(),
+            "deployments should include user_email when available"
+        );
+        assert!(
+            d.get("user_name").is_some(),
+            "deployments should include user_name when available"
+        );
+        assert!(
+            d.get("user_avatar_url").is_some(),
+            "deployments should include user_avatar_url when available"
+        );
         assert!(d.get("instance_id").is_some());
         assert!(d.get("instance_type").is_some());
         assert!(d.get("status").is_some());
@@ -677,12 +690,29 @@ async fn test_bi_usage_with_type_filter() {
     let body: serde_json::Value = response.json();
     let data = body.get("data").unwrap().as_array().unwrap();
 
-    // All instance groups returned should be openclaw instances
+    // All instance groups returned should be openclaw instances and include user info
     for row in data {
+        assert!(
+            row.get("user_email").is_some(),
+            "usage group_by=instance should include user_email"
+        );
+        assert!(
+            row.get("user_name").is_some(),
+            "usage group_by=instance should include user_name"
+        );
+        assert!(
+            row.get("user_avatar_url").is_some(),
+            "usage group_by=instance should include user_avatar_url"
+        );
         let instance_id = row.get("group_key").unwrap().as_str().unwrap();
-        // Our openclaw instance should be present
+        // Our openclaw instance should be present with owner's user_email
         if instance_id == inst1_id.to_string() {
             assert_eq!(row.get("request_count").unwrap().as_i64().unwrap(), 5);
+            assert_eq!(
+                row.get("user_email").and_then(|v| v.as_str()).unwrap_or(""),
+                "bi_admin_utfilter@admin.org",
+                "instance row should include owner user_email"
+            );
         }
         // inst2_id (ironclaw) should NOT appear
         assert_ne!(
@@ -693,6 +723,130 @@ async fn test_bi_usage_with_type_filter() {
     }
 
     cleanup(&db, inst1_id, inst2_id).await;
+}
+
+// =============================================================================
+// Daily active agents endpoint
+// =============================================================================
+
+#[tokio::test]
+async fn test_bi_daily_active_agents_with_data() {
+    let (server, db) = server_and_db().await;
+    let admin_token = mock_login(&server, "bi_admin_daily_agents@admin.org").await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email("bi_admin_daily_agents@admin.org")
+        .await
+        .unwrap()
+        .unwrap();
+
+    let (inst1_id, inst2_id) = seed_bi_test_data(&db, user.id.0).await;
+
+    // Date range that includes today (UTC) so the seeded usage events are counted
+    let now = Utc::now();
+    let start = (now - Duration::days(1))
+        .format("%Y-%m-%dT00:00:00Z")
+        .to_string();
+    let end = (now + Duration::days(1))
+        .format("%Y-%m-%dT00:00:00Z")
+        .to_string();
+    let url = format!(
+        "/v1/admin/bi/usage/daily-active-agents?start_date={}&end_date={}",
+        start, end,
+    );
+
+    let response = server
+        .get(&url)
+        .add_header(AUTH, auth_header(&admin_token))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        200,
+        "daily-active-agents should return 200"
+    );
+
+    let body: serde_json::Value = response.json();
+    let points = body.as_array().expect("response should be array of points");
+    assert!(
+        !points.is_empty(),
+        "Should have at least one day in the range"
+    );
+
+    // Today (UTC) should have 2 active agents (both instances have usage > 0)
+    let today_str = now.format("%Y-%m-%d").to_string();
+    let today_point = points
+        .iter()
+        .find(|p| p.get("date").and_then(|v| v.as_str()).unwrap_or("") == today_str);
+    assert!(
+        today_point.is_some(),
+        "Should have a point for today {} in {:?}",
+        today_str,
+        points
+            .iter()
+            .map(|p| p.get("date").and_then(|v| v.as_str()).unwrap_or("?"))
+            .collect::<Vec<_>>()
+    );
+    let count = today_point
+        .unwrap()
+        .get("active_agents_count")
+        .unwrap()
+        .as_i64()
+        .unwrap();
+    assert!(
+        count >= 2,
+        "Today should have at least 2 active agents (we seeded 2 instances with usage), got {}",
+        count
+    );
+
+    // Breakdown by instance type: we seeded one openclaw and one ironclaw with usage
+    let binding = vec![];
+    let by_type = today_point
+        .unwrap()
+        .get("by_instance_type")
+        .and_then(|v| v.as_array())
+        .map(|v| v.as_slice())
+        .unwrap_or(&binding);
+    let openclaw_count = by_type
+        .iter()
+        .find(|e| e.get("instance_type").and_then(|v| v.as_str()) == Some("openclaw"))
+        .and_then(|e| e.get("active_agents_count").and_then(|v| v.as_i64()))
+        .unwrap_or(0);
+    let ironclaw_count = by_type
+        .iter()
+        .find(|e| e.get("instance_type").and_then(|v| v.as_str()) == Some("ironclaw"))
+        .and_then(|e| e.get("active_agents_count").and_then(|v| v.as_i64()))
+        .unwrap_or(0);
+    assert!(
+        openclaw_count >= 1,
+        "Today should have at least 1 openclaw active agent, by_instance_type={:?}",
+        by_type
+    );
+    assert!(
+        ironclaw_count >= 1,
+        "Today should have at least 1 ironclaw active agent, by_instance_type={:?}",
+        by_type
+    );
+
+    cleanup(&db, inst1_id, inst2_id).await;
+}
+
+#[tokio::test]
+async fn test_bi_daily_active_agents_requires_date_range() {
+    let (server, _db) = server_and_db().await;
+    let admin_token = mock_login(&server, "bi_admin_daily_no_range@admin.org").await;
+
+    // No query params: validate_date_range passes (both None), repo returns []
+    let response = server
+        .get("/v1/admin/bi/usage/daily-active-agents")
+        .add_header(AUTH, auth_header(&admin_token))
+        .await;
+
+    assert_eq!(response.status_code(), 200);
+    let body: serde_json::Value = response.json();
+    let points = body.as_array().unwrap();
+    assert!(points.is_empty(), "No date range should return empty array");
 }
 
 // =============================================================================
@@ -916,4 +1070,108 @@ async fn test_bi_deployments_pagination() {
     assert_ne!(id1, id2, "Pagination should return different items");
 
     cleanup(&db, inst1_id, inst2_id).await;
+}
+
+// =============================================================================
+// BI users endpoint - subscription filtering (active/trialing only)
+// =============================================================================
+
+#[tokio::test]
+async fn test_bi_users_returns_only_active_subscriptions() {
+    let (server, db) = server_and_db().await;
+    let admin_token = mock_login(&server, "bi_users_admin@admin.org").await;
+
+    // Configure subscription plans so we can filter by plan
+    common::set_subscription_plans(
+        &server,
+        serde_json::json!({
+            "basic": { "providers": { "stripe": { "price_id": "price_bi_test_basic" } } }
+        }),
+    )
+    .await;
+
+    // User 1: active subscription - should appear with subscription_status=active
+    let _ = mock_login(&server, "bi_user_active@test.org").await;
+    common::insert_test_subscription_with_status(
+        &server,
+        &db,
+        "bi_user_active@test.org",
+        "active",
+        "price_bi_test_basic",
+    )
+    .await;
+
+    // User 2: no subscription - should appear with subscription_status=none
+    let _ = mock_login(&server, "bi_user_none@test.org").await;
+
+    // User 3: canceled subscription only - BI returns only active/trialing, so this user gets null
+    let _ = mock_login(&server, "bi_user_canceled@test.org").await;
+    common::insert_test_subscription_with_status(
+        &server,
+        &db,
+        "bi_user_canceled@test.org",
+        "canceled",
+        "price_bi_test_basic",
+    )
+    .await;
+
+    // Filter by subscription_status=active: should include user 1, exclude user 2 and 3
+    let response = server
+        .get("/v1/admin/bi/users?filter_by=subscription_status&filter_value=active&limit=100")
+        .add_header(AUTH, auth_header(&admin_token))
+        .await;
+    assert_eq!(response.status_code(), 200);
+    let body: serde_json::Value = response.json();
+    let users = body.get("users").unwrap().as_array().unwrap();
+    let active_emails: Vec<_> = users
+        .iter()
+        .filter_map(|u| u.get("email").and_then(|e| e.as_str()))
+        .collect();
+    assert!(
+        active_emails.contains(&"bi_user_active@test.org"),
+        "User with active subscription should appear: {:?}",
+        active_emails
+    );
+    assert!(
+        !active_emails.contains(&"bi_user_canceled@test.org"),
+        "User with only canceled subscription should not appear"
+    );
+
+    // Filter by subscription_status=none: should include user 2 and 3 (no active sub)
+    let response = server
+        .get("/v1/admin/bi/users?filter_by=subscription_status&filter_value=none&limit=100")
+        .add_header(AUTH, auth_header(&admin_token))
+        .await;
+    assert_eq!(response.status_code(), 200);
+    let body: serde_json::Value = response.json();
+    let users = body.get("users").unwrap().as_array().unwrap();
+    let none_emails: Vec<_> = users
+        .iter()
+        .filter_map(|u| u.get("email").and_then(|e| e.as_str()))
+        .collect();
+    assert!(
+        none_emails.contains(&"bi_user_none@test.org"),
+        "User with no subscription should appear: {:?}",
+        none_emails
+    );
+    assert!(
+        none_emails.contains(&"bi_user_canceled@test.org"),
+        "User with only canceled subscription should appear as 'none' (no active sub): {:?}",
+        none_emails
+    );
+
+    // Filter subscription_status=canceled should return 400 (invalid - only active, trialing, none)
+    let response = server
+        .get("/v1/admin/bi/users?filter_by=subscription_status&filter_value=canceled")
+        .add_header(AUTH, auth_header(&admin_token))
+        .await;
+    assert_eq!(
+        response.status_code(),
+        400,
+        "filter_value=canceled should be rejected"
+    );
+
+    // Cleanup
+    common::cleanup_user_subscriptions(&db, "bi_user_active@test.org").await;
+    common::cleanup_user_subscriptions(&db, "bi_user_canceled@test.org").await;
 }

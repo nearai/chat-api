@@ -16,13 +16,16 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use services::analytics::{ActivityLogEntry, AnalyticsSummary, TopActiveUsersResponse};
 use services::bi_metrics::{
-    DeploymentFilter, DeploymentRecord, DeploymentSummary, StatusChangeRecord, TopConsumer,
-    TopConsumerFilter, TopConsumerGroupBy, UsageAggregation, UsageFilter, UsageGroupBy,
-    UsageRankBy as BiUsageRankBy,
+    DailyActiveAgentsPoint, DeploymentFilter, DeploymentRecord, DeploymentSummary,
+    StatusChangeRecord, TopConsumer, TopConsumerFilter, TopConsumerGroupBy, UsageAggregation,
+    UsageFilter, UsageGroupBy, UsageRankBy as BiUsageRankBy, UserSummary,
 };
 
 /// Maximum rows for BI usage aggregation queries.
 const BI_USAGE_MAX_ROWS: i64 = 1000;
+
+/// Maximum date range (days) for daily active agents time series.
+const MAX_DAILY_ACTIVE_AGENTS_RANGE_DAYS: i64 = 365;
 use services::model::ports::{UpdateModelParams, UpsertModelParams};
 use services::user_usage::UsageRankBy;
 use services::UserId;
@@ -81,7 +84,7 @@ pub struct ListUsersQuery {
     pub offset: i64,
     /// Filter type: "subscription_status" or "subscription_plan"
     pub filter_by: Option<String>,
-    /// Filter value. For subscription_status: active, canceled, past_due, trialing, unpaid, none. For subscription_plan: plan name or none
+    /// Filter value. For subscription_status: active, trialing, none (BI returns only active subscriptions). For subscription_plan: plan name or none
     pub filter_value: Option<String>,
     /// Substring search on email and name (case-insensitive)
     pub q: Option<String>,
@@ -116,11 +119,8 @@ impl ListUsersQuery {
                 if !fb.is_empty() && !fv.is_empty() {
                     match fb {
                         "subscription_status" => {
-                            if ![
-                                "active", "canceled", "past_due", "trialing", "unpaid", "none",
-                            ]
-                            .contains(&fv)
-                            {
+                            // BI endpoint returns only active/trialing subscriptions; filter supports active, trialing, none
+                            if !["active", "trialing", "none"].contains(&fv) {
                                 return Err(ApiError::bad_request(format!(
                                     "invalid filter_value for subscription_status: {}",
                                     fv
@@ -301,7 +301,7 @@ async fn list_users_bi_impl(
         })
         .unwrap_or((None, false, None));
 
-    let filter = services::user::ports::AdminListUsersFilter {
+    let filter = services::bi_metrics::ListUsersFilter {
         subscription_status,
         subscription_plan_price_ids,
         subscription_plan_none,
@@ -315,27 +315,27 @@ async fn list_users_bi_impl(
         }),
     };
 
-    let sort = services::user::ports::AdminListUsersSort {
+    let sort = services::bi_metrics::ListUsersSort {
         sort_by: match params.sort_by.as_str() {
-            "created_at" => services::user::ports::AdminUsersSortBy::CreatedAt,
-            "total_spent_nano" => services::user::ports::AdminUsersSortBy::TotalSpentNano,
-            "agent_spent_nano" => services::user::ports::AdminUsersSortBy::AgentSpentNano,
-            "agent_token_usage" => services::user::ports::AdminUsersSortBy::AgentTokenUsage,
-            "last_activity_at" => services::user::ports::AdminUsersSortBy::LastActivityAt,
-            "agent_count" => services::user::ports::AdminUsersSortBy::AgentCount,
-            "email" => services::user::ports::AdminUsersSortBy::Email,
-            "name" => services::user::ports::AdminUsersSortBy::Name,
-            _ => services::user::ports::AdminUsersSortBy::CreatedAt,
+            "created_at" => services::bi_metrics::UsersSortBy::CreatedAt,
+            "total_spent_nano" => services::bi_metrics::UsersSortBy::TotalSpentNano,
+            "agent_spent_nano" => services::bi_metrics::UsersSortBy::AgentSpentNano,
+            "agent_token_usage" => services::bi_metrics::UsersSortBy::AgentTokenUsage,
+            "last_activity_at" => services::bi_metrics::UsersSortBy::LastActivityAt,
+            "agent_count" => services::bi_metrics::UsersSortBy::AgentCount,
+            "email" => services::bi_metrics::UsersSortBy::Email,
+            "name" => services::bi_metrics::UsersSortBy::Name,
+            _ => services::bi_metrics::UsersSortBy::CreatedAt,
         },
         sort_order: if params.sort_order == "asc" {
-            services::user::ports::AdminUsersSortOrder::Asc
+            services::bi_metrics::UsersSortOrder::Asc
         } else {
-            services::user::ports::AdminUsersSortOrder::Desc
+            services::bi_metrics::UsersSortOrder::Desc
         },
     };
 
     let (users, total) = app_state
-        .user_service
+        .bi_metrics_service
         .list_users_with_stats(params.limit, params.offset, &filter, &sort)
         .await
         .map_err(|e| {
@@ -2074,7 +2074,7 @@ fn validate_string_filter(name: &str, value: &Option<String>) -> Result<(), ApiE
         ("limit" = Option<i64>, Query, description = "Maximum number of items to return (default: 20, max: 100)"),
         ("offset" = Option<i64>, Query, description = "Number of items to skip (default: 0)"),
         ("filter_by" = Option<String>, Query, description = "Filter type: subscription_status or subscription_plan"),
-        ("filter_value" = Option<String>, Query, description = "Filter value. For subscription_status: active, canceled, past_due, none. For subscription_plan: plan name or none"),
+        ("filter_value" = Option<String>, Query, description = "Filter value. For subscription_status: active, trialing, none. For subscription_plan: plan name or none"),
         ("q" = Option<String>, Query, description = "Substring search on email and name (case-insensitive)"),
         ("sort_by" = Option<String>, Query, description = "Sort by: created_at, total_spent_nano, agent_spent_nano, agent_token_usage, last_activity_at, agent_count, email, name"),
         ("sort_order" = Option<String>, Query, description = "Sort order: asc or desc")
@@ -2103,6 +2103,36 @@ pub async fn bi_list_users(
         params.sort_order
     );
     list_users_bi_impl(&app_state, params).await
+}
+
+/// User distribution by subscription plan and by deployed agent count (BI). Requires admin authentication.
+#[utoipa::path(
+    get,
+    path = "/v1/admin/bi/users/summary",
+    tag = "Admin",
+    responses(
+        (status = 200, description = "User distribution summary", body = UserSummary),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn bi_users_summary(
+    State(app_state): State<AppState>,
+) -> Result<Json<UserSummary>, ApiError> {
+    tracing::info!("BI: Getting user summary");
+    let summary = app_state
+        .bi_metrics_service
+        .get_user_summary()
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get user summary: {}", e);
+            ApiError::internal_server_error("Failed to get user distribution summary")
+        })?;
+    Ok(Json(summary))
 }
 
 /// List deployments with optional filters (BI). Requires admin authentication.
@@ -2349,6 +2379,51 @@ pub async fn bi_top_consumers(
     }))
 }
 
+/// Get daily active agents (with usage > 0) time series (BI). Requires admin authentication.
+/// Dates are UTC. Maximum range 365 days.
+#[utoipa::path(
+    get,
+    path = "/v1/admin/bi/usage/daily-active-agents",
+    tag = "Admin",
+    params(BiSummaryQuery),
+    responses(
+        (status = 200, description = "Daily active agents time series", body = [DailyActiveAgentsPoint]),
+        (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn bi_daily_active_agents(
+    State(app_state): State<AppState>,
+    Query(params): Query<BiSummaryQuery>,
+) -> Result<Json<Vec<DailyActiveAgentsPoint>>, ApiError> {
+    validate_date_range(params.start_date, params.end_date)?;
+
+    if let (Some(s), Some(e)) = (params.start_date, params.end_date) {
+        if (e - s).num_days() > MAX_DAILY_ACTIVE_AGENTS_RANGE_DAYS {
+            return Err(ApiError::bad_request(format!(
+                "Date range must not exceed {} days",
+                MAX_DAILY_ACTIVE_AGENTS_RANGE_DAYS
+            )));
+        }
+    }
+
+    let points = app_state
+        .bi_metrics_service
+        .get_daily_active_agents(params.start_date, params.end_date)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get daily active agents: {}", e);
+            ApiError::internal_server_error("Failed to get daily active agents")
+        })?;
+
+    Ok(Json(points))
+}
+
 /// Create admin router with all admin routes (requires admin authentication)
 pub fn create_admin_router() -> Router<AppState> {
     Router::new()
@@ -2392,10 +2467,12 @@ pub fn create_admin_router() -> Router<AppState> {
         .nest(
             "/bi",
             Router::new()
+                .route("/users/summary", get(bi_users_summary))
                 .route("/users", get(bi_list_users))
                 .route("/deployments", get(bi_list_deployments))
                 .route("/deployments/summary", get(bi_deployment_summary))
                 .route("/deployments/{id}/status-history", get(bi_status_history))
+                .route("/usage/daily-active-agents", get(bi_daily_active_agents))
                 .route("/usage", get(bi_usage))
                 .route("/usage/top", get(bi_top_consumers)),
         )
