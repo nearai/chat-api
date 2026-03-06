@@ -18,7 +18,7 @@ use services::analytics::{ActivityLogEntry, AnalyticsSummary, TopActiveUsersResp
 use services::bi_metrics::{
     DeploymentFilter, DeploymentRecord, DeploymentSummary, StatusChangeRecord, TopConsumer,
     TopConsumerFilter, TopConsumerGroupBy, UsageAggregation, UsageFilter, UsageGroupBy,
-    UsageRankBy as BiUsageRankBy,
+    UsageRankBy as BiUsageRankBy, UserSummary,
 };
 
 /// Maximum rows for BI usage aggregation queries.
@@ -298,7 +298,7 @@ async fn list_users_bi_impl(
         })
         .unwrap_or((None, false, None));
 
-    let filter = services::user::ports::AdminListUsersFilter {
+    let filter = services::bi_metrics::ListUsersFilter {
         subscription_status,
         subscription_plan_price_ids,
         subscription_plan_none,
@@ -312,27 +312,27 @@ async fn list_users_bi_impl(
         }),
     };
 
-    let sort = services::user::ports::AdminListUsersSort {
+    let sort = services::bi_metrics::ListUsersSort {
         sort_by: match params.sort_by.as_str() {
-            "created_at" => services::user::ports::AdminUsersSortBy::CreatedAt,
-            "total_spent_nano" => services::user::ports::AdminUsersSortBy::TotalSpentNano,
-            "agent_spent_nano" => services::user::ports::AdminUsersSortBy::AgentSpentNano,
-            "agent_token_usage" => services::user::ports::AdminUsersSortBy::AgentTokenUsage,
-            "last_activity_at" => services::user::ports::AdminUsersSortBy::LastActivityAt,
-            "agent_count" => services::user::ports::AdminUsersSortBy::AgentCount,
-            "email" => services::user::ports::AdminUsersSortBy::Email,
-            "name" => services::user::ports::AdminUsersSortBy::Name,
-            _ => services::user::ports::AdminUsersSortBy::CreatedAt,
+            "created_at" => services::bi_metrics::UsersSortBy::CreatedAt,
+            "total_spent_nano" => services::bi_metrics::UsersSortBy::TotalSpentNano,
+            "agent_spent_nano" => services::bi_metrics::UsersSortBy::AgentSpentNano,
+            "agent_token_usage" => services::bi_metrics::UsersSortBy::AgentTokenUsage,
+            "last_activity_at" => services::bi_metrics::UsersSortBy::LastActivityAt,
+            "agent_count" => services::bi_metrics::UsersSortBy::AgentCount,
+            "email" => services::bi_metrics::UsersSortBy::Email,
+            "name" => services::bi_metrics::UsersSortBy::Name,
+            _ => services::bi_metrics::UsersSortBy::CreatedAt,
         },
         sort_order: if params.sort_order == "asc" {
-            services::user::ports::AdminUsersSortOrder::Asc
+            services::bi_metrics::UsersSortOrder::Asc
         } else {
-            services::user::ports::AdminUsersSortOrder::Desc
+            services::bi_metrics::UsersSortOrder::Desc
         },
     };
 
     let (users, total) = app_state
-        .user_service
+        .bi_metrics_service
         .list_users_with_stats(params.limit, params.offset, &filter, &sort)
         .await
         .map_err(|e| {
@@ -2102,6 +2102,36 @@ pub async fn bi_list_users(
     list_users_bi_impl(&app_state, params).await
 }
 
+/// User distribution by subscription plan and by deployed agent count (BI). Requires admin authentication.
+#[utoipa::path(
+    get,
+    path = "/v1/admin/bi/users/summary",
+    tag = "Admin",
+    responses(
+        (status = 200, description = "User distribution summary", body = UserSummary),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn bi_users_summary(
+    State(app_state): State<AppState>,
+) -> Result<Json<UserSummary>, ApiError> {
+    tracing::info!("BI: Getting user summary");
+    let summary = app_state
+        .bi_metrics_service
+        .get_user_summary()
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get user summary: {}", e);
+            ApiError::internal_server_error("Failed to get user distribution summary")
+        })?;
+    Ok(Json(summary))
+}
+
 /// List deployments with optional filters (BI). Requires admin authentication.
 #[utoipa::path(
     get,
@@ -2389,6 +2419,7 @@ pub fn create_admin_router() -> Router<AppState> {
         .nest(
             "/bi",
             Router::new()
+                .route("/users/summary", get(bi_users_summary))
                 .route("/users", get(bi_list_users))
                 .route("/deployments", get(bi_list_deployments))
                 .route("/deployments/summary", get(bi_deployment_summary))

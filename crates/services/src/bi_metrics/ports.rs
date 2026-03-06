@@ -4,7 +4,73 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use uuid::Uuid;
 
+use crate::user::ports::User;
 use crate::UserId;
+
+// ---- BI user list types (used only by GET /v1/admin/bi/users) ----
+
+/// User with BI stats (subscription, agent count, spending, etc.)
+#[derive(Debug, Clone)]
+pub struct UserWithStats {
+    pub user: User,
+    pub subscription_status: Option<String>,
+    pub subscription_price_id: Option<String>,
+    pub agent_count: i64,
+    pub total_spent_nano: i64,
+    pub agent_spent_nano: i64,
+    pub agent_token_usage: i64,
+    pub last_activity_at: Option<DateTime<Utc>>,
+}
+
+/// Filter for BI user list
+#[derive(Debug, Clone, Default)]
+pub struct ListUsersFilter {
+    /// Filter by subscription status: "active", "canceled", "past_due", or "none" for no subscription
+    pub subscription_status: Option<String>,
+    /// Filter by subscription plan name (e.g. "Pro", "Starter") or "none" for no subscription.
+    /// Requires price_ids resolved from system config.
+    pub subscription_plan_price_ids: Option<Vec<String>>,
+    /// Filter by subscription plan = none (no subscription)
+    pub subscription_plan_none: bool,
+    /// Substring search on email and name (case-insensitive)
+    pub search: Option<String>,
+}
+
+/// Sort options for BI user list
+#[derive(Debug, Clone)]
+pub struct ListUsersSort {
+    pub sort_by: UsersSortBy,
+    pub sort_order: UsersSortOrder,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsersSortBy {
+    CreatedAt,
+    TotalSpentNano,
+    AgentSpentNano,
+    AgentTokenUsage,
+    LastActivityAt,
+    AgentCount,
+    Email,
+    Name,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsersSortOrder {
+    Asc,
+    Desc,
+}
+
+impl Default for ListUsersSort {
+    fn default() -> Self {
+        Self {
+            sort_by: UsersSortBy::CreatedAt,
+            sort_order: UsersSortOrder::Desc,
+        }
+    }
+}
+
+// ---- BI metrics types ----
 
 /// A single deployment record for BI reporting.
 /// Note: `name` is intentionally excluded to avoid exposing user-provided labels (per privacy policy).
@@ -43,6 +109,30 @@ pub struct DeploymentSummary {
     pub counts_by_type_status: Vec<DeploymentStatusCount>,
     pub new_deployments_in_range: i64,
     pub deleted_in_range: i64,
+}
+
+/// User count per subscription plan (plan name from system config, or "none")
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct UserSummaryPlanCount {
+    pub plan: String,
+    pub user_count: i64,
+}
+
+/// User count per agent count bucket (deployed agents = non-deleted instances)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct UserSummaryAgentCountBucket {
+    pub agent_count: i64,
+    pub user_count: i64,
+}
+
+/// User distribution summary: counts by subscription plan and by deployed agent count
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct UserSummary {
+    pub by_subscription_plan: Vec<UserSummaryPlanCount>,
+    pub by_agent_count: Vec<UserSummaryAgentCountBucket>,
 }
 
 /// A single status change event from the audit trail
@@ -223,6 +313,20 @@ pub trait BiMetricsRepository: Send + Sync {
         &self,
         filter: &TopConsumerFilter,
     ) -> anyhow::Result<Vec<TopConsumer>>;
+
+    /// User summary: counts by subscription_price_id and by agent_count (raw, no plan name resolution)
+    async fn get_user_summary(
+        &self,
+    ) -> anyhow::Result<(Vec<(Option<String>, i64)>, Vec<(i64, i64)>)>;
+
+    /// List users with BI stats (subscription, agent count, spending). Used by GET /v1/admin/bi/users.
+    async fn list_users_with_stats(
+        &self,
+        limit: i64,
+        offset: i64,
+        filter: &ListUsersFilter,
+        sort: &ListUsersSort,
+    ) -> anyhow::Result<(Vec<UserWithStats>, u64)>;
 }
 
 /// Service trait for BI metrics
@@ -254,4 +358,16 @@ pub trait BiMetricsService: Send + Sync {
         &self,
         filter: &TopConsumerFilter,
     ) -> anyhow::Result<Vec<TopConsumer>>;
+
+    /// User distribution by subscription plan and by deployed agent count
+    async fn get_user_summary(&self) -> anyhow::Result<UserSummary>;
+
+    /// List users with BI stats. Used by GET /v1/admin/bi/users.
+    async fn list_users_with_stats(
+        &self,
+        limit: i64,
+        offset: i64,
+        filter: &ListUsersFilter,
+        sort: &ListUsersSort,
+    ) -> anyhow::Result<(Vec<UserWithStats>, u64)>;
 }
