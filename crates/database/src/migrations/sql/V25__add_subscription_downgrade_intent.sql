@@ -10,7 +10,7 @@ ALTER TABLE subscriptions
     ADD CONSTRAINT chk_pending_downgrade_status
         CHECK (
             pending_downgrade_status IS NULL
-            OR pending_downgrade_status IN ('pending', 'applied', 'missed', 'unsatisfy')
+            OR pending_downgrade_status IN ('pending', 'applied', 'missed', 'unsatisfied')
         );
 
 CREATE INDEX idx_subscriptions_pending_downgrade_status

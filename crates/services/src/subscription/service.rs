@@ -431,7 +431,10 @@ impl SubscriptionServiceImpl {
                 as u64;
 
             if instance_count > target_limits.instances_max {
-                Self::mark_downgrade_terminal(&mut current_model, DowngradeIntentStatus::Unsatisfy);
+                Self::mark_downgrade_terminal(
+                    &mut current_model,
+                    DowngradeIntentStatus::Unsatisfied,
+                );
                 let updated = self
                     .subscription_repo
                     .upsert_subscription(txn, current_model)
@@ -963,8 +966,12 @@ impl SubscriptionService for SubscriptionServiceImpl {
         }
 
         let plans = self.get_subscription_plans().await?;
-        let is_downgrade =
-            is_downgrade_by_limits(&subscription.price_id, &price_id, "stripe", &plans);
+        let is_downgrade = is_downgrade_by_limits(
+            &subscription.price_id,
+            &price_id,
+            &subscription.provider,
+            &plans,
+        );
 
         if is_downgrade {
             let mut pending_model = subscription.clone();
