@@ -1,11 +1,11 @@
 use crate::pool::DbPool;
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use services::bi_metrics::{
-    BiMetricsRepository, DeploymentFilter, DeploymentRecord, DeploymentStatusCount,
-    DeploymentSummary, ListUsersFilter, ListUsersSort, StatusChangeRecord, TopConsumer,
-    TopConsumerFilter, TopConsumerGroupBy, UsageAggregation, UsageFilter, UsageGroupBy,
-    UsageRankBy, UserWithStats, UsersSortBy, UsersSortOrder,
+    BiMetricsRepository, DailyActiveAgentsByType, DailyActiveAgentsPoint, DeploymentFilter,
+    DeploymentRecord, DeploymentStatusCount, DeploymentSummary, ListUsersFilter, ListUsersSort,
+    StatusChangeRecord, TopConsumer, TopConsumerFilter, TopConsumerGroupBy, UsageAggregation,
+    UsageFilter, UsageGroupBy, UsageRankBy, UserWithStats, UsersSortBy, UsersSortOrder,
 };
 use services::user::ports::User;
 use services::UserId;
@@ -16,6 +16,9 @@ const AGGREGATION_TIMEOUT_MS: u32 = 30_000;
 
 /// Hard limit for unbounded queries (status history, usage aggregation).
 const MAX_UNBOUNDED_ROWS: i64 = 1000;
+
+/// Max date range (days) for daily active agents time series.
+const MAX_DAILY_ACTIVE_AGENTS_RANGE_DAYS: i64 = 365;
 
 pub struct PostgresBiMetricsRepository {
     pool: DbPool,
@@ -743,5 +746,117 @@ WHERE 1=1
             .collect();
 
         Ok((users, total_count as u64))
+    }
+
+    async fn get_daily_active_agents(
+        &self,
+        start_date: Option<DateTime<Utc>>,
+        end_date: Option<DateTime<Utc>>,
+    ) -> anyhow::Result<Vec<DailyActiveAgentsPoint>> {
+        let (start, end) = match (start_date, end_date) {
+            (Some(s), Some(e)) => {
+                if s >= e {
+                    return Ok(Vec::new());
+                }
+                let cap_end = if (e - s).num_days() > MAX_DAILY_ACTIVE_AGENTS_RANGE_DAYS {
+                    s + Duration::days(MAX_DAILY_ACTIVE_AGENTS_RANGE_DAYS)
+                } else {
+                    e
+                };
+                (s, cap_end)
+            }
+            _ => return Ok(Vec::new()),
+        };
+
+        let mut client = self.pool.get().await?;
+        let tx = client.build_transaction().start().await?;
+        tx.execute(
+            &format!("SET LOCAL statement_timeout = '{AGGREGATION_TIMEOUT_MS}'"),
+            &[],
+        )
+        .await?;
+
+        // Total per day: generate all days, left join to count of distinct instance_id
+        let rows = tx
+            .query(
+                r#"
+                WITH days AS (
+                    SELECT d::date AS day
+                    FROM generate_series($1::timestamptz, $2::timestamptz, '1 day'::interval) AS d
+                ),
+                daily_counts AS (
+                    SELECT (created_at AT TIME ZONE 'UTC')::date AS day,
+                           COUNT(DISTINCT instance_id)::bigint AS cnt
+                    FROM user_usage_event
+                    WHERE instance_id IS NOT NULL
+                      AND (quantity > 0 OR COALESCE(cost_nano_usd, 0) > 0)
+                      AND created_at >= $1
+                      AND created_at < $2 + interval '1 day'
+                    GROUP BY (created_at AT TIME ZONE 'UTC')::date
+                )
+                SELECT days.day, COALESCE(daily_counts.cnt, 0)::bigint
+                FROM days
+                LEFT JOIN daily_counts ON days.day = daily_counts.day
+                ORDER BY days.day
+                "#,
+                &[&start, &end],
+            )
+            .await?;
+
+        // Per day per instance_type: join to agent_instances to get type
+        let by_type_rows = tx
+            .query(
+                r#"
+                SELECT (u.created_at AT TIME ZONE 'UTC')::date AS day,
+                       ai.type AS instance_type,
+                       COUNT(DISTINCT u.instance_id)::bigint AS cnt
+                FROM user_usage_event u
+                JOIN agent_instances ai ON u.instance_id = ai.id
+                WHERE u.instance_id IS NOT NULL
+                  AND (u.quantity > 0 OR COALESCE(u.cost_nano_usd, 0) > 0)
+                  AND u.created_at >= $1
+                  AND u.created_at < $2 + interval '1 day'
+                GROUP BY (u.created_at AT TIME ZONE 'UTC')::date, ai.type
+                ORDER BY day, instance_type
+                "#,
+                &[&start, &end],
+            )
+            .await?;
+
+        tx.commit().await?;
+
+        // Index by day: day -> Vec<(instance_type, count)>
+        let mut by_type_per_day: std::collections::HashMap<
+            chrono::NaiveDate,
+            Vec<DailyActiveAgentsByType>,
+        > = std::collections::HashMap::new();
+        for r in by_type_rows {
+            let day: chrono::NaiveDate = r.get(0);
+            let instance_type: String = r.get(1);
+            let count: i64 = r.get(2);
+            by_type_per_day
+                .entry(day)
+                .or_default()
+                .push(DailyActiveAgentsByType {
+                    instance_type,
+                    active_agents_count: count,
+                });
+        }
+
+        let points = rows
+            .into_iter()
+            .map(|r| {
+                let day: chrono::NaiveDate = r.get(0);
+                let count: i64 = r.get(1);
+                let by_instance_type = by_type_per_day.remove(&day).unwrap_or_default();
+                DailyActiveAgentsPoint {
+                    date: day.format("%Y-%m-%d").to_string(),
+                    active_agents_count: count,
+                    by_instance_type,
+                }
+            })
+            .collect();
+
+        Ok(points)
     }
 }

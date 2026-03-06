@@ -16,9 +16,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use services::analytics::{ActivityLogEntry, AnalyticsSummary, TopActiveUsersResponse};
 use services::bi_metrics::{
-    DeploymentFilter, DeploymentRecord, DeploymentSummary, StatusChangeRecord, TopConsumer,
-    TopConsumerFilter, TopConsumerGroupBy, UsageAggregation, UsageFilter, UsageGroupBy,
-    UsageRankBy as BiUsageRankBy, UserSummary,
+    DailyActiveAgentsPoint, DeploymentFilter, DeploymentRecord, DeploymentSummary,
+    StatusChangeRecord, TopConsumer, TopConsumerFilter, TopConsumerGroupBy, UsageAggregation,
+    UsageFilter, UsageGroupBy, UsageRankBy as BiUsageRankBy, UserSummary,
 };
 
 /// Maximum rows for BI usage aggregation queries.
@@ -2376,6 +2376,42 @@ pub async fn bi_top_consumers(
     }))
 }
 
+/// Get daily active agents (with usage > 0) time series (BI). Requires admin authentication.
+/// Dates are UTC. Maximum range 365 days.
+#[utoipa::path(
+    get,
+    path = "/v1/admin/bi/usage/daily-active-agents",
+    tag = "Admin",
+    params(BiSummaryQuery),
+    responses(
+        (status = 200, description = "Daily active agents time series", body = [DailyActiveAgentsPoint]),
+        (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn bi_daily_active_agents(
+    State(app_state): State<AppState>,
+    Query(params): Query<BiSummaryQuery>,
+) -> Result<Json<Vec<DailyActiveAgentsPoint>>, ApiError> {
+    validate_date_range(params.start_date, params.end_date)?;
+
+    let points = app_state
+        .bi_metrics_service
+        .get_daily_active_agents(params.start_date, params.end_date)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get daily active agents: {}", e);
+            ApiError::internal_server_error("Failed to get daily active agents")
+        })?;
+
+    Ok(Json(points))
+}
+
 /// Create admin router with all admin routes (requires admin authentication)
 pub fn create_admin_router() -> Router<AppState> {
     Router::new()
@@ -2424,6 +2460,7 @@ pub fn create_admin_router() -> Router<AppState> {
                 .route("/deployments", get(bi_list_deployments))
                 .route("/deployments/summary", get(bi_deployment_summary))
                 .route("/deployments/{id}/status-history", get(bi_status_history))
+                .route("/usage/daily-active-agents", get(bi_daily_active_agents))
                 .route("/usage", get(bi_usage))
                 .route("/usage/top", get(bi_top_consumers)),
         )
