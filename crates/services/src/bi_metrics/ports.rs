@@ -84,12 +84,14 @@ impl fmt::Display for UsageGroupBy {
 pub struct UsageAggregation {
     /// The grouping key value (date string, user_id, instance_id, or model_id)
     pub group_key: String,
-    /// User email when group_by is user (from users table)
+    /// User email when group_by is user or instance (from users table)
     pub user_email: Option<String>,
-    /// User name when group_by is user (from users table)
+    /// User name when group_by is user or instance (from users table)
     pub user_name: Option<String>,
-    /// User avatar URL when group_by is user (from users table)
+    /// User avatar URL when group_by is user or instance (from users table)
     pub user_avatar_url: Option<String>,
+    /// Agent type (openclaw/ironclaw) when group_by is instance
+    pub instance_type: Option<String>,
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub total_tokens: i64,

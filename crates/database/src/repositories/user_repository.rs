@@ -356,7 +356,7 @@ impl UserRepository for PostgresUserRepository {
         if let Some(s) = filter.subscription_status.as_ref() {
             match s.as_str() {
                 "none" => filter_clauses.push("enriched.subscription_status IS NULL".to_string()),
-                "active" | "canceled" | "past_due" | "trialing" | "unpaid" => {
+                "active" | "trialing" => {
                     filter_clauses.push(format!("enriched.subscription_status = ${param_idx}"));
                     params.push(Box::new(s.to_string()));
                     param_idx += 1;
@@ -442,7 +442,7 @@ enriched AS (
     LEFT JOIN LATERAL (
         SELECT status, price_id FROM subscriptions s
         WHERE s.user_id = u.id AND s.status IN ('active', 'trialing')
-        ORDER BY s.current_period_end DESC
+        ORDER BY s.created_at DESC
         LIMIT 1
     ) sub ON true
     LEFT JOIN agent_counts ac ON u.id = ac.user_id

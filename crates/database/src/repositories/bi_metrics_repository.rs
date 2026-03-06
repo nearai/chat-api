@@ -262,33 +262,42 @@ impl BiMetricsRepository for PostgresBiMetricsRepository {
         )
         .await?;
 
-        // Determine GROUP BY, SELECT, and user-join expressions
-        let (group_expr, select_expr, user_select, user_group) = match filter.group_by {
-            UsageGroupBy::Day => (
-                "DATE(u.created_at)",
-                "CAST(DATE(u.created_at) AS TEXT) as group_key",
-                "NULL::TEXT as user_email, NULL::TEXT as user_name, NULL::TEXT as user_avatar_url",
-                "",
-            ),
-            UsageGroupBy::User => (
-                "u.user_id, u2.email, u2.name, u2.avatar_url",
-                "CAST(u.user_id AS TEXT) as group_key",
-                "u2.email as user_email, u2.name as user_name, u2.avatar_url as user_avatar_url",
-                "LEFT JOIN users u2 ON u.user_id = u2.id",
-            ),
-            UsageGroupBy::Instance => (
-                "u.instance_id",
-                "CAST(u.instance_id AS TEXT) as group_key",
-                "NULL::TEXT as user_email, NULL::TEXT as user_name, NULL::TEXT as user_avatar_url",
-                "",
-            ),
-            UsageGroupBy::Model => (
-                "COALESCE(u.model_id, 'unknown')",
-                "COALESCE(u.model_id, 'unknown') as group_key",
-                "NULL::TEXT as user_email, NULL::TEXT as user_name, NULL::TEXT as user_avatar_url",
-                "",
-            ),
-        };
+        // Determine GROUP BY, SELECT, user-join, type-select, and join expressions
+        let (group_expr, select_expr, user_select, type_select, join_clause, user_group) =
+            match filter.group_by {
+                UsageGroupBy::Day => (
+                    "DATE(u.created_at)",
+                    "CAST(DATE(u.created_at) AS TEXT) as group_key",
+                    "NULL::TEXT as user_email, NULL::TEXT as user_name, NULL::TEXT as user_avatar_url",
+                    "NULL::TEXT as instance_type",
+                    "",
+                    "",
+                ),
+                UsageGroupBy::User => (
+                    "u.user_id, u2.email, u2.name, u2.avatar_url",
+                    "CAST(u.user_id AS TEXT) as group_key",
+                    "u2.email as user_email, u2.name as user_name, u2.avatar_url as user_avatar_url",
+                    "NULL::TEXT as instance_type",
+                    "",
+                    "LEFT JOIN users u2 ON u.user_id = u2.id",
+                ),
+                UsageGroupBy::Instance => (
+                    "u.instance_id, ai.type, u2.email, u2.name, u2.avatar_url",
+                    "CAST(u.instance_id AS TEXT) as group_key",
+                    "u2.email as user_email, u2.name as user_name, u2.avatar_url as user_avatar_url",
+                    "ai.type as instance_type",
+                    "JOIN agent_instances ai ON u.instance_id = ai.id",
+                    "LEFT JOIN users u2 ON ai.user_id = u2.id",
+                ),
+                UsageGroupBy::Model => (
+                    "COALESCE(u.model_id, 'unknown')",
+                    "COALESCE(u.model_id, 'unknown') as group_key",
+                    "NULL::TEXT as user_email, NULL::TEXT as user_name, NULL::TEXT as user_avatar_url",
+                    "NULL::TEXT as instance_type",
+                    "",
+                    "",
+                ),
+            };
 
         let mut qb = QueryBuilder::new();
 
@@ -311,7 +320,10 @@ impl BiMetricsRepository for PostgresBiMetricsRepository {
             qb.push("ai.type", "=", t.clone());
         }
 
-        let join_clause = if filter.instance_type.is_some() {
+        // For Instance we always join agent_instances; for instance_type filter we need it too
+        let effective_join = if !join_clause.is_empty() {
+            join_clause
+        } else if filter.instance_type.is_some() {
             "JOIN agent_instances ai ON u.instance_id = ai.id"
         } else {
             ""
@@ -324,6 +336,7 @@ impl BiMetricsRepository for PostgresBiMetricsRepository {
         let sql = format!(
             "SELECT {select_expr},
                     {user_select},
+                    {type_select},
                     COALESCE(SUM((u.details->>'input_tokens')::BIGINT), 0)::BIGINT,
                     COALESCE(SUM((u.details->>'output_tokens')::BIGINT), 0)::BIGINT,
                     COALESCE(SUM(u.quantity), 0)::BIGINT,
@@ -332,7 +345,7 @@ impl BiMetricsRepository for PostgresBiMetricsRepository {
                     COALESCE(SUM(u.cost_nano_usd), 0)::BIGINT,
                     COUNT(*)
              FROM user_usage_event u
-             {join_clause}
+             {effective_join}
              {user_group}
              {where_clause}
              GROUP BY {group_expr}
@@ -350,13 +363,14 @@ impl BiMetricsRepository for PostgresBiMetricsRepository {
                 user_email: r.get(1),
                 user_name: r.get(2),
                 user_avatar_url: r.get(3),
-                input_tokens: r.get(4),
-                output_tokens: r.get(5),
-                total_tokens: r.get(6),
-                input_cost_nano: r.get(7),
-                output_cost_nano: r.get(8),
-                total_cost_nano: r.get(9),
-                request_count: r.get(10),
+                instance_type: r.get(4),
+                input_tokens: r.get(5),
+                output_tokens: r.get(6),
+                total_tokens: r.get(7),
+                input_cost_nano: r.get(8),
+                output_cost_nano: r.get(9),
+                total_cost_nano: r.get(10),
+                request_count: r.get(11),
             })
             .collect();
 

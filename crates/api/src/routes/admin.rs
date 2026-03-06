@@ -81,7 +81,7 @@ pub struct ListUsersQuery {
     pub offset: i64,
     /// Filter type: "subscription_status" or "subscription_plan"
     pub filter_by: Option<String>,
-    /// Filter value. For subscription_status: active, canceled, past_due, trialing, unpaid, none. For subscription_plan: plan name or none
+    /// Filter value. For subscription_status: active, trialing, none (BI returns only active subscriptions). For subscription_plan: plan name or none
     pub filter_value: Option<String>,
     /// Substring search on email and name (case-insensitive)
     pub q: Option<String>,
@@ -116,11 +116,8 @@ impl ListUsersQuery {
                 if !fb.is_empty() && !fv.is_empty() {
                     match fb {
                         "subscription_status" => {
-                            if ![
-                                "active", "canceled", "past_due", "trialing", "unpaid", "none",
-                            ]
-                            .contains(&fv)
-                            {
+                            // BI endpoint returns only active/trialing subscriptions; filter supports active, trialing, none
+                            if !["active", "trialing", "none"].contains(&fv) {
                                 return Err(ApiError::bad_request(format!(
                                     "invalid filter_value for subscription_status: {}",
                                     fv
@@ -2074,7 +2071,7 @@ fn validate_string_filter(name: &str, value: &Option<String>) -> Result<(), ApiE
         ("limit" = Option<i64>, Query, description = "Maximum number of items to return (default: 20, max: 100)"),
         ("offset" = Option<i64>, Query, description = "Number of items to skip (default: 0)"),
         ("filter_by" = Option<String>, Query, description = "Filter type: subscription_status or subscription_plan"),
-        ("filter_value" = Option<String>, Query, description = "Filter value. For subscription_status: active, canceled, past_due, none. For subscription_plan: plan name or none"),
+        ("filter_value" = Option<String>, Query, description = "Filter value. For subscription_status: active, trialing, none. For subscription_plan: plan name or none"),
         ("q" = Option<String>, Query, description = "Substring search on email and name (case-insensitive)"),
         ("sort_by" = Option<String>, Query, description = "Sort by: created_at, total_spent_nano, agent_spent_nano, agent_token_usage, last_activity_at, agent_count, email, name"),
         ("sort_order" = Option<String>, Query, description = "Sort order: asc or desc")
