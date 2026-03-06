@@ -14,7 +14,7 @@ pub enum DowngradeIntentStatus {
     Pending,
     Applied,
     Missed,
-    Unsatisfy,
+    Unsatisfied,
 }
 
 impl DowngradeIntentStatus {
@@ -23,7 +23,7 @@ impl DowngradeIntentStatus {
             Self::Pending => "pending",
             Self::Applied => "applied",
             Self::Missed => "missed",
-            Self::Unsatisfy => "unsatisfy",
+            Self::Unsatisfied => "unsatisfied",
         }
     }
 }
@@ -36,7 +36,7 @@ impl std::str::FromStr for DowngradeIntentStatus {
             "pending" => Ok(Self::Pending),
             "applied" => Ok(Self::Applied),
             "missed" => Ok(Self::Missed),
-            "unsatisfy" => Ok(Self::Unsatisfy),
+            "unsatisfied" => Ok(Self::Unsatisfied),
             _ => Err(format!("invalid downgrade intent status: {value}")),
         }
     }
