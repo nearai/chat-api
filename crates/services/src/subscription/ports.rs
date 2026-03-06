@@ -6,6 +6,42 @@ use std::fmt;
 use crate::system_configs::ports::PlanLimitConfig;
 use crate::UserId;
 
+pub const DEFAULT_MONTHLY_TOKEN_LIMIT: u64 = 1_000_000;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DowngradeIntentStatus {
+    Pending,
+    Applied,
+    Missed,
+    Unsatisfied,
+}
+
+impl DowngradeIntentStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Applied => "applied",
+            Self::Missed => "missed",
+            Self::Unsatisfied => "unsatisfied",
+        }
+    }
+}
+
+impl std::str::FromStr for DowngradeIntentStatus {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "pending" => Ok(Self::Pending),
+            "applied" => Ok(Self::Applied),
+            "missed" => Ok(Self::Missed),
+            "unsatisfied" => Ok(Self::Unsatisfied),
+            _ => Err(format!("invalid downgrade intent status: {value}")),
+        }
+    }
+}
+
 /// Database model for subscription records (generic, supports multiple providers e.g. Stripe)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Subscription {
@@ -19,6 +55,14 @@ pub struct Subscription {
     pub cancel_at_period_end: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Target price_id for a deferred downgrade intent.
+    pub pending_downgrade_target_price_id: Option<String>,
+    /// Snapshot of current price_id when the downgrade intent was created.
+    pub pending_downgrade_from_price_id: Option<String>,
+    /// Snapshot of current_period_end when the downgrade intent was created.
+    pub pending_downgrade_expected_period_end: Option<DateTime<Utc>>,
+    /// Last downgrade intent status.
+    pub pending_downgrade_status: Option<DowngradeIntentStatus>,
 }
 
 /// API response model with plan name resolved from price_id
@@ -34,6 +78,19 @@ pub struct SubscriptionWithPlan {
     pub cancel_at_period_end: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Result of a plan-change request.
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangePlanOutcome {
+    /// Stripe subscription was updated immediately.
+    ChangedImmediately,
+    /// A downgrade intent was recorded and will be checked near period end.
+    ScheduledForPeriodEnd,
+    /// Requested plan is already active.
+    NoOp,
 }
 
 /// Stripe customer mapping data
@@ -194,6 +251,14 @@ pub trait SubscriptionRepository: Send + Sync {
         txn: &tokio_postgres::Transaction<'_>,
         user_id: UserId,
     ) -> anyhow::Result<()>;
+
+    /// Fetch a pending-downgrade row with row lock.
+    /// Returns None when no pending intent exists or row is locked by another transaction.
+    async fn get_pending_downgrade_for_update_skip_locked(
+        &self,
+        txn: &tokio_postgres::Transaction<'_>,
+        subscription_id: &str,
+    ) -> anyhow::Result<Option<Subscription>>;
 }
 
 /// Repository trait for payment webhook events
@@ -256,12 +321,12 @@ pub trait SubscriptionService: Send + Sync {
     async fn resume_subscription(&self, user_id: UserId) -> Result<(), SubscriptionError>;
 
     /// Change the user's subscription to a different plan.
-    /// Validates that the user's active instance count does not exceed the target plan's limit.
+    /// Upgrades are applied immediately; downgrades are scheduled for period-end checks.
     async fn change_plan(
         &self,
         user_id: UserId,
         target_plan: String,
-    ) -> Result<(), SubscriptionError>;
+    ) -> Result<ChangePlanOutcome, SubscriptionError>;
 
     /// Get subscriptions for a user with plan names resolved
     /// If active_only is true, returns only active (not expired) subscriptions
