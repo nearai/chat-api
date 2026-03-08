@@ -170,9 +170,11 @@ impl BiMetricsRepository for PostgresBiMetricsRepository {
         let limit_idx = qb.next_param_idx();
         let offset_idx = limit_idx + 1;
         let data_sql = format!(
-            "SELECT ai.id, ai.user_id, u.email, u.name, u.avatar_url, ai.name, ai.instance_id, ai.type, ai.status, ai.created_at, ai.updated_at,
-                    COALESCE(uue.total_spent_nano, 0)::BIGINT, COALESCE(uue.total_tokens, 0)::BIGINT,
-                    COUNT(*) OVER() as total_count
+            "SELECT ai.id AS id, ai.user_id AS user_id, u.email AS user_email, u.name AS user_name, u.avatar_url AS user_avatar_url,
+                    ai.name AS name, ai.instance_id AS instance_id, ai.type AS instance_type, ai.status AS status,
+                    ai.created_at AS created_at, ai.updated_at AS updated_at,
+                    COALESCE(uue.total_spent_nano, 0)::BIGINT AS total_spent_nano, COALESCE(uue.total_tokens, 0)::BIGINT AS total_tokens,
+                    COUNT(*) OVER() AS total_count
              FROM agent_instances ai
              LEFT JOIN users u ON ai.user_id = u.id
              LEFT JOIN LATERAL (
@@ -189,24 +191,27 @@ impl BiMetricsRepository for PostgresBiMetricsRepository {
 
         let rows = client.query(&data_sql, &qb.param_refs()).await?;
 
-        let total: i64 = rows.first().map(|r| r.get(13)).unwrap_or(0);
+        let total: i64 = rows
+            .first()
+            .map(|r| r.get::<_, i64>("total_count"))
+            .unwrap_or(0);
 
         let records = rows
             .into_iter()
             .map(|r| DeploymentRecord {
-                id: r.get(0),
-                user_id: r.get(1),
-                user_email: r.get(2),
-                user_name: r.get(3),
-                user_avatar_url: r.get(4),
-                name: r.get(5),
-                instance_id: r.get(6),
-                instance_type: r.get(7),
-                status: r.get(8),
-                created_at: r.get(9),
-                updated_at: r.get(10),
-                total_spent_nano: r.get(11),
-                total_tokens: r.get(12),
+                id: r.get("id"),
+                user_id: r.get("user_id"),
+                user_email: r.get("user_email"),
+                user_name: r.get("user_name"),
+                user_avatar_url: r.get("user_avatar_url"),
+                name: r.get("name"),
+                instance_id: r.get("instance_id"),
+                instance_type: r.get("instance_type"),
+                status: r.get("status"),
+                created_at: r.get("created_at"),
+                updated_at: r.get("updated_at"),
+                total_spent_nano: r.get("total_spent_nano"),
+                total_tokens: r.get("total_tokens"),
             })
             .collect();
 
@@ -602,9 +607,18 @@ impl BiMetricsRepository for PostgresBiMetricsRepository {
     async fn get_user_summary(
         &self,
     ) -> anyhow::Result<(Vec<(Option<String>, i64)>, Vec<(i64, i64)>)> {
-        let client = self.pool.get().await?;
+        let mut client = self.pool.get().await?;
 
-        let enriched_cte = r#"
+        // Wrap in a transaction so SET LOCAL statement_timeout takes effect
+        let tx = client.build_transaction().start().await?;
+        tx.execute(
+            &format!("SET LOCAL statement_timeout = '{AGGREGATION_TIMEOUT_MS}'"),
+            &[],
+        )
+        .await?;
+
+        // Single query: one CTE pass, two aggregations via UNION ALL
+        let sql = r#"
 WITH agent_counts AS (
     SELECT user_id, COUNT(*)::bigint AS agent_count
     FROM agent_instances
@@ -623,37 +637,34 @@ enriched AS (
         LIMIT 1
     ) sub ON true
     LEFT JOIN agent_counts ac ON u.id = ac.user_id
-)"#;
+),
+by_plan AS (
+    SELECT 1 AS part, subscription_price_id, NULL::bigint AS agent_count, COUNT(*)::bigint AS user_count
+    FROM enriched GROUP BY subscription_price_id
+),
+by_agent AS (
+    SELECT 2 AS part, NULL::text AS subscription_price_id, agent_count, COUNT(*)::bigint AS user_count
+    FROM enriched GROUP BY agent_count
+)
+SELECT part, subscription_price_id, agent_count, user_count FROM by_plan
+UNION ALL
+SELECT part, subscription_price_id, agent_count, user_count FROM by_agent ORDER BY part, agent_count
+"#;
 
-        let by_plan_sql = format!(
-            "{} SELECT subscription_price_id, COUNT(*)::bigint AS user_count FROM enriched GROUP BY subscription_price_id",
-            enriched_cte
-        );
-        let by_plan_rows = client.query(&by_plan_sql, &[]).await?;
-        let by_subscription_price_id: Vec<(Option<String>, i64)> = by_plan_rows
-            .into_iter()
-            .map(|r| {
-                (
-                    r.get::<_, Option<String>>("subscription_price_id"),
-                    r.get::<_, i64>("user_count"),
-                )
-            })
-            .collect();
+        let rows = tx.query(sql, &[]).await?;
+        tx.commit().await?;
 
-        let by_agent_sql = format!(
-            "{} SELECT agent_count, COUNT(*)::bigint AS user_count FROM enriched GROUP BY agent_count ORDER BY agent_count",
-            enriched_cte
-        );
-        let by_agent_rows = client.query(&by_agent_sql, &[]).await?;
-        let by_agent_count: Vec<(i64, i64)> = by_agent_rows
-            .into_iter()
-            .map(|r| {
-                (
-                    r.get::<_, i64>("agent_count"),
-                    r.get::<_, i64>("user_count"),
-                )
-            })
-            .collect();
+        let mut by_subscription_price_id: Vec<(Option<String>, i64)> = Vec::new();
+        let mut by_agent_count: Vec<(i64, i64)> = Vec::new();
+        for r in rows {
+            let part: i32 = r.get("part");
+            let user_count: i64 = r.get("user_count");
+            if part == 1 {
+                by_subscription_price_id.push((r.get("subscription_price_id"), user_count));
+            } else {
+                by_agent_count.push((r.get::<_, i64>("agent_count"), user_count));
+            }
+        }
 
         Ok((by_subscription_price_id, by_agent_count))
     }
@@ -665,7 +676,15 @@ enriched AS (
         filter: &ListUsersFilter,
         sort: &ListUsersSort,
     ) -> anyhow::Result<(Vec<UserWithStats>, u64)> {
-        let client = self.pool.get().await?;
+        let mut client = self.pool.get().await?;
+
+        // Wrap in a transaction so SET LOCAL statement_timeout takes effect
+        let tx = client.build_transaction().start().await?;
+        tx.execute(
+            &format!("SET LOCAL statement_timeout = '{AGGREGATION_TIMEOUT_MS}'"),
+            &[],
+        )
+        .await?;
 
         let mut filter_clauses = Vec::new();
         let mut params: Vec<Box<dyn tokio_postgres::types::ToSql + Send + Sync>> = Vec::new();
@@ -781,7 +800,7 @@ WHERE 1=1
         query_params.push(Box::new(limit));
         query_params.push(Box::new(offset));
 
-        let rows = client
+        let rows = tx
             .query(
                 &query,
                 &query_params
@@ -790,6 +809,7 @@ WHERE 1=1
                     .collect::<Vec<_>>(),
             )
             .await?;
+        tx.commit().await?;
 
         let total_count: i64 = if rows.is_empty() {
             0
