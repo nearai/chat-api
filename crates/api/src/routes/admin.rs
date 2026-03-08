@@ -16,16 +16,14 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use services::analytics::{ActivityLogEntry, AnalyticsSummary, TopActiveUsersResponse};
 use services::bi_metrics::{
-    DailyActiveAgentsPoint, DeploymentFilter, DeploymentRecord, DeploymentSummary,
-    StatusChangeRecord, TopConsumer, TopConsumerFilter, TopConsumerGroupBy, UsageAggregation,
-    UsageFilter, UsageGroupBy, UsageRankBy as BiUsageRankBy, UserSummary,
+    DeploymentFilter, DeploymentRecord, DeploymentSummary, StatusChangeRecord, TopConsumer,
+    TopConsumerFilter, TopConsumerGroupBy, UsageAggregation, UsageFilter, UsageGroupBy,
+    UsageRankBy as BiUsageRankBy, UserSummary,
 };
 
 /// Maximum rows for BI usage aggregation queries.
 const BI_USAGE_MAX_ROWS: i64 = 1000;
 
-/// Maximum date range (days) for daily active agents time series.
-const MAX_DAILY_ACTIVE_AGENTS_RANGE_DAYS: i64 = 365;
 use services::model::ports::{UpdateModelParams, UpsertModelParams};
 use services::user_usage::UsageRankBy;
 use services::UserId;
@@ -2379,51 +2377,6 @@ pub async fn bi_top_consumers(
     }))
 }
 
-/// Get daily active agents (with usage > 0) time series (BI). Requires admin authentication.
-/// Dates are UTC. Maximum range 365 days.
-#[utoipa::path(
-    get,
-    path = "/v1/admin/bi/usage/daily-active-agents",
-    tag = "Admin",
-    params(BiSummaryQuery),
-    responses(
-        (status = 200, description = "Daily active agents time series", body = [DailyActiveAgentsPoint]),
-        (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
-        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
-        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
-        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
-    ),
-    security(
-        ("session_token" = [])
-    )
-)]
-pub async fn bi_daily_active_agents(
-    State(app_state): State<AppState>,
-    Query(params): Query<BiSummaryQuery>,
-) -> Result<Json<Vec<DailyActiveAgentsPoint>>, ApiError> {
-    validate_date_range(params.start_date, params.end_date)?;
-
-    if let (Some(s), Some(e)) = (params.start_date, params.end_date) {
-        if (e - s).num_days() > MAX_DAILY_ACTIVE_AGENTS_RANGE_DAYS {
-            return Err(ApiError::bad_request(format!(
-                "Date range must not exceed {} days",
-                MAX_DAILY_ACTIVE_AGENTS_RANGE_DAYS
-            )));
-        }
-    }
-
-    let points = app_state
-        .bi_metrics_service
-        .get_daily_active_agents(params.start_date, params.end_date)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to get daily active agents: {}", e);
-            ApiError::internal_server_error("Failed to get daily active agents")
-        })?;
-
-    Ok(Json(points))
-}
-
 /// Create admin router with all admin routes (requires admin authentication)
 pub fn create_admin_router() -> Router<AppState> {
     Router::new()
@@ -2472,7 +2425,6 @@ pub fn create_admin_router() -> Router<AppState> {
                 .route("/deployments", get(bi_list_deployments))
                 .route("/deployments/summary", get(bi_deployment_summary))
                 .route("/deployments/{id}/status-history", get(bi_status_history))
-                .route("/usage/daily-active-agents", get(bi_daily_active_agents))
                 .route("/usage", get(bi_usage))
                 .route("/usage/top", get(bi_top_consumers)),
         )

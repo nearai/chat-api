@@ -1,11 +1,11 @@
 use crate::pool::DbPool;
 use async_trait::async_trait;
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use services::bi_metrics::{
-    BiMetricsRepository, DailyActiveAgentsByType, DailyActiveAgentsPoint, DeploymentFilter,
-    DeploymentRecord, DeploymentStatusCount, DeploymentSummary, ListUsersFilter, ListUsersSort,
-    StatusChangeRecord, TopConsumer, TopConsumerFilter, TopConsumerGroupBy, UsageAggregation,
-    UsageFilter, UsageGroupBy, UsageRankBy, UserWithStats, UsersSortBy, UsersSortOrder,
+    BiMetricsRepository, DeploymentFilter, DeploymentRecord, DeploymentStatusCount,
+    DeploymentSummary, ListUsersFilter, ListUsersSort, StatusChangeRecord, TopConsumer,
+    TopConsumerFilter, TopConsumerGroupBy, UsageAggregation, UsageFilter, UsageGroupBy,
+    UsageRankBy, UserWithStats, UsersSortBy, UsersSortOrder,
 };
 use services::user::ports::User;
 use services::UserId;
@@ -16,9 +16,6 @@ const AGGREGATION_TIMEOUT_MS: u32 = 30_000;
 
 /// Hard limit for unbounded queries (status history, usage aggregation).
 const MAX_UNBOUNDED_ROWS: i64 = 1000;
-
-/// Max date range (days) for daily active agents time series.
-const MAX_DAILY_ACTIVE_AGENTS_RANGE_DAYS: i64 = 365;
 
 pub struct PostgresBiMetricsRepository {
     pool: DbPool,
@@ -290,8 +287,8 @@ impl BiMetricsRepository for PostgresBiMetricsRepository {
         )
         .await?;
 
-        // Determine GROUP BY, SELECT, user-join, type-select, and join expressions
-        let (group_expr, select_expr, user_select, type_select, join_clause, user_group) =
+        // Determine GROUP BY, SELECT, joins, and optional active_agents / active_users counts
+        let (group_expr, select_expr, user_select, type_select, join_clause, user_group, active_agents_select, active_users_select) =
             match filter.group_by {
                 UsageGroupBy::Day => (
                     "DATE(u.created_at)",
@@ -300,6 +297,8 @@ impl BiMetricsRepository for PostgresBiMetricsRepository {
                     "NULL::TEXT as instance_type",
                     "",
                     "",
+                    ", COUNT(DISTINCT CASE WHEN (u.quantity > 0 OR COALESCE(u.cost_nano_usd, 0) > 0) THEN u.instance_id END)::BIGINT AS active_agents_count",
+                    ", COUNT(DISTINCT CASE WHEN (u.quantity > 0 OR COALESCE(u.cost_nano_usd, 0) > 0) THEN u.user_id END)::BIGINT AS active_users_count",
                 ),
                 UsageGroupBy::User => (
                     "u.user_id, u2.email, u2.name, u2.avatar_url",
@@ -308,6 +307,8 @@ impl BiMetricsRepository for PostgresBiMetricsRepository {
                     "NULL::TEXT as instance_type",
                     "",
                     "LEFT JOIN users u2 ON u.user_id = u2.id",
+                    ", COUNT(DISTINCT CASE WHEN (u.quantity > 0 OR COALESCE(u.cost_nano_usd, 0) > 0) THEN u.instance_id END)::BIGINT AS active_agents_count",
+                    "",
                 ),
                 UsageGroupBy::Instance => (
                     "u.instance_id, ai.type, u2.email, u2.name, u2.avatar_url",
@@ -316,6 +317,8 @@ impl BiMetricsRepository for PostgresBiMetricsRepository {
                     "ai.type as instance_type",
                     "JOIN agent_instances ai ON u.instance_id = ai.id",
                     "LEFT JOIN users u2 ON ai.user_id = u2.id",
+                    "",
+                    "",
                 ),
                 UsageGroupBy::Model => (
                     "COALESCE(u.model_id, 'unknown')",
@@ -324,6 +327,8 @@ impl BiMetricsRepository for PostgresBiMetricsRepository {
                     "NULL::TEXT as instance_type",
                     "",
                     "",
+                    ", COUNT(DISTINCT CASE WHEN (u.quantity > 0 OR COALESCE(u.cost_nano_usd, 0) > 0) THEN u.instance_id END)::BIGINT AS active_agents_count",
+                    ", COUNT(DISTINCT CASE WHEN (u.quantity > 0 OR COALESCE(u.cost_nano_usd, 0) > 0) THEN u.user_id END)::BIGINT AS active_users_count",
                 ),
             };
 
@@ -371,7 +376,7 @@ impl BiMetricsRepository for PostgresBiMetricsRepository {
                     COALESCE(SUM((u.details->>'input_cost')::BIGINT), 0)::BIGINT,
                     COALESCE(SUM((u.details->>'output_cost')::BIGINT), 0)::BIGINT,
                     COALESCE(SUM(u.cost_nano_usd), 0)::BIGINT,
-                    COUNT(*)
+                    COUNT(*){active_agents_select}{active_users_select}
              FROM user_usage_event u
              {effective_join}
              {user_group}
@@ -384,21 +389,41 @@ impl BiMetricsRepository for PostgresBiMetricsRepository {
         let rows = tx.query(&sql, &qb.param_refs()).await?;
         tx.commit().await?;
 
+        let include_active_agents = matches!(
+            filter.group_by,
+            UsageGroupBy::Day | UsageGroupBy::User | UsageGroupBy::Model
+        );
+        let include_active_users =
+            matches!(filter.group_by, UsageGroupBy::Day | UsageGroupBy::Model);
         let records = rows
             .into_iter()
-            .map(|r| UsageAggregation {
-                group_key: r.get(0),
-                user_email: r.get(1),
-                user_name: r.get(2),
-                user_avatar_url: r.get(3),
-                instance_type: r.get(4),
-                input_tokens: r.get(5),
-                output_tokens: r.get(6),
-                total_tokens: r.get(7),
-                input_cost_nano: r.get(8),
-                output_cost_nano: r.get(9),
-                total_cost_nano: r.get(10),
-                request_count: r.get(11),
+            .map(|r| {
+                let active_agents_count = if include_active_agents {
+                    Some(r.get::<_, i64>(12))
+                } else {
+                    None
+                };
+                let active_users_count = if include_active_users {
+                    Some(r.get::<_, i64>(13))
+                } else {
+                    None
+                };
+                UsageAggregation {
+                    group_key: r.get(0),
+                    user_email: r.get(1),
+                    user_name: r.get(2),
+                    user_avatar_url: r.get(3),
+                    instance_type: r.get(4),
+                    input_tokens: r.get(5),
+                    output_tokens: r.get(6),
+                    total_tokens: r.get(7),
+                    input_cost_nano: r.get(8),
+                    output_cost_nano: r.get(9),
+                    total_cost_nano: r.get(10),
+                    request_count: r.get(11),
+                    active_agents_count,
+                    active_users_count,
+                }
             })
             .collect();
 
@@ -746,116 +771,5 @@ WHERE 1=1
             .collect();
 
         Ok((users, total_count as u64))
-    }
-
-    async fn get_daily_active_agents(
-        &self,
-        start_date: Option<DateTime<Utc>>,
-        end_date: Option<DateTime<Utc>>,
-    ) -> anyhow::Result<Vec<DailyActiveAgentsPoint>> {
-        let (start, end) = match (start_date, end_date) {
-            (Some(s), Some(e)) => {
-                if s >= e {
-                    return Ok(Vec::new());
-                }
-                let cap_end = if (e - s).num_days() > MAX_DAILY_ACTIVE_AGENTS_RANGE_DAYS {
-                    s + Duration::days(MAX_DAILY_ACTIVE_AGENTS_RANGE_DAYS)
-                } else {
-                    e
-                };
-                (s, cap_end)
-            }
-            _ => return Ok(Vec::new()),
-        };
-
-        let mut client = self.pool.get().await?;
-        let tx = client.build_transaction().start().await?;
-        tx.execute(
-            &format!("SET LOCAL statement_timeout = '{AGGREGATION_TIMEOUT_MS}'"),
-            &[],
-        )
-        .await?;
-
-        // Total per day: generate all days, left join to count of distinct instance_id.
-        // Select day as text (YYYY-MM-DD) to avoid DATE/NaiveDate type mapping issues across drivers.
-        let rows = tx
-            .query(
-                r#"
-                WITH days AS (
-                    SELECT ((d AT TIME ZONE 'UTC')::date)::text AS day
-                    FROM generate_series($1::timestamptz, $2::timestamptz, '1 day'::interval) AS d
-                ),
-                daily_counts AS (
-                    SELECT ((created_at AT TIME ZONE 'UTC')::date)::text AS day,
-                           COUNT(DISTINCT instance_id)::bigint AS cnt
-                    FROM user_usage_event
-                    WHERE instance_id IS NOT NULL
-                      AND (quantity > 0 OR COALESCE(cost_nano_usd, 0) > 0)
-                      AND created_at >= $1
-                      AND created_at < $2 + interval '1 day'
-                    GROUP BY (created_at AT TIME ZONE 'UTC')::date
-                )
-                SELECT days.day, COALESCE(daily_counts.cnt, 0)::bigint
-                FROM days
-                LEFT JOIN daily_counts ON days.day = daily_counts.day
-                ORDER BY days.day
-                "#,
-                &[&start, &end],
-            )
-            .await?;
-
-        // Per day per instance_type: join to agent_instances to get type
-        let by_type_rows = tx
-            .query(
-                r#"
-                SELECT ((u.created_at AT TIME ZONE 'UTC')::date)::text AS day,
-                       ai.type AS instance_type,
-                       COUNT(DISTINCT u.instance_id)::bigint AS cnt
-                FROM user_usage_event u
-                JOIN agent_instances ai ON u.instance_id = ai.id
-                WHERE u.instance_id IS NOT NULL
-                  AND (u.quantity > 0 OR COALESCE(u.cost_nano_usd, 0) > 0)
-                  AND u.created_at >= $1
-                  AND u.created_at < $2 + interval '1 day'
-                GROUP BY (u.created_at AT TIME ZONE 'UTC')::date, ai.type
-                ORDER BY day, instance_type
-                "#,
-                &[&start, &end],
-            )
-            .await?;
-
-        tx.commit().await?;
-
-        // Index by day string -> Vec<(instance_type, count)>
-        let mut by_type_per_day: std::collections::HashMap<String, Vec<DailyActiveAgentsByType>> =
-            std::collections::HashMap::new();
-        for r in by_type_rows {
-            let day: String = r.get(0);
-            let instance_type: String = r.get(1);
-            let count: i64 = r.get(2);
-            by_type_per_day
-                .entry(day)
-                .or_default()
-                .push(DailyActiveAgentsByType {
-                    instance_type,
-                    active_agents_count: count,
-                });
-        }
-
-        let points = rows
-            .into_iter()
-            .map(|r| {
-                let date: String = r.get(0);
-                let count: i64 = r.get(1);
-                let by_instance_type = by_type_per_day.remove(&date).unwrap_or_default();
-                DailyActiveAgentsPoint {
-                    date,
-                    active_agents_count: count,
-                    by_instance_type,
-                }
-            })
-            .collect();
-
-        Ok(points)
     }
 }

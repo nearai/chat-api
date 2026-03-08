@@ -125,14 +125,4 @@ impl BiMetricsService for BiMetricsServiceImpl {
             .list_users_with_stats(limit, offset, filter, sort)
             .await
     }
-
-    async fn get_daily_active_agents(
-        &self,
-        start_date: Option<DateTime<Utc>>,
-        end_date: Option<DateTime<Utc>>,
-    ) -> anyhow::Result<Vec<DailyActiveAgentsPoint>> {
-        self.repo
-            .get_daily_active_agents(start_date, end_date)
-            .await
-    }
 }

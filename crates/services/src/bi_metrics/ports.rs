@@ -135,29 +135,6 @@ pub struct UserSummary {
     pub by_agent_count: Vec<UserSummaryAgentCountBucket>,
 }
 
-/// Count of daily active agents for a single instance type (e.g. openclaw, ironclaw).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-pub struct DailyActiveAgentsByType {
-    /// Agent type: openclaw, ironclaw, etc.
-    pub instance_type: String,
-    /// Number of distinct instances of this type with usage > 0 on this day
-    pub active_agents_count: i64,
-}
-
-/// One point in the daily active agents time series (UTC date, count of distinct agents with usage > 0 that day).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-pub struct DailyActiveAgentsPoint {
-    /// ISO date string (YYYY-MM-DD), UTC
-    pub date: String,
-    /// Number of distinct agent instances that had at least one usage event with quantity > 0 or cost > 0 on this day
-    pub active_agents_count: i64,
-    /// Breakdown by instance type (openclaw, ironclaw). Empty if none.
-    #[serde(default)]
-    pub by_instance_type: Vec<DailyActiveAgentsByType>,
-}
-
 /// A single status change event from the audit trail
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -212,6 +189,12 @@ pub struct UsageAggregation {
     pub output_cost_nano: i64,
     pub total_cost_nano: i64,
     pub request_count: i64,
+    /// Count of distinct agent instances with usage (quantity > 0 or cost > 0) in this group. Present when group_by is day, model, or user.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_agents_count: Option<i64>,
+    /// Count of distinct users with usage in this group. Present when group_by is day or model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_users_count: Option<i64>,
 }
 
 /// Ranking dimension for top consumers
@@ -350,13 +333,6 @@ pub trait BiMetricsRepository: Send + Sync {
         filter: &ListUsersFilter,
         sort: &ListUsersSort,
     ) -> anyhow::Result<(Vec<UserWithStats>, u64)>;
-
-    /// Daily active agents (with usage > 0): one row per day in range with count of distinct instance_id.
-    async fn get_daily_active_agents(
-        &self,
-        start_date: Option<DateTime<Utc>>,
-        end_date: Option<DateTime<Utc>>,
-    ) -> anyhow::Result<Vec<DailyActiveAgentsPoint>>;
 }
 
 /// Service trait for BI metrics
@@ -400,11 +376,4 @@ pub trait BiMetricsService: Send + Sync {
         filter: &ListUsersFilter,
         sort: &ListUsersSort,
     ) -> anyhow::Result<(Vec<UserWithStats>, u64)>;
-
-    /// Daily active agents (with usage > 0) time series for the given date range.
-    async fn get_daily_active_agents(
-        &self,
-        start_date: Option<DateTime<Utc>>,
-        end_date: Option<DateTime<Utc>>,
-    ) -> anyhow::Result<Vec<DailyActiveAgentsPoint>>;
 }
