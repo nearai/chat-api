@@ -442,7 +442,11 @@ async fn test_bi_users_summary() {
         .add_header(AUTH, auth_header(&admin_token))
         .await;
 
-    assert_eq!(response.status_code(), 200, "users/summary should return 200");
+    assert_eq!(
+        response.status_code(),
+        200,
+        "users/summary should return 200"
+    );
 
     let body: serde_json::Value = response.json();
     let by_plan = body
@@ -645,10 +649,22 @@ async fn test_bi_usage_group_by_day_with_data() {
         row.get("active_users_count").is_some(),
         "usage group_by=day should include active_users_count"
     );
-    let active_agents = row.get("active_agents_count").and_then(|v| v.as_i64()).unwrap_or(0);
-    let active_users = row.get("active_users_count").and_then(|v| v.as_i64()).unwrap_or(0);
-    assert!(active_agents > 0, "expected active_agents_count > 0 when usage data exists");
-    assert!(active_users > 0, "expected active_users_count > 0 when usage data exists");
+    let active_agents = row
+        .get("active_agents_count")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let active_users = row
+        .get("active_users_count")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    assert!(
+        active_agents > 0,
+        "expected active_agents_count > 0 when usage data exists"
+    );
+    assert!(
+        active_users > 0,
+        "expected active_users_count > 0 when usage data exists"
+    );
 
     cleanup(&db, inst1_id, inst2_id).await;
 }
