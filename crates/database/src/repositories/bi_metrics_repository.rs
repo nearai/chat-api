@@ -776,16 +776,17 @@ WHERE 1=1
         )
         .await?;
 
-        // Total per day: generate all days, left join to count of distinct instance_id
+        // Total per day: generate all days, left join to count of distinct instance_id.
+        // Select day as text (YYYY-MM-DD) to avoid DATE/NaiveDate type mapping issues across drivers.
         let rows = tx
             .query(
                 r#"
                 WITH days AS (
-                    SELECT d::date AS day
+                    SELECT ((d AT TIME ZONE 'UTC')::date)::text AS day
                     FROM generate_series($1::timestamptz, $2::timestamptz, '1 day'::interval) AS d
                 ),
                 daily_counts AS (
-                    SELECT (created_at AT TIME ZONE 'UTC')::date AS day,
+                    SELECT ((created_at AT TIME ZONE 'UTC')::date)::text AS day,
                            COUNT(DISTINCT instance_id)::bigint AS cnt
                     FROM user_usage_event
                     WHERE instance_id IS NOT NULL
@@ -807,7 +808,7 @@ WHERE 1=1
         let by_type_rows = tx
             .query(
                 r#"
-                SELECT (u.created_at AT TIME ZONE 'UTC')::date AS day,
+                SELECT ((u.created_at AT TIME ZONE 'UTC')::date)::text AS day,
                        ai.type AS instance_type,
                        COUNT(DISTINCT u.instance_id)::bigint AS cnt
                 FROM user_usage_event u
@@ -825,13 +826,13 @@ WHERE 1=1
 
         tx.commit().await?;
 
-        // Index by day: day -> Vec<(instance_type, count)>
+        // Index by day string -> Vec<(instance_type, count)>
         let mut by_type_per_day: std::collections::HashMap<
-            chrono::NaiveDate,
+            String,
             Vec<DailyActiveAgentsByType>,
         > = std::collections::HashMap::new();
         for r in by_type_rows {
-            let day: chrono::NaiveDate = r.get(0);
+            let day: String = r.get(0);
             let instance_type: String = r.get(1);
             let count: i64 = r.get(2);
             by_type_per_day
@@ -846,11 +847,11 @@ WHERE 1=1
         let points = rows
             .into_iter()
             .map(|r| {
-                let day: chrono::NaiveDate = r.get(0);
+                let date: String = r.get(0);
                 let count: i64 = r.get(1);
-                let by_instance_type = by_type_per_day.remove(&day).unwrap_or_default();
+                let by_instance_type = by_type_per_day.remove(&date).unwrap_or_default();
                 DailyActiveAgentsPoint {
-                    date: day.format("%Y-%m-%d").to_string(),
+                    date,
                     active_agents_count: count,
                     by_instance_type,
                 }
