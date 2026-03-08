@@ -1,6 +1,5 @@
 mod common;
 
-use chrono::{Duration, Utc};
 use common::{create_test_server_and_db, mock_login, TestServerConfig};
 use services::user::ports::UserRepository;
 use uuid::Uuid;

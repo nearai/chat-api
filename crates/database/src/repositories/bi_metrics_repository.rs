@@ -3,9 +3,9 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use services::bi_metrics::{
     BiMetricsRepository, DeploymentFilter, DeploymentRecord, DeploymentStatusCount,
-    DeploymentSummary, ListUsersFilter, ListUsersSort, StatusChangeRecord, TopConsumer,
-    TopConsumerFilter, TopConsumerGroupBy, UsageAggregation, UsageFilter, UsageGroupBy,
-    UsageRankBy, UserWithStats, UsersSortBy, UsersSortOrder,
+    DeploymentsSortBy, DeploymentsSortOrder, DeploymentSummary, ListUsersFilter, ListUsersSort,
+    StatusChangeRecord, TopConsumer, TopConsumerFilter, TopConsumerGroupBy, UsageAggregation,
+    UsageFilter, UsageGroupBy, UsageRankBy, UserWithStats, UsersSortBy, UsersSortOrder,
 };
 use services::user::ports::User;
 use services::UserId;
@@ -58,6 +58,14 @@ impl QueryBuilder {
         self.params.push(Box::new(value));
     }
 
+    /// Search deployments by agent name, user email, or user name (ILIKE, one param).
+    fn push_search_deployments(&mut self, pattern: String) {
+        let idx = self.next_param_idx();
+        self.conditions
+            .push(format!("(ai.name ILIKE ${idx} OR u.email ILIKE ${idx} OR u.name ILIKE ${idx})"));
+        self.params.push(Box::new(pattern));
+    }
+
     fn where_clause(&self) -> String {
         if self.conditions.is_empty() {
             String::new()
@@ -69,6 +77,27 @@ impl QueryBuilder {
     fn param_refs(&self) -> Vec<&(dyn tokio_postgres::types::ToSql + Sync)> {
         self.params.iter().map(|p| p.as_ref() as _).collect()
     }
+}
+
+fn list_deployments_order_clause(sort_by: DeploymentsSortBy, sort_order: DeploymentsSortOrder) -> String {
+    let col = match sort_by {
+        DeploymentsSortBy::CreatedAt => "ai.created_at",
+        DeploymentsSortBy::UpdatedAt => "ai.updated_at",
+        DeploymentsSortBy::InstanceType => "ai.type",
+        DeploymentsSortBy::Status => "ai.status",
+        DeploymentsSortBy::UserEmail => "u.email",
+        DeploymentsSortBy::UserName => "u.name",
+        DeploymentsSortBy::Name => "ai.name",
+    };
+    let order = match sort_order {
+        DeploymentsSortOrder::Asc => "ASC",
+        DeploymentsSortOrder::Desc => "DESC",
+    };
+    let nulls = match sort_by {
+        DeploymentsSortBy::UserEmail | DeploymentsSortBy::UserName | DeploymentsSortBy::Name => " NULLS LAST",
+        _ => "",
+    };
+    format!("{col} {order}{nulls}")
 }
 
 fn list_users_order_clause(sort: &ListUsersSort) -> String {
@@ -115,20 +144,29 @@ impl BiMetricsRepository for PostgresBiMetricsRepository {
         if let Some(ed) = filter.end_date {
             qb.push("ai.created_at", "<=", ed);
         }
+        if let Some(ref search) = filter.search {
+            let escaped = search
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
+            let pattern = format!("%{escaped}%");
+            qb.push_search_deployments(pattern);
+        }
 
         let where_clause = qb.where_clause();
+        let order_clause = list_deployments_order_clause(filter.sort_by, filter.sort_order);
 
         // Use COUNT(*) OVER() window function to get total in a single query
-        // LEFT JOIN users to get user_email and user_name for admin display
+        // LEFT JOIN users to get user_email, user_name, and for search/sort
         let limit_idx = qb.next_param_idx();
         let offset_idx = limit_idx + 1;
         let data_sql = format!(
-            "SELECT ai.id, ai.user_id, u.email, u.name, u.avatar_url, ai.instance_id, ai.type, ai.status, ai.created_at, ai.updated_at,
+            "SELECT ai.id, ai.user_id, u.email, u.name, u.avatar_url, ai.name, ai.instance_id, ai.type, ai.status, ai.created_at, ai.updated_at,
                     COUNT(*) OVER() as total_count
              FROM agent_instances ai
              LEFT JOIN users u ON ai.user_id = u.id
              {where_clause}
-             ORDER BY ai.created_at DESC
+             ORDER BY {order_clause}
              LIMIT ${limit_idx} OFFSET ${offset_idx}"
         );
         qb.params.push(Box::new(filter.limit));
@@ -136,7 +174,7 @@ impl BiMetricsRepository for PostgresBiMetricsRepository {
 
         let rows = client.query(&data_sql, &qb.param_refs()).await?;
 
-        let total: i64 = rows.first().map(|r| r.get(10)).unwrap_or(0);
+        let total: i64 = rows.first().map(|r| r.get(11)).unwrap_or(0);
 
         let records = rows
             .into_iter()
@@ -146,11 +184,12 @@ impl BiMetricsRepository for PostgresBiMetricsRepository {
                 user_email: r.get(2),
                 user_name: r.get(3),
                 user_avatar_url: r.get(4),
-                instance_id: r.get(5),
-                instance_type: r.get(6),
-                status: r.get(7),
-                created_at: r.get(8),
-                updated_at: r.get(9),
+                name: r.get(5),
+                instance_id: r.get(6),
+                instance_type: r.get(7),
+                status: r.get(8),
+                created_at: r.get(9),
+                updated_at: r.get(10),
             })
             .collect();
 

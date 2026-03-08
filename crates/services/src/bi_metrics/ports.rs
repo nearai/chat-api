@@ -73,7 +73,6 @@ impl Default for ListUsersSort {
 // ---- BI metrics types ----
 
 /// A single deployment record for BI reporting.
-/// Note: `name` is intentionally excluded to avoid exposing user-provided labels (per privacy policy).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct DeploymentRecord {
@@ -85,6 +84,8 @@ pub struct DeploymentRecord {
     pub user_name: Option<String>,
     /// User avatar URL from users table (for display in admin UI)
     pub user_avatar_url: Option<String>,
+    /// Agent instance name (user-provided label)
+    pub name: Option<String>,
     pub instance_id: String,
     pub instance_type: String, // openclaw | ironclaw
     pub status: String,
@@ -251,15 +252,57 @@ pub struct TopConsumer {
     pub request_count: i64,
 }
 
+/// Sort field for deployment list
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub enum DeploymentsSortBy {
+    #[default]
+    CreatedAt,
+    UpdatedAt,
+    InstanceType,
+    Status,
+    UserEmail,
+    UserName,
+    Name,
+}
+
+/// Sort order for deployment list
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub enum DeploymentsSortOrder {
+    Asc,
+    #[default]
+    Desc,
+}
+
 /// Filter parameters for deployment queries
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct DeploymentFilter {
     pub instance_type: Option<String>,
     pub status: Option<String>,
     pub start_date: Option<DateTime<Utc>>,
     pub end_date: Option<DateTime<Utc>>,
+    pub search: Option<String>,
+    pub sort_by: DeploymentsSortBy,
+    pub sort_order: DeploymentsSortOrder,
     pub limit: i64,
     pub offset: i64,
+}
+
+impl Default for DeploymentFilter {
+    fn default() -> Self {
+        Self {
+            instance_type: None,
+            status: None,
+            start_date: None,
+            end_date: None,
+            search: None,
+            sort_by: DeploymentsSortBy::default(),
+            sort_order: DeploymentsSortOrder::default(),
+            limit: 20,
+            offset: 0,
+        }
+    }
 }
 
 /// Filter parameters for usage queries

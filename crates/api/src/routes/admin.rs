@@ -16,9 +16,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use services::analytics::{ActivityLogEntry, AnalyticsSummary, TopActiveUsersResponse};
 use services::bi_metrics::{
-    DeploymentFilter, DeploymentRecord, DeploymentSummary, StatusChangeRecord, TopConsumer,
-    TopConsumerFilter, TopConsumerGroupBy, UsageAggregation, UsageFilter, UsageGroupBy,
-    UsageRankBy as BiUsageRankBy, UserSummary,
+    DeploymentFilter, DeploymentRecord, DeploymentsSortBy, DeploymentsSortOrder, DeploymentSummary,
+    StatusChangeRecord, TopConsumer, TopConsumerFilter, TopConsumerGroupBy, UsageAggregation,
+    UsageFilter, UsageGroupBy, UsageRankBy as BiUsageRankBy, UserSummary,
 };
 
 /// Maximum rows for BI usage aggregation queries.
@@ -1959,6 +1959,63 @@ pub struct BiDeploymentQuery {
     pub status: Option<String>,
     pub start_date: Option<DateTime<Utc>>,
     pub end_date: Option<DateTime<Utc>>,
+    /// Substring search on agent name, user email, or user name (case-insensitive)
+    pub q: Option<String>,
+    /// Sort by: created_at, updated_at, instance_type, status, user_email, user_name, name
+    #[serde(default = "default_deployment_sort_by")]
+    pub sort_by: String,
+    /// Sort order: asc or desc
+    #[serde(default = "default_deployment_sort_order")]
+    pub sort_order: String,
+}
+
+fn default_deployment_sort_by() -> String {
+    "created_at".to_string()
+}
+
+fn default_deployment_sort_order() -> String {
+    "desc".to_string()
+}
+
+impl BiDeploymentQuery {
+    fn validate_deployments(&self) -> Result<(), ApiError> {
+        if let Some(ref q) = self.q {
+            let q_trimmed = q.trim();
+            if !q_trimmed.is_empty() {
+                if q_trimmed.len() > 200 {
+                    return Err(ApiError::bad_request(
+                        "search query exceeds maximum length of 200",
+                    ));
+                }
+                if q_trimmed.matches('%').count() > 5 {
+                    return Err(ApiError::bad_request(
+                        "search query contains too many wildcard characters",
+                    ));
+                }
+            }
+        }
+        const VALID_SORT_BY: [&str; 7] = [
+            "created_at",
+            "updated_at",
+            "instance_type",
+            "status",
+            "user_email",
+            "user_name",
+            "name",
+        ];
+        if !VALID_SORT_BY.contains(&self.sort_by.as_str()) {
+            return Err(ApiError::bad_request(format!(
+                "invalid sort_by: {}, must be one of {:?}",
+                self.sort_by, VALID_SORT_BY
+            )));
+        }
+        if self.sort_order != "asc" && self.sort_order != "desc" {
+            return Err(ApiError::bad_request(
+                "sort_order must be asc or desc",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Query parameters for BI deployment summary
@@ -2133,7 +2190,7 @@ pub async fn bi_users_summary(
     Ok(Json(summary))
 }
 
-/// List deployments with optional filters (BI). Requires admin authentication.
+/// List deployments with optional filters, search, and sort (BI). Requires admin authentication.
 #[utoipa::path(
     get,
     path = "/v1/admin/bi/deployments",
@@ -2157,12 +2214,42 @@ pub async fn bi_list_deployments(
     validate_string_filter("type", &params.instance_type)?;
     validate_string_filter("status", &params.status)?;
     validate_date_range(params.start_date, params.end_date)?;
+    params.validate_deployments()?;
+
+    let sort_by = match params.sort_by.as_str() {
+        "created_at" => DeploymentsSortBy::CreatedAt,
+        "updated_at" => DeploymentsSortBy::UpdatedAt,
+        "instance_type" => DeploymentsSortBy::InstanceType,
+        "status" => DeploymentsSortBy::Status,
+        "user_email" => DeploymentsSortBy::UserEmail,
+        "user_name" => DeploymentsSortBy::UserName,
+        "name" => DeploymentsSortBy::Name,
+        _ => DeploymentsSortBy::CreatedAt,
+    };
+    let sort_order = if params.sort_order == "asc" {
+        DeploymentsSortOrder::Asc
+    } else {
+        DeploymentsSortOrder::Desc
+    };
 
     let filter = DeploymentFilter {
         instance_type: params.instance_type,
         status: params.status,
         start_date: params.start_date,
         end_date: params.end_date,
+        search: params
+            .q
+            .as_ref()
+            .and_then(|q| {
+                let t = q.trim();
+                if t.is_empty() {
+                    None
+                } else {
+                    Some(t.to_string())
+                }
+            }),
+        sort_by,
+        sort_order,
         limit: params.limit.clamp(1, 100),
         offset: params.offset.max(0),
     };
