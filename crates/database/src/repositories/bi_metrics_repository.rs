@@ -827,10 +827,8 @@ WHERE 1=1
         tx.commit().await?;
 
         // Index by day string -> Vec<(instance_type, count)>
-        let mut by_type_per_day: std::collections::HashMap<
-            String,
-            Vec<DailyActiveAgentsByType>,
-        > = std::collections::HashMap::new();
+        let mut by_type_per_day: std::collections::HashMap<String, Vec<DailyActiveAgentsByType>> =
+            std::collections::HashMap::new();
         for r in by_type_rows {
             let day: String = r.get(0);
             let instance_type: String = r.get(1);
