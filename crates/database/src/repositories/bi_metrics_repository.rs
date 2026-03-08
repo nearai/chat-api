@@ -166,7 +166,7 @@ impl BiMetricsRepository for PostgresBiMetricsRepository {
 
         // Use COUNT(*) OVER() window function to get total in a single query
         // LEFT JOIN users to get user_email, user_name, and for search/sort
-        // LEFT JOIN usage aggregates for total_spent_nano and total_tokens per instance
+        // LEFT JOIN LATERAL: aggregate usage only for this row's instance_id (avoids full table aggregate)
         let limit_idx = qb.next_param_idx();
         let offset_idx = limit_idx + 1;
         let data_sql = format!(
@@ -175,12 +175,11 @@ impl BiMetricsRepository for PostgresBiMetricsRepository {
                     COUNT(*) OVER() as total_count
              FROM agent_instances ai
              LEFT JOIN users u ON ai.user_id = u.id
-             LEFT JOIN (
-                 SELECT instance_id,
-                    COALESCE(SUM(cost_nano_usd), 0)::BIGINT AS total_spent_nano,
-                    COALESCE(SUM(CASE WHEN metric_key = 'llm.tokens' THEN quantity ELSE 0 END), 0)::BIGINT AS total_tokens
-                 FROM user_usage_event WHERE instance_id IS NOT NULL GROUP BY instance_id
-             ) uue ON ai.id = uue.instance_id
+             LEFT JOIN LATERAL (
+                 SELECT COALESCE(SUM(cost_nano_usd), 0)::BIGINT AS total_spent_nano,
+                        COALESCE(SUM(CASE WHEN metric_key = 'llm.tokens' THEN quantity ELSE 0 END), 0)::BIGINT AS total_tokens
+                 FROM user_usage_event WHERE instance_id = ai.id
+             ) uue ON TRUE
              {where_clause}
              ORDER BY {order_clause}
              LIMIT ${limit_idx} OFFSET ${offset_idx}"

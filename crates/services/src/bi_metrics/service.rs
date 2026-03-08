@@ -86,18 +86,22 @@ impl BiMetricsService for BiMetricsServiceImpl {
         let config = self.system_configs_service.get_configs().await?;
         let price_to_plan = Self::build_price_id_to_plan_name(&config);
 
-        let by_subscription_plan: Vec<UserSummaryPlanCount> = by_price_id
+        // Aggregate by resolved plan name so multiple price IDs for the same plan
+        // (e.g. monthly vs yearly) or multiple unknown price IDs merge into one bucket.
+        let mut plan_to_count: HashMap<String, i64> = HashMap::new();
+        for (price_id_opt, user_count) in by_price_id {
+            let plan = match price_id_opt {
+                None => "none".to_string(),
+                Some(id) => price_to_plan
+                    .get(&id)
+                    .cloned()
+                    .unwrap_or_else(|| "Unknown".to_string()),
+            };
+            *plan_to_count.entry(plan).or_insert(0) += user_count;
+        }
+        let by_subscription_plan: Vec<UserSummaryPlanCount> = plan_to_count
             .into_iter()
-            .map(|(price_id_opt, user_count)| {
-                let plan = match price_id_opt {
-                    None => "none".to_string(),
-                    Some(id) => price_to_plan
-                        .get(&id)
-                        .cloned()
-                        .unwrap_or_else(|| "Unknown".to_string()),
-                };
-                UserSummaryPlanCount { plan, user_count }
-            })
+            .map(|(plan, user_count)| UserSummaryPlanCount { plan, user_count })
             .collect();
 
         let by_agent_count: Vec<UserSummaryAgentCountBucket> = by_agent_count
