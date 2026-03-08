@@ -94,7 +94,7 @@ impl BiMetricsService for BiMetricsServiceImpl {
                     Some(id) => price_to_plan
                         .get(&id)
                         .cloned()
-                        .unwrap_or_else(|| "unknown".to_string()),
+                        .unwrap_or_else(|| "Unknown".to_string()),
                 };
                 UserSummaryPlanCount { plan, user_count }
             })

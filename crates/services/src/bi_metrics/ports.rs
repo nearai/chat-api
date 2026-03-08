@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::str::FromStr;
 use uuid::Uuid;
 
 use crate::user::ports::User;
@@ -84,7 +85,7 @@ pub struct DeploymentRecord {
     pub user_name: Option<String>,
     /// User avatar URL from users table (for display in admin UI)
     pub user_avatar_url: Option<String>,
-    /// Agent instance name (user-provided label)
+    /// Agent instance name (user-provided label). Exposed in BI for admin UI display; product decision to show for support and operations.
     pub name: Option<String>,
     pub instance_id: String,
     pub instance_type: String, // openclaw | ironclaw
@@ -270,6 +271,25 @@ pub enum DeploymentsSortBy {
     Name,
     TotalSpentNano,
     TotalTokens,
+}
+
+impl FromStr for DeploymentsSortBy {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "created_at" => Ok(DeploymentsSortBy::CreatedAt),
+            "updated_at" => Ok(DeploymentsSortBy::UpdatedAt),
+            "instance_type" => Ok(DeploymentsSortBy::InstanceType),
+            "status" => Ok(DeploymentsSortBy::Status),
+            "user_email" => Ok(DeploymentsSortBy::UserEmail),
+            "user_name" => Ok(DeploymentsSortBy::UserName),
+            "name" => Ok(DeploymentsSortBy::Name),
+            "total_spent_nano" => Ok(DeploymentsSortBy::TotalSpentNano),
+            "total_tokens" => Ok(DeploymentsSortBy::TotalTokens),
+            _ => Err(()),
+        }
+    }
 }
 
 /// Sort order for deployment list

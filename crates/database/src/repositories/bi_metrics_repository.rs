@@ -178,7 +178,7 @@ impl BiMetricsRepository for PostgresBiMetricsRepository {
              LEFT JOIN (
                  SELECT instance_id,
                     COALESCE(SUM(cost_nano_usd), 0)::BIGINT AS total_spent_nano,
-                    COALESCE(SUM(quantity), 0)::BIGINT AS total_tokens
+                    COALESCE(SUM(CASE WHEN metric_key = 'llm.tokens' THEN quantity ELSE 0 END), 0)::BIGINT AS total_tokens
                  FROM user_usage_event WHERE instance_id IS NOT NULL GROUP BY instance_id
              ) uue ON ai.id = uue.instance_id
              {where_clause}

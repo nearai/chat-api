@@ -1961,7 +1961,7 @@ pub struct BiDeploymentQuery {
     pub end_date: Option<DateTime<Utc>>,
     /// Substring search on agent name, user email, or user name (case-insensitive)
     pub q: Option<String>,
-    /// Sort by: created_at, updated_at, instance_type, status, user_email, user_name, name
+    /// Sort by: created_at, updated_at, instance_type, status, user_email, user_name, name, total_spent_nano, total_tokens
     #[serde(default = "default_deployment_sort_by")]
     pub sort_by: String,
     /// Sort order: asc or desc
@@ -1994,21 +1994,10 @@ impl BiDeploymentQuery {
                 }
             }
         }
-        const VALID_SORT_BY: [&str; 9] = [
-            "created_at",
-            "updated_at",
-            "instance_type",
-            "status",
-            "user_email",
-            "user_name",
-            "name",
-            "total_spent_nano",
-            "total_tokens",
-        ];
-        if !VALID_SORT_BY.contains(&self.sort_by.as_str()) {
+        if self.sort_by.parse::<DeploymentsSortBy>().is_err() {
             return Err(ApiError::bad_request(format!(
-                "invalid sort_by: {}, must be one of {:?}",
-                self.sort_by, VALID_SORT_BY
+                "invalid sort_by: {}; must be one of: created_at, updated_at, instance_type, status, user_email, user_name, name, total_spent_nano, total_tokens",
+                self.sort_by
             )));
         }
         if self.sort_order != "asc" && self.sort_order != "desc" {
@@ -2216,18 +2205,10 @@ pub async fn bi_list_deployments(
     validate_date_range(params.start_date, params.end_date)?;
     params.validate_deployments()?;
 
-    let sort_by = match params.sort_by.as_str() {
-        "created_at" => DeploymentsSortBy::CreatedAt,
-        "updated_at" => DeploymentsSortBy::UpdatedAt,
-        "instance_type" => DeploymentsSortBy::InstanceType,
-        "status" => DeploymentsSortBy::Status,
-        "user_email" => DeploymentsSortBy::UserEmail,
-        "user_name" => DeploymentsSortBy::UserName,
-        "name" => DeploymentsSortBy::Name,
-        "total_spent_nano" => DeploymentsSortBy::TotalSpentNano,
-        "total_tokens" => DeploymentsSortBy::TotalTokens,
-        _ => DeploymentsSortBy::CreatedAt,
-    };
+    let sort_by = params
+        .sort_by
+        .parse::<DeploymentsSortBy>()
+        .unwrap_or_default();
     let sort_order = if params.sort_order == "asc" {
         DeploymentsSortOrder::Asc
     } else {

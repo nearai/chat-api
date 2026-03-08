@@ -420,6 +420,74 @@ async fn test_bi_deployment_summary_with_date_range() {
 }
 
 // =============================================================================
+// User summary endpoint
+// =============================================================================
+
+#[tokio::test]
+async fn test_bi_users_summary() {
+    let (server, db) = server_and_db().await;
+    let admin_token = mock_login(&server, "bi_admin_summary@admin.org").await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email("bi_admin_summary@admin.org")
+        .await
+        .unwrap()
+        .unwrap();
+
+    let (inst1_id, inst2_id) = seed_bi_test_data(&db, user.id.0).await;
+
+    let response = server
+        .get("/v1/admin/bi/users/summary")
+        .add_header(AUTH, auth_header(&admin_token))
+        .await;
+
+    assert_eq!(response.status_code(), 200, "users/summary should return 200");
+
+    let body: serde_json::Value = response.json();
+    let by_plan = body
+        .get("by_subscription_plan")
+        .expect("response should have by_subscription_plan")
+        .as_array()
+        .expect("by_subscription_plan should be array");
+    let by_agents = body
+        .get("by_agent_count")
+        .expect("response should have by_agent_count")
+        .as_array()
+        .expect("by_agent_count should be array");
+
+    for p in by_plan {
+        assert!(p.get("plan").is_some(), "each plan count should have plan");
+        assert!(
+            p.get("user_count").is_some(),
+            "each plan count should have user_count"
+        );
+    }
+    for b in by_agents {
+        assert!(
+            b.get("agent_count").is_some(),
+            "each agent bucket should have agent_count"
+        );
+        assert!(
+            b.get("user_count").is_some(),
+            "each agent bucket should have user_count"
+        );
+    }
+
+    // We seeded 2 instances for one user, so there should be at least one bucket with user_count >= 1
+    let total_users_with_agents: i64 = by_agents
+        .iter()
+        .map(|b| b.get("user_count").and_then(|v| v.as_i64()).unwrap_or(0))
+        .sum();
+    assert!(
+        total_users_with_agents >= 1,
+        "expected at least one user in by_agent_count (we seeded 2 instances for one user)"
+    );
+
+    cleanup(&db, inst1_id, inst2_id).await;
+}
+
+// =============================================================================
 // Status history endpoint
 // =============================================================================
 
@@ -567,6 +635,20 @@ async fn test_bi_usage_group_by_day_with_data() {
     assert!(row.get("output_tokens").unwrap().as_i64().unwrap() > 0);
     assert!(row.get("total_tokens").unwrap().as_i64().unwrap() > 0);
     assert!(row.get("request_count").unwrap().as_i64().unwrap() > 0);
+
+    // group_by=day includes active_agents_count and active_users_count (usage > 0)
+    assert!(
+        row.get("active_agents_count").is_some(),
+        "usage group_by=day should include active_agents_count"
+    );
+    assert!(
+        row.get("active_users_count").is_some(),
+        "usage group_by=day should include active_users_count"
+    );
+    let active_agents = row.get("active_agents_count").and_then(|v| v.as_i64()).unwrap_or(0);
+    let active_users = row.get("active_users_count").and_then(|v| v.as_i64()).unwrap_or(0);
+    assert!(active_agents > 0, "expected active_agents_count > 0 when usage data exists");
+    assert!(active_users > 0, "expected active_users_count > 0 when usage data exists");
 
     cleanup(&db, inst1_id, inst2_id).await;
 }
