@@ -91,6 +91,10 @@ pub struct DeploymentRecord {
     pub status: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Total spend for this instance (nano USD) from usage events
+    pub total_spent_nano: i64,
+    /// Total tokens used for this instance from usage events
+    pub total_tokens: i64,
 }
 
 /// Aggregate deployment counts grouped by type and status

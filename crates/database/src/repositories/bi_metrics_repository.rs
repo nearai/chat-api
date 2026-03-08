@@ -164,13 +164,21 @@ impl BiMetricsRepository for PostgresBiMetricsRepository {
 
         // Use COUNT(*) OVER() window function to get total in a single query
         // LEFT JOIN users to get user_email, user_name, and for search/sort
+        // LEFT JOIN usage aggregates for total_spent_nano and total_tokens per instance
         let limit_idx = qb.next_param_idx();
         let offset_idx = limit_idx + 1;
         let data_sql = format!(
             "SELECT ai.id, ai.user_id, u.email, u.name, u.avatar_url, ai.name, ai.instance_id, ai.type, ai.status, ai.created_at, ai.updated_at,
+                    COALESCE(uue.total_spent_nano, 0)::BIGINT, COALESCE(uue.total_tokens, 0)::BIGINT,
                     COUNT(*) OVER() as total_count
              FROM agent_instances ai
              LEFT JOIN users u ON ai.user_id = u.id
+             LEFT JOIN (
+                 SELECT instance_id,
+                    COALESCE(SUM(cost_nano_usd), 0)::BIGINT AS total_spent_nano,
+                    COALESCE(SUM(quantity), 0)::BIGINT AS total_tokens
+                 FROM user_usage_event WHERE instance_id IS NOT NULL GROUP BY instance_id
+             ) uue ON ai.id = uue.instance_id
              {where_clause}
              ORDER BY {order_clause}
              LIMIT ${limit_idx} OFFSET ${offset_idx}"
@@ -180,7 +188,7 @@ impl BiMetricsRepository for PostgresBiMetricsRepository {
 
         let rows = client.query(&data_sql, &qb.param_refs()).await?;
 
-        let total: i64 = rows.first().map(|r| r.get(11)).unwrap_or(0);
+        let total: i64 = rows.first().map(|r| r.get(13)).unwrap_or(0);
 
         let records = rows
             .into_iter()
@@ -196,6 +204,8 @@ impl BiMetricsRepository for PostgresBiMetricsRepository {
                 status: r.get(8),
                 created_at: r.get(9),
                 updated_at: r.get(10),
+                total_spent_nano: r.get(11),
+                total_tokens: r.get(12),
             })
             .collect();
 
