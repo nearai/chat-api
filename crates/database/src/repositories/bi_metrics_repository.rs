@@ -92,6 +92,8 @@ fn list_deployments_order_clause(
         DeploymentsSortBy::UserEmail => "u.email",
         DeploymentsSortBy::UserName => "u.name",
         DeploymentsSortBy::Name => "ai.name",
+        DeploymentsSortBy::TotalSpentNano => "COALESCE(uue.total_spent_nano, 0)",
+        DeploymentsSortBy::TotalTokens => "COALESCE(uue.total_tokens, 0)",
     };
     let order = match sort_order {
         DeploymentsSortOrder::Asc => "ASC",

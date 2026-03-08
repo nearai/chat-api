@@ -268,6 +268,8 @@ pub enum DeploymentsSortBy {
     UserEmail,
     UserName,
     Name,
+    TotalSpentNano,
+    TotalTokens,
 }
 
 /// Sort order for deployment list

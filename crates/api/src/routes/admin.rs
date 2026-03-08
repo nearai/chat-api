@@ -1994,7 +1994,7 @@ impl BiDeploymentQuery {
                 }
             }
         }
-        const VALID_SORT_BY: [&str; 7] = [
+        const VALID_SORT_BY: [&str; 9] = [
             "created_at",
             "updated_at",
             "instance_type",
@@ -2002,6 +2002,8 @@ impl BiDeploymentQuery {
             "user_email",
             "user_name",
             "name",
+            "total_spent_nano",
+            "total_tokens",
         ];
         if !VALID_SORT_BY.contains(&self.sort_by.as_str()) {
             return Err(ApiError::bad_request(format!(
@@ -2222,6 +2224,8 @@ pub async fn bi_list_deployments(
         "user_email" => DeploymentsSortBy::UserEmail,
         "user_name" => DeploymentsSortBy::UserName,
         "name" => DeploymentsSortBy::Name,
+        "total_spent_nano" => DeploymentsSortBy::TotalSpentNano,
+        "total_tokens" => DeploymentsSortBy::TotalTokens,
         _ => DeploymentsSortBy::CreatedAt,
     };
     let sort_order = if params.sort_order == "asc" {
