@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use services::bi_metrics::{
     BiMetricsRepository, DeploymentFilter, DeploymentRecord, DeploymentStatusCount,
-    DeploymentsSortBy, DeploymentsSortOrder, DeploymentSummary, ListUsersFilter, ListUsersSort,
+    DeploymentSummary, DeploymentsSortBy, DeploymentsSortOrder, ListUsersFilter, ListUsersSort,
     StatusChangeRecord, TopConsumer, TopConsumerFilter, TopConsumerGroupBy, UsageAggregation,
     UsageFilter, UsageGroupBy, UsageRankBy, UserWithStats, UsersSortBy, UsersSortOrder,
 };
@@ -61,8 +61,9 @@ impl QueryBuilder {
     /// Search deployments by agent name, user email, or user name (ILIKE, one param).
     fn push_search_deployments(&mut self, pattern: String) {
         let idx = self.next_param_idx();
-        self.conditions
-            .push(format!("(ai.name ILIKE ${idx} OR u.email ILIKE ${idx} OR u.name ILIKE ${idx})"));
+        self.conditions.push(format!(
+            "(ai.name ILIKE ${idx} OR u.email ILIKE ${idx} OR u.name ILIKE ${idx})"
+        ));
         self.params.push(Box::new(pattern));
     }
 
@@ -79,7 +80,10 @@ impl QueryBuilder {
     }
 }
 
-fn list_deployments_order_clause(sort_by: DeploymentsSortBy, sort_order: DeploymentsSortOrder) -> String {
+fn list_deployments_order_clause(
+    sort_by: DeploymentsSortBy,
+    sort_order: DeploymentsSortOrder,
+) -> String {
     let col = match sort_by {
         DeploymentsSortBy::CreatedAt => "ai.created_at",
         DeploymentsSortBy::UpdatedAt => "ai.updated_at",
@@ -94,7 +98,9 @@ fn list_deployments_order_clause(sort_by: DeploymentsSortBy, sort_order: Deploym
         DeploymentsSortOrder::Desc => "DESC",
     };
     let nulls = match sort_by {
-        DeploymentsSortBy::UserEmail | DeploymentsSortBy::UserName | DeploymentsSortBy::Name => " NULLS LAST",
+        DeploymentsSortBy::UserEmail | DeploymentsSortBy::UserName | DeploymentsSortBy::Name => {
+            " NULLS LAST"
+        }
         _ => "",
     };
     format!("{col} {order}{nulls}")

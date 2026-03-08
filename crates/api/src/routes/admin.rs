@@ -16,7 +16,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use services::analytics::{ActivityLogEntry, AnalyticsSummary, TopActiveUsersResponse};
 use services::bi_metrics::{
-    DeploymentFilter, DeploymentRecord, DeploymentsSortBy, DeploymentsSortOrder, DeploymentSummary,
+    DeploymentFilter, DeploymentRecord, DeploymentSummary, DeploymentsSortBy, DeploymentsSortOrder,
     StatusChangeRecord, TopConsumer, TopConsumerFilter, TopConsumerGroupBy, UsageAggregation,
     UsageFilter, UsageGroupBy, UsageRankBy as BiUsageRankBy, UserSummary,
 };
@@ -2010,9 +2010,7 @@ impl BiDeploymentQuery {
             )));
         }
         if self.sort_order != "asc" && self.sort_order != "desc" {
-            return Err(ApiError::bad_request(
-                "sort_order must be asc or desc",
-            ));
+            return Err(ApiError::bad_request("sort_order must be asc or desc"));
         }
         Ok(())
     }
@@ -2237,17 +2235,14 @@ pub async fn bi_list_deployments(
         status: params.status,
         start_date: params.start_date,
         end_date: params.end_date,
-        search: params
-            .q
-            .as_ref()
-            .and_then(|q| {
-                let t = q.trim();
-                if t.is_empty() {
-                    None
-                } else {
-                    Some(t.to_string())
-                }
-            }),
+        search: params.q.as_ref().and_then(|q| {
+            let t = q.trim();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            }
+        }),
         sort_by,
         sort_order,
         limit: params.limit.clamp(1, 100),
