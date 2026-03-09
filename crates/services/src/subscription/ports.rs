@@ -254,6 +254,9 @@ pub trait PaymentWebhookRepository: Send + Sync {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubscriptionPlan {
     pub name: String,
+    /// Plan price in cents (e.g. 999 for $9.99, 0 for free)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub price: Option<i64>,
     /// Free trial period in days before first charge
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trial_period_days: Option<u32>,

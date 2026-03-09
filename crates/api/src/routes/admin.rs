@@ -16,13 +16,14 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use services::analytics::{ActivityLogEntry, AnalyticsSummary, TopActiveUsersResponse};
 use services::bi_metrics::{
-    DeploymentFilter, DeploymentRecord, DeploymentSummary, StatusChangeRecord, TopConsumer,
-    TopConsumerFilter, TopConsumerGroupBy, UsageAggregation, UsageFilter, UsageGroupBy,
-    UsageRankBy as BiUsageRankBy,
+    DeploymentFilter, DeploymentRecord, DeploymentSummary, DeploymentsSortBy, DeploymentsSortOrder,
+    StatusChangeRecord, TopConsumer, TopConsumerFilter, TopConsumerGroupBy, UsageAggregation,
+    UsageFilter, UsageGroupBy, UsageRankBy as BiUsageRankBy, UserSummary,
 };
 
 /// Maximum rows for BI usage aggregation queries.
 const BI_USAGE_MAX_ROWS: i64 = 1000;
+
 use services::model::ports::{UpdateModelParams, UpsertModelParams};
 use services::user_usage::UsageRankBy;
 use services::UserId;
@@ -81,7 +82,7 @@ pub struct ListUsersQuery {
     pub offset: i64,
     /// Filter type: "subscription_status" or "subscription_plan"
     pub filter_by: Option<String>,
-    /// Filter value. For subscription_status: active, canceled, past_due, trialing, unpaid, none. For subscription_plan: plan name or none
+    /// Filter value. For subscription_status: active, trialing, none (BI returns only active subscriptions). For subscription_plan: plan name or none
     pub filter_value: Option<String>,
     /// Substring search on email and name (case-insensitive)
     pub q: Option<String>,
@@ -116,11 +117,8 @@ impl ListUsersQuery {
                 if !fb.is_empty() && !fv.is_empty() {
                     match fb {
                         "subscription_status" => {
-                            if ![
-                                "active", "canceled", "past_due", "trialing", "unpaid", "none",
-                            ]
-                            .contains(&fv)
-                            {
+                            // BI endpoint returns only active/trialing subscriptions; filter supports active, trialing, none
+                            if !["active", "trialing", "none"].contains(&fv) {
                                 return Err(ApiError::bad_request(format!(
                                     "invalid filter_value for subscription_status: {}",
                                     fv
@@ -301,7 +299,7 @@ async fn list_users_bi_impl(
         })
         .unwrap_or((None, false, None));
 
-    let filter = services::user::ports::AdminListUsersFilter {
+    let filter = services::bi_metrics::ListUsersFilter {
         subscription_status,
         subscription_plan_price_ids,
         subscription_plan_none,
@@ -315,27 +313,27 @@ async fn list_users_bi_impl(
         }),
     };
 
-    let sort = services::user::ports::AdminListUsersSort {
+    let sort = services::bi_metrics::ListUsersSort {
         sort_by: match params.sort_by.as_str() {
-            "created_at" => services::user::ports::AdminUsersSortBy::CreatedAt,
-            "total_spent_nano" => services::user::ports::AdminUsersSortBy::TotalSpentNano,
-            "agent_spent_nano" => services::user::ports::AdminUsersSortBy::AgentSpentNano,
-            "agent_token_usage" => services::user::ports::AdminUsersSortBy::AgentTokenUsage,
-            "last_activity_at" => services::user::ports::AdminUsersSortBy::LastActivityAt,
-            "agent_count" => services::user::ports::AdminUsersSortBy::AgentCount,
-            "email" => services::user::ports::AdminUsersSortBy::Email,
-            "name" => services::user::ports::AdminUsersSortBy::Name,
-            _ => services::user::ports::AdminUsersSortBy::CreatedAt,
+            "created_at" => services::bi_metrics::UsersSortBy::CreatedAt,
+            "total_spent_nano" => services::bi_metrics::UsersSortBy::TotalSpentNano,
+            "agent_spent_nano" => services::bi_metrics::UsersSortBy::AgentSpentNano,
+            "agent_token_usage" => services::bi_metrics::UsersSortBy::AgentTokenUsage,
+            "last_activity_at" => services::bi_metrics::UsersSortBy::LastActivityAt,
+            "agent_count" => services::bi_metrics::UsersSortBy::AgentCount,
+            "email" => services::bi_metrics::UsersSortBy::Email,
+            "name" => services::bi_metrics::UsersSortBy::Name,
+            _ => services::bi_metrics::UsersSortBy::CreatedAt,
         },
         sort_order: if params.sort_order == "asc" {
-            services::user::ports::AdminUsersSortOrder::Asc
+            services::bi_metrics::UsersSortOrder::Asc
         } else {
-            services::user::ports::AdminUsersSortOrder::Desc
+            services::bi_metrics::UsersSortOrder::Desc
         },
     };
 
     let (users, total) = app_state
-        .user_service
+        .bi_metrics_service
         .list_users_with_stats(params.limit, params.offset, &filter, &sort)
         .await
         .map_err(|e| {
@@ -1961,6 +1959,45 @@ pub struct BiDeploymentQuery {
     pub status: Option<String>,
     pub start_date: Option<DateTime<Utc>>,
     pub end_date: Option<DateTime<Utc>>,
+    /// Substring search on agent name, user email, or user name (case-insensitive)
+    pub q: Option<String>,
+    /// Sort by: created_at, updated_at, instance_type, status, user_email, user_name, name, total_spent_nano, total_tokens
+    #[serde(default = "default_deployment_sort_by")]
+    pub sort_by: String,
+    /// Sort order: asc or desc
+    #[serde(default = "default_deployment_sort_order")]
+    pub sort_order: String,
+}
+
+fn default_deployment_sort_by() -> String {
+    "created_at".to_string()
+}
+
+fn default_deployment_sort_order() -> String {
+    "desc".to_string()
+}
+
+impl BiDeploymentQuery {
+    fn validate_deployments(&self) -> Result<(), ApiError> {
+        if let Some(ref q) = self.q {
+            let q_trimmed = q.trim();
+            if !q_trimmed.is_empty() && q_trimmed.len() > 200 {
+                return Err(ApiError::bad_request(
+                    "search query exceeds maximum length of 200",
+                ));
+            }
+        }
+        if self.sort_by.parse::<DeploymentsSortBy>().is_err() {
+            return Err(ApiError::bad_request(format!(
+                "invalid sort_by: {}; must be one of: created_at, updated_at, instance_type, status, user_email, user_name, name, total_spent_nano, total_tokens",
+                self.sort_by
+            )));
+        }
+        if self.sort_order != "asc" && self.sort_order != "desc" {
+            return Err(ApiError::bad_request("sort_order must be asc or desc"));
+        }
+        Ok(())
+    }
 }
 
 /// Query parameters for BI deployment summary
@@ -2074,7 +2111,7 @@ fn validate_string_filter(name: &str, value: &Option<String>) -> Result<(), ApiE
         ("limit" = Option<i64>, Query, description = "Maximum number of items to return (default: 20, max: 100)"),
         ("offset" = Option<i64>, Query, description = "Number of items to skip (default: 0)"),
         ("filter_by" = Option<String>, Query, description = "Filter type: subscription_status or subscription_plan"),
-        ("filter_value" = Option<String>, Query, description = "Filter value. For subscription_status: active, canceled, past_due, none. For subscription_plan: plan name or none"),
+        ("filter_value" = Option<String>, Query, description = "Filter value. For subscription_status: active, trialing, none. For subscription_plan: plan name or none"),
         ("q" = Option<String>, Query, description = "Substring search on email and name (case-insensitive)"),
         ("sort_by" = Option<String>, Query, description = "Sort by: created_at, total_spent_nano, agent_spent_nano, agent_token_usage, last_activity_at, agent_count, email, name"),
         ("sort_order" = Option<String>, Query, description = "Sort order: asc or desc")
@@ -2105,7 +2142,37 @@ pub async fn bi_list_users(
     list_users_bi_impl(&app_state, params).await
 }
 
-/// List deployments with optional filters (BI). Requires admin authentication.
+/// User distribution by subscription plan and by deployed agent count (BI). Requires admin authentication.
+#[utoipa::path(
+    get,
+    path = "/v1/admin/bi/users/summary",
+    tag = "Admin",
+    responses(
+        (status = 200, description = "User distribution summary", body = UserSummary),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn bi_users_summary(
+    State(app_state): State<AppState>,
+) -> Result<Json<UserSummary>, ApiError> {
+    tracing::info!("BI: Getting user summary");
+    let summary = app_state
+        .bi_metrics_service
+        .get_user_summary()
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get user summary: {}", e);
+            ApiError::internal_server_error("Failed to get user distribution summary")
+        })?;
+    Ok(Json(summary))
+}
+
+/// List deployments with optional filters, search, and sort (BI). Requires admin authentication.
 #[utoipa::path(
     get,
     path = "/v1/admin/bi/deployments",
@@ -2129,12 +2196,33 @@ pub async fn bi_list_deployments(
     validate_string_filter("type", &params.instance_type)?;
     validate_string_filter("status", &params.status)?;
     validate_date_range(params.start_date, params.end_date)?;
+    params.validate_deployments()?;
+
+    let sort_by = params
+        .sort_by
+        .parse::<DeploymentsSortBy>()
+        .unwrap_or_default();
+    let sort_order = if params.sort_order == "asc" {
+        DeploymentsSortOrder::Asc
+    } else {
+        DeploymentsSortOrder::Desc
+    };
 
     let filter = DeploymentFilter {
         instance_type: params.instance_type,
         status: params.status,
         start_date: params.start_date,
         end_date: params.end_date,
+        search: params.q.as_ref().and_then(|q| {
+            let t = q.trim();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            }
+        }),
+        sort_by,
+        sort_order,
         limit: params.limit.clamp(1, 100),
         offset: params.offset.max(0),
     };
@@ -2392,6 +2480,7 @@ pub fn create_admin_router() -> Router<AppState> {
         .nest(
             "/bi",
             Router::new()
+                .route("/users/summary", get(bi_users_summary))
                 .route("/users", get(bi_list_users))
                 .route("/deployments", get(bi_list_deployments))
                 .route("/deployments/summary", get(bi_deployment_summary))

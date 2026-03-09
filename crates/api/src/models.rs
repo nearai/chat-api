@@ -484,7 +484,7 @@ pub struct AdminUserListResponse {
 
 impl AdminUserResponse {
     pub fn from_stats(
-        u: services::user::ports::AdminUserWithStats,
+        u: services::bi_metrics::UserWithStats,
         subscription_plan_name: Option<String>,
     ) -> Self {
         Self {
@@ -505,8 +505,8 @@ impl AdminUserResponse {
     }
 }
 
-impl From<services::user::ports::AdminUserWithStats> for AdminUserResponse {
-    fn from(u: services::user::ports::AdminUserWithStats) -> Self {
+impl From<services::bi_metrics::UserWithStats> for AdminUserResponse {
+    fn from(u: services::bi_metrics::UserWithStats) -> Self {
         Self::from_stats(u, None)
     }
 }

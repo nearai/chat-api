@@ -2,12 +2,78 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::str::FromStr;
 use uuid::Uuid;
 
+use crate::user::ports::User;
 use crate::UserId;
 
+// ---- BI user list types (used only by GET /v1/admin/bi/users) ----
+
+/// User with BI stats (subscription, agent count, spending, etc.)
+#[derive(Debug, Clone)]
+pub struct UserWithStats {
+    pub user: User,
+    pub subscription_status: Option<String>,
+    pub subscription_price_id: Option<String>,
+    pub agent_count: i64,
+    pub total_spent_nano: i64,
+    pub agent_spent_nano: i64,
+    pub agent_token_usage: i64,
+    pub last_activity_at: Option<DateTime<Utc>>,
+}
+
+/// Filter for BI user list
+#[derive(Debug, Clone, Default)]
+pub struct ListUsersFilter {
+    /// Filter by subscription status: "active", "trialing", or "none" for no subscription
+    pub subscription_status: Option<String>,
+    /// Filter by subscription plan name (e.g. "Pro", "Starter") or "none" for no subscription.
+    /// Requires price_ids resolved from system config.
+    pub subscription_plan_price_ids: Option<Vec<String>>,
+    /// Filter by subscription plan = none (no subscription)
+    pub subscription_plan_none: bool,
+    /// Substring search on email and name (case-insensitive)
+    pub search: Option<String>,
+}
+
+/// Sort options for BI user list
+#[derive(Debug, Clone)]
+pub struct ListUsersSort {
+    pub sort_by: UsersSortBy,
+    pub sort_order: UsersSortOrder,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsersSortBy {
+    CreatedAt,
+    TotalSpentNano,
+    AgentSpentNano,
+    AgentTokenUsage,
+    LastActivityAt,
+    AgentCount,
+    Email,
+    Name,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsersSortOrder {
+    Asc,
+    Desc,
+}
+
+impl Default for ListUsersSort {
+    fn default() -> Self {
+        Self {
+            sort_by: UsersSortBy::CreatedAt,
+            sort_order: UsersSortOrder::Desc,
+        }
+    }
+}
+
+// ---- BI metrics types ----
+
 /// A single deployment record for BI reporting.
-/// Note: `name` is intentionally excluded to avoid exposing user-provided labels (per privacy policy).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct DeploymentRecord {
@@ -19,11 +85,17 @@ pub struct DeploymentRecord {
     pub user_name: Option<String>,
     /// User avatar URL from users table (for display in admin UI)
     pub user_avatar_url: Option<String>,
+    /// Agent instance name (user-provided label). Exposed in BI for admin UI display; product decision to show for support and operations.
+    pub name: Option<String>,
     pub instance_id: String,
     pub instance_type: String, // openclaw | ironclaw
     pub status: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Total spend for this instance (nano USD) from usage events
+    pub total_spent_nano: i64,
+    /// Total tokens used for this instance from usage events
+    pub total_tokens: i64,
 }
 
 /// Aggregate deployment counts grouped by type and status
@@ -43,6 +115,30 @@ pub struct DeploymentSummary {
     pub counts_by_type_status: Vec<DeploymentStatusCount>,
     pub new_deployments_in_range: i64,
     pub deleted_in_range: i64,
+}
+
+/// User count per subscription plan (plan name from system config, or "none")
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct UserSummaryPlanCount {
+    pub plan: String,
+    pub user_count: i64,
+}
+
+/// User count per agent count bucket (deployed agents = non-deleted instances)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct UserSummaryAgentCountBucket {
+    pub agent_count: i64,
+    pub user_count: i64,
+}
+
+/// User distribution summary: counts by subscription plan and by deployed agent count
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct UserSummary {
+    pub by_subscription_plan: Vec<UserSummaryPlanCount>,
+    pub by_agent_count: Vec<UserSummaryAgentCountBucket>,
 }
 
 /// A single status change event from the audit trail
@@ -84,12 +180,14 @@ impl fmt::Display for UsageGroupBy {
 pub struct UsageAggregation {
     /// The grouping key value (date string, user_id, instance_id, or model_id)
     pub group_key: String,
-    /// User email when group_by is user (from users table)
+    /// User email when group_by is user or instance (from users table)
     pub user_email: Option<String>,
-    /// User name when group_by is user (from users table)
+    /// User name when group_by is user or instance (from users table)
     pub user_name: Option<String>,
-    /// User avatar URL when group_by is user (from users table)
+    /// User avatar URL when group_by is user or instance (from users table)
     pub user_avatar_url: Option<String>,
+    /// Agent type (openclaw/ironclaw) when group_by is instance
+    pub instance_type: Option<String>,
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub total_tokens: i64,
@@ -97,6 +195,12 @@ pub struct UsageAggregation {
     pub output_cost_nano: i64,
     pub total_cost_nano: i64,
     pub request_count: i64,
+    /// Count of distinct agent instances with usage (quantity > 0 or cost > 0) in this group. Present when group_by is day, model, or user.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_agents_count: Option<i64>,
+    /// Count of distinct users with usage in this group. Present when group_by is day or model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_users_count: Option<i64>,
 }
 
 /// Ranking dimension for top consumers
@@ -153,15 +257,78 @@ pub struct TopConsumer {
     pub request_count: i64,
 }
 
+/// Sort field for deployment list
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub enum DeploymentsSortBy {
+    #[default]
+    CreatedAt,
+    UpdatedAt,
+    InstanceType,
+    Status,
+    UserEmail,
+    UserName,
+    Name,
+    TotalSpentNano,
+    TotalTokens,
+}
+
+impl FromStr for DeploymentsSortBy {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "created_at" => Ok(DeploymentsSortBy::CreatedAt),
+            "updated_at" => Ok(DeploymentsSortBy::UpdatedAt),
+            "instance_type" => Ok(DeploymentsSortBy::InstanceType),
+            "status" => Ok(DeploymentsSortBy::Status),
+            "user_email" => Ok(DeploymentsSortBy::UserEmail),
+            "user_name" => Ok(DeploymentsSortBy::UserName),
+            "name" => Ok(DeploymentsSortBy::Name),
+            "total_spent_nano" => Ok(DeploymentsSortBy::TotalSpentNano),
+            "total_tokens" => Ok(DeploymentsSortBy::TotalTokens),
+            _ => Err(()),
+        }
+    }
+}
+
+/// Sort order for deployment list
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub enum DeploymentsSortOrder {
+    Asc,
+    #[default]
+    Desc,
+}
+
 /// Filter parameters for deployment queries
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct DeploymentFilter {
     pub instance_type: Option<String>,
     pub status: Option<String>,
     pub start_date: Option<DateTime<Utc>>,
     pub end_date: Option<DateTime<Utc>>,
+    pub search: Option<String>,
+    pub sort_by: DeploymentsSortBy,
+    pub sort_order: DeploymentsSortOrder,
     pub limit: i64,
     pub offset: i64,
+}
+
+impl Default for DeploymentFilter {
+    fn default() -> Self {
+        Self {
+            instance_type: None,
+            status: None,
+            start_date: None,
+            end_date: None,
+            search: None,
+            sort_by: DeploymentsSortBy::default(),
+            sort_order: DeploymentsSortOrder::default(),
+            limit: 20,
+            offset: 0,
+        }
+    }
 }
 
 /// Filter parameters for usage queries
@@ -221,6 +388,20 @@ pub trait BiMetricsRepository: Send + Sync {
         &self,
         filter: &TopConsumerFilter,
     ) -> anyhow::Result<Vec<TopConsumer>>;
+
+    /// User summary: counts by subscription_price_id and by agent_count (raw, no plan name resolution)
+    async fn get_user_summary(
+        &self,
+    ) -> anyhow::Result<(Vec<(Option<String>, i64)>, Vec<(i64, i64)>)>;
+
+    /// List users with BI stats (subscription, agent count, spending). Used by GET /v1/admin/bi/users.
+    async fn list_users_with_stats(
+        &self,
+        limit: i64,
+        offset: i64,
+        filter: &ListUsersFilter,
+        sort: &ListUsersSort,
+    ) -> anyhow::Result<(Vec<UserWithStats>, u64)>;
 }
 
 /// Service trait for BI metrics
@@ -252,4 +433,16 @@ pub trait BiMetricsService: Send + Sync {
         &self,
         filter: &TopConsumerFilter,
     ) -> anyhow::Result<Vec<TopConsumer>>;
+
+    /// User distribution by subscription plan and by deployed agent count
+    async fn get_user_summary(&self) -> anyhow::Result<UserSummary>;
+
+    /// List users with BI stats. Used by GET /v1/admin/bi/users.
+    async fn list_users_with_stats(
+        &self,
+        limit: i64,
+        offset: i64,
+        filter: &ListUsersFilter,
+        sort: &ListUsersSort,
+    ) -> anyhow::Result<(Vec<UserWithStats>, u64)>;
 }

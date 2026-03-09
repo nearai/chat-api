@@ -278,6 +278,8 @@ async fn main() -> anyhow::Result<()> {
     let bi_metrics_service: Arc<dyn services::bi_metrics::BiMetricsService> =
         Arc::new(services::bi_metrics::BiMetricsServiceImpl::new(
             bi_metrics_repo as Arc<dyn services::bi_metrics::BiMetricsRepository>,
+            system_configs_service.clone()
+                as Arc<dyn services::system_configs::ports::SystemConfigsService>,
         ));
 
     // Load rate limit config from system configs
