@@ -460,12 +460,12 @@ impl BiMetricsRepository for PostgresBiMetricsRepository {
             .into_iter()
             .map(|r| {
                 let active_agents_count = if include_active_agents {
-                    Some(r.get::<_, i64>(12))
+                    Some(r.get::<_, i64>("active_agents_count"))
                 } else {
                     None
                 };
                 let active_users_count = if include_active_users {
-                    Some(r.get::<_, i64>(13))
+                    Some(r.get::<_, i64>("active_users_count"))
                 } else {
                     None
                 };

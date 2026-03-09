@@ -99,10 +99,16 @@ impl BiMetricsService for BiMetricsServiceImpl {
             };
             *plan_to_count.entry(plan).or_insert(0) += user_count;
         }
-        let by_subscription_plan: Vec<UserSummaryPlanCount> = plan_to_count
+        let mut by_subscription_plan: Vec<UserSummaryPlanCount> = plan_to_count
             .into_iter()
             .map(|(plan, user_count)| UserSummaryPlanCount { plan, user_count })
             .collect();
+        // Stable order: by user_count desc, then by plan name asc (avoids UI flicker and non-deterministic API)
+        by_subscription_plan.sort_by(|a, b| {
+            b.user_count
+                .cmp(&a.user_count)
+                .then_with(|| a.plan.cmp(&b.plan))
+        });
 
         let by_agent_count: Vec<UserSummaryAgentCountBucket> = by_agent_count
             .into_iter()

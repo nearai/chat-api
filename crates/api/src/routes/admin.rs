@@ -1981,17 +1981,10 @@ impl BiDeploymentQuery {
     fn validate_deployments(&self) -> Result<(), ApiError> {
         if let Some(ref q) = self.q {
             let q_trimmed = q.trim();
-            if !q_trimmed.is_empty() {
-                if q_trimmed.len() > 200 {
-                    return Err(ApiError::bad_request(
-                        "search query exceeds maximum length of 200",
-                    ));
-                }
-                if q_trimmed.matches('%').count() > 5 {
-                    return Err(ApiError::bad_request(
-                        "search query contains too many wildcard characters",
-                    ));
-                }
+            if !q_trimmed.is_empty() && q_trimmed.len() > 200 {
+                return Err(ApiError::bad_request(
+                    "search query exceeds maximum length of 200",
+                ));
             }
         }
         if self.sort_by.parse::<DeploymentsSortBy>().is_err() {

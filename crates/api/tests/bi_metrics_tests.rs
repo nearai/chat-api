@@ -227,7 +227,7 @@ async fn test_bi_list_deployments_with_data() {
         "Deployments array should not be empty"
     );
 
-    // Verify response fields are present on each deployment (including user info for admin UI)
+    // Verify response fields are present on each deployment (including user info and usage-derived fields)
     for d in deployments {
         assert!(d.get("id").is_some());
         assert!(d.get("user_id").is_some());
@@ -243,11 +243,81 @@ async fn test_bi_list_deployments_with_data() {
             d.get("user_avatar_url").is_some(),
             "deployments should include user_avatar_url when available"
         );
+        assert!(
+            d.get("name").is_some(),
+            "deployments should include name (agent name)"
+        );
         assert!(d.get("instance_id").is_some());
         assert!(d.get("instance_type").is_some());
         assert!(d.get("status").is_some());
+        assert!(
+            d.get("total_spent_nano").is_some(),
+            "deployments should include total_spent_nano"
+        );
+        assert!(
+            d.get("total_tokens").is_some(),
+            "deployments should include total_tokens"
+        );
         assert!(d.get("created_at").is_some());
         assert!(d.get("updated_at").is_some());
+    }
+
+    cleanup(&db, inst1_id, inst2_id).await;
+}
+
+#[tokio::test]
+async fn test_bi_list_deployments_search_and_sort() {
+    let (server, db) = server_and_db().await;
+    let admin_token = mock_login(&server, "bi_admin_searchsort@admin.org").await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email("bi_admin_searchsort@admin.org")
+        .await
+        .unwrap()
+        .unwrap();
+
+    let (inst1_id, inst2_id) = seed_bi_test_data(&db, user.id.0).await;
+
+    // Search by instance name (seed uses "BI Test Instance OC" / "BI Test Instance IC")
+    let response = server
+        .get("/v1/admin/bi/deployments?q=BI+Test&limit=10")
+        .add_header(AUTH, auth_header(&admin_token))
+        .await;
+    assert_eq!(response.status_code(), 200);
+    let body: serde_json::Value = response.json();
+    let deployments = body.get("deployments").unwrap().as_array().unwrap();
+    assert!(
+        deployments.iter().any(|d| d
+            .get("name")
+            .and_then(|n| n.as_str())
+            .is_some_and(|s| s.contains("BI Test"))),
+        "search q=BI Test should return deployments whose name contains 'BI Test'"
+    );
+
+    // sort_by=name ascending: first deployment name should be <= second
+    let response = server
+        .get("/v1/admin/bi/deployments?sort_by=name&sort_order=asc&limit=10")
+        .add_header(AUTH, auth_header(&admin_token))
+        .await;
+    assert_eq!(response.status_code(), 200);
+    let body: serde_json::Value = response.json();
+    let deployments = body.get("deployments").unwrap().as_array().unwrap();
+    if deployments.len() >= 2 {
+        let name0 = deployments[0]
+            .get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or("");
+        let name1 = deployments[1]
+            .get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or("");
+        assert!(
+            name0 <= name1,
+            "sort_by=name asc: expected first name '{}' <= second '{}'",
+            name0,
+            name1
+        );
     }
 
     cleanup(&db, inst1_id, inst2_id).await;
