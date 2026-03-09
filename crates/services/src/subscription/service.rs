@@ -47,6 +47,10 @@ struct CachedCreditLimit {
 const TTL_CACHE_SECS: u64 = 600; // 10 minutes
 /// Default monthly credits when plan has no monthly_credits config. 1 USD in nano-dollars ($1 = 1_000_000_000).
 const DEFAULT_MONTHLY_CREDITS_NANO_USD: u64 = 1_000_000_000;
+/// When falling back from monthly_tokens: 1.5 USD per M tokens. M = 1 million tokens.
+const TOKENS_TO_CREDITS_PER_M: u64 = 1_000_000;
+/// 1.5 USD in nano-USD. Used for monthly_tokens fallback: limit_nano_usd = (monthly_tokens / M) * this.
+const NANO_USD_PER_1_5_USD: u64 = 1_500_000_000;
 
 pub struct SubscriptionServiceImpl {
     db_pool: deadpool_postgres::Pool,
@@ -1310,6 +1314,20 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     .and_then(|c| c.subscription_plans)
                     .unwrap_or_default();
 
+                // Use monthly_credits when set (nano USD); else monthly_tokens → nano USD at 1.5 USD per M tokens. Never fail for missing config.
+                let plan_limit_max = |config: &SubscriptionPlanConfig| {
+                    if let Some(ref lim) = config.monthly_credits {
+                        return lim.max;
+                    }
+                    if let Some(ref lim) = config.monthly_tokens {
+                        // fallback: 1.5 USD per M tokens => limit_nano_usd = (monthly_tokens / M) * 1.5 * 1e9
+                        let nano_usd = (lim.max as u128 * NANO_USD_PER_1_5_USD as u128
+                            / TOKENS_TO_CREDITS_PER_M as u128)
+                            .min(u64::MAX as u128) as u64;
+                        return nano_usd;
+                    }
+                    DEFAULT_MONTHLY_CREDITS_NANO_USD
+                };
                 let (plan_credits, period_start, period_end) = match self
                     .subscription_repo
                     .get_active_subscription(user_id)
@@ -1324,8 +1342,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                         );
                         let plan_credits = subscription_plans
                             .get(&plan_name)
-                            .and_then(|c| c.monthly_credits.as_ref())
-                            .map(|l| l.max)
+                            .map(plan_limit_max)
                             .unwrap_or(DEFAULT_MONTHLY_CREDITS_NANO_USD);
                         let period_end = sub.current_period_end;
                         let period_start = sub_one_month_same_day(period_end);
@@ -1334,8 +1351,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     None => {
                         let plan_credits = subscription_plans
                             .get("free")
-                            .and_then(|c| c.monthly_credits.as_ref())
-                            .map(|l| l.max)
+                            .map(plan_limit_max)
                             .unwrap_or(DEFAULT_MONTHLY_CREDITS_NANO_USD);
                         let (period_start, period_end) = current_calendar_month_period(Utc::now());
                         (plan_credits, period_start, period_end)
@@ -1547,6 +1563,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
         let customer_id = self.get_or_create_stripe_customer(user_id, None).await?;
 
         let base_client = self.get_stripe_client();
+        // Hour-granular idempotency: same user+credits within the same clock hour reuses Stripe session (avoids duplicate checkouts; retry after hour gets new session).
         let idempotency_key = format!(
             "credit_checkout_{}_{}_{}",
             user_id,
@@ -1603,6 +1620,20 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .and_then(|c| c.subscription_plans)
             .unwrap_or_default();
 
+        // Use monthly_credits when set (nano USD); else monthly_tokens → nano USD at 1.5 USD per M tokens. Never fail for missing config.
+        let plan_limit_max = |config: &SubscriptionPlanConfig| {
+            if let Some(ref lim) = config.monthly_credits {
+                return lim.max;
+            }
+            if let Some(ref lim) = config.monthly_tokens {
+                // fallback: 1.5 USD per M tokens => limit_nano_usd = (monthly_tokens / M) * 1.5 * 1e9
+                let nano_usd = (lim.max as u128 * NANO_USD_PER_1_5_USD as u128
+                    / TOKENS_TO_CREDITS_PER_M as u128)
+                    .min(u64::MAX as u128) as u64;
+                return nano_usd;
+            }
+            DEFAULT_MONTHLY_CREDITS_NANO_USD
+        };
         let (plan_credits, period_start, period_end) = match self
             .subscription_repo
             .get_active_subscription(user_id)
@@ -1614,8 +1645,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     resolve_plan_name_from_config("stripe", &sub.price_id, &subscription_plans);
                 let plan_credits = subscription_plans
                     .get(&plan_name)
-                    .and_then(|c| c.monthly_credits.as_ref())
-                    .map(|l| l.max)
+                    .map(plan_limit_max)
                     .unwrap_or(DEFAULT_MONTHLY_CREDITS_NANO_USD);
                 let period_end = sub.current_period_end;
                 let period_start = sub_one_month_same_day(period_end);
@@ -1624,8 +1654,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
             None => {
                 let plan_credits = subscription_plans
                     .get("free")
-                    .and_then(|c| c.monthly_credits.as_ref())
-                    .map(|l| l.max)
+                    .map(plan_limit_max)
                     .unwrap_or(DEFAULT_MONTHLY_CREDITS_NANO_USD);
                 let (period_start, period_end) = current_calendar_month_period(Utc::now());
                 (plan_credits, period_start, period_end)

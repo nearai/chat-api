@@ -1,4 +1,5 @@
--- Table for purchased credits balance per user
+-- Table for purchased credits balance per user.
+-- Unit: nano-USD (1e-9 USD; 1_000_000_000 = $1). Same unit as cost_nano_usd and monthly_credits.
 CREATE TABLE user_credits (
     user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
     balance BIGINT NOT NULL DEFAULT 0 CHECK (balance >= 0),
@@ -12,7 +13,8 @@ CREATE TRIGGER update_user_credits_updated_at
     FOR EACH ROW
     EXECUTE FUNCTION update_updated_at_column();
 
--- Table for credit transaction audit (purchases, grants, admin adjustments)
+-- Table for credit transaction audit (purchases, grants, admin adjustments).
+-- amount is in nano-USD (same unit as user_credits.balance).
 CREATE TABLE credit_transactions (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,

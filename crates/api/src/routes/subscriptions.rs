@@ -9,7 +9,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use services::subscription::ports::{SubscriptionError, SubscriptionPlan, SubscriptionWithPlan};
-use url::Url;
+use url::{Host, Url};
 use utoipa::ToSchema;
 
 /// Request to create a new subscription
@@ -34,7 +34,7 @@ fn default_provider() -> String {
 }
 
 /// Validates that a URL is valid and secure for Stripe checkout/portal redirects.
-/// Requires https for production. Allows http only for localhost/127.0.0.1 (development).
+/// Requires https for production. Allows http only for loopback (localhost, 127.0.0.1, [::1]).
 fn validate_redirect_url(url_str: &str, field_name: &str) -> Result<(), ApiError> {
     let url = Url::parse(url_str).map_err(|_| {
         ApiError::bad_request(format!(
@@ -45,22 +45,23 @@ fn validate_redirect_url(url_str: &str, field_name: &str) -> Result<(), ApiError
     match url.scheme() {
         "https" => Ok(()),
         "http" => {
-            // Allow http only for local development (localhost, 127.0.0.1)
-            let host_ok = url
-                .host_str()
-                .map(|h| h == "localhost" || h == "127.0.0.1")
-                .unwrap_or(false);
+            let host_ok = match url.host() {
+                Some(Host::Domain(d)) => d == "localhost",
+                Some(Host::Ipv4(ip)) => ip.is_loopback(),
+                Some(Host::Ipv6(ip)) => ip.is_loopback(),
+                _ => false,
+            };
             if host_ok {
                 Ok(())
             } else {
                 Err(ApiError::bad_request(format!(
-                    "Invalid {}: URL must use https for non-localhost addresses (http is only allowed for localhost/127.0.0.1 during development)",
+                    "Invalid {}: URL must use https for non-localhost addresses (http is only allowed for localhost/127.0.0.1/[::1] during development)",
                     field_name
                 )))
             }
         }
         _ => Err(ApiError::bad_request(format!(
-            "Invalid {}: URL scheme must be https (or http for localhost/127.0.0.1 only)",
+            "Invalid {}: URL scheme must be https (or http for loopback only)",
             field_name
         ))),
     }

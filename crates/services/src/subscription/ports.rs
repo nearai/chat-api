@@ -367,11 +367,18 @@ pub trait SubscriptionService: Send + Sync {
     async fn get_credits(&self, user_id: UserId) -> Result<CreditsSummary, SubscriptionError>;
 }
 
-/// Summary of user's credits (balance, used, effective limit)
+/// Summary of user's credits (balance, used, effective limit).
+///
+/// **Unit: nano-USD** (1 credit = 1e-9 USD; 1_000_000_000 = $1). All fields use this unit so they
+/// can be compared: usage is recorded as `cost_nano_usd`, plan limits and purchased balance
+/// are in the same unit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct CreditsSummary {
+    /// Purchased credits balance (nano-USD).
     pub balance: i64,
+    /// Usage in the current period (sum of cost_nano_usd).
     pub used_credits: i64,
+    /// Effective limit: plan limit + balance (nano-USD).
     pub effective_max_credits: i64,
 }

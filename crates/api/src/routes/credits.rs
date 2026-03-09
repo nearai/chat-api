@@ -6,7 +6,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use services::subscription::ports::{CreditsSummary, SubscriptionError};
-use url::Url;
+use url::{Host, Url};
 use utoipa::ToSchema;
 
 /// Request to create a credit purchase checkout session
@@ -34,10 +34,12 @@ fn validate_redirect_url(url_str: &str, field_name: &str) -> Result<(), ApiError
     match url.scheme() {
         "https" => Ok(()),
         "http" => {
-            let host_ok = url
-                .host_str()
-                .map(|h| h == "localhost" || h == "127.0.0.1")
-                .unwrap_or(false);
+            let host_ok = match url.host() {
+                Some(Host::Domain(d)) => d == "localhost",
+                Some(Host::Ipv4(ip)) => ip.is_loopback(),
+                Some(Host::Ipv6(ip)) => ip.is_loopback(),
+                _ => false,
+            };
             if host_ok {
                 Ok(())
             } else {
