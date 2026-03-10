@@ -93,10 +93,11 @@ pub async fn subscription_middleware(
                 StatusCode::PAYMENT_REQUIRED,
                 Json(SubscriptionErrorResponse {
                     error: format!(
-                        "{} You have used ${:.2} of a ${:.2} monthly credit budget this period.",
+                        "{} You have used ${:.2} of a ${:.2} monthly credit budget this period (raw limit = {}).",
                         MONTHLY_CREDIT_LIMIT_EXCEEDED_MESSAGE,
                         used as f64 / 1_000_000_000_f64,
-                        limit as f64 / 1_000_000_000_f64
+                        limit as f64 / 1_000_000_000_f64,
+                        limit
                     ),
                 }),
             )
