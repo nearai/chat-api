@@ -8,6 +8,7 @@ use crate::UserId;
 
 pub const DEFAULT_MONTHLY_TOKEN_LIMIT: u64 = 1_000_000;
 
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DowngradeIntentStatus {
@@ -78,6 +79,15 @@ pub struct SubscriptionWithPlan {
     pub cancel_at_period_end: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Target plan name for a pending downgrade (resolved from price_id)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_downgrade_plan: Option<String>,
+    /// Status of the pending downgrade intent
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_downgrade_status: Option<DowngradeIntentStatus>,
+    /// Expected period end when the downgrade will be checked
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_downgrade_period_end: Option<DateTime<Utc>>,
 }
 
 /// Result of a plan-change request.

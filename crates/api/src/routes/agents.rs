@@ -696,7 +696,7 @@ pub struct PaginationParams {
 
 /// Create agent router with all routes (requires authentication for user routes)
 pub fn create_agent_router() -> Router<AppState> {
-    Router::new()
+    let router = Router::new()
         .route("/instances", post(create_instance))
         .route("/instances", get(list_instances))
         .route("/instances/{id}", get(get_instance))
@@ -713,7 +713,13 @@ pub fn create_agent_router() -> Router<AppState> {
             "/instances/{id}/upgrade-available",
             get(check_upgrade_available),
         )
-        .route("/instances/{id}", delete(delete_instance))
+        .route("/instances/{id}", delete(delete_instance));
+
+    // TODO: REMOVE BEFORE COMMIT - temporary dev/QA helper only, must not be merged to main.
+    #[cfg(feature = "test")]
+    let router = router.route("/mock-instances/set-count", post(mock_set_instance_count));
+
+    router
 }
 
 /// Delete an agent instance (user must own it)
@@ -1161,4 +1167,92 @@ pub struct UpgradeAvailabilityResponse {
     pub has_upgrade: bool,
     pub current_image: Option<String>,
     pub latest_image: String,
+}
+
+// TODO: REMOVE BEFORE COMMIT - temporary dev/QA helper only, must not be merged to main.
+#[cfg(feature = "test")]
+#[derive(serde::Deserialize)]
+pub struct MockSetInstanceCountRequest {
+    pub count: u64,
+}
+
+#[cfg(feature = "test")]
+#[derive(serde::Serialize)]
+pub struct MockSetInstanceCountResponse {
+    pub count: u64,
+}
+
+/// Test-only: set the number of fake agent instances for the authenticated user.
+/// Inserts or soft-deletes records so that `count_user_instances` returns exactly `count`.
+#[cfg(feature = "test")]
+async fn mock_set_instance_count(
+    State(app_state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Json(body): Json<MockSetInstanceCountRequest>,
+) -> Result<Json<MockSetInstanceCountResponse>, ApiError> {
+    use services::agent::ports::CreateInstanceParams;
+
+    let user_id = user.user_id;
+    let target = body.count as i64;
+
+    let current = app_state
+        .agent_repository
+        .count_user_instances(user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("mock_set_instance_count: count failed: {}", e);
+            ApiError::internal_server_error("Failed to count instances")
+        })?;
+
+    if current < target {
+        // Insert fake instances to reach target
+        let to_add = target - current;
+        for i in 0..to_add {
+            app_state
+                .agent_repository
+                .create_instance(CreateInstanceParams {
+                    user_id,
+                    instance_id: format!("mock-{}-{}", user_id, uuid::Uuid::new_v4()),
+                    name: format!("mock-instance-{}", i + 1),
+                    public_ssh_key: None,
+                    instance_url: None,
+                    instance_token: None,
+                    gateway_port: None,
+                    dashboard_url: None,
+                    agent_api_base_url: None,
+                    service_type: None,
+                })
+                .await
+                .map_err(|e| {
+                    tracing::error!("mock_set_instance_count: create failed: {}", e);
+                    ApiError::internal_server_error("Failed to create mock instance")
+                })?;
+        }
+    } else if current > target {
+        // Soft-delete excess instances
+        let to_remove = (current - target) as i64;
+        let (instances, _) = app_state
+            .agent_repository
+            .list_user_instances(user_id, to_remove, 0)
+            .await
+            .map_err(|e| {
+                tracing::error!("mock_set_instance_count: list failed: {}", e);
+                ApiError::internal_server_error("Failed to list instances")
+            })?;
+
+        for instance in instances {
+            app_state
+                .agent_repository
+                .update_instance_status(instance.id, "deleted")
+                .await
+                .map_err(|e| {
+                    tracing::error!("mock_set_instance_count: soft-delete failed: {}", e);
+                    ApiError::internal_server_error("Failed to delete mock instance")
+                })?;
+        }
+    }
+
+    Ok(Json(MockSetInstanceCountResponse {
+        count: target as u64,
+    }))
 }

@@ -421,7 +421,13 @@ impl SubscriptionServiceImpl {
         {
             let plans = self.get_subscription_plans().await?;
             let target_plan_name =
-                resolve_plan_name_from_config(&pending.provider, &target_price_id, &plans);
+                resolve_plan_name_from_config(&pending.provider, &target_price_id, &plans)
+                    .ok_or_else(|| {
+                        SubscriptionError::InternalError(format!(
+                            "Cannot resolve plan for price_id={}, provider={}",
+                            target_price_id, pending.provider
+                        ))
+                    })?;
             let target_limits = effective_limits(plans.get(&target_plan_name));
             let instance_count = self
                 .agent_repo
@@ -560,8 +566,8 @@ fn resolve_plan_name_from_config(
     provider: &str,
     price_id: &str,
     plans: &HashMap<String, SubscriptionPlanConfig>,
-) -> String {
-    plans
+) -> Option<String> {
+    let result = plans
         .iter()
         .find(|(_, config)| {
             config
@@ -570,8 +576,18 @@ fn resolve_plan_name_from_config(
                 .map(|p| p.price_id.as_str() == price_id)
                 .unwrap_or(false)
         })
-        .map(|(name, _)| name.clone())
-        .unwrap_or_else(|| "unknown".to_string())
+        .map(|(name, _)| name.clone());
+
+    if result.is_none() {
+        tracing::error!(
+            "Failed to resolve plan name: provider={}, price_id={}, configured_plans=[{}]",
+            provider,
+            price_id,
+            plans.keys().cloned().collect::<Vec<_>>().join(", ")
+        );
+    }
+
+    result
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -601,8 +617,8 @@ fn is_downgrade_by_limits(
 ) -> bool {
     let old_plan = resolve_plan_name_from_config(provider, old_price_id, plans);
     let new_plan = resolve_plan_name_from_config(provider, new_price_id, plans);
-    let old_limits = effective_limits(plans.get(&old_plan));
-    let new_limits = effective_limits(plans.get(&new_plan));
+    let old_limits = effective_limits(old_plan.as_deref().and_then(|n| plans.get(n)));
+    let new_limits = effective_limits(new_plan.as_deref().and_then(|n| plans.get(n)));
     new_limits.tokens_max < old_limits.tokens_max
         || new_limits.instances_max < old_limits.instances_max
 }
@@ -1092,27 +1108,37 @@ impl SubscriptionService for SubscriptionServiceImpl {
         };
 
         // Map to API response model with plan names resolved
-        let result: Vec<SubscriptionWithPlan> = subscriptions
-            .into_iter()
-            .map(|sub| {
-                let plan = resolve_plan_name_from_config(
-                    &sub.provider,
-                    &sub.price_id,
-                    &subscription_plans,
-                );
-                SubscriptionWithPlan {
-                    subscription_id: sub.subscription_id,
-                    user_id: sub.user_id.0.to_string(),
-                    provider: sub.provider,
-                    plan,
-                    status: sub.status,
-                    current_period_end: sub.current_period_end,
-                    cancel_at_period_end: sub.cancel_at_period_end,
-                    created_at: sub.created_at,
-                    updated_at: sub.updated_at,
-                }
-            })
-            .collect();
+        let mut result: Vec<SubscriptionWithPlan> = Vec::new();
+        for sub in subscriptions {
+            let plan =
+                resolve_plan_name_from_config(&sub.provider, &sub.price_id, &subscription_plans)
+                    .ok_or_else(|| {
+                        SubscriptionError::InternalError(format!(
+                            "Cannot resolve plan for price_id={}, provider={}",
+                            sub.price_id, sub.provider
+                        ))
+                    })?;
+            let pending_downgrade_plan =
+                sub.pending_downgrade_target_price_id
+                    .as_deref()
+                    .and_then(|pid| {
+                        resolve_plan_name_from_config(&sub.provider, pid, &subscription_plans)
+                    });
+            result.push(SubscriptionWithPlan {
+                subscription_id: sub.subscription_id,
+                user_id: sub.user_id.0.to_string(),
+                provider: sub.provider,
+                plan,
+                status: sub.status,
+                current_period_end: sub.current_period_end,
+                cancel_at_period_end: sub.cancel_at_period_end,
+                created_at: sub.created_at,
+                updated_at: sub.updated_at,
+                pending_downgrade_plan,
+                pending_downgrade_status: sub.pending_downgrade_status,
+                pending_downgrade_period_end: sub.pending_downgrade_expected_period_end,
+            });
+        }
 
         Ok(result)
     }
@@ -1519,8 +1545,10 @@ impl SubscriptionService for SubscriptionServiceImpl {
                             &effective_sub.price_id,
                             &subscription_plans,
                         );
-                        let max_tokens =
-                            effective_limits(subscription_plans.get(&plan_name)).tokens_max;
+                        let max_tokens = effective_limits(
+                            plan_name.as_deref().and_then(|n| subscription_plans.get(n)),
+                        )
+                        .tokens_max;
                         let period_end = effective_sub.current_period_end;
                         let period_start = sub_one_month_same_day(period_end);
                         (max_tokens, period_start, period_end)
@@ -1681,6 +1709,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
             cancel_at_period_end: result.cancel_at_period_end,
             created_at: result.created_at,
             updated_at: result.updated_at,
+            pending_downgrade_plan: None,
+            pending_downgrade_status: None,
+            pending_downgrade_period_end: None,
         })
     }
 
@@ -1885,11 +1916,11 @@ mod tests {
 
         assert_eq!(
             resolve_plan_name_from_config("stripe", "price_pro", &plans),
-            "pro"
+            Some("pro".to_string())
         );
         assert_eq!(
             resolve_plan_name_from_config("stripe", "price_unknown", &plans),
-            "unknown"
+            None
         );
     }
 }
