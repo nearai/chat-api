@@ -377,6 +377,32 @@ fn generate_checkout_idempotency_key(user_id: &UserId, price_id: &str) -> String
     format!("{:x}", hasher.finalize())
 }
 
+/// Generate idempotency key for credit checkout session creation.
+/// Format: SHA-256(user_id:credits:success_url:cancel_url:time_window)
+/// Time window: current timestamp / 3600 (1 hour window). Within the same window and with
+/// identical inputs, Stripe will reuse the same session; changing URLs or credits yields
+/// a different key even within the same window.
+fn generate_credit_checkout_idempotency_key(
+    user_id: &UserId,
+    credits: u64,
+    success_url: &str,
+    cancel_url: &str,
+) -> String {
+    use sha2::{Digest, Sha256};
+
+    let time_window = chrono::Utc::now().timestamp() / 3600;
+
+    let mut hasher = Sha256::new();
+    hasher.update(
+        format!(
+            "{}:{}:{}:{}:{}",
+            user_id.0, credits, success_url, cancel_url, time_window
+        )
+        .as_bytes(),
+    );
+    format!("{:x}", hasher.finalize())
+}
+
 #[async_trait]
 impl SubscriptionService for SubscriptionServiceImpl {
     async fn get_available_plans(&self) -> Result<Vec<SubscriptionPlan>, SubscriptionError> {
@@ -1563,13 +1589,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
         let customer_id = self.get_or_create_stripe_customer(user_id, None).await?;
 
         let base_client = self.get_stripe_client();
-        // Hour-granular idempotency: same user+credits within the same clock hour reuses Stripe session (avoids duplicate checkouts; retry after hour gets new session).
-        let idempotency_key = format!(
-            "credit_checkout_{}_{}_{}",
-            user_id,
-            credits,
-            chrono::Utc::now().format("%Y%m%d%H")
-        );
+        let idempotency_key =
+            generate_credit_checkout_idempotency_key(&user_id, credits, &success_url, &cancel_url);
         let client = base_client
             .clone()
             .with_strategy(RequestStrategy::Idempotent(idempotency_key));

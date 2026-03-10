@@ -1648,7 +1648,10 @@ async fn test_admin_set_subscription_success() {
     set_subscription_plans(
         &server,
         json!({
-            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "monthly_credits": { "max": 1000000 }, "monthly_credits": { "max": 1000000 } }
+            "basic": {
+                "providers": { "stripe": { "price_id": "price_test_basic" } },
+                "monthly_credits": { "max": 1000000 }
+            }
         }),
     )
     .await;
@@ -1839,13 +1842,12 @@ async fn test_subscription_gating_full_flow() {
         json!({
             "free": {
                 "providers": {},
-                "monthly_credits": { "max": 0 },
                 "monthly_credits": { "max": 0 }
             },
             "basic": {
                 "providers": { "stripe": { "price_id": "price_test_basic" } },
                 "agent_instances": { "max": 1 },
-                "monthly_credits": { "max": 1000000 }, "monthly_credits": { "max": 1000000 }
+                "monthly_credits": { "max": 1000000 }
             }
         }),
     )
