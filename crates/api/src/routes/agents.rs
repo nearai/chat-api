@@ -174,12 +174,7 @@ pub async fn create_instance(
             .subscription_plans
             .as_ref()
             .and_then(|plans| plans.get(&sub.plan))
-            .map(|plan| {
-                plan.agent_instances
-                    .as_ref()
-                    .map(|l| l.max)
-                    .unwrap_or(u64::MAX)
-            })
+            .map(|plan| plan.agent_instances.as_ref().map(|l| l.max).unwrap_or(0))
             .unwrap_or(0),
         _ => 0,
     };
@@ -1230,7 +1225,7 @@ async fn mock_set_instance_count(
         }
     } else if current > target {
         // Soft-delete excess instances
-        let to_remove = (current - target) as i64;
+        let to_remove = current - target;
         let (instances, _) = app_state
             .agent_repository
             .list_user_instances(user_id, to_remove, 0)
