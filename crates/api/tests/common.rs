@@ -482,6 +482,14 @@ pub async fn insert_test_agent_instances(db: &database::Database, user_email: &s
         .expect("user must exist");
 
     let client = db.pool().get().await.expect("get pool client");
+    // Soft-delete any existing instances to ensure exact count
+    client
+        .execute(
+            "UPDATE agent_instances SET status = 'deleted' WHERE user_id = $1 AND status != 'deleted'",
+            &[&user.id],
+        )
+        .await
+        .expect("cleanup existing agent instances");
     for i in 0..count {
         let instance_id = format!("inst_test_{}_{}", Uuid::new_v4(), i);
         client

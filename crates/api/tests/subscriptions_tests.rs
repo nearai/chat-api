@@ -4,8 +4,8 @@ use api::routes::api::SUBSCRIPTION_REQUIRED_ERROR_MESSAGE;
 use chrono::Duration;
 use common::{
     cleanup_user_subscriptions, clear_subscription_plans, create_test_server,
-    create_test_server_and_db, insert_test_agent_instances, insert_test_subscription, mock_login,
-    set_subscription_plans, TestServerConfig,
+    create_test_server_and_db, insert_test_agent_instances, insert_test_subscription,
+    insert_test_subscription_with_price_id, mock_login, set_subscription_plans, TestServerConfig,
 };
 use serde_json::json;
 use serial_test::serial;
@@ -2072,5 +2072,74 @@ async fn test_create_subscription_with_test_clock_disabled() {
         error_msg.contains("Test clock feature is not enabled"),
         "Error should mention test clock not enabled, got: {}",
         error_msg
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_list_subscriptions_includes_pending_downgrade_info() {
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } },
+            "pro":   { "providers": { "stripe": { "price_id": "price_test_pro"  } }, "agent_instances": { "max": 3 }, "monthly_tokens": { "max": 5000000 } }
+        }),
+    )
+    .await;
+
+    let user_email = "test_list_subscriptions_pending_downgrade@example.com";
+    // Start user on pro
+    insert_test_subscription_with_price_id(&server, &db, user_email, false, "price_test_pro").await;
+
+    // Manually set a pending downgrade in DB
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .unwrap()
+        .unwrap();
+    let client = db.pool().get().await.unwrap();
+    client
+        .execute(
+            "UPDATE subscriptions SET
+                pending_downgrade_target_price_id = 'price_test_basic',
+                pending_downgrade_from_price_id = 'price_test_pro',
+                pending_downgrade_expected_period_end = current_period_end,
+                pending_downgrade_status = 'pending'
+             WHERE user_id = $1",
+            &[&user.id],
+        )
+        .await
+        .unwrap();
+
+    let user_token = mock_login(&server, user_email).await;
+    let response = server
+        .get("/v1/subscriptions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 200);
+
+    let body: serde_json::Value = response.json();
+    let sub = &body["subscriptions"][0];
+
+    assert_eq!(
+        sub["pending_downgrade_plan"].as_str(),
+        Some("basic"),
+        "Should include pending_downgrade_plan"
+    );
+    assert_eq!(
+        sub["pending_downgrade_status"].as_str(),
+        Some("pending"),
+        "Should include pending_downgrade_status"
+    );
+    assert!(
+        sub["pending_downgrade_period_end"].is_string(),
+        "Should include pending_downgrade_period_end"
     );
 }
