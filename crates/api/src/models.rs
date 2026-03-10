@@ -825,6 +825,68 @@ impl From<FileData> for FileGetResponse {
 }
 
 // ============================================================================
+// Web Search (GET /v1/web/search) — aligned with cloud-api
+// ============================================================================
+
+/// GET /v1/web/search response
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WebSearchResponse {
+    pub query: String,
+    pub result_count: u32,
+    pub results: Vec<WebSearchResultItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WebSearchResultItem {
+    pub title: String,
+    pub url: String,
+    pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub published: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub site_name: Option<String>,
+}
+
+/// Query parameters for GET /v1/web/search (aligned with cloud-api / Brave WebSearchParams)
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, utoipa::IntoParams)]
+pub struct WebSearchQueryParams {
+    /// Search query (required)
+    pub q: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub country: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search_lang: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ui_lang: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offset: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub safesearch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_decorations: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spellcheck: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub units: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra_snippets: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_filter: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub goggles: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable_rich_callback: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include_fetch_metadata: Option<bool>,
+}
+
+// ============================================================================
 // Agent Models
 // ============================================================================
 

@@ -10,6 +10,7 @@ pub mod state;
 pub mod static_files;
 pub mod usage_parsing;
 pub mod validation;
+pub mod web_search_pricing;
 
 pub use error::{ApiError, ApiErrorResponse};
 pub use middleware::{auth_middleware, AuthState, AuthenticatedUser};

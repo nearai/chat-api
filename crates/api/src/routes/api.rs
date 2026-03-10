@@ -1,12 +1,13 @@
 use crate::consts::{LIST_FILES_LIMIT_MAX, MAX_REQUEST_BODY_SIZE, MAX_RESPONSE_BODY_SIZE};
 use crate::middleware::auth::{AuthenticatedApiKey, AuthenticatedUser};
+use crate::models::{WebSearchQueryParams, WebSearchResponse};
 use crate::usage_parsing::{
     parse_chat_completion_usage_from_bytes, parse_response_usage_from_bytes,
     UsageTrackingStreamChatCompletions, UsageTrackingStreamResponseCompleted,
 };
 use axum::{
     body::{to_bytes, Body},
-    extract::{Extension, Path, Request, State},
+    extract::{Extension, Path, Query, Request, State},
     http::{HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post},
@@ -141,6 +142,14 @@ pub fn create_api_router(
         .route("/v1/models", get(proxy_models))
         .route("/v1/signature/{chat_id}", get(proxy_signature))
         .layer(axum::middleware::from_fn_with_state(
+            dual_auth_state.clone(),
+            crate::middleware::dual_auth_middleware,
+        ));
+
+    // Dual auth only: web search (separate from llm_proxy — not an LLM endpoint)
+    let web_search_router = Router::new()
+        .route("/v1/web/search", get(proxy_web_search))
+        .layer(axum::middleware::from_fn_with_state(
             dual_auth_state,
             crate::middleware::dual_auth_middleware,
         ));
@@ -208,6 +217,7 @@ pub fn create_api_router(
     Router::new()
         .merge(llm_proxy_router)
         .merge(models_proxy_router)
+        .merge(web_search_router)
         .merge(session_auth_routes)
 }
 
@@ -3026,6 +3036,174 @@ async fn proxy_signature(
         Body::from_stream(proxy_response.body),
     )
     .await
+}
+
+/// Typed usage details for web_search (avoids raw Value construction).
+#[derive(Serialize)]
+struct WebSearchUsageDetails {
+    request_type: &'static str,
+}
+
+/// Proxy web search to cloud-api with usage tracking.
+#[utoipa::path(
+    get,
+    path = "/v1/web/search",
+    tag = PROXY,
+    params(WebSearchQueryParams),
+    responses(
+        (status = 200, description = "Web search results", body = WebSearchResponse),
+        (status = 400, description = BAD_REQUEST, body = ErrorResponse),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
+        (status = 502, description = "Cloud API error", body = ErrorResponse),
+        (status = 503, description = "Service unavailable", body = ErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+async fn proxy_web_search(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    api_key_ext: Option<Extension<AuthenticatedApiKey>>,
+    Query(params): Query<WebSearchQueryParams>,
+    headers: HeaderMap,
+) -> Result<Json<WebSearchResponse>, Response> {
+    if params.q.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Query parameter 'q' is required and must be non-empty".to_string(),
+            }),
+        )
+            .into_response());
+    }
+
+    let query_string = serde_urlencoded::to_string(&params).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to serialize query: {e}"),
+            }),
+        )
+            .into_response()
+    })?;
+
+    let path = format!("web/search?{}", query_string);
+
+    let proxy_response = state
+        .proxy_service
+        .forward_request(Method::GET, &path, headers.clone(), None)
+        .await
+        .map_err(|e| {
+            tracing::error!("Web search proxy error for user_id={}: {}", user.user_id, e);
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("Cloud API error: {e}"),
+                }),
+            )
+                .into_response()
+        })?;
+
+    match proxy_response.status {
+        400 => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Invalid web search request".to_string(),
+                }),
+            )
+                .into_response());
+        }
+        503 => {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ErrorResponse {
+                    error: "Web search service temporarily unavailable".to_string(),
+                }),
+            )
+                .into_response());
+        }
+        _ => {}
+    }
+
+    let bytes = match collect_stream_to_bytes(proxy_response.body).await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!(
+                "Failed to read web search response for user_id={}: {}",
+                user.user_id,
+                e
+            );
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: "Failed to read response body".to_string(),
+                }),
+            )
+                .into_response());
+        }
+    };
+
+    let response: WebSearchResponse = match serde_json::from_slice(&bytes) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(
+                "Failed to parse web search response for user_id={}: {}",
+                user.user_id,
+                e
+            );
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: "Invalid response from web search service".to_string(),
+                }),
+            )
+                .into_response());
+        }
+    };
+
+    // Record usage (same pattern as image: instance_id => record_usage_and_update_balance)
+    let cost_nano_usd = state.web_search_pricing_cache.get_cost_per_unit().await;
+    let details = serde_json::to_value(WebSearchUsageDetails {
+        request_type: "web_search",
+    })
+    .ok();
+
+    let (instance_id, api_key_id) = api_key_ext
+        .as_ref()
+        .map(|ak| (ak.api_key_info.instance_id, Some(ak.api_key_info.id)))
+        .unwrap_or((None, None));
+
+    let usage_params = services::user_usage::RecordUsageParams {
+        user_id: user.user_id,
+        metric_key: services::user_usage::METRIC_KEY_SERVICE_WEB_SEARCH.to_string(),
+        quantity: 1,
+        cost_nano_usd: Some(cost_nano_usd),
+        model_id: None,
+        instance_id,
+        api_key_id,
+        details,
+    };
+
+    let result = if instance_id.is_some() {
+        state
+            .user_usage_service
+            .record_usage_and_update_balance(usage_params)
+            .await
+    } else {
+        state.user_usage_service.record_usage(usage_params).await
+    };
+
+    if let Err(e) = result {
+        tracing::warn!(
+            "Failed to record web search usage for user_id={}: {}",
+            user.user_id,
+            e
+        );
+    }
+
+    Ok(Json(response))
 }
 
 /// Get system configs with in-memory TTL caching.

@@ -79,6 +79,8 @@ pub struct AppState {
     pub model_settings_cache: ModelSettingsCache,
     /// In-memory cache for model pricing (input/output nano per token) from cloud-api for cost calculation
     pub model_pricing_cache: crate::model_pricing::ModelPricingCache,
+    /// In-memory cache for web_search cost_per_unit from cloud-api GET /v1/services/web_search
+    pub web_search_pricing_cache: crate::web_search_pricing::WebSearchPricingCache,
     /// In-memory cache for system configs (single entry with TTL)
     pub system_configs_cache: SystemConfigsCache,
     /// Rate limit state for hot-reloadable rate limit configuration
