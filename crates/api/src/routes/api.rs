@@ -66,10 +66,6 @@ pub const USER_BANNED_ERROR_MESSAGE: &str =
 pub const SUBSCRIPTION_REQUIRED_ERROR_MESSAGE: &str =
     "Active subscription required. Please subscribe to continue.";
 
-/// Error message when monthly token limit is exceeded
-pub const MONTHLY_TOKEN_LIMIT_EXCEEDED_MESSAGE: &str =
-    "Monthly token limit exceeded. Upgrade your plan or wait for the next billing period.";
-
 /// OpenAPI tag constants for API documentation
 mod openapi_tags {
     pub const CONVERSATIONS: &str = "Conversations";

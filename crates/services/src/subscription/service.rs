@@ -68,6 +68,11 @@ pub struct SubscriptionServiceImpl {
 }
 
 impl SubscriptionServiceImpl {
+    /// Returns true when Stripe is configured well enough to perform API calls.
+    fn is_stripe_configured(&self) -> bool {
+        !self.stripe_secret_key.is_empty() && !self.stripe_webhook_secret.is_empty()
+    }
+
     pub fn new(config: SubscriptionServiceConfig) -> Self {
         Self {
             db_pool: config.db_pool,
@@ -104,9 +109,7 @@ impl SubscriptionServiceImpl {
         );
 
         // Treat missing/empty Stripe secrets as "not configured" when provider is stripe
-        if provider.to_lowercase() == "stripe"
-            && (self.stripe_secret_key.is_empty() || self.stripe_webhook_secret.is_empty())
-        {
+        if provider.to_lowercase() == "stripe" && !self.is_stripe_configured() {
             tracing::debug!(
                 "Stripe secrets are not set (secret_key_empty={}, webhook_secret_empty={}), Stripe not configured",
                 self.stripe_secret_key.is_empty(),
@@ -933,8 +936,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
         }
 
         // Only parse JSON after signature verification succeeds
-        let payload_json: serde_json::Value = serde_json::from_slice(payload)
-            .map_err(|e| SubscriptionError::InternalError(format!("Invalid JSON: {}", e)))?;
+        let payload_json: serde_json::Value = serde_json::from_slice(payload).map_err(|e| {
+            SubscriptionError::WebhookVerificationFailed(format!("Invalid JSON: {}", e))
+        })?;
 
         let event_id = payload_json
             .get("id")
@@ -1391,7 +1395,14 @@ impl SubscriptionService for SubscriptionServiceImpl {
                         let plan_credits = subscription_plans
                             .get(&plan_name)
                             .map(plan_limit_max)
-                            .unwrap_or(DEFAULT_MONTHLY_CREDITS_NANO_USD);
+                            .unwrap_or_else(|| {
+                                tracing::warn!(
+                                    "Falling back to default monthly credits for unmatched plan '{}'; using {} nano-USD",
+                                    plan_name,
+                                    DEFAULT_MONTHLY_CREDITS_NANO_USD
+                                );
+                                DEFAULT_MONTHLY_CREDITS_NANO_USD
+                            });
                         let period_end = sub.current_period_end;
                         let period_start = sub_one_month_same_day(period_end);
                         (plan_credits, period_start, period_end)
@@ -1400,7 +1411,13 @@ impl SubscriptionService for SubscriptionServiceImpl {
                         let plan_credits = subscription_plans
                             .get("free")
                             .map(plan_limit_max)
-                            .unwrap_or(DEFAULT_MONTHLY_CREDITS_NANO_USD);
+                            .unwrap_or_else(|| {
+                                tracing::warn!(
+                                    "Falling back to default monthly credits for missing 'free' plan; using {} nano-USD",
+                                    DEFAULT_MONTHLY_CREDITS_NANO_USD
+                                );
+                                DEFAULT_MONTHLY_CREDITS_NANO_USD
+                            });
                         let (period_start, period_end) = current_calendar_month_period(Utc::now());
                         (plan_credits, period_start, period_end)
                     }
@@ -1586,6 +1603,16 @@ impl SubscriptionService for SubscriptionServiceImpl {
         cancel_url: String,
     ) -> Result<String, SubscriptionError> {
         const MAX_CREDITS_PER_PURCHASE: u64 = 1_000_000_000;
+
+        // When Stripe is not configured, credit purchase is not available.
+        if !self.is_stripe_configured() {
+            tracing::debug!(
+                "Credit purchase skipped: Stripe not configured (secret_key_empty={}, webhook_secret_empty={})",
+                self.stripe_secret_key.is_empty(),
+                self.stripe_webhook_secret.is_empty(),
+            );
+            return Err(SubscriptionError::CreditsNotConfigured);
+        }
         if credits == 0 {
             return Err(SubscriptionError::InvalidCredits(
                 "credits must be positive".to_string(),
@@ -1689,7 +1716,14 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 let plan_credits = subscription_plans
                     .get(&plan_name)
                     .map(plan_limit_max)
-                    .unwrap_or(DEFAULT_MONTHLY_CREDITS_NANO_USD);
+                    .unwrap_or_else(|| {
+                        tracing::warn!(
+                            "Falling back to default monthly credits in get_credits for unmatched plan '{}'; using {} nano-USD",
+                            plan_name,
+                            DEFAULT_MONTHLY_CREDITS_NANO_USD
+                        );
+                        DEFAULT_MONTHLY_CREDITS_NANO_USD
+                    });
                 let period_end = sub.current_period_end;
                 let period_start = sub_one_month_same_day(period_end);
                 (plan_credits, period_start, period_end)
@@ -1698,7 +1732,13 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 let plan_credits = subscription_plans
                     .get("free")
                     .map(plan_limit_max)
-                    .unwrap_or(DEFAULT_MONTHLY_CREDITS_NANO_USD);
+                    .unwrap_or_else(|| {
+                        tracing::warn!(
+                            "Falling back to default monthly credits in get_credits for missing 'free' plan; using {} nano-USD",
+                            DEFAULT_MONTHLY_CREDITS_NANO_USD
+                        );
+                        DEFAULT_MONTHLY_CREDITS_NANO_USD
+                    });
                 let (period_start, period_end) = current_calendar_month_period(Utc::now());
                 (plan_credits, period_start, period_end)
             }

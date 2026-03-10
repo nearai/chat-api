@@ -78,8 +78,6 @@ pub enum SubscriptionError {
     NoActiveSubscription,
     /// Monthly credit limit exceeded (used >= limit)
     MonthlyCreditLimitExceeded { used: i64, limit: u64 },
-    /// Monthly token limit exceeded (used >= limit)
-    MonthlyTokenLimitExceeded { used: i64, limit: u64 },
     /// Cannot switch to plan: current instance count exceeds target plan's limit
     InstanceLimitExceeded { current: u64, max: u64 },
     /// Subscription is not scheduled for cancellation (cannot resume)
@@ -136,13 +134,6 @@ impl fmt::Display for SubscriptionError {
                 write!(f, "Webhook verification failed: {}", msg)
             }
             Self::InternalError(msg) => write!(f, "Internal error: {}", msg),
-            Self::MonthlyTokenLimitExceeded { used, limit } => {
-                write!(
-                    f,
-                    "Monthly token limit exceeded: used {} of {} tokens",
-                    used, limit
-                )
-            }
             Self::CreditsNotConfigured => write!(f, "Credit purchase is not configured"),
             Self::InvalidCredits(msg) => write!(f, "Invalid credits: {}", msg),
             Self::TestClockNotAllowedForExistingCustomer => {

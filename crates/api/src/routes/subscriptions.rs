@@ -240,10 +240,6 @@ pub async fn create_subscription(
                 ApiError::service_unavailable("Credit purchase is not configured")
             }
             SubscriptionError::InvalidCredits(msg) => ApiError::bad_request(msg),
-            SubscriptionError::MonthlyTokenLimitExceeded { .. } => {
-                tracing::error!("Unexpected MonthlyTokenLimitExceeded in create");
-                ApiError::internal_server_error("Failed to create subscription")
-            }
             SubscriptionError::InstanceLimitExceeded { current, max } => {
                 ApiError::bad_request(format!(
                     "Cannot subscribe: current instance count ({}) exceeds plan limit ({})",

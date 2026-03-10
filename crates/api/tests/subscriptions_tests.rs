@@ -1252,9 +1252,8 @@ async fn test_proxy_returns_403_without_subscription_when_plans_configured() {
         let err_msg = body_res.get("error").and_then(|v| v.as_str()).unwrap_or("");
         assert!(
             err_msg.contains("Monthly credit limit exceeded")
-                || err_msg.contains("Monthly token limit exceeded")
                 || err_msg == SUBSCRIPTION_REQUIRED_ERROR_MESSAGE,
-            "POST {} should return token limit or subscription error, got: {}",
+            "POST {} should return credit limit or subscription error, got: {}",
             path,
             err_msg
         );
@@ -1536,9 +1535,8 @@ async fn test_responses_returns_403_without_subscription_when_plans_configured()
     let err_msg = body_res.get("error").and_then(|v| v.as_str()).unwrap_or("");
     assert!(
         err_msg.contains("Monthly credit limit exceeded")
-            || err_msg.contains("Monthly token limit exceeded")
             || err_msg == SUBSCRIPTION_REQUIRED_ERROR_MESSAGE,
-        "POST /v1/responses should return token limit or subscription error, got: {}",
+        "POST /v1/responses should return credit limit or subscription error, got: {}",
         err_msg
     );
 }
