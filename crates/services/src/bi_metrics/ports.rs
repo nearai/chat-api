@@ -21,6 +21,10 @@ pub struct UserWithStats {
     pub agent_spent_nano: i64,
     pub agent_token_usage: i64,
     pub last_activity_at: Option<DateTime<Utc>>,
+    /// Purchased credits balance (nano-USD) from user_credits.balance.
+    pub purchased_credits_nano: i64,
+    /// Used portion of purchased credits (nano-USD).
+    pub used_purchased_credits_nano: i64,
 }
 
 /// Filter for BI user list

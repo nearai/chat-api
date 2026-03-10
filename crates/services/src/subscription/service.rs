@@ -1809,4 +1809,19 @@ impl SubscriptionService for SubscriptionServiceImpl {
 
         Ok(new_balance)
     }
+
+    async fn admin_get_credit_history(
+        &self,
+        user_id: UserId,
+        limit: i64,
+        offset: i64,
+    ) -> Result<(Vec<super::ports::CreditTransaction>, i64), SubscriptionError> {
+        let limit = limit.clamp(1, 100);
+        let offset = offset.max(0);
+
+        self.credits_repo
+            .list_transactions(user_id, limit, offset)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))
+    }
 }

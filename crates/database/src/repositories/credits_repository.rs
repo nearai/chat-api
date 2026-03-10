@@ -2,7 +2,7 @@
 
 use crate::pool::DbPool;
 use async_trait::async_trait;
-use services::subscription::ports::CreditsRepository;
+use services::subscription::ports::{CreditTransaction, CreditsRepository};
 use services::UserId;
 
 pub struct PostgresCreditsRepository {
@@ -95,5 +95,53 @@ impl CreditsRepository for PostgresCreditsRepository {
         )
         .await?;
         Ok(())
+    }
+
+    async fn list_transactions(
+        &self,
+        user_id: UserId,
+        limit: i64,
+        offset: i64,
+    ) -> anyhow::Result<(Vec<CreditTransaction>, i64)> {
+        let client = self.pool.get().await?;
+        let rows = client
+            .query(
+                r#"
+                SELECT
+                    id,
+                    user_id,
+                    amount,
+                    type,
+                    reference_id,
+                    created_at,
+                    COUNT(*) OVER() AS total_count
+                FROM credit_transactions
+                WHERE user_id = $1
+                ORDER BY created_at DESC
+                LIMIT $2 OFFSET $3
+                "#,
+                &[&user_id, &limit, &offset],
+            )
+            .await?;
+
+        let total_count: i64 = if rows.is_empty() {
+            0
+        } else {
+            rows[0].get("total_count")
+        };
+
+        let txs = rows
+            .into_iter()
+            .map(|r| CreditTransaction {
+                id: r.get("id"),
+                user_id: r.get("user_id"),
+                amount: r.get("amount"),
+                r#type: r.get("type"),
+                reference_id: r.get("reference_id"),
+                created_at: r.get("created_at"),
+            })
+            .collect();
+
+        Ok((txs, total_count))
     }
 }

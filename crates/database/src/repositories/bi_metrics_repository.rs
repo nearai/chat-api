@@ -758,6 +758,17 @@ usage_stats AS (
     FROM user_usage_event
     GROUP BY user_id
 ),
+credits_aggregate AS (
+    SELECT
+        user_id,
+        (COALESCE(SUM(amount), 0))::bigint AS total_credited_nano
+    FROM credit_transactions
+    GROUP BY user_id
+),
+credits_balance AS (
+    SELECT user_id, (COALESCE(balance, 0))::bigint AS purchased_credits_nano
+    FROM user_credits
+),
 enriched AS (
     SELECT
         u.id,
@@ -772,7 +783,9 @@ enriched AS (
         COALESCE(us.total_spent_nano, 0) AS total_spent_nano,
         COALESCE(us.agent_spent_nano, 0) AS agent_spent_nano,
         COALESCE(us.agent_token_usage, 0) AS agent_token_usage,
-        COALESCE(us.last_usage_at, u.updated_at) AS last_activity_at
+        COALESCE(us.last_usage_at, u.updated_at) AS last_activity_at,
+        COALESCE(cb.purchased_credits_nano, 0) AS purchased_credits_nano,
+        (COALESCE(ca.total_credited_nano, 0) - COALESCE(cb.purchased_credits_nano, 0))::bigint AS used_purchased_credits_nano
     FROM users u
     LEFT JOIN LATERAL (
         SELECT status, price_id FROM subscriptions s
@@ -782,10 +795,12 @@ enriched AS (
     ) sub ON true
     LEFT JOIN agent_counts ac ON u.id = ac.user_id
     LEFT JOIN usage_stats us ON u.id = us.user_id
+    LEFT JOIN credits_aggregate ca ON u.id = ca.user_id
+    LEFT JOIN credits_balance cb ON u.id = cb.user_id
 )
 SELECT id, email, name, avatar_url, created_at, updated_at,
        subscription_status, subscription_price_id, agent_count, total_spent_nano, agent_spent_nano,
-       agent_token_usage, last_activity_at,
+       agent_token_usage, last_activity_at, purchased_credits_nano, used_purchased_credits_nano,
        COUNT(*) OVER() AS total_count
 FROM enriched
 WHERE 1=1
@@ -842,6 +857,8 @@ WHERE 1=1
                     agent_spent_nano: r.get::<_, i64>("agent_spent_nano"),
                     agent_token_usage: r.get::<_, i64>("agent_token_usage"),
                     last_activity_at: r.get("last_activity_at"),
+                    purchased_credits_nano: r.get::<_, i64>("purchased_credits_nano"),
+                    used_purchased_credits_nano: r.get::<_, i64>("used_purchased_credits_nano"),
                 }
             })
             .collect();

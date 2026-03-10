@@ -471,6 +471,30 @@ pub struct AdminUserResponse {
     pub agent_spent_nano: i64,
     pub agent_token_usage: i64,
     pub last_activity_at: Option<String>,
+    /// Purchased credits balance for the user (nano-USD), from user_credits.balance.
+    pub purchased_credits_nano: i64,
+    /// Used portion of purchased credits for the user (nano-USD).
+    pub used_purchased_credits_nano: i64,
+}
+
+/// Single credit transaction entry for admin credit history.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct AdminCreditTransactionResponse {
+    pub id: uuid::Uuid,
+    pub amount_nano_usd: i64,
+    pub kind: String,
+    pub reference_id: Option<String>,
+    pub created_at: String,
+}
+
+/// Paginated credit history response for a user.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct AdminCreditHistoryResponse {
+    pub user_id: UserId,
+    pub transactions: Vec<AdminCreditTransactionResponse>,
+    pub limit: i64,
+    pub offset: i64,
+    pub total: u64,
 }
 
 /// Paginated admin user list response
@@ -501,6 +525,8 @@ impl AdminUserResponse {
             agent_spent_nano: u.agent_spent_nano,
             agent_token_usage: u.agent_token_usage,
             last_activity_at: u.last_activity_at.map(|t| t.to_rfc3339()),
+            purchased_credits_nano: u.purchased_credits_nano,
+            used_purchased_credits_nano: u.used_purchased_credits_nano,
         }
     }
 }

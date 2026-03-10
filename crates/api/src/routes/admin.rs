@@ -322,6 +322,86 @@ pub async fn admin_grant_credits(
     }))
 }
 
+/// Query parameters for admin credit history.
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct AdminCreditHistoryQuery {
+    /// Target user id
+    pub user_id: Uuid,
+    /// Maximum number of items to return (default: 20, max: 100)
+    pub limit: Option<i64>,
+    /// Number of items to skip (default: 0)
+    pub offset: Option<i64>,
+}
+
+/// Admin endpoint: Get credit transaction history for a user.
+#[utoipa::path(
+    get,
+    path = "/v1/admin/credits/history",
+    tag = "Admin",
+    params(
+        AdminCreditHistoryQuery
+    ),
+    responses(
+        (status = 200, description = "Credit history retrieved successfully", body = AdminCreditHistoryResponse),
+        (status = 400, description = "Invalid request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn admin_credit_history(
+    State(app_state): State<AppState>,
+    Query(params): Query<AdminCreditHistoryQuery>,
+) -> Result<Json<AdminCreditHistoryResponse>, ApiError> {
+    let limit = params.limit.unwrap_or(20).clamp(1, 100);
+    let offset = params.offset.unwrap_or(0).max(0);
+
+    let user_id = UserId(params.user_id);
+    tracing::info!(
+        "Admin: Fetching credit history for user_id={}, limit={}, offset={}",
+        user_id,
+        limit,
+        offset
+    );
+
+    let (txs, total) = app_state
+        .subscription_service
+        .admin_get_credit_history(user_id, limit, offset)
+        .await
+        .map_err(|e| match e {
+            services::subscription::ports::SubscriptionError::DatabaseError(msg) => {
+                tracing::error!(error = ?msg, "Database error fetching credit history");
+                ApiError::internal_server_error("Failed to fetch credit history")
+            }
+            other => {
+                tracing::error!(error = ?other, "Unexpected error fetching credit history");
+                ApiError::internal_server_error("Failed to fetch credit history")
+            }
+        })?;
+
+    let transactions = txs
+        .into_iter()
+        .map(|t| AdminCreditTransactionResponse {
+            id: t.id,
+            amount_nano_usd: t.amount,
+            kind: t.r#type,
+            reference_id: t.reference_id,
+            created_at: t.created_at.to_rfc3339(),
+        })
+        .collect();
+
+    Ok(Json(AdminCreditHistoryResponse {
+        user_id,
+        transactions,
+        limit,
+        offset,
+        total: total as u64,
+    }))
+}
+
 /// Implementation used by bi_list_users only (BI endpoint).
 async fn list_users_bi_impl(
     app_state: &AppState,
@@ -2531,6 +2611,7 @@ pub fn create_admin_router() -> Router<AppState> {
         .route("/models/{model_id}", delete(delete_model))
         .route("/vpc/revoke", post(revoke_vpc_credentials))
         .route("/credits", post(admin_grant_credits))
+        .route("/credits/history", get(admin_credit_history))
         .route(
             "/configs",
             get(get_system_configs_admin).patch(upsert_system_configs),

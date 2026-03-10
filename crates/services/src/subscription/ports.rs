@@ -202,7 +202,21 @@ pub trait SubscriptionRepository: Send + Sync {
     ) -> anyhow::Result<()>;
 }
 
-/// Repository trait for user purchased credits
+/// Single credit transaction record (purchase, grant, admin adjustment).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct CreditTransaction {
+    pub id: uuid::Uuid,
+    pub user_id: UserId,
+    /// Amount in nano-USD (positive for credits added, negative for debits if ever used).
+    pub amount: i64,
+    /// Transaction type: 'purchase', 'grant', or 'admin_adjust'.
+    pub r#type: String,
+    /// Optional external reference (e.g. Stripe session id or admin reason).
+    pub reference_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
 #[async_trait]
 pub trait CreditsRepository: Send + Sync {
     /// Get purchased credits balance for a user (0 if no row)
@@ -233,6 +247,14 @@ pub trait CreditsRepository: Send + Sync {
         amount: i64,
         reason: Option<String>,
     ) -> anyhow::Result<()>;
+
+    /// List credit transactions for a user, newest first, with total count.
+    async fn list_transactions(
+        &self,
+        user_id: UserId,
+        limit: i64,
+        offset: i64,
+    ) -> anyhow::Result<(Vec<CreditTransaction>, i64)>;
 }
 
 /// Repository trait for payment webhook events
@@ -374,6 +396,14 @@ pub trait SubscriptionService: Send + Sync {
         amount_nano_usd: i64,
         reason: Option<String>,
     ) -> Result<i64, SubscriptionError>;
+
+    /// Admin-only: list credit transactions for a user (for payment history / audit).
+    async fn admin_get_credit_history(
+        &self,
+        user_id: UserId,
+        limit: i64,
+        offset: i64,
+    ) -> Result<(Vec<CreditTransaction>, i64), SubscriptionError>;
 }
 
 /// Summary of user's credits (balance, used, effective limit).
