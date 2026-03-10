@@ -994,6 +994,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
         }
 
         // For checkout.session.completed with mode=payment: process credit purchase (no Stripe API call)
+        // Assumption: 1 credit == 1 USD, and Stripe Price is configured as $1 per credit.
+        // We treat the "credits" metadata as a count of credits and convert to nano-USD as
+        // amount_nano_usd = credits * 1_000_000_000.
         let credit_purchase_user_id = if event_type == "checkout.session.completed" {
             let obj = payload_json
                 .get("data")
@@ -1028,48 +1031,67 @@ impl SubscriptionService for SubscriptionServiceImpl {
                         let credits_str = meta.get("credits").and_then(|v| v.as_str());
                         if let (Some(uid), Some(cr)) = (user_id_str, credits_str) {
                             match (uuid::Uuid::parse_str(uid), cr.parse::<i64>()) {
-                                (Ok(uuid), Ok(credits)) if credits > 0 => {
-                                    let user_id = UserId(uuid);
-                                    let inserted = self
-                                        .credits_repo
-                                        .try_record_purchase(&txn, user_id, credits, sid)
-                                        .await
-                                        .map_err(|e| {
-                                            SubscriptionError::DatabaseError(e.to_string())
-                                        })?;
-                                    if inserted {
-                                        self.credits_repo
-                                            .add_credits(&txn, user_id, credits)
+                                (Ok(uuid), Ok(credits_count)) if credits_count > 0 => {
+                                    let amount_nano_usd_i128 =
+                                        (credits_count as i128) * 1_000_000_000_i128;
+                                    if let Ok(amount_nano_usd) = i64::try_from(amount_nano_usd_i128)
+                                    {
+                                        let user_id = UserId(uuid);
+                                        let inserted = self
+                                            .credits_repo
+                                            .try_record_purchase(
+                                                &txn,
+                                                user_id,
+                                                amount_nano_usd,
+                                                sid,
+                                            )
                                             .await
                                             .map_err(|e| {
                                                 SubscriptionError::DatabaseError(e.to_string())
                                             })?;
-                                        tracing::info!(
-                                            "Credits added for user_id={}, amount={}",
-                                            user_id,
-                                            credits
-                                        );
-                                        Some(user_id)
+                                        if inserted {
+                                            self.credits_repo
+                                                .add_credits(&txn, user_id, amount_nano_usd)
+                                                .await
+                                                .map_err(|e| {
+                                                    SubscriptionError::DatabaseError(e.to_string())
+                                                })?;
+                                            tracing::info!(
+                                                "Credits added for user_id={}, amount_nano_usd={}, credits_count={}",
+                                                user_id,
+                                                amount_nano_usd,
+                                                credits_count
+                                            );
+                                            Some(user_id)
+                                        } else {
+                                            tracing::info!(
+                                                "Credit purchase already processed (duplicate): session_id={}",
+                                                sid
+                                            );
+                                            None
+                                        }
                                     } else {
-                                        tracing::info!(
-                                        "Credit purchase already processed (duplicate): session_id={}",
-                                        sid
-                                    );
+                                        tracing::error!(
+                                            "Overflow converting credits_count={} to nano-USD for session_id={}",
+                                            credits_count,
+                                            sid
+                                        );
                                         None
                                     }
                                 }
                                 _ => {
                                     tracing::warn!(
-                                    "Invalid user_id or credits in checkout.session.completed: user_id={:?}, credits={:?}",
-                                    user_id_str, credits_str
-                                );
+                                        "Invalid user_id or credits in checkout.session.completed: user_id={:?}, credits={:?}",
+                                        user_id_str,
+                                        credits_str
+                                    );
                                     None
                                 }
                             }
                         } else {
                             tracing::warn!(
-                            "Missing user_id or credits in checkout.session.completed payment metadata"
-                        );
+                                "Missing user_id or credits in checkout.session.completed payment metadata"
+                            );
                             None
                         }
                     } else {

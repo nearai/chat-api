@@ -112,7 +112,11 @@ pub struct SubscriptionPlanConfig {
     pub monthly_credits: Option<PlanLimitConfig>,
 }
 
-/// Configuration for credit purchase (Stripe Price ID for 1 credit)
+/// Configuration for credit purchase (Stripe Price ID for 1 credit).
+///
+/// Assumption: 1 credit == 1 USD of internal credits (1_000_000_000 nano-USD). The configured
+/// Stripe Price should therefore represent a $1.00 charge per unit so that purchasing N credits
+/// results in N * 1_000_000_000 nano-USD being recorded.
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreditsConfig {
