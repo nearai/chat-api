@@ -1683,4 +1683,47 @@ impl SubscriptionService for SubscriptionServiceImpl {
             effective_max_credits,
         })
     }
+
+    async fn admin_grant_credits(
+        &self,
+        user_id: UserId,
+        amount_nano_usd: i64,
+        reason: Option<String>,
+    ) -> Result<i64, SubscriptionError> {
+        if amount_nano_usd <= 0 {
+            return Err(SubscriptionError::InvalidCredits(
+                "grant amount must be positive".to_string(),
+            ));
+        }
+
+        let mut client = self
+            .db_pool
+            .get()
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+        let txn = client
+            .transaction()
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        self.credits_repo
+            .record_grant(&txn, user_id, amount_nano_usd, reason)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        let new_balance = self
+            .credits_repo
+            .add_credits(&txn, user_id, amount_nano_usd)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        txn.commit()
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        // Invalidate cache so future checks see updated purchased balance
+        self.invalidate_credit_limit_cache(user_id).await;
+
+        Ok(new_balance)
+    }
 }

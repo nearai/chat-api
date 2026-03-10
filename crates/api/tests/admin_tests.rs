@@ -1,6 +1,7 @@
 mod common;
 
 use common::{create_test_server, create_test_server_and_db, mock_login};
+use serde_json::json;
 use services::user::ports::UserRepository;
 use uuid::Uuid;
 
@@ -129,6 +130,112 @@ async fn test_revoke_vpc_credentials_with_non_admin_account() {
     let body: serde_json::Value = response.json();
     let error = body.get("message").and_then(|v| v.as_str());
     assert_eq!(error, Some("Admin access required"));
+}
+
+#[tokio::test]
+async fn test_admin_grant_credits_with_admin_account() {
+    let (server, db) = create_test_server_and_db(common::TestServerConfig::default()).await;
+
+    // Create a regular user
+    let user_email = "credits_user@example.com";
+    let user_token = mock_login(&server, user_email).await;
+    let users_repo = db.user_repository();
+    let user = users_repo
+        .get_user_by_email(user_email)
+        .await
+        .expect("get_user_by_email")
+        .expect("user should exist");
+
+    // Admin token
+    let admin_email = "credits_admin@admin.org";
+    let admin_token = mock_login(&server, admin_email).await;
+
+    // Grant 2 USD worth of credits (2_000_000_000 nano-USD)
+    let grant_body = json!({
+        "user_id": user.id,
+        "amount_nano_usd": 2_000_000_000_i64,
+        "reason": "test admin grant"
+    });
+
+    let response = server
+        .post("/v1/admin/credits")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&grant_body)
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        200,
+        "Admin should be able to grant credits"
+    );
+
+    let body: serde_json::Value = response.json();
+    let new_balance = body
+        .get("new_balance_nano_usd")
+        .and_then(|v| v.as_i64())
+        .expect("new_balance_nano_usd should be present");
+    assert_eq!(new_balance, 2_000_000_000_i64);
+
+    // Verify that the endpoint is protected (regular user cannot call it successfully)
+    let response_non_admin = server
+        .post("/v1/admin/credits")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&grant_body)
+        .await;
+
+    assert_eq!(
+        response_non_admin.status_code(),
+        403,
+        "Non-admin should receive 403 Forbidden when trying to grant credits"
+    );
+    let body_non_admin: serde_json::Value = response_non_admin.json();
+    let error = body_non_admin.get("message").and_then(|v| v.as_str());
+    assert_eq!(error, Some("Admin access required"));
+}
+
+#[tokio::test]
+async fn test_admin_grant_credits_validation() {
+    let server = create_test_server().await;
+
+    let admin_email = "credits_admin_validation@admin.org";
+    let admin_token = mock_login(&server, admin_email).await;
+
+    let body = json!({
+        "user_id": "00000000-0000-4000-8000-000000000000",
+        "amount_nano_usd": 0
+    });
+
+    let response = server
+        .post("/v1/admin/credits")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&body)
+        .await;
+
+    assert_eq!(response.status_code(), 400);
+    let body_json: serde_json::Value = response.json();
+    let message = body_json.get("message").and_then(|v| v.as_str());
+    assert_eq!(message, Some("amount_nano_usd must be positive"));
 }
 
 /// Admin list instances sanitizes dashboard_url by stripping query params, fragment, and userinfo.

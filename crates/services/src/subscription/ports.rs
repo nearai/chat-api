@@ -233,6 +233,15 @@ pub trait CreditsRepository: Send + Sync {
         amount: i64,
         reference_id: &str,
     ) -> anyhow::Result<bool>;
+
+    /// Record an admin grant transaction (for manual/admin adjustments).
+    async fn record_grant(
+        &self,
+        txn: &tokio_postgres::Transaction<'_>,
+        user_id: UserId,
+        amount: i64,
+        reason: Option<String>,
+    ) -> anyhow::Result<()>;
 }
 
 /// Repository trait for payment webhook events
@@ -365,6 +374,15 @@ pub trait SubscriptionService: Send + Sync {
 
     /// Get user's credits: balance, used in period, effective max.
     async fn get_credits(&self, user_id: UserId) -> Result<CreditsSummary, SubscriptionError>;
+
+    /// Admin-only: grant credits (nano-USD) directly to a user.
+    /// Records a 'grant' transaction and updates user_credits balance.
+    async fn admin_grant_credits(
+        &self,
+        user_id: UserId,
+        amount_nano_usd: i64,
+        reason: Option<String>,
+    ) -> Result<i64, SubscriptionError>;
 }
 
 /// Summary of user's credits (balance, used, effective limit).

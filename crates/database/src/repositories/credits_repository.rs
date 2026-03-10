@@ -78,4 +78,22 @@ impl CreditsRepository for PostgresCreditsRepository {
             }
         }
     }
+
+    async fn record_grant(
+        &self,
+        txn: &tokio_postgres::Transaction<'_>,
+        user_id: UserId,
+        amount: i64,
+        reason: Option<String>,
+    ) -> anyhow::Result<()> {
+        txn.execute(
+            r#"
+            INSERT INTO credit_transactions (user_id, amount, type, reference_id)
+            VALUES ($1, $2, 'grant', $3)
+            "#,
+            &[&user_id, &amount, &reason],
+        )
+        .await?;
+        Ok(())
+    }
 }
