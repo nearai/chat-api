@@ -1,4 +1,5 @@
 //! PostgreSQL implementation of the credits repository.
+//! Remaining credits = total_nano_usd - used_nano_usd (no stored balance column).
 
 use crate::pool::DbPool;
 use async_trait::async_trait;
@@ -18,15 +19,19 @@ impl PostgresCreditsRepository {
 
 #[async_trait]
 impl CreditsRepository for PostgresCreditsRepository {
+    /// Remaining purchased credits: total_purchased - used_purchased (computed).
     async fn get_balance(&self, user_id: UserId) -> anyhow::Result<i64> {
         let client = self.pool.get().await?;
         let row = client
             .query_opt(
-                "SELECT balance FROM user_credits WHERE user_id = $1",
+                r#"
+                SELECT (total_nano_usd - used_nano_usd)::bigint AS remaining
+                FROM user_credits WHERE user_id = $1
+                "#,
                 &[&user_id],
             )
             .await?;
-        Ok(row.map(|r| r.get::<_, i64>("balance")).unwrap_or(0))
+        Ok(row.map(|r| r.get::<_, i64>("remaining")).unwrap_or(0))
     }
 
     async fn get_purchased_breakdown(&self, user_id: UserId) -> anyhow::Result<(i64, i64, i64)> {
@@ -34,7 +39,10 @@ impl CreditsRepository for PostgresCreditsRepository {
         let row = client
             .query_opt(
                 r#"
-                SELECT balance, total_purchased_nano_usd, used_purchased_nano_usd
+                SELECT
+                    total_nano_usd,
+                    used_nano_usd,
+                    (total_nano_usd - used_nano_usd)::bigint AS remaining
                 FROM user_credits WHERE user_id = $1
                 "#,
                 &[&user_id],
@@ -42,9 +50,9 @@ impl CreditsRepository for PostgresCreditsRepository {
             .await?;
         Ok(match row {
             Some(r) => (
-                r.get::<_, i64>("balance"),
-                r.get::<_, i64>("total_purchased_nano_usd"),
-                r.get::<_, i64>("used_purchased_nano_usd"),
+                r.get::<_, i64>("remaining"),
+                r.get::<_, i64>("total_nano_usd"),
+                r.get::<_, i64>("used_nano_usd"),
             ),
             None => (0, 0, 0),
         })
@@ -59,19 +67,18 @@ impl CreditsRepository for PostgresCreditsRepository {
         let row = txn
             .query_one(
                 r#"
-                INSERT INTO user_credits (user_id, balance, total_purchased_nano_usd)
-                VALUES ($1, $2, $2)
+                INSERT INTO user_credits (user_id, total_nano_usd)
+                VALUES ($1, $2)
                 ON CONFLICT (user_id)
                 DO UPDATE SET
-                    balance = user_credits.balance + EXCLUDED.balance,
-                    total_purchased_nano_usd = user_credits.total_purchased_nano_usd + EXCLUDED.balance,
+                    total_nano_usd = user_credits.total_nano_usd + EXCLUDED.total_nano_usd,
                     updated_at = NOW()
-                RETURNING balance
+                RETURNING (total_nano_usd - used_nano_usd)::bigint AS remaining
                 "#,
                 &[&user_id, &amount],
             )
             .await?;
-        Ok(row.get::<_, i64>("balance"))
+        Ok(row.get::<_, i64>("remaining"))
     }
 
     async fn try_record_purchase(
@@ -183,7 +190,7 @@ impl CreditsRepository for PostgresCreditsRepository {
         let row = txn
             .query_opt(
                 r#"
-                SELECT total_purchased_nano_usd, used_purchased_nano_usd
+                SELECT total_nano_usd, used_nano_usd
                 FROM user_credits
                 WHERE user_id = $1
                 FOR UPDATE
@@ -194,8 +201,8 @@ impl CreditsRepository for PostgresCreditsRepository {
 
         let (total_purchased, _old_used) = match row {
             Some(r) => (
-                r.get::<_, i64>("total_purchased_nano_usd"),
-                r.get::<_, i64>("used_purchased_nano_usd"),
+                r.get::<_, i64>("total_nano_usd"),
+                r.get::<_, i64>("used_nano_usd"),
             ),
             None => return Ok(()), // no purchased pool
         };
@@ -222,17 +229,15 @@ impl CreditsRepository for PostgresCreditsRepository {
         let plan = plan_credits_nano_usd.max(0);
         let over_plan = (u - plan).max(0);
         let new_used = over_plan.min(total_purchased).max(0);
-        let new_balance = (total_purchased - new_used).max(0);
 
         txn.execute(
             r#"
             UPDATE user_credits
-            SET used_purchased_nano_usd = $2,
-                balance = $3,
+            SET used_nano_usd = $2,
                 updated_at = NOW()
             WHERE user_id = $1
             "#,
-            &[&user_id, &new_used, &new_balance],
+            &[&user_id, &new_used],
         )
         .await?;
 

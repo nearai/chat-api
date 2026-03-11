@@ -762,8 +762,8 @@ credits_balance AS (
     SELECT
         user_id,
         -- purchased_credits_nano = total purchased+granted; remaining = purchased - used_purchased
-        (COALESCE(total_purchased_nano_usd, 0))::bigint AS purchased_credits_nano,
-        (COALESCE(used_purchased_nano_usd, 0))::bigint AS used_purchased_nano
+        (COALESCE(total_nano_usd, 0))::bigint AS purchased_credits_nano,
+        (COALESCE(used_nano_usd, 0))::bigint AS used_purchased_nano
     FROM user_credits
 ),
 enriched AS (

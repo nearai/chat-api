@@ -376,13 +376,12 @@ fn record_usage_on_stream_end(usage: Option<ParsedUsage>, ctx: StreamUsageContex
                     ctx.user_usage.record_usage(params).await
                 };
 
-                if result.is_ok()
-                    && cost_nano_usd.unwrap_or(0) > 0 {
-                        let _ = ctx
-                            .subscription_service
-                            .reconcile_purchased_after_usage(ctx.user_id)
-                            .await;
-                    }
+                if result.is_ok() && cost_nano_usd.unwrap_or(0) > 0 {
+                    let _ = ctx
+                        .subscription_service
+                        .reconcile_purchased_after_usage(ctx.user_id)
+                        .await;
+                }
 
                 if let Err(e) = result {
                     tracing::warn!(

@@ -21,10 +21,10 @@ pub struct UserWithStats {
     pub agent_spent_nano: i64,
     pub agent_token_usage: i64,
     pub last_activity_at: Option<DateTime<Utc>>,
-    /// Total purchased+granted credits (nano-USD), from user_credits.total_purchased_nano_usd.
+    /// Total purchased+granted credits (nano-USD), from user_credits.total_nano_usd.
     /// Remaining = purchased_credits_nano - used_purchased_credits_nano.
     pub purchased_credits_nano: i64,
-    /// Used portion of purchased credits (nano-USD), from user_credits.used_purchased_nano_usd.
+    /// Used portion of purchased credits (nano-USD), from user_credits.used_nano_usd.
     pub used_purchased_credits_nano: i64,
 }
 

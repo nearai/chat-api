@@ -219,7 +219,7 @@ pub struct CreditTransaction {
 
 #[async_trait]
 pub trait CreditsRepository: Send + Sync {
-    /// Remaining purchased credits for a user (0 if no row). Same as balance column.
+    /// Remaining purchased credits for a user (0 if no row). Computed as total_nano_usd - used_nano_usd.
     async fn get_balance(&self, user_id: UserId) -> anyhow::Result<i64>;
 
     /// Remaining, total purchased, used purchased (nano-USD). Zeros if no row.
