@@ -277,6 +277,9 @@ pub async fn create_test_server_and_db(
         model_pricing_cache: api::model_pricing::ModelPricingCache::new(
             test_config.cloud_api_base_url.clone(),
         ),
+        web_search_pricing_cache: api::web_search_pricing::WebSearchPricingCache::new(
+            test_config.cloud_api_base_url.clone(),
+        ),
         system_configs_cache: Arc::new(tokio::sync::RwLock::new(None)),
         rate_limit_state,
         bi_metrics_service,

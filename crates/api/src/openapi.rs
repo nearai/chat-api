@@ -59,6 +59,7 @@ use utoipa::OpenApi;
         crate::routes::api::proxy_models,
         crate::routes::api::proxy_model_list,
         crate::routes::api::proxy_signature,
+        crate::routes::api::proxy_web_search,
         // Subscription endpoints
         crate::routes::subscriptions::create_subscription,
         crate::routes::subscriptions::create_portal_session,

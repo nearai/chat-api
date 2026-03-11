@@ -325,6 +325,9 @@ async fn main() -> anyhow::Result<()> {
         model_pricing_cache: api::model_pricing::ModelPricingCache::new(
             config.openai.base_url.clone().unwrap_or_default(),
         ),
+        web_search_pricing_cache: api::web_search_pricing::WebSearchPricingCache::new(
+            config.openai.base_url.clone().unwrap_or_default(),
+        ),
         system_configs_cache: Arc::new(tokio::sync::RwLock::new(None)),
         rate_limit_state,
         bi_metrics_service,
