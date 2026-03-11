@@ -8,3 +8,6 @@ version = "0.0.0"
 authors = ["support@near.ai"]
 license = "MIT"
 description = "NEAR AI Chat API"
+
+[profile.dev]
+debug = false

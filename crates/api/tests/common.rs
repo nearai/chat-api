@@ -126,6 +126,15 @@ pub async fn create_test_server_and_db(
     // Create agent repo (needed by subscription service for change_plan)
     let agent_repo = db.agent_repository();
 
+    // Create agent service (needed by subscription service for instance kill on cancel)
+    let agent_service = Arc::new(services::agent::AgentServiceImpl::new(
+        agent_repo.clone(),
+        config.agent.managers.clone(),
+        config.agent.nearai_api_url.clone(),
+        system_configs_service.clone()
+            as Arc<dyn services::system_configs::ports::SystemConfigsService>,
+    ));
+
     // Initialize subscription service for testing
     let subscription_service = Arc::new(services::subscription::SubscriptionServiceImpl::new(
         services::subscription::SubscriptionServiceConfig {
@@ -142,6 +151,7 @@ pub async fn create_test_server_and_db(
             user_usage_repo: db.user_usage_repository()
                 as Arc<dyn services::user_usage::UserUsageRepository>,
             agent_repo: agent_repo.clone() as Arc<dyn services::agent::ports::AgentRepository>,
+            agent_service: agent_service.clone() as Arc<dyn services::agent::ports::AgentService>,
             stripe_secret_key: config.stripe.secret_key.clone(),
             stripe_webhook_secret: config.stripe.webhook_secret.clone(),
         },
@@ -223,15 +233,6 @@ pub async fn create_test_server_and_db(
         analytics_service.clone(),
         user_usage_service.clone(),
     );
-
-    // Create agent service for testing
-    let agent_service = Arc::new(services::agent::AgentServiceImpl::new(
-        agent_repo.clone(),
-        config.agent.managers.clone(),
-        config.agent.nearai_api_url.clone(),
-        system_configs_service.clone()
-            as Arc<dyn services::system_configs::ports::SystemConfigsService>,
-    ));
 
     // Create agent proxy service for testing
     let agent_proxy_service: Arc<dyn services::agent::AgentProxyService> =

@@ -257,4 +257,18 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
 
         Ok(row.as_ref().map(row_to_subscription))
     }
+
+    async fn get_subscription_status_for_update(
+        &self,
+        txn: &tokio_postgres::Transaction<'_>,
+        subscription_id: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let row = txn
+            .query_opt(
+                "SELECT status FROM subscriptions WHERE subscription_id = $1 FOR UPDATE",
+                &[&subscription_id],
+            )
+            .await?;
+        Ok(row.map(|r| r.get(0)))
+    }
 }
