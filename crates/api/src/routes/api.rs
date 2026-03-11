@@ -3115,51 +3115,53 @@ async fn proxy_web_search(
         _ => {}
     }
 
-    // Record usage (instance_id => record_usage_and_update_balance).
-    let cost_nano_usd = state.web_search_pricing_cache.get_cost_per_unit().await;
-    let details = serde_json::to_value(WebSearchUsageDetails {
-        request_type: "web_search",
-    })
-    .ok();
+    if (200..300).contains(&proxy_response.status) {
+        // Record usage only for successful upstream responses.
+        let cost_nano_usd = state.web_search_pricing_cache.get_cost_per_unit().await;
+        let details = serde_json::to_value(WebSearchUsageDetails {
+            request_type: "web_search",
+        })
+        .ok();
 
-    let (instance_id, api_key_id) = api_key_ext
-        .as_ref()
-        .map(|ak| (ak.api_key_info.instance_id, Some(ak.api_key_info.id)))
-        .unwrap_or((None, None));
+        let (instance_id, api_key_id) = api_key_ext
+            .as_ref()
+            .map(|ak| (ak.api_key_info.instance_id, Some(ak.api_key_info.id)))
+            .unwrap_or((None, None));
 
-    let usage_params = services::user_usage::RecordUsageParams {
-        user_id: user.user_id,
-        metric_key: services::user_usage::METRIC_KEY_SERVICE_WEB_SEARCH.to_string(),
-        quantity: 1,
-        cost_nano_usd: Some(cost_nano_usd),
-        model_id: None,
-        instance_id,
-        api_key_id,
-        details,
-    };
-
-    let state_clone = state.clone();
-    tokio::spawn(async move {
-        let result = if instance_id.is_some() {
-            state_clone
-                .user_usage_service
-                .record_usage_and_update_balance(usage_params)
-                .await
-        } else {
-            state_clone
-                .user_usage_service
-                .record_usage(usage_params)
-                .await
+        let usage_params = services::user_usage::RecordUsageParams {
+            user_id: user.user_id,
+            metric_key: services::user_usage::METRIC_KEY_SERVICE_WEB_SEARCH.to_string(),
+            quantity: 1,
+            cost_nano_usd: Some(cost_nano_usd),
+            model_id: None,
+            instance_id,
+            api_key_id,
+            details,
         };
 
-        if let Err(e) = result {
-            tracing::warn!(
-                "Failed to record web search usage for user_id={}: {}",
-                user.user_id,
-                e
-            );
-        }
-    });
+        let state_clone = state.clone();
+        tokio::spawn(async move {
+            let result = if instance_id.is_some() {
+                state_clone
+                    .user_usage_service
+                    .record_usage_and_update_balance(usage_params)
+                    .await
+            } else {
+                state_clone
+                    .user_usage_service
+                    .record_usage(usage_params)
+                    .await
+            };
+
+            if let Err(e) = result {
+                tracing::warn!(
+                    "Failed to record web search usage for user_id={}: {}",
+                    user.user_id,
+                    e
+                );
+            }
+        });
+    }
 
     build_response(
         proxy_response.status,
