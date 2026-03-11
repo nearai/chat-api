@@ -4,6 +4,7 @@ use super::ports::{
     SubscriptionWithPlan, DEFAULT_MONTHLY_TOKEN_LIMIT,
 };
 use crate::agent::ports::AgentRepository;
+use crate::agent::ports::AgentService;
 use crate::system_configs::ports::{SubscriptionPlanConfig, SystemConfigsService};
 use crate::user::ports::UserRepository;
 use crate::user_usage::ports::UserUsageRepository;
@@ -31,6 +32,7 @@ pub struct SubscriptionServiceConfig {
     pub user_repository: Arc<dyn UserRepository>,
     pub user_usage_repo: Arc<dyn UserUsageRepository>,
     pub agent_repo: Arc<dyn AgentRepository>,
+    pub agent_service: Arc<dyn AgentService>,
     pub stripe_secret_key: String,
     pub stripe_webhook_secret: String,
 }
@@ -56,6 +58,7 @@ pub struct SubscriptionServiceImpl {
     user_repository: Arc<dyn UserRepository>,
     user_usage_repo: Arc<dyn UserUsageRepository>,
     agent_repo: Arc<dyn AgentRepository>,
+    agent_service: Arc<dyn AgentService>,
     stripe_secret_key: String,
     stripe_webhook_secret: String,
     token_limit_cache: Arc<RwLock<HashMap<UserId, CachedTokenLimit>>>,
@@ -72,6 +75,7 @@ impl SubscriptionServiceImpl {
             user_repository: config.user_repository,
             user_usage_repo: config.user_usage_repo,
             agent_repo: config.agent_repo,
+            agent_service: config.agent_service,
             stripe_secret_key: config.stripe_secret_key,
             stripe_webhook_secret: config.stripe_webhook_secret,
             token_limit_cache: Arc::new(RwLock::new(HashMap::new())),
@@ -83,6 +87,66 @@ impl SubscriptionServiceImpl {
         let mut guard = self.token_limit_cache.write().await;
         guard.remove(&user_id);
         tracing::debug!("Invalidated token limit cache for user_id={}", user_id);
+    }
+
+    /// Maximum number of retries when killing instances after subscription cancel.
+    const KILL_INSTANCE_MAX_RETRIES: u32 = 1;
+
+    /// Kill all running instances for a user after their subscription is canceled.
+    /// Runs asynchronously after the webhook transaction commits.
+    /// Each instance deletion is attempted up to KILL_INSTANCE_MAX_RETRIES+1 times.
+    /// Failures are logged but do not affect the webhook response.
+    async fn kill_user_instances_with_retry(agent_service: Arc<dyn AgentService>, user_id: UserId) {
+        let instances = match agent_service.list_instances(user_id, 1000, 0).await {
+            Ok((list, _)) => list,
+            Err(e) => {
+                tracing::error!(
+                    "Failed to list instances for cancel cleanup: user_id={}, err={}",
+                    user_id,
+                    e
+                );
+                return;
+            }
+        };
+
+        if instances.is_empty() {
+            return;
+        }
+
+        tracing::info!(
+            "Killing {} instance(s) after subscription cancel: user_id={}",
+            instances.len(),
+            user_id
+        );
+
+        for instance in &instances {
+            let mut last_err = None;
+            for attempt in 0..=Self::KILL_INSTANCE_MAX_RETRIES {
+                match agent_service.delete_instance(instance.id).await {
+                    Ok(()) => {
+                        last_err = None;
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to kill instance (attempt {}): instance_id={}, err={}",
+                            attempt + 1,
+                            instance.id,
+                            e
+                        );
+                        last_err = Some(e);
+                    }
+                }
+            }
+            if let Some(e) = last_err {
+                tracing::error!(
+                    "All retries exhausted for instance kill: instance_id={}, user_id={}, err={}",
+                    instance.id,
+                    user_id,
+                    e
+                );
+            }
+        }
     }
 
     /// Get subscription plans for a provider from system configs (lazy loading)
@@ -1312,12 +1376,28 @@ impl SubscriptionService for SubscriptionServiceImpl {
 
         // Upsert subscription if we have data
         let mut user_id_to_invalidate: Option<UserId> = None;
+        let mut user_id_to_kill_instances: Option<UserId> = None;
         if let Some((subscription_id, subscription)) = subscription_data {
             let user_id = subscription.user_id;
-            self.subscription_repo
+
+            // Read current status with row lock to detect first-time cancel transition.
+            // FOR UPDATE serializes concurrent webhooks for the same subscription.
+            let old_status = self
+                .subscription_repo
+                .get_subscription_status_for_update(&txn, &subscription_id)
+                .await
+                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+            let new_sub = self
+                .subscription_repo
                 .upsert_subscription(&txn, subscription)
                 .await
                 .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+            // Detect first transition to canceled: trigger async instance kill
+            if old_status.as_deref() != Some("canceled") && new_sub.status == "canceled" {
+                user_id_to_kill_instances = Some(user_id);
+            }
 
             tracing::info!(
                 "Subscription synced to database: subscription_id={}, user_id={}",
@@ -1371,6 +1451,19 @@ impl SubscriptionService for SubscriptionServiceImpl {
             event_id,
             event_type
         );
+
+        // After commit: spawn async kill task for canceled subscriptions.
+        // The FOR UPDATE above ensures only the first webhook to detect the transition spawns this.
+        if let Some(uid) = user_id_to_kill_instances {
+            tracing::info!(
+                "Subscription canceled, spawning instance kill task: user_id={}",
+                uid
+            );
+            let agent_svc = self.agent_service.clone();
+            tokio::spawn(async move {
+                Self::kill_user_instances_with_retry(agent_svc, uid).await;
+            });
+        }
 
         Ok(())
     }

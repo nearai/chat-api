@@ -269,6 +269,15 @@ pub trait SubscriptionRepository: Send + Sync {
         txn: &tokio_postgres::Transaction<'_>,
         subscription_id: &str,
     ) -> anyhow::Result<Option<Subscription>>;
+
+    /// Fetch current status of a subscription with a row lock (FOR UPDATE).
+    /// Returns None if the subscription does not exist yet.
+    /// Used to detect first-time status transitions (e.g. active → canceled) under concurrent webhooks.
+    async fn get_subscription_status_for_update(
+        &self,
+        txn: &tokio_postgres::Transaction<'_>,
+        subscription_id: &str,
+    ) -> anyhow::Result<Option<String>>;
 }
 
 /// Repository trait for payment webhook events
