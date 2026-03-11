@@ -97,6 +97,16 @@ impl SubscriptionServiceImpl {
         tracing::debug!("Invalidated credit limit cache for user_id={}", user_id);
     }
 
+    /// Convert a whole-number credit count into nano-USD (1 credit == $1 == 1_000_000_000 nano-USD).
+    /// Returns None when the multiplication would overflow i64.
+    fn credits_to_nano_usd(credits: i64) -> Option<i64> {
+        if credits <= 0 {
+            return None;
+        }
+        let v = (credits as i128) * 1_000_000_000_i128;
+        i64::try_from(v).ok()
+    }
+
     /// Get subscription plans for a provider from system configs (lazy loading)
     /// Returns HashMap<plan_name, price_id> for the given provider
     async fn get_plans_for_provider(
@@ -1035,10 +1045,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
                         let credits_str = meta.get("credits").and_then(|v| v.as_str());
                         if let (Some(uid), Some(cr)) = (user_id_str, credits_str) {
                             match (uuid::Uuid::parse_str(uid), cr.parse::<i64>()) {
-                                (Ok(uuid), Ok(credits_count)) if credits_count > 0 => {
-                                    let amount_nano_usd_i128 =
-                                        (credits_count as i128) * 1_000_000_000_i128;
-                                    if let Ok(amount_nano_usd) = i64::try_from(amount_nano_usd_i128)
+                                (Ok(uuid), Ok(credits_count)) => {
+                                    if let Some(amount_nano_usd) =
+                                        Self::credits_to_nano_usd(credits_count)
                                     {
                                         let user_id = UserId(uuid);
                                         let inserted = self
