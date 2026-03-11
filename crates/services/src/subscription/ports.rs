@@ -101,6 +101,8 @@ pub enum ChangePlanOutcome {
     ScheduledForPeriodEnd,
     /// Requested plan is already active.
     NoOp,
+    /// A pending downgrade was cancelled (same plan requested with active pending downgrade).
+    DowngradeCancelled,
 }
 
 /// Stripe customer mapping data
@@ -161,6 +163,8 @@ pub enum SubscriptionError {
     InternalError(String),
     /// Cannot associate test clock with existing Stripe customer
     TestClockNotAllowedForExistingCustomer,
+    /// No pending downgrade to cancel (same plan requested but no pending downgrade exists)
+    NoPendingDowngrade,
 }
 
 impl fmt::Display for SubscriptionError {
@@ -202,6 +206,9 @@ impl fmt::Display for SubscriptionError {
                     f,
                     "Cannot associate test clock with existing Stripe customer"
                 )
+            }
+            Self::NoPendingDowngrade => {
+                write!(f, "No pending downgrade to cancel")
             }
         }
     }
@@ -278,6 +285,10 @@ pub trait SubscriptionRepository: Send + Sync {
         txn: &tokio_postgres::Transaction<'_>,
         subscription_id: &str,
     ) -> anyhow::Result<Option<String>>;
+
+    /// Unconditionally clear all pending-downgrade fields for a subscription.
+    /// Used when an upgrade or explicit cancellation makes the pending intent obsolete.
+    async fn clear_pending_downgrade(&self, subscription_id: &str) -> anyhow::Result<()>;
 }
 
 /// Repository trait for payment webhook events

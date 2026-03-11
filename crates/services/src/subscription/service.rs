@@ -1037,14 +1037,23 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
             .ok_or(SubscriptionError::NoActiveSubscription)?;
 
-        // Don't change if already on target plan
+        // Same plan requested: cancel pending downgrade if one exists, otherwise error
         if subscription.price_id == price_id {
-            tracing::info!(
-                "User already on target plan: user_id={}, plan={}",
-                user_id,
-                target_plan
-            );
-            return Ok(ChangePlanOutcome::NoOp);
+            if subscription.pending_downgrade_status == Some(DowngradeIntentStatus::Pending) {
+                self.subscription_repo
+                    .clear_pending_downgrade(&subscription.subscription_id)
+                    .await
+                    .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+                self.invalidate_token_limit_cache(user_id).await;
+                tracing::info!(
+                    "Pending downgrade cancelled: user_id={}, subscription_id={}",
+                    user_id,
+                    subscription.subscription_id
+                );
+                return Ok(ChangePlanOutcome::DowngradeCancelled);
+            } else {
+                return Err(SubscriptionError::NoPendingDowngrade);
+            }
         }
 
         let plans = self.get_subscription_plans().await?;
@@ -1096,6 +1105,17 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .subscription_id
             .parse()
             .map_err(|_| SubscriptionError::StripeError("Invalid subscription ID".into()))?;
+
+        // Clear any pending downgrade before applying the upgrade.
+        // The user's intent is now to upgrade, so the pending intent is obsolete regardless of
+        // whether the Stripe call succeeds.
+        if subscription.pending_downgrade_status.is_some() {
+            self.subscription_repo
+                .clear_pending_downgrade(&subscription.subscription_id)
+                .await
+                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+            self.invalidate_token_limit_cache(user_id).await;
+        }
 
         let stripe_sub = StripeSubscription::retrieve(&client, &subscription_id, &[])
             .await

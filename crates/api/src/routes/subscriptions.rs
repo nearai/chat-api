@@ -248,6 +248,10 @@ pub async fn create_subscription(
             SubscriptionError::TestClockNotAllowedForExistingCustomer => ApiError::bad_request(
                 "Cannot associate test clock with existing Stripe customer".to_string(),
             ),
+            SubscriptionError::NoPendingDowngrade => {
+                tracing::error!("Unexpected NoPendingDowngrade in create");
+                ApiError::internal_server_error("Failed to create subscription")
+            }
         })?;
 
     Ok(Json(CreateSubscriptionResponse { checkout_url }))
@@ -410,6 +414,9 @@ pub async fn change_plan(
                 tracing::error!(error = ?msg, "Stripe error changing plan");
                 ApiError::internal_server_error("Failed to change plan")
             }
+            SubscriptionError::NoPendingDowngrade => {
+                ApiError::bad_request("No pending downgrade to cancel")
+            }
             _ => {
                 tracing::error!(error = ?e, "Failed to change plan");
                 ApiError::internal_server_error("Failed to change plan")
@@ -423,6 +430,7 @@ pub async fn change_plan(
                 "Downgrade scheduled and will be checked near period end".to_string()
             }
             ChangePlanOutcome::NoOp => "User is already on the target plan".to_string(),
+            ChangePlanOutcome::DowngradeCancelled => "Pending downgrade cancelled".to_string(),
         },
         result: outcome,
     }))
