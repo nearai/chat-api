@@ -242,6 +242,8 @@ pub async fn create_test_server_and_db(
     let bi_metrics_service: Arc<dyn services::bi_metrics::BiMetricsService> =
         Arc::new(services::bi_metrics::BiMetricsServiceImpl::new(
             bi_metrics_repo as Arc<dyn services::bi_metrics::BiMetricsRepository>,
+            system_configs_service.clone()
+                as Arc<dyn services::system_configs::ports::SystemConfigsService>,
         ));
 
     // Create application state
@@ -377,6 +379,49 @@ pub async fn insert_test_subscription_with_price_id(
         price_id,
     )
     .await;
+}
+
+/// Insert a test subscription with custom status (for testing BI subscription filtering).
+/// Use status: "active", "trialing", "canceled", "past_due", "unpaid", etc.
+pub async fn insert_test_subscription_with_status(
+    server: &TestServer,
+    db: &database::Database,
+    user_email: &str,
+    status: &str,
+    price_id: &str,
+) {
+    let _token = mock_login(server, user_email).await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .expect("get user")
+        .expect("user created by mock_login");
+
+    let period_end = chrono::Utc::now() + chrono::Duration::days(1);
+    let sub_id = format!("sub_test_{}", Uuid::new_v4());
+
+    let client = db.pool().get().await.expect("get pool client");
+    client
+        .execute(
+            "INSERT INTO subscriptions (
+                subscription_id, user_id, provider, customer_id, price_id, status,
+                current_period_end, cancel_at_period_end
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            &[
+                &sub_id,
+                &user.id,
+                &"stripe",
+                &"cus_test",
+                &price_id,
+                &status,
+                &period_end,
+                &false,
+            ],
+        )
+        .await
+        .expect("insert subscription");
 }
 
 /// Internal helper that contains the common upsert logic for test subscriptions.

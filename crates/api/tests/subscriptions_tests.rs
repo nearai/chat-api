@@ -926,16 +926,18 @@ async fn test_list_plans_returns_configured_plans() {
     let admin_email = "test_list_plans@admin.org";
     let admin_token = mock_login(&server, admin_email).await;
 
-    // Configure subscription plans with private_assistant_instances and monthly_tokens
+    // Configure subscription plans with price, agent_instances, and monthly_tokens
     let config_body = json!({
         "subscription_plans": {
             "starter": {
                 "providers": { "stripe": { "price_id": "price_starter_789" } },
+                "price": 999,
                 "agent_instances": { "max": 1 },
                 "monthly_tokens": { "max": 500_000 }
             },
             "premium": {
                 "providers": { "stripe": { "price_id": "price_premium_012" } },
+                "price": 1999,
                 "agent_instances": { "max": 5 },
                 "monthly_tokens": { "max": 5_000_000 }
             }
@@ -996,6 +998,11 @@ async fn test_list_plans_returns_configured_plans() {
         match name {
             "starter" => {
                 assert_eq!(
+                    plan.get("price").and_then(|p| p.as_i64()),
+                    Some(999),
+                    "Starter plan should have price = 999 cents ($9.99)"
+                );
+                assert_eq!(
                     plan.get("agent_instances")
                         .and_then(|d| d.get("max"))
                         .and_then(|m| m.as_u64()),
@@ -1011,6 +1018,11 @@ async fn test_list_plans_returns_configured_plans() {
                 );
             }
             "premium" => {
+                assert_eq!(
+                    plan.get("price").and_then(|p| p.as_i64()),
+                    Some(1999),
+                    "Premium plan should have price = 1999 cents ($19.99)"
+                );
                 assert_eq!(
                     plan.get("agent_instances")
                         .and_then(|d| d.get("max"))

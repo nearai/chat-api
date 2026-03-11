@@ -3,9 +3,12 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use services::bi_metrics::{
     BiMetricsRepository, DeploymentFilter, DeploymentRecord, DeploymentStatusCount,
-    DeploymentSummary, StatusChangeRecord, TopConsumer, TopConsumerFilter, TopConsumerGroupBy,
-    UsageAggregation, UsageFilter, UsageGroupBy, UsageRankBy,
+    DeploymentSummary, DeploymentsSortBy, DeploymentsSortOrder, ListUsersFilter, ListUsersSort,
+    StatusChangeRecord, TopConsumer, TopConsumerFilter, TopConsumerGroupBy, UsageAggregation,
+    UsageFilter, UsageGroupBy, UsageRankBy, UserWithStats, UsersSortBy, UsersSortOrder,
 };
+use services::user::ports::User;
+use services::UserId;
 use uuid::Uuid;
 
 /// Statement timeout for heavy aggregation queries (30 seconds).
@@ -55,6 +58,15 @@ impl QueryBuilder {
         self.params.push(Box::new(value));
     }
 
+    /// Search deployments by agent name, user email, or user name (ILIKE, one param).
+    fn push_search_deployments(&mut self, pattern: String) {
+        let idx = self.next_param_idx();
+        self.conditions.push(format!(
+            "(ai.name ILIKE ${idx} OR u.email ILIKE ${idx} OR u.name ILIKE ${idx})"
+        ));
+        self.params.push(Box::new(pattern));
+    }
+
     fn where_clause(&self) -> String {
         if self.conditions.is_empty() {
             String::new()
@@ -66,6 +78,56 @@ impl QueryBuilder {
     fn param_refs(&self) -> Vec<&(dyn tokio_postgres::types::ToSql + Sync)> {
         self.params.iter().map(|p| p.as_ref() as _).collect()
     }
+}
+
+fn list_deployments_order_clause(
+    sort_by: DeploymentsSortBy,
+    sort_order: DeploymentsSortOrder,
+) -> String {
+    let col = match sort_by {
+        DeploymentsSortBy::CreatedAt => "ai.created_at",
+        DeploymentsSortBy::UpdatedAt => "ai.updated_at",
+        DeploymentsSortBy::InstanceType => "ai.type",
+        DeploymentsSortBy::Status => "ai.status",
+        DeploymentsSortBy::UserEmail => "u.email",
+        DeploymentsSortBy::UserName => "u.name",
+        DeploymentsSortBy::Name => "ai.name",
+        DeploymentsSortBy::TotalSpentNano => "COALESCE(uue.total_spent_nano, 0)",
+        DeploymentsSortBy::TotalTokens => "COALESCE(uue.total_tokens, 0)",
+    };
+    let order = match sort_order {
+        DeploymentsSortOrder::Asc => "ASC",
+        DeploymentsSortOrder::Desc => "DESC",
+    };
+    let nulls = match sort_by {
+        DeploymentsSortBy::UserEmail | DeploymentsSortBy::UserName | DeploymentsSortBy::Name => {
+            " NULLS LAST"
+        }
+        _ => "",
+    };
+    format!("{col} {order}{nulls}")
+}
+
+fn list_users_order_clause(sort: &ListUsersSort) -> String {
+    let col = match sort.sort_by {
+        UsersSortBy::CreatedAt => "enriched.created_at",
+        UsersSortBy::TotalSpentNano => "enriched.total_spent_nano",
+        UsersSortBy::AgentSpentNano => "enriched.agent_spent_nano",
+        UsersSortBy::AgentTokenUsage => "enriched.agent_token_usage",
+        UsersSortBy::LastActivityAt => "enriched.last_activity_at",
+        UsersSortBy::AgentCount => "enriched.agent_count",
+        UsersSortBy::Email => "enriched.email",
+        UsersSortBy::Name => "enriched.name",
+    };
+    let order = match sort.sort_order {
+        UsersSortOrder::Asc => "ASC",
+        UsersSortOrder::Desc => "DESC",
+    };
+    let nulls = match sort.sort_by {
+        UsersSortBy::LastActivityAt | UsersSortBy::Name => " NULLS LAST",
+        _ => "",
+    };
+    format!("{col} {order}{nulls}")
 }
 
 #[async_trait]
@@ -90,20 +152,38 @@ impl BiMetricsRepository for PostgresBiMetricsRepository {
         if let Some(ed) = filter.end_date {
             qb.push("ai.created_at", "<=", ed);
         }
+        if let Some(ref search) = filter.search {
+            let escaped = search
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
+            let pattern = format!("%{escaped}%");
+            qb.push_search_deployments(pattern);
+        }
 
         let where_clause = qb.where_clause();
+        let order_clause = list_deployments_order_clause(filter.sort_by, filter.sort_order);
 
         // Use COUNT(*) OVER() window function to get total in a single query
-        // LEFT JOIN users to get user_email and user_name for admin display
+        // LEFT JOIN users to get user_email, user_name, and for search/sort
+        // LEFT JOIN LATERAL: aggregate usage only for this row's instance_id (avoids full table aggregate)
         let limit_idx = qb.next_param_idx();
         let offset_idx = limit_idx + 1;
         let data_sql = format!(
-            "SELECT ai.id, ai.user_id, u.email, u.name, u.avatar_url, ai.instance_id, ai.type, ai.status, ai.created_at, ai.updated_at,
-                    COUNT(*) OVER() as total_count
+            "SELECT ai.id AS id, ai.user_id AS user_id, u.email AS user_email, u.name AS user_name, u.avatar_url AS user_avatar_url,
+                    ai.name AS name, ai.instance_id AS instance_id, ai.type AS instance_type, ai.status AS status,
+                    ai.created_at AS created_at, ai.updated_at AS updated_at,
+                    COALESCE(uue.total_spent_nano, 0)::BIGINT AS total_spent_nano, COALESCE(uue.total_tokens, 0)::BIGINT AS total_tokens,
+                    COUNT(*) OVER() AS total_count
              FROM agent_instances ai
              LEFT JOIN users u ON ai.user_id = u.id
+             LEFT JOIN LATERAL (
+                 SELECT COALESCE(SUM(cost_nano_usd), 0)::BIGINT AS total_spent_nano,
+                        COALESCE(SUM(CASE WHEN metric_key = 'llm.tokens' THEN quantity ELSE 0 END), 0)::BIGINT AS total_tokens
+                 FROM user_usage_event WHERE instance_id = ai.id
+             ) uue ON TRUE
              {where_clause}
-             ORDER BY ai.created_at DESC
+             ORDER BY {order_clause}
              LIMIT ${limit_idx} OFFSET ${offset_idx}"
         );
         qb.params.push(Box::new(filter.limit));
@@ -111,21 +191,27 @@ impl BiMetricsRepository for PostgresBiMetricsRepository {
 
         let rows = client.query(&data_sql, &qb.param_refs()).await?;
 
-        let total: i64 = rows.first().map(|r| r.get(10)).unwrap_or(0);
+        let total: i64 = rows
+            .first()
+            .map(|r| r.get::<_, i64>("total_count"))
+            .unwrap_or(0);
 
         let records = rows
             .into_iter()
             .map(|r| DeploymentRecord {
-                id: r.get(0),
-                user_id: r.get(1),
-                user_email: r.get(2),
-                user_name: r.get(3),
-                user_avatar_url: r.get(4),
-                instance_id: r.get(5),
-                instance_type: r.get(6),
-                status: r.get(7),
-                created_at: r.get(8),
-                updated_at: r.get(9),
+                id: r.get("id"),
+                user_id: r.get("user_id"),
+                user_email: r.get("user_email"),
+                user_name: r.get("user_name"),
+                user_avatar_url: r.get("user_avatar_url"),
+                name: r.get("name"),
+                instance_id: r.get("instance_id"),
+                instance_type: r.get("instance_type"),
+                status: r.get("status"),
+                created_at: r.get("created_at"),
+                updated_at: r.get("updated_at"),
+                total_spent_nano: r.get("total_spent_nano"),
+                total_tokens: r.get("total_tokens"),
             })
             .collect();
 
@@ -262,33 +348,50 @@ impl BiMetricsRepository for PostgresBiMetricsRepository {
         )
         .await?;
 
-        // Determine GROUP BY, SELECT, and user-join expressions
-        let (group_expr, select_expr, user_select, user_group) = match filter.group_by {
-            UsageGroupBy::Day => (
-                "DATE(u.created_at)",
-                "CAST(DATE(u.created_at) AS TEXT) as group_key",
-                "NULL::TEXT as user_email, NULL::TEXT as user_name, NULL::TEXT as user_avatar_url",
-                "",
-            ),
-            UsageGroupBy::User => (
-                "u.user_id, u2.email, u2.name, u2.avatar_url",
-                "CAST(u.user_id AS TEXT) as group_key",
-                "u2.email as user_email, u2.name as user_name, u2.avatar_url as user_avatar_url",
-                "LEFT JOIN users u2 ON u.user_id = u2.id",
-            ),
-            UsageGroupBy::Instance => (
-                "u.instance_id",
-                "CAST(u.instance_id AS TEXT) as group_key",
-                "NULL::TEXT as user_email, NULL::TEXT as user_name, NULL::TEXT as user_avatar_url",
-                "",
-            ),
-            UsageGroupBy::Model => (
-                "COALESCE(u.model_id, 'unknown')",
-                "COALESCE(u.model_id, 'unknown') as group_key",
-                "NULL::TEXT as user_email, NULL::TEXT as user_name, NULL::TEXT as user_avatar_url",
-                "",
-            ),
-        };
+        // Determine GROUP BY, SELECT, joins, and optional active_agents / active_users counts
+        let (group_expr, select_expr, user_select, type_select, join_clause, user_group, active_agents_select, active_users_select) =
+            match filter.group_by {
+                UsageGroupBy::Day => (
+                    "DATE(u.created_at)",
+                    "CAST(DATE(u.created_at) AS TEXT) as group_key",
+                    "NULL::TEXT as user_email, NULL::TEXT as user_name, NULL::TEXT as user_avatar_url",
+                    "NULL::TEXT as instance_type",
+                    "",
+                    "",
+                    ", COUNT(DISTINCT CASE WHEN (u.quantity > 0 OR COALESCE(u.cost_nano_usd, 0) > 0) THEN u.instance_id END)::BIGINT AS active_agents_count",
+                    ", COUNT(DISTINCT CASE WHEN (u.quantity > 0 OR COALESCE(u.cost_nano_usd, 0) > 0) THEN u.user_id END)::BIGINT AS active_users_count",
+                ),
+                UsageGroupBy::User => (
+                    "u.user_id, u2.email, u2.name, u2.avatar_url",
+                    "CAST(u.user_id AS TEXT) as group_key",
+                    "u2.email as user_email, u2.name as user_name, u2.avatar_url as user_avatar_url",
+                    "NULL::TEXT as instance_type",
+                    "",
+                    "LEFT JOIN users u2 ON u.user_id = u2.id",
+                    ", COUNT(DISTINCT CASE WHEN (u.quantity > 0 OR COALESCE(u.cost_nano_usd, 0) > 0) THEN u.instance_id END)::BIGINT AS active_agents_count",
+                    "",
+                ),
+                UsageGroupBy::Instance => (
+                    "u.instance_id, ai.type, u2.email, u2.name, u2.avatar_url",
+                    "CAST(u.instance_id AS TEXT) as group_key",
+                    "u2.email as user_email, u2.name as user_name, u2.avatar_url as user_avatar_url",
+                    "ai.type as instance_type",
+                    "JOIN agent_instances ai ON u.instance_id = ai.id",
+                    "LEFT JOIN users u2 ON ai.user_id = u2.id",
+                    "",
+                    "",
+                ),
+                UsageGroupBy::Model => (
+                    "COALESCE(u.model_id, 'unknown')",
+                    "COALESCE(u.model_id, 'unknown') as group_key",
+                    "NULL::TEXT as user_email, NULL::TEXT as user_name, NULL::TEXT as user_avatar_url",
+                    "NULL::TEXT as instance_type",
+                    "",
+                    "",
+                    ", COUNT(DISTINCT CASE WHEN (u.quantity > 0 OR COALESCE(u.cost_nano_usd, 0) > 0) THEN u.instance_id END)::BIGINT AS active_agents_count",
+                    ", COUNT(DISTINCT CASE WHEN (u.quantity > 0 OR COALESCE(u.cost_nano_usd, 0) > 0) THEN u.user_id END)::BIGINT AS active_users_count",
+                ),
+            };
 
         let mut qb = QueryBuilder::new();
 
@@ -311,7 +414,10 @@ impl BiMetricsRepository for PostgresBiMetricsRepository {
             qb.push("ai.type", "=", t.clone());
         }
 
-        let join_clause = if filter.instance_type.is_some() {
+        // For Instance we always join agent_instances; for instance_type filter we need it too
+        let effective_join = if !join_clause.is_empty() {
+            join_clause
+        } else if filter.instance_type.is_some() {
             "JOIN agent_instances ai ON u.instance_id = ai.id"
         } else {
             ""
@@ -324,15 +430,16 @@ impl BiMetricsRepository for PostgresBiMetricsRepository {
         let sql = format!(
             "SELECT {select_expr},
                     {user_select},
+                    {type_select},
                     COALESCE(SUM((u.details->>'input_tokens')::BIGINT), 0)::BIGINT,
                     COALESCE(SUM((u.details->>'output_tokens')::BIGINT), 0)::BIGINT,
                     COALESCE(SUM(u.quantity), 0)::BIGINT,
                     COALESCE(SUM((u.details->>'input_cost')::BIGINT), 0)::BIGINT,
                     COALESCE(SUM((u.details->>'output_cost')::BIGINT), 0)::BIGINT,
                     COALESCE(SUM(u.cost_nano_usd), 0)::BIGINT,
-                    COUNT(*)
+                    COUNT(*){active_agents_select}{active_users_select}
              FROM user_usage_event u
-             {join_clause}
+             {effective_join}
              {user_group}
              {where_clause}
              GROUP BY {group_expr}
@@ -343,20 +450,41 @@ impl BiMetricsRepository for PostgresBiMetricsRepository {
         let rows = tx.query(&sql, &qb.param_refs()).await?;
         tx.commit().await?;
 
+        let include_active_agents = matches!(
+            filter.group_by,
+            UsageGroupBy::Day | UsageGroupBy::User | UsageGroupBy::Model
+        );
+        let include_active_users =
+            matches!(filter.group_by, UsageGroupBy::Day | UsageGroupBy::Model);
         let records = rows
             .into_iter()
-            .map(|r| UsageAggregation {
-                group_key: r.get(0),
-                user_email: r.get(1),
-                user_name: r.get(2),
-                user_avatar_url: r.get(3),
-                input_tokens: r.get(4),
-                output_tokens: r.get(5),
-                total_tokens: r.get(6),
-                input_cost_nano: r.get(7),
-                output_cost_nano: r.get(8),
-                total_cost_nano: r.get(9),
-                request_count: r.get(10),
+            .map(|r| {
+                let active_agents_count = if include_active_agents {
+                    Some(r.get::<_, i64>("active_agents_count"))
+                } else {
+                    None
+                };
+                let active_users_count = if include_active_users {
+                    Some(r.get::<_, i64>("active_users_count"))
+                } else {
+                    None
+                };
+                UsageAggregation {
+                    group_key: r.get(0),
+                    user_email: r.get(1),
+                    user_name: r.get(2),
+                    user_avatar_url: r.get(3),
+                    instance_type: r.get(4),
+                    input_tokens: r.get(5),
+                    output_tokens: r.get(6),
+                    total_tokens: r.get(7),
+                    input_cost_nano: r.get(8),
+                    output_cost_nano: r.get(9),
+                    total_cost_nano: r.get(10),
+                    request_count: r.get(11),
+                    active_agents_count,
+                    active_users_count,
+                }
             })
             .collect();
 
@@ -474,5 +602,250 @@ impl BiMetricsRepository for PostgresBiMetricsRepository {
             .collect();
 
         Ok(records)
+    }
+
+    async fn get_user_summary(
+        &self,
+    ) -> anyhow::Result<(Vec<(Option<String>, i64)>, Vec<(i64, i64)>)> {
+        let mut client = self.pool.get().await?;
+
+        // Wrap in a transaction so SET LOCAL statement_timeout takes effect
+        let tx = client.build_transaction().start().await?;
+        tx.execute(
+            &format!("SET LOCAL statement_timeout = '{AGGREGATION_TIMEOUT_MS}'"),
+            &[],
+        )
+        .await?;
+
+        // Single query: one CTE pass, two aggregations via UNION ALL
+        let sql = r#"
+WITH agent_counts AS (
+    SELECT user_id, COUNT(*)::bigint AS agent_count
+    FROM agent_instances
+    WHERE status != 'deleted'
+    GROUP BY user_id
+),
+enriched AS (
+    SELECT
+        sub.price_id AS subscription_price_id,
+        COALESCE(ac.agent_count, 0)::bigint AS agent_count
+    FROM users u
+    LEFT JOIN LATERAL (
+        SELECT price_id FROM subscriptions s
+        WHERE s.user_id = u.id AND s.status IN ('active', 'trialing')
+        ORDER BY s.created_at DESC
+        LIMIT 1
+    ) sub ON true
+    LEFT JOIN agent_counts ac ON u.id = ac.user_id
+),
+by_plan AS (
+    SELECT 1 AS part, subscription_price_id, NULL::bigint AS agent_count, COUNT(*)::bigint AS user_count
+    FROM enriched GROUP BY subscription_price_id
+),
+by_agent AS (
+    SELECT 2 AS part, NULL::text AS subscription_price_id, agent_count, COUNT(*)::bigint AS user_count
+    FROM enriched GROUP BY agent_count
+)
+SELECT part, subscription_price_id, agent_count, user_count FROM by_plan
+UNION ALL
+SELECT part, subscription_price_id, agent_count, user_count FROM by_agent ORDER BY part, agent_count
+"#;
+
+        let rows = tx.query(sql, &[]).await?;
+        tx.commit().await?;
+
+        let mut by_subscription_price_id: Vec<(Option<String>, i64)> = Vec::new();
+        let mut by_agent_count: Vec<(i64, i64)> = Vec::new();
+        for r in rows {
+            let part: i32 = r.get("part");
+            let user_count: i64 = r.get("user_count");
+            if part == 1 {
+                by_subscription_price_id.push((r.get("subscription_price_id"), user_count));
+            } else {
+                by_agent_count.push((r.get::<_, i64>("agent_count"), user_count));
+            }
+        }
+
+        Ok((by_subscription_price_id, by_agent_count))
+    }
+
+    async fn list_users_with_stats(
+        &self,
+        limit: i64,
+        offset: i64,
+        filter: &ListUsersFilter,
+        sort: &ListUsersSort,
+    ) -> anyhow::Result<(Vec<UserWithStats>, u64)> {
+        let mut client = self.pool.get().await?;
+
+        // Wrap in a transaction so SET LOCAL statement_timeout takes effect
+        let tx = client.build_transaction().start().await?;
+        tx.execute(
+            &format!("SET LOCAL statement_timeout = '{AGGREGATION_TIMEOUT_MS}'"),
+            &[],
+        )
+        .await?;
+
+        let mut filter_clauses = Vec::new();
+        let mut params: Vec<Box<dyn tokio_postgres::types::ToSql + Send + Sync>> = Vec::new();
+        let mut param_idx = 1u32;
+
+        if let Some(s) = filter.subscription_status.as_ref() {
+            match s.as_str() {
+                "none" => filter_clauses.push("enriched.subscription_status IS NULL".to_string()),
+                "active" | "trialing" => {
+                    filter_clauses.push(format!("enriched.subscription_status = ${param_idx}"));
+                    params.push(Box::new(s.to_string()));
+                    param_idx += 1;
+                }
+                _ => {}
+            }
+        }
+
+        if filter.subscription_plan_none {
+            filter_clauses.push("enriched.subscription_price_id IS NULL".to_string());
+        }
+
+        if let Some(ref price_ids) = filter.subscription_plan_price_ids {
+            if price_ids.is_empty() {
+                filter_clauses.push("1 = 0".to_string());
+            } else {
+                filter_clauses.push(format!(
+                    "enriched.subscription_price_id = ANY(${param_idx}::text[])"
+                ));
+                params.push(Box::new(price_ids.clone()));
+                param_idx += 1;
+            }
+        }
+
+        if let Some(ref search) = filter.search {
+            let escaped = search
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
+            let pattern = format!("%{escaped}%");
+            filter_clauses.push(format!(
+                "(enriched.email ILIKE ${param_idx} OR COALESCE(enriched.name, '') ILIKE ${param_idx})"
+            ));
+            params.push(Box::new(pattern));
+            param_idx += 1;
+        }
+
+        let filter_sql = if filter_clauses.is_empty() {
+            String::new()
+        } else {
+            " AND ".to_string() + &filter_clauses.join(" AND ")
+        };
+
+        let order_sql = list_users_order_clause(sort);
+        let limit_param = param_idx;
+        let offset_param = param_idx + 1;
+
+        let base_query = r#"
+WITH agent_counts AS (
+    SELECT user_id, COUNT(*)::bigint AS agent_count
+    FROM agent_instances
+    WHERE status != 'deleted'
+    GROUP BY user_id
+),
+usage_stats AS (
+    SELECT
+        user_id,
+        (COALESCE(SUM(cost_nano_usd), 0))::bigint AS total_spent_nano,
+        (COALESCE(SUM(CASE WHEN instance_id IS NOT NULL THEN cost_nano_usd ELSE 0 END), 0))::bigint AS agent_spent_nano,
+        (COALESCE(SUM(CASE WHEN instance_id IS NOT NULL AND metric_key = 'llm.tokens' THEN quantity ELSE 0 END), 0))::bigint AS agent_token_usage,
+        MAX(created_at) AS last_usage_at
+    FROM user_usage_event
+    GROUP BY user_id
+),
+enriched AS (
+    SELECT
+        u.id,
+        u.email,
+        u.name,
+        u.avatar_url,
+        u.created_at,
+        u.updated_at,
+        sub.status AS subscription_status,
+        sub.price_id AS subscription_price_id,
+        COALESCE(ac.agent_count, 0) AS agent_count,
+        COALESCE(us.total_spent_nano, 0) AS total_spent_nano,
+        COALESCE(us.agent_spent_nano, 0) AS agent_spent_nano,
+        COALESCE(us.agent_token_usage, 0) AS agent_token_usage,
+        COALESCE(us.last_usage_at, u.updated_at) AS last_activity_at
+    FROM users u
+    LEFT JOIN LATERAL (
+        SELECT status, price_id FROM subscriptions s
+        WHERE s.user_id = u.id AND s.status IN ('active', 'trialing')
+        ORDER BY s.created_at DESC
+        LIMIT 1
+    ) sub ON true
+    LEFT JOIN agent_counts ac ON u.id = ac.user_id
+    LEFT JOIN usage_stats us ON u.id = us.user_id
+)
+SELECT id, email, name, avatar_url, created_at, updated_at,
+       subscription_status, subscription_price_id, agent_count, total_spent_nano, agent_spent_nano,
+       agent_token_usage, last_activity_at,
+       COUNT(*) OVER() AS total_count
+FROM enriched
+WHERE 1=1
+"#;
+
+        let query = format!(
+            "{} {} ORDER BY {} LIMIT ${} OFFSET ${}",
+            base_query, filter_sql, order_sql, limit_param, offset_param,
+        );
+
+        let mut query_params: Vec<Box<dyn tokio_postgres::types::ToSql + Send + Sync>> = params;
+        query_params.push(Box::new(limit));
+        query_params.push(Box::new(offset));
+
+        let rows = tx
+            .query(
+                &query,
+                &query_params
+                    .iter()
+                    .map(|b| b.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
+                    .collect::<Vec<_>>(),
+            )
+            .await?;
+        tx.commit().await?;
+
+        let total_count: i64 = if rows.is_empty() {
+            0
+        } else {
+            rows[0].get("total_count")
+        };
+
+        let users = rows
+            .into_iter()
+            .map(|r| {
+                let id: UserId = r.get("id");
+                let email: String = r.get("email");
+                let name: Option<String> = r.get("name");
+                let avatar_url: Option<String> = r.get("avatar_url");
+                let created_at: DateTime<Utc> = r.get("created_at");
+                let updated_at: DateTime<Utc> = r.get("updated_at");
+                UserWithStats {
+                    user: User {
+                        id,
+                        email,
+                        name,
+                        avatar_url,
+                        created_at,
+                        updated_at,
+                    },
+                    subscription_status: r.get("subscription_status"),
+                    subscription_price_id: r.get("subscription_price_id"),
+                    agent_count: r.get::<_, i64>("agent_count"),
+                    total_spent_nano: r.get::<_, i64>("total_spent_nano"),
+                    agent_spent_nano: r.get::<_, i64>("agent_spent_nano"),
+                    agent_token_usage: r.get::<_, i64>("agent_token_usage"),
+                    last_activity_at: r.get("last_activity_at"),
+                }
+            })
+            .collect();
+
+        Ok((users, total_count as u64))
     }
 }
