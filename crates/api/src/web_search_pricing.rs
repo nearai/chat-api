@@ -1,4 +1,4 @@
-//! In-memory cache for web_search pricing from cloud-api (GET /v1/services/web_search).
+//! In-memory cache for web_search pricing from cloud-api (GET /services/web_search).
 //! Used to compute cost in nano-dollars for web_search usage recording.
 
 use chrono::{DateTime, Utc};
@@ -16,7 +16,7 @@ pub struct WebSearchPricing {
     pub cost_per_unit: i64,
 }
 
-/// Typed response from cloud-api GET /v1/services/{service_name}.
+/// Typed response from cloud-api GET /services/{service_name}.
 /// Matches AdminServiceResponse schema (camelCase).
 #[derive(Debug, serde::Deserialize)]
 struct ServicePricingResponse {
@@ -32,7 +32,7 @@ struct CacheEntry {
 }
 
 /// Thread-safe in-memory cache for web_search pricing with TTL.
-/// Fetches from cloud-api GET /v1/services/web_search (unauthenticated) on miss or expiry.
+/// Fetches from cloud-api GET /services/web_search (unauthenticated) on miss or expiry.
 #[derive(Clone)]
 pub struct WebSearchPricingCache {
     base_url: String,
@@ -73,7 +73,7 @@ impl WebSearchPricingCache {
             }
         }
 
-        let url = format!("{}/v1/services/web_search", self.base_url);
+        let url = format!("{}/services/web_search", self.base_url);
         let resp = match self.http_client.get(&url).send().await {
             Ok(r) => r,
             Err(e) => {
