@@ -3116,8 +3116,6 @@ async fn proxy_web_search(
     }
 
     if (200..300).contains(&proxy_response.status) {
-        // Record usage only for successful upstream responses.
-        let cost_nano_usd = state.web_search_pricing_cache.get_cost_per_unit().await;
         let details = serde_json::to_value(WebSearchUsageDetails {
             request_type: "web_search",
         })
@@ -3128,19 +3126,23 @@ async fn proxy_web_search(
             .map(|ak| (ak.api_key_info.instance_id, Some(ak.api_key_info.id)))
             .unwrap_or((None, None));
 
-        let usage_params = services::user_usage::RecordUsageParams {
-            user_id: user.user_id,
-            metric_key: services::user_usage::METRIC_KEY_SERVICE_WEB_SEARCH.to_string(),
-            quantity: 1,
-            cost_nano_usd: Some(cost_nano_usd),
-            model_id: None,
-            instance_id,
-            api_key_id,
-            details,
-        };
-
         let state_clone = state.clone();
         tokio::spawn(async move {
+            let cost_nano_usd = state_clone
+                .web_search_pricing_cache
+                .get_cost_per_unit()
+                .await;
+            let usage_params = services::user_usage::RecordUsageParams {
+                user_id: user.user_id,
+                metric_key: services::user_usage::METRIC_KEY_SERVICE_WEB_SEARCH.to_string(),
+                quantity: 1,
+                cost_nano_usd: Some(cost_nano_usd),
+                model_id: None,
+                instance_id,
+                api_key_id,
+                details,
+            };
+
             let result = if instance_id.is_some() {
                 state_clone
                     .user_usage_service
