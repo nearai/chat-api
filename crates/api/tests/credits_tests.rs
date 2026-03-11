@@ -76,6 +76,14 @@ async fn test_get_credits_returns_summary() {
         body.get("effective_max_credits").is_some(),
         "Should have effective_max_credits"
     );
+    assert!(
+        body.get("total_purchased_nano_usd").is_some(),
+        "Should have total_purchased_nano_usd"
+    );
+    assert!(
+        body.get("used_purchased_nano_usd").is_some(),
+        "Should have used_purchased_nano_usd"
+    );
 }
 
 #[tokio::test]

@@ -2483,6 +2483,7 @@ async fn proxy_responses(
         let mut usage_stream = UsageTrackingStreamResponseCompleted::new(
             proxy_response.body,
             state.user_usage_service.clone(),
+            state.subscription_service.clone(),
             state.model_pricing_cache.clone(),
             user.user_id,
         );
@@ -3627,6 +3628,7 @@ async fn proxy_chat_completions(
         let mut usage_stream = UsageTrackingStreamChatCompletions::new(
             proxy_response.body,
             state.user_usage_service.clone(),
+            state.subscription_service.clone(),
             state.model_pricing_cache.clone(),
             user.user_id,
         );
@@ -4738,6 +4740,11 @@ async fn record_image_usage(
             user_id,
             e
         );
+    } else if cost_nano_usd > 0 {
+        let _ = state
+            .subscription_service
+            .reconcile_purchased_after_usage(user_id)
+            .await;
     }
 }
 
@@ -4819,6 +4826,13 @@ async fn record_chat_usage_from_body(
         return false;
     }
 
+    if cost_nano_usd.unwrap_or(0) > 0 {
+        let _ = state
+            .subscription_service
+            .reconcile_purchased_after_usage(user_id)
+            .await;
+    }
+
     true
 }
 
@@ -4887,6 +4901,13 @@ async fn record_response_usage_from_body(
     if let Err(e) = result {
         tracing::warn!("Failed to record usage for user_id={}: {}", user_id, e);
         return false;
+    }
+
+    if cost_nano_usd.unwrap_or(0) > 0 {
+        let _ = state
+            .subscription_service
+            .reconcile_purchased_after_usage(user_id)
+            .await;
     }
 
     true

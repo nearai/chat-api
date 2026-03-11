@@ -1,11 +1,18 @@
--- Table for purchased credits balance per user.
+-- Table for purchased credits per user.
 -- Unit: nano-USD (1e-9 USD; 1_000_000_000 = $1). Same unit as cost_nano_usd and monthly_credits.
+-- balance = remaining purchased; total_purchased = cumulative purchased+granted; used_purchased = consumed above plan.
 CREATE TABLE user_credits (
     user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
     balance BIGINT NOT NULL DEFAULT 0 CHECK (balance >= 0),
+    total_purchased_nano_usd BIGINT NOT NULL DEFAULT 0,
+    used_purchased_nano_usd BIGINT NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+COMMENT ON COLUMN user_credits.balance IS 'Remaining purchased credits (nano-USD); total_purchased - used_purchased';
+COMMENT ON COLUMN user_credits.total_purchased_nano_usd IS 'Cumulative purchased+granted credits (nano-USD)';
+COMMENT ON COLUMN user_credits.used_purchased_nano_usd IS 'Portion of period usage that exceeded plan, capped by total_purchased (nano-USD)';
 
 -- Trigger for updating updated_at timestamp on user_credits
 CREATE TRIGGER update_user_credits_updated_at

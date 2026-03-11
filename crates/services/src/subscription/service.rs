@@ -314,6 +314,63 @@ impl SubscriptionServiceImpl {
             updated_at: chrono::Utc::now(),
         })
     }
+
+    /// Resolve plan monthly credits (nano-USD) and billing period for credit reconciliation.
+    async fn resolve_plan_period_for_user(
+        &self,
+        user_id: UserId,
+    ) -> Result<(i64, chrono::DateTime<Utc>, chrono::DateTime<Utc>), SubscriptionError> {
+        let configs = self
+            .system_configs_service
+            .get_configs()
+            .await
+            .map_err(|e| SubscriptionError::InternalError(e.to_string()))?;
+        let subscription_plans = configs
+            .and_then(|c| c.subscription_plans)
+            .unwrap_or_default();
+
+        let plan_limit_max = |config: &SubscriptionPlanConfig| {
+            if let Some(ref lim) = config.monthly_credits {
+                return lim.max;
+            }
+            if let Some(ref lim) = config.monthly_tokens {
+                let nano_usd = (lim.max as u128 * NANO_USD_PER_1_5_USD as u128
+                    / TOKENS_TO_CREDITS_PER_M as u128)
+                    .min(u64::MAX as u128) as u64;
+                return nano_usd;
+            }
+            DEFAULT_MONTHLY_CREDITS_NANO_USD
+        };
+
+        let (plan_credits, period_start, period_end) = match self
+            .subscription_repo
+            .get_active_subscription(user_id)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
+        {
+            Some(ref sub) => {
+                let plan_name =
+                    resolve_plan_name_from_config("stripe", &sub.price_id, &subscription_plans);
+                let plan_credits = subscription_plans
+                    .get(&plan_name)
+                    .map(plan_limit_max)
+                    .unwrap_or(DEFAULT_MONTHLY_CREDITS_NANO_USD);
+                let period_end = sub.current_period_end;
+                let period_start = sub_one_month_same_day(period_end);
+                (plan_credits, period_start, period_end)
+            }
+            None => {
+                let plan_credits = subscription_plans
+                    .get("free")
+                    .map(plan_limit_max)
+                    .unwrap_or(DEFAULT_MONTHLY_CREDITS_NANO_USD);
+                let (period_start, period_end) = current_calendar_month_period(Utc::now());
+                (plan_credits, period_start, period_end)
+            }
+        };
+
+        Ok((plan_credits as i64, period_start, period_end))
+    }
 }
 
 /// Subtract one calendar month from a datetime, keeping the same day when possible.
@@ -1689,73 +1746,33 @@ impl SubscriptionService for SubscriptionServiceImpl {
         Ok(checkout_url)
     }
 
+    async fn reconcile_purchased_after_usage(
+        &self,
+        user_id: UserId,
+    ) -> Result<(), SubscriptionError> {
+        if !self.is_stripe_configured() {
+            return Ok(());
+        }
+        let (plan_credits, period_start, period_end) =
+            self.resolve_plan_period_for_user(user_id).await?;
+        self.credits_repo
+            .reconcile_purchased_after_usage(user_id, plan_credits, period_start, period_end)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+        self.invalidate_credit_limit_cache(user_id).await;
+        Ok(())
+    }
+
     async fn get_credits(&self, user_id: UserId) -> Result<CreditsSummary, SubscriptionError> {
-        let configs = self
-            .system_configs_service
-            .get_configs()
-            .await
-            .map_err(|e| SubscriptionError::InternalError(e.to_string()))?;
-        let subscription_plans = configs
-            .and_then(|c| c.subscription_plans)
-            .unwrap_or_default();
+        // Refresh remaining balance from period usage vs plan before returning summary
+        let _ = self.reconcile_purchased_after_usage(user_id).await;
 
-        // Use monthly_credits when set (nano USD); else monthly_tokens → nano USD at 1.5 USD per M tokens. Never fail for missing config.
-        let plan_limit_max = |config: &SubscriptionPlanConfig| {
-            if let Some(ref lim) = config.monthly_credits {
-                return lim.max;
-            }
-            if let Some(ref lim) = config.monthly_tokens {
-                // fallback: 1.5 USD per M tokens => limit_nano_usd = (monthly_tokens / M) * 1.5 * 1e9
-                let nano_usd = (lim.max as u128 * NANO_USD_PER_1_5_USD as u128
-                    / TOKENS_TO_CREDITS_PER_M as u128)
-                    .min(u64::MAX as u128) as u64;
-                return nano_usd;
-            }
-            DEFAULT_MONTHLY_CREDITS_NANO_USD
-        };
-        let (plan_credits, period_start, period_end) = match self
-            .subscription_repo
-            .get_active_subscription(user_id)
-            .await
-            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
-        {
-            Some(ref sub) => {
-                let plan_name =
-                    resolve_plan_name_from_config("stripe", &sub.price_id, &subscription_plans);
-                let plan_credits = subscription_plans
-                    .get(&plan_name)
-                    .map(plan_limit_max)
-                    .unwrap_or_else(|| {
-                        tracing::warn!(
-                            "Falling back to default monthly credits in get_credits for unmatched plan '{}'; using {} nano-USD",
-                            plan_name,
-                            DEFAULT_MONTHLY_CREDITS_NANO_USD
-                        );
-                        DEFAULT_MONTHLY_CREDITS_NANO_USD
-                    });
-                let period_end = sub.current_period_end;
-                let period_start = sub_one_month_same_day(period_end);
-                (plan_credits, period_start, period_end)
-            }
-            None => {
-                let plan_credits = subscription_plans
-                    .get("free")
-                    .map(plan_limit_max)
-                    .unwrap_or_else(|| {
-                        tracing::warn!(
-                            "Falling back to default monthly credits in get_credits for missing 'free' plan; using {} nano-USD",
-                            DEFAULT_MONTHLY_CREDITS_NANO_USD
-                        );
-                        DEFAULT_MONTHLY_CREDITS_NANO_USD
-                    });
-                let (period_start, period_end) = current_calendar_month_period(Utc::now());
-                (plan_credits, period_start, period_end)
-            }
-        };
+        let (plan_credits, period_start, period_end) =
+            self.resolve_plan_period_for_user(user_id).await?;
 
-        let balance = self
+        let (balance, total_purchased_nano_usd, used_purchased_nano_usd) = self
             .credits_repo
-            .get_balance(user_id)
+            .get_purchased_breakdown(user_id)
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
@@ -1767,10 +1784,12 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .map(|s| s.cost_nano_usd)
             .unwrap_or(0);
 
-        let effective_max_credits = (plan_credits as i64).saturating_add(balance);
+        let effective_max_credits = plan_credits.saturating_add(balance);
 
         Ok(CreditsSummary {
             balance,
+            total_purchased_nano_usd,
+            used_purchased_nano_usd,
             used_credits,
             effective_max_credits,
         })

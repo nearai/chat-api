@@ -219,8 +219,11 @@ pub struct CreditTransaction {
 
 #[async_trait]
 pub trait CreditsRepository: Send + Sync {
-    /// Get purchased credits balance for a user (0 if no row)
+    /// Remaining purchased credits for a user (0 if no row). Same as balance column.
     async fn get_balance(&self, user_id: UserId) -> anyhow::Result<i64>;
+
+    /// Remaining, total purchased, used purchased (nano-USD). Zeros if no row.
+    async fn get_purchased_breakdown(&self, user_id: UserId) -> anyhow::Result<(i64, i64, i64)>;
 
     /// Add credits to user balance (upsert). Returns new balance.
     async fn add_credits(
@@ -255,6 +258,15 @@ pub trait CreditsRepository: Send + Sync {
         limit: i64,
         offset: i64,
     ) -> anyhow::Result<(Vec<CreditTransaction>, i64)>;
+
+    /// Reconcile used_purchased and remaining balance from usage in period vs plan allowance.
+    async fn reconcile_purchased_after_usage(
+        &self,
+        user_id: UserId,
+        plan_credits_nano_usd: i64,
+        period_start: chrono::DateTime<chrono::Utc>,
+        period_end: chrono::DateTime<chrono::Utc>,
+    ) -> anyhow::Result<()>;
 }
 
 /// Repository trait for payment webhook events
@@ -385,8 +397,15 @@ pub trait SubscriptionService: Send + Sync {
         cancel_url: String,
     ) -> Result<String, SubscriptionError>;
 
-    /// Get user's credits: balance, used in period, effective max.
+    /// Get user's credits: remaining balance, totals, used in period, effective max.
     async fn get_credits(&self, user_id: UserId) -> Result<CreditsSummary, SubscriptionError>;
+
+    /// After recording usage with cost, reconcile purchased used/remaining from period usage vs plan.
+    /// No-op if Stripe not configured or user has no purchased pool.
+    async fn reconcile_purchased_after_usage(
+        &self,
+        user_id: UserId,
+    ) -> Result<(), SubscriptionError>;
 
     /// Admin-only: grant credits (nano-USD) directly to a user.
     /// Records a 'grant' transaction and updates user_credits balance.
@@ -414,10 +433,14 @@ pub trait SubscriptionService: Send + Sync {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct CreditsSummary {
-    /// Purchased credits balance (nano-USD).
+    /// Remaining purchased credits (nano-USD); can spend from this pool after plan allowance.
     pub balance: i64,
+    /// Cumulative purchased+granted credits (nano-USD).
+    pub total_purchased_nano_usd: i64,
+    /// Purchased credits already consumed (usage over plan in period, capped by total).
+    pub used_purchased_nano_usd: i64,
     /// Usage in the current period (sum of cost_nano_usd).
     pub used_credits: i64,
-    /// Effective limit: plan limit + balance (nano-USD).
+    /// Effective limit: plan limit + remaining balance (nano-USD).
     pub effective_max_credits: i64,
 }

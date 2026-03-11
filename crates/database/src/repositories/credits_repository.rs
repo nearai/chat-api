@@ -2,6 +2,7 @@
 
 use crate::pool::DbPool;
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use services::subscription::ports::{CreditTransaction, CreditsRepository};
 use services::UserId;
 
@@ -28,6 +29,27 @@ impl CreditsRepository for PostgresCreditsRepository {
         Ok(row.map(|r| r.get::<_, i64>("balance")).unwrap_or(0))
     }
 
+    async fn get_purchased_breakdown(&self, user_id: UserId) -> anyhow::Result<(i64, i64, i64)> {
+        let client = self.pool.get().await?;
+        let row = client
+            .query_opt(
+                r#"
+                SELECT balance, total_purchased_nano_usd, used_purchased_nano_usd
+                FROM user_credits WHERE user_id = $1
+                "#,
+                &[&user_id],
+            )
+            .await?;
+        Ok(match row {
+            Some(r) => (
+                r.get::<_, i64>("balance"),
+                r.get::<_, i64>("total_purchased_nano_usd"),
+                r.get::<_, i64>("used_purchased_nano_usd"),
+            ),
+            None => (0, 0, 0),
+        })
+    }
+
     async fn add_credits(
         &self,
         txn: &tokio_postgres::Transaction<'_>,
@@ -37,10 +59,13 @@ impl CreditsRepository for PostgresCreditsRepository {
         let row = txn
             .query_one(
                 r#"
-                INSERT INTO user_credits (user_id, balance)
-                VALUES ($1, $2)
+                INSERT INTO user_credits (user_id, balance, total_purchased_nano_usd)
+                VALUES ($1, $2, $2)
                 ON CONFLICT (user_id)
-                DO UPDATE SET balance = user_credits.balance + EXCLUDED.balance, updated_at = NOW()
+                DO UPDATE SET
+                    balance = user_credits.balance + EXCLUDED.balance,
+                    total_purchased_nano_usd = user_credits.total_purchased_nano_usd + EXCLUDED.balance,
+                    updated_at = NOW()
                 RETURNING balance
                 "#,
                 &[&user_id, &amount],
@@ -143,5 +168,75 @@ impl CreditsRepository for PostgresCreditsRepository {
             .collect();
 
         Ok((txs, total_count))
+    }
+
+    async fn reconcile_purchased_after_usage(
+        &self,
+        user_id: UserId,
+        plan_credits_nano_usd: i64,
+        period_start: DateTime<Utc>,
+        period_end: DateTime<Utc>,
+    ) -> anyhow::Result<()> {
+        let mut client = self.pool.get().await?;
+        let txn = client.transaction().await?;
+
+        let row = txn
+            .query_opt(
+                r#"
+                SELECT total_purchased_nano_usd, used_purchased_nano_usd
+                FROM user_credits
+                WHERE user_id = $1
+                FOR UPDATE
+                "#,
+                &[&user_id],
+            )
+            .await?;
+
+        let (total_purchased, _old_used) = match row {
+            Some(r) => (
+                r.get::<_, i64>("total_purchased_nano_usd"),
+                r.get::<_, i64>("used_purchased_nano_usd"),
+            ),
+            None => return Ok(()), // no purchased pool
+        };
+
+        if total_purchased <= 0 {
+            txn.commit().await?;
+            return Ok(());
+        }
+
+        let usage_row = txn
+            .query_one(
+                r#"
+                SELECT COALESCE(SUM(COALESCE(cost_nano_usd, 0)), 0)::bigint AS cost_sum
+                FROM user_usage_event
+                WHERE user_id = $1
+                  AND created_at >= $2
+                  AND created_at < $3
+                "#,
+                &[&user_id, &period_start, &period_end],
+            )
+            .await?;
+        let u: i64 = usage_row.get("cost_sum");
+
+        let plan = plan_credits_nano_usd.max(0);
+        let over_plan = (u - plan).max(0);
+        let new_used = over_plan.min(total_purchased).max(0);
+        let new_balance = (total_purchased - new_used).max(0);
+
+        txn.execute(
+            r#"
+            UPDATE user_credits
+            SET used_purchased_nano_usd = $2,
+                balance = $3,
+                updated_at = NOW()
+            WHERE user_id = $1
+            "#,
+            &[&user_id, &new_used, &new_balance],
+        )
+        .await?;
+
+        txn.commit().await?;
+        Ok(())
     }
 }
