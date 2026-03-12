@@ -10,4 +10,4 @@ license = "MIT"
 description = "NEAR AI Chat API"
 
 [profile.dev]
-debug = false
+debug = true
