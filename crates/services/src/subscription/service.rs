@@ -89,14 +89,14 @@ impl SubscriptionServiceImpl {
         tracing::debug!("Invalidated token limit cache for user_id={}", user_id);
     }
 
-    /// Maximum number of retries when killing instances after subscription cancel.
+    /// Maximum number of retries when stopping instances after subscription cancel.
     const KILL_INSTANCE_MAX_RETRIES: u32 = 1;
 
-    /// Kill all running instances for a user after their subscription is canceled.
+    /// Stop all active instances for a user after their subscription is canceled.
     /// Runs asynchronously after the webhook transaction commits.
-    /// Each instance deletion is attempted up to KILL_INSTANCE_MAX_RETRIES+1 times.
+    /// Each instance stop is attempted up to KILL_INSTANCE_MAX_RETRIES+1 times.
     /// Failures are logged but do not affect the webhook response.
-    async fn kill_user_instances_with_retry(agent_service: Arc<dyn AgentService>, user_id: UserId) {
+    async fn stop_user_instances_with_retry(agent_service: Arc<dyn AgentService>, user_id: UserId) {
         let instances = match agent_service.list_instances(user_id, 1000, 0).await {
             Ok((list, _)) => list,
             Err(e) => {
@@ -109,27 +109,32 @@ impl SubscriptionServiceImpl {
             }
         };
 
-        if instances.is_empty() {
+        let active_instances: Vec<_> = instances
+            .into_iter()
+            .filter(|i| i.status == "active")
+            .collect();
+
+        if active_instances.is_empty() {
             return;
         }
 
         tracing::info!(
-            "Killing {} instance(s) after subscription cancel: user_id={}",
-            instances.len(),
+            "Stopping {} active instance(s) after subscription cancel: user_id={}",
+            active_instances.len(),
             user_id
         );
 
-        for instance in &instances {
+        for instance in &active_instances {
             let mut last_err = None;
             for attempt in 0..=Self::KILL_INSTANCE_MAX_RETRIES {
-                match agent_service.delete_instance(instance.id).await {
+                match agent_service.stop_instance(instance.id, user_id).await {
                     Ok(()) => {
                         last_err = None;
                         break;
                     }
                     Err(e) => {
                         tracing::warn!(
-                            "Failed to kill instance (attempt {}): instance_id={}, err={}",
+                            "Failed to stop instance (attempt {}): instance_id={}, err={}",
                             attempt + 1,
                             instance.id,
                             e
@@ -140,7 +145,7 @@ impl SubscriptionServiceImpl {
             }
             if let Some(e) = last_err {
                 tracing::error!(
-                    "All retries exhausted for instance kill: instance_id={}, user_id={}, err={}",
+                    "All retries exhausted for instance stop: instance_id={}, user_id={}, err={}",
                     instance.id,
                     user_id,
                     e
@@ -1479,16 +1484,16 @@ impl SubscriptionService for SubscriptionServiceImpl {
             event_type
         );
 
-        // After commit: spawn async kill task for canceled subscriptions.
+        // After commit: spawn async stop task for canceled subscriptions.
         // The FOR UPDATE above ensures only the first webhook to detect the transition spawns this.
         if let Some(uid) = user_id_to_kill_instances {
             tracing::info!(
-                "Subscription canceled, spawning instance kill task: user_id={}",
+                "Subscription canceled, spawning instance stop task: user_id={}",
                 uid
             );
             let agent_svc = self.agent_service.clone();
             tokio::spawn(async move {
-                Self::kill_user_instances_with_retry(agent_svc, uid).await;
+                Self::stop_user_instances_with_retry(agent_svc, uid).await;
             });
         }
 

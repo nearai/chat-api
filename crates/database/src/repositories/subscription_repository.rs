@@ -51,6 +51,13 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
             .pending_downgrade_status
             .map(DowngradeIntentStatus::as_str);
 
+        let pending_downgrade_updated_at: Option<chrono::DateTime<chrono::Utc>> =
+            if pending_downgrade_status.is_some() {
+                Some(chrono::Utc::now())
+            } else {
+                None
+            };
+
         let row = txn
             .query_one(
                 "INSERT INTO subscriptions (
@@ -60,7 +67,7 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
                     pending_downgrade_expected_period_end, pending_downgrade_status,
                     pending_downgrade_updated_at
                  )
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
                  ON CONFLICT (subscription_id)
                  DO UPDATE SET
                      user_id = EXCLUDED.user_id,
@@ -112,9 +119,22 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
                     &subscription.pending_downgrade_from_price_id,
                     &subscription.pending_downgrade_expected_period_end,
                     &pending_downgrade_status,
+                    &pending_downgrade_updated_at,
                 ],
             )
-            .await?;
+            .await
+            .map_err(|e| {
+                if let Some(db_err) = e.as_db_error() {
+                    tracing::debug!(
+                        "upsert_subscription DB error: severity={}, code={}, message={}, detail={:?}, hint={:?}",
+                        db_err.severity(), db_err.code().code(), db_err.message(),
+                        db_err.detail(), db_err.hint()
+                    );
+                } else {
+                    tracing::debug!("upsert_subscription non-DB error: {:?}", e);
+                }
+                e
+            })?;
 
         Ok(row_to_subscription(&row))
     }
