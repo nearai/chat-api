@@ -422,7 +422,14 @@ impl SubscriptionServiceImpl {
         {
             Ok(row) => row,
             Err(e) => {
-                if e.to_string().to_lowercase().contains("lock timeout") {
+                let is_lock_timeout = e
+                    .downcast_ref::<tokio_postgres::Error>()
+                    .and_then(|pg_err| pg_err.as_db_error())
+                    .map(|db_err| {
+                        db_err.code() == &tokio_postgres::error::SqlState::LOCK_NOT_AVAILABLE
+                    })
+                    .unwrap_or(false);
+                if is_lock_timeout {
                     return Ok(None);
                 }
                 return Err(SubscriptionError::DatabaseError(e.to_string()));
