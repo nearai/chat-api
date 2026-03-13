@@ -241,6 +241,167 @@ pub async fn list_users(
     }))
 }
 
+/// Admin request to grant credits to a user (nano-USD).
+#[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
+pub struct AdminGrantCreditsRequest {
+    /// Target user id
+    pub user_id: Uuid,
+    /// Grant amount in nano-USD (must be positive; 1_000_000_000 = $1).
+    pub amount_nano_usd: i64,
+    /// Optional reason for the grant (stored as reference_id in credit_transactions).
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// Admin response after granting credits.
+#[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
+pub struct AdminGrantCreditsResponse {
+    /// New purchased credits balance for the user (nano-USD).
+    pub new_balance_nano_usd: i64,
+}
+
+/// Admin endpoint: Grant credits to a user (manual/admin adjustment).
+#[utoipa::path(
+    post,
+    path = "/v1/admin/credits",
+    tag = "Admin",
+    request_body = AdminGrantCreditsRequest,
+    responses(
+        (status = 200, description = "Credits granted successfully", body = AdminGrantCreditsResponse),
+        (status = 400, description = "Invalid request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn admin_grant_credits(
+    State(app_state): State<AppState>,
+    Json(request): Json<AdminGrantCreditsRequest>,
+) -> Result<Json<AdminGrantCreditsResponse>, ApiError> {
+    if request.amount_nano_usd <= 0 {
+        return Err(ApiError::bad_request(
+            "amount_nano_usd must be positive".to_string(),
+        ));
+    }
+
+    let user_id = UserId(request.user_id);
+    tracing::info!(
+        "Admin: Granting credits to user_id={}, amount_nano_usd={}, reason={:?}",
+        user_id,
+        request.amount_nano_usd,
+        request.reason
+    );
+
+    let new_balance = app_state
+        .subscription_service
+        .admin_grant_credits(user_id, request.amount_nano_usd, request.reason.clone())
+        .await
+        .map_err(|e| match e {
+            services::subscription::ports::SubscriptionError::InvalidCredits(msg) => {
+                ApiError::bad_request(msg)
+            }
+            services::subscription::ports::SubscriptionError::DatabaseError(msg) => {
+                tracing::error!(error = ?msg, "Database error granting credits");
+                ApiError::internal_server_error("Failed to grant credits")
+            }
+            services::subscription::ports::SubscriptionError::InternalError(msg) => {
+                tracing::error!(error = ?msg, "Internal error granting credits");
+                ApiError::internal_server_error("Failed to grant credits")
+            }
+            other => {
+                tracing::error!(error = ?other, "Unexpected error granting credits");
+                ApiError::internal_server_error("Failed to grant credits")
+            }
+        })?;
+
+    Ok(Json(AdminGrantCreditsResponse {
+        new_balance_nano_usd: new_balance,
+    }))
+}
+
+/// Query parameters for admin credit history.
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct AdminCreditHistoryQuery {
+    /// Target user id
+    pub user_id: Uuid,
+    /// Maximum number of items to return (default: 20, max: 100)
+    pub limit: Option<i64>,
+    /// Number of items to skip (default: 0)
+    pub offset: Option<i64>,
+}
+
+/// Admin endpoint: Get credit transaction history for a user.
+#[utoipa::path(
+    get,
+    path = "/v1/admin/credits/history",
+    tag = "Admin",
+    params(
+        AdminCreditHistoryQuery
+    ),
+    responses(
+        (status = 200, description = "Credit history retrieved successfully", body = AdminCreditHistoryResponse),
+        (status = 400, description = "Invalid request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn admin_credit_history(
+    State(app_state): State<AppState>,
+    Query(params): Query<AdminCreditHistoryQuery>,
+) -> Result<Json<AdminCreditHistoryResponse>, ApiError> {
+    let limit = params.limit.unwrap_or(20).clamp(1, 100);
+    let offset = params.offset.unwrap_or(0).max(0);
+
+    let user_id = UserId(params.user_id);
+    tracing::info!(
+        "Admin: Fetching credit history for user_id={}, limit={}, offset={}",
+        user_id,
+        limit,
+        offset
+    );
+
+    let (txs, total) = app_state
+        .subscription_service
+        .admin_get_credit_history(user_id, limit, offset)
+        .await
+        .map_err(|e| match e {
+            services::subscription::ports::SubscriptionError::DatabaseError(msg) => {
+                tracing::error!(error = ?msg, "Database error fetching credit history");
+                ApiError::internal_server_error("Failed to fetch credit history")
+            }
+            other => {
+                tracing::error!(error = ?other, "Unexpected error fetching credit history");
+                ApiError::internal_server_error("Failed to fetch credit history")
+            }
+        })?;
+
+    let transactions = txs
+        .into_iter()
+        .map(|t| AdminCreditTransactionResponse {
+            id: t.id,
+            amount_nano_usd: t.amount,
+            kind: t.r#type,
+            reference_id: t.reference_id,
+            created_at: t.created_at.to_rfc3339(),
+        })
+        .collect();
+
+    Ok(Json(AdminCreditHistoryResponse {
+        user_id,
+        transactions,
+        limit,
+        offset,
+        total: total as u64,
+    }))
+}
+
 /// Implementation used by bi_list_users only (BI endpoint).
 async fn list_users_bi_impl(
     app_state: &AppState,
@@ -2449,6 +2610,8 @@ pub fn create_admin_router() -> Router<AppState> {
         .route("/models", get(list_models).patch(batch_upsert_models))
         .route("/models/{model_id}", delete(delete_model))
         .route("/vpc/revoke", post(revoke_vpc_credentials))
+        .route("/credits", post(admin_grant_credits))
+        .route("/credits/history", get(admin_credit_history))
         .route(
             "/configs",
             get(get_system_configs_admin).patch(upsert_system_configs),

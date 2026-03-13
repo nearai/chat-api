@@ -46,12 +46,12 @@ async fn test_my_usage_returns_404_when_no_usage() {
 #[tokio::test]
 async fn test_my_usage_returns_200_with_correct_body() {
     let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
-    let email = "test_my_usage_with_usage@example.com";
-    let token = mock_login(&server, email).await;
+    let email = format!("test_my_usage_{}@example.com", uuid::Uuid::new_v4());
+    let token = mock_login(&server, &email).await;
 
     let user = db
         .user_repository()
-        .get_user_by_email(email)
+        .get_user_by_email(&email)
         .await
         .expect("db")
         .expect("user created by mock_login");
@@ -147,13 +147,13 @@ async fn test_admin_usage_by_user_id_returns_404_when_no_usage() {
 #[tokio::test]
 async fn test_admin_usage_by_user_id_returns_200_with_usage() {
     let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
-    let email = "test_admin_usage_with_usage@example.com";
-    let _ = mock_login(&server, email).await;
+    let email = format!("test_admin_usage_{}@example.com", uuid::Uuid::new_v4());
+    let _ = mock_login(&server, &email).await;
 
     let admin_token = mock_login(&server, "test_admin_usage_admin2@admin.org").await;
     let user = db
         .user_repository()
-        .get_user_by_email(email)
+        .get_user_by_email(&email)
         .await
         .expect("db")
         .expect("user exists");

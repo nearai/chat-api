@@ -138,6 +138,7 @@ pub struct UsageTrackingStreamChatCompletions<S> {
     buffer: String,
     usage: Option<ParsedUsage>,
     user_usage: Arc<dyn services::user_usage::UserUsageService>,
+    subscription_service: Arc<dyn services::subscription::ports::SubscriptionService>,
     pricing_cache: crate::model_pricing::ModelPricingCache,
     user_id: UserId,
     instance_id: Option<Uuid>,
@@ -151,6 +152,7 @@ where
     pub fn new(
         inner: S,
         user_usage: Arc<dyn services::user_usage::UserUsageService>,
+        subscription_service: Arc<dyn services::subscription::ports::SubscriptionService>,
         pricing_cache: crate::model_pricing::ModelPricingCache,
         user_id: UserId,
     ) -> Self {
@@ -159,6 +161,7 @@ where
             buffer: String::new(),
             usage: None,
             user_usage,
+            subscription_service,
             pricing_cache,
             user_id,
             instance_id: None,
@@ -204,6 +207,7 @@ where
                     this.usage.take(),
                     StreamUsageContext {
                         user_usage: this.user_usage.clone(),
+                        subscription_service: this.subscription_service.clone(),
                         pricing_cache: this.pricing_cache.clone(),
                         user_id: this.user_id,
                         stream_name: "UsageTrackingStreamChatCompletions",
@@ -229,6 +233,7 @@ pub struct UsageTrackingStreamResponseCompleted<S> {
     buffer: String,
     usage: Option<ParsedUsage>,
     user_usage: Arc<dyn services::user_usage::UserUsageService>,
+    subscription_service: Arc<dyn services::subscription::ports::SubscriptionService>,
     pricing_cache: crate::model_pricing::ModelPricingCache,
     user_id: UserId,
     instance_id: Option<Uuid>,
@@ -242,6 +247,7 @@ where
     pub fn new(
         inner: S,
         user_usage: Arc<dyn services::user_usage::UserUsageService>,
+        subscription_service: Arc<dyn services::subscription::ports::SubscriptionService>,
         pricing_cache: crate::model_pricing::ModelPricingCache,
         user_id: UserId,
     ) -> Self {
@@ -250,6 +256,7 @@ where
             buffer: String::new(),
             usage: None,
             user_usage,
+            subscription_service,
             pricing_cache,
             user_id,
             instance_id: None,
@@ -292,6 +299,7 @@ where
                     this.usage.take(),
                     StreamUsageContext {
                         user_usage: this.user_usage.clone(),
+                        subscription_service: this.subscription_service.clone(),
                         pricing_cache: this.pricing_cache.clone(),
                         user_id: this.user_id,
                         stream_name: "UsageTrackingStreamResponseCompleted",
@@ -309,6 +317,7 @@ where
 
 struct StreamUsageContext {
     user_usage: Arc<dyn services::user_usage::UserUsageService>,
+    subscription_service: Arc<dyn services::subscription::ports::SubscriptionService>,
     pricing_cache: crate::model_pricing::ModelPricingCache,
     user_id: UserId,
     stream_name: &'static str,
@@ -366,6 +375,13 @@ fn record_usage_on_stream_end(usage: Option<ParsedUsage>, ctx: StreamUsageContex
                 } else {
                     ctx.user_usage.record_usage(params).await
                 };
+
+                if result.is_ok() && cost_nano_usd.unwrap_or(0) > 0 {
+                    let _ = ctx
+                        .subscription_service
+                        .reconcile_purchased_after_usage(ctx.user_id)
+                        .await;
+                }
 
                 if let Err(e) = result {
                     tracing::warn!(
