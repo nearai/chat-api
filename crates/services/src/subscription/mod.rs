@@ -3,7 +3,7 @@ pub mod service;
 
 // Re-export commonly used types
 pub use ports::{
-    CreditsRepository, CreditsSummary, PaymentWebhook, PaymentWebhookRepository,
+    ChangePlanOutcome, CreditsRepository, CreditsSummary, PaymentWebhook, PaymentWebhookRepository,
     StoreWebhookResult, StripeCustomer, StripeCustomerRepository, Subscription, SubscriptionError,
     SubscriptionRepository, SubscriptionService, SubscriptionWithPlan,
 };

@@ -5,7 +5,8 @@ use chrono::Duration;
 use common::{
     cleanup_user_agent_instances, cleanup_user_subscriptions, clear_subscription_plans,
     create_test_server, create_test_server_and_db, insert_test_agent_instances,
-    insert_test_subscription, mock_login, set_subscription_plans, TestServerConfig,
+    insert_test_subscription, insert_test_subscription_with_price_id, mock_login,
+    set_subscription_plans, TestServerConfig,
 };
 use serde_json::json;
 use serial_test::serial;
@@ -547,7 +548,7 @@ async fn test_change_plan_invalid_plan() {
 
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn test_change_plan_instance_limit_exceeded() {
+async fn test_change_plan_downgrade_schedules_even_if_instance_limit_exceeded() {
     let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
 
     set_subscription_plans(
@@ -584,20 +585,52 @@ async fn test_change_plan_instance_limit_exceeded() {
 
     assert_eq!(
         response.status_code(),
-        400,
-        "Should return 400 when instance count exceeds target plan limit"
+        200,
+        "Should return 200 when downgrade is scheduled"
     );
 
     let body: serde_json::Value = response.json();
-    let message = body
-        .get("message")
-        .and_then(|v| v.as_str())
-        .or_else(|| body.get("detail").and_then(|v| v.as_str()))
-        .unwrap_or("");
-    assert!(
-        message.contains("2") && message.contains("1"),
-        "Error message should include current (2) and max (1) instance counts, got: {}",
-        message
+    let result = body.get("result").and_then(|v| v.as_str()).unwrap_or("");
+    assert_eq!(
+        result, "scheduled_for_period_end",
+        "Should return scheduled_for_period_end for downgrade scheduling"
+    );
+
+    // Verify pending downgrade intent persisted
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .expect("get user")
+        .expect("user exists");
+    let client = db.pool().get().await.expect("get pool client");
+    let row = client
+        .query_one(
+            "SELECT pending_downgrade_target_price_id, pending_downgrade_from_price_id,
+                    pending_downgrade_expected_period_end, pending_downgrade_status, current_period_end
+             FROM subscriptions
+             WHERE user_id = $1 AND status IN ('active', 'trialing')
+             ORDER BY created_at DESC
+             LIMIT 1",
+            &[&user.id],
+        )
+        .await
+        .expect("select subscription");
+
+    let target: Option<String> = row.get("pending_downgrade_target_price_id");
+    let from: Option<String> = row.get("pending_downgrade_from_price_id");
+    let expected_end: Option<chrono::DateTime<chrono::Utc>> =
+        row.get("pending_downgrade_expected_period_end");
+    let status: Option<String> = row.get("pending_downgrade_status");
+    let current_end: chrono::DateTime<chrono::Utc> = row.get("current_period_end");
+
+    assert_eq!(target.as_deref(), Some("price_test_starter"));
+    assert_eq!(from.as_deref(), Some("price_test_basic"));
+    assert_eq!(status.as_deref(), Some("pending"));
+    assert_eq!(
+        expected_end,
+        Some(current_end),
+        "Expected period end snapshot should match current period end"
     );
 }
 
@@ -646,6 +679,14 @@ async fn test_change_plan_success_validates_before_stripe() {
         "Should pass validation (200) or fail at Stripe (500), got {}",
         status
     );
+    if status == 200 {
+        let body: serde_json::Value = response.json();
+        let result = body.get("result").and_then(|v| v.as_str()).unwrap_or("");
+        assert_eq!(
+            result, "changed_immediately",
+            "Successful upgrade should return changed_immediately"
+        );
+    }
 }
 
 #[tokio::test]
@@ -2037,5 +2078,74 @@ async fn test_create_subscription_with_test_clock_disabled() {
         error_msg.contains("Test clock feature is not enabled"),
         "Error should mention test clock not enabled, got: {}",
         error_msg
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_list_subscriptions_includes_pending_downgrade_info() {
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } }, "agent_instances": { "max": 1 }, "monthly_tokens": { "max": 1000000 } },
+            "pro":   { "providers": { "stripe": { "price_id": "price_test_pro"  } }, "agent_instances": { "max": 3 }, "monthly_tokens": { "max": 5000000 } }
+        }),
+    )
+    .await;
+
+    let user_email = "test_list_subscriptions_pending_downgrade@example.com";
+    // Start user on pro
+    insert_test_subscription_with_price_id(&server, &db, user_email, false, "price_test_pro").await;
+
+    // Manually set a pending downgrade in DB
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .unwrap()
+        .unwrap();
+    let client = db.pool().get().await.unwrap();
+    client
+        .execute(
+            "UPDATE subscriptions SET
+                pending_downgrade_target_price_id = 'price_test_basic',
+                pending_downgrade_from_price_id = 'price_test_pro',
+                pending_downgrade_expected_period_end = current_period_end,
+                pending_downgrade_status = 'pending'
+             WHERE user_id = $1",
+            &[&user.id],
+        )
+        .await
+        .unwrap();
+
+    let user_token = mock_login(&server, user_email).await;
+    let response = server
+        .get("/v1/subscriptions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 200);
+
+    let body: serde_json::Value = response.json();
+    let sub = &body["subscriptions"][0];
+
+    assert_eq!(
+        sub["pending_downgrade_plan"].as_str(),
+        Some("basic"),
+        "Should include pending_downgrade_plan"
+    );
+    assert_eq!(
+        sub["pending_downgrade_status"].as_str(),
+        Some("pending"),
+        "Should include pending_downgrade_status"
+    );
+    assert!(
+        sub["pending_downgrade_period_end"].is_string(),
+        "Should include pending_downgrade_period_end"
     );
 }

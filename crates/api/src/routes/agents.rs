@@ -97,6 +97,63 @@ async fn create_instance_streaming_response(
         })
 }
 
+/// Returns (current_count, max_allowed) for the user based on their active subscription plan.
+async fn get_instance_limit(
+    app_state: &AppState,
+    user_id: services::UserId,
+) -> Result<(u64, u64), ApiError> {
+    let subscriptions = app_state
+        .subscription_service
+        .get_user_subscriptions(user_id, true)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to fetch subscriptions: user_id={}, error={}",
+                user_id,
+                e
+            );
+            ApiError::internal_server_error("Failed to check subscription")
+        })?;
+
+    let system_configs = app_state
+        .system_configs_service
+        .get_configs()
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to fetch system configs: user_id={}, error={}",
+                user_id,
+                e
+            );
+            ApiError::internal_server_error("Failed to check plan limits")
+        })?;
+
+    let max_allowed: u64 = match (subscriptions.first(), system_configs.as_ref()) {
+        (Some(sub), Some(configs)) => configs
+            .subscription_plans
+            .as_ref()
+            .and_then(|plans| plans.get(&sub.plan))
+            .map(|plan| plan.agent_instances.as_ref().map(|l| l.max).unwrap_or(0))
+            .unwrap_or(0),
+        _ => 0,
+    };
+
+    let (_, total) = app_state
+        .agent_service
+        .list_instances(user_id, 1, 0)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to count instances: user_id={}, error={}",
+                user_id,
+                e
+            );
+            ApiError::internal_server_error("Failed to check instance count")
+        })?;
+
+    Ok((total as u64, max_allowed))
+}
+
 /// Create a new agent instance.
 ///
 /// Agent instance limits are enforced for all users to prevent resource exhaustion:
@@ -141,64 +198,9 @@ pub async fn create_instance(
     }
 
     // Get user's active subscriptions
-    let subscriptions = app_state
-        .subscription_service
-        .get_user_subscriptions(user.user_id, true)
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                "Failed to fetch subscriptions: user_id={}, error={}",
-                user.user_id,
-                e
-            );
-            ApiError::internal_server_error("Failed to check subscription")
-        })?;
-
-    // Get system configs for subscription plans
-    let system_configs = app_state
-        .system_configs_service
-        .get_configs()
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                "Failed to fetch system configs: user_id={}, error={}",
-                user.user_id,
-                e
-            );
-            ApiError::internal_server_error("Failed to check plan limits")
-        })?;
-
-    // Limit: plan max if subscribed, else 0 (active subscription required).
-    let max_allowed: u64 = match (subscriptions.first(), system_configs.as_ref()) {
-        (Some(sub), Some(configs)) => configs
-            .subscription_plans
-            .as_ref()
-            .and_then(|plans| plans.get(&sub.plan))
-            .map(|plan| {
-                plan.agent_instances
-                    .as_ref()
-                    .map(|l| l.max)
-                    .unwrap_or(u64::MAX)
-            })
-            .unwrap_or(0),
-        _ => 0,
-    };
+    let (current_count, max_allowed) = get_instance_limit(&app_state, user.user_id).await?;
 
     // Enforce the limit
-    let (_, total) = app_state
-        .agent_service
-        .list_instances(user.user_id, 1, 0)
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                "Failed to count instances: user_id={}, error={}",
-                user.user_id,
-                e
-            );
-            ApiError::internal_server_error("Failed to check instance count")
-        })?;
-
-    let current_count = total as u64;
     if current_count >= max_allowed {
         tracing::warn!(
             "Agent instance limit exceeded: user_id={}, current={}, max={}",
@@ -831,6 +833,25 @@ pub async fn start_instance(
         return Err(ApiError::forbidden("This instance does not belong to you"));
     }
 
+    // Check plan quota: reject if user is already over the allowed limit
+    let (current_count, max_allowed) = get_instance_limit(&app_state, user.user_id).await?;
+    if current_count > max_allowed {
+        tracing::warn!(
+            "Agent instance limit exceeded on start: user_id={}, current={}, max={}",
+            user.user_id,
+            current_count,
+            max_allowed
+        );
+        return Err(ApiError::new(
+            axum::http::StatusCode::PAYMENT_REQUIRED,
+            "payment_required",
+            format!(
+                "Agent instance limit of {} exceeded for your plan",
+                max_allowed
+            ),
+        ));
+    }
+
     app_state
         .agent_service
         .start_instance(instance_uuid, user.user_id)
@@ -967,6 +988,25 @@ pub async fn restart_instance(
     // Verify ownership
     if instance.user_id != user.user_id {
         return Err(ApiError::forbidden("This instance does not belong to you"));
+    }
+
+    // Check plan quota: reject if user is already over the allowed limit
+    let (current_count, max_allowed) = get_instance_limit(&app_state, user.user_id).await?;
+    if current_count > max_allowed {
+        tracing::warn!(
+            "Agent instance limit exceeded on restart: user_id={}, current={}, max={}",
+            user.user_id,
+            current_count,
+            max_allowed
+        );
+        return Err(ApiError::new(
+            axum::http::StatusCode::PAYMENT_REQUIRED,
+            "payment_required",
+            format!(
+                "Agent instance limit of {} exceeded for your plan",
+                max_allowed
+            ),
+        ));
     }
 
     app_state

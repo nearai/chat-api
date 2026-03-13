@@ -1,4 +1,4 @@
-use crate::{error::ApiError, middleware::AuthenticatedUser, state::AppState};
+use crate::{error::ApiError, middleware::AuthenticatedUser, state::AppState, validation};
 use axum::{
     body::Bytes,
     extract::Query,
@@ -8,8 +8,9 @@ use axum::{
     Extension, Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use services::subscription::ports::{SubscriptionError, SubscriptionPlan, SubscriptionWithPlan};
-use url::{Host, Url};
+use services::subscription::ports::{
+    ChangePlanOutcome, SubscriptionError, SubscriptionPlan, SubscriptionWithPlan,
+};
 use utoipa::ToSchema;
 
 /// Request to create a new subscription
@@ -31,40 +32,6 @@ pub struct CreateSubscriptionRequest {
 
 fn default_provider() -> String {
     "stripe".to_string()
-}
-
-/// Validates that a URL is valid and secure for Stripe checkout/portal redirects.
-/// Requires https for production. Allows http only for loopback (localhost, 127.0.0.1, [::1]).
-fn validate_redirect_url(url_str: &str, field_name: &str) -> Result<(), ApiError> {
-    let url = Url::parse(url_str).map_err(|_| {
-        ApiError::bad_request(format!(
-            "Invalid {}: must be a valid URL (e.g., https://example.com/success)",
-            field_name
-        ))
-    })?;
-    match url.scheme() {
-        "https" => Ok(()),
-        "http" => {
-            let host_ok = match url.host() {
-                Some(Host::Domain(d)) => d == "localhost",
-                Some(Host::Ipv4(ip)) => ip.is_loopback(),
-                Some(Host::Ipv6(ip)) => ip.is_loopback(),
-                _ => false,
-            };
-            if host_ok {
-                Ok(())
-            } else {
-                Err(ApiError::bad_request(format!(
-                    "Invalid {}: URL must use https for non-localhost addresses (http is only allowed for localhost/127.0.0.1/[::1] during development)",
-                    field_name
-                )))
-            }
-        }
-        _ => Err(ApiError::bad_request(format!(
-            "Invalid {}: URL scheme must be https (or http for loopback only)",
-            field_name
-        ))),
-    }
 }
 
 /// Response containing checkout URL
@@ -100,6 +67,8 @@ pub struct ChangePlanRequest {
 pub struct ChangePlanResponse {
     /// Success message
     pub message: String,
+    /// Change result type
+    pub result: ChangePlanOutcome,
 }
 
 /// Response containing user's subscriptions
@@ -172,8 +141,10 @@ pub async fn create_subscription(
         req.plan
     );
 
-    validate_redirect_url(&req.success_url, "success_url")?;
-    validate_redirect_url(&req.cancel_url, "cancel_url")?;
+    validation::validate_redirect_url(&req.success_url, "success_url")
+        .map_err(ApiError::bad_request)?;
+    validation::validate_redirect_url(&req.cancel_url, "cancel_url")
+        .map_err(ApiError::bad_request)?;
 
     // Validate test clock usage
     if req.test_clock_id.is_some() && !app_state.stripe_test_clock_enabled {
@@ -249,6 +220,10 @@ pub async fn create_subscription(
             SubscriptionError::TestClockNotAllowedForExistingCustomer => ApiError::bad_request(
                 "Cannot associate test clock with existing Stripe customer".to_string(),
             ),
+            SubscriptionError::NoPendingDowngrade => {
+                tracing::error!("Unexpected NoPendingDowngrade in create");
+                ApiError::internal_server_error("Failed to create subscription")
+            }
         })?;
 
     Ok(Json(CreateSubscriptionResponse { checkout_url }))
@@ -383,7 +358,7 @@ pub async fn change_plan(
         req.plan
     );
 
-    app_state
+    let outcome = app_state
         .subscription_service
         .change_plan(user.user_id, req.plan.clone())
         .await
@@ -411,6 +386,9 @@ pub async fn change_plan(
                 tracing::error!(error = ?msg, "Stripe error changing plan");
                 ApiError::internal_server_error("Failed to change plan")
             }
+            SubscriptionError::NoPendingDowngrade => {
+                ApiError::bad_request("No pending downgrade to cancel")
+            }
             _ => {
                 tracing::error!(error = ?e, "Failed to change plan");
                 ApiError::internal_server_error("Failed to change plan")
@@ -418,7 +396,15 @@ pub async fn change_plan(
         })?;
 
     Ok(Json(ChangePlanResponse {
-        message: "Plan changed successfully".to_string(),
+        message: match outcome {
+            ChangePlanOutcome::ChangedImmediately => "Plan changed successfully".to_string(),
+            ChangePlanOutcome::ScheduledForPeriodEnd => {
+                "Downgrade scheduled and will be checked near period end".to_string()
+            }
+            ChangePlanOutcome::NoOp => "User is already on the target plan".to_string(),
+            ChangePlanOutcome::DowngradeCancelled => "Pending downgrade cancelled".to_string(),
+        },
+        result: outcome,
     }))
 }
 
@@ -529,7 +515,8 @@ pub async fn create_portal_session(
 ) -> Result<Json<CreatePortalSessionResponse>, ApiError> {
     tracing::info!("Creating portal session for user_id={}", user.user_id);
 
-    validate_redirect_url(&req.return_url, "return_url")?;
+    validation::validate_redirect_url(&req.return_url, "return_url")
+        .map_err(ApiError::bad_request)?;
 
     let url = app_state
         .subscription_service

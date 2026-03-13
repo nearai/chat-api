@@ -1,4 +1,4 @@
-use crate::{error::ApiError, middleware::AuthenticatedUser, state::AppState};
+use crate::{error::ApiError, middleware::AuthenticatedUser, state::AppState, validation};
 use axum::{
     extract::State,
     routing::{get, post},
@@ -6,7 +6,6 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use services::subscription::ports::{CreditsSummary, SubscriptionError};
-use url::{Host, Url};
 use utoipa::ToSchema;
 
 /// Request to create a credit purchase checkout session
@@ -25,35 +24,6 @@ pub struct CreateCreditCheckoutRequest {
 pub struct CreateCreditCheckoutResponse {
     /// Stripe checkout URL for completing purchase
     pub checkout_url: String,
-}
-
-fn validate_redirect_url(url_str: &str, field_name: &str) -> Result<(), ApiError> {
-    let url = Url::parse(url_str).map_err(|_| {
-        ApiError::bad_request(format!("Invalid {}: must be a valid URL", field_name))
-    })?;
-    match url.scheme() {
-        "https" => Ok(()),
-        "http" => {
-            let host_ok = match url.host() {
-                Some(Host::Domain(d)) => d == "localhost",
-                Some(Host::Ipv4(ip)) => ip.is_loopback(),
-                Some(Host::Ipv6(ip)) => ip.is_loopback(),
-                _ => false,
-            };
-            if host_ok {
-                Ok(())
-            } else {
-                Err(ApiError::bad_request(format!(
-                    "Invalid {}: URL must use https for non-localhost",
-                    field_name
-                )))
-            }
-        }
-        _ => Err(ApiError::bad_request(format!(
-            "Invalid {}: URL scheme must be https or http (localhost only)",
-            field_name
-        ))),
-    }
 }
 
 /// GET /v1/credits - Get user's credits summary
@@ -108,8 +78,10 @@ pub async fn create_credit_checkout(
     Extension(user): Extension<AuthenticatedUser>,
     Json(req): Json<CreateCreditCheckoutRequest>,
 ) -> Result<Json<CreateCreditCheckoutResponse>, ApiError> {
-    validate_redirect_url(&req.success_url, "success_url")?;
-    validate_redirect_url(&req.cancel_url, "cancel_url")?;
+    validation::validate_redirect_url(&req.success_url, "success_url")
+        .map_err(ApiError::bad_request)?;
+    validation::validate_redirect_url(&req.cancel_url, "cancel_url")
+        .map_err(ApiError::bad_request)?;
 
     let checkout_url = app_state
         .subscription_service

@@ -181,6 +181,7 @@ use utoipa::OpenApi;
         crate::routes::subscriptions::ResumeSubscriptionResponse,
         crate::routes::subscriptions::ChangePlanRequest,
         crate::routes::subscriptions::ChangePlanResponse,
+        services::subscription::ports::ChangePlanOutcome,
         crate::routes::subscriptions::ListSubscriptionsResponse,
         crate::routes::subscriptions::ListPlansResponse,
         services::subscription::ports::SubscriptionWithPlan,
