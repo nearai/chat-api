@@ -292,11 +292,13 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
         Ok(row.map(|r| r.get(0)))
     }
 
-    async fn clear_pending_downgrade(&self, subscription_id: &str) -> anyhow::Result<()> {
-        let client = self.pool.get().await?;
-        client
-            .execute(
-                "UPDATE subscriptions
+    async fn clear_pending_downgrade(
+        &self,
+        txn: &tokio_postgres::Transaction<'_>,
+        subscription_id: &str,
+    ) -> anyhow::Result<()> {
+        txn.execute(
+            "UPDATE subscriptions
                  SET pending_downgrade_target_price_id = NULL,
                      pending_downgrade_from_price_id = NULL,
                      pending_downgrade_expected_period_end = NULL,
@@ -304,9 +306,9 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
                      pending_downgrade_updated_at = NOW(),
                      updated_at = NOW()
                  WHERE subscription_id = $1",
-                &[&subscription_id],
-            )
-            .await?;
+            &[&subscription_id],
+        )
+        .await?;
         Ok(())
     }
 }

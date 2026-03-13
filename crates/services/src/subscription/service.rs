@@ -910,15 +910,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .map_err(|e| SubscriptionError::StripeError(e.to_string()))?;
 
         // Update database (with transaction)
-        let mut updated_model =
+        let updated_model =
             self.stripe_subscription_to_model(&updated_sub, user_id, &subscription.provider)?;
-        updated_model.pending_downgrade_target_price_id =
-            subscription.pending_downgrade_target_price_id.clone();
-        updated_model.pending_downgrade_from_price_id =
-            subscription.pending_downgrade_from_price_id.clone();
-        updated_model.pending_downgrade_expected_period_end =
-            subscription.pending_downgrade_expected_period_end;
-        updated_model.pending_downgrade_status = subscription.pending_downgrade_status;
         let mut db_client = self
             .db_pool
             .get()
@@ -931,6 +924,12 @@ impl SubscriptionService for SubscriptionServiceImpl {
 
         self.subscription_repo
             .upsert_subscription(&txn, updated_model)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        // Cancel is a stronger intent than downgrade — clear any pending downgrade
+        self.subscription_repo
+            .clear_pending_downgrade(&txn, &subscription.subscription_id)
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
@@ -983,15 +982,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .map_err(|e| SubscriptionError::StripeError(e.to_string()))?;
 
         // Update database (with transaction)
-        let mut updated_model =
+        let updated_model =
             self.stripe_subscription_to_model(&updated_sub, user_id, &subscription.provider)?;
-        updated_model.pending_downgrade_target_price_id =
-            subscription.pending_downgrade_target_price_id.clone();
-        updated_model.pending_downgrade_from_price_id =
-            subscription.pending_downgrade_from_price_id.clone();
-        updated_model.pending_downgrade_expected_period_end =
-            subscription.pending_downgrade_expected_period_end;
-        updated_model.pending_downgrade_status = subscription.pending_downgrade_status;
         let mut db_client = self
             .db_pool
             .get()
@@ -1004,6 +996,12 @@ impl SubscriptionService for SubscriptionServiceImpl {
 
         self.subscription_repo
             .upsert_subscription(&txn, updated_model)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        // Resume is a stronger intent than downgrade — clear any pending downgrade
+        self.subscription_repo
+            .clear_pending_downgrade(&txn, &subscription.subscription_id)
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
@@ -1049,11 +1047,23 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
             .ok_or(SubscriptionError::NoActiveSubscription)?;
 
-        // Same plan requested: cancel pending downgrade if one exists, otherwise error
+        // Same plan requested: cancel pending downgrade if one exists, otherwise no-op
         if subscription.price_id == price_id {
             if subscription.pending_downgrade_status == Some(DowngradeIntentStatus::Pending) {
+                let mut client = self
+                    .db_pool
+                    .get()
+                    .await
+                    .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+                let txn = client
+                    .transaction()
+                    .await
+                    .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
                 self.subscription_repo
-                    .clear_pending_downgrade(&subscription.subscription_id)
+                    .clear_pending_downgrade(&txn, &subscription.subscription_id)
+                    .await
+                    .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+                txn.commit()
                     .await
                     .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
                 self.invalidate_token_limit_cache(user_id).await;
@@ -1064,7 +1074,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 );
                 return Ok(ChangePlanOutcome::DowngradeCancelled);
             } else {
-                return Err(SubscriptionError::NoPendingDowngrade);
+                return Ok(ChangePlanOutcome::NoOp);
             }
         }
 
@@ -1122,8 +1132,20 @@ impl SubscriptionService for SubscriptionServiceImpl {
         // The user's intent is now to upgrade, so the pending intent is obsolete regardless of
         // whether the Stripe call succeeds.
         if subscription.pending_downgrade_status.is_some() {
+            let mut client = self
+                .db_pool
+                .get()
+                .await
+                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+            let txn = client
+                .transaction()
+                .await
+                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
             self.subscription_repo
-                .clear_pending_downgrade(&subscription.subscription_id)
+                .clear_pending_downgrade(&txn, &subscription.subscription_id)
+                .await
+                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+            txn.commit()
                 .await
                 .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
             self.invalidate_token_limit_cache(user_id).await;
@@ -1429,6 +1451,11 @@ impl SubscriptionService for SubscriptionServiceImpl {
             // Detect first transition to canceled: trigger async instance kill
             if old_status.as_deref() != Some("canceled") && new_sub.status == "canceled" {
                 user_id_to_kill_instances = Some(user_id);
+                // Subscription is canceled — clear any stale pending downgrade intent
+                self.subscription_repo
+                    .clear_pending_downgrade(&txn, &subscription_id)
+                    .await
+                    .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
             }
 
             tracing::info!(

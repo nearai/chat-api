@@ -288,7 +288,11 @@ pub trait SubscriptionRepository: Send + Sync {
 
     /// Unconditionally clear all pending-downgrade fields for a subscription.
     /// Used when an upgrade or explicit cancellation makes the pending intent obsolete.
-    async fn clear_pending_downgrade(&self, subscription_id: &str) -> anyhow::Result<()>;
+    async fn clear_pending_downgrade(
+        &self,
+        txn: &tokio_postgres::Transaction<'_>,
+        subscription_id: &str,
+    ) -> anyhow::Result<()>;
 }
 
 /// Repository trait for payment webhook events
