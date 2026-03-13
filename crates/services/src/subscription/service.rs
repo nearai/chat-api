@@ -90,11 +90,11 @@ impl SubscriptionServiceImpl {
     }
 
     /// Maximum number of retries when stopping instances after subscription cancel.
-    const KILL_INSTANCE_MAX_RETRIES: u32 = 1;
+    const STOP_INSTANCE_MAX_RETRIES: u32 = 1;
 
     /// Stop all active instances for a user after their subscription is canceled.
     /// Runs asynchronously after the webhook transaction commits.
-    /// Each instance stop is attempted up to KILL_INSTANCE_MAX_RETRIES+1 times.
+    /// Each instance stop is attempted up to STOP_INSTANCE_MAX_RETRIES+1 times.
     /// Failures are logged but do not affect the webhook response.
     async fn stop_user_instances_with_retry(agent_service: Arc<dyn AgentService>, user_id: UserId) {
         let instances = match agent_service.list_instances(user_id, 1000, 0).await {
@@ -126,7 +126,7 @@ impl SubscriptionServiceImpl {
 
         for instance in &active_instances {
             let mut last_err = None;
-            for attempt in 0..=Self::KILL_INSTANCE_MAX_RETRIES {
+            for attempt in 0..=Self::STOP_INSTANCE_MAX_RETRIES {
                 match agent_service.stop_instance(instance.id, user_id).await {
                     Ok(()) => {
                         last_err = None;
