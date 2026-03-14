@@ -1162,7 +1162,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .map(|item| item.id.to_string())
             .ok_or_else(|| SubscriptionError::StripeError("No subscription item found".into()))?;
 
-        // Update subscription to new price
+        // Update subscription to new price.
+        // For upgrades: always_invoice immediately charges the prorated amount, and
+        // pending_if_incomplete ensures the upgrade is NOT applied if payment fails.
         let update_item = UpdateSubscriptionItems {
             id: Some(subscription_item_id),
             price: Some(price_id.clone()),
@@ -1171,7 +1173,10 @@ impl SubscriptionService for SubscriptionServiceImpl {
         let params = stripe::UpdateSubscription {
             items: Some(vec![update_item]),
             proration_behavior: Some(
-                stripe::generated::billing::subscription::SubscriptionProrationBehavior::CreateProrations,
+                stripe::generated::billing::subscription::SubscriptionProrationBehavior::AlwaysInvoice,
+            ),
+            payment_behavior: Some(
+                stripe::generated::billing::subscription::SubscriptionPaymentBehavior::PendingIfIncomplete,
             ),
             ..Default::default()
         };
