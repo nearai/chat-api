@@ -2097,8 +2097,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .map(|s| s.cost_nano_usd)
             .unwrap_or(0);
 
-        // 3. Enforce limit
-        if used_credits >= max_credits as i64 {
+        // 3. Enforce limit (compare without casting max_credits to i64 to avoid wrap-around DoS when max_credits > i64::MAX)
+        if used_credits >= 0 && (used_credits as u64) >= max_credits {
             tracing::info!(
                 "Blocking proxy access for user_id={}: monthly credit limit exceeded (used {} of {})",
                 user_id, used_credits, max_credits
