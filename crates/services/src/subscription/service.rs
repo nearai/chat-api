@@ -418,19 +418,6 @@ impl SubscriptionServiceImpl {
             .and_then(|c| c.subscription_plans)
             .unwrap_or_default();
 
-        let plan_limit_max = |config: &SubscriptionPlanConfig| {
-            if let Some(ref lim) = config.monthly_credits {
-                return lim.max;
-            }
-            if let Some(ref lim) = config.monthly_tokens {
-                let nano_usd = (lim.max as u128 * NANO_USD_PER_1_5_USD as u128
-                    / TOKENS_TO_CREDITS_PER_M as u128)
-                    .min(u64::MAX as u128) as u64;
-                return nano_usd;
-            }
-            DEFAULT_MONTHLY_CREDITS_NANO_USD
-        };
-
         let (plan_credits, period_start, period_end) = match self
             .subscription_repo
             .get_active_subscription(user_id)
@@ -443,7 +430,7 @@ impl SubscriptionServiceImpl {
                 let plan_credits = plan_name
                     .as_ref()
                     .and_then(|n| subscription_plans.get(n))
-                    .map(plan_limit_max)
+                    .map(Self::plan_limit_max)
                     .unwrap_or(DEFAULT_MONTHLY_CREDITS_NANO_USD);
                 let period_end = sub.current_period_end;
                 let period_start = sub_one_month_same_day(period_end);
@@ -452,7 +439,7 @@ impl SubscriptionServiceImpl {
             None => {
                 let plan_credits = subscription_plans
                     .get("free")
-                    .map(plan_limit_max)
+                    .map(Self::plan_limit_max)
                     .unwrap_or(DEFAULT_MONTHLY_CREDITS_NANO_USD);
                 let (period_start, period_end) = current_calendar_month_period(Utc::now());
                 (plan_credits, period_start, period_end)
@@ -476,6 +463,20 @@ impl SubscriptionServiceImpl {
         subscription.pending_downgrade_from_price_id = None;
         subscription.pending_downgrade_expected_period_end = None;
         subscription.pending_downgrade_status = Some(status);
+    }
+
+    /// Returns the plan's monthly credit limit in nano-USD: from monthly_credits, or from monthly_tokens converted at 1.5 USD per M tokens, or default.
+    fn plan_limit_max(config: &SubscriptionPlanConfig) -> u64 {
+        if let Some(ref lim) = config.monthly_credits {
+            return lim.max;
+        }
+        if let Some(ref lim) = config.monthly_tokens {
+            let nano_usd = (lim.max as u128 * NANO_USD_PER_1_5_USD as u128
+                / TOKENS_TO_CREDITS_PER_M as u128)
+                .min(u64::MAX as u128) as u64;
+            return nano_usd;
+        }
+        DEFAULT_MONTHLY_CREDITS_NANO_USD
     }
 
     fn should_check_pending_downgrade(subscription: &Subscription) -> bool {
@@ -2003,19 +2004,6 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     .unwrap_or_default();
 
                 // Use monthly_credits when set (nano USD); else monthly_tokens → nano USD at 1.5 USD per M tokens. Never fail for missing config.
-                let plan_limit_max = |config: &SubscriptionPlanConfig| {
-                    if let Some(ref lim) = config.monthly_credits {
-                        return lim.max;
-                    }
-                    if let Some(ref lim) = config.monthly_tokens {
-                        // fallback: 1.5 USD per M tokens => limit_nano_usd = (monthly_tokens / M) * 1.5 * 1e9
-                        let nano_usd = (lim.max as u128 * NANO_USD_PER_1_5_USD as u128
-                            / TOKENS_TO_CREDITS_PER_M as u128)
-                            .min(u64::MAX as u128) as u64;
-                        return nano_usd;
-                    }
-                    DEFAULT_MONTHLY_CREDITS_NANO_USD
-                };
                 let (plan_credits, period_start, period_end) = match self
                     .subscription_repo
                     .get_active_subscription(user_id)
@@ -2047,7 +2035,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                         let plan_credits = plan_name
                             .as_deref()
                             .and_then(|n| subscription_plans.get(n))
-                            .map(plan_limit_max)
+                            .map(Self::plan_limit_max)
                             .unwrap_or_else(|| {
                                 tracing::warn!(
                                     "Falling back to default monthly credits for unmatched plan '{:?}'; using {} nano-USD",
@@ -2063,7 +2051,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     None => {
                         let plan_credits = subscription_plans
                             .get("free")
-                            .map(plan_limit_max)
+                            .map(Self::plan_limit_max)
                             .unwrap_or_else(|| {
                                 tracing::warn!(
                                     "Falling back to default monthly credits for missing 'free' plan; using {} nano-USD",
