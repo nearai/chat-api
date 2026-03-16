@@ -1,11 +1,12 @@
 mod common;
 
 use common::{create_test_server_and_db, mock_login, TestServerConfig};
+use serde_json::json;
 use services::user::ports::UserRepository;
 use services::UserId;
 use tokio::time::{sleep, Duration};
 use uuid::Uuid;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 async fn wait_for_web_search_usage_count(
@@ -80,7 +81,7 @@ async fn create_agent_api_key(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
         )
-        .json(&serde_json::json!({
+        .json(&json!({
             "name": "web-search-key",
             "spend_limit": null,
             "expires_at": null
@@ -97,18 +98,49 @@ async fn create_agent_api_key(
     (user.id, instance_id, api_key)
 }
 
+fn web_search_tool_call(query: &str) -> serde_json::Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "web_search",
+            "arguments": {
+                "query": query
+            }
+        }
+    })
+}
+
+fn other_tool_call() -> serde_json::Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "other_tool",
+            "arguments": {
+                "query": "ignored"
+            }
+        }
+    })
+}
+
 #[tokio::test]
 async fn web_search_requires_authentication() {
     let mock_upstream = MockServer::start().await;
 
     let (server, _db) = create_test_server_and_db(TestServerConfig {
-        proxy_base_url: Some(format!("{}/v1", mock_upstream.uri())),
+        proxy_base_url: Some(mock_upstream.uri()),
         cloud_api_base_url: mock_upstream.uri(),
         ..Default::default()
     })
     .await;
 
-    let response = server.get("/v1/web/search?q=rust").await;
+    let response = server
+        .post("/mcp")
+        .json(&web_search_tool_call("rust"))
+        .await;
 
     assert_eq!(response.status_code(), 401);
 }
@@ -117,12 +149,31 @@ async fn web_search_requires_authentication() {
 async fn web_search_records_usage_only_on_success() {
     let mock_upstream = MockServer::start().await;
 
-    Mock::given(method("GET"))
-        .and(path("/v1/web/search"))
+    Mock::given(method("POST"))
+        .and(path("/mcp"))
+        .and(body_partial_json(json!({
+            "method": "tools/call",
+            "params": { "name": "web_search" }
+        })))
         .respond_with(
             ResponseTemplate::new(200)
                 .insert_header("content-type", "application/json")
-                .set_body_raw(r#"{"results":[{"title":"Rust"}]}"#, "application/json"),
+                .set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {
+                        "content": [{
+                            "type": "text",
+                            "text": "{\"query\":\"rust\",\"result_count\":1,\"results\":[{\"title\":\"Rust\"}]}"
+                        }],
+                        "structuredContent": {
+                            "query": "rust",
+                            "result_count": 1,
+                            "results": [{ "title": "Rust" }]
+                        },
+                        "isError": false
+                    }
+                })),
         )
         .mount(&mock_upstream)
         .await;
@@ -138,32 +189,39 @@ async fn web_search_records_usage_only_on_success() {
         .await;
 
     let (server, db) = create_test_server_and_db(TestServerConfig {
-        proxy_base_url: Some(format!("{}/v1", mock_upstream.uri())),
+        proxy_base_url: Some(mock_upstream.uri()),
         cloud_api_base_url: mock_upstream.uri(),
         ..Default::default()
     })
     .await;
 
-    let email = "test_web_search_success@example.com";
-    let token = mock_login(&server, email).await;
+    let email = format!(
+        "test_web_search_success_{}@example.com",
+        Uuid::new_v4().simple()
+    );
+    let token = mock_login(&server, &email).await;
     let user = db
         .user_repository()
-        .get_user_by_email(email)
+        .get_user_by_email(&email)
         .await
         .expect("db")
         .expect("user");
 
     let response = server
-        .get("/v1/web/search?q=rust")
+        .post("/mcp")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
         )
+        .json(&web_search_tool_call("rust"))
         .await;
 
     assert_eq!(response.status_code(), 200);
     let body: serde_json::Value = response.json();
-    assert_eq!(body["results"][0]["title"], "Rust");
+    assert_eq!(
+        body["result"]["structuredContent"]["results"][0]["title"],
+        "Rust"
+    );
 
     let count = wait_for_web_search_usage_count(&db, user.id, 1).await;
     assert_eq!(
@@ -190,42 +248,56 @@ async fn web_search_records_usage_only_on_success() {
 
     assert_eq!(quantity, 1);
     assert_eq!(cost_nano_usd, Some(123));
-    assert_eq!(request_type.as_deref(), Some("web_search"));
+    assert_eq!(request_type.as_deref(), Some("mcp.web_search"));
 }
 
 #[tokio::test]
 async fn web_search_does_not_record_usage_for_failed_agent_request() {
     let mock_upstream = MockServer::start().await;
 
-    Mock::given(method("GET"))
-        .and(path("/v1/web/search"))
+    Mock::given(method("POST"))
+        .and(path("/mcp"))
         .respond_with(
-            ResponseTemplate::new(429)
+            ResponseTemplate::new(200)
                 .insert_header("content-type", "application/json")
-                .set_body_raw(r#"{"error":"rate limited"}"#, "application/json"),
+                .set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "error": {
+                        "code": -32003,
+                        "message": "rate limited"
+                    }
+                })),
         )
         .mount(&mock_upstream)
         .await;
 
     let (server, db) = create_test_server_and_db(TestServerConfig {
-        proxy_base_url: Some(format!("{}/v1", mock_upstream.uri())),
+        proxy_base_url: Some(mock_upstream.uri()),
         cloud_api_base_url: mock_upstream.uri(),
         ..Default::default()
     })
     .await;
 
+    let failed_agent_email = format!(
+        "test_web_search_failed_agent_{}@example.com",
+        Uuid::new_v4().simple()
+    );
     let (user_id, instance_id, api_key) =
-        create_agent_api_key(&server, &db, "test_web_search_failed_agent@example.com").await;
+        create_agent_api_key(&server, &db, &failed_agent_email).await;
 
     let response = server
-        .get("/v1/web/search?q=rust")
+        .post("/mcp")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {api_key}")).unwrap(),
         )
+        .json(&web_search_tool_call("rust"))
         .await;
 
-    assert_eq!(response.status_code(), 429);
+    assert_eq!(response.status_code(), 200);
+    let body: serde_json::Value = response.json();
+    assert_eq!(body["error"]["code"], -32003);
 
     let count = wait_for_web_search_usage_count(&db, user_id, 0).await;
     assert_eq!(count, 0, "failed web search should not record usage");
@@ -249,18 +321,95 @@ async fn web_search_does_not_record_usage_for_failed_agent_request() {
 }
 
 #[tokio::test]
-async fn web_search_records_usage_for_successful_agent_request() {
+async fn non_web_search_mcp_call_does_not_record_usage() {
     let mock_upstream = MockServer::start().await;
 
-    Mock::given(method("GET"))
-        .and(path("/v1/web/search"))
+    Mock::given(method("POST"))
+        .and(path("/mcp"))
         .respond_with(
             ResponseTemplate::new(200)
                 .insert_header("content-type", "application/json")
-                .set_body_raw(
-                    r#"{"results":[{"title":"Agent search"}]}"#,
-                    "application/json",
-                ),
+                .set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "result": {
+                        "content": [{
+                            "type": "text",
+                            "text": "ok"
+                        }],
+                        "structuredContent": {
+                            "status": "ok"
+                        },
+                        "isError": false
+                    }
+                })),
+        )
+        .mount(&mock_upstream)
+        .await;
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        proxy_base_url: Some(mock_upstream.uri()),
+        cloud_api_base_url: mock_upstream.uri(),
+        ..Default::default()
+    })
+    .await;
+
+    let email = format!(
+        "test_mcp_other_tool_{}@example.com",
+        Uuid::new_v4().simple()
+    );
+    let token = mock_login(&server, &email).await;
+    let user = db
+        .user_repository()
+        .get_user_by_email(&email)
+        .await
+        .expect("db")
+        .expect("user");
+
+    let response = server
+        .post("/mcp")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .json(&other_tool_call())
+        .await;
+
+    assert_eq!(response.status_code(), 200);
+
+    let count = wait_for_web_search_usage_count(&db, user.id, 0).await;
+    assert_eq!(count, 0, "non-web_search MCP calls should not record usage");
+}
+
+#[tokio::test]
+async fn web_search_records_usage_for_successful_agent_request() {
+    let mock_upstream = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/mcp"))
+        .and(body_partial_json(json!({
+            "method": "tools/call",
+            "params": { "name": "web_search" }
+        })))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {
+                        "content": [{
+                            "type": "text",
+                            "text": "{\"query\":\"rust\",\"result_count\":1,\"results\":[{\"title\":\"Agent search\"}]}"
+                        }],
+                        "structuredContent": {
+                            "query": "rust",
+                            "result_count": 1,
+                            "results": [{ "title": "Agent search" }]
+                        },
+                        "isError": false
+                    }
+                })),
         )
         .mount(&mock_upstream)
         .await;
@@ -276,26 +425,34 @@ async fn web_search_records_usage_for_successful_agent_request() {
         .await;
 
     let (server, db) = create_test_server_and_db(TestServerConfig {
-        proxy_base_url: Some(format!("{}/v1", mock_upstream.uri())),
+        proxy_base_url: Some(mock_upstream.uri()),
         cloud_api_base_url: mock_upstream.uri(),
         ..Default::default()
     })
     .await;
 
+    let success_agent_email = format!(
+        "test_web_search_success_agent_{}@example.com",
+        Uuid::new_v4().simple()
+    );
     let (user_id, instance_id, api_key) =
-        create_agent_api_key(&server, &db, "test_web_search_success_agent@example.com").await;
+        create_agent_api_key(&server, &db, &success_agent_email).await;
 
     let response = server
-        .get("/v1/web/search?q=rust")
+        .post("/mcp")
         .add_header(
             http::HeaderName::from_static("authorization"),
             http::HeaderValue::from_str(&format!("Bearer {api_key}")).unwrap(),
         )
+        .json(&web_search_tool_call("rust"))
         .await;
 
     assert_eq!(response.status_code(), 200);
     let body: serde_json::Value = response.json();
-    assert_eq!(body["results"][0]["title"], "Agent search");
+    assert_eq!(
+        body["result"]["structuredContent"]["results"][0]["title"],
+        "Agent search"
+    );
 
     let count = wait_for_web_search_usage_count(&db, user_id, 1).await;
     assert_eq!(count, 1, "successful agent web search should record usage");
@@ -321,7 +478,7 @@ async fn web_search_records_usage_for_successful_agent_request() {
     assert_eq!(quantity, 1);
     assert_eq!(cost_nano_usd, Some(456));
     assert_eq!(recorded_instance_id, Some(instance_id));
-    assert_eq!(request_type.as_deref(), Some("web_search"));
+    assert_eq!(request_type.as_deref(), Some("mcp.web_search"));
 
     let balance_row = client
         .query_one(
