@@ -176,6 +176,8 @@ async fn main() -> anyhow::Result<()> {
         config.agent.nearai_api_url.clone(),
         system_configs_service.clone()
             as Arc<dyn services::system_configs::ports::SystemConfigsService>,
+        config.agent.channel_relay_url.clone(),
+        config.agent.channel_relay_signing_secret.clone(),
     ));
 
     // Initialize agent proxy service
