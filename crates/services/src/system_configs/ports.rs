@@ -112,16 +112,27 @@ pub struct SubscriptionPlanConfig {
     pub monthly_credits: Option<PlanLimitConfig>,
 }
 
-/// Configuration for credit purchase (Stripe Price ID for 1 credit).
+/// Configuration for credit purchase across payment providers.
 ///
-/// Assumption: 1 credit == 1 USD of internal credits (1_000_000_000 nano-USD). The configured
-/// Stripe Price should therefore represent a $1.00 charge per unit so that purchasing N credits
-/// results in N * 1_000_000_000 nano-USD being recorded.
+/// Internal unit is **nano-USD**. External "credits" are treated as a **count of $1 units**:
+/// 1 credit == 1 USD == 1_000_000_000 nano-USD. Provider integrations should convert explicitly.
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreditsConfig {
-    /// Stripe Price ID for 1 credit (unit amount defined in Stripe)
-    pub credit_price_id: String,
+    /// Provider-specific configs (e.g. "stripe" -> { "price_id": "price_xxx" }).
+    #[serde(default)]
+    pub providers: HashMap<String, CreditsProviderConfig>,
+    /// Optional default provider key. If omitted, implementations may assume "stripe".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_provider: Option<String>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CreditsProviderConfig {
+    /// Stripe: price id for a $1 "credit" unit (quantity == credits count).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_id: Option<String>,
 }
 
 impl Default for RateLimitConfig {

@@ -161,7 +161,7 @@ pub enum SubscriptionError {
     WebhookVerificationFailed(String),
     /// Internal error
     InternalError(String),
-    /// Credit purchase not configured (missing credit_price_id)
+    /// Credit purchase not configured (missing provider config / price id)
     CreditsNotConfigured,
     /// Invalid credits amount for purchase
     InvalidCredits(String),

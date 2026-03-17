@@ -1560,7 +1560,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
                                 .await
                                 .map_err(|e| SubscriptionError::InternalError(e.to_string()))?
                                 .and_then(|c| c.credits)
-                                .map(|c| c.credit_price_id);
+                                .and_then(|c| {
+                                    c.providers.get("stripe").and_then(|p| p.price_id.clone())
+                                });
 
                             if user_uuid.is_none() {
                                 None
@@ -2291,9 +2293,24 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .get_configs()
             .await
             .map_err(|e| SubscriptionError::InternalError(e.to_string()))?;
-        let credit_price_id = configs
+        let credits_cfg = configs
             .and_then(|c| c.credits)
-            .map(|c| c.credit_price_id)
+            .ok_or(SubscriptionError::CreditsNotConfigured)?;
+        let provider = credits_cfg
+            .default_provider
+            .clone()
+            .unwrap_or_else(|| "stripe".to_string());
+        if provider != "stripe" {
+            tracing::warn!(
+                "Credit purchase requested for unsupported provider: {}",
+                provider
+            );
+            return Err(SubscriptionError::CreditsNotConfigured);
+        }
+        let credit_price_id = credits_cfg
+            .providers
+            .get("stripe")
+            .and_then(|p| p.price_id.clone())
             .ok_or(SubscriptionError::CreditsNotConfigured)?;
 
         let customer_id = self.get_or_create_stripe_customer(user_id, None).await?;
@@ -2322,6 +2339,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
         let mut metadata = HashMap::new();
         metadata.insert("user_id".to_string(), user_id.to_string());
         metadata.insert("credits".to_string(), credits.to_string());
+        metadata.insert("provider".to_string(), provider);
         params.metadata = Some(metadata);
 
         let session = CheckoutSession::create(&client, params)

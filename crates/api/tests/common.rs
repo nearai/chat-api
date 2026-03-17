@@ -602,14 +602,19 @@ pub async fn clear_credits_config(db: &database::Database) {
         .ok();
 }
 
-/// Set credits configuration (credit_price_id for Stripe)
+/// Set credits configuration (Stripe provider price_id)
 /// Must be called before tests that need credit purchase checkout.
 pub async fn set_credits_config(server: &axum_test::TestServer, credit_price_id: &str) {
     let admin_email = "test_setup_admin@admin.org";
     let admin_token = mock_login(server, admin_email).await;
 
     let config_body = json!({
-        "credits": { "credit_price_id": credit_price_id }
+        "credits": {
+            "default_provider": "stripe",
+            "providers": {
+                "stripe": { "price_id": credit_price_id }
+            }
+        }
     });
 
     let response = server
