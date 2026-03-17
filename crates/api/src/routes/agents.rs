@@ -1213,10 +1213,6 @@ pub struct VerifyAgentKeyResponse {
     pub name: String,
     pub status: String,
     pub instance_url: Option<String>,
-    /// Per-instance signing token used by channel-relay to sign callbacks.
-    /// This is the decrypted instance_token — sensitive but the endpoint is
-    /// already auth-gated by the sk-agent key itself.
-    pub instance_token: Option<String>,
 }
 
 /// Verify an agent API key and return instance metadata.
@@ -1276,6 +1272,5 @@ pub async fn verify_agent_key(
         name: instance.name,
         status: instance.status,
         instance_url: instance.instance_url,
-        instance_token: instance.instance_token,
     }))
 }
