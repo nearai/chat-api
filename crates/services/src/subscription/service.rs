@@ -466,18 +466,9 @@ impl SubscriptionServiceImpl {
         subscription.pending_downgrade_status = Some(status);
     }
 
-    /// Returns the plan's monthly credit limit in nano-USD: from monthly_credits, or from monthly_tokens converted at 1.5 USD per M tokens, or default.
+    /// Returns the plan's monthly credit limit in nano-USD (see `credits_max_nano_usd`).
     fn plan_limit_max(config: &SubscriptionPlanConfig) -> u64 {
-        if let Some(ref lim) = config.monthly_credits {
-            return lim.max;
-        }
-        if let Some(ref lim) = config.monthly_tokens {
-            let nano_usd = (lim.max as u128 * NANO_USD_PER_1_5_USD as u128
-                / TOKENS_TO_CREDITS_PER_M as u128)
-                .min(u64::MAX as u128) as u64;
-            return nano_usd;
-        }
-        DEFAULT_MONTHLY_CREDITS_NANO_USD
+        credits_max_nano_usd(Some(config))
     }
 
     fn should_check_pending_downgrade(subscription: &Subscription) -> bool {
@@ -754,7 +745,25 @@ fn resolve_plan_name_from_config(
 #[derive(Debug, Clone, Copy)]
 struct EffectivePlanLimits {
     tokens_max: u64,
+    credits_max_nano_usd: u64,
     instances_max: u64,
+}
+
+/// Monthly credit limit in nano-USD: from monthly_credits, or from monthly_tokens converted at 1.5 USD per M tokens, or default.
+fn credits_max_nano_usd(plan_config: Option<&SubscriptionPlanConfig>) -> u64 {
+    let Some(config) = plan_config else {
+        return DEFAULT_MONTHLY_CREDITS_NANO_USD;
+    };
+    if let Some(ref lim) = config.monthly_credits {
+        return lim.max;
+    }
+    if let Some(ref lim) = config.monthly_tokens {
+        let nano_usd = (lim.max as u128 * NANO_USD_PER_1_5_USD as u128
+            / TOKENS_TO_CREDITS_PER_M as u128)
+            .min(u64::MAX as u128) as u64;
+        return nano_usd;
+    }
+    DEFAULT_MONTHLY_CREDITS_NANO_USD
 }
 
 fn effective_limits(plan_config: Option<&SubscriptionPlanConfig>) -> EffectivePlanLimits {
@@ -763,6 +772,7 @@ fn effective_limits(plan_config: Option<&SubscriptionPlanConfig>) -> EffectivePl
             .and_then(|c| c.monthly_tokens.as_ref())
             .map(|l| l.max)
             .unwrap_or(DEFAULT_MONTHLY_TOKEN_LIMIT),
+        credits_max_nano_usd: credits_max_nano_usd(plan_config),
         instances_max: plan_config
             .and_then(|c| c.agent_instances.as_ref())
             .map(|l| l.max)
@@ -781,6 +791,7 @@ fn is_downgrade_by_limits(
     let old_limits = effective_limits(old_plan.as_deref().and_then(|n| plans.get(n)));
     let new_limits = effective_limits(new_plan.as_deref().and_then(|n| plans.get(n)));
     new_limits.tokens_max < old_limits.tokens_max
+        || new_limits.credits_max_nano_usd < old_limits.credits_max_nano_usd
         || new_limits.instances_max < old_limits.instances_max
 }
 
@@ -2334,9 +2345,6 @@ impl SubscriptionService for SubscriptionServiceImpl {
         &self,
         user_id: UserId,
     ) -> Result<(), SubscriptionError> {
-        if !self.is_stripe_configured() {
-            return Ok(());
-        }
         let (plan_credits, period_start, period_end) =
             self.resolve_plan_period_for_user(user_id).await?;
         self.credits_repo
@@ -2485,6 +2493,10 @@ mod tests {
     fn test_effective_limits_defaults() {
         let limits = effective_limits(None);
         assert_eq!(limits.tokens_max, DEFAULT_MONTHLY_TOKEN_LIMIT);
+        assert_eq!(
+            limits.credits_max_nano_usd,
+            DEFAULT_MONTHLY_CREDITS_NANO_USD
+        );
         assert_eq!(limits.instances_max, u64::MAX);
     }
 
