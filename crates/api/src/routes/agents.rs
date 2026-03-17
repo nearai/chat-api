@@ -1206,12 +1206,13 @@ pub struct UpgradeAvailabilityResponse {
 /// Response for agent key verification
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct VerifyAgentKeyResponse {
-    pub id: Uuid,  // DB primary key UUID
+    pub id: Uuid,
     pub instance_id: String,
     pub user_id: Uuid,
     pub service_type: Option<String>,
     pub name: String,
     pub status: String,
+    pub instance_url: Option<String>,
 }
 
 /// Verify an agent API key and return instance metadata.
@@ -1270,5 +1271,6 @@ pub async fn verify_agent_key(
         service_type: instance.service_type,
         name: instance.name,
         status: instance.status,
+        instance_url: instance.instance_url,
     }))
 }
