@@ -591,7 +591,11 @@ async fn test_rate_limit_config_hot_reload() {
     let admin_token = mock_login(&server, admin_email).await;
 
     // Step 1: Set initial rate limit config (very restrictive)
+    // Include subscription_plans so subscription passes before rate limiting is exercised
     let initial_config = json!({
+        "subscription_plans": {
+            "free": { "providers": {}, "monthly_credits": { "max": 1000000 } }
+        },
         "rate_limit": {
             "max_concurrent": 1,
             "max_requests_per_window": 1,
