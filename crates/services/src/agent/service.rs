@@ -52,8 +52,6 @@ pub struct AgentServiceImpl {
     system_configs_service: Arc<dyn SystemConfigsService>,
     /// Channel-relay URL for provisioning relay config to IronClaw instances
     channel_relay_url: Option<String>,
-    /// Channel-relay signing secret for webhook callbacks
-    channel_relay_signing_secret: Option<String>,
 }
 
 impl AgentServiceImpl {
@@ -63,7 +61,6 @@ impl AgentServiceImpl {
         nearai_api_url: String,
         system_configs_service: Arc<dyn SystemConfigsService>,
         channel_relay_url: Option<String>,
-        channel_relay_signing_secret: Option<String>,
     ) -> Self {
         // Validate required configuration
         if managers.is_empty() {
@@ -90,7 +87,6 @@ impl AgentServiceImpl {
             nearai_api_url,
             system_configs_service,
             channel_relay_url,
-            channel_relay_signing_secret,
         }
     }
 
@@ -203,15 +199,14 @@ impl AgentServiceImpl {
             "ssh_pubkey": params.ssh_pubkey,
             "service_type": service_type,
         });
-        // Inject channel-relay config for IronClaw instances
+        // Inject channel-relay config for IronClaw instances.
+        // CHANNEL_RELAY_SIGNING_SECRET is no longer passed: each IronClaw
+        // instance uses its own OPENCLAW_GATEWAY_TOKEN as the signing secret.
         if service_type == "ironclaw" {
-            if let (Some(ref relay_url), Some(ref relay_secret)) =
-                (&self.channel_relay_url, &self.channel_relay_signing_secret)
-            {
+            if let Some(ref relay_url) = self.channel_relay_url {
                 request_body["extra_env"] = serde_json::json!({
                     "CHANNEL_RELAY_URL": relay_url,
                     "CHANNEL_RELAY_API_KEY": nearai_api_key,
-                    "CHANNEL_RELAY_SIGNING_SECRET": relay_secret,
                 });
             }
         }
@@ -337,15 +332,14 @@ impl AgentServiceImpl {
             "ssh_pubkey": params.ssh_pubkey,
             "service_type": service_type,
         });
-        // Inject channel-relay config for IronClaw instances
+        // Inject channel-relay config for IronClaw instances.
+        // CHANNEL_RELAY_SIGNING_SECRET is no longer passed: each IronClaw
+        // instance uses its own OPENCLAW_GATEWAY_TOKEN as the signing secret.
         if service_type == "ironclaw" {
-            if let (Some(ref relay_url), Some(ref relay_secret)) =
-                (&self.channel_relay_url, &self.channel_relay_signing_secret)
-            {
+            if let Some(ref relay_url) = self.channel_relay_url {
                 request_body["extra_env"] = serde_json::json!({
                     "CHANNEL_RELAY_URL": relay_url,
                     "CHANNEL_RELAY_API_KEY": nearai_api_key,
-                    "CHANNEL_RELAY_SIGNING_SECRET": relay_secret,
                 });
             }
         }
@@ -2349,7 +2343,6 @@ mod tests {
             managers,
             "https://nearai.test/v1".to_string(),
             configs,
-            None,
             None,
         )
     }

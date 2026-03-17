@@ -339,13 +339,11 @@ pub struct AgentConfig {
     #[serde(default = "default_nearai_api_url")]
     pub nearai_api_url: String,
     /// Channel-relay URL for Slack integration. When set, provisioned IronClaw
-    /// instances receive CHANNEL_RELAY_URL, CHANNEL_RELAY_API_KEY, and
-    /// CHANNEL_RELAY_SIGNING_SECRET in their environment.
+    /// instances receive CHANNEL_RELAY_URL and CHANNEL_RELAY_API_KEY in their
+    /// environment. The per-instance OPENCLAW_GATEWAY_TOKEN is used as the
+    /// signing secret instead of the former shared CHANNEL_RELAY_SIGNING_SECRET.
     #[serde(default)]
     pub channel_relay_url: Option<String>,
-    /// Signing secret for channel-relay webhook callbacks.
-    #[serde(default)]
-    pub channel_relay_signing_secret: Option<String>,
 }
 
 /// Split a comma-separated env var value into non-empty trimmed entries.
@@ -401,7 +399,6 @@ impl Default for AgentConfig {
                 .map(|url| url.trim_end_matches('/').to_string() + "/v1")
                 .unwrap_or_else(|_| "https://private.near.ai/v1".to_string()),
             channel_relay_url: std::env::var("CHANNEL_RELAY_URL").ok(),
-            channel_relay_signing_secret: std::env::var("CHANNEL_RELAY_SIGNING_SECRET").ok(),
         }
     }
 }
