@@ -1206,6 +1206,7 @@ pub struct UpgradeAvailabilityResponse {
 /// Response for agent key verification
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct VerifyAgentKeyResponse {
+    pub id: Uuid,  // DB primary key UUID
     pub instance_id: String,
     pub user_id: Uuid,
     pub service_type: Option<String>,
@@ -1252,12 +1253,18 @@ pub async fn verify_agent_key(
         }
     }
 
+    // Reject non-active instances (e.g., stopped, deleted)
+    if instance.status != "active" {
+        return Err(ApiError::unauthorized("Invalid token"));
+    }
+
     let _ = app_state
         .agent_repository
         .update_api_key_last_used(api_key_info.id)
         .await;
 
     Ok(Json(VerifyAgentKeyResponse {
+        id: instance.id,
         instance_id: instance.instance_id,
         user_id: instance.user_id.0,
         service_type: instance.service_type,

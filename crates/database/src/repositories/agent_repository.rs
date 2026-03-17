@@ -9,11 +9,15 @@ use services::agent::ports::{
 use services::UserId;
 use uuid::Uuid;
 
-fn encrypt_token(token: Option<String>) -> Option<String> {
-    token.map(|t| encryption::encrypt(&t).unwrap_or(t))
+fn encrypt_token(token: Option<String>) -> Result<Option<String>, anyhow::Error> {
+    match token {
+        Some(t) => Ok(Some(encryption::encrypt(&t)?)),
+        None => Ok(None),
+    }
 }
 
 fn decrypt_token(token: Option<String>) -> Option<String> {
+    // Decrypt is allowed to fall back for migration of existing plaintext data
     token.map(|t| encryption::decrypt(&t).unwrap_or(t))
 }
 
@@ -40,7 +44,8 @@ impl AgentRepository for PostgresAgentRepository {
 
         // Default to 'openclaw' if service_type not provided (matches DEFAULT_SERVICE_TYPE in service layer)
         let service_type = params.service_type.as_deref().unwrap_or("openclaw");
-        let encrypted_token = encrypt_token(params.instance_token);
+        let encrypted_token = encrypt_token(params.instance_token)
+            .map_err(|e| anyhow::anyhow!("Failed to encrypt instance token: {e}"))?;
 
         let row = client
             .query_one(
