@@ -1300,6 +1300,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
             payment_behavior: Some(
                 stripe::generated::billing::subscription::SubscriptionPaymentBehavior::PendingIfIncomplete,
             ),
+            billing_cycle_anchor: Some(
+                stripe::generated::billing::subscription::SubscriptionBillingCycleAnchor::Unchanged,
+            ),
             ..Default::default()
         };
 
