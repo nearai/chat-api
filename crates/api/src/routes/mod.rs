@@ -127,8 +127,8 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
     ));
 
     // Agent key verification route (uses its own auth via agent API key, no session middleware)
-    let verify_agent_key_route = Router::new()
-        .route("/v1/auth/verify-agent-key", get(agents::verify_agent_key));
+    let verify_agent_key_route =
+        Router::new().route("/v1/auth/verify-agent-key", get(agents::verify_agent_key));
 
     // Get rate limit state from app state
     let rate_limit_state = app_state.rate_limit_state.clone();

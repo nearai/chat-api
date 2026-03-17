@@ -3700,12 +3700,10 @@ mod tests {
     fn validate_agent_api_url_rejects_javascript() {
         let result = validate_agent_api_url("javascript:alert(1)", "test_url");
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("must use http or https scheme")
-        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must use http or https scheme"));
     }
 
     #[test]
