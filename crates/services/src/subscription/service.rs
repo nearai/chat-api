@@ -385,6 +385,8 @@ impl SubscriptionServiceImpl {
             stripe::Expandable::Object(customer) => customer.id.to_string(),
         };
 
+        let current_period_end = chrono::DateTime::from_timestamp(stripe_sub.current_period_end, 0)
+            .ok_or_else(|| SubscriptionError::StripeError("Invalid current_period_end".into()))?;
         Ok(Subscription {
             subscription_id: stripe_sub.id.to_string(),
             user_id,
@@ -392,8 +394,7 @@ impl SubscriptionServiceImpl {
             customer_id,
             price_id,
             status: stripe_sub.status.to_string(),
-            current_period_end: chrono::DateTime::from_timestamp(stripe_sub.current_period_end, 0)
-                .ok_or_else(|| SubscriptionError::StripeError("Invalid timestamp".into()))?,
+            current_period_end,
             cancel_at_period_end: stripe_sub.cancel_at_period_end,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
@@ -433,7 +434,7 @@ impl SubscriptionServiceImpl {
                     .map(Self::plan_limit_max)
                     .unwrap_or(DEFAULT_MONTHLY_CREDITS_NANO_USD);
                 let period_end = sub.current_period_end;
-                let period_start = sub_one_month_same_day(period_end);
+                let period_start = sub_one_month_same_day(sub.current_period_end);
                 (plan_credits, period_start, period_end)
             }
             None => {
@@ -2045,7 +2046,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                                 DEFAULT_MONTHLY_CREDITS_NANO_USD
                             });
                         let period_end = effective_sub.current_period_end;
-                        let period_start = sub_one_month_same_day(period_end);
+                        let period_start = sub_one_month_same_day(effective_sub.current_period_end);
                         (plan_credits, period_start, period_end)
                     }
                     None => {
@@ -2461,6 +2462,7 @@ mod tests {
     }
 
     fn base_subscription() -> Subscription {
+        let period_end = Utc::now() + Duration::days(7);
         Subscription {
             subscription_id: "sub_test".to_string(),
             user_id: UserId::new(),
@@ -2468,7 +2470,7 @@ mod tests {
             customer_id: "cus_test".to_string(),
             price_id: "price_basic".to_string(),
             status: "active".to_string(),
-            current_period_end: Utc::now() + Duration::days(7),
+            current_period_end: period_end,
             cancel_at_period_end: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
