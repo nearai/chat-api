@@ -258,7 +258,7 @@ pub struct AdminGrantCreditsRequest {
 /// Admin response after granting credits.
 #[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct AdminGrantCreditsResponse {
-    /// New purchased credits balance for the user (nano-USD).
+    /// New balance: remaining purchased credits (nano-USD).
     pub new_balance_nano_usd: i64,
 }
 
@@ -304,14 +304,6 @@ pub async fn admin_grant_credits(
         .map_err(|e| match e {
             services::subscription::ports::SubscriptionError::InvalidCredits(msg) => {
                 ApiError::bad_request(msg)
-            }
-            services::subscription::ports::SubscriptionError::DatabaseError(msg) => {
-                tracing::error!(error = ?msg, "Database error granting credits");
-                ApiError::internal_server_error("Failed to grant credits")
-            }
-            services::subscription::ports::SubscriptionError::InternalError(msg) => {
-                tracing::error!(error = ?msg, "Internal error granting credits");
-                ApiError::internal_server_error("Failed to grant credits")
             }
             other => {
                 tracing::error!(error = ?other, "Unexpected error granting credits");
