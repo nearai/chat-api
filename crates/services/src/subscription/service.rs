@@ -2101,7 +2101,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
         };
 
         // 2. Get used credits (cost_nano_usd) in the period
-        let used_credits = self
+        let period_spent_credits = self
             .user_usage_repo
             .get_usage_by_user_id(user_id, Some(period_start), Some(period_end))
             .await
@@ -2110,13 +2110,13 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .unwrap_or(0);
 
         // 3. Enforce limit (compare without casting max_credits to i64 to avoid wrap-around DoS when max_credits > i64::MAX)
-        if used_credits >= 0 && (used_credits as u64) >= max_credits {
+        if period_spent_credits >= 0 && (period_spent_credits as u64) >= max_credits {
             tracing::info!(
                 "Blocking proxy access for user_id={}: monthly credit limit exceeded (used {} of {})",
-                user_id, used_credits, max_credits
+                user_id, period_spent_credits, max_credits
             );
             return Err(SubscriptionError::MonthlyCreditLimitExceeded {
-                used: used_credits,
+                used: period_spent_credits,
                 limit: max_credits,
             });
         }
@@ -2124,7 +2124,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
         tracing::debug!(
             "User user_id={} within credit limit (used {} of {}), allowing proxy access",
             user_id,
-            used_credits,
+            period_spent_credits,
             max_credits
         );
         Ok(())
@@ -2364,13 +2364,13 @@ impl SubscriptionService for SubscriptionServiceImpl {
         let (plan_credits, period_start, period_end) =
             self.resolve_plan_period_for_user(user_id).await?;
 
-        let (balance, total_purchased_nano_usd, used_purchased_nano_usd) = self
+        let (balance, total_purchased_nano_usd, spent_purchased_nano_usd) = self
             .credits_repo
             .get_purchased_breakdown(user_id)
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
-        let used_credits = self
+        let period_spent_credits = self
             .user_usage_repo
             .get_usage_by_user_id(user_id, Some(period_start), Some(period_end))
             .await
@@ -2383,8 +2383,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
         Ok(CreditsSummary {
             balance,
             total_purchased_nano_usd,
-            used_purchased_nano_usd,
-            used_credits,
+            spent_purchased_nano_usd,
+            period_spent_credits,
             effective_max_credits,
         })
     }

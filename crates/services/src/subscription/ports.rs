@@ -318,10 +318,10 @@ pub struct CreditTransaction {
 
 #[async_trait]
 pub trait CreditsRepository: Send + Sync {
-    /// Remaining purchased credits for a user (0 if no row). Computed as total_nano_usd - used_nano_usd.
+    /// Remaining purchased credits for a user (0 if no row). Computed as total_nano_usd - spent_nano_usd.
     async fn get_balance(&self, user_id: UserId) -> anyhow::Result<i64>;
 
-    /// Remaining, total purchased, used purchased (nano-USD). Zeros if no row.
+    /// Remaining, total purchased, spent purchased (nano-USD). Zeros if no row.
     async fn get_purchased_breakdown(&self, user_id: UserId) -> anyhow::Result<(i64, i64, i64)>;
 
     /// Add credits to user balance (upsert). Returns new balance.
@@ -536,10 +536,10 @@ pub struct CreditsSummary {
     pub balance: i64,
     /// Cumulative purchased+granted credits (nano-USD).
     pub total_purchased_nano_usd: i64,
-    /// Purchased credits already consumed (usage over plan in period, capped by total).
-    pub used_purchased_nano_usd: i64,
-    /// Usage in the current period (sum of cost_nano_usd).
-    pub used_credits: i64,
+    /// Purchased credits already spent (lifetime), capped by total.
+    pub spent_purchased_nano_usd: i64,
+    /// Spend in the current period (sum of cost_nano_usd).
+    pub period_spent_credits: i64,
     /// Effective limit: plan limit + remaining balance (nano-USD).
     pub effective_max_credits: i64,
 }

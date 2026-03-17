@@ -69,8 +69,8 @@ async fn test_get_credits_returns_summary() {
     let body: serde_json::Value = response.json();
     assert!(body.get("balance").is_some(), "Should have balance");
     assert!(
-        body.get("used_credits").is_some(),
-        "Should have used_credits"
+        body.get("period_spent_credits").is_some(),
+        "Should have period_spent_credits"
     );
     assert!(
         body.get("effective_max_credits").is_some(),
@@ -81,8 +81,8 @@ async fn test_get_credits_returns_summary() {
         "Should have total_purchased_nano_usd"
     );
     assert!(
-        body.get("used_purchased_nano_usd").is_some(),
-        "Should have used_purchased_nano_usd"
+        body.get("spent_purchased_nano_usd").is_some(),
+        "Should have spent_purchased_nano_usd"
     );
 }
 

@@ -22,10 +22,10 @@ pub struct UserWithStats {
     pub agent_token_usage: i64,
     pub last_activity_at: Option<DateTime<Utc>>,
     /// Total purchased+granted credits (nano-USD), from user_credits.total_nano_usd.
-    /// Remaining = purchased_credits_nano - used_purchased_credits_nano.
     pub purchased_credits_nano: i64,
-    /// Used portion of purchased credits (nano-USD), from user_credits.used_nano_usd.
-    pub used_purchased_credits_nano: i64,
+    /// Spent portion of purchased credits (nano-USD), from user_credits.spent_nano_usd.
+    /// Remaining = purchased_credits_nano - spent_purchased_credits_nano.
+    pub spent_purchased_credits_nano: i64,
 }
 
 /// Filter for BI user list
@@ -60,7 +60,7 @@ pub enum UsersSortBy {
     Email,
     Name,
     PurchasedCreditsNano,
-    UsedPurchasedCreditsNano,
+    SpentPurchasedCreditsNano,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1,5 +1,5 @@
 //! PostgreSQL implementation of the credits repository.
-//! Remaining credits = total_nano_usd - used_nano_usd (no stored balance column).
+//! Remaining credits = total_nano_usd - spent_nano_usd (no stored balance column).
 
 use crate::pool::DbPool;
 use async_trait::async_trait;
@@ -25,7 +25,7 @@ impl CreditsRepository for PostgresCreditsRepository {
         let row = client
             .query_opt(
                 r#"
-                SELECT (total_nano_usd - used_nano_usd)::bigint AS remaining
+                SELECT (total_nano_usd - spent_nano_usd)::bigint AS remaining
                 FROM user_credits WHERE user_id = $1
                 "#,
                 &[&user_id],
@@ -41,8 +41,8 @@ impl CreditsRepository for PostgresCreditsRepository {
                 r#"
                 SELECT
                     total_nano_usd,
-                    used_nano_usd,
-                    (total_nano_usd - used_nano_usd)::bigint AS remaining
+                    spent_nano_usd,
+                    (total_nano_usd - spent_nano_usd)::bigint AS remaining
                 FROM user_credits WHERE user_id = $1
                 "#,
                 &[&user_id],
@@ -52,7 +52,7 @@ impl CreditsRepository for PostgresCreditsRepository {
             Some(r) => (
                 r.get::<_, i64>("remaining"),
                 r.get::<_, i64>("total_nano_usd"),
-                r.get::<_, i64>("used_nano_usd"),
+                r.get::<_, i64>("spent_nano_usd"),
             ),
             None => (0, 0, 0),
         })
@@ -73,7 +73,7 @@ impl CreditsRepository for PostgresCreditsRepository {
                 DO UPDATE SET
                     total_nano_usd = user_credits.total_nano_usd + EXCLUDED.total_nano_usd,
                     updated_at = NOW()
-                RETURNING (total_nano_usd - used_nano_usd)::bigint AS remaining
+                RETURNING (total_nano_usd - spent_nano_usd)::bigint AS remaining
                 "#,
                 &[&user_id, &amount],
             )
@@ -190,7 +190,7 @@ impl CreditsRepository for PostgresCreditsRepository {
         let row = txn
             .query_opt(
                 r#"
-                SELECT total_nano_usd, used_nano_usd
+                SELECT total_nano_usd, spent_nano_usd, last_reconciled_period_start, last_reconciled_over_plan_nano_usd
                 FROM user_credits
                 WHERE user_id = $1
                 FOR UPDATE
@@ -199,10 +199,12 @@ impl CreditsRepository for PostgresCreditsRepository {
             )
             .await?;
 
-        let (total_purchased, _old_used) = match row {
+        let (total_purchased, old_spent, last_period_start, last_over_plan) = match row {
             Some(r) => (
                 r.get::<_, i64>("total_nano_usd"),
-                r.get::<_, i64>("used_nano_usd"),
+                r.get::<_, i64>("spent_nano_usd"),
+                r.get::<_, Option<DateTime<Utc>>>("last_reconciled_period_start"),
+                r.get::<_, i64>("last_reconciled_over_plan_nano_usd"),
             ),
             None => return Ok(()), // no purchased pool
         };
@@ -227,17 +229,33 @@ impl CreditsRepository for PostgresCreditsRepository {
         let u: i64 = usage_row.get("cost_sum");
 
         let plan = plan_credits_nano_usd.max(0);
-        let over_plan = (u - plan).max(0);
-        let new_used = over_plan.min(total_purchased).max(0);
+        let current_over_plan = (u - plan).max(0);
+
+        // We treat spent_nano_usd as lifetime spent. To avoid double-counting, we only add the
+        // delta since the last reconciliation for the same period_start.
+        let is_same_period = last_period_start
+            .map(|s| s == period_start)
+            .unwrap_or(false);
+        let already_applied = if is_same_period {
+            last_over_plan.max(0)
+        } else {
+            0
+        };
+        let delta_over_plan = (current_over_plan - already_applied).max(0);
+
+        // Apply delta, but never exceed total_purchased.
+        let new_spent = (old_spent + delta_over_plan).min(total_purchased).max(0);
 
         txn.execute(
             r#"
             UPDATE user_credits
-            SET used_nano_usd = $2,
+            SET spent_nano_usd = $2,
+                last_reconciled_period_start = $3,
+                last_reconciled_over_plan_nano_usd = $4,
                 updated_at = NOW()
             WHERE user_id = $1
             "#,
-            &[&user_id, &new_used],
+            &[&user_id, &new_spent, &period_start, &current_over_plan],
         )
         .await?;
 

@@ -472,10 +472,10 @@ pub struct AdminUserResponse {
     pub agent_token_usage: i64,
     pub last_activity_at: Option<String>,
     /// Total purchased+granted credits for the user (nano-USD), from user_credits.total_nano_usd.
-    /// Remaining credits = purchased_credits_nano - used_purchased_credits_nano.
     pub purchased_credits_nano: i64,
-    /// Used portion of purchased credits (nano-USD), from user_credits.used_nano_usd.
-    pub used_purchased_credits_nano: i64,
+    /// Spent portion of purchased credits (nano-USD), from user_credits.spent_nano_usd.
+    /// Remaining credits = purchased_credits_nano - spent_purchased_credits_nano.
+    pub spent_purchased_credits_nano: i64,
 }
 
 /// Single credit transaction entry for admin credit history.
@@ -527,7 +527,7 @@ impl AdminUserResponse {
             agent_token_usage: u.agent_token_usage,
             last_activity_at: u.last_activity_at.map(|t| t.to_rfc3339()),
             purchased_credits_nano: u.purchased_credits_nano,
-            used_purchased_credits_nano: u.used_purchased_credits_nano,
+            spent_purchased_credits_nano: u.spent_purchased_credits_nano,
         }
     }
 }
