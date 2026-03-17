@@ -8,7 +8,9 @@ use axum::{
     Extension, Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use services::subscription::ports::{SubscriptionError, SubscriptionPlan, SubscriptionWithPlan};
+use services::subscription::ports::{
+    ChangePlanOutcome, SubscriptionError, SubscriptionPlan, SubscriptionWithPlan,
+};
 use url::Url;
 use utoipa::ToSchema;
 
@@ -99,6 +101,8 @@ pub struct ChangePlanRequest {
 pub struct ChangePlanResponse {
     /// Success message
     pub message: String,
+    /// Change result type
+    pub result: ChangePlanOutcome,
 }
 
 /// Response containing user's subscriptions
@@ -244,6 +248,10 @@ pub async fn create_subscription(
             SubscriptionError::TestClockNotAllowedForExistingCustomer => ApiError::bad_request(
                 "Cannot associate test clock with existing Stripe customer".to_string(),
             ),
+            SubscriptionError::NoPendingDowngrade => {
+                tracing::error!("Unexpected NoPendingDowngrade in create");
+                ApiError::internal_server_error("Failed to create subscription")
+            }
         })?;
 
     Ok(Json(CreateSubscriptionResponse { checkout_url }))
@@ -378,7 +386,7 @@ pub async fn change_plan(
         req.plan
     );
 
-    app_state
+    let outcome = app_state
         .subscription_service
         .change_plan(user.user_id, req.plan.clone())
         .await
@@ -406,6 +414,9 @@ pub async fn change_plan(
                 tracing::error!(error = ?msg, "Stripe error changing plan");
                 ApiError::internal_server_error("Failed to change plan")
             }
+            SubscriptionError::NoPendingDowngrade => {
+                ApiError::bad_request("No pending downgrade to cancel")
+            }
             _ => {
                 tracing::error!(error = ?e, "Failed to change plan");
                 ApiError::internal_server_error("Failed to change plan")
@@ -413,7 +424,15 @@ pub async fn change_plan(
         })?;
 
     Ok(Json(ChangePlanResponse {
-        message: "Plan changed successfully".to_string(),
+        message: match outcome {
+            ChangePlanOutcome::ChangedImmediately => "Plan changed successfully".to_string(),
+            ChangePlanOutcome::ScheduledForPeriodEnd => {
+                "Downgrade scheduled and will be checked near period end".to_string()
+            }
+            ChangePlanOutcome::NoOp => "User is already on the target plan".to_string(),
+            ChangePlanOutcome::DowngradeCancelled => "Pending downgrade cancelled".to_string(),
+        },
+        result: outcome,
     }))
 }
 

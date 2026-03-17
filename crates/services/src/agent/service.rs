@@ -1667,12 +1667,13 @@ impl AgentService for AgentServiceImpl {
             );
         }
 
+        let fetched_count = all_instances.len();
         let instances: Vec<_> = all_instances
             .into_iter()
             .filter(|i| i.status != "deleted")
             .collect();
 
-        let filtered_count = total as usize - instances.len();
+        let filtered_count = fetched_count - instances.len();
         if filtered_count > 0 {
             tracing::debug!(
                 "sync_all_instance_statuses: filtered out {} deleted instances",
