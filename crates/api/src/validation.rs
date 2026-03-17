@@ -1,5 +1,37 @@
 //! Validation utilities for API request data
+use url::{Host, Url};
+
 use near_api::AccountId;
+
+/// Validates a URL for Stripe checkout/portal redirects.
+/// Requires https for production. Allows http only for loopback (localhost, 127.0.0.1, [::1]).
+pub fn validate_redirect_url(url_str: &str, field_name: &str) -> Result<(), String> {
+    let url =
+        Url::parse(url_str).map_err(|_| format!("Invalid {}: must be a valid URL", field_name))?;
+    match url.scheme() {
+        "https" => Ok(()),
+        "http" => {
+            let host_ok = match url.host() {
+                Some(Host::Domain(d)) => d == "localhost",
+                Some(Host::Ipv4(ip)) => ip.is_loopback(),
+                Some(Host::Ipv6(ip)) => ip.is_loopback(),
+                _ => false,
+            };
+            if host_ok {
+                Ok(())
+            } else {
+                Err(format!(
+                    "Invalid {}: URL must use https for non-localhost",
+                    field_name
+                ))
+            }
+        }
+        _ => Err(format!(
+            "Invalid {}: URL scheme must be https or http (localhost only)",
+            field_name
+        )),
+    }
+}
 
 /// Validates an email address format.
 ///
