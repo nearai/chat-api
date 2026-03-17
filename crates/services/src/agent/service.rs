@@ -2,7 +2,7 @@ use crate::system_configs::ports::SystemConfigsService;
 use crate::UserId;
 use anyhow::anyhow;
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use config::AgentManager;
 use reqwest::Client;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -419,6 +419,16 @@ impl AgentServiceImpl {
     }
 }
 
+/// Validate that a URL from the Agent API response uses an allowed scheme (http or https).
+/// Rejects URLs with unexpected schemes (e.g., javascript:, file:, data:) that could be
+/// injected by a compromised or malicious Agent Manager.
+fn validate_agent_api_url(url: &str, field_name: &str) -> anyhow::Result<()> {
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        anyhow::bail!("Invalid {field_name}: must use http or https scheme");
+    }
+    Ok(())
+}
+
 /// Save instance data from a lifecycle event to database.
 /// `agent_api_base_url` is the manager URL that created this instance (for routing future operations).
 async fn save_instance_from_event(
@@ -459,10 +469,20 @@ async fn save_instance_from_event(
         .get("url")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    // Validate instance_url scheme to prevent injection from a compromised Agent Manager
+    if let Some(ref url) = instance_url {
+        validate_agent_api_url(url, "instance_url")?;
+    }
     let instance_token = instance_data
         .get("token")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    // Reject empty instance_token if present (defense-in-depth)
+    if let Some(ref token) = instance_token {
+        if token.is_empty() {
+            anyhow::bail!("Invalid instance_token: must be non-empty");
+        }
+    }
     let gateway_port = instance_data
         .get("gateway_port")
         .and_then(|v| v.as_i64())
@@ -471,6 +491,10 @@ async fn save_instance_from_event(
         .get("dashboard_url")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    // Validate dashboard_url scheme to prevent injection from a compromised Agent Manager
+    if let Some(ref url) = dashboard_url {
+        validate_agent_api_url(url, "dashboard_url")?;
+    }
 
     // Extract service_type from instance_data if present and valid, otherwise use provided value
     let service_type_from_response = instance_data
@@ -547,8 +571,9 @@ impl AgentService for AgentServiceImpl {
             .as_deref()
             .map(|n| format!("instance-{}", n))
             .unwrap_or_else(|| "instance".to_string());
+        let default_expiry = Some(Utc::now() + Duration::days(90));
         let (api_key, plaintext_key) = self
-            .create_unbound_api_key(user_id, key_name, None, None)
+            .create_unbound_api_key(user_id, key_name, None, default_expiry)
             .await?;
 
         // Apply default service type if not provided
@@ -598,11 +623,21 @@ impl AgentService for AgentServiceImpl {
             .get("url")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        // Validate instance_url scheme to prevent injection from a compromised Agent Manager
+        if let Some(ref url) = instance_url {
+            validate_agent_api_url(url, "instance_url")?;
+        }
 
         let instance_token = instance_data
             .get("token")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        // Reject empty instance_token if present (defense-in-depth)
+        if let Some(ref token) = instance_token {
+            if token.is_empty() {
+                anyhow::bail!("Invalid instance_token: must be non-empty");
+            }
+        }
 
         let gateway_port = instance_data
             .get("gateway_port")
@@ -613,6 +648,10 @@ impl AgentService for AgentServiceImpl {
             .get("dashboard_url")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        // Validate dashboard_url scheme to prevent injection from a compromised Agent Manager
+        if let Some(ref url) = dashboard_url {
+            validate_agent_api_url(url, "dashboard_url")?;
+        }
 
         // Generate a unique instance_id based on the Agent API name
         let instance_id = format!("agent-{}-{}", instance_name, Uuid::new_v4());
@@ -688,8 +727,9 @@ impl AgentService for AgentServiceImpl {
             .as_deref()
             .map(|n| format!("instance-{}", n))
             .unwrap_or_else(|| "instance".to_string());
+        let default_expiry = Some(Utc::now() + Duration::days(90));
         let (api_key, plaintext_key) = self
-            .create_unbound_api_key(user_id, key_name, None, None)
+            .create_unbound_api_key(user_id, key_name, None, default_expiry)
             .await?;
 
         // Apply default service type if not provided
@@ -3610,5 +3650,47 @@ mod tests {
             assert_eq!(r.error_skipped, 1);
             assert!(!r.errors.is_empty());
         }
+    }
+
+    #[test]
+    fn validate_agent_api_url_accepts_https() {
+        assert!(validate_agent_api_url("https://example.com/path", "test_url").is_ok());
+    }
+
+    #[test]
+    fn validate_agent_api_url_accepts_http() {
+        assert!(validate_agent_api_url("http://example.com/path", "test_url").is_ok());
+    }
+
+    #[test]
+    fn validate_agent_api_url_rejects_javascript() {
+        let result = validate_agent_api_url("javascript:alert(1)", "test_url");
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must use http or https scheme")
+        );
+    }
+
+    #[test]
+    fn validate_agent_api_url_rejects_file() {
+        assert!(validate_agent_api_url("file:///etc/passwd", "test_url").is_err());
+    }
+
+    #[test]
+    fn validate_agent_api_url_rejects_data() {
+        assert!(validate_agent_api_url("data:text/html,<h1>hi</h1>", "test_url").is_err());
+    }
+
+    #[test]
+    fn validate_agent_api_url_rejects_empty() {
+        assert!(validate_agent_api_url("", "test_url").is_err());
+    }
+
+    #[test]
+    fn validate_agent_api_url_rejects_relative() {
+        assert!(validate_agent_api_url("/foo/bar", "test_url").is_err());
     }
 }
