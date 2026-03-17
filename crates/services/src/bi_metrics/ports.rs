@@ -59,6 +59,8 @@ pub enum UsersSortBy {
     AgentCount,
     Email,
     Name,
+    PurchasedCreditsNano,
+    UsedPurchasedCreditsNano,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

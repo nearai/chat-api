@@ -170,6 +170,8 @@ impl ListUsersQuery {
             "agent_count",
             "email",
             "name",
+            "purchased_credits_nano",
+            "used_purchased_credits_nano",
         ];
         if !valid_sort_by.contains(&self.sort_by.as_str()) {
             return Err(ApiError::bad_request(format!(
@@ -484,6 +486,10 @@ async fn list_users_bi_impl(
             "agent_count" => services::bi_metrics::UsersSortBy::AgentCount,
             "email" => services::bi_metrics::UsersSortBy::Email,
             "name" => services::bi_metrics::UsersSortBy::Name,
+            "purchased_credits_nano" => services::bi_metrics::UsersSortBy::PurchasedCreditsNano,
+            "used_purchased_credits_nano" => {
+                services::bi_metrics::UsersSortBy::UsedPurchasedCreditsNano
+            }
             _ => services::bi_metrics::UsersSortBy::CreatedAt,
         },
         sort_order: if params.sort_order == "asc" {
@@ -2274,7 +2280,7 @@ fn validate_string_filter(name: &str, value: &Option<String>) -> Result<(), ApiE
         ("filter_by" = Option<String>, Query, description = "Filter type: subscription_status or subscription_plan"),
         ("filter_value" = Option<String>, Query, description = "Filter value. For subscription_status: active, trialing, none. For subscription_plan: plan name or none"),
         ("q" = Option<String>, Query, description = "Substring search on email and name (case-insensitive)"),
-        ("sort_by" = Option<String>, Query, description = "Sort by: created_at, total_spent_nano, agent_spent_nano, agent_token_usage, last_activity_at, agent_count, email, name"),
+        ("sort_by" = Option<String>, Query, description = "Sort by: created_at, total_spent_nano, agent_spent_nano, agent_token_usage, last_activity_at, agent_count, email, name, purchased_credits_nano, used_purchased_credits_nano"),
         ("sort_order" = Option<String>, Query, description = "Sort order: asc or desc")
     ),
     responses(

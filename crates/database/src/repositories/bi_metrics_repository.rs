@@ -118,6 +118,8 @@ fn list_users_order_clause(sort: &ListUsersSort) -> String {
         UsersSortBy::AgentCount => "enriched.agent_count",
         UsersSortBy::Email => "enriched.email",
         UsersSortBy::Name => "enriched.name",
+        UsersSortBy::PurchasedCreditsNano => "enriched.purchased_credits_nano",
+        UsersSortBy::UsedPurchasedCreditsNano => "enriched.used_purchased_credits_nano",
     };
     let order = match sort.sort_order {
         UsersSortOrder::Asc => "ASC",
