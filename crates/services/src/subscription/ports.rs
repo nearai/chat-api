@@ -145,8 +145,8 @@ pub enum SubscriptionError {
     NotConfigured,
     /// No active subscription found for user
     NoActiveSubscription,
-    /// Monthly token limit exceeded (used >= limit)
-    MonthlyTokenLimitExceeded { used: i64, limit: u64 },
+    /// Monthly credit limit exceeded (used >= limit)
+    MonthlyCreditLimitExceeded { used: i64, limit: u64 },
     /// Cannot switch to plan: current instance count exceeds target plan's limit
     InstanceLimitExceeded { current: u64, max: u64 },
     /// Subscription is not scheduled for cancellation (cannot resume)
@@ -161,6 +161,10 @@ pub enum SubscriptionError {
     WebhookVerificationFailed(String),
     /// Internal error
     InternalError(String),
+    /// Credit purchase not configured (missing credit_price_id)
+    CreditsNotConfigured,
+    /// Invalid credits amount for purchase
+    InvalidCredits(String),
     /// Cannot associate test clock with existing Stripe customer
     TestClockNotAllowedForExistingCustomer,
     /// No pending downgrade to cancel (same plan requested but no pending downgrade exists)
@@ -177,10 +181,10 @@ impl fmt::Display for SubscriptionError {
             Self::InvalidProvider(provider) => write!(f, "Invalid provider: {}", provider),
             Self::NotConfigured => write!(f, "Stripe is not configured"),
             Self::NoActiveSubscription => write!(f, "No active subscription found"),
-            Self::MonthlyTokenLimitExceeded { used, limit } => {
+            Self::MonthlyCreditLimitExceeded { used, limit } => {
                 write!(
                     f,
-                    "Monthly token limit exceeded: used {} of {} tokens",
+                    "Monthly credit limit exceeded: used {} of {} credits",
                     used, limit
                 )
             }
@@ -201,6 +205,8 @@ impl fmt::Display for SubscriptionError {
                 write!(f, "Webhook verification failed: {}", msg)
             }
             Self::InternalError(msg) => write!(f, "Internal error: {}", msg),
+            Self::CreditsNotConfigured => write!(f, "Credit purchase is not configured"),
+            Self::InvalidCredits(msg) => write!(f, "Invalid credits: {}", msg),
             Self::TestClockNotAllowedForExistingCustomer => {
                 write!(
                     f,
@@ -295,6 +301,73 @@ pub trait SubscriptionRepository: Send + Sync {
     ) -> anyhow::Result<()>;
 }
 
+/// Single credit transaction record (purchase, grant, admin adjustment).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct CreditTransaction {
+    pub id: uuid::Uuid,
+    pub user_id: UserId,
+    /// Amount in nano-USD (positive for credits added, negative for debits if ever used).
+    pub amount: i64,
+    /// Transaction type: 'purchase', 'grant', or 'admin_adjust'.
+    pub r#type: String,
+    /// Optional external reference (e.g. Stripe session id or admin reason).
+    pub reference_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[async_trait]
+pub trait CreditsRepository: Send + Sync {
+    /// Remaining purchased credits for a user (0 if no row). Computed as total_nano_usd - spent_nano_usd.
+    async fn get_balance(&self, user_id: UserId) -> anyhow::Result<i64>;
+
+    /// Remaining, total purchased, spent purchased (nano-USD). Zeros if no row.
+    async fn get_purchased_breakdown(&self, user_id: UserId) -> anyhow::Result<(i64, i64, i64)>;
+
+    /// Add credits to user balance (upsert). Returns new balance.
+    async fn add_credits(
+        &self,
+        txn: &tokio_postgres::Transaction<'_>,
+        user_id: UserId,
+        amount: i64,
+    ) -> anyhow::Result<i64>;
+
+    /// Record a credit transaction (for audit/idempotency). Returns false if duplicate.
+    async fn try_record_purchase(
+        &self,
+        txn: &tokio_postgres::Transaction<'_>,
+        user_id: UserId,
+        amount: i64,
+        reference_id: &str,
+    ) -> anyhow::Result<bool>;
+
+    /// Record an admin grant transaction (for manual/admin adjustments).
+    async fn record_grant(
+        &self,
+        txn: &tokio_postgres::Transaction<'_>,
+        user_id: UserId,
+        amount: i64,
+        reason: Option<String>,
+    ) -> anyhow::Result<()>;
+
+    /// List credit transactions for a user, newest first, with total count.
+    async fn list_transactions(
+        &self,
+        user_id: UserId,
+        limit: i64,
+        offset: i64,
+    ) -> anyhow::Result<(Vec<CreditTransaction>, i64)>;
+
+    /// Reconcile used_purchased and remaining balance from usage in period vs plan allowance.
+    async fn reconcile_purchased_after_usage(
+        &self,
+        user_id: UserId,
+        plan_credits_nano_usd: i64,
+        period_start: chrono::DateTime<chrono::Utc>,
+        period_end: chrono::DateTime<chrono::Utc>,
+    ) -> anyhow::Result<()>;
+}
+
 /// Repository trait for payment webhook events
 #[async_trait]
 pub trait PaymentWebhookRepository: Send + Sync {
@@ -323,9 +396,9 @@ pub struct SubscriptionPlan {
     /// Agent instance limits (e.g. { "max": 1 })
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_instances: Option<PlanLimitConfig>,
-    /// Monthly token limits (e.g. { "max": 1000000 })
+    /// Monthly credit limits in nano-USD (e.g. { "max": 1000000000 } for $1; $1 = 1_000_000_000 nano-USD). When missing, defaults to 1_000_000_000. Used for quota enforcement.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub monthly_tokens: Option<PlanLimitConfig>,
+    pub monthly_credits: Option<PlanLimitConfig>,
 }
 
 /// Service trait for subscription management
@@ -413,4 +486,60 @@ pub trait SubscriptionService: Send + Sync {
         &self,
         user_id: UserId,
     ) -> Result<(), SubscriptionError>;
+
+    /// Create checkout session for purchasing credits. Returns checkout URL.
+    async fn create_credit_purchase_checkout(
+        &self,
+        user_id: UserId,
+        credits: u64,
+        success_url: String,
+        cancel_url: String,
+    ) -> Result<String, SubscriptionError>;
+
+    /// Get user's credits: remaining balance, totals, used in period, effective max.
+    async fn get_credits(&self, user_id: UserId) -> Result<CreditsSummary, SubscriptionError>;
+
+    /// After recording usage with cost, reconcile purchased used/remaining from period usage vs plan.
+    /// No-op if Stripe not configured or user has no purchased pool.
+    async fn reconcile_purchased_after_usage(
+        &self,
+        user_id: UserId,
+    ) -> Result<(), SubscriptionError>;
+
+    /// Admin-only: grant credits (nano-USD) directly to a user.
+    /// Records a 'grant' transaction and updates user_credits balance.
+    async fn admin_grant_credits(
+        &self,
+        user_id: UserId,
+        amount_nano_usd: i64,
+        reason: Option<String>,
+    ) -> Result<i64, SubscriptionError>;
+
+    /// Admin-only: list credit transactions for a user (for payment history / audit).
+    async fn admin_get_credit_history(
+        &self,
+        user_id: UserId,
+        limit: i64,
+        offset: i64,
+    ) -> Result<(Vec<CreditTransaction>, i64), SubscriptionError>;
+}
+
+/// Summary of user's credits (balance, used, effective limit).
+///
+/// **Unit: nano-USD** (1 credit = 1e-9 USD; 1_000_000_000 = $1). All fields use this unit so they
+/// can be compared: usage is recorded as `cost_nano_usd`, plan limits and purchased balance
+/// are in the same unit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct CreditsSummary {
+    /// Remaining purchased credits (nano-USD); can spend from this pool after plan allowance.
+    pub balance: i64,
+    /// Cumulative purchased+granted credits (nano-USD).
+    pub total_purchased_nano_usd: i64,
+    /// Purchased credits already spent (lifetime), capped by total.
+    pub spent_purchased_nano_usd: i64,
+    /// Spend in the current period (sum of cost_nano_usd).
+    pub period_spent_credits: i64,
+    /// Effective limit: plan limit + remaining balance (nano-USD).
+    pub effective_max_credits: i64,
 }

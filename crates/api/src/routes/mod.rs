@@ -3,6 +3,7 @@ pub mod agents;
 pub mod api;
 pub mod attestation;
 pub mod configs;
+pub mod credits;
 pub mod oauth;
 pub mod subscriptions;
 pub mod users;
@@ -140,6 +141,12 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         from_fn_with_state(auth_state.clone(), crate::middleware::auth_middleware),
     );
 
+    // Credits routes (requires user authentication)
+    let credits_routes = credits::create_credits_router().layer(from_fn_with_state(
+        auth_state.clone(),
+        crate::middleware::auth_middleware,
+    ));
+
     // Public subscription routes (webhook, no auth required)
     let public_subscription_routes = subscriptions::create_public_subscriptions_router();
 
@@ -178,6 +185,7 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         .route("/health", get(health_check))
         .merge(configs_routes) // Configs route (requires user auth)
         .merge(subscription_routes) // Subscription routes (requires user auth)
+        .merge(credits_routes) // Credits routes (requires user auth)
         .merge(public_subscription_routes) // Public subscription webhook route (no auth)
         .nest("/v1/auth", auth_routes)
         .nest("/v1/auth", logout_route) // Logout route with auth middleware

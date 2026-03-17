@@ -1,7 +1,8 @@
 //! Subscription validation middleware for LLM proxy endpoints.
 //!
-//! Ensures the authenticated user has sufficient token quota (active subscription
-//! and within monthly limits) before allowing access to chat completions, images, and responses.
+//! Ensures the authenticated user has an active subscription and is within their configured
+//! monthly credit (or legacy token) limits before allowing access to chat completions,
+//! images, and responses.
 
 use axum::{
     extract::{Request, State},
@@ -26,9 +27,9 @@ struct SubscriptionErrorResponse {
 const SUBSCRIPTION_REQUIRED_ERROR_MESSAGE: &str =
     "Active subscription required. Please subscribe to continue.";
 
-/// Error message when monthly token limit is exceeded
-const MONTHLY_TOKEN_LIMIT_EXCEEDED_MESSAGE: &str =
-    "Monthly token limit exceeded. Upgrade your plan or wait for the next billing period.";
+/// Error message when monthly credit limit is exceeded
+const MONTHLY_CREDIT_LIMIT_EXCEEDED_MESSAGE: &str =
+    "Monthly credit limit exceeded. Upgrade your plan or purchase more credits.";
 
 /// State for subscription validation middleware
 #[derive(Clone)]
@@ -37,11 +38,11 @@ pub struct SubscriptionState {
 }
 
 /// Middleware that validates the authenticated user has an active subscription
-/// and sufficient token quota for proxy/chat access.
+/// and sufficient quota for proxy/chat access (credits-first, with legacy token support).
 ///
 /// Must run after auth middleware (so `AuthenticatedUser` is in request extensions).
 /// Applies to both session users and agent API key users (owner's subscription).
-/// Returns 403 when no active subscription, 402 when monthly token limit exceeded.
+/// Returns 403 when no active subscription, 402 when monthly credit/token limit exceeded.
 pub async fn subscription_middleware(
     State(state): State<SubscriptionState>,
     request: Request,
@@ -81,9 +82,9 @@ pub async fn subscription_middleware(
             )
                 .into_response())
         }
-        Err(SubscriptionError::MonthlyTokenLimitExceeded { used, limit }) => {
+        Err(SubscriptionError::MonthlyCreditLimitExceeded { used, limit }) => {
             tracing::info!(
-                "Blocked proxy access for user_id={}: monthly token limit exceeded (used {} of {})",
+                "Blocked proxy access for user_id={}: monthly credit limit exceeded (used {} of {})",
                 user.user_id,
                 used,
                 limit
@@ -92,8 +93,11 @@ pub async fn subscription_middleware(
                 StatusCode::PAYMENT_REQUIRED,
                 Json(SubscriptionErrorResponse {
                     error: format!(
-                        "{} You have used {} of {} tokens this period.",
-                        MONTHLY_TOKEN_LIMIT_EXCEEDED_MESSAGE, used, limit
+                        "{} You have used ${:.2} of a ${:.2} monthly credit budget this period (raw limit = {}).",
+                        MONTHLY_CREDIT_LIMIT_EXCEEDED_MESSAGE,
+                        used as f64 / 1_000_000_000_f64,
+                        limit as f64 / 1_000_000_000_f64,
+                        limit
                     ),
                 }),
             )
