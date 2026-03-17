@@ -377,10 +377,16 @@ fn record_usage_on_stream_end(usage: Option<ParsedUsage>, ctx: StreamUsageContex
                 };
 
                 if result.is_ok() && cost_nano_usd.unwrap_or(0) > 0 {
-                    let _ = ctx
+                    if let Err(e) = ctx
                         .subscription_service
                         .reconcile_purchased_after_usage(ctx.user_id)
-                        .await;
+                        .await
+                    {
+                        tracing::warn!(
+                            error = ?e,
+                            "Failed to reconcile purchased credits after stream usage"
+                        );
+                    }
                 }
 
                 if let Err(e) = result {

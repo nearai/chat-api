@@ -4741,10 +4741,16 @@ async fn record_image_usage(
             e
         );
     } else if cost_nano_usd > 0 {
-        let _ = state
+        if let Err(e) = state
             .subscription_service
             .reconcile_purchased_after_usage(user_id)
-            .await;
+            .await
+        {
+            tracing::warn!(
+                error = ?e,
+                "Failed to reconcile purchased credits after image usage"
+            );
+        }
     }
 }
 
@@ -4827,10 +4833,16 @@ async fn record_chat_usage_from_body(
     }
 
     if cost_nano_usd.unwrap_or(0) > 0 {
-        let _ = state
+        if let Err(e) = state
             .subscription_service
             .reconcile_purchased_after_usage(user_id)
-            .await;
+            .await
+        {
+            tracing::warn!(
+                error = ?e,
+                "Failed to reconcile purchased credits after chat usage"
+            );
+        }
     }
 
     true
@@ -4904,10 +4916,16 @@ async fn record_response_usage_from_body(
     }
 
     if cost_nano_usd.unwrap_or(0) > 0 {
-        let _ = state
+        if let Err(e) = state
             .subscription_service
             .reconcile_purchased_after_usage(user_id)
-            .await;
+            .await
+        {
+            tracing::warn!(
+                error = ?e,
+                "Failed to reconcile purchased credits after response usage"
+            );
+        }
     }
 
     true

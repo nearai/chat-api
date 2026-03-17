@@ -2357,7 +2357,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
 
     async fn get_credits(&self, user_id: UserId) -> Result<CreditsSummary, SubscriptionError> {
         // Refresh remaining balance from period usage vs plan before returning summary
-        let _ = self.reconcile_purchased_after_usage(user_id).await;
+        if let Err(e) = self.reconcile_purchased_after_usage(user_id).await {
+            tracing::warn!(error = ?e, "Failed to reconcile purchased credits before get_credits");
+        }
 
         let (plan_credits, period_start, period_end) =
             self.resolve_plan_period_for_user(user_id).await?;
