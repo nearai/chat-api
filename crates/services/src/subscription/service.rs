@@ -1284,7 +1284,12 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .map(|item| item.id.to_string())
             .ok_or_else(|| SubscriptionError::StripeError("No subscription item found".into()))?;
 
-        // Update subscription to new price
+        // Update subscription to new price.
+        // For upgrades: always_invoice immediately charges the prorated amount.
+        // pending_if_incomplete means if payment fails, the subscription moves to incomplete
+        // status rather than rejecting the update outright. The local DB is updated via webhook
+        // (customer.subscription.updated), which syncs Stripe's subscription state as-is. Until
+        // the webhook arrives, entitlement checks remain on the old plan.
         let update_item = UpdateSubscriptionItems {
             id: Some(subscription_item_id),
             price: Some(price_id.clone()),
@@ -1293,38 +1298,20 @@ impl SubscriptionService for SubscriptionServiceImpl {
         let params = stripe::UpdateSubscription {
             items: Some(vec![update_item]),
             proration_behavior: Some(
-                stripe::generated::billing::subscription::SubscriptionProrationBehavior::CreateProrations,
+                stripe::generated::billing::subscription::SubscriptionProrationBehavior::AlwaysInvoice,
+            ),
+            payment_behavior: Some(
+                stripe::generated::billing::subscription::SubscriptionPaymentBehavior::PendingIfIncomplete,
+            ),
+            billing_cycle_anchor: Some(
+                stripe::generated::billing::subscription::SubscriptionBillingCycleAnchor::Unchanged,
             ),
             ..Default::default()
         };
 
-        let updated_sub = StripeSubscription::update(&client, &subscription_id, params)
+        StripeSubscription::update(&client, &subscription_id, params)
             .await
             .map_err(|e| SubscriptionError::StripeError(e.to_string()))?;
-
-        // Update database
-        let updated_model =
-            self.stripe_subscription_to_model(&updated_sub, user_id, &subscription.provider)?;
-        let mut db_client = self
-            .db_pool
-            .get()
-            .await
-            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-        let txn = db_client
-            .transaction()
-            .await
-            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-
-        self.subscription_repo
-            .upsert_subscription(&txn, updated_model)
-            .await
-            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-
-        self.invalidate_credit_limit_cache(user_id).await;
-
-        txn.commit()
-            .await
-            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
         tracing::info!(
             "Plan changed immediately in Stripe: user_id={}, target_plan={}, subscription_id={}",
