@@ -3077,12 +3077,7 @@ async fn proxy_mcp(
         .map(is_web_search_tool_call)
         .unwrap_or(false);
 
-    let normalized_base_url = state
-        .cloud_api_base_url
-        .trim_end_matches('/')
-        .trim_end_matches("/v1")
-        .to_string();
-    let url = format!("{}/mcp", normalized_base_url);
+    let url = crate::cloud_api::mcp_url(&state.cloud_api_base_url);
 
     let api_key = state
         .vpc_credentials_service
@@ -3104,11 +3099,11 @@ async fn proxy_mcp(
     forward_headers.remove("host");
     forward_headers.remove("content-length");
 
-    let http_client = reqwest::Client::new();
-    let mut request_builder = http_client
+    let mut request_builder = state
+        .http_client
         .post(&url)
         .header("Authorization", format!("Bearer {}", api_key))
-        .body(body_bytes.clone());
+        .body(body_bytes);
 
     for (key, value) in forward_headers.iter() {
         request_builder = request_builder.header(key, value);
@@ -3144,7 +3139,14 @@ async fn proxy_mcp(
 
     if is_web_search_call && (200..300).contains(&status) {
         let decompressed_body = decompress_if_gzipped(&response_body, &response_headers)
-            .unwrap_or_else(|_| response_body.to_vec());
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    "Failed to decompress MCP response for user_id={}: {}",
+                    user.user_id,
+                    e
+                );
+                response_body.to_vec()
+            });
         let response_json = serde_json::from_slice::<serde_json::Value>(&decompressed_body).ok();
 
         if response_json
@@ -3224,7 +3226,7 @@ fn is_successful_mcp_web_search_response(response: &serde_json::Value) -> bool {
         .get("result")
         .and_then(|result| result.get("isError"))
         .and_then(|value| value.as_bool())
-        != Some(true)
+        == Some(false)
 }
 
 /// Get system configs with in-memory TTL caching.

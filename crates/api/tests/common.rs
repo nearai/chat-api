@@ -250,6 +250,8 @@ pub async fn create_test_server_and_db(
         ));
 
     // Create application state
+    let http_client = reqwest::Client::new();
+
     let app_state = AppState {
         oauth_service,
         user_service,
@@ -271,6 +273,7 @@ pub async fn create_test_server_and_db(
         admin_domains: Arc::new(admin_domains),
         stripe_test_clock_enabled: config.stripe.test_clock_enabled,
         cloud_api_base_url: test_config.cloud_api_base_url.clone(),
+        http_client,
         metrics_service,
         analytics_service,
         user_usage_service,

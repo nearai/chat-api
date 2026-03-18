@@ -1,3 +1,4 @@
+pub mod cloud_api;
 pub mod common;
 pub mod consts;
 pub mod error;

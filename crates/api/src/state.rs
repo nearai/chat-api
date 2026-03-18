@@ -63,8 +63,11 @@ pub struct AppState {
     pub vpc_credentials_service: Arc<dyn services::vpc::VpcCredentialsService>,
     /// Whether Stripe test clock feature is enabled
     pub stripe_test_clock_enabled: bool,
-    /// Base URL for Cloud API calls (same as OpenAI base URL when using VPC)
+    /// Base URL for Cloud API calls. Accepts either the API root URL or an
+    /// OpenAI-compatible `/v1` base URL.
     pub cloud_api_base_url: String,
+    /// Shared HTTP client for API handlers that call upstream services directly.
+    pub http_client: reqwest::Client,
     /// Metrics service for recording usage metrics
     pub metrics_service: Arc<dyn services::metrics::MetricsServiceTrait>,
     /// Analytics service for database-backed analytics and rate limiting

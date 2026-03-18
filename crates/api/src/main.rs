@@ -298,6 +298,8 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Create application state
+    let http_client = reqwest::Client::new();
+
     let app_state = AppState {
         oauth_service,
         user_service,
@@ -319,6 +321,7 @@ async fn main() -> anyhow::Result<()> {
         vpc_credentials_service,
         stripe_test_clock_enabled: config.stripe.test_clock_enabled,
         cloud_api_base_url: config.openai.base_url.clone().unwrap_or_default(),
+        http_client,
         metrics_service,
         analytics_service,
         user_usage_service,

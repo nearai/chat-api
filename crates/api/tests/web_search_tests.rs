@@ -252,6 +252,71 @@ async fn web_search_records_usage_only_on_success() {
 }
 
 #[tokio::test]
+async fn web_search_does_not_record_usage_when_is_error_flag_is_missing() {
+    let mock_upstream = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/mcp"))
+        .and(body_partial_json(json!({
+            "method": "tools/call",
+            "params": { "name": "web_search" }
+        })))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {
+                        "content": [{
+                            "type": "text",
+                            "text": "{\"query\":\"rust\",\"result_count\":1}"
+                        }],
+                        "structuredContent": {
+                            "query": "rust",
+                            "result_count": 1
+                        }
+                    }
+                })),
+        )
+        .mount(&mock_upstream)
+        .await;
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        proxy_base_url: Some(mock_upstream.uri()),
+        cloud_api_base_url: mock_upstream.uri(),
+        ..Default::default()
+    })
+    .await;
+
+    let email = format!(
+        "test_web_search_missing_flag_{}@example.com",
+        Uuid::new_v4().simple()
+    );
+    let token = mock_login(&server, &email).await;
+    let user = db
+        .user_repository()
+        .get_user_by_email(&email)
+        .await
+        .expect("db")
+        .expect("user");
+
+    let response = server
+        .post("/mcp")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .json(&web_search_tool_call("rust"))
+        .await;
+
+    assert_eq!(response.status_code(), 200);
+
+    let count = wait_for_web_search_usage_count(&db, user.id, 0).await;
+    assert_eq!(count, 0, "missing isError should not record usage");
+}
+
+#[tokio::test]
 async fn web_search_does_not_record_usage_for_failed_agent_request() {
     let mock_upstream = MockServer::start().await;
 
@@ -495,4 +560,87 @@ async fn web_search_records_usage_for_successful_agent_request() {
 
     assert_eq!(total_spent, 456);
     assert_eq!(total_requests, 1);
+}
+
+#[tokio::test]
+async fn web_search_supports_cloud_api_base_url_with_v1_suffix() {
+    let mock_upstream = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/mcp"))
+        .and(body_partial_json(json!({
+            "method": "tools/call",
+            "params": { "name": "web_search" }
+        })))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {
+                        "content": [{
+                            "type": "text",
+                            "text": "{\"query\":\"rust\",\"result_count\":1,\"results\":[{\"title\":\"Rust via v1 base\"}]}"
+                        }],
+                        "structuredContent": {
+                            "query": "rust",
+                            "result_count": 1,
+                            "results": [{ "title": "Rust via v1 base" }]
+                        },
+                        "isError": false
+                    }
+                })),
+        )
+        .mount(&mock_upstream)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1/services/web_search"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .set_body_raw(r#"{"costPerUnit":789}"#, "application/json"),
+        )
+        .mount(&mock_upstream)
+        .await;
+
+    let cloud_api_base_url = format!("{}/v1", mock_upstream.uri());
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        proxy_base_url: Some(mock_upstream.uri()),
+        cloud_api_base_url,
+        ..Default::default()
+    })
+    .await;
+
+    let email = format!(
+        "test_web_search_v1_base_url_{}@example.com",
+        Uuid::new_v4().simple()
+    );
+    let token = mock_login(&server, &email).await;
+    let user = db
+        .user_repository()
+        .get_user_by_email(&email)
+        .await
+        .expect("db")
+        .expect("user");
+
+    let response = server
+        .post("/mcp")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .json(&web_search_tool_call("rust"))
+        .await;
+
+    assert_eq!(response.status_code(), 200);
+    let body: serde_json::Value = response.json();
+    assert_eq!(
+        body["result"]["structuredContent"]["results"][0]["title"],
+        "Rust via v1 base"
+    );
+
+    let count = wait_for_web_search_usage_count(&db, user.id, 1).await;
+    assert_eq!(count, 1, "web search should record usage with /v1 base URL");
 }

@@ -73,10 +73,7 @@ impl WebSearchPricingCache {
             }
         }
 
-        // `OPENAI_BASE_URL` is usually configured with a `/v1` suffix for the proxy service.
-        // Normalize it here so pricing fetches consistently hit `/v1/services/web_search`.
-        let normalized_base_url = self.base_url.strip_suffix("/v1").unwrap_or(&self.base_url);
-        let url = format!("{}/v1/services/web_search", normalized_base_url);
+        let url = crate::cloud_api::web_search_service_url(&self.base_url);
         let resp = match self.http_client.get(&url).send().await {
             Ok(r) => r,
             Err(e) => {
