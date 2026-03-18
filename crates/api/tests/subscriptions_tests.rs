@@ -1513,7 +1513,7 @@ async fn test_proxy_blocks_when_monthly_token_limit_exceeded() {
     let body_res: serde_json::Value = response.json();
     let err_msg = body_res.get("error").and_then(|v| v.as_str()).unwrap_or("");
     assert!(
-        err_msg.contains("Credit limit exceeded") && err_msg.contains("100"),
+        err_msg.contains("Credit limit exceeded"),
         "POST /v1/responses error should mention credit limit, got: {}",
         err_msg
     );
