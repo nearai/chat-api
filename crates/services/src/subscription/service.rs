@@ -1285,8 +1285,11 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .ok_or_else(|| SubscriptionError::StripeError("No subscription item found".into()))?;
 
         // Update subscription to new price.
-        // For upgrades: always_invoice immediately charges the prorated amount, and
-        // pending_if_incomplete ensures the upgrade is NOT applied if payment fails.
+        // For upgrades: always_invoice immediately charges the prorated amount.
+        // pending_if_incomplete means if payment fails, the subscription moves to incomplete
+        // status rather than rejecting the update outright. The local DB is only updated
+        // via webhook (customer.subscription.updated), so entitlement checks remain on the
+        // old plan until the webhook confirms the payment succeeded.
         let update_item = UpdateSubscriptionItems {
             id: Some(subscription_item_id),
             price: Some(price_id.clone()),
