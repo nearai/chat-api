@@ -90,6 +90,13 @@ pub struct SubscriptionWithPlan {
     pub pending_downgrade_period_end: Option<DateTime<Utc>>,
 }
 
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BillingPeriod {
+    pub start_at: DateTime<Utc>,
+    pub end_at: DateTime<Utc>,
+}
+
 /// Result of a plan-change request.
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -498,6 +505,12 @@ pub trait SubscriptionService: Send + Sync {
 
     /// Get user's credits: remaining balance, totals, used in period, effective max.
     async fn get_credits(&self, user_id: UserId) -> Result<CreditsSummary, SubscriptionError>;
+
+    /// Get the user's current billing period boundaries.
+    async fn get_current_billing_period(
+        &self,
+        user_id: UserId,
+    ) -> Result<BillingPeriod, SubscriptionError>;
 
     /// After recording usage with cost, reconcile purchased used/remaining from period usage vs plan.
     /// No-op if Stripe not configured or user has no purchased pool.

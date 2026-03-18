@@ -1,5 +1,5 @@
 use super::ports::{
-    ChangePlanOutcome, CreditsRepository, CreditsSummary, DowngradeIntentStatus,
+    BillingPeriod, ChangePlanOutcome, CreditsRepository, CreditsSummary, DowngradeIntentStatus,
     PaymentWebhookRepository, StripeCustomerRepository, Subscription, SubscriptionError,
     SubscriptionPlan, SubscriptionRepository, SubscriptionService, SubscriptionWithPlan,
     DEFAULT_MONTHLY_TOKEN_LIMIT,
@@ -2374,6 +2374,14 @@ impl SubscriptionService for SubscriptionServiceImpl {
             period_spent_credits,
             effective_max_credits,
         })
+    }
+
+    async fn get_current_billing_period(
+        &self,
+        user_id: UserId,
+    ) -> Result<BillingPeriod, SubscriptionError> {
+        let (_, start_at, end_at) = self.resolve_plan_period_for_user(user_id).await?;
+        Ok(BillingPeriod { start_at, end_at })
     }
 
     async fn admin_grant_credits(

@@ -1135,21 +1135,46 @@ impl From<services::agent::ports::UsageLogEntry> for UsageResponse {
 /// Instance balance response
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct BalanceResponse {
+    /// Lifetime spend for the instance, formatted from nano-dollars to a decimal USD string.
     pub total_spent: String, // formatted nano-dollars
+    /// Lifetime request count cached in agent_balance.
     pub total_requests: i64,
+    /// Lifetime token count cached in agent_balance.
     pub total_tokens: i64,
     pub last_usage_at: Option<String>,
     pub updated_at: String,
+    /// Spend within the current billing period, formatted from nano-dollars to a decimal USD string.
+    ///
+    /// The billing period follows the active paid subscription when present; otherwise it falls
+    /// back to the current UTC calendar month.
+    pub period_spent: String, // formatted nano-dollars
+    /// Request count within the current billing period.
+    pub period_requests: i64,
+    /// Token count within the current billing period.
+    pub period_tokens: i64,
+    /// Inclusive start timestamp of the current billing period in RFC 3339 format.
+    pub period_start_at: String,
+    /// Exclusive end timestamp of the current billing period in RFC 3339 format.
+    pub period_end_at: String,
 }
 
-impl From<services::agent::ports::InstanceBalance> for BalanceResponse {
-    fn from(balance: services::agent::ports::InstanceBalance) -> Self {
+impl BalanceResponse {
+    pub fn from_parts(
+        balance: services::agent::ports::InstanceBalance,
+        billing_period: services::subscription::ports::BillingPeriod,
+        period_usage: services::user_usage::ports::InstanceUsageSummary,
+    ) -> Self {
         Self {
             total_spent: format_nano_dollars(balance.total_spent),
             total_requests: balance.total_requests,
             total_tokens: balance.total_tokens,
             last_usage_at: balance.last_usage_at.map(|u| u.to_rfc3339()),
             updated_at: balance.updated_at.to_rfc3339(),
+            period_spent: format_nano_dollars(period_usage.cost_nano_usd),
+            period_requests: period_usage.request_count,
+            period_tokens: period_usage.token_sum,
+            period_start_at: billing_period.start_at.to_rfc3339(),
+            period_end_at: billing_period.end_at.to_rfc3339(),
         }
     }
 }
