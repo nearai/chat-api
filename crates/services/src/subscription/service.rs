@@ -1287,9 +1287,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
         // Update subscription to new price.
         // For upgrades: always_invoice immediately charges the prorated amount.
         // pending_if_incomplete means if payment fails, the subscription moves to incomplete
-        // status rather than rejecting the update outright. The local DB is only updated
-        // via webhook (customer.subscription.updated), so entitlement checks remain on the
-        // old plan until the webhook confirms the payment succeeded.
+        // status rather than rejecting the update outright. The local DB is updated via webhook
+        // (customer.subscription.updated), which syncs Stripe's subscription state as-is. Until
+        // the webhook arrives, entitlement checks remain on the old plan.
         let update_item = UpdateSubscriptionItems {
             id: Some(subscription_item_id),
             price: Some(price_id.clone()),
