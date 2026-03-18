@@ -1309,33 +1309,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
             ..Default::default()
         };
 
-        let updated_sub = StripeSubscription::update(&client, &subscription_id, params)
+        StripeSubscription::update(&client, &subscription_id, params)
             .await
             .map_err(|e| SubscriptionError::StripeError(e.to_string()))?;
-
-        // Update database
-        let updated_model =
-            self.stripe_subscription_to_model(&updated_sub, user_id, &subscription.provider)?;
-        let mut db_client = self
-            .db_pool
-            .get()
-            .await
-            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-        let txn = db_client
-            .transaction()
-            .await
-            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-
-        self.subscription_repo
-            .upsert_subscription(&txn, updated_model)
-            .await
-            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-
-        self.invalidate_credit_limit_cache(user_id).await;
-
-        txn.commit()
-            .await
-            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
         tracing::info!(
             "Plan changed immediately in Stripe: user_id={}, target_plan={}, subscription_id={}",
