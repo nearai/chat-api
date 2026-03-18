@@ -22,10 +22,26 @@ const MAX_BUFFER_SIZE: usize = 100 * 1024;
 /// Default service type for agent instances when not specified.
 const DEFAULT_SERVICE_TYPE: &str = "openclaw";
 
+/// Default CPU allocation
+const DEFAULT_CPUS: &str = "1";
+
+/// Default memory limit
+const DEFAULT_MEM_LIMIT: &str = "4g";
+
+/// Default storage size
+const DEFAULT_STORAGE_SIZE: &str = "10G";
+
+/// Map service type to worker image
+fn get_image_for_service_type(service_type: &str) -> &'static str {
+    match service_type {
+        "ironclaw" => "ironclaw-nearai-worker:local",
+        "openclaw" => "openclaw-nearai-worker:local",
+        _ => "openclaw-nearai-worker:local", // default to openclaw
+    }
+}
+
 /// Parameters for Agent API instance creation.
 struct AgentApiCreateParams {
-    image: Option<String>,
-    name: Option<String>,
     ssh_pubkey: Option<String>,
     service_type: Option<String>,
 }
@@ -37,6 +53,7 @@ struct SaveInstanceParams {
     max_allowed: u64,
     agent_api_base_url: Option<String>,
     service_type: Option<String>,
+    agent_domain: String,
 }
 
 pub struct AgentServiceImpl {
@@ -48,6 +65,9 @@ pub struct AgentServiceImpl {
     round_robin_counter: AtomicUsize,
     /// Chat-API base URL passed to the Agent API as nearai_api_url when creating instances
     nearai_api_url: String,
+    /// Domain where agent instances are accessible (e.g., claws.sare.dev)
+    /// Used to construct instance_url as https://{name}.{agent_domain}/?token={token}
+    agent_domain: String,
     /// System configs for reading instance limits
     system_configs_service: Arc<dyn SystemConfigsService>,
 }
@@ -57,6 +77,7 @@ impl AgentServiceImpl {
         repository: Arc<dyn AgentRepository>,
         managers: Vec<AgentManager>,
         nearai_api_url: String,
+        agent_domain: String,
         system_configs_service: Arc<dyn SystemConfigsService>,
     ) -> Self {
         // Validate required configuration
@@ -82,6 +103,7 @@ impl AgentServiceImpl {
             managers,
             round_robin_counter: AtomicUsize::new(0),
             nearai_api_url,
+            agent_domain,
             system_configs_service,
         }
     }
@@ -187,9 +209,12 @@ impl AgentServiceImpl {
             .service_type
             .as_deref()
             .unwrap_or(DEFAULT_SERVICE_TYPE);
+        let image = get_image_for_service_type(service_type);
         let request_body = serde_json::json!({
-            "image": params.image,
-            "name": params.name,
+            "image": image,
+            "cpus": DEFAULT_CPUS,
+            "mem_limit": DEFAULT_MEM_LIMIT,
+            "storage_size": DEFAULT_STORAGE_SIZE,
             "nearai_api_key": nearai_api_key,
             "nearai_api_url": nearai_api_url,
             "ssh_pubkey": params.ssh_pubkey,
@@ -292,6 +317,67 @@ impl AgentServiceImpl {
         response.json::<serde_json::Value>().await.ok()
     }
 
+    /// Fetch SSH command for an instance from Agent API /instances/{name}/ssh
+    async fn fetch_ssh_command(
+        &self,
+        manager: &AgentManager,
+        instance_name: &str,
+    ) -> Option<String> {
+        let encoded_name = urlencoding::encode(instance_name);
+        let url = format!("{}/instances/{}/ssh", manager.url, encoded_name);
+
+        tracing::debug!(
+            "Fetching SSH command from Agent API: instance_name={}, url={}",
+            instance_name,
+            url
+        );
+
+        let response = self
+            .http_client
+            .get(&url)
+            .bearer_auth(&manager.token)
+            .send()
+            .await
+            .ok()?;
+
+        if !response.status().is_success() {
+            if response.status().as_u16() == 404 {
+                tracing::debug!(
+                    "SSH endpoint not found for instance: name={}",
+                    instance_name
+                );
+            } else {
+                tracing::warn!(
+                    "Agent API SSH endpoint failed: status={}, instance_name={}",
+                    response.status(),
+                    instance_name
+                );
+            }
+            return None;
+        }
+
+        match response.json::<serde_json::Value>().await {
+            Ok(data) => {
+                tracing::info!(
+                    "SSH command fetched: instance_name={}, response={}",
+                    instance_name,
+                    serde_json::to_string(&data).unwrap_or_default()
+                );
+                data.get("command")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to parse SSH command response: instance_name={}, error={}",
+                    instance_name,
+                    e
+                );
+                None
+            }
+        }
+    }
+
     /// Call Agent API to create an instance with streaming lifecycle events on a specific manager.
     ///
     /// # Security Note
@@ -309,9 +395,12 @@ impl AgentServiceImpl {
             .service_type
             .as_deref()
             .unwrap_or(DEFAULT_SERVICE_TYPE);
+        let image = get_image_for_service_type(service_type);
         let request_body = serde_json::json!({
-            "image": params.image,
-            "name": params.name,
+            "image": image,
+            "cpus": DEFAULT_CPUS,
+            "mem_limit": DEFAULT_MEM_LIMIT,
+            "storage_size": DEFAULT_STORAGE_SIZE,
             "nearai_api_key": nearai_api_key,
             "nearai_api_url": nearai_api_url,
             "ssh_pubkey": params.ssh_pubkey,
@@ -455,22 +544,20 @@ async fn save_instance_from_event(
         .map(|s| s.to_string())
         .unwrap_or_else(|| format!("agent-{}-{}", instance_name, Uuid::new_v4()));
 
-    let instance_url = instance_data
-        .get("url")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
     let instance_token = instance_data
         .get("token")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
-    let gateway_port = instance_data
-        .get("gateway_port")
-        .and_then(|v| v.as_i64())
-        .map(|p| p as i32);
-    let dashboard_url = instance_data
-        .get("dashboard_url")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+
+    // Build instance_url as https://{name}.{agent_domain}/?token={token}
+    let instance_url = if let Some(token) = &instance_token {
+        Some(format!("https://{}.{}/?token={}", instance_name, params.agent_domain, token))
+    } else {
+        None
+    };
+
+    // Use instance_url as dashboard_url for UI access
+    let dashboard_url = instance_url.clone();
 
     // Extract service_type from instance_data if present and valid, otherwise use provided value
     let service_type_from_response = instance_data
@@ -488,7 +575,6 @@ async fn save_instance_from_event(
             public_ssh_key: params.ssh_pubkey.clone(),
             instance_url,
             instance_token,
-            gateway_port,
             dashboard_url,
             agent_api_base_url: params.agent_api_base_url.clone(),
             service_type: final_service_type,
@@ -519,6 +605,64 @@ async fn save_instance_from_event(
     Ok(instance)
 }
 
+/// Fetch instance details from Agent API to enrich instance data.
+async fn fetch_instance_details(
+    http_client: &reqwest::Client,
+    manager: &AgentManager,
+    instance_name: &str,
+) -> Option<serde_json::Value> {
+    let encoded_name = urlencoding::encode(instance_name);
+    let url = format!("{}/instances/{}", manager.url, encoded_name);
+
+    tracing::debug!("Fetching instance details from Agent API: url={}", url);
+
+    let response = http_client
+        .get(&url)
+        .bearer_auth(&manager.token)
+        .send()
+        .await
+        .ok()?;
+
+    let status = response.status();
+    tracing::info!(
+        "Agent API /instances/{{name}} response: status={}, instance_name={}",
+        status,
+        instance_name
+    );
+
+    if !response.status().is_success() {
+        if response.status().as_u16() == 404 {
+            tracing::debug!("Instance not found on Agent API: name={}", instance_name);
+        } else {
+            tracing::warn!(
+                "Agent API instance detail fetch failed: status={}, name={}",
+                response.status(),
+                instance_name
+            );
+        }
+        return None;
+    }
+
+    match response.json::<serde_json::Value>().await {
+        Ok(data) => {
+            // Only log safe fields; instance_url and token will be built/handled at save time
+            tracing::debug!(
+                "Instance details fetched successfully: instance_name={}",
+                instance_name
+            );
+            Some(data)
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Failed to parse instance details response: name={}, error={}",
+                instance_name,
+                e
+            );
+            None
+        }
+    }
+}
+
 #[async_trait]
 impl AgentService for AgentServiceImpl {
     async fn list_all_instances(
@@ -532,10 +676,7 @@ impl AgentService for AgentServiceImpl {
     async fn create_instance_from_agent_api(
         &self,
         user_id: UserId,
-        image: Option<String>,
-        name: Option<String>,
-        ssh_pubkey: Option<String>,
-        service_type: Option<String>,
+        params: super::ports::InstanceCreationParams,
     ) -> anyhow::Result<AgentInstance> {
         tracing::info!("Creating instance from Agent API: user_id={}", user_id);
 
@@ -543,7 +684,8 @@ impl AgentService for AgentServiceImpl {
         let manager = self.next_available_manager().await?;
 
         // Create an unbound API key on behalf of the user; the agent will use it to authenticate to the chat-api.
-        let key_name = name
+        let key_name = params
+            .name
             .as_deref()
             .map(|n| format!("instance-{}", n))
             .unwrap_or_else(|| "instance".to_string());
@@ -553,7 +695,7 @@ impl AgentService for AgentServiceImpl {
 
         // Apply default service type if not provided
         // Defense-in-depth: validate service type early to prevent invalid values reaching Agent API
-        if let Some(ref st) = service_type {
+        if let Some(ref st) = &params.service_type {
             if !is_valid_service_type(st) {
                 return Err(anyhow!(
                     "Invalid service type '{}'. Valid types are: {}",
@@ -563,7 +705,8 @@ impl AgentService for AgentServiceImpl {
             }
         }
 
-        let service_type_for_api = service_type
+        let service_type_for_api = params
+            .service_type
             .clone()
             .or_else(|| Some(DEFAULT_SERVICE_TYPE.to_string()));
 
@@ -574,9 +717,7 @@ impl AgentService for AgentServiceImpl {
                 &plaintext_key,
                 &self.nearai_api_url,
                 AgentApiCreateParams {
-                    image,
-                    name: name.clone(),
-                    ssh_pubkey: ssh_pubkey.clone(),
+                    ssh_pubkey: params.ssh_pubkey.clone(),
                     service_type: service_type_for_api.clone(),
                 },
             )
@@ -604,11 +745,6 @@ impl AgentService for AgentServiceImpl {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        let gateway_port = instance_data
-            .get("gateway_port")
-            .and_then(|v| v.as_i64())
-            .map(|p| p as i32);
-
         let dashboard_url = instance_data
             .get("dashboard_url")
             .and_then(|v| v.as_str())
@@ -632,10 +768,9 @@ impl AgentService for AgentServiceImpl {
                 user_id,
                 instance_id: instance_id.clone(),
                 name: instance_name,
-                public_ssh_key: ssh_pubkey,
+                public_ssh_key: params.ssh_pubkey,
                 instance_url,
                 instance_token,
-                gateway_port,
                 dashboard_url,
                 agent_api_base_url: Some(manager.url.clone()),
                 service_type: final_service_type,
@@ -669,10 +804,7 @@ impl AgentService for AgentServiceImpl {
     async fn create_instance_from_agent_api_streaming(
         &self,
         user_id: UserId,
-        image: Option<String>,
-        name: Option<String>,
-        ssh_pubkey: Option<String>,
-        service_type: Option<String>,
+        params: super::ports::InstanceCreationParams,
         max_allowed: u64,
     ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<serde_json::Value>>> {
         tracing::info!(
@@ -684,7 +816,8 @@ impl AgentService for AgentServiceImpl {
         let manager = self.next_available_manager().await?;
         let manager_url = manager.url.clone();
 
-        let key_name = name
+        let key_name = params
+            .name
             .as_deref()
             .map(|n| format!("instance-{}", n))
             .unwrap_or_else(|| "instance".to_string());
@@ -694,7 +827,7 @@ impl AgentService for AgentServiceImpl {
 
         // Apply default service type if not provided
         // Defense-in-depth: validate service type early to prevent invalid values reaching Agent API
-        if let Some(ref st) = service_type {
+        if let Some(ref st) = &params.service_type {
             if !is_valid_service_type(st) {
                 return Err(anyhow!(
                     "Invalid service type '{}'. Valid types are: {}",
@@ -704,7 +837,8 @@ impl AgentService for AgentServiceImpl {
             }
         }
 
-        let service_type_for_api = service_type
+        let service_type_for_api = params
+            .service_type
             .clone()
             .or_else(|| Some(DEFAULT_SERVICE_TYPE.to_string()));
 
@@ -714,9 +848,7 @@ impl AgentService for AgentServiceImpl {
                 &plaintext_key,
                 &self.nearai_api_url,
                 AgentApiCreateParams {
-                    image,
-                    name: name.clone(),
-                    ssh_pubkey: ssh_pubkey.clone(),
+                    ssh_pubkey: params.ssh_pubkey.clone(),
                     service_type: service_type_for_api.clone(),
                 },
             )
@@ -743,126 +875,130 @@ impl AgentService for AgentServiceImpl {
 
         let (tx, output_rx) = tokio::sync::mpsc::channel(10);
         let repo = Arc::clone(&self.repository);
+        let http_client = self.http_client.clone();
         let api_key_id = api_key.id;
+        let ssh_pubkey = params.ssh_pubkey.clone();
+        let manager_clone = manager.clone();
+        let agent_domain = self.agent_domain.clone();
 
         tokio::spawn(async move {
-            let mut created_event_processed = false;
+            let mut accumulated_data = serde_json::json!({});
 
             while let Some(event_result) = rx.recv().await {
                 match event_result {
                     Ok(event) => {
-                        if !created_event_processed {
-                            if let Some(stage) = event.get("stage").and_then(|s| s.as_str()) {
-                                if stage == "created" {
-                                    if let Some(instance_data) = event.get("instance") {
-                                        if let Err(e) = save_instance_from_event(
-                                            repo.as_ref(),
-                                            user_id,
-                                            instance_data,
-                                            SaveInstanceParams {
-                                                api_key_id,
-                                                ssh_pubkey: ssh_pubkey.clone(),
-                                                max_allowed,
-                                                agent_api_base_url: Some(manager_url.clone()),
-                                                service_type: service_type_for_api.clone(),
-                                            },
-                                        )
-                                        .await
-                                        {
-                                            tracing::error!(
-                                                "Failed to save instance from created event: user_id={}, error={}",
-                                                user_id,
-                                                e
-                                            );
-                                            if let Err(cleanup_err) =
-                                                repo.revoke_api_key(api_key_id).await
-                                            {
-                                                tracing::warn!(
-                                                    "Failed to revoke API key on instance save failure: user_id={}, api_key_id={}, error={}",
-                                                    user_id,
-                                                    api_key_id,
-                                                    cleanup_err
-                                                );
-                                            }
-                                            let _ = tx
-                                                .send(Err(anyhow!("Failed to save instance")))
-                                                .await;
-                                            break;
-                                        }
-                                        created_event_processed = true;
-                                    } else {
-                                        tracing::error!(
-                                            "Received 'created' event without instance data: user_id={}",
-                                            user_id
-                                        );
-                                        if let Err(cleanup_err) =
-                                            repo.revoke_api_key(api_key_id).await
-                                        {
-                                            tracing::warn!(
-                                                "Failed to revoke API key on malformed event: user_id={}, api_key_id={}, error={}",
-                                                user_id,
-                                                api_key_id,
-                                                cleanup_err
-                                            );
-                                        }
-                                        let _ = tx
-                                            .send(Err(anyhow!(
-                                                "Invalid created event: missing instance data"
-                                            )))
-                                            .await;
-                                        break;
-                                    }
-                                }
+                        // Accumulate event fields
+                        if let Some(obj) = event.as_object() {
+                            for (key, value) in obj.iter() {
+                                accumulated_data[key] = value.clone();
                             }
-                        } else if let Some(stage) = event.get("stage").and_then(|s| s.as_str()) {
-                            if stage == "created" {
-                                tracing::warn!(
-                                    "Ignoring duplicate 'created' event from Agent API: user_id={}",
-                                    user_id
-                                );
-                                if tx.send(Ok(event)).await.is_err() {
-                                    break;
-                                }
-                                continue;
-                            }
+                            tracing::debug!(
+                                "Accumulated instance data: {}",
+                                serde_json::to_string(&accumulated_data).unwrap_or_default()
+                            );
                         }
 
+                        // Forward event to client
                         if tx.send(Ok(event)).await.is_err() {
-                            if !created_event_processed {
-                                tracing::warn!(
-                                    "Client disconnected before instance creation: revoking unbound API key: user_id={}",
-                                    user_id
-                                );
-                                if let Err(cleanup_err) = repo.revoke_api_key(api_key_id).await {
-                                    tracing::warn!(
-                                        "Failed to revoke API key on client disconnect: user_id={}, api_key_id={}, error={}",
-                                        user_id,
-                                        api_key_id,
-                                        cleanup_err
-                                    );
-                                }
-                            }
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        if !created_event_processed {
                             tracing::warn!(
-                                "Stream error before instance creation: user_id={}, revoking unbound API key",
+                                "Client disconnected: revoking unbound API key: user_id={}",
                                 user_id
                             );
                             if let Err(cleanup_err) = repo.revoke_api_key(api_key_id).await {
                                 tracing::warn!(
-                                    "Failed to revoke API key on stream error: user_id={}, api_key_id={}, error={}",
+                                    "Failed to revoke API key on client disconnect: user_id={}, api_key_id={}, error={}",
                                     user_id,
                                     api_key_id,
                                     cleanup_err
                                 );
                             }
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Stream error: user_id={}, revoking unbound API key: {}",
+                            user_id,
+                            e
+                        );
+                        if let Err(cleanup_err) = repo.revoke_api_key(api_key_id).await {
+                            tracing::warn!(
+                                "Failed to revoke API key on stream error: user_id={}, api_key_id={}, error={}",
+                                user_id,
+                                api_key_id,
+                                cleanup_err
+                            );
                         }
                         let _ = tx.send(Err(e)).await;
                         break;
                     }
+                }
+            }
+
+            // Stream ended: save instance if we have data
+            if accumulated_data.as_object().is_some_and(|o| !o.is_empty()) {
+                // Enrich accumulated data with full instance details from Agent API
+                if let Some(instance_name) = accumulated_data.get("name").and_then(|v| v.as_str()) {
+                    tracing::info!(
+                        "Fetching full instance details: user_id={}, instance_name={}",
+                        user_id,
+                        instance_name
+                    );
+
+                    if let Some(instance_details) =
+                        fetch_instance_details(&http_client, &manager_clone, instance_name).await
+                    {
+                        // Merge instance details into accumulated data
+                        if let Some(details_obj) = instance_details.as_object() {
+                            for (key, value) in details_obj.iter() {
+                                // Only add fields that don't already exist (don't override stream data)
+                                if accumulated_data.get(key).is_none() {
+                                    accumulated_data[key] = value.clone();
+                                }
+                            }
+                        }
+                    } else {
+                        tracing::warn!(
+                            "Failed to fetch instance details for enrichment: user_id={}, instance_name={}",
+                            user_id,
+                            instance_name
+                        );
+                    }
+                }
+
+                if let Err(e) = save_instance_from_event(
+                    repo.as_ref(),
+                    user_id,
+                    &accumulated_data,
+                    SaveInstanceParams {
+                        api_key_id,
+                        ssh_pubkey: ssh_pubkey.clone(),
+                        max_allowed,
+                        agent_api_base_url: Some(manager_url.clone()),
+                        service_type: service_type_for_api.clone(),
+                        agent_domain: agent_domain.clone(),
+                    },
+                )
+                .await
+                {
+                    tracing::error!(
+                        "Failed to save instance from accumulated data: user_id={}, error={}",
+                        user_id,
+                        e
+                    );
+                    if let Err(cleanup_err) = repo.revoke_api_key(api_key_id).await {
+                        tracing::warn!(
+                            "Failed to revoke API key on save failure: user_id={}, api_key_id={}, error={}",
+                            user_id,
+                            api_key_id,
+                            cleanup_err
+                        );
+                    }
+                } else {
+                    tracing::info!(
+                        "Instance saved successfully from accumulated data: user_id={}",
+                        user_id
+                    );
                 }
             }
         });
@@ -901,7 +1037,6 @@ impl AgentService for AgentServiceImpl {
                 public_ssh_key,
                 instance_url: None,
                 instance_token: None,
-                gateway_port: None,
                 dashboard_url: None,
                 agent_api_base_url: None,
                 service_type: None,
@@ -1082,15 +1217,11 @@ impl AgentService for AgentServiceImpl {
                                     .get("status")
                                     .and_then(|v| v.as_str())
                                     .map(|s| s.to_string());
-                                let ssh_command = inst
-                                    .get("ssh_command")
-                                    .and_then(|v| v.as_str())
-                                    .map(|s| s.to_string());
                                 map.insert(
                                     name.to_string(),
                                     AgentApiInstanceEnrichment {
                                         status,
-                                        ssh_command,
+                                        ssh_command: None, // Will be fetched separately below
                                     },
                                 );
                             }
@@ -1102,6 +1233,69 @@ impl AgentService for AgentServiceImpl {
                 }
             }
         }
+
+        // Fetch SSH commands for all requested instances
+        tracing::debug!("Fetching SSH commands for {} instances", instances.len());
+        let ssh_futures: Vec<_> = instances
+            .iter()
+            .map(|inst| {
+                let fallback_url = &self.managers[0].url;
+                let mgr_url = inst.agent_api_base_url.as_deref().unwrap_or(fallback_url);
+                let manager = self.managers.iter().find(|m| m.url == mgr_url).cloned();
+                let name = inst.name.clone();
+                async move {
+                    if let Some(mgr) = manager {
+                        (name, self.fetch_ssh_command(&mgr, &inst.name).await)
+                    } else {
+                        (name, None)
+                    }
+                }
+            })
+            .collect();
+
+        let ssh_results = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            futures::future::join_all(ssh_futures),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            tracing::warn!("SSH command fetch timed out after 20s");
+            vec![]
+        });
+
+        tracing::debug!(
+            "SSH command fetch completed: got results for {} instances",
+            ssh_results.len()
+        );
+
+        // Ensure all requested instances have enrichment entries (even if not in Agent API list)
+        for inst in instances {
+            map.entry(inst.name.clone())
+                .or_insert_with(|| AgentApiInstanceEnrichment {
+                    status: None,
+                    ssh_command: None,
+                });
+        }
+
+        // Merge SSH commands into enrichment map
+        for (name, ssh_cmd) in ssh_results {
+            if let Some(ssh_cmd_str) = &ssh_cmd {
+                tracing::info!(
+                    "Adding SSH command to instance response: instance_name={}, command={}",
+                    name,
+                    ssh_cmd_str
+                );
+            } else {
+                tracing::debug!(
+                    "No SSH command available for instance: instance_name={}",
+                    name
+                );
+            }
+            if let Some(enrichment) = map.get_mut(&name) {
+                enrichment.ssh_command = ssh_cmd;
+            }
+        }
+
         map
     }
 
@@ -2276,6 +2470,7 @@ mod tests {
             repo,
             managers,
             "https://nearai.test/v1".to_string(),
+            "test.local".to_string(),
             configs,
         )
     }
@@ -2348,7 +2543,6 @@ mod tests {
             public_ssh_key: None,
             instance_url: None,
             instance_token: None,
-            gateway_port: None,
             dashboard_url: None,
             agent_api_base_url: Some("https://mgr2.example.com".to_string()),
             service_type: None,
@@ -2379,7 +2573,6 @@ mod tests {
             public_ssh_key: None,
             instance_url: None,
             instance_token: None,
-            gateway_port: None,
             dashboard_url: None,
             agent_api_base_url: Some("https://unknown.example.com".to_string()),
             service_type: None,
@@ -2409,7 +2602,6 @@ mod tests {
             public_ssh_key: None,
             instance_url: None,
             instance_token: None,
-            gateway_port: None,
             dashboard_url: None,
             agent_api_base_url: None,
             service_type: None,
@@ -2562,7 +2754,6 @@ mod tests {
                 public_ssh_key: None,
                 instance_url: None,
                 instance_token: None,
-                gateway_port: None,
                 dashboard_url: None,
                 agent_api_base_url: manager_url.map(|s| s.to_string()),
                 service_type: None,
@@ -2937,8 +3128,6 @@ mod tests {
                     "key1",
                     "https://nearai/v1",
                     AgentApiCreateParams {
-                        image: None,
-                        name: Some("inst1".to_string()),
                         ssh_pubkey: None,
                         service_type: None,
                     },
@@ -2950,8 +3139,6 @@ mod tests {
                     "key2",
                     "https://nearai/v1",
                     AgentApiCreateParams {
-                        image: None,
-                        name: Some("inst2".to_string()),
                         ssh_pubkey: None,
                         service_type: None,
                     },
@@ -2976,7 +3163,6 @@ mod tests {
                 public_ssh_key: None,
                 instance_url: None,
                 instance_token: None,
-                gateway_port: None,
                 dashboard_url: None,
                 agent_api_base_url: Some(manager_url.to_string()),
                 service_type: None,

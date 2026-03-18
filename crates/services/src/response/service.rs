@@ -100,7 +100,7 @@ impl OpenAIProxyService for OpenAIProxy {
 
         tracing::debug!("Response has {} header(s)", response_headers.len());
 
-        // Get the body as a stream (don't buffer it)
+        // Stream the response body without buffering
         let body_stream = response.bytes_stream();
 
         Ok(ProxyResponse {

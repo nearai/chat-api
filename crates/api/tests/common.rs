@@ -131,6 +131,7 @@ pub async fn create_test_server_and_db(
         agent_repo.clone(),
         config.agent.managers.clone(),
         config.agent.nearai_api_url.clone(),
+        config.agent.agent_domain.clone(),
         system_configs_service.clone()
             as Arc<dyn services::system_configs::ports::SystemConfigsService>,
     ));

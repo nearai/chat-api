@@ -59,7 +59,6 @@ pub struct AgentInstance {
     pub public_ssh_key: Option<String>,
     pub instance_url: Option<String>,
     pub instance_token: Option<String>,
-    pub gateway_port: Option<i32>,
     pub dashboard_url: Option<String>,
     /// The agent manager URL that owns this instance (for routing operations)
     pub agent_api_base_url: Option<String>,
@@ -142,12 +141,25 @@ pub struct CreateInstanceParams {
     pub public_ssh_key: Option<String>,
     pub instance_url: Option<String>,
     pub instance_token: Option<String>,
-    pub gateway_port: Option<i32>,
     pub dashboard_url: Option<String>,
     /// The agent manager URL that created this instance
     pub agent_api_base_url: Option<String>,
     /// Service type selected at creation time
     pub service_type: Option<String>,
+}
+
+/// Parameters for creating an instance via Agent API
+#[derive(Debug, Clone)]
+pub struct InstanceCreationParams {
+    pub image: Option<String>,
+    pub name: Option<String>,
+    pub ssh_pubkey: Option<String>,
+    pub service_type: Option<String>,
+    pub cpus: Option<String>,
+    pub mem_limit: Option<String>,
+    pub storage_size: Option<String>,
+    pub nearai_api_url: Option<String>,
+    pub nearai_api_key: Option<String>,
 }
 
 #[cfg_attr(test, mockall::automock)]
@@ -285,10 +297,7 @@ pub trait AgentService: Send + Sync {
     async fn create_instance_from_agent_api(
         &self,
         user_id: UserId,
-        image: Option<String>,
-        name: Option<String>,
-        ssh_pubkey: Option<String>,
-        service_type: Option<String>,
+        params: InstanceCreationParams,
     ) -> anyhow::Result<AgentInstance>;
 
     /// Create instance with streaming lifecycle events.
@@ -299,10 +308,7 @@ pub trait AgentService: Send + Sync {
     async fn create_instance_from_agent_api_streaming(
         &self,
         user_id: UserId,
-        image: Option<String>,
-        name: Option<String>,
-        ssh_pubkey: Option<String>,
-        service_type: Option<String>,
+        params: InstanceCreationParams,
         max_allowed: u64,
     ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<serde_json::Value>>>;
 

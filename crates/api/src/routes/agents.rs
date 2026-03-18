@@ -27,28 +27,33 @@ pub struct CreateInstanceRequest {
     /// Service type preset, e.g. "ironclaw" (optional)
     #[serde(default)]
     pub service_type: Option<String>,
+    /// CPU allocation (optional, e.g. "1", "2")
+    #[serde(default)]
+    pub cpus: Option<String>,
+    /// Memory limit (optional, e.g. "4g", "8g")
+    #[serde(default)]
+    pub mem_limit: Option<String>,
+    /// Storage size (optional, e.g. "10G", "100G")
+    #[serde(default)]
+    pub storage_size: Option<String>,
+    /// NEAR AI API URL (optional, defaults to server config)
+    #[serde(default)]
+    pub nearai_api_url: Option<String>,
+    /// NEAR AI API key (optional, defaults to server-generated key)
+    #[serde(default)]
+    pub nearai_api_key: Option<String>,
 }
 
 /// Helper to create SSE streaming response for instance creation
 async fn create_instance_streaming_response(
     app_state: AppState,
     user_id: services::UserId,
-    image: Option<String>,
-    name: Option<String>,
-    ssh_pubkey: Option<String>,
-    service_type: Option<String>,
+    params: services::agent::ports::InstanceCreationParams,
     max_allowed: u64,
 ) -> Result<Response, ApiError> {
     let rx = app_state
         .agent_service
-        .create_instance_from_agent_api_streaming(
-            user_id,
-            image,
-            name,
-            ssh_pubkey,
-            service_type,
-            max_allowed,
-        )
+        .create_instance_from_agent_api_streaming(user_id, params, max_allowed)
         .await
         .map_err(|e| {
             tracing::error!("Failed to start instance creation stream: {}", e);
@@ -185,6 +190,18 @@ pub async fn create_instance(
     Json(request): Json<CreateInstanceRequest>,
 ) -> Result<Response, ApiError> {
     tracing::info!("Creating agent instance: user_id={}", user.user_id);
+    tracing::info!(
+        "Instance creation request received: image={:?}, name={:?}, cpus={:?}, mem_limit={:?}, storage_size={:?}, service_type={:?}, has_ssh_pubkey={}, has_nearai_api_url={}, has_nearai_api_key={}",
+        request.image,
+        request.name,
+        request.cpus,
+        request.mem_limit,
+        request.storage_size,
+        request.service_type,
+        request.ssh_pubkey.is_some(),
+        request.nearai_api_url.is_some(),
+        request.nearai_api_key.is_some()
+    );
 
     // Validate service_type if provided
     if let Some(service_type) = request.service_type.as_deref() {
@@ -230,10 +247,17 @@ pub async fn create_instance(
         create_instance_streaming_response(
             app_state,
             user.user_id,
-            request.image,
-            request.name,
-            request.ssh_pubkey,
-            request.service_type,
+            services::agent::ports::InstanceCreationParams {
+                image: request.image,
+                name: request.name,
+                ssh_pubkey: request.ssh_pubkey,
+                service_type: request.service_type,
+                cpus: request.cpus,
+                mem_limit: request.mem_limit,
+                storage_size: request.storage_size,
+                nearai_api_url: request.nearai_api_url,
+                nearai_api_key: request.nearai_api_key,
+            },
             max_allowed,
         )
         .await
@@ -242,10 +266,17 @@ pub async fn create_instance(
             .agent_service
             .create_instance_from_agent_api(
                 user.user_id,
-                request.image,
-                request.name,
-                request.ssh_pubkey,
-                request.service_type,
+                services::agent::ports::InstanceCreationParams {
+                    image: request.image,
+                    name: request.name,
+                    ssh_pubkey: request.ssh_pubkey,
+                    service_type: request.service_type,
+                    cpus: request.cpus,
+                    mem_limit: request.mem_limit,
+                    storage_size: request.storage_size,
+                    nearai_api_url: request.nearai_api_url,
+                    nearai_api_key: request.nearai_api_key,
+                },
             )
             .await
             .map_err(|e| {
@@ -322,6 +353,24 @@ pub async fn list_instances(
             crate::models::instance_response_with_enrichment(inst, enrichment)
         })
         .collect();
+
+    // Log instances response with SSH commands
+    for instance in &paginated {
+        if let Some(ssh_cmd) = &instance.ssh_command {
+            tracing::info!(
+                "Instance response with SSH command: id={}, name={}, ssh_command={}",
+                instance.id,
+                instance.name,
+                ssh_cmd
+            );
+        } else {
+            tracing::debug!(
+                "Instance response without SSH command: id={}, name={}",
+                instance.id,
+                instance.name
+            );
+        }
+    }
 
     Ok(Json(PaginatedResponse {
         items: paginated,

@@ -309,6 +309,10 @@ fn default_nearai_api_url() -> String {
         .unwrap_or_else(|_| "https://private.near.ai/v1".to_string())
 }
 
+fn default_agent_domain() -> String {
+    std::env::var("AGENT_DOMAIN").unwrap_or_else(|_| "claws.sare.dev".to_string())
+}
+
 /// A single agent manager endpoint with its URL and bearer token
 #[derive(Clone, serde::Deserialize)]
 pub struct AgentManager {
@@ -338,6 +342,11 @@ pub struct AgentConfig {
     /// Used as nearai_api_url when creating instances so the agent knows where to authenticate.
     #[serde(default = "default_nearai_api_url")]
     pub nearai_api_url: String,
+    /// Domain where agent instances are accessible (e.g., claws.sare.dev)
+    /// Used to construct instance_url and dashboard_url as {instance_name}.{agent_domain}
+    /// Configured via AGENT_DOMAIN environment variable.
+    #[serde(default = "default_agent_domain")]
+    pub agent_domain: String,
 }
 
 /// Split a comma-separated env var value into non-empty trimmed entries.
@@ -392,6 +401,7 @@ impl Default for AgentConfig {
             nearai_api_url: std::env::var("BACKEND_URL")
                 .map(|url| url.trim_end_matches('/').to_string() + "/v1")
                 .unwrap_or_else(|_| "https://private.near.ai/v1".to_string()),
+            agent_domain: default_agent_domain(),
         }
     }
 }

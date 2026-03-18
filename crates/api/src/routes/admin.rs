@@ -1632,10 +1632,17 @@ pub async fn admin_create_instance(
         .agent_service
         .create_instance_from_agent_api(
             user_id,
-            request.image,
-            request.name,
-            request.ssh_pubkey,
-            request.service_type,
+            services::agent::ports::InstanceCreationParams {
+                image: request.image,
+                name: request.name,
+                ssh_pubkey: request.ssh_pubkey,
+                service_type: request.service_type,
+                cpus: None,
+                mem_limit: None,
+                storage_size: None,
+                nearai_api_url: None,
+                nearai_api_key: None,
+            },
         )
         .await
         .map_err(|_| {
