@@ -3049,20 +3049,6 @@ struct McpRequestEnvelope {
 }
 
 /// Proxy MCP requests to cloud-api and track successful web_search tool calls for end users.
-#[utoipa::path(
-    post,
-    path = "/mcp",
-    tag = PROXY,
-    responses(
-        (status = 200, description = "Proxied MCP response from cloud-api"),
-        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
-        (status = 400, description = BAD_REQUEST, body = ErrorResponse),
-        (status = 502, description = "Cloud API error", body = ErrorResponse)
-    ),
-    security(
-        ("session_token" = [])
-    )
-)]
 async fn proxy_mcp(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
