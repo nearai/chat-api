@@ -219,8 +219,8 @@ impl UserUsageRepository for PostgresUserUsageRepository {
                 r#"
                 SELECT
                     COUNT(*)::bigint AS request_count,
-                    COALESCE(SUM(CASE WHEN metric_key = 'llm.tokens' THEN quantity ELSE 0 END), 0)::bigint AS token_sum,
-                    COALESCE(SUM(COALESCE(cost_nano_usd, 0)), 0)::bigint AS cost_nano_usd
+                    COALESCE(SUM(quantity) FILTER (WHERE metric_key = 'llm.tokens'), 0)::bigint AS token_sum,
+                    COALESCE(SUM(cost_nano_usd), 0)::bigint AS cost_nano_usd
                 FROM user_usage_event
                 WHERE instance_id = $1
                   AND ($2::timestamptz IS NULL OR created_at >= $2)
