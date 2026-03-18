@@ -19,6 +19,10 @@ use uuid::Uuid;
 
 // Global once cell to ensure migrations only run once across all tests
 static MIGRATIONS_INITIALIZED: OnceCell<()> = OnceCell::const_new();
+static TEST_ENV_INITIALIZED: OnceCell<()> = OnceCell::const_new();
+
+const TEST_ENCRYPTION_KEY: &str =
+    "3031323334353637383961626364656666656463626139383736353433323130";
 
 /// Configuration for test server with Cloud API mocking
 #[derive(Default)]
@@ -64,6 +68,16 @@ pub async fn create_test_server_and_db(
 ) -> (TestServer, database::Database) {
     // Load .env file
     dotenvy::dotenv().ok();
+
+    TEST_ENV_INITIALIZED
+        .get_or_init(|| async {
+            // CI does not provide ENCRYPTION_KEY, but repository-level agent instance
+            // creation in integration tests now requires token encryption.
+            if std::env::var_os("ENCRYPTION_KEY").is_none() {
+                std::env::set_var("ENCRYPTION_KEY", TEST_ENCRYPTION_KEY);
+            }
+        })
+        .await;
 
     // Load configuration
     let config = config::Config::from_env();
