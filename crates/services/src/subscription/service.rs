@@ -2109,14 +2109,13 @@ impl SubscriptionService for SubscriptionServiceImpl {
         };
 
         if limit_exceeded {
-            let effective_limit = plan_credits.saturating_add(credits_balance.max(0) as u64);
             tracing::info!(
                 "Blocking proxy access for user_id={}: credit limit exceeded (used {} of plan {}, credits_balance={})",
-                user_id, period_spent_credits, effective_limit, credits_balance
+                user_id, period_spent_credits, plan_credits, credits_balance
             );
             return Err(SubscriptionError::CreditLimitExceeded {
                 used: period_spent_credits,
-                limit: effective_limit,
+                limit: plan_credits,
             });
         }
 
@@ -2302,11 +2301,14 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 "Credit purchase requested for unsupported provider: {}",
                 provider
             );
-            return Err(SubscriptionError::CreditsNotConfigured);
+            return Err(SubscriptionError::InvalidProvider(format!(
+                "Credits purchase is not supported for provider '{}'",
+                provider
+            )));
         }
         let credit_price_id = credits_cfg
             .providers
-            .get("stripe")
+            .get(&provider)
             .and_then(|p| p.price_id.clone())
             .ok_or(SubscriptionError::CreditsNotConfigured)?;
 
@@ -2336,7 +2338,6 @@ impl SubscriptionService for SubscriptionServiceImpl {
         let mut metadata = HashMap::new();
         metadata.insert("user_id".to_string(), user_id.to_string());
         metadata.insert("credits".to_string(), credits.to_string());
-        metadata.insert("provider".to_string(), provider);
         params.metadata = Some(metadata);
 
         let session = CheckoutSession::create(&client, params)
