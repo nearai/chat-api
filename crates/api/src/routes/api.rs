@@ -137,9 +137,18 @@ pub fn create_api_router(
         .route("/v1/models", get(proxy_models))
         .route("/v1/signature/{chat_id}", get(proxy_signature))
         .layer(axum::middleware::from_fn_with_state(
-            dual_auth_state,
+            dual_auth_state.clone(),
             crate::middleware::dual_auth_middleware,
         ));
+
+    // Dual auth only: MCP passthrough for tool calls (separate from llm_proxy)
+    let mcp_router =
+        Router::new()
+            .route("/mcp", post(proxy_mcp))
+            .layer(axum::middleware::from_fn_with_state(
+                dual_auth_state,
+                crate::middleware::dual_auth_middleware,
+            ));
 
     // Session auth only: conversations, share groups, files
     let conversations_router = Router::new()
@@ -204,6 +213,7 @@ pub fn create_api_router(
     Router::new()
         .merge(llm_proxy_router)
         .merge(models_proxy_router)
+        .merge(mcp_router)
         .merge(session_auth_routes)
 }
 
@@ -3023,6 +3033,186 @@ async fn proxy_signature(
         Body::from_stream(proxy_response.body),
     )
     .await
+}
+
+/// Typed usage details for web_search (avoids raw Value construction).
+#[derive(Serialize)]
+struct WebSearchUsageDetails {
+    request_type: &'static str,
+}
+
+#[derive(Debug, Deserialize)]
+struct McpRequestEnvelope {
+    method: String,
+    #[serde(default)]
+    params: Option<serde_json::Value>,
+}
+
+/// Proxy MCP requests to cloud-api and track successful web_search tool calls for end users.
+async fn proxy_mcp(
+    State(state): State<crate::state::AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    api_key_ext: Option<Extension<AuthenticatedApiKey>>,
+    headers: HeaderMap,
+    request: Request,
+) -> Result<Response, Response> {
+    let body_bytes = extract_body_bytes(request).await?;
+    let mcp_request = serde_json::from_slice::<McpRequestEnvelope>(&body_bytes).ok();
+    let is_web_search_call = mcp_request
+        .as_ref()
+        .map(is_web_search_tool_call)
+        .unwrap_or(false);
+
+    let url = crate::cloud_api::mcp_url(&state.cloud_api_base_url);
+
+    let api_key = state
+        .vpc_credentials_service
+        .get_api_key()
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get VPC API key for MCP proxy: {}", e);
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: "Cloud API credentials unavailable".to_string(),
+                }),
+            )
+                .into_response()
+        })?;
+
+    let mut forward_headers = headers.clone();
+    forward_headers.remove("authorization");
+    forward_headers.remove("host");
+    forward_headers.remove("content-length");
+
+    let mut request_builder = state
+        .http_client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .body(body_bytes);
+
+    for (key, value) in forward_headers.iter() {
+        request_builder = request_builder.header(key, value);
+    }
+
+    let upstream_response = request_builder.send().await.map_err(|e| {
+        tracing::error!("MCP proxy error for user_id={}: {}", user.user_id, e);
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(ErrorResponse {
+                error: format!("Cloud API error: {e}"),
+            }),
+        )
+            .into_response()
+    })?;
+
+    let status = upstream_response.status().as_u16();
+    let response_headers = upstream_response.headers().clone();
+    let response_body = upstream_response.bytes().await.map_err(|e| {
+        tracing::error!(
+            "Failed to read MCP response for user_id={}: {}",
+            user.user_id,
+            e
+        );
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(ErrorResponse {
+                error: format!("Failed to read cloud API response: {e}"),
+            }),
+        )
+            .into_response()
+    })?;
+
+    if is_web_search_call && (200..300).contains(&status) {
+        let decompressed_body = decompress_if_gzipped(&response_body, &response_headers)
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    "Failed to decompress MCP response for user_id={}: {}",
+                    user.user_id,
+                    e
+                );
+                response_body.to_vec()
+            });
+        let response_json = serde_json::from_slice::<serde_json::Value>(&decompressed_body).ok();
+
+        if response_json
+            .as_ref()
+            .map(is_successful_mcp_web_search_response)
+            .unwrap_or(false)
+        {
+            let details = serde_json::to_value(WebSearchUsageDetails {
+                request_type: "mcp.web_search",
+            })
+            .ok();
+
+            let (instance_id, api_key_id) = api_key_ext
+                .as_ref()
+                .map(|ak| (ak.api_key_info.instance_id, Some(ak.api_key_info.id)))
+                .unwrap_or((None, None));
+
+            let state_clone = state.clone();
+            tokio::spawn(async move {
+                let cost_nano_usd = state_clone
+                    .web_search_pricing_cache
+                    .get_cost_per_unit()
+                    .await;
+                let usage_params = services::user_usage::RecordUsageParams {
+                    user_id: user.user_id,
+                    metric_key: services::user_usage::METRIC_KEY_SERVICE_WEB_SEARCH.to_string(),
+                    quantity: 1,
+                    cost_nano_usd: Some(cost_nano_usd),
+                    model_id: None,
+                    instance_id,
+                    api_key_id,
+                    details,
+                };
+
+                let result = if instance_id.is_some() {
+                    state_clone
+                        .user_usage_service
+                        .record_usage_and_update_balance(usage_params)
+                        .await
+                } else {
+                    state_clone
+                        .user_usage_service
+                        .record_usage(usage_params)
+                        .await
+                };
+
+                if let Err(e) = result {
+                    tracing::warn!(
+                        "Failed to record web search MCP usage for user_id={}: {}",
+                        user.user_id,
+                        e
+                    );
+                }
+            });
+        }
+    }
+
+    build_response(status, response_headers, Body::from(response_body)).await
+}
+
+fn is_web_search_tool_call(request: &McpRequestEnvelope) -> bool {
+    request.method == "tools/call"
+        && request
+            .params
+            .as_ref()
+            .and_then(|params| params.get("name"))
+            .and_then(|value| value.as_str())
+            == Some("web_search")
+}
+
+fn is_successful_mcp_web_search_response(response: &serde_json::Value) -> bool {
+    if response.get("error").is_some() {
+        return false;
+    }
+
+    response
+        .get("result")
+        .and_then(|result| result.get("isError"))
+        .and_then(|value| value.as_bool())
+        == Some(false)
 }
 
 /// Get system configs with in-memory TTL caching.

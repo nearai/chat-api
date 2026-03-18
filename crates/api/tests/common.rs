@@ -250,6 +250,8 @@ pub async fn create_test_server_and_db(
         ));
 
     // Create application state
+    let http_client = reqwest::Client::new();
+
     let app_state = AppState {
         oauth_service,
         user_service,
@@ -271,6 +273,7 @@ pub async fn create_test_server_and_db(
         admin_domains: Arc::new(admin_domains),
         stripe_test_clock_enabled: config.stripe.test_clock_enabled,
         cloud_api_base_url: test_config.cloud_api_base_url.clone(),
+        http_client,
         metrics_service,
         analytics_service,
         user_usage_service,
@@ -278,6 +281,9 @@ pub async fn create_test_server_and_db(
         near_balance_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         model_settings_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         model_pricing_cache: api::model_pricing::ModelPricingCache::new(
+            test_config.cloud_api_base_url.clone(),
+        ),
+        web_search_pricing_cache: api::web_search_pricing::WebSearchPricingCache::new(
             test_config.cloud_api_base_url.clone(),
         ),
         system_configs_cache: Arc::new(tokio::sync::RwLock::new(None)),
