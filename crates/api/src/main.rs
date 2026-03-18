@@ -206,6 +206,8 @@ async fn main() -> anyhow::Result<()> {
                 as Arc<dyn services::subscription::ports::SubscriptionRepository>,
             webhook_repo: db.payment_webhook_repository()
                 as Arc<dyn services::subscription::ports::PaymentWebhookRepository>,
+            credits_repo: db.credits_repository()
+                as Arc<dyn services::subscription::ports::CreditsRepository>,
             system_configs_service: system_configs_service.clone()
                 as Arc<dyn services::system_configs::ports::SystemConfigsService>,
             user_repository: user_repo.clone(),
@@ -297,6 +299,8 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Create application state
+    let http_client = reqwest::Client::new();
+
     let app_state = AppState {
         oauth_service,
         user_service,
@@ -318,6 +322,7 @@ async fn main() -> anyhow::Result<()> {
         vpc_credentials_service,
         stripe_test_clock_enabled: config.stripe.test_clock_enabled,
         cloud_api_base_url: config.openai.base_url.clone().unwrap_or_default(),
+        http_client,
         metrics_service,
         analytics_service,
         user_usage_service,
@@ -325,6 +330,9 @@ async fn main() -> anyhow::Result<()> {
         near_balance_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         model_settings_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         model_pricing_cache: api::model_pricing::ModelPricingCache::new(
+            config.openai.base_url.clone().unwrap_or_default(),
+        ),
+        web_search_pricing_cache: api::web_search_pricing::WebSearchPricingCache::new(
             config.openai.base_url.clone().unwrap_or_default(),
         ),
         system_configs_cache: Arc::new(tokio::sync::RwLock::new(None)),

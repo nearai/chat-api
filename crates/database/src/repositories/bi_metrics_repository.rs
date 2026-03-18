@@ -118,6 +118,8 @@ fn list_users_order_clause(sort: &ListUsersSort) -> String {
         UsersSortBy::AgentCount => "enriched.agent_count",
         UsersSortBy::Email => "enriched.email",
         UsersSortBy::Name => "enriched.name",
+        UsersSortBy::PurchasedCreditsNano => "enriched.purchased_credits_nano",
+        UsersSortBy::SpentPurchasedCreditsNano => "enriched.spent_purchased_credits_nano",
     };
     let order = match sort.sort_order {
         UsersSortOrder::Asc => "ASC",
@@ -758,6 +760,14 @@ usage_stats AS (
     FROM user_usage_event
     GROUP BY user_id
 ),
+credits_balance AS (
+    SELECT
+        user_id,
+        -- purchased_credits_nano = total purchased+granted; remaining = purchased - spent_purchased
+        (COALESCE(total_nano_usd, 0))::bigint AS purchased_credits_nano,
+        (COALESCE(spent_nano_usd, 0))::bigint AS used_purchased_nano
+    FROM user_credits
+),
 enriched AS (
     SELECT
         u.id,
@@ -772,7 +782,9 @@ enriched AS (
         COALESCE(us.total_spent_nano, 0) AS total_spent_nano,
         COALESCE(us.agent_spent_nano, 0) AS agent_spent_nano,
         COALESCE(us.agent_token_usage, 0) AS agent_token_usage,
-        COALESCE(us.last_usage_at, u.updated_at) AS last_activity_at
+        COALESCE(us.last_usage_at, u.updated_at) AS last_activity_at,
+        COALESCE(cb.purchased_credits_nano, 0) AS purchased_credits_nano,
+        COALESCE(cb.used_purchased_nano, 0) AS spent_purchased_credits_nano
     FROM users u
     LEFT JOIN LATERAL (
         SELECT status, price_id FROM subscriptions s
@@ -782,10 +794,11 @@ enriched AS (
     ) sub ON true
     LEFT JOIN agent_counts ac ON u.id = ac.user_id
     LEFT JOIN usage_stats us ON u.id = us.user_id
+    LEFT JOIN credits_balance cb ON u.id = cb.user_id
 )
 SELECT id, email, name, avatar_url, created_at, updated_at,
        subscription_status, subscription_price_id, agent_count, total_spent_nano, agent_spent_nano,
-       agent_token_usage, last_activity_at,
+       agent_token_usage, last_activity_at, purchased_credits_nano, spent_purchased_credits_nano,
        COUNT(*) OVER() AS total_count
 FROM enriched
 WHERE 1=1
@@ -842,6 +855,8 @@ WHERE 1=1
                     agent_spent_nano: r.get::<_, i64>("agent_spent_nano"),
                     agent_token_usage: r.get::<_, i64>("agent_token_usage"),
                     last_activity_at: r.get("last_activity_at"),
+                    purchased_credits_nano: r.get::<_, i64>("purchased_credits_nano"),
+                    spent_purchased_credits_nano: r.get::<_, i64>("spent_purchased_credits_nano"),
                 }
             })
             .collect();

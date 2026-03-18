@@ -3,8 +3,11 @@
 use crate::pool::DbPool;
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
-use services::user_usage::{RecordUsageParams, UsageRankBy, UserUsageRepository, UserUsageSummary};
+use services::user_usage::{
+    InstanceUsageSummary, RecordUsageParams, UsageRankBy, UserUsageRepository, UserUsageSummary,
+};
 use services::UserId;
+use uuid::Uuid;
 
 pub struct PostgresUserUsageRepository {
     pool: DbPool,
@@ -202,6 +205,36 @@ impl UserUsageRepository for PostgresUserUsageRepository {
             image_num: row.get(2),
             cost_nano_usd: row.get(3),
         }))
+    }
+
+    async fn get_instance_usage_summary(
+        &self,
+        instance_id: Uuid,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+    ) -> anyhow::Result<InstanceUsageSummary> {
+        let client = self.pool.get().await?;
+        let row = client
+            .query_one(
+                r#"
+                SELECT
+                    COUNT(*)::bigint AS request_count,
+                    COALESCE(SUM(quantity) FILTER (WHERE metric_key = 'llm.tokens'), 0)::bigint AS token_sum,
+                    COALESCE(SUM(cost_nano_usd), 0)::bigint AS cost_nano_usd
+                FROM user_usage_event
+                WHERE instance_id = $1
+                  AND ($2::timestamptz IS NULL OR created_at >= $2)
+                  AND ($3::timestamptz IS NULL OR created_at < $3)
+                "#,
+                &[&instance_id, &start, &end],
+            )
+            .await?;
+
+        Ok(InstanceUsageSummary {
+            request_count: row.get(0),
+            token_sum: row.get(1),
+            cost_nano_usd: row.get(2),
+        })
     }
 
     async fn get_top_users_usage(

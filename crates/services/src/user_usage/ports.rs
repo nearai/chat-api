@@ -14,6 +14,14 @@ pub struct UserUsageSummary {
     pub cost_nano_usd: i64,
 }
 
+/// Per-instance usage aggregate for a time range.
+#[derive(Debug, Clone)]
+pub struct InstanceUsageSummary {
+    pub request_count: i64,
+    pub token_sum: i64,
+    pub cost_nano_usd: i64,
+}
+
 /// Rank order for top usage listing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UsageRankBy {
@@ -25,6 +33,7 @@ pub enum UsageRankBy {
 pub const METRIC_KEY_LLM_TOKENS: &str = "llm.tokens";
 pub const METRIC_KEY_IMAGE_GENERATE: &str = "image.generate";
 pub const METRIC_KEY_IMAGE_EDIT: &str = "image.edit";
+pub const METRIC_KEY_SERVICE_WEB_SEARCH: &str = "service.web_search";
 
 /// Parameters for recording a usage event with optional agent-specific fields.
 #[derive(Debug, Clone)]
@@ -85,6 +94,14 @@ pub trait UserUsageRepository: Send + Sync {
         end: Option<DateTime<Utc>>,
     ) -> anyhow::Result<Option<UserUsageSummary>>;
 
+    /// Usage for a single instance within an optional [start, end) time range.
+    async fn get_instance_usage_summary(
+        &self,
+        instance_id: Uuid,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+    ) -> anyhow::Result<InstanceUsageSummary>;
+
     /// Top N users by usage, ordered by token_sum or cost_nano_usd.
     /// When start/end are Some, only events with created_at in [start, end) are included.
     async fn get_top_users_usage(
@@ -136,6 +153,14 @@ pub trait UserUsageService: Send + Sync {
         start: Option<DateTime<Utc>>,
         end: Option<DateTime<Utc>>,
     ) -> anyhow::Result<Option<UserUsageSummary>>;
+
+    /// Usage for a single instance within an optional [start, end) time range.
+    async fn get_instance_usage_summary(
+        &self,
+        instance_id: Uuid,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+    ) -> anyhow::Result<InstanceUsageSummary>;
 
     /// Top N users by usage, ordered by token or cost. Optional [start, end) time range.
     async fn get_top_users_usage(

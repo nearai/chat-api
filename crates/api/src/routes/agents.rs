@@ -672,10 +672,16 @@ pub async fn get_instance_balance(
         user.user_id
     );
 
-    let balance = app_state
-        .agent_service
-        .get_instance_balance(instance_uuid, user.user_id)
-        .await
+    let (balance_result, billing_period_result) = tokio::join!(
+        app_state
+            .agent_service
+            .get_instance_balance(instance_uuid, user.user_id),
+        app_state
+            .subscription_service
+            .get_current_billing_period(user.user_id),
+    );
+
+    let balance = balance_result
         .map_err(|e| {
             tracing::error!(
                 "Failed to get balance: instance_id={}, error={}",
@@ -686,7 +692,37 @@ pub async fn get_instance_balance(
         })?
         .ok_or_else(|| ApiError::not_found("Balance not found"))?;
 
-    Ok(Json(balance.into()))
+    let billing_period = billing_period_result.map_err(|e| {
+        tracing::error!(
+            "Failed to resolve billing period: user_id={}, error={}",
+            user.user_id,
+            e
+        );
+        ApiError::internal_server_error("Failed to get balance")
+    })?;
+
+    let period_usage = app_state
+        .user_usage_service
+        .get_instance_usage_summary(
+            instance_uuid,
+            Some(billing_period.start_at),
+            Some(billing_period.end_at),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to aggregate period usage: instance_id={}, error={}",
+                instance_uuid,
+                e
+            );
+            ApiError::internal_server_error("Failed to get balance")
+        })?;
+
+    Ok(Json(BalanceResponse::from_parts(
+        balance,
+        billing_period,
+        period_usage,
+    )))
 }
 
 /// Pagination query parameters
