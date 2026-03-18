@@ -33,6 +33,7 @@ pub enum UsageRankBy {
 pub const METRIC_KEY_LLM_TOKENS: &str = "llm.tokens";
 pub const METRIC_KEY_IMAGE_GENERATE: &str = "image.generate";
 pub const METRIC_KEY_IMAGE_EDIT: &str = "image.edit";
+pub const METRIC_KEY_SERVICE_WEB_SEARCH: &str = "service.web_search";
 
 /// Parameters for recording a usage event with optional agent-specific fields.
 #[derive(Debug, Clone)]
