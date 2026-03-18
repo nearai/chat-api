@@ -2093,18 +2093,22 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .map(|s| s.cost_nano_usd)
             .unwrap_or(0);
 
-        // 3. Get credits balance (always fetch; changes with usage)
-        let credits_balance = self
-            .credits_repo
-            .get_balance(user_id)
-            .await
-            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-
-        // 4. Enforce limit: exceeded when spent > plan_credits and credits_balance <= 0
-        if period_spent_credits >= 0
-            && (period_spent_credits as u64) > plan_credits
-            && credits_balance <= 0
+        // 3. Only check credits balance when spent >= plan (might need purchased credits to cover overage)
+        let (limit_exceeded, credits_balance) = if period_spent_credits >= 0
+            && (period_spent_credits as u64) >= plan_credits
         {
+            let credits_balance = self
+                .credits_repo
+                .get_balance(user_id)
+                .await
+                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+            let exceeded = (period_spent_credits as u64) >= plan_credits && credits_balance <= 0;
+            (exceeded, credits_balance)
+        } else {
+            (false, 0)
+        };
+
+        if limit_exceeded {
             let effective_limit = plan_credits.saturating_add(credits_balance.max(0) as u64);
             tracing::info!(
                 "Blocking proxy access for user_id={}: credit limit exceeded (used {} of plan {}, credits_balance={})",
