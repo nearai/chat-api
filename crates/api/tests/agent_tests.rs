@@ -324,7 +324,7 @@ async fn test_get_instance_balance_includes_current_period_usage() {
         .await
         .expect("insert previous-period usage");
 
-    client
+    let updated_rows = client
         .execute(
             "UPDATE agent_balance
              SET total_spent = $2,
@@ -343,6 +343,10 @@ async fn test_get_instance_balance_includes_current_period_usage() {
         )
         .await
         .expect("update balance snapshot");
+    assert_eq!(
+        updated_rows, 1,
+        "agent_balance row should exist via insert trigger"
+    );
 
     let response = server
         .get(&format!("/v1/agents/instances/{}/balance", instance_id))
