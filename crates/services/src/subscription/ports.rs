@@ -145,8 +145,8 @@ pub enum SubscriptionError {
     NotConfigured,
     /// No active subscription found for user
     NoActiveSubscription,
-    /// Monthly credit limit exceeded (used >= limit)
-    MonthlyCreditLimitExceeded { used: i64, limit: u64 },
+    /// Credit limit exceeded (used >= limit)
+    CreditLimitExceeded { used: i64, limit: u64 },
     /// Cannot switch to plan: current instance count exceeds target plan's limit
     InstanceLimitExceeded { current: u64, max: u64 },
     /// Subscription is not scheduled for cancellation (cannot resume)
@@ -181,10 +181,10 @@ impl fmt::Display for SubscriptionError {
             Self::InvalidProvider(provider) => write!(f, "Invalid provider: {}", provider),
             Self::NotConfigured => write!(f, "Stripe is not configured"),
             Self::NoActiveSubscription => write!(f, "No active subscription found"),
-            Self::MonthlyCreditLimitExceeded { used, limit } => {
+            Self::CreditLimitExceeded { used, limit } => {
                 write!(
                     f,
-                    "Monthly credit limit exceeded: used {} of {} credits",
+                    "Credit limit exceeded: used {} of {} credits",
                     used, limit
                 )
             }
@@ -544,6 +544,6 @@ pub struct CreditsSummary {
     pub spent_purchased_nano_usd: i64,
     /// Spend in the current period (sum of cost_nano_usd).
     pub period_spent_credits: i64,
-    /// Effective limit: plan limit + remaining balance (nano-USD).
-    pub effective_max_credits: i64,
+    /// Plan credit limit (nano-USD).
+    pub plan_credits: i64,
 }

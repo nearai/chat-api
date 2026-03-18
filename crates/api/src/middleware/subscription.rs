@@ -82,7 +82,7 @@ pub async fn subscription_middleware(
             )
                 .into_response())
         }
-        Err(SubscriptionError::MonthlyCreditLimitExceeded { used, limit }) => {
+        Err(SubscriptionError::CreditLimitExceeded { used, limit }) => {
             tracing::info!(
                 "Blocked proxy access for user_id={}: monthly credit limit exceeded (used {} of {})",
                 user.user_id,
