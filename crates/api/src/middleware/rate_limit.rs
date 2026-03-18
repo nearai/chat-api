@@ -622,7 +622,9 @@ mod tests {
             AnalyticsSummary, CheckAndRecordActivityRequest, CheckAndRecordActivityResult,
             RecordActivityRequest, TopActiveUser,
         };
-        use services::user_usage::{UsageRankBy, UserUsageService, UserUsageSummary};
+        use services::user_usage::{
+            InstanceUsageSummary, UsageRankBy, UserUsageService, UserUsageSummary,
+        };
         use tokio::sync::Mutex;
 
         /// User usage mock that returns zero usage (always under limit).
@@ -683,6 +685,19 @@ mod tests {
                     image_num: 0,
                     cost_nano_usd: 0,
                 }))
+            }
+
+            async fn get_instance_usage_summary(
+                &self,
+                _instance_id: uuid::Uuid,
+                _start: Option<chrono::DateTime<chrono::Utc>>,
+                _end: Option<chrono::DateTime<chrono::Utc>>,
+            ) -> anyhow::Result<InstanceUsageSummary> {
+                Ok(InstanceUsageSummary {
+                    request_count: 0,
+                    token_sum: 0,
+                    cost_nano_usd: 0,
+                })
             }
 
             async fn get_top_users_usage(
@@ -757,6 +772,19 @@ mod tests {
                     image_num: 0,
                     cost_nano_usd: self.cost_sum,
                 }))
+            }
+
+            async fn get_instance_usage_summary(
+                &self,
+                _instance_id: uuid::Uuid,
+                _start: Option<chrono::DateTime<chrono::Utc>>,
+                _end: Option<chrono::DateTime<chrono::Utc>>,
+            ) -> anyhow::Result<InstanceUsageSummary> {
+                Ok(InstanceUsageSummary {
+                    request_count: 0,
+                    token_sum: self.token_sum,
+                    cost_nano_usd: self.cost_sum,
+                })
             }
 
             async fn get_top_users_usage(

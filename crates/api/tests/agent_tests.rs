@@ -1,9 +1,11 @@
 mod common;
 
+use chrono::{Datelike, Duration, NaiveDate, NaiveTime, Utc};
 use common::{create_test_server_and_db, mock_login};
 use serde_json::json;
 use serial_test::serial;
 use services::agent::ports::{AgentRepository, CreateInstanceParams};
+use services::user::ports::UserRepository;
 use uuid::Uuid;
 
 /// Test creating an Agent instance (as admin or regular user)
@@ -233,6 +235,165 @@ async fn test_get_instance_balance_requires_auth() {
         401,
         "Should require authentication to get balance"
     );
+}
+
+#[tokio::test]
+async fn test_get_instance_balance_includes_current_period_usage() {
+    let (server, db) = create_test_server_and_db(Default::default()).await;
+
+    let user_email = "balance_period_user@example.com";
+    let user_token = mock_login(&server, user_email).await;
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .expect("get user")
+        .expect("user should exist");
+
+    let client = db.pool().get().await.expect("get pool client");
+    let instance_id = Uuid::new_v4();
+    let external_instance_id = format!("balance-test-{}", Uuid::new_v4());
+    let now = Utc::now();
+    let current_created_at = now - Duration::hours(1);
+    let previous_created_at = now - Duration::days(40);
+
+    client
+        .execute(
+            "INSERT INTO agent_instances (id, user_id, instance_id, name, type, status)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+            &[
+                &instance_id,
+                &user.id,
+                &external_instance_id,
+                &"Balance Period Test",
+                &"openclaw",
+                &"active",
+            ],
+        )
+        .await
+        .expect("insert instance");
+
+    let current_details = serde_json::json!({
+        "input_tokens": 120,
+        "output_tokens": 80,
+        "input_cost": 100_000_000_i64,
+        "output_cost": 150_000_000_i64,
+        "request_type": "chat",
+    });
+    let previous_details = serde_json::json!({
+        "input_tokens": 250,
+        "output_tokens": 150,
+        "input_cost": 300_000_000_i64,
+        "output_cost": 450_000_000_i64,
+        "request_type": "chat",
+    });
+
+    client
+        .execute(
+            "INSERT INTO user_usage_event
+             (user_id, metric_key, quantity, cost_nano_usd, model_id, instance_id, details, created_at)
+             VALUES ($1, 'llm.tokens', $2, $3, $4, $5, $6, $7)",
+            &[
+                &user.id,
+                &200_i64,
+                &250_000_000_i64,
+                &"gpt-4o-mini",
+                &instance_id,
+                &current_details,
+                &current_created_at,
+            ],
+        )
+        .await
+        .expect("insert current-period usage");
+
+    client
+        .execute(
+            "INSERT INTO user_usage_event
+             (user_id, metric_key, quantity, cost_nano_usd, model_id, instance_id, details, created_at)
+             VALUES ($1, 'llm.tokens', $2, $3, $4, $5, $6, $7)",
+            &[
+                &user.id,
+                &400_i64,
+                &750_000_000_i64,
+                &"gpt-4o-mini",
+                &instance_id,
+                &previous_details,
+                &previous_created_at,
+            ],
+        )
+        .await
+        .expect("insert previous-period usage");
+
+    client
+        .execute(
+            "UPDATE agent_balance
+             SET total_spent = $2,
+                 total_requests = $3,
+                 total_tokens = $4,
+                 last_usage_at = $5,
+                 updated_at = NOW()
+             WHERE instance_id = $1",
+            &[
+                &instance_id,
+                &1_000_000_000_i64,
+                &2_i64,
+                &600_i64,
+                &current_created_at,
+            ],
+        )
+        .await
+        .expect("update balance snapshot");
+
+    let response = server
+        .get(&format!("/v1/agents/instances/{}/balance", instance_id))
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 200);
+
+    let body: serde_json::Value = response.json();
+    assert_eq!(body["total_spent"], "1");
+    assert_eq!(body["total_requests"], 2);
+    assert_eq!(body["total_tokens"], 600);
+    assert_eq!(body["period_spent"], "0.25");
+    assert_eq!(body["period_requests"], 1);
+    assert_eq!(body["period_tokens"], 200);
+
+    let period_start_at = chrono::DateTime::parse_from_rfc3339(
+        body["period_start_at"]
+            .as_str()
+            .expect("period_start_at should be present"),
+    )
+    .expect("valid period_start_at")
+    .with_timezone(&Utc);
+    let period_end_at = chrono::DateTime::parse_from_rfc3339(
+        body["period_end_at"]
+            .as_str()
+            .expect("period_end_at should be present"),
+    )
+    .expect("valid period_end_at")
+    .with_timezone(&Utc);
+
+    let midnight = NaiveTime::from_hms_opt(0, 0, 0).expect("midnight is valid");
+    let expected_start: chrono::DateTime<Utc> = NaiveDate::from_ymd_opt(now.year(), now.month(), 1)
+        .map(|d| chrono::DateTime::from_naive_utc_and_offset(d.and_time(midnight), Utc))
+        .expect("first of month is valid");
+    let (next_year, next_month) = if now.month() == 12 {
+        (now.year() + 1, 1)
+    } else {
+        (now.year(), now.month() + 1)
+    };
+    let expected_end: chrono::DateTime<Utc> = NaiveDate::from_ymd_opt(next_year, next_month, 1)
+        .map(|d| chrono::DateTime::from_naive_utc_and_offset(d.and_time(midnight), Utc))
+        .expect("first of next month is valid");
+
+    assert_eq!(period_start_at, expected_start);
+    assert_eq!(period_end_at, expected_end);
+    assert!(current_created_at >= period_start_at && current_created_at < period_end_at);
+    assert!(previous_created_at < period_start_at);
 }
 
 /// Test getting instance usage history requires authentication

@@ -1140,16 +1140,30 @@ pub struct BalanceResponse {
     pub total_tokens: i64,
     pub last_usage_at: Option<String>,
     pub updated_at: String,
+    pub period_spent: String, // formatted nano-dollars
+    pub period_requests: i64,
+    pub period_tokens: i64,
+    pub period_start_at: String,
+    pub period_end_at: String,
 }
 
-impl From<services::agent::ports::InstanceBalance> for BalanceResponse {
-    fn from(balance: services::agent::ports::InstanceBalance) -> Self {
+impl BalanceResponse {
+    pub fn from_parts(
+        balance: services::agent::ports::InstanceBalance,
+        billing_period: services::subscription::ports::BillingPeriod,
+        period_usage: services::user_usage::ports::InstanceUsageSummary,
+    ) -> Self {
         Self {
             total_spent: format_nano_dollars(balance.total_spent),
             total_requests: balance.total_requests,
             total_tokens: balance.total_tokens,
             last_usage_at: balance.last_usage_at.map(|u| u.to_rfc3339()),
             updated_at: balance.updated_at.to_rfc3339(),
+            period_spent: format_nano_dollars(period_usage.cost_nano_usd),
+            period_requests: period_usage.request_count,
+            period_tokens: period_usage.token_sum,
+            period_start_at: billing_period.start_at.to_rfc3339(),
+            period_end_at: billing_period.end_at.to_rfc3339(),
         }
     }
 }

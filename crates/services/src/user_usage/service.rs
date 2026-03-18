@@ -5,7 +5,9 @@ use chrono::{DateTime, Duration, Utc};
 
 use crate::UserId;
 
-use super::ports::{RecordUsageParams, UserUsageRepository, UserUsageService};
+use super::ports::{
+    InstanceUsageSummary, RecordUsageParams, UserUsageRepository, UserUsageService,
+};
 
 /// Default implementation of `UserUsageService` backed by a `UserUsageRepository`.
 ///
@@ -72,6 +74,17 @@ impl UserUsageService for UserUsageServiceImpl {
         end: Option<DateTime<Utc>>,
     ) -> anyhow::Result<Option<super::ports::UserUsageSummary>> {
         self.repo.get_usage_by_user_id(user_id, start, end).await
+    }
+
+    async fn get_instance_usage_summary(
+        &self,
+        instance_id: uuid::Uuid,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+    ) -> anyhow::Result<InstanceUsageSummary> {
+        self.repo
+            .get_instance_usage_summary(instance_id, start, end)
+            .await
     }
 
     async fn get_top_users_usage(
