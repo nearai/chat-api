@@ -1554,7 +1554,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
                                     c.providers.get("stripe").and_then(|p| p.price_id.clone())
                                 });
 
-                            if credit_price_id.is_none() {
+                            if user_uuid.is_none() {
+                                None
+                            } else if credit_price_id.is_none() {
                                 tracing::warn!(
                                     "Credit purchase event received but credits not configured"
                                 );
