@@ -1499,8 +1499,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
             return Ok(());
         }
 
-        // Credit purchases are fulfilled via checkout.session.completed (immediate).
-        // invoice_creation is kept enabled on checkout so invoices are created for receipts.
+        // For checkout.session.completed with mode=payment: process credit purchase.
         let credit_purchase_user_id = if event_type == "checkout.session.completed" {
             let obj = payload_json
                 .get("data")
@@ -1561,7 +1560,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                                 (user_uuid, credit_price_id)
                             {
                                 let stripe_client = self.get_stripe_client();
-                                let session_id_parsed: stripe::CheckoutSessionId =
+                                let session_id: stripe::CheckoutSessionId =
                                     sid.parse().map_err(|_| {
                                         SubscriptionError::StripeError(
                                             "Invalid checkout session id".into(),
@@ -1569,7 +1568,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                                     })?;
                                 let session = CheckoutSession::retrieve(
                                     &stripe_client,
-                                    &session_id_parsed,
+                                    &session_id,
                                     &["line_items"],
                                 )
                                 .await
@@ -2335,8 +2334,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
         metadata.insert("credits".to_string(), credits.to_string());
         params.metadata = Some(metadata);
 
-        // Enable invoice creation for one-time payments (required for invoices/receipts).
-        // When enabled, Stripe creates an invoice after payment; listen to invoice.paid.
+        // Enable invoice creation for one-time payments (invoices/receipts).
         let mut invoice_metadata: Metadata = HashMap::new();
         invoice_metadata.insert("user_id".to_string(), user_id.to_string());
         invoice_metadata.insert("credits".to_string(), credits.to_string());
