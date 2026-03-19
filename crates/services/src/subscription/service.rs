@@ -2254,6 +2254,18 @@ impl SubscriptionService for SubscriptionServiceImpl {
         Ok(())
     }
 
+    async fn admin_list_subscriptions(
+        &self,
+        user_id: Option<UserId>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<(Vec<Subscription>, i64), SubscriptionError> {
+        self.subscription_repo
+            .list_subscriptions(user_id, limit, offset)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))
+    }
+
     async fn create_credit_purchase_checkout(
         &self,
         user_id: UserId,

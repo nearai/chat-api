@@ -32,7 +32,7 @@ use urlencoding::encode;
 use uuid::Uuid;
 
 /// Pagination query parameters
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams, utoipa::ToSchema)]
 pub struct PaginationQuery {
     /// Maximum number of items to return (default: 20, max: LIMIT_MAX)
     #[serde(default = "default_limit")]
@@ -71,6 +71,21 @@ fn default_limit() -> i64 {
 
 fn default_offset() -> i64 {
     0
+}
+
+/// Query parameters for admin list subscriptions
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct AdminListSubscriptionsQuery {
+    #[serde(flatten)]
+    pub pagination: PaginationQuery,
+    /// Optional user_id filter
+    pub user_id: Option<UserId>,
+}
+
+impl AdminListSubscriptionsQuery {
+    pub fn validate(&self) -> Result<(), ApiError> {
+        self.pagination.validate()
+    }
 }
 
 /// Query parameters for admin list users (with filter and sort)
@@ -788,6 +803,50 @@ pub async fn admin_cancel_user_subscriptions(
         "success": true,
         "message": "All subscriptions cancelled"
     })))
+}
+
+/// List subscriptions (admin)
+///
+/// Returns paginated raw rows from `subscriptions`. Requires admin authentication.
+#[utoipa::path(
+    get,
+    path = "/v1/admin/subscriptions",
+    tag = "Admin",
+    params(AdminListSubscriptionsQuery),
+    responses(
+        (status = 200, description = "Subscriptions retrieved", body = PaginatedResponse<services::subscription::ports::Subscription>),
+        (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(("session_token" = []))
+)]
+pub async fn admin_list_subscriptions(
+    State(app_state): State<AppState>,
+    Query(params): Query<AdminListSubscriptionsQuery>,
+) -> Result<Json<PaginatedResponse<services::subscription::ports::Subscription>>, ApiError> {
+    params.validate()?;
+
+    let (items, total) = app_state
+        .subscription_service
+        .admin_list_subscriptions(
+            params.user_id,
+            params.pagination.limit,
+            params.pagination.offset,
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to list subscriptions: {}", e);
+            ApiError::internal_server_error("Failed to list subscriptions")
+        })?;
+
+    Ok(Json(PaginatedResponse {
+        items,
+        limit: params.pagination.limit,
+        offset: params.pagination.offset,
+        total,
+    }))
 }
 
 /// Get top active users
@@ -2605,6 +2664,7 @@ pub fn create_admin_router() -> Router<AppState> {
             "/users/{user_id}/subscription",
             post(admin_set_user_subscription).delete(admin_cancel_user_subscriptions),
         )
+        .route("/subscriptions", get(admin_list_subscriptions))
         .route("/models", get(list_models).patch(batch_upsert_models))
         .route("/models/{model_id}", delete(delete_model))
         .route("/vpc/revoke", post(revoke_vpc_credentials))

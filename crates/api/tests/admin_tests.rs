@@ -1,6 +1,9 @@
 mod common;
 
-use common::{create_test_server, create_test_server_and_db, mock_login};
+use common::{
+    cleanup_user_subscriptions, create_test_server, create_test_server_and_db,
+    insert_test_subscription, mock_login,
+};
 use serde_json::json;
 use services::user::ports::UserRepository;
 use uuid::Uuid;
@@ -82,6 +85,88 @@ async fn test_admin_users_list_pagination() {
     assert_eq!(offset, 0);
     assert!(users.len() <= 2, "Should return at most 2 users");
     assert!(total >= 4, "Should have at least 4 users total");
+}
+
+#[tokio::test]
+async fn test_admin_list_subscriptions_requires_admin() {
+    let server = create_test_server().await;
+
+    let non_admin_email = "test_subs_user@no-admin.org";
+    let non_admin_token = mock_login(&server, non_admin_email).await;
+
+    let response = server
+        .get("/v1/admin/subscriptions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {non_admin_token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        403,
+        "Non-admin should receive 403 when listing subscriptions"
+    );
+}
+
+#[tokio::test]
+async fn test_admin_list_subscriptions_with_user_filter() {
+    let (server, db) = create_test_server_and_db(common::TestServerConfig::default()).await;
+
+    let target_user_email = "admin_subs_target@example.com";
+    let other_user_email = "admin_subs_other@example.com";
+    let _target_token = mock_login(&server, target_user_email).await;
+    let _other_token = mock_login(&server, other_user_email).await;
+
+    cleanup_user_subscriptions(&db, target_user_email).await;
+    cleanup_user_subscriptions(&db, other_user_email).await;
+    insert_test_subscription(&server, &db, target_user_email, false).await;
+    insert_test_subscription(&server, &db, other_user_email, false).await;
+
+    let target_user = db
+        .user_repository()
+        .get_user_by_email(target_user_email)
+        .await
+        .expect("get user by email")
+        .expect("target user should exist");
+
+    let admin_token = mock_login(&server, "subs_admin@admin.org").await;
+
+    let response = server
+        .get(&format!(
+            "/v1/admin/subscriptions?limit=10&offset=0&user_id={}",
+            target_user.id
+        ))
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 200);
+    let body: serde_json::Value = response.json();
+    let target_user_id = target_user.id.to_string();
+
+    let total = body
+        .get("total")
+        .and_then(|v| v.as_i64())
+        .expect("total should be i64");
+    let items = body
+        .get("items")
+        .and_then(|v| v.as_array())
+        .expect("items should be array");
+
+    assert_eq!(total, 1, "Filtered result should only include target user");
+    assert_eq!(items.len(), 1, "Should return exactly one subscription row");
+    assert_eq!(
+        items[0].get("user_id").and_then(|v| v.as_str()),
+        Some(target_user_id.as_str()),
+        "Returned subscription should belong to target user"
+    );
+    assert!(
+        items[0].get("customer_id").is_some(),
+        "Raw subscription payload should include customer_id"
+    );
 }
 
 #[tokio::test]
