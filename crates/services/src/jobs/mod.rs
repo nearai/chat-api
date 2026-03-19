@@ -78,6 +78,10 @@ pub struct CleanupCanceledInstancesTaskPayload {
     pub dry_run: bool,
 }
 
+pub const CLEANUP_CANCELED_INSTANCES_DAILY_TASK_ID: &str = "cleanup.canceled-instances.daily";
+pub const CLEANUP_CANCELED_INSTANCES_DAILY_CRON_UTC: &str = "cron(0 0 * * ? *)";
+pub const CLEANUP_CANCELED_INSTANCES_DEFAULT_GRACE_DAYS: i64 = 15;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "task_type", content = "payload", rename_all = "snake_case")]
 pub enum TaskPayload {
@@ -109,6 +113,17 @@ impl ScheduledTaskRequest {
             payload: self.payload.clone(),
         }
     }
+}
+
+pub fn daily_cleanup_canceled_instances_request() -> anyhow::Result<ScheduledTaskRequest> {
+    Ok(ScheduledTaskRequest {
+        task_id: TaskId::new(CLEANUP_CANCELED_INSTANCES_DAILY_TASK_ID.to_string())?,
+        schedule: ScheduleSpec::Cron(CLEANUP_CANCELED_INSTANCES_DAILY_CRON_UTC.to_string()),
+        payload: TaskPayload::CleanupCanceledInstances(CleanupCanceledInstancesTaskPayload {
+            grace_days: CLEANUP_CANCELED_INSTANCES_DEFAULT_GRACE_DAYS,
+            dry_run: false,
+        }),
+    })
 }
 
 #[async_trait]
@@ -175,7 +190,9 @@ mod tests {
         assert!(ScheduleSpec::Cron("cron(0 8 * * ? *)".to_string())
             .validate()
             .is_ok());
-        assert!(ScheduleSpec::Cron("0 8 * * *".to_string()).validate().is_err());
+        assert!(ScheduleSpec::Cron("0 8 * * *".to_string())
+            .validate()
+            .is_err());
         assert!(ScheduleSpec::Cron("cron()".to_string()).validate().is_err());
     }
 
@@ -204,6 +221,29 @@ mod tests {
         match msg.payload {
             TaskPayload::Noop(payload) => assert_eq!(payload.note.as_deref(), Some("hello")),
             TaskPayload::CleanupCanceledInstances(_) => panic!("unexpected payload variant"),
+        }
+    }
+
+    #[test]
+    fn test_daily_cleanup_request_shape() {
+        let req = daily_cleanup_canceled_instances_request().unwrap();
+        assert_eq!(
+            req.task_id.as_str(),
+            CLEANUP_CANCELED_INSTANCES_DAILY_TASK_ID
+        );
+        assert_eq!(
+            req.schedule,
+            ScheduleSpec::Cron(CLEANUP_CANCELED_INSTANCES_DAILY_CRON_UTC.to_string())
+        );
+        match req.payload {
+            TaskPayload::CleanupCanceledInstances(payload) => {
+                assert_eq!(
+                    payload.grace_days,
+                    CLEANUP_CANCELED_INSTANCES_DEFAULT_GRACE_DAYS
+                );
+                assert!(!payload.dry_run);
+            }
+            TaskPayload::Noop(_) => panic!("unexpected payload variant"),
         }
     }
 
