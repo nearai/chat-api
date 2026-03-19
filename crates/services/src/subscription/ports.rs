@@ -191,7 +191,7 @@ impl fmt::Display for SubscriptionError {
             Self::CreditLimitExceeded { used, limit } => {
                 write!(
                     f,
-                    "Credit limit exceeded: used {} of {} credits in plan",
+                    "Credit limit exceeded: used {} of {} plan credits",
                     used, limit
                 )
             }
