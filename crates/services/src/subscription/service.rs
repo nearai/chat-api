@@ -17,9 +17,10 @@ use std::sync::Arc;
 use std::time::Instant;
 use stripe::{
     BillingPortalSession, CheckoutSession, CheckoutSessionMode, Client, CreateBillingPortalSession,
-    CreateCheckoutSession, CreateCheckoutSessionLineItems, CreateCheckoutSessionSubscriptionData,
-    Customer, CustomerId, RequestStrategy, Subscription as StripeSubscription,
-    UpdateSubscriptionItems, Webhook, WebhookError,
+    CreateCheckoutSession, CreateCheckoutSessionInvoiceCreation,
+    CreateCheckoutSessionInvoiceCreationInvoiceData, CreateCheckoutSessionLineItems,
+    CreateCheckoutSessionSubscriptionData, Customer, CustomerId, Metadata, RequestStrategy,
+    Subscription as StripeSubscription, UpdateSubscriptionItems, Webhook, WebhookError,
 };
 use tokio::sync::RwLock;
 
@@ -1606,10 +1607,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
                                                 break;
                                             }
                                             let qty = item.quantity.unwrap_or(0);
-                                            let qty_i64 = qty.min(i64::MAX as u64) as i64;
-                                            credits_count = credits_count.saturating_add(qty_i64);
+                                            credits_count = credits_count
+                                                .saturating_add(qty.min(i64::MAX as u64) as i64);
                                         }
-
                                         if bad_price {
                                             None
                                         } else if credits_count <= 0 {
@@ -1644,10 +1644,11 @@ impl SubscriptionService for SubscriptionServiceImpl {
                                                         )
                                                     })?;
                                                 tracing::info!(
-                                                    "Credits added for user_id={}, amount_nano_usd={}, credits_count={}",
+                                                    "Credits added for user_id={}, amount_nano_usd={}, credits_count={}, session_id={}",
                                                     user_id,
                                                     amount_nano_usd,
-                                                    credits_count
+                                                    credits_count,
+                                                    sid
                                                 );
                                                 Some(user_id)
                                             } else {
@@ -1688,7 +1689,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                         );
                         None
                     }
-                } // close payment_status == "paid" else block
+                }
             } else {
                 None
             }
@@ -2335,10 +2336,19 @@ impl SubscriptionService for SubscriptionServiceImpl {
             quantity: Some(credits),
             ..Default::default()
         }]);
-        let mut metadata = HashMap::new();
+        let mut metadata: Metadata = HashMap::new();
         metadata.insert("user_id".to_string(), user_id.to_string());
         metadata.insert("credits".to_string(), credits.to_string());
-        params.metadata = Some(metadata);
+
+        // Enable invoice creation for one-time payments (invoices/receipts).
+        params.metadata = Some(metadata.clone());
+        params.invoice_creation = Some(CreateCheckoutSessionInvoiceCreation {
+            enabled: true,
+            invoice_data: Some(CreateCheckoutSessionInvoiceCreationInvoiceData {
+                metadata: Some(metadata),
+                ..Default::default()
+            }),
+        });
 
         let session = CheckoutSession::create(&client, params)
             .await
