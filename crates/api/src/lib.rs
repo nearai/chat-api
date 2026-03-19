@@ -9,6 +9,7 @@ pub mod openapi;
 pub mod routes;
 pub mod state;
 pub mod static_files;
+pub mod tasks;
 pub mod usage_parsing;
 pub mod validation;
 pub mod web_search_pricing;
