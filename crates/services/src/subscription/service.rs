@@ -2336,19 +2336,16 @@ impl SubscriptionService for SubscriptionServiceImpl {
             quantity: Some(credits),
             ..Default::default()
         }]);
-        let mut metadata = HashMap::new();
+        let mut metadata: Metadata = HashMap::new();
         metadata.insert("user_id".to_string(), user_id.to_string());
         metadata.insert("credits".to_string(), credits.to_string());
-        params.metadata = Some(metadata);
 
         // Enable invoice creation for one-time payments (invoices/receipts).
-        let mut invoice_metadata: Metadata = HashMap::new();
-        invoice_metadata.insert("user_id".to_string(), user_id.to_string());
-        invoice_metadata.insert("credits".to_string(), credits.to_string());
+        params.metadata = Some(metadata.clone());
         params.invoice_creation = Some(CreateCheckoutSessionInvoiceCreation {
             enabled: true,
             invoice_data: Some(CreateCheckoutSessionInvoiceCreationInvoiceData {
-                metadata: Some(invoice_metadata),
+                metadata: Some(metadata),
                 ..Default::default()
             }),
         });
