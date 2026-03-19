@@ -1500,6 +1500,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
         }
 
         // For checkout.session.completed with mode=payment: process credit purchase.
+        // Credits are determined from Stripe line items (quantity) and validated against configured price id.
         let credit_purchase_user_id = if event_type == "checkout.session.completed" {
             let obj = payload_json
                 .get("data")
@@ -1542,6 +1543,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                                     None
                                 }
                             };
+
                             let credit_price_id = self
                                 .system_configs_service
                                 .get_configs()
@@ -1551,6 +1553,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                                 .and_then(|c| {
                                     c.providers.get("stripe").and_then(|p| p.price_id.clone())
                                 });
+
                             if credit_price_id.is_none() {
                                 tracing::warn!(
                                     "Credit purchase event received but credits not configured"
@@ -1566,6 +1569,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                                             "Invalid checkout session id".into(),
                                         )
                                     })?;
+
                                 let session = CheckoutSession::retrieve(
                                     &stripe_client,
                                     &session_id,
@@ -1573,6 +1577,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                                 )
                                 .await
                                 .map_err(|e| SubscriptionError::StripeError(e.to_string()))?;
+
                                 if let Some(line_items) = session.line_items {
                                     if line_items.has_more {
                                         tracing::warn!(
