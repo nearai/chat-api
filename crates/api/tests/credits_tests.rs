@@ -73,8 +73,8 @@ async fn test_get_credits_returns_summary() {
         "Should have period_spent_credits"
     );
     assert!(
-        body.get("effective_max_credits").is_some(),
-        "Should have effective_max_credits"
+        body.get("plan_credits").is_some(),
+        "Should have plan_credits"
     );
     assert!(
         body.get("total_purchased_nano_usd").is_some(),

@@ -27,9 +27,8 @@ struct SubscriptionErrorResponse {
 const SUBSCRIPTION_REQUIRED_ERROR_MESSAGE: &str =
     "Active subscription required. Please subscribe to continue.";
 
-/// Error message when monthly credit limit is exceeded
-const MONTHLY_CREDIT_LIMIT_EXCEEDED_MESSAGE: &str =
-    "Monthly credit limit exceeded. Upgrade your plan or purchase more credits.";
+/// Error message when credit limit is exceeded
+const CREDIT_LIMIT_EXCEEDED_MESSAGE: &str = "Credit limit exceeded.";
 
 /// State for subscription validation middleware
 #[derive(Clone)]
@@ -82,9 +81,9 @@ pub async fn subscription_middleware(
             )
                 .into_response())
         }
-        Err(SubscriptionError::MonthlyCreditLimitExceeded { used, limit }) => {
+        Err(SubscriptionError::CreditLimitExceeded { used, limit }) => {
             tracing::info!(
-                "Blocked proxy access for user_id={}: monthly credit limit exceeded (used {} of {})",
+                "Blocked proxy access for user_id={}: credit limit exceeded (used {} of {})",
                 user.user_id,
                 used,
                 limit
@@ -93,11 +92,10 @@ pub async fn subscription_middleware(
                 StatusCode::PAYMENT_REQUIRED,
                 Json(SubscriptionErrorResponse {
                     error: format!(
-                        "{} You have used ${:.2} of a ${:.2} monthly credit budget this period (raw limit = {}).",
-                        MONTHLY_CREDIT_LIMIT_EXCEEDED_MESSAGE,
+                        "{} You have used ${:.2} of ${:.2} this period. No credits balance available.",
+                        CREDIT_LIMIT_EXCEEDED_MESSAGE,
                         used as f64 / 1_000_000_000_f64,
-                        limit as f64 / 1_000_000_000_f64,
-                        limit
+                        limit as f64 / 1_000_000_000_f64
                     ),
                 }),
             )
