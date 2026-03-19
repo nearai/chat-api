@@ -4,8 +4,8 @@ use aws_sdk_scheduler::types::{
     ActionAfterCompletion, FlexibleTimeWindow, FlexibleTimeWindowMode, Target,
 };
 use services::jobs::{
-    dispatch_task, ScheduledTaskRequest, ScheduleSpec, TaskExecutor, TaskId, TaskScheduler,
-    TaskMessage,
+    daily_cleanup_canceled_instances_request, dispatch_task, ScheduleSpec, ScheduledTaskRequest,
+    TaskExecutor, TaskId, TaskMessage, TaskScheduler,
 };
 use std::sync::Arc;
 use tokio::sync::Semaphore;
@@ -43,6 +43,58 @@ impl AwsTaskScheduler {
             .input(input)
             .build()
             .map_err(|e| anyhow!("failed to build scheduler target: {}", e))
+    }
+
+    pub async fn create_task_if_absent(&self, request: ScheduledTaskRequest) -> anyhow::Result<()> {
+        request.validate()?;
+
+        let target = self.build_target(&request)?;
+        let expression = request.schedule.to_aws_expression();
+        let flex_window = FlexibleTimeWindow::builder()
+            .mode(FlexibleTimeWindowMode::Off)
+            .build()
+            .map_err(|e| anyhow!("failed to build flexible time window: {}", e))?;
+
+        let mut create = self
+            .client
+            .create_schedule()
+            .name(request.task_id.as_str())
+            .group_name(&self.scheduler_group)
+            .schedule_expression(&expression)
+            .flexible_time_window(flex_window)
+            .target(target);
+
+        if matches!(request.schedule, ScheduleSpec::At(_)) {
+            create = create.action_after_completion(ActionAfterCompletion::Delete);
+        }
+
+        match create.send().await {
+            Ok(_) => {
+                tracing::info!(
+                    "created schedule task_id={} group={}",
+                    request.task_id,
+                    self.scheduler_group
+                );
+                Ok(())
+            }
+            Err(err) => {
+                let err_text = err.to_string();
+                if err_text.contains("ConflictException") || err_text.contains("already exists") {
+                    tracing::info!(
+                        "schedule already exists, skipping create task_id={} group={}",
+                        request.task_id,
+                        self.scheduler_group
+                    );
+                    Ok(())
+                } else {
+                    Err(anyhow!(
+                        "failed to create schedule for task_id={}: {}",
+                        request.task_id,
+                        err
+                    ))
+                }
+            }
+        }
     }
 }
 
@@ -217,6 +269,47 @@ fn parse_task_message(body: &str) -> anyhow::Result<TaskMessage> {
     serde_json::from_str(body).context("failed to parse task message")
 }
 
+pub async fn ensure_daily_cleanup_task(task_config: &config::TaskConfig) -> anyhow::Result<()> {
+    if !task_config.enabled {
+        return Ok(());
+    }
+
+    if !task_config.is_scheduler_configured() {
+        return Err(anyhow!(
+            "tasks scheduler is not configured: TASKS_SQS_QUEUE_ARN and TASKS_SCHEDULER_ROLE_ARN are required"
+        ));
+    }
+
+    let region = task_config
+        .aws_region
+        .clone()
+        .ok_or_else(|| anyhow!("TASKS_AWS_REGION or AWS_REGION is required for scheduler"))?;
+    let queue_arn = task_config
+        .sqs_queue_arn
+        .clone()
+        .ok_or_else(|| anyhow!("TASKS_SQS_QUEUE_ARN is required"))?;
+    let scheduler_role_arn = task_config
+        .scheduler_role_arn
+        .clone()
+        .ok_or_else(|| anyhow!("TASKS_SCHEDULER_ROLE_ARN is required"))?;
+
+    let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .region(aws_sdk_scheduler::config::Region::new(region))
+        .load()
+        .await;
+
+    let scheduler = AwsTaskScheduler::new(
+        aws_sdk_scheduler::Client::new(&aws_config),
+        task_config.scheduler_group.clone(),
+        queue_arn,
+        scheduler_role_arn,
+    );
+
+    scheduler
+        .create_task_if_absent(daily_cleanup_canceled_instances_request()?)
+        .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,5 +404,27 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: TaskMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.task_id.as_str(), "roundtrip_1");
+    }
+
+    #[tokio::test]
+    async fn test_ensure_daily_cleanup_task_noop_when_disabled() {
+        let cfg = config::TaskConfig {
+            enabled: false,
+            ..Default::default()
+        };
+        assert!(ensure_daily_cleanup_task(&cfg).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_ensure_daily_cleanup_task_requires_scheduler_config() {
+        let cfg = config::TaskConfig {
+            enabled: true,
+            aws_region: Some("us-east-1".to_string()),
+            ..Default::default()
+        };
+        let err = ensure_daily_cleanup_task(&cfg).await.unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("TASKS_SQS_QUEUE_ARN and TASKS_SCHEDULER_ROLE_ARN are required"));
     }
 }

@@ -1,3 +1,4 @@
+use anyhow::Context;
 use api::middleware::RateLimitState;
 use api::{create_router_with_cors, ApiDoc, AppState};
 use config::LoggingConfig;
@@ -40,6 +41,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize tracing based on configuration
     init_tracing(&config.logging);
+
+    api::tasks::ensure_daily_cleanup_task(&config.tasks)
+        .await
+        .context("failed to ensure daily cleanup schedule")?;
 
     tracing::info!("Starting API server...");
 
