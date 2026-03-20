@@ -211,7 +211,10 @@ async fn test_admin_list_subscriptions_with_offset_preserves_total() {
         .and_then(|v| v.as_array())
         .expect("items should be array");
 
-    assert_eq!(total, 1, "Total should reflect matching rows even if page is empty");
+    assert_eq!(
+        total, 1,
+        "Total should reflect matching rows even if page is empty"
+    );
     assert!(
         items.is_empty(),
         "Items should be empty when offset is beyond available rows"
