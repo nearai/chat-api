@@ -224,6 +224,17 @@ pub async fn create_subscription(
                 tracing::error!("Unexpected NoPendingDowngrade in create");
                 ApiError::internal_server_error("Failed to create subscription")
             }
+            SubscriptionError::SubscriptionNotFound => {
+                tracing::error!("Unexpected SubscriptionNotFound in create");
+                ApiError::internal_server_error("Failed to create subscription")
+            }
+            SubscriptionError::SubscriptionDeletionNotAllowed(msg) => {
+                tracing::error!(
+                    "Unexpected SubscriptionDeletionNotAllowed in create: {}",
+                    msg
+                );
+                ApiError::internal_server_error("Failed to create subscription")
+            }
         })?;
 
     Ok(Json(CreateSubscriptionResponse { checkout_url }))

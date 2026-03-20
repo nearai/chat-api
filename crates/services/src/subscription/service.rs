@@ -2,7 +2,7 @@ use super::ports::{
     BillingPeriod, ChangePlanOutcome, CreditsRepository, CreditsSummary, DowngradeIntentStatus,
     PaymentWebhookRepository, StripeCustomerRepository, Subscription, SubscriptionError,
     SubscriptionPlan, SubscriptionRepository, SubscriptionService, SubscriptionWithPlan,
-    DEFAULT_MONTHLY_TOKEN_LIMIT,
+    CANCELED_SUBSCRIPTION_DELETE_AFTER_PERIOD_END_DAYS, DEFAULT_MONTHLY_TOKEN_LIMIT,
 };
 use crate::agent::ports::AgentRepository;
 use crate::agent::ports::AgentService;
@@ -2251,6 +2251,76 @@ impl SubscriptionService for SubscriptionServiceImpl {
         }
 
         self.invalidate_credit_limit_cache(user_id).await;
+
+        Ok(())
+    }
+
+    async fn admin_delete_subscription(
+        &self,
+        subscription_id: String,
+    ) -> Result<(), SubscriptionError> {
+        tracing::info!(
+            "Admin: Deleting subscription - subscription_id={}",
+            subscription_id
+        );
+
+        // Get subscription by ID
+        let subscription = self
+            .subscription_repo
+            .get_subscription(&subscription_id)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
+            .ok_or(SubscriptionError::SubscriptionNotFound)?;
+
+        // Check if it's an admin-created subscription (always allowed to delete)
+        if subscription.subscription_id.starts_with("admin_sub_") {
+            self.subscription_repo
+                .delete_subscription(&subscription_id)
+                .await
+                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+            tracing::info!(
+                "Admin: Deleted admin-created subscription - subscription_id={}",
+                subscription_id
+            );
+            return Ok(());
+        }
+
+        // For Stripe subscriptions, only 'canceled' status is allowed for deletion
+        if subscription.status != "canceled" {
+            return Err(SubscriptionError::SubscriptionDeletionNotAllowed(format!(
+                "Subscription status is '{}'. Only 'canceled' subscriptions can be deleted.",
+                subscription.status
+            )));
+        }
+
+        // Check if enough time has passed since period end
+        let now = Utc::now();
+        let earliest_deletion_time = subscription.current_period_end
+            + Duration::days(CANCELED_SUBSCRIPTION_DELETE_AFTER_PERIOD_END_DAYS);
+
+        if now < earliest_deletion_time {
+            let days_remaining = (earliest_deletion_time - now).num_days();
+            return Err(SubscriptionError::SubscriptionDeletionNotAllowed(
+                format!(
+                    "Subscription period ended at {}. Must wait {} more days before deletion (retention + grace period).",
+                    subscription.current_period_end.format("%Y-%m-%d"),
+                    days_remaining
+                )
+            ));
+        }
+
+        // Delete the subscription
+        self.subscription_repo
+            .delete_subscription(&subscription_id)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        tracing::info!(
+            "Admin: Deleted Stripe subscription - subscription_id={}, status={}, period_end={}",
+            subscription_id,
+            subscription.status,
+            subscription.current_period_end
+        );
 
         Ok(())
     }

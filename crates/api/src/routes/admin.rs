@@ -867,6 +867,58 @@ pub async fn admin_list_subscriptions(
     }))
 }
 
+/// Admin endpoint: Delete a subscription by ID
+///
+/// Allows admin to delete a subscription record.
+/// - For Stripe subscriptions: only allowed if status is 'canceled' (or equivalent inactive)
+///   and current_period_end has passed by 18 days (15 days retention + 3 days grace period).
+/// - For admin-created subscriptions (subscription_id starts with 'admin_sub_'): always allowed.
+#[utoipa::path(
+    delete,
+    path = "/v1/admin/subscriptions/{subscription_id}",
+    tag = "Admin",
+    params(
+        ("subscription_id" = String, Path, description = "Subscription ID to delete")
+    ),
+    responses(
+        (status = 204, description = "Subscription deleted successfully"),
+        (status = 400, description = "Bad request - deletion not allowed", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "Subscription not found", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(("session_token" = []))
+)]
+pub async fn admin_delete_subscription(
+    State(app_state): State<AppState>,
+    Path(subscription_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    tracing::info!(
+        "Admin: Deleting subscription - subscription_id={}",
+        subscription_id
+    );
+
+    app_state
+        .subscription_service
+        .admin_delete_subscription(subscription_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to delete subscription: {}", e);
+            match e {
+                services::subscription::ports::SubscriptionError::SubscriptionNotFound => {
+                    ApiError::not_found("Subscription not found")
+                }
+                services::subscription::ports::SubscriptionError::SubscriptionDeletionNotAllowed(msg) => {
+                    ApiError::bad_request(&msg)
+                }
+                _ => ApiError::internal_server_error("Failed to delete subscription"),
+            }
+        })?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Get top active users
 ///
 /// Returns the most active users in a time period. Requires admin authentication.
@@ -2683,6 +2735,10 @@ pub fn create_admin_router() -> Router<AppState> {
             post(admin_set_user_subscription).delete(admin_cancel_user_subscriptions),
         )
         .route("/subscriptions", get(admin_list_subscriptions))
+        .route(
+            "/subscriptions/{subscription_id}",
+            delete(admin_delete_subscription),
+        )
         .route("/models", get(list_models).patch(batch_upsert_models))
         .route("/models/{model_id}", delete(delete_model))
         .route("/vpc/revoke", post(revoke_vpc_credentials))

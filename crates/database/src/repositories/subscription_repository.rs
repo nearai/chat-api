@@ -270,6 +270,32 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
         Ok(())
     }
 
+    async fn get_subscription(
+        &self,
+        subscription_id: &str,
+    ) -> anyhow::Result<Option<Subscription>> {
+        tracing::debug!(
+            "Repository: Fetching subscription by id - subscription_id={}",
+            subscription_id
+        );
+
+        let client = self.pool.get().await?;
+
+        let row = client
+            .query_opt(
+                "SELECT subscription_id, user_id, provider, customer_id, price_id, status,
+                        current_period_end, cancel_at_period_end, created_at, updated_at,
+                        pending_downgrade_target_price_id, pending_downgrade_from_price_id,
+                        pending_downgrade_expected_period_end, pending_downgrade_status
+                 FROM subscriptions
+                 WHERE subscription_id = $1",
+                &[&subscription_id],
+            )
+            .await?;
+
+        Ok(row.as_ref().map(row_to_subscription))
+    }
+
     async fn deactivate_user_subscriptions(
         &self,
         txn: &tokio_postgres::Transaction<'_>,

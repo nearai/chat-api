@@ -2475,3 +2475,291 @@ async fn test_list_subscriptions_includes_pending_downgrade_info() {
         "Should include pending_downgrade_period_end"
     );
 }
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_admin_delete_subscription_not_found() {
+    ensure_stripe_env_for_gating();
+
+    let (server, _db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    // Setup subscription plans
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": { "stripe": { "price_id": "price_test_basic" } },
+                "agent_instances": { "max": 1 },
+                "monthly_credits": { "max": 1000000 }
+            }
+        }),
+    )
+    .await;
+
+    let admin_email = "test_admin_delete_not_found@admin.org";
+    let admin_token = mock_login(&server, admin_email).await;
+
+    // Try to delete non-existent subscription
+    let response = server
+        .delete("/v1/admin/subscriptions/non_existent_sub_123")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        404,
+        "Deleting non-existent subscription should return 404"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_admin_delete_admin_subscription_allowed() {
+    ensure_stripe_env_for_gating();
+
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    // Setup subscription plans
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": { "stripe": { "price_id": "price_test_basic" } },
+                "agent_instances": { "max": 1 },
+                "monthly_credits": { "max": 1000000 }
+            }
+        }),
+    )
+    .await;
+
+    let admin_email = "test_admin_delete_admin_sub@admin.org";
+    let user_email = "test_admin_delete_admin_sub_user@example.com";
+
+    // Create admin user and get token
+    let admin_token = mock_login(&server, admin_email).await;
+
+    // Create a regular user
+    let _user_token = mock_login(&server, user_email).await;
+
+    // Get user ID
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .expect("get user")
+        .expect("user exists");
+
+    // Insert admin-created subscription (subscription_id starts with "admin_sub_")
+    let admin_sub_id = format!("admin_sub_{}", uuid::Uuid::new_v4());
+    let period_end = chrono::Utc::now() + chrono::Duration::days(30);
+
+    let client = db.pool().get().await.expect("get pool client");
+    client
+        .execute(
+            "INSERT INTO subscriptions (
+                subscription_id, user_id, provider, customer_id, price_id, status,
+                current_period_end, cancel_at_period_end
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            &[
+                &admin_sub_id,
+                &user.id,
+                &"stripe",
+                &format!("admin_{}", user.id),
+                &"price_test_basic",
+                &"active",
+                &period_end,
+                &false,
+            ],
+        )
+        .await
+        .expect("insert admin subscription");
+
+    // Delete admin subscription - should succeed
+    let response = server
+        .delete(&format!("/v1/admin/subscriptions/{}", admin_sub_id))
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        204,
+        "Deleting admin-created subscription should return 204"
+    );
+
+    // Verify it's deleted
+    let client = db.pool().get().await.expect("get pool client");
+    let row = client
+        .query_opt(
+            "SELECT subscription_id FROM subscriptions WHERE subscription_id = $1",
+            &[&admin_sub_id],
+        )
+        .await
+        .expect("query");
+    assert!(row.is_none(), "Admin subscription should be deleted");
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_admin_delete_stripe_canceled_too_recent_not_allowed() {
+    ensure_stripe_env_for_gating();
+
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    // Setup subscription plans
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": { "stripe": { "price_id": "price_test_basic" } },
+                "agent_instances": { "max": 1 },
+                "monthly_credits": { "max": 1000000 }
+            }
+        }),
+    )
+    .await;
+
+    let admin_email = "test_admin_delete_canceled_recent@admin.org";
+    let user_email = "test_admin_delete_canceled_recent_user@example.com";
+
+    let admin_token = mock_login(&server, admin_email).await;
+    let _user_token = mock_login(&server, user_email).await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .expect("get user")
+        .expect("user exists");
+
+    // Insert Stripe subscription with 'canceled' status but period_end is recent (within 18 days)
+    let stripe_sub_id = format!("sub_test_{}", uuid::Uuid::new_v4());
+    let period_end = chrono::Utc::now() + chrono::Duration::days(5); // Only 5 days from now
+
+    let client = db.pool().get().await.expect("get pool client");
+    client
+        .execute(
+            "INSERT INTO subscriptions (
+                subscription_id, user_id, provider, customer_id, price_id, status,
+                current_period_end, cancel_at_period_end
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            &[
+                &stripe_sub_id,
+                &user.id,
+                &"stripe",
+                &"cus_test",
+                &"price_test_basic",
+                &"canceled",
+                &period_end,
+                &true,
+            ],
+        )
+        .await
+        .expect("insert canceled subscription");
+
+    // Try to delete - should fail because period hasn't ended long enough
+    let response = server
+        .delete(&format!("/v1/admin/subscriptions/{}", stripe_sub_id))
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        400,
+        "Deleting canceled subscription too soon should return 400"
+    );
+
+    let body: serde_json::Value = response.json();
+    assert!(
+        body["message"].as_str().unwrap_or("").contains("Must wait"),
+        "Error message should mention waiting period"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_admin_delete_stripe_active_not_allowed() {
+    ensure_stripe_env_for_gating();
+
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    // Setup subscription plans
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": { "stripe": { "price_id": "price_test_basic" } },
+                "agent_instances": { "max": 1 },
+                "monthly_credits": { "max": 1000000 }
+            }
+        }),
+    )
+    .await;
+
+    let admin_email = "test_admin_delete_active@admin.org";
+    let user_email = "test_admin_delete_active_user@example.com";
+
+    let admin_token = mock_login(&server, admin_email).await;
+    let _user_token = mock_login(&server, user_email).await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .expect("get user")
+        .expect("user exists");
+
+    // Insert Stripe subscription with 'active' status
+    let stripe_sub_id = format!("sub_test_{}", uuid::Uuid::new_v4());
+    let period_end = chrono::Utc::now() + chrono::Duration::days(30);
+
+    let client = db.pool().get().await.expect("get pool client");
+    client
+        .execute(
+            "INSERT INTO subscriptions (
+                subscription_id, user_id, provider, customer_id, price_id, status,
+                current_period_end, cancel_at_period_end
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            &[
+                &stripe_sub_id,
+                &user.id,
+                &"stripe",
+                &"cus_test",
+                &"price_test_basic",
+                &"active",
+                &period_end,
+                &false,
+            ],
+        )
+        .await
+        .expect("insert active subscription");
+
+    // Try to delete - should fail because status is 'active', not 'canceled'
+    let response = server
+        .delete(&format!("/v1/admin/subscriptions/{}", stripe_sub_id))
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        400,
+        "Deleting active subscription should return 400"
+    );
+
+    let body: serde_json::Value = response.json();
+    assert!(
+        body["message"].as_str().unwrap_or("").contains("canceled"),
+        "Error message should mention only 'canceled' status is allowed"
+    );
+}

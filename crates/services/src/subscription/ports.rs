@@ -8,6 +8,19 @@ use crate::UserId;
 
 pub const DEFAULT_MONTHLY_TOKEN_LIMIT: u64 = 1_000_000;
 
+/// Minimum days to keep a canceled Stripe subscription before allowing deletion.
+/// This allows time for cleanup processes to stop unused resources.
+pub const CANCELED_SUBSCRIPTION_RETENTION_DAYS: i64 = 15;
+
+/// Additional buffer days beyond RETENTION_DAYS for cleanup grace period.
+/// Gives cleanup jobs time to terminate unused instances before the subscription record is removed.
+pub const CANCELED_SUBSCRIPTION_DELETE_GRACE_PERIOD_DAYS: i64 = 3;
+
+/// Total days after period end before a canceled subscription can be deleted.
+/// Equals RETENTION_DAYS + GRACE_PERIOD = 18 days.
+pub const CANCELED_SUBSCRIPTION_DELETE_AFTER_PERIOD_END_DAYS: i64 =
+    CANCELED_SUBSCRIPTION_RETENTION_DAYS + CANCELED_SUBSCRIPTION_DELETE_GRACE_PERIOD_DAYS;
+
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -177,6 +190,10 @@ pub enum SubscriptionError {
     TestClockNotAllowedForExistingCustomer,
     /// No pending downgrade to cancel (same plan requested but no pending downgrade exists)
     NoPendingDowngrade,
+    /// Subscription not found
+    SubscriptionNotFound,
+    /// Subscription deletion not allowed (e.g., Stripe subscription not canceled/expired)
+    SubscriptionDeletionNotAllowed(String),
 }
 
 impl fmt::Display for SubscriptionError {
@@ -223,6 +240,12 @@ impl fmt::Display for SubscriptionError {
             }
             Self::NoPendingDowngrade => {
                 write!(f, "No pending downgrade to cancel")
+            }
+            Self::SubscriptionNotFound => {
+                write!(f, "Subscription not found")
+            }
+            Self::SubscriptionDeletionNotAllowed(msg) => {
+                write!(f, "Subscription deletion not allowed: {}", msg)
             }
         }
     }
@@ -283,6 +306,10 @@ pub trait SubscriptionRepository: Send + Sync {
 
     /// Delete a subscription record
     async fn delete_subscription(&self, subscription_id: &str) -> anyhow::Result<()>;
+
+    /// Get a subscription by its ID
+    async fn get_subscription(&self, subscription_id: &str)
+        -> anyhow::Result<Option<Subscription>>;
 
     /// Deactivate all subscriptions for a user (set status = 'canceled').
     /// Used when admin sets a new subscription to ensure only one active plan.
@@ -506,6 +533,15 @@ pub trait SubscriptionService: Send + Sync {
     async fn admin_cancel_user_subscriptions(
         &self,
         user_id: UserId,
+    ) -> Result<(), SubscriptionError>;
+
+    /// Admin only: Delete a subscription record.
+    /// - For Stripe subscriptions: only allowed if status is 'canceled' (or equivalent inactive)
+    ///   and current_period_end has passed by RETENTION_DAYS + GRACE_PERIOD (18 days).
+    /// - For admin-created subscriptions (subscription_id starts with 'admin_sub_'): always allowed.
+    async fn admin_delete_subscription(
+        &self,
+        subscription_id: String,
     ) -> Result<(), SubscriptionError>;
 
     /// Admin only: List subscriptions with pagination, optionally filtered by user_id.
