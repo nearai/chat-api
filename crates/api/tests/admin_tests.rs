@@ -170,6 +170,55 @@ async fn test_admin_list_subscriptions_with_user_filter() {
 }
 
 #[tokio::test]
+async fn test_admin_list_subscriptions_with_offset_preserves_total() {
+    let (server, db) = create_test_server_and_db(common::TestServerConfig::default()).await;
+
+    let target_user_email = "admin_subs_offset_target@example.com";
+    let _target_token = mock_login(&server, target_user_email).await;
+
+    cleanup_user_subscriptions(&db, target_user_email).await;
+    insert_test_subscription(&server, &db, target_user_email, false).await;
+
+    let target_user = db
+        .user_repository()
+        .get_user_by_email(target_user_email)
+        .await
+        .expect("get user by email")
+        .expect("target user should exist");
+
+    let admin_token = mock_login(&server, "subs_offset_admin@admin.org").await;
+
+    let response = server
+        .get(&format!(
+            "/v1/admin/subscriptions?limit=10&offset=100&user_id={}",
+            target_user.id
+        ))
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 200);
+    let body: serde_json::Value = response.json();
+
+    let total = body
+        .get("total")
+        .and_then(|v| v.as_i64())
+        .expect("total should be i64");
+    let items = body
+        .get("items")
+        .and_then(|v| v.as_array())
+        .expect("items should be array");
+
+    assert_eq!(total, 1, "Total should reflect matching rows even if page is empty");
+    assert!(
+        items.is_empty(),
+        "Items should be empty when offset is beyond available rows"
+    );
+}
+
+#[tokio::test]
 async fn test_revoke_vpc_credentials_with_admin_account() {
     let server = create_test_server().await;
 

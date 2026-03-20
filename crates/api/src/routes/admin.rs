@@ -76,15 +76,29 @@ fn default_offset() -> i64 {
 /// Query parameters for admin list subscriptions
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
 pub struct AdminListSubscriptionsQuery {
-    #[serde(flatten)]
-    pub pagination: PaginationQuery,
+    /// Maximum number of items to return (default: 20, max: LIMIT_MAX)
+    pub limit: Option<i64>,
+    /// Number of items to skip (default: 0)
+    pub offset: Option<i64>,
     /// Optional user_id filter
     pub user_id: Option<Uuid>,
 }
 
 impl AdminListSubscriptionsQuery {
     pub fn validate(&self) -> Result<(), ApiError> {
-        self.pagination.validate()
+        PaginationQuery {
+            limit: self.limit.unwrap_or(default_limit()),
+            offset: self.offset.unwrap_or(default_offset()),
+        }
+        .validate()
+    }
+
+    fn normalized_limit(&self) -> i64 {
+        self.limit.unwrap_or(default_limit())
+    }
+
+    fn normalized_offset(&self) -> i64 {
+        self.offset.unwrap_or(default_offset())
     }
 }
 
@@ -836,8 +850,8 @@ pub async fn admin_list_subscriptions(
         .subscription_service
         .admin_list_subscriptions(
             params.user_id.map(UserId::from),
-            params.pagination.limit,
-            params.pagination.offset,
+            params.normalized_limit(),
+            params.normalized_offset(),
         )
         .await
         .map_err(|e| {
@@ -847,8 +861,8 @@ pub async fn admin_list_subscriptions(
 
     Ok(Json(PaginatedResponse {
         items,
-        limit: params.pagination.limit,
-        offset: params.pagination.offset,
+        limit: params.normalized_limit(),
+        offset: params.normalized_offset(),
         total,
     }))
 }
