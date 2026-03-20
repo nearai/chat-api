@@ -79,7 +79,7 @@ pub struct AdminListSubscriptionsQuery {
     #[serde(flatten)]
     pub pagination: PaginationQuery,
     /// Optional user_id filter
-    pub user_id: Option<UserId>,
+    pub user_id: Option<Uuid>,
 }
 
 impl AdminListSubscriptionsQuery {
@@ -831,7 +831,7 @@ pub async fn admin_list_subscriptions(
     let (items, total) = app_state
         .subscription_service
         .admin_list_subscriptions(
-            params.user_id,
+            params.user_id.map(UserId::from),
             params.pagination.limit,
             params.pagination.offset,
         )
