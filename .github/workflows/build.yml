@@ -91,3 +91,12 @@ jobs:
             echo "- digest: \`${{ env.IMAGE_DIGEST }}\`"
             echo "- sigstore: https://search.sigstore.dev/?hash=${{ env.IMAGE_DIGEST }}"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Trigger deploy chat-api staging
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: peter-evans/repository-dispatch@v4
+        with:
+          token: ${{ secrets.GITHUB_WORKFLOW_DISPATCH_TOKEN }}
+          repository: nearai/cvm-ansible-playbooks
+          event-type: deploy-chat-api-stg
+          client-payload: '{"source":"chat-api","ref":"${{ github.sha }}","image_tag":"latest"}'
