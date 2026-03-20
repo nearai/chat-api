@@ -44,6 +44,7 @@ impl std::str::FromStr for DowngradeIntentStatus {
 }
 
 /// Database model for subscription records (generic, supports multiple providers e.g. Stripe)
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Subscription {
     pub subscription_id: String,
@@ -271,6 +272,15 @@ pub trait SubscriptionRepository: Send + Sync {
         user_id: UserId,
     ) -> anyhow::Result<Option<Subscription>>;
 
+    /// List subscriptions with pagination, optionally filtered by user_id.
+    /// Returns (items, total_count).
+    async fn list_subscriptions(
+        &self,
+        user_id: Option<UserId>,
+        limit: i64,
+        offset: i64,
+    ) -> anyhow::Result<(Vec<Subscription>, i64)>;
+
     /// Delete a subscription record
     async fn delete_subscription(&self, subscription_id: &str) -> anyhow::Result<()>;
 
@@ -497,6 +507,14 @@ pub trait SubscriptionService: Send + Sync {
         &self,
         user_id: UserId,
     ) -> Result<(), SubscriptionError>;
+
+    /// Admin only: List subscriptions with pagination, optionally filtered by user_id.
+    async fn admin_list_subscriptions(
+        &self,
+        user_id: Option<UserId>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<(Vec<Subscription>, i64), SubscriptionError>;
 
     /// Create checkout session for purchasing credits. Returns checkout URL.
     async fn create_credit_purchase_checkout(
