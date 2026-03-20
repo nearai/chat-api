@@ -313,6 +313,18 @@ fn default_agent_domain() -> String {
     std::env::var("AGENT_DOMAIN").unwrap_or_else(|_| "claws.sare.dev".to_string())
 }
 
+fn default_instance_cpus() -> String {
+    std::env::var("INSTANCE_DEFAULT_CPUS").unwrap_or_else(|_| "1".to_string())
+}
+
+fn default_instance_mem_limit() -> String {
+    std::env::var("INSTANCE_DEFAULT_MEM_LIMIT").unwrap_or_else(|_| "4g".to_string())
+}
+
+fn default_instance_storage_size() -> String {
+    std::env::var("INSTANCE_DEFAULT_STORAGE_SIZE").unwrap_or_else(|_| "10G".to_string())
+}
+
 /// A single agent manager endpoint with its URL and bearer token
 #[derive(Clone, serde::Deserialize)]
 pub struct AgentManager {
@@ -347,6 +359,15 @@ pub struct AgentConfig {
     /// Configured via AGENT_DOMAIN environment variable.
     #[serde(default = "default_agent_domain")]
     pub agent_domain: String,
+    /// Default CPU allocation for new instances (configurable via INSTANCE_DEFAULT_CPUS)
+    #[serde(default = "default_instance_cpus")]
+    pub instance_default_cpus: String,
+    /// Default memory limit for new instances (configurable via INSTANCE_DEFAULT_MEM_LIMIT)
+    #[serde(default = "default_instance_mem_limit")]
+    pub instance_default_mem_limit: String,
+    /// Default storage size for new instances (configurable via INSTANCE_DEFAULT_STORAGE_SIZE)
+    #[serde(default = "default_instance_storage_size")]
+    pub instance_default_storage_size: String,
 }
 
 /// Split a comma-separated env var value into non-empty trimmed entries.
@@ -402,6 +423,9 @@ impl Default for AgentConfig {
                 .map(|url| url.trim_end_matches('/').to_string() + "/v1")
                 .unwrap_or_else(|_| "https://private.near.ai/v1".to_string()),
             agent_domain: default_agent_domain(),
+            instance_default_cpus: default_instance_cpus(),
+            instance_default_mem_limit: default_instance_mem_limit(),
+            instance_default_storage_size: default_instance_storage_size(),
         }
     }
 }

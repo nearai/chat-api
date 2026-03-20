@@ -544,6 +544,9 @@ async fn test_create_instance_respects_agent_instance_limit_max_1() {
             dashboard_url: None,
             agent_api_base_url: None,
             service_type: None,
+            auth_method: "manager_token".to_string(),
+            auth_secret: None,
+            backup_passphrase: None,
         })
         .await
         .expect("Should create first instance");

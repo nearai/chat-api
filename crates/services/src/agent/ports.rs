@@ -5,6 +5,9 @@ use uuid::Uuid;
 
 use crate::UserId;
 
+/// Instance credentials: (auth_method, auth_secret, backup_passphrase)
+pub type InstanceCredentials = (String, Option<String>, Option<String>);
+
 /// Result of sync_all_instance_statuses.
 ///
 /// Counter semantics:
@@ -27,7 +30,7 @@ pub struct SyncStatusResult {
 // ============ Service Type Validation ============
 
 /// Valid service types for agent instances.
-pub const VALID_SERVICE_TYPES: &[&str] = &["openclaw", "ironclaw"];
+pub const VALID_SERVICE_TYPES: &[&str] = &["openclaw", "ironclaw", "ironclaw-dind"];
 
 /// Validates that a service type is in the list of allowed values.
 pub fn is_valid_service_type(service_type: &str) -> bool {
@@ -66,6 +69,8 @@ pub struct AgentInstance {
     pub service_type: Option<String>,
     /// DB-tracked status: active, stopped, deleted, provisioning, error
     pub status: String,
+    /// Authentication method: "manager_token" or "passkey"
+    pub auth_method: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -146,6 +151,12 @@ pub struct CreateInstanceParams {
     pub agent_api_base_url: Option<String>,
     /// Service type selected at creation time
     pub service_type: Option<String>,
+    /// Authentication method: "manager_token" or "passkey"
+    pub auth_method: String,
+    /// Hashed auth_secret (SHA-256) for passkey instances
+    pub auth_secret: Option<String>,
+    /// Hashed backup_passphrase (SHA-256) for passkey instances
+    pub backup_passphrase: Option<String>,
 }
 
 /// Parameters for creating an instance via Agent API
@@ -179,6 +190,13 @@ pub trait AgentRepository: Send + Sync {
         &self,
         key_hash: &str,
     ) -> anyhow::Result<Option<(AgentInstance, AgentApiKey)>>;
+
+    /// Get auth method and credentials for an instance (passkey instances only)
+    /// Returns (auth_method, auth_secret, backup_passphrase)
+    async fn get_instance_credentials(
+        &self,
+        instance_id: Uuid,
+    ) -> anyhow::Result<Option<InstanceCredentials>>;
 
     async fn list_user_instances(
         &self,
@@ -306,6 +324,17 @@ pub trait AgentService: Send + Sync {
     /// **TOCTOU Mitigation**: The `max_allowed` parameter enables re-checking the instance limit
     /// just before instance creation in the spawned task, preventing race conditions from concurrent requests.
     async fn create_instance_from_agent_api_streaming(
+        &self,
+        user_id: UserId,
+        params: InstanceCreationParams,
+        max_allowed: u64,
+    ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<serde_json::Value>>>;
+
+    /// Create instance with per-instance passkey credentials and streaming lifecycle events.
+    /// Calls compose-api /auth/register to set up the instance with unique credentials,
+    /// then creates the instance using the session token instead of manager token.
+    /// Returns a receiver that yields raw JSON events as they occur during instance creation.
+    async fn create_passkey_instance_streaming(
         &self,
         user_id: UserId,
         params: InstanceCreationParams,

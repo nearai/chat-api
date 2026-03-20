@@ -27,79 +27,6 @@ pub struct CreateInstanceRequest {
     /// Service type preset, e.g. "ironclaw" (optional)
     #[serde(default)]
     pub service_type: Option<String>,
-    /// CPU allocation (optional, e.g. "1", "2")
-    #[serde(default)]
-    pub cpus: Option<String>,
-    /// Memory limit (optional, e.g. "4g", "8g")
-    #[serde(default)]
-    pub mem_limit: Option<String>,
-    /// Storage size (optional, e.g. "10G", "100G")
-    #[serde(default)]
-    pub storage_size: Option<String>,
-    /// NEAR AI API URL (optional, defaults to server config)
-    #[serde(default)]
-    pub nearai_api_url: Option<String>,
-    /// NEAR AI API key (optional, defaults to server-generated key)
-    #[serde(default)]
-    pub nearai_api_key: Option<String>,
-}
-
-/// Helper to create SSE streaming response for instance creation
-async fn create_instance_streaming_response(
-    app_state: AppState,
-    user_id: services::UserId,
-    params: services::agent::ports::InstanceCreationParams,
-    max_allowed: u64,
-) -> Result<Response, ApiError> {
-    let rx = app_state
-        .agent_service
-        .create_instance_from_agent_api_streaming(user_id, params, max_allowed)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to start instance creation stream: {}", e);
-            ApiError::internal_server_error("Failed to start instance creation")
-        })?;
-
-    use futures::stream::StreamExt;
-    use tokio_stream::wrappers::ReceiverStream;
-
-    let stream = ReceiverStream::new(rx)
-        .then(|event_result| async move {
-            match event_result {
-                Ok(event) => {
-                    if let Ok(json_str) = serde_json::to_string(&event) {
-                        Ok(axum::body::Bytes::from(format!("data: {}\n\n", json_str)))
-                    } else {
-                        Err(axum::Error::new(anyhow::anyhow!(
-                            "Failed to serialize event"
-                        )))
-                    }
-                }
-                Err(e) => {
-                    tracing::error!("Error in instance creation stream: {}", e);
-                    let error_json =
-                        serde_json::json!({"error": "Instance creation failed"}).to_string();
-                    Ok(axum::body::Bytes::from(format!("data: {}\n\n", error_json)))
-                }
-            }
-        })
-        .chain(futures::stream::once(async {
-            Ok(axum::body::Bytes::from("data: [DONE]\n\n"))
-        }));
-
-    let body = axum::body::Body::from_stream(stream);
-
-    Response::builder()
-        .status(StatusCode::OK)
-        .header("content-type", "text/event-stream")
-        .header("cache-control", "no-cache")
-        .header("connection", "keep-alive")
-        .header("x-accel-buffering", "no")
-        .body(body)
-        .map_err(|e| {
-            tracing::error!("Failed to build SSE response: {}", e);
-            ApiError::internal_server_error("Failed to construct response")
-        })
 }
 
 /// Returns (current_count, max_allowed) for the user based on their active subscription plan.
@@ -159,11 +86,14 @@ async fn get_instance_limit(
     Ok((total as u64, max_allowed))
 }
 
-/// Create a new agent instance.
+/// Create a new agent instance with per-instance passkey credentials.
 ///
 /// Agent instance limits are enforced for all users to prevent resource exhaustion:
 /// - Subscribed users: plan limit from subscription_plans config
 /// - Unsubscribed users: no instances allowed (active subscription required)
+///
+/// Each instance receives unique auth_secret and backup_passphrase credentials generated on the backend.
+/// These credentials are used for compose-api /auth/register and /auth/login.
 ///
 /// Supports two response modes via content negotiation:
 /// - Accept: text/event-stream → Returns SSE stream of lifecycle events
@@ -189,18 +119,13 @@ pub async fn create_instance(
     headers: HeaderMap,
     Json(request): Json<CreateInstanceRequest>,
 ) -> Result<Response, ApiError> {
-    tracing::info!("Creating agent instance: user_id={}", user.user_id);
     tracing::info!(
-        "Instance creation request received: image={:?}, name={:?}, cpus={:?}, mem_limit={:?}, storage_size={:?}, service_type={:?}, has_ssh_pubkey={}, has_nearai_api_url={}, has_nearai_api_key={}",
-        request.image,
-        request.name,
-        request.cpus,
-        request.mem_limit,
-        request.storage_size,
-        request.service_type,
+        "Creating agent instance: user_id={}, has_image={}, has_name={}, has_ssh_pubkey={}, service_type={:?}",
+        user.user_id,
+        request.image.is_some(),
+        request.name.is_some(),
         request.ssh_pubkey.is_some(),
-        request.nearai_api_url.is_some(),
-        request.nearai_api_key.is_some()
+        request.service_type
     );
 
     // Validate service_type if provided
@@ -236,7 +161,6 @@ pub async fn create_instance(
     }
 
     // Content negotiation: SSE streaming or JSON response
-    // Use get_all to handle multiple Accept headers per HTTP spec
     let wants_stream = headers.get_all("accept").iter().any(|v| {
         v.to_str()
             .map(|s| s.contains("text/event-stream"))
@@ -244,55 +168,76 @@ pub async fn create_instance(
     });
 
     if wants_stream {
-        create_instance_streaming_response(
-            app_state,
-            user.user_id,
-            services::agent::ports::InstanceCreationParams {
-                image: request.image,
-                name: request.name,
-                ssh_pubkey: request.ssh_pubkey,
-                service_type: request.service_type,
-                cpus: request.cpus,
-                mem_limit: request.mem_limit,
-                storage_size: request.storage_size,
-                nearai_api_url: request.nearai_api_url,
-                nearai_api_key: request.nearai_api_key,
-            },
-            max_allowed,
-        )
-        .await
-    } else {
-        let instance = app_state
+        // SSE streaming response
+        let rx = app_state
             .agent_service
-            .create_instance_from_agent_api(
+            .create_passkey_instance_streaming(
                 user.user_id,
                 services::agent::ports::InstanceCreationParams {
                     image: request.image,
                     name: request.name,
                     ssh_pubkey: request.ssh_pubkey,
                     service_type: request.service_type,
-                    cpus: request.cpus,
-                    mem_limit: request.mem_limit,
-                    storage_size: request.storage_size,
-                    nearai_api_url: request.nearai_api_url,
-                    nearai_api_key: request.nearai_api_key,
+                    cpus: None,
+                    mem_limit: None,
+                    storage_size: None,
+                    nearai_api_url: None,
+                    nearai_api_key: None,
                 },
+                max_allowed,
             )
             .await
             .map_err(|e| {
-                tracing::error!(
-                    "Failed to create instance: user_id={}, error={}",
-                    user.user_id,
-                    e
-                );
-                ApiError::internal_server_error("Failed to create instance")
+                tracing::error!("Failed to start instance creation stream: {}", e);
+                ApiError::internal_server_error("Failed to start instance creation")
             })?;
 
-        Ok((
-            StatusCode::CREATED,
-            Json::<InstanceResponse>(instance.into()),
-        )
-            .into_response())
+        use futures::stream::StreamExt;
+        use tokio_stream::wrappers::ReceiverStream;
+
+        let stream = ReceiverStream::new(rx)
+            .then(|event_result| async move {
+                match event_result {
+                    Ok(event) => {
+                        if let Ok(json_str) = serde_json::to_string(&event) {
+                            Ok(axum::body::Bytes::from(format!("data: {}\n\n", json_str)))
+                        } else {
+                            Err(axum::Error::new(anyhow::anyhow!(
+                                "Failed to serialize event"
+                            )))
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Error in instance creation stream: {}", e);
+                        let error_json =
+                            serde_json::json!({"error": "Instance creation failed"}).to_string();
+                        Ok(axum::body::Bytes::from(format!("data: {}\n\n", error_json)))
+                    }
+                }
+            })
+            .chain(futures::stream::once(async {
+                Ok(axum::body::Bytes::from("data: [DONE]\n\n"))
+            }));
+
+        let body = axum::body::Body::from_stream(stream);
+
+        Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "text/event-stream")
+            .header("cache-control", "no-cache")
+            .header("connection", "keep-alive")
+            .header("x-accel-buffering", "no")
+            .body(body)
+            .map_err(|_| ApiError::internal_server_error("Failed to construct response"))?)
+    } else {
+        // Non-streaming: Passkey instance creation requires SSE streaming
+        // This is the primary pattern for instance creation
+        tracing::warn!("Non-streaming instance creation not supported, use Accept: text/event-stream");
+        Err(ApiError::new(
+            axum::http::StatusCode::BAD_REQUEST,
+            "streaming_required",
+            "Instance creation requires SSE streaming (Accept: text/event-stream header)",
+        ))
     }
 }
 
@@ -356,12 +301,11 @@ pub async fn list_instances(
 
     // Log instances response with SSH commands
     for instance in &paginated {
-        if let Some(ssh_cmd) = &instance.ssh_command {
-            tracing::info!(
-                "Instance response with SSH command: id={}, name={}, ssh_command={}",
+        if let Some(_ssh_cmd) = &instance.ssh_command {
+            tracing::debug!(
+                "Instance response with SSH command available: id={}, name={}",
                 instance.id,
-                instance.name,
-                ssh_cmd
+                instance.name
             );
         } else {
             tracing::debug!(

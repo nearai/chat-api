@@ -177,6 +177,9 @@ async fn main() -> anyhow::Result<()> {
         config.agent.agent_domain.clone(),
         system_configs_service.clone()
             as Arc<dyn services::system_configs::ports::SystemConfigsService>,
+        config.agent.instance_default_cpus.clone(),
+        config.agent.instance_default_mem_limit.clone(),
+        config.agent.instance_default_storage_size.clone(),
     ));
 
     // Initialize agent proxy service
