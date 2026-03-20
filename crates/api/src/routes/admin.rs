@@ -807,7 +807,11 @@ pub async fn admin_cancel_user_subscriptions(
 
 /// List subscriptions (admin)
 ///
-/// Returns paginated raw rows from `subscriptions`. Requires admin authentication.
+/// Returns paginated raw subscription rows for internal operations and debugging.
+/// Requires admin authentication.
+///
+/// **Note:** The response intentionally includes `customer_id` (the Stripe customer identifier).
+/// This endpoint is admin-only and returns full raw subscription data for internal use.
 #[utoipa::path(
     get,
     path = "/v1/admin/subscriptions",
