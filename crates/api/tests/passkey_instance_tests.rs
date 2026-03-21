@@ -14,8 +14,6 @@ async fn test_create_passkey_instance_requires_auth() {
     let response = server
         .post("/v1/agents/instances")
         .json(&json!({
-            "auth_secret": "test-secret-32-chars-minimum---",
-            "backup_passphrase": "test-phrase-32-chars-minimum----",
             "name": "test-instance"
         }))
         .await;
@@ -75,8 +73,6 @@ async fn test_create_passkey_instance_validates_service_type() {
             http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
         )
         .json(&json!({
-            "auth_secret": "test-secret-32-chars-minimum---",
-            "backup_passphrase": "test-phrase-32-chars-minimum----",
             "name": "test-instance",
             "service_type": "invalid-service-type"
         }))
@@ -106,8 +102,6 @@ async fn test_create_passkey_instance_enforces_limits() {
             http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
         )
         .json(&json!({
-            "auth_secret": "test-secret-32-chars-minimum---",
-            "backup_passphrase": "test-phrase-32-chars-minimum----",
             "name": "test-instance"
         }))
         .await;
@@ -142,8 +136,6 @@ async fn test_create_passkey_instance_with_sse_header() {
             http::HeaderValue::from_str("text/event-stream").unwrap(),
         )
         .json(&json!({
-            "auth_secret": "test-secret-32-chars-minimum---",
-            "backup_passphrase": "test-phrase-32-chars-minimum----",
             "name": "test-instance"
         }))
         .await;
