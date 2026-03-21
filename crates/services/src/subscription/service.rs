@@ -17,9 +17,10 @@ use std::sync::Arc;
 use std::time::Instant;
 use stripe::{
     BillingPortalSession, CheckoutSession, CheckoutSessionMode, Client, CreateBillingPortalSession,
-    CreateCheckoutSession, CreateCheckoutSessionLineItems, CreateCheckoutSessionSubscriptionData,
-    Customer, CustomerId, RequestStrategy, Subscription as StripeSubscription,
-    UpdateSubscriptionItems, Webhook, WebhookError,
+    CreateCheckoutSession, CreateCheckoutSessionInvoiceCreation,
+    CreateCheckoutSessionInvoiceCreationInvoiceData, CreateCheckoutSessionLineItems,
+    CreateCheckoutSessionSubscriptionData, Customer, CustomerId, Metadata, RequestStrategy,
+    Subscription as StripeSubscription, UpdateSubscriptionItems, Webhook, WebhookError,
 };
 use tokio::sync::RwLock;
 
@@ -41,7 +42,7 @@ pub struct SubscriptionServiceConfig {
 
 /// Cached credit limit for a user. Invalid after TTL_CACHE_SECS (10 mins) or when plan/credits change.
 struct CachedCreditLimit {
-    max_credits: u64, // plan_monthly_credits + purchased_balance
+    plan_credits: u64,
     period_start: chrono::DateTime<Utc>,
     period_end: chrono::DateTime<Utc>,
     cached_at: Instant,
@@ -447,7 +448,7 @@ impl SubscriptionServiceImpl {
             }
         };
 
-        // Clamp to i64::MAX so CreditsSummary.effective_max_credits and comparisons don't overflow
+        // Clamp to i64::MAX so CreditsSummary.plan_credits and comparisons don't overflow
         let plan_credits_i64 = plan_credits.min(i64::MAX as u64) as i64;
         Ok((plan_credits_i64, period_start, period_end))
     }
@@ -858,6 +859,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 let plan_config = subscription_plans.get(&name);
                 let price = plan_config.and_then(|c| c.price);
                 let agent_instances = plan_config.and_then(|c| c.agent_instances.clone());
+                let monthly_tokens = plan_config.and_then(|c| c.monthly_tokens.clone());
                 let monthly_credits = plan_config.and_then(|c| c.monthly_credits.clone());
                 let trial_period_days = plan_config.and_then(|c| c.trial_period_days);
                 SubscriptionPlan {
@@ -865,6 +867,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     price,
                     trial_period_days,
                     agent_instances,
+                    monthly_tokens,
                     monthly_credits,
                 }
             })
@@ -1547,7 +1550,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
                                 .await
                                 .map_err(|e| SubscriptionError::InternalError(e.to_string()))?
                                 .and_then(|c| c.credits)
-                                .map(|c| c.credit_price_id);
+                                .and_then(|c| {
+                                    c.providers.get("stripe").and_then(|p| p.price_id.clone())
+                                });
 
                             if user_uuid.is_none() {
                                 None
@@ -1602,10 +1607,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
                                                 break;
                                             }
                                             let qty = item.quantity.unwrap_or(0);
-                                            let qty_i64 = qty.min(i64::MAX as u64) as i64;
-                                            credits_count = credits_count.saturating_add(qty_i64);
+                                            credits_count = credits_count
+                                                .saturating_add(qty.min(i64::MAX as u64) as i64);
                                         }
-
                                         if bad_price {
                                             None
                                         } else if credits_count <= 0 {
@@ -1640,10 +1644,11 @@ impl SubscriptionService for SubscriptionServiceImpl {
                                                         )
                                                     })?;
                                                 tracing::info!(
-                                                    "Credits added for user_id={}, amount_nano_usd={}, credits_count={}",
+                                                    "Credits added for user_id={}, amount_nano_usd={}, credits_count={}, session_id={}",
                                                     user_id,
                                                     amount_nano_usd,
-                                                    credits_count
+                                                    credits_count,
+                                                    sid
                                                 );
                                                 Some(user_id)
                                             } else {
@@ -1684,7 +1689,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                         );
                         None
                     }
-                } // close payment_status == "paid" else block
+                }
             } else {
                 None
             }
@@ -1970,18 +1975,18 @@ impl SubscriptionService for SubscriptionServiceImpl {
             Ok(_) => {}
         }
 
-        // 1. Determine max credits (plan monthly_credits + purchased). Cache 10 mins.
+        // 1. Get plan credits (monthly_credits) from the config. Cache 10 mins.
         let cached_limit = {
             let cache_guard = self.credit_limit_cache.read().await;
             if let Some(cached) = cache_guard.get(&user_id) {
                 if cached.cached_at.elapsed().as_secs() < TTL_CACHE_SECS {
                     tracing::debug!(
-                        "Using cached credit limit for user_id={} (max={}, age_secs={})",
+                        "Using cached credit limit for user_id={} (plan={}, age_secs={})",
                         user_id,
-                        cached.max_credits,
+                        cached.plan_credits,
                         cached.cached_at.elapsed().as_secs()
                     );
-                    Some((cached.max_credits, cached.period_start, cached.period_end))
+                    Some((cached.plan_credits, cached.period_start, cached.period_end))
                 } else {
                     None
                 }
@@ -1990,8 +1995,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
             }
         };
 
-        let (max_credits, period_start, period_end) = match cached_limit {
-            Some((max, start, end)) => (max, start, end),
+        let (plan_credits, period_start, period_end) = match cached_limit {
+            Some((plan, start, end)) => (plan, start, end),
             None => {
                 let configs = self
                     .system_configs_service
@@ -2064,30 +2069,23 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     }
                 };
 
-                let purchased = self
-                    .credits_repo
-                    .get_balance(user_id)
-                    .await
-                    .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-                let max_credits = plan_credits.saturating_add(purchased.max(0) as u64);
-
                 {
                     let mut cache_guard = self.credit_limit_cache.write().await;
                     cache_guard.insert(
                         user_id,
                         CachedCreditLimit {
-                            max_credits,
+                            plan_credits,
                             period_start,
                             period_end,
                             cached_at: Instant::now(),
                         },
                     );
                 }
-                (max_credits, period_start, period_end)
+                (plan_credits, period_start, period_end)
             }
         };
 
-        // 2. Get used credits (cost_nano_usd) in the period
+        // 2. Get spent credits (cost_nano_usd) in the period
         let period_spent_credits = self
             .user_usage_repo
             .get_usage_by_user_id(user_id, Some(period_start), Some(period_end))
@@ -2096,23 +2094,37 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .map(|s| s.cost_nano_usd)
             .unwrap_or(0);
 
-        // 3. Enforce limit (compare without casting max_credits to i64 to avoid wrap-around DoS when max_credits > i64::MAX)
-        if period_spent_credits >= 0 && (period_spent_credits as u64) >= max_credits {
+        // 3. Only check credits balance when spent >= plan (might need purchased credits to cover overage)
+        let (limit_exceeded, credits_balance) = if period_spent_credits >= 0
+            && (period_spent_credits as u64) >= plan_credits
+        {
+            let credits_balance = self
+                .credits_repo
+                .get_balance(user_id)
+                .await
+                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+            let exceeded = (period_spent_credits as u64) >= plan_credits && credits_balance <= 0;
+            (exceeded, credits_balance)
+        } else {
+            (false, 0)
+        };
+
+        if limit_exceeded {
             tracing::info!(
-                "Blocking proxy access for user_id={}: monthly credit limit exceeded (used {} of {})",
-                user_id, period_spent_credits, max_credits
+                "Blocking proxy access for user_id={}: credit limit exceeded (used {} of plan {}, credits_balance={})",
+                user_id, period_spent_credits, plan_credits, credits_balance
             );
-            return Err(SubscriptionError::MonthlyCreditLimitExceeded {
+            return Err(SubscriptionError::CreditLimitExceeded {
                 used: period_spent_credits,
-                limit: max_credits,
+                limit: plan_credits,
             });
         }
 
         tracing::debug!(
-            "User user_id={} within credit limit (used {} of {}), allowing proxy access",
+            "User user_id={} within credit limit (used {} of plan {}), allowing proxy access",
             user_id,
             period_spent_credits,
-            max_credits
+            plan_credits
         );
         Ok(())
     }
@@ -2243,6 +2255,18 @@ impl SubscriptionService for SubscriptionServiceImpl {
         Ok(())
     }
 
+    async fn admin_list_subscriptions(
+        &self,
+        user_id: Option<UserId>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<(Vec<Subscription>, i64), SubscriptionError> {
+        self.subscription_repo
+            .list_subscriptions(user_id, limit, offset)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))
+    }
+
     async fn create_credit_purchase_checkout(
         &self,
         user_id: UserId,
@@ -2278,9 +2302,27 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .get_configs()
             .await
             .map_err(|e| SubscriptionError::InternalError(e.to_string()))?;
-        let credit_price_id = configs
+        let credits_cfg = configs
             .and_then(|c| c.credits)
-            .map(|c| c.credit_price_id)
+            .ok_or(SubscriptionError::CreditsNotConfigured)?;
+        let provider = credits_cfg
+            .default_provider
+            .clone()
+            .unwrap_or_else(|| "stripe".to_string());
+        if provider != "stripe" {
+            tracing::warn!(
+                "Credit purchase requested for unsupported provider: {}",
+                provider
+            );
+            return Err(SubscriptionError::InvalidProvider(format!(
+                "Credits purchase is not supported for provider '{}'",
+                provider
+            )));
+        }
+        let credit_price_id = credits_cfg
+            .providers
+            .get(&provider)
+            .and_then(|p| p.price_id.clone())
             .ok_or(SubscriptionError::CreditsNotConfigured)?;
 
         let customer_id = self.get_or_create_stripe_customer(user_id, None).await?;
@@ -2306,10 +2348,19 @@ impl SubscriptionService for SubscriptionServiceImpl {
             quantity: Some(credits),
             ..Default::default()
         }]);
-        let mut metadata = HashMap::new();
+        let mut metadata: Metadata = HashMap::new();
         metadata.insert("user_id".to_string(), user_id.to_string());
         metadata.insert("credits".to_string(), credits.to_string());
-        params.metadata = Some(metadata);
+
+        // Enable invoice creation for one-time payments (invoices/receipts).
+        params.metadata = Some(metadata.clone());
+        params.invoice_creation = Some(CreateCheckoutSessionInvoiceCreation {
+            enabled: true,
+            invoice_data: Some(CreateCheckoutSessionInvoiceCreationInvoiceData {
+                metadata: Some(metadata),
+                ..Default::default()
+            }),
+        });
 
         let session = CheckoutSession::create(&client, params)
             .await
@@ -2365,14 +2416,12 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .map(|s| s.cost_nano_usd)
             .unwrap_or(0);
 
-        let effective_max_credits = plan_credits.saturating_add(balance);
-
         Ok(CreditsSummary {
             balance,
             total_purchased_nano_usd,
             spent_purchased_nano_usd,
             period_spent_credits,
-            effective_max_credits,
+            plan_credits,
         })
     }
 

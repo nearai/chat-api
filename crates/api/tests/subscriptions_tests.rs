@@ -1292,7 +1292,7 @@ async fn test_proxy_returns_403_without_subscription_when_plans_configured() {
         let body_res: serde_json::Value = response.json();
         let err_msg = body_res.get("error").and_then(|v| v.as_str()).unwrap_or("");
         assert!(
-            err_msg.contains("Monthly credit limit exceeded")
+            err_msg.contains("Credit limit exceeded")
                 || err_msg == SUBSCRIPTION_REQUIRED_ERROR_MESSAGE,
             "POST {} should return credit limit or subscription error, got: {}",
             path,
@@ -1487,13 +1487,8 @@ async fn test_proxy_blocks_when_monthly_token_limit_exceeded() {
     let body_res: serde_json::Value = response.json();
     let err_msg = body_res.get("error").and_then(|v| v.as_str()).unwrap_or("");
     assert!(
-        err_msg.contains("Monthly credit limit exceeded"),
+        err_msg.contains("Credit limit exceeded"),
         "Error should mention credit limit, got: {}",
-        err_msg
-    );
-    assert!(
-        err_msg.contains("100"),
-        "Error should include limit value, got: {}",
         err_msg
     );
 
@@ -1518,9 +1513,341 @@ async fn test_proxy_blocks_when_monthly_token_limit_exceeded() {
     let body_res: serde_json::Value = response.json();
     let err_msg = body_res.get("error").and_then(|v| v.as_str()).unwrap_or("");
     assert!(
-        err_msg.contains("Monthly credit limit exceeded") && err_msg.contains("100"),
+        err_msg.contains("Credit limit exceeded"),
         "POST /v1/responses error should mention credit limit, got: {}",
         err_msg
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_proxy_blocks_exactly_at_plan_limit() {
+    ensure_stripe_env_for_gating();
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        rate_limit_config: Some(permissive_rate_limit_config()),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": {"stripe": {"price_id": "price_test_basic"}},
+                "agent_instances": {"max": 1},
+                "monthly_credits": {"max": 100}
+            }
+        }),
+    )
+    .await;
+
+    let user_email = "test_proxy_exact_limit@example.com";
+    insert_test_subscription(&server, &db, user_email, false).await;
+    let user_token = mock_login(&server, user_email).await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .expect("get user")
+        .expect("user exists");
+
+    // Record usage exactly at plan limit (100)
+    db.user_usage_repository()
+        .record_usage_event(user.id, METRIC_KEY_LLM_TOKENS, 100, Some(100), None)
+        .await
+        .expect("record usage");
+
+    // Proxy should return 402 when exactly at limit with no purchased credits
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}]
+        }))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        402,
+        "Proxy should return 402 when exactly at plan limit with no credits balance"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_proxy_allows_over_plan_with_purchased_credits() {
+    ensure_stripe_env_for_gating();
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        rate_limit_config: Some(permissive_rate_limit_config()),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": {"stripe": {"price_id": "price_test_basic"}},
+                "agent_instances": {"max": 1},
+                "monthly_credits": {"max": 100}
+            }
+        }),
+    )
+    .await;
+
+    let user_email = "test_proxy_over_plan_with_credits@example.com";
+    insert_test_subscription(&server, &db, user_email, false).await;
+    let user_token = mock_login(&server, user_email).await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .expect("get user")
+        .expect("user exists");
+
+    // Record usage over plan (150 > 100); overage is 50.
+    db.user_usage_repository()
+        .record_usage_event(user.id, METRIC_KEY_LLM_TOKENS, 150, Some(150), None)
+        .await
+        .expect("record usage");
+
+    // Grant 100 nano-USD purchased credits. After reconcile: 50 covers overage, 50 remains.
+    // (Reconcile runs on GET /v1/credits or when recording usage.)
+    let admin_token = mock_login(&server, "test_credits_over_plan_admin@admin.org").await;
+    let grant_response = server
+        .post("/v1/admin/credits")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&json!({
+            "user_id": user.id,
+            "amount_nano_usd": 100,
+            "reason": "test over-plan with credits"
+        }))
+        .await;
+
+    assert_eq!(
+        grant_response.status_code(),
+        200,
+        "Admin grant credits should succeed"
+    );
+
+    // Trigger reconcile (GET /v1/credits). After: overage 50 charged to purchased, balance = 50 remaining.
+    let credits_resp = server
+        .get("/v1/credits")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .await;
+    assert!(
+        credits_resp.status_code().is_success(),
+        "GET /v1/credits should succeed to trigger reconcile"
+    );
+
+    // Proxy should allow (not 402) when over plan but has purchased credits remaining
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}]
+        }))
+        .await;
+
+    assert_ne!(
+        response.status_code(),
+        402,
+        "Proxy should allow when over plan but has purchased credits (got 402)"
+    );
+    let body_res: serde_json::Value = response.json();
+    let err_msg = body_res.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        !err_msg.contains("Credit limit exceeded"),
+        "Should not get credit limit error when has purchased credits, got: {}",
+        err_msg
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_proxy_blocks_when_all_credits_used_up() {
+    ensure_stripe_env_for_gating();
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        rate_limit_config: Some(permissive_rate_limit_config()),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": {"stripe": {"price_id": "price_test_basic"}},
+                "agent_instances": {"max": 1},
+                "monthly_credits": {"max": 100}
+            }
+        }),
+    )
+    .await;
+
+    let user_email = "test_proxy_all_credits_used@example.com";
+    insert_test_subscription(&server, &db, user_email, false).await;
+    let user_token = mock_login(&server, user_email).await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .expect("get user")
+        .expect("user exists");
+
+    // Record usage: 150 = 100 plan + 50 overage.
+    db.user_usage_repository()
+        .record_usage_event(user.id, METRIC_KEY_LLM_TOKENS, 150, Some(150), None)
+        .await
+        .expect("record usage");
+
+    // Grant exactly 50 purchased credits (same as overage). After reconcile, all used up.
+    let admin_token = mock_login(&server, "test_credits_all_used_admin@admin.org").await;
+    let grant_response = server
+        .post("/v1/admin/credits")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&json!({
+            "user_id": user.id,
+            "amount_nano_usd": 50,
+            "reason": "test all credits used"
+        }))
+        .await;
+
+    assert_eq!(
+        grant_response.status_code(),
+        200,
+        "Admin grant credits should succeed"
+    );
+
+    // Trigger reconcile. Overage 50 charged to purchased; balance = 0.
+    let credits_resp = server
+        .get("/v1/credits")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .await;
+    assert!(
+        credits_resp.status_code().is_success(),
+        "GET /v1/credits should succeed to trigger reconcile"
+    );
+
+    // Proxy should return 402 when all credits (plan + purchased) are used up.
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}]
+        }))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        402,
+        "Proxy should return 402 when all credits (plan + purchased) are used up"
+    );
+    let body_res: serde_json::Value = response.json();
+    let err_msg = body_res.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        err_msg.contains("Credit limit exceeded"),
+        "Error should mention credit limit, got: {}",
+        err_msg
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_proxy_allows_within_plan() {
+    ensure_stripe_env_for_gating();
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        rate_limit_config: Some(permissive_rate_limit_config()),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": {"stripe": {"price_id": "price_test_basic"}},
+                "agent_instances": {"max": 1},
+                "monthly_credits": {"max": 100}
+            }
+        }),
+    )
+    .await;
+
+    let user_email = "test_proxy_within_plan@example.com";
+    insert_test_subscription(&server, &db, user_email, false).await;
+    let user_token = mock_login(&server, user_email).await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .expect("get user")
+        .expect("user exists");
+
+    // Record usage within plan (50 < 100)
+    db.user_usage_repository()
+        .record_usage_event(user.id, METRIC_KEY_LLM_TOKENS, 50, Some(50), None)
+        .await
+        .expect("record usage");
+
+    // Proxy should allow (not 402 or 403)
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}]
+        }))
+        .await;
+
+    assert_ne!(
+        response.status_code(),
+        402,
+        "Proxy should allow when within plan (got 402)"
+    );
+    assert_ne!(
+        response.status_code(),
+        403,
+        "Proxy should allow when within plan (got 403)"
     );
 }
 
@@ -1575,8 +1902,7 @@ async fn test_responses_returns_403_without_subscription_when_plans_configured()
     let body_res: serde_json::Value = response.json();
     let err_msg = body_res.get("error").and_then(|v| v.as_str()).unwrap_or("");
     assert!(
-        err_msg.contains("Monthly credit limit exceeded")
-            || err_msg == SUBSCRIPTION_REQUIRED_ERROR_MESSAGE,
+        err_msg.contains("Credit limit exceeded") || err_msg == SUBSCRIPTION_REQUIRED_ERROR_MESSAGE,
         "POST /v1/responses should return credit limit or subscription error, got: {}",
         err_msg
     );

@@ -44,6 +44,7 @@ impl std::str::FromStr for DowngradeIntentStatus {
 }
 
 /// Database model for subscription records (generic, supports multiple providers e.g. Stripe)
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Subscription {
     pub subscription_id: String,
@@ -152,8 +153,8 @@ pub enum SubscriptionError {
     NotConfigured,
     /// No active subscription found for user
     NoActiveSubscription,
-    /// Monthly credit limit exceeded (used >= limit)
-    MonthlyCreditLimitExceeded { used: i64, limit: u64 },
+    /// Credit limit exceeded (used >= limit)
+    CreditLimitExceeded { used: i64, limit: u64 },
     /// Cannot switch to plan: current instance count exceeds target plan's limit
     InstanceLimitExceeded { current: u64, max: u64 },
     /// Subscription is not scheduled for cancellation (cannot resume)
@@ -168,7 +169,7 @@ pub enum SubscriptionError {
     WebhookVerificationFailed(String),
     /// Internal error
     InternalError(String),
-    /// Credit purchase not configured (missing credit_price_id)
+    /// Credit purchase not configured (missing provider config / price id)
     CreditsNotConfigured,
     /// Invalid credits amount for purchase
     InvalidCredits(String),
@@ -188,10 +189,10 @@ impl fmt::Display for SubscriptionError {
             Self::InvalidProvider(provider) => write!(f, "Invalid provider: {}", provider),
             Self::NotConfigured => write!(f, "Stripe is not configured"),
             Self::NoActiveSubscription => write!(f, "No active subscription found"),
-            Self::MonthlyCreditLimitExceeded { used, limit } => {
+            Self::CreditLimitExceeded { used, limit } => {
                 write!(
                     f,
-                    "Monthly credit limit exceeded: used {} of {} credits",
+                    "Credit limit exceeded: used {} of {} plan credits",
                     used, limit
                 )
             }
@@ -270,6 +271,15 @@ pub trait SubscriptionRepository: Send + Sync {
         &self,
         user_id: UserId,
     ) -> anyhow::Result<Option<Subscription>>;
+
+    /// List subscriptions with pagination, optionally filtered by user_id.
+    /// Returns (items, total_count).
+    async fn list_subscriptions(
+        &self,
+        user_id: Option<UserId>,
+        limit: i64,
+        offset: i64,
+    ) -> anyhow::Result<(Vec<Subscription>, i64)>;
 
     /// Delete a subscription record
     async fn delete_subscription(&self, subscription_id: &str) -> anyhow::Result<()>;
@@ -403,6 +413,10 @@ pub struct SubscriptionPlan {
     /// Agent instance limits (e.g. { "max": 1 })
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_instances: Option<PlanLimitConfig>,
+    /// Monthly token limits (legacy/backward compatibility).
+    /// When present, represents the plan limit in tokens (not nano-USD).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub monthly_tokens: Option<PlanLimitConfig>,
     /// Monthly credit limits in nano-USD (e.g. { "max": 1000000000 } for $1; $1 = 1_000_000_000 nano-USD). When missing, defaults to 1_000_000_000. Used for quota enforcement.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub monthly_credits: Option<PlanLimitConfig>,
@@ -494,6 +508,14 @@ pub trait SubscriptionService: Send + Sync {
         user_id: UserId,
     ) -> Result<(), SubscriptionError>;
 
+    /// Admin only: List subscriptions with pagination, optionally filtered by user_id.
+    async fn admin_list_subscriptions(
+        &self,
+        user_id: Option<UserId>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<(Vec<Subscription>, i64), SubscriptionError>;
+
     /// Create checkout session for purchasing credits. Returns checkout URL.
     async fn create_credit_purchase_checkout(
         &self,
@@ -553,6 +575,6 @@ pub struct CreditsSummary {
     pub spent_purchased_nano_usd: i64,
     /// Spend in the current period (sum of cost_nano_usd).
     pub period_spent_credits: i64,
-    /// Effective limit: plan limit + remaining balance (nano-USD).
-    pub effective_max_credits: i64,
+    /// Plan credit limit (nano-USD).
+    pub plan_credits: i64,
 }

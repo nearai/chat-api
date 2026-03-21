@@ -191,6 +191,43 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
         Ok(row.as_ref().map(row_to_subscription))
     }
 
+    async fn list_subscriptions(
+        &self,
+        user_id: Option<UserId>,
+        limit: i64,
+        offset: i64,
+    ) -> anyhow::Result<(Vec<Subscription>, i64)> {
+        let client = self.pool.get().await?;
+
+        let total_row = client
+            .query_one(
+                "SELECT COUNT(*) FROM subscriptions WHERE ($1::uuid IS NULL OR user_id = $1)",
+                &[&user_id],
+            )
+            .await?;
+        let total: i64 = total_row.get(0);
+
+        if total == 0 {
+            return Ok((vec![], 0));
+        }
+
+        let rows = client
+            .query(
+                "SELECT subscription_id, user_id, provider, customer_id, price_id, status,
+                        current_period_end, cancel_at_period_end, created_at, updated_at,
+                        pending_downgrade_target_price_id, pending_downgrade_from_price_id,
+                        pending_downgrade_expected_period_end, pending_downgrade_status
+                 FROM subscriptions
+                 WHERE ($1::uuid IS NULL OR user_id = $1)
+                 ORDER BY created_at DESC
+                 LIMIT $2 OFFSET $3",
+                &[&user_id, &limit, &offset],
+            )
+            .await?;
+
+        Ok((rows.iter().map(row_to_subscription).collect(), total))
+    }
+
     async fn get_active_subscriptions(&self, user_id: UserId) -> anyhow::Result<Vec<Subscription>> {
         tracing::debug!(
             "Repository: Fetching active subscriptions for user_id={}",
