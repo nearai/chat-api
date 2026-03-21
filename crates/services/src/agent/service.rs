@@ -1904,6 +1904,7 @@ impl AgentService for AgentServiceImpl {
             "Fetching SSH commands for {} instances (O(n) concurrent HTTP calls)",
             instances.len()
         );
+        let repo = Arc::clone(&self.repository);
         let ssh_futures: Vec<_> = instances
             .iter()
             .map(|inst| {
@@ -1911,12 +1912,38 @@ impl AgentService for AgentServiceImpl {
                 let mgr_url = inst.agent_api_base_url.as_deref().unwrap_or(fallback_url);
                 let manager = self.managers.iter().find(|m| m.url == mgr_url).cloned();
                 let name = inst.name.clone();
+                let auth_method = inst.auth_method.clone();
+                let instance_id = inst.id;
+                let repo = Arc::clone(&repo);
                 let http_client = self.http_client.clone();
                 async move {
                     if let Some(mgr) = manager {
-                        // TEST: Always use AGENT_MANAGER_TOKENS (pass None for bearer_token fallback)
-                        // This temporarily disables per-instance passkey session tokens for testing
-                        let bearer_token: Option<String> = None;
+                        // For passkey instances, try to get session token; otherwise use manager token (fallback)
+                        let bearer_token = if auth_method == "passkey" {
+                            if let Ok(Some((_auth_method, auth_secret, backup_passphrase))) =
+                                repo.get_instance_credentials(instance_id).await
+                            {
+                                // Try to get session token from /auth/login
+                                if let (Some(auth_secret_val), Some(backup_passphrase_val)) =
+                                    (auth_secret, backup_passphrase)
+                                {
+                                    AgentServiceImpl::compose_api_passkey_login_static(
+                                        &http_client,
+                                        &mgr,
+                                        &auth_secret_val,
+                                        &backup_passphrase_val,
+                                    )
+                                    .await
+                                    .ok()
+                                } else {
+                                    None // Fall back to manager token
+                                }
+                            } else {
+                                None // Fall back to manager token
+                            }
+                        } else {
+                            None // manager_token instances: use manager.token (None = use fallback)
+                        };
 
                         (
                             name,
