@@ -215,10 +215,7 @@ async fn test_passkey_instance_credentials_stored_and_retrievable() {
         if let Ok(Some(credentials)) = agent_repo.get_instance_credentials(uuid).await {
             let (auth_method, auth_secret, backup_passphrase) = credentials;
             assert_eq!(auth_method, "passkey", "Auth method should be passkey");
-            assert!(
-                auth_secret.is_some(),
-                "Auth secret should be stored"
-            );
+            assert!(auth_secret.is_some(), "Auth secret should be stored");
             assert!(
                 backup_passphrase.is_some(),
                 "Backup passphrase should be stored"
@@ -258,17 +255,17 @@ async fn test_list_instances_returns_correct_structure() {
     if let Some(items) = body.get("items").and_then(|v| v.as_array()) {
         for item in items {
             // Each instance should have an id and name
-            assert!(
-                item.get("id").is_some(),
-                "Instance should have id field"
-            );
+            assert!(item.get("id").is_some(), "Instance should have id field");
             assert!(
                 item.get("name").is_some(),
                 "Instance should have name field"
             );
             // Note: auth_method is not exposed in the API response for security reasons,
             // but it's stored in the database and used internally for bearer token resolution
-            tracing::debug!("Instance response keys: {:?}", item.as_object().map(|o| o.keys().collect::<Vec<_>>()));
+            tracing::debug!(
+                "Instance response keys: {:?}",
+                item.as_object().map(|o| o.keys().collect::<Vec<_>>())
+            );
         }
     }
 

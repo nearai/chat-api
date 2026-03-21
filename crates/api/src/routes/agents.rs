@@ -232,7 +232,9 @@ pub async fn create_instance(
     } else {
         // Non-streaming: Passkey instance creation requires SSE streaming
         // This is the primary pattern for instance creation
-        tracing::warn!("Non-streaming instance creation not supported, use Accept: text/event-stream");
+        tracing::warn!(
+            "Non-streaming instance creation not supported, use Accept: text/event-stream"
+        );
         Err(ApiError::new(
             axum::http::StatusCode::BAD_REQUEST,
             "streaming_required",

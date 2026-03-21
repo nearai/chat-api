@@ -92,15 +92,14 @@ async fn get_instance_details_static(
 
     tracing::debug!("Calling GET {}/instances/{}", manager.url, encoded_name);
 
-    let response = http_client
-        .get(&url)
-        .bearer_auth(token)
-        .send()
-        .await
-        .ok()?;
+    let response = http_client.get(&url).bearer_auth(token).send().await.ok()?;
 
     let status = response.status();
-    tracing::debug!("GET /instances/{} response status: {}", encoded_name, status);
+    tracing::debug!(
+        "GET /instances/{} response status: {}",
+        encoded_name,
+        status
+    );
 
     if !response.status().is_success() {
         if response.status().as_u16() == 404 {
@@ -257,7 +256,13 @@ impl AgentServiceImpl {
         auth_secret: &str,
         backup_passphrase: &str,
     ) -> anyhow::Result<String> {
-        Self::compose_api_passkey_login_static(&self.http_client, manager, auth_secret, backup_passphrase).await
+        Self::compose_api_passkey_login_static(
+            &self.http_client,
+            manager,
+            auth_secret,
+            backup_passphrase,
+        )
+        .await
     }
 
     /// Static version for use in closures. Takes http_client explicitly.
@@ -379,7 +384,9 @@ impl AgentServiceImpl {
         body.get("session_token")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
-            .ok_or_else(|| anyhow!("Missing 'session_token' in compose-api /auth/register response"))
+            .ok_or_else(|| {
+                anyhow!("Missing 'session_token' in compose-api /auth/register response")
+            })
     }
 
     /// Generate a new API key in format: sk-agent-{uuid}
@@ -532,12 +539,7 @@ impl AgentServiceImpl {
             url
         );
 
-        let response = http_client
-            .get(&url)
-            .bearer_auth(token)
-            .send()
-            .await
-            .ok()?;
+        let response = http_client.get(&url).bearer_auth(token).send().await.ok()?;
 
         if !response.status().is_success() {
             if response.status().as_u16() == 404 {
@@ -1007,7 +1009,8 @@ async fn fetch_instance_details_static(
         instance_name
     );
 
-    let result = get_instance_details_static(http_client, manager, instance_name, bearer_token).await;
+    let result =
+        get_instance_details_static(http_client, manager, instance_name, bearer_token).await;
 
     if result.is_some() {
         tracing::debug!(
@@ -1316,8 +1319,13 @@ impl AgentService for AgentServiceImpl {
                         instance_name
                     );
 
-                    if let Some(instance_details) =
-                        fetch_instance_details_static(&http_client, &manager_clone, instance_name, None).await
+                    if let Some(instance_details) = fetch_instance_details_static(
+                        &http_client,
+                        &manager_clone,
+                        instance_name,
+                        None,
+                    )
+                    .await
                     {
                         // Merge instance details into accumulated data
                         if let Some(details_obj) = instance_details.as_object() {
@@ -1561,8 +1569,13 @@ impl AgentService for AgentServiceImpl {
                         instance_name
                     );
 
-                    if let Some(instance_details) =
-                        fetch_instance_details_static(&http_client, &manager_clone, &instance_name, Some(&session_token_for_details)).await
+                    if let Some(instance_details) = fetch_instance_details_static(
+                        &http_client,
+                        &manager_clone,
+                        &instance_name,
+                        Some(&session_token_for_details),
+                    )
+                    .await
                     {
                         tracing::info!(
                             "Fetched /instances/{} response: {}",
@@ -1905,7 +1918,16 @@ impl AgentService for AgentServiceImpl {
                         // This temporarily disables per-instance passkey session tokens for testing
                         let bearer_token: Option<String> = None;
 
-                        (name, AgentServiceImpl::fetch_ssh_command_static(&http_client, &mgr, &inst.name, bearer_token.as_deref()).await)
+                        (
+                            name,
+                            AgentServiceImpl::fetch_ssh_command_static(
+                                &http_client,
+                                &mgr,
+                                &inst.name,
+                                bearer_token.as_deref(),
+                            )
+                            .await,
+                        )
                     } else {
                         (name, None)
                     }
