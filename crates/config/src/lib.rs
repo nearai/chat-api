@@ -310,7 +310,7 @@ fn default_nearai_api_url() -> String {
 }
 
 fn default_agent_domain() -> String {
-    std::env::var("AGENT_DOMAIN").unwrap_or_else(|_| String::new())
+    std::env::var("AGENT_DOMAIN").unwrap_or_else(|_| "localhost".to_string())
 }
 
 fn default_instance_cpus() -> String {
