@@ -153,9 +153,9 @@ pub struct CreateInstanceParams {
     pub service_type: Option<String>,
     /// Authentication method: "manager_token" or "passkey"
     pub auth_method: String,
-    /// Hashed auth_secret (SHA-256) for passkey instances
+    /// auth_secret for passkey instances (plaintext in DB, protected by encryption at rest)
     pub auth_secret: Option<String>,
-    /// Hashed backup_passphrase (SHA-256) for passkey instances
+    /// backup_passphrase for passkey instances (plaintext in DB, protected by encryption at rest)
     pub backup_passphrase: Option<String>,
 }
 
@@ -317,18 +317,6 @@ pub trait AgentService: Send + Sync {
         user_id: UserId,
         params: InstanceCreationParams,
     ) -> anyhow::Result<AgentInstance>;
-
-    /// Create instance with streaming lifecycle events.
-    /// Returns a receiver that yields raw JSON events as they occur during instance creation.
-    ///
-    /// **TOCTOU Mitigation**: The `max_allowed` parameter enables re-checking the instance limit
-    /// just before instance creation in the spawned task, preventing race conditions from concurrent requests.
-    async fn create_instance_from_agent_api_streaming(
-        &self,
-        user_id: UserId,
-        params: InstanceCreationParams,
-        max_allowed: u64,
-    ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<serde_json::Value>>>;
 
     /// Create instance with per-instance passkey credentials and streaming lifecycle events.
     /// Calls compose-api /auth/register to set up the instance with unique credentials,

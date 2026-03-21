@@ -119,15 +119,6 @@ pub async fn create_instance(
     headers: HeaderMap,
     Json(request): Json<CreateInstanceRequest>,
 ) -> Result<Response, ApiError> {
-    tracing::info!(
-        "Creating agent instance: user_id={}, has_image={}, has_name={}, has_ssh_pubkey={}, service_type={:?}",
-        user.user_id,
-        request.image.is_some(),
-        request.name.is_some(),
-        request.ssh_pubkey.is_some(),
-        request.service_type
-    );
-
     // Validate service_type if provided
     if let Some(service_type) = request.service_type.as_deref() {
         if !is_valid_service_type(service_type) {
@@ -138,6 +129,15 @@ pub async fn create_instance(
             ));
         }
     }
+
+    tracing::info!(
+        "Creating agent instance: user_id={}, has_image={}, has_name={}, has_ssh_pubkey={}, service_type={:?}",
+        user.user_id,
+        request.image.is_some(),
+        request.name.is_some(),
+        request.ssh_pubkey.is_some(),
+        request.service_type
+    );
 
     // Get user's active subscriptions
     let (current_count, max_allowed) = get_instance_limit(&app_state, user.user_id).await?;
@@ -230,16 +230,55 @@ pub async fn create_instance(
             .body(body)
             .map_err(|_| ApiError::internal_server_error("Failed to construct response"))?)
     } else {
-        // Non-streaming: Passkey instance creation requires SSE streaming
-        // This is the primary pattern for instance creation
-        tracing::warn!(
-            "Non-streaming instance creation not supported, use Accept: text/event-stream"
-        );
-        Err(ApiError::new(
-            axum::http::StatusCode::BAD_REQUEST,
-            "streaming_required",
-            "Instance creation requires SSE streaming (Accept: text/event-stream header)",
-        ))
+        // Non-streaming fallback: Collect stream and return final instance as JSON
+        // Note: This blocks the request until instance creation completes
+        let mut rx = app_state
+            .agent_service
+            .create_passkey_instance_streaming(
+                user.user_id,
+                services::agent::ports::InstanceCreationParams {
+                    image: request.image,
+                    name: request.name,
+                    ssh_pubkey: request.ssh_pubkey,
+                    service_type: request.service_type,
+                    cpus: None,
+                    mem_limit: None,
+                    storage_size: None,
+                    nearai_api_url: None,
+                    nearai_api_key: None,
+                },
+                max_allowed,
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to start instance creation stream: {}", e);
+                ApiError::internal_server_error("Failed to start instance creation")
+            })?;
+
+        // Collect all events from the stream
+        let mut accumulated_data = serde_json::json!({});
+        while let Some(event_result) = rx.recv().await {
+            match event_result {
+                Ok(event) => {
+                    if let Some(obj) = event.as_object() {
+                        for (key, value) in obj.iter() {
+                            accumulated_data[key] = value.clone();
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Error during instance creation: {}", e);
+                    return Err(ApiError::internal_server_error("Instance creation failed"));
+                }
+            }
+        }
+
+        // Return the accumulated instance data as JSON
+        Ok(Response::builder()
+            .status(StatusCode::CREATED)
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(accumulated_data.to_string()))
+            .map_err(|_| ApiError::internal_server_error("Failed to construct response"))?)
     }
 }
 

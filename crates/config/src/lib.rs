@@ -310,7 +310,7 @@ fn default_nearai_api_url() -> String {
 }
 
 fn default_agent_domain() -> String {
-    std::env::var("AGENT_DOMAIN").unwrap_or_else(|_| "claws.sare.dev".to_string())
+    std::env::var("AGENT_DOMAIN").unwrap_or_else(|_| String::new())
 }
 
 fn default_instance_cpus() -> String {

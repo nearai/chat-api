@@ -278,11 +278,7 @@ impl AgentServiceImpl {
             "backup_passphrase": backup_passphrase,
         });
 
-        tracing::debug!(
-            "Calling compose-api /auth/login: url={}, body={}",
-            url,
-            serde_json::to_string(&request_body).unwrap_or_default()
-        );
+        tracing::debug!("Calling compose-api /auth/login: url={}", url);
 
         let response = http_client
             .post(&url)
@@ -297,20 +293,8 @@ impl AgentServiceImpl {
         tracing::debug!("compose-api /auth/login response: status={}", status);
 
         if !response.status().is_success() {
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "unable to read".to_string());
-            tracing::warn!(
-                "compose-api /auth/login failed: status={}, body={}",
-                status,
-                body
-            );
-            return Err(anyhow!(
-                "compose-api /auth/login error: {} - {}",
-                status,
-                body
-            ));
+            tracing::warn!("compose-api /auth/login failed: status={}", status);
+            return Err(anyhow!("compose-api /auth/login error: {}", status));
         }
 
         let body = response
@@ -318,12 +302,37 @@ impl AgentServiceImpl {
             .await
             .map_err(|e| anyhow!("Failed to parse compose-api /auth/login response: {}", e))?;
 
-        tracing::debug!("compose-api /auth/login response body: {}", body);
-
         body.get("session_token")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .ok_or_else(|| anyhow!("Missing 'session_token' in compose-api /auth/login response"))
+    }
+
+    /// Resolve the bearer token to use for compose-api calls based on instance auth method.
+    /// - For passkey instances: fetch credentials, call /auth/login, return session token
+    /// - For manager_token instances: return the manager's bearer token
+    async fn resolve_bearer_token(
+        &self,
+        instance: &AgentInstance,
+        manager: &AgentManager,
+    ) -> anyhow::Result<String> {
+        if instance.auth_method == "passkey" {
+            let (_, auth_secret, backup_passphrase) = self
+                .repository
+                .get_instance_credentials(instance.id)
+                .await?
+                .ok_or_else(|| anyhow!("Credentials not found for passkey instance"))?;
+
+            let auth_secret =
+                auth_secret.ok_or_else(|| anyhow!("auth_secret missing for passkey instance"))?;
+            let backup_passphrase = backup_passphrase
+                .ok_or_else(|| anyhow!("backup_passphrase missing for passkey instance"))?;
+
+            self.compose_api_passkey_login(manager, &auth_secret, &backup_passphrase)
+                .await
+        } else {
+            Ok(manager.token.clone())
+        }
     }
 
     async fn compose_api_passkey_register(
@@ -338,11 +347,7 @@ impl AgentServiceImpl {
             "backup_passphrase": backup_passphrase,
         });
 
-        tracing::debug!(
-            "Calling compose-api /auth/register: url={}, body={}",
-            url,
-            serde_json::to_string(&request_body).unwrap_or_default()
-        );
+        tracing::debug!("Calling compose-api /auth/register: url={}", url);
 
         let response = self
             .http_client
@@ -358,28 +363,14 @@ impl AgentServiceImpl {
         tracing::debug!("compose-api /auth/register response: status={}", status);
 
         if !response.status().is_success() {
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "unable to read".to_string());
-            tracing::warn!(
-                "compose-api /auth/register failed: status={}, body={}",
-                status,
-                body
-            );
-            return Err(anyhow!(
-                "compose-api /auth/register error: {} - {}",
-                status,
-                body
-            ));
+            tracing::warn!("compose-api /auth/register failed: status={}", status);
+            return Err(anyhow!("compose-api /auth/register error: {}", status));
         }
 
         let body = response
             .json::<serde_json::Value>()
             .await
             .map_err(|e| anyhow!("Failed to parse compose-api /auth/register response: {}", e))?;
-
-        tracing::debug!("compose-api /auth/register success: response={}", body);
 
         body.get("session_token")
             .and_then(|v| v.as_str())
@@ -539,7 +530,13 @@ impl AgentServiceImpl {
             url
         );
 
-        let response = http_client.get(&url).bearer_auth(token).send().await.ok()?;
+        let response = http_client
+            .get(&url)
+            .bearer_auth(token)
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+            .ok()?;
 
         if !response.status().is_success() {
             if response.status().as_u16() == 404 {
@@ -734,118 +731,6 @@ impl AgentServiceImpl {
 
 /// Save instance data from a lifecycle event to database.
 /// `agent_api_base_url` is the manager URL that created this instance (for routing future operations).
-async fn save_instance_from_event(
-    repository: &dyn AgentRepository,
-    user_id: UserId,
-    instance_data: &serde_json::Value,
-    params: SaveInstanceParams,
-) -> anyhow::Result<AgentInstance> {
-    // TOCTOU mitigation: Re-check instance limit before creating
-    let (_instances, total_count) = repository.list_user_instances(user_id, 1, 0).await?;
-    if total_count as u64 >= params.max_allowed {
-        tracing::error!(
-            "Instance creation rejected: subscription limit exceeded due to concurrent request. current={}, max={}, user_id={}",
-            total_count,
-            params.max_allowed,
-            user_id
-        );
-        return Err(anyhow!(
-            "Agent instance limit exceeded. Current: {}, Max: {}",
-            total_count,
-            params.max_allowed
-        ));
-    }
-
-    let instance_name = instance_data
-        .get("name")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("Missing 'name' in Agent API instance data"))?
-        .to_string();
-
-    let instance_id = instance_data
-        .get("instance_id")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| format!("agent-{}-{}", instance_name, Uuid::new_v4()));
-
-    let instance_token = instance_data
-        .get("token")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-
-    // Extract instance_url from API response if available
-    let instance_url = instance_data
-        .get("url")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .or_else(|| {
-            // Fall back to constructing instance_url if API didn't provide one
-            if let Some(token) = &instance_token {
-                Some(format!(
-                    "https://{}.{}/?token={}",
-                    instance_name, params.agent_domain, token
-                ))
-            } else {
-                None
-            }
-        });
-
-    // Use dashboard_url from API response if available, otherwise use instance_url
-    let dashboard_url = instance_data
-        .get("dashboard_url")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .or_else(|| instance_url.clone());
-
-    // Extract service_type from instance_data if present and valid, otherwise use provided value
-    let service_type_from_response = instance_data
-        .get("service_type")
-        .and_then(|v| v.as_str())
-        .filter(|s| is_valid_service_type(s))
-        .map(|s| s.to_string());
-    let final_service_type = service_type_from_response.or(params.service_type.clone());
-
-    let instance = repository
-        .create_instance(CreateInstanceParams {
-            user_id,
-            instance_id: instance_id.clone(),
-            name: instance_name,
-            public_ssh_key: params.ssh_pubkey.clone(),
-            instance_url,
-            instance_token,
-            dashboard_url,
-            agent_api_base_url: params.agent_api_base_url.clone(),
-            service_type: final_service_type,
-            auth_method: "manager_token".to_string(),
-            auth_secret: None,
-            backup_passphrase: None,
-        })
-        .await?;
-
-    // Defense-in-depth: verify the created instance belongs to the requesting user
-    if instance.user_id != user_id {
-        tracing::error!(
-            "Security violation: created instance ownership mismatch: instance_id={}, expected_user_id={}, actual_user_id={}",
-            instance.id,
-            user_id,
-            instance.user_id
-        );
-        return Err(anyhow!("Instance creation failed: ownership mismatch"));
-    }
-
-    repository
-        .bind_api_key_to_instance(params.api_key_id, instance.id)
-        .await?;
-
-    tracing::info!(
-        "Instance saved from lifecycle event: instance_id={}, user_id={}",
-        instance_id,
-        user_id
-    );
-
-    Ok(instance)
-}
-
 /// Save passkey instance data from a lifecycle event to database.
 /// Similar to save_instance_from_event but stores passkey credentials (hashed) in the DB.
 async fn save_passkey_instance_from_event(
@@ -1169,226 +1054,6 @@ impl AgentService for AgentServiceImpl {
         );
 
         Ok(instance)
-    }
-
-    async fn create_instance_from_agent_api_streaming(
-        &self,
-        user_id: UserId,
-        params: super::ports::InstanceCreationParams,
-        max_allowed: u64,
-    ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<serde_json::Value>>> {
-        tracing::info!(
-            "Creating instance from Agent API with streaming: user_id={}",
-            user_id
-        );
-
-        // Pick next manager with available capacity
-        let manager = self.next_available_manager().await?;
-        let manager_url = manager.url.clone();
-
-        let key_name = params
-            .name
-            .as_deref()
-            .map(|n| format!("instance-{}", n))
-            .unwrap_or_else(|| "instance".to_string());
-        let (api_key, plaintext_key) = self
-            .create_unbound_api_key(user_id, key_name, None, None)
-            .await?;
-
-        // Apply default service type if not provided
-        // Defense-in-depth: validate service type early to prevent invalid values reaching Agent API
-        if let Some(ref st) = &params.service_type {
-            if !is_valid_service_type(st) {
-                return Err(anyhow!(
-                    "Invalid service type '{}'. Valid types are: {}",
-                    st,
-                    VALID_SERVICE_TYPES.join(", ")
-                ));
-            }
-        }
-
-        let service_type_for_api = params
-            .service_type
-            .clone()
-            .or_else(|| Some(DEFAULT_SERVICE_TYPE.to_string()));
-
-        let mut rx = match self
-            .call_agent_api_create_streaming(
-                &manager,
-                &plaintext_key,
-                &self.nearai_api_url,
-                AgentApiCreateParams {
-                    ssh_pubkey: params.ssh_pubkey.clone(),
-                    service_type: service_type_for_api.clone(),
-                    cpus: params.cpus.clone(),
-                    mem_limit: params.mem_limit.clone(),
-                    storage_size: params.storage_size.clone(),
-                },
-                AuthMethod::BearerToken(&manager.token),
-            )
-            .await
-        {
-            Ok(rx) => rx,
-            Err(e) => {
-                tracing::error!(
-                    "Failed to start Agent API streaming: user_id={}, error={}. Revoking orphaned API key.",
-                    user_id,
-                    e
-                );
-                if let Err(cleanup_err) = self.repository.revoke_api_key(api_key.id).await {
-                    tracing::warn!(
-                        "Failed to revoke API key after streaming setup failure: user_id={}, api_key_id={}, error={}",
-                        user_id,
-                        api_key.id,
-                        cleanup_err
-                    );
-                }
-                return Err(e);
-            }
-        };
-
-        let (tx, output_rx) = tokio::sync::mpsc::channel(10);
-        let repo = Arc::clone(&self.repository);
-        let http_client = self.http_client.clone();
-        let api_key_id = api_key.id;
-        let ssh_pubkey = params.ssh_pubkey.clone();
-        let manager_clone = manager.clone();
-        let agent_domain = self.agent_domain.clone();
-
-        tokio::spawn(async move {
-            let mut accumulated_data = serde_json::json!({});
-            let mut stream_interrupted = false;
-
-            while let Some(event_result) = rx.recv().await {
-                match event_result {
-                    Ok(event) => {
-                        // Accumulate event fields
-                        if let Some(obj) = event.as_object() {
-                            for (key, value) in obj.iter() {
-                                accumulated_data[key] = value.clone();
-                            }
-                        }
-
-                        // Forward event to client
-                        if tx.send(Ok(event)).await.is_err() {
-                            tracing::warn!(
-                                "Client disconnected: revoking unbound API key: user_id={}",
-                                user_id
-                            );
-                            if let Err(cleanup_err) = repo.revoke_api_key(api_key_id).await {
-                                tracing::warn!(
-                                    "Failed to revoke API key on client disconnect: user_id={}, api_key_id={}, error={}",
-                                    user_id,
-                                    api_key_id,
-                                    cleanup_err
-                                );
-                            }
-                            stream_interrupted = true;
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Stream error: user_id={}, revoking unbound API key: {}",
-                            user_id,
-                            e
-                        );
-                        if let Err(cleanup_err) = repo.revoke_api_key(api_key_id).await {
-                            tracing::warn!(
-                                "Failed to revoke API key on stream error: user_id={}, api_key_id={}, error={}",
-                                user_id,
-                                api_key_id,
-                                cleanup_err
-                            );
-                        }
-                        let _ = tx.send(Err(e)).await;
-                        stream_interrupted = true;
-                        break;
-                    }
-                }
-            }
-
-            // Stream ended naturally (not interrupted): save instance if we have data
-            if !stream_interrupted && accumulated_data.as_object().is_some_and(|o| !o.is_empty()) {
-                // Validate that critical field (instance_name) is present before saving.
-                // Incomplete streams (e.g., Agent API disconnect) may lack essential fields.
-                if let Some(instance_name) = accumulated_data.get("name").and_then(|v| v.as_str()) {
-                    tracing::info!(
-                        "Fetching full instance details: user_id={}, instance_name={}",
-                        user_id,
-                        instance_name
-                    );
-
-                    if let Some(instance_details) = fetch_instance_details_static(
-                        &http_client,
-                        &manager_clone,
-                        instance_name,
-                        None,
-                    )
-                    .await
-                    {
-                        // Merge instance details into accumulated data
-                        if let Some(details_obj) = instance_details.as_object() {
-                            for (key, value) in details_obj.iter() {
-                                // Only add fields that don't already exist (don't override stream data)
-                                if accumulated_data.get(key).is_none() {
-                                    accumulated_data[key] = value.clone();
-                                }
-                            }
-                        }
-                    } else {
-                        tracing::warn!(
-                            "Failed to fetch instance details for enrichment: user_id={}, instance_name={}",
-                            user_id,
-                            instance_name
-                        );
-                    }
-
-                    if let Err(e) = save_instance_from_event(
-                        repo.as_ref(),
-                        user_id,
-                        &accumulated_data,
-                        SaveInstanceParams {
-                            api_key_id,
-                            ssh_pubkey: ssh_pubkey.clone(),
-                            max_allowed,
-                            agent_api_base_url: Some(manager_url.clone()),
-                            service_type: service_type_for_api.clone(),
-                            agent_domain: agent_domain.clone(),
-                        },
-                    )
-                    .await
-                    {
-                        tracing::error!(
-                            "Failed to save instance from accumulated data: user_id={}, error={}",
-                            user_id,
-                            e
-                        );
-                        if let Err(cleanup_err) = repo.revoke_api_key(api_key_id).await {
-                            tracing::warn!(
-                                "Failed to revoke API key on save failure: user_id={}, api_key_id={}, error={}",
-                                user_id,
-                                api_key_id,
-                                cleanup_err
-                            );
-                        }
-                    } else {
-                        tracing::info!(
-                            "Instance saved successfully from accumulated data: user_id={}",
-                            user_id
-                        );
-                    }
-                } else {
-                    tracing::warn!(
-                        "Cannot save instance: stream ended with incomplete data (missing 'name' field). \
-                         This suggests the Agent API stream terminated prematurely. user_id={}",
-                        user_id
-                    );
-                }
-            }
-        });
-
-        Ok(output_rx)
     }
 
     async fn create_passkey_instance_streaming(
@@ -2069,23 +1734,7 @@ impl AgentService for AgentServiceImpl {
         let manager = self.resolve_manager(&instance);
 
         // Resolve bearer token: for passkey instances, login to get a fresh token
-        let bearer_token = if instance.auth_method == "passkey" {
-            let (_, auth_secret, backup_passphrase) = self
-                .repository
-                .get_instance_credentials(instance_id)
-                .await?
-                .ok_or_else(|| anyhow!("Credentials not found for passkey instance"))?;
-
-            let auth_secret =
-                auth_secret.ok_or_else(|| anyhow!("auth_secret missing for passkey instance"))?;
-            let backup_passphrase = backup_passphrase
-                .ok_or_else(|| anyhow!("backup_passphrase missing for passkey instance"))?;
-
-            self.compose_api_passkey_login(manager, &auth_secret, &backup_passphrase)
-                .await?
-        } else {
-            manager.token.clone()
-        };
+        let bearer_token = self.resolve_bearer_token(&instance, manager).await?;
 
         // Call Agent API to terminate the instance. URL-encode instance name to prevent path
         // traversal (it can be derived from instance_name returned by the external Agent API).
@@ -2153,23 +1802,7 @@ impl AgentService for AgentServiceImpl {
         let manager = self.resolve_manager(&instance);
 
         // Resolve bearer token: for passkey instances, login to get a fresh token
-        let bearer_token = if instance.auth_method == "passkey" {
-            let (_, auth_secret, backup_passphrase) = self
-                .repository
-                .get_instance_credentials(instance_id)
-                .await?
-                .ok_or_else(|| anyhow!("Credentials not found for passkey instance"))?;
-
-            let auth_secret =
-                auth_secret.ok_or_else(|| anyhow!("auth_secret missing for passkey instance"))?;
-            let backup_passphrase = backup_passphrase
-                .ok_or_else(|| anyhow!("backup_passphrase missing for passkey instance"))?;
-
-            self.compose_api_passkey_login(manager, &auth_secret, &backup_passphrase)
-                .await?
-        } else {
-            manager.token.clone()
-        };
+        let bearer_token = self.resolve_bearer_token(&instance, manager).await?;
 
         // Call Agent API to restart the instance
         let encoded_name = urlencoding::encode(&instance.name);
@@ -2230,23 +1863,7 @@ impl AgentService for AgentServiceImpl {
         let manager = self.resolve_manager(&instance);
 
         // Resolve bearer token: for passkey instances, login to get a fresh token
-        let bearer_token = if instance.auth_method == "passkey" {
-            let (_, auth_secret, backup_passphrase) = self
-                .repository
-                .get_instance_credentials(instance_id)
-                .await?
-                .ok_or_else(|| anyhow!("Credentials not found for passkey instance"))?;
-
-            let auth_secret =
-                auth_secret.ok_or_else(|| anyhow!("auth_secret missing for passkey instance"))?;
-            let backup_passphrase = backup_passphrase
-                .ok_or_else(|| anyhow!("backup_passphrase missing for passkey instance"))?;
-
-            self.compose_api_passkey_login(manager, &auth_secret, &backup_passphrase)
-                .await?
-        } else {
-            manager.token.clone()
-        };
+        let bearer_token = self.resolve_bearer_token(&instance, manager).await?;
 
         // Fetch latest images from compose-api
         let version_url = format!("{}/version", manager.url);
@@ -2389,23 +2006,7 @@ impl AgentService for AgentServiceImpl {
         let manager = self.resolve_manager(&instance);
 
         // Resolve bearer token: for passkey instances, login to get a fresh token
-        let bearer_token = if instance.auth_method == "passkey" {
-            let (_, auth_secret, backup_passphrase) = self
-                .repository
-                .get_instance_credentials(instance_id)
-                .await?
-                .ok_or_else(|| anyhow!("Credentials not found for passkey instance"))?;
-
-            let auth_secret =
-                auth_secret.ok_or_else(|| anyhow!("auth_secret missing for passkey instance"))?;
-            let backup_passphrase = backup_passphrase
-                .ok_or_else(|| anyhow!("backup_passphrase missing for passkey instance"))?;
-
-            self.compose_api_passkey_login(manager, &auth_secret, &backup_passphrase)
-                .await?
-        } else {
-            manager.token.clone()
-        };
+        let bearer_token = self.resolve_bearer_token(&instance, manager).await?;
 
         // Fetch latest versions from compose-api
         let version_url = format!("{}/version", manager.url);
@@ -2539,23 +2140,7 @@ impl AgentService for AgentServiceImpl {
         let manager = self.resolve_manager(&instance);
 
         // Resolve bearer token: for passkey instances, login to get a fresh token
-        let bearer_token = if instance.auth_method == "passkey" {
-            let (_, auth_secret, backup_passphrase) = self
-                .repository
-                .get_instance_credentials(instance_id)
-                .await?
-                .ok_or_else(|| anyhow!("Credentials not found for passkey instance"))?;
-
-            let auth_secret =
-                auth_secret.ok_or_else(|| anyhow!("auth_secret missing for passkey instance"))?;
-            let backup_passphrase = backup_passphrase
-                .ok_or_else(|| anyhow!("backup_passphrase missing for passkey instance"))?;
-
-            self.compose_api_passkey_login(manager, &auth_secret, &backup_passphrase)
-                .await?
-        } else {
-            manager.token.clone()
-        };
+        let bearer_token = self.resolve_bearer_token(&instance, manager).await?;
 
         // Call Agent API to stop the instance
         let encoded_name = urlencoding::encode(&instance.name);
@@ -2613,23 +2198,7 @@ impl AgentService for AgentServiceImpl {
         let manager = self.resolve_manager(&instance);
 
         // Resolve bearer token: for passkey instances, login to get a fresh token
-        let bearer_token = if instance.auth_method == "passkey" {
-            let (_, auth_secret, backup_passphrase) = self
-                .repository
-                .get_instance_credentials(instance_id)
-                .await?
-                .ok_or_else(|| anyhow!("Credentials not found for passkey instance"))?;
-
-            let auth_secret =
-                auth_secret.ok_or_else(|| anyhow!("auth_secret missing for passkey instance"))?;
-            let backup_passphrase = backup_passphrase
-                .ok_or_else(|| anyhow!("backup_passphrase missing for passkey instance"))?;
-
-            self.compose_api_passkey_login(manager, &auth_secret, &backup_passphrase)
-                .await?
-        } else {
-            manager.token.clone()
-        };
+        let bearer_token = self.resolve_bearer_token(&instance, manager).await?;
 
         // Call Agent API to start the instance
         let encoded_name = urlencoding::encode(&instance.name);
