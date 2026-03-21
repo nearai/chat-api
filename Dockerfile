@@ -1,8 +1,64 @@
-# Stage 1: Copy pre-built frontend (built locally via npm/pnpm)
-FROM scratch AS frontend-builder
+# Stage 1: Frontend build stage
+FROM node:22-slim@sha256:b21fe589dfbe5cc39365d0544b9be3f1f33f55f3c86c87a76ff65a02f8f5848e AS frontend-builder
 
-# Copy the pre-built frontend distribution from local build
-COPY frontend/dist /frontend/dist
+# Set working directory for frontend build
+WORKDIR /frontend
+
+# Bootstrap by installing ca-certificates which will be overridden by the pinned packages.
+# Otherwise the source list cannot be fetched from the debian snapshot.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* /var/log/* /var/cache/ldconfig/aux-cache
+
+# Install pinned apt dependencies
+RUN --mount=type=bind,source=scripts/pinned-packages-frontend-builder.txt,target=/tmp/pinned-packages-frontend-builder.txt,ro \
+    set -e; \
+    # Create a sources.list file pointing to a specific snapshot
+    echo 'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20250411T024939Z bookworm main' > /etc/apt/sources.list && \
+    echo 'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/20250411T024939Z bookworm-security main' >> /etc/apt/sources.list && \
+    echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/10no-check-valid-until && \
+    # Create preferences file to pin all packages
+    rm -rf /etc/apt/sources.list.d/debian.sources && \
+    mkdir -p /etc/apt/preferences.d && \
+    cat /tmp/pinned-packages-frontend-builder.txt | while read line; do \
+        pkg=$(echo $line | cut -d= -f1); \
+        ver=$(echo $line | cut -d= -f2); \
+        if [ ! -z "$pkg" ] && [ ! -z "$ver" ]; then \
+            printf "Package: %s\nPin: version %s\nPin-Priority: 1001\n\n" "$pkg" "$ver" >> /etc/apt/preferences.d/pinned-packages; \
+        fi; \
+    done && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        && rm -rf /var/lib/apt/lists/* /var/log/* /var/cache/ldconfig/aux-cache
+
+# Fetch the latest pinned package list
+RUN dpkg -l | grep '^ii' | awk '{print $2"="$3}' | sort > ./pinned-packages-frontend-builder.txt
+
+# Download the private-chat frontend repository archive for the specific version
+ARG PRIVATE_CHAT_FRONTEND_VERSION
+RUN curl -L -o /tmp/private-chat.tar.gz "https://github.com/nearai/private-chat/archive/${PRIVATE_CHAT_FRONTEND_VERSION}.tar.gz" && \
+    tar -xzf /tmp/private-chat.tar.gz --strip-components=1 && \
+    rm /tmp/private-chat.tar.gz
+
+# Install pnpm with specific version
+RUN npm install -g pnpm@10.10.0
+
+# Install dependencies and build
+RUN pnpm install --frozen-lockfile
+
+# Set the PostHog key and host
+ARG POSTHOG_KEY
+ARG POSTHOG_HOST
+ENV VITE_PUBLIC_POSTHOG_KEY=${POSTHOG_KEY}
+ENV VITE_PUBLIC_POSTHOG_HOST=${POSTHOG_HOST}
+
+# Set git commit hash from version
+ENV VITE_GIT_COMMIT_HASH=${PRIVATE_CHAT_FRONTEND_VERSION}
+
+# Build the frontend
+RUN pnpm run build
 
 
 # Stage 2: Rust build stage  
@@ -102,6 +158,7 @@ COPY --from=backend-builder --chmod=0664 /app/crates/database/src/migrations/sql
 COPY --from=frontend-builder /frontend/dist /app/crates/api/frontend/dist
 
 # Copy the pinned package list from builder stage
+COPY --from=frontend-builder --chmod=0664 /frontend/pinned-packages-frontend-builder.txt /app/pinned-packages-frontend-builder.txt
 COPY --from=backend-builder --chmod=0664 /app/pinned-packages-backend-builder.txt /app/pinned-packages-backend-builder.txt
 
 # Change ownership to app user

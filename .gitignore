@@ -14,13 +14,9 @@ config/examples/production.yaml
 !CLAUDE.md
 !**/README.md
 
-# Frontend build artifacts (for local development) - but keep built dist/ for deployment
-frontend/node_modules/
-frontend/src/
-frontend/package.json
-frontend/pnpm-lock.yaml
-crates/api/frontend/node_modules/
-crates/api/frontend/src/
+# Frontend build artifacts (for local development)
+frontend/
+crates/api/frontend/
 
 # Reproducible build artifacts
 .GIT_REV
