@@ -697,6 +697,23 @@ impl AgentRepository for PostgresAgentRepository {
         Ok(())
     }
 
+    async fn get_api_key_total_spend(&self, api_key_id: Uuid) -> anyhow::Result<i64> {
+        let client = self.pool.get().await?;
+
+        let row = client
+            .query_one(
+                r#"
+                SELECT COALESCE(SUM(COALESCE(cost_nano_usd, 0)), 0)::bigint
+                FROM user_usage_event
+                WHERE api_key_id = $1
+                "#,
+                &[&api_key_id],
+            )
+            .await?;
+
+        Ok(row.get(0))
+    }
+
     async fn get_instance_usage(
         &self,
         instance_id: Uuid,

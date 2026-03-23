@@ -2111,6 +2111,22 @@ impl AgentService for AgentServiceImpl {
             }
         }
 
+        if let Some(spend_limit) = api_key_info.spend_limit {
+            let total_spend = self
+                .repository
+                .get_api_key_total_spend(api_key_info.id)
+                .await?;
+            if total_spend >= spend_limit {
+                tracing::warn!(
+                    "API key spend limit exceeded: api_key_id={}, total_spend={}, spend_limit={}",
+                    api_key_info.id,
+                    total_spend,
+                    spend_limit
+                );
+                return Err(anyhow!("API key spend limit exceeded"));
+            }
+        }
+
         // Update last used
         self.repository
             .update_api_key_last_used(api_key_info.id)

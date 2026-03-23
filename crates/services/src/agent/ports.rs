@@ -247,6 +247,9 @@ pub trait AgentRepository: Send + Sync {
 
     async fn update_api_key_last_used(&self, api_key_id: Uuid) -> anyhow::Result<()>;
 
+    /// Total recorded spend for a specific API key in nano-dollars.
+    async fn get_api_key_total_spend(&self, api_key_id: Uuid) -> anyhow::Result<i64>;
+
     // Usage logging
     async fn get_instance_usage(
         &self,

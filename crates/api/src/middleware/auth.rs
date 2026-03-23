@@ -458,6 +458,37 @@ pub async fn dual_auth_middleware(
             );
         }
 
+        if let Some(spend_limit) = api_key_info.spend_limit {
+            let total_spend = state
+                .agent_auth_state
+                .agent_repository
+                .get_api_key_total_spend(api_key_info.id)
+                .await
+                .map_err(|e| {
+                    tracing::error!(
+                        "Failed to load API key spend for api_key_id={}: {}",
+                        api_key_info.id,
+                        e
+                    );
+                    ApiError::internal_server_error("Failed to authenticate API key")
+                        .into_response()
+                })?;
+
+            if total_spend >= spend_limit {
+                tracing::warn!(
+                    api_key_id = %api_key_info.id,
+                    total_spend,
+                    spend_limit,
+                    "Agent API key spend limit exceeded"
+                );
+                return Err(ApiError::forbidden("API key spend limit exceeded")
+                    .with_details(
+                        "This API key has reached its configured spend limit and can no longer be used.",
+                    )
+                    .into_response());
+            }
+        }
+
         let _ = state
             .agent_auth_state
             .agent_repository

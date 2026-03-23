@@ -1,8 +1,74 @@
 mod common;
 
-use common::{create_test_server_and_db, mock_login, TestServerConfig};
+use common::{create_test_server_and_db, mock_login, set_subscription_plans, TestServerConfig};
+use serde_json::json;
 use services::user::ports::UserRepository;
-use services::user_usage::UserUsageRepository;
+use services::user_usage::{RecordUsageParams, UserUsageRepository, METRIC_KEY_LLM_TOKENS};
+use services::UserId;
+use uuid::Uuid;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+async fn create_bound_agent_api_key(
+    server: &axum_test::TestServer,
+    db: &database::Database,
+    user_email: &str,
+    spend_limit: Option<i64>,
+) -> (UserId, Uuid, Uuid, String) {
+    let token = mock_login(server, user_email).await;
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .expect("db")
+        .expect("user");
+
+    let instance_id = Uuid::new_v4();
+    let client = db.pool().get().await.expect("db client");
+    client
+        .execute(
+            "INSERT INTO agent_instances (id, user_id, instance_id, name, instance_url, instance_token, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())",
+            &[
+                &instance_id,
+                &user.id,
+                &format!("inst_test_{}", Uuid::new_v4().simple()),
+                &"usage-test-instance",
+                &"http://test-instance.local",
+                &"tok_test_instance_secret",
+            ],
+        )
+        .await
+        .expect("insert instance");
+
+    let api_key_response = server
+        .post(&format!("/v1/agents/instances/{instance_id}/keys"))
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .json(&json!({
+            "name": "usage-test-key",
+            "spend_limit": spend_limit,
+            "expires_at": null
+        }))
+        .await;
+
+    assert_eq!(api_key_response.status_code(), 201);
+    let api_key_body: serde_json::Value = api_key_response.json();
+    let api_key_id = Uuid::parse_str(
+        api_key_body["id"]
+            .as_str()
+            .expect("response should include api key id"),
+    )
+    .expect("valid uuid");
+    let api_key = api_key_body["api_key"]
+        .as_str()
+        .expect("response should include plaintext api key")
+        .to_string();
+
+    (user.id, instance_id, api_key_id, api_key)
+}
 
 /// Test that the dual auth middleware provides both user and API key extensions
 /// This verifies that both AuthenticatedUser and AuthenticatedApiKey can be extracted
@@ -182,4 +248,150 @@ async fn test_auth_middleware_handles_both_methods() {
         401,
         "Invalid token should return 401"
     );
+}
+
+#[tokio::test]
+async fn test_agent_api_key_spend_limit_blocks_chat_completions_once_limit_reached() {
+    let mock_upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "gpt-test",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Hello"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        })))
+        .mount(&mock_upstream)
+        .await;
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        proxy_base_url: Some(mock_upstream.uri()),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({ "free": { "providers": {}, "monthly_credits": { "max": 1_000_000_000 } } }),
+    )
+    .await;
+
+    let email = format!("spend-limit-blocked-{}@example.com", Uuid::new_v4());
+    let (user_id, instance_id, api_key_id, api_key) =
+        create_bound_agent_api_key(&server, &db, &email, Some(1_000)).await;
+
+    db.user_usage_repository()
+        .record_usage(RecordUsageParams {
+            user_id,
+            metric_key: METRIC_KEY_LLM_TOKENS.to_string(),
+            quantity: 10,
+            cost_nano_usd: Some(1_000),
+            model_id: Some("gpt-test".to_string()),
+            instance_id: Some(instance_id),
+            api_key_id: Some(api_key_id),
+            details: Some(json!({ "request_type": "chat_completion" })),
+        })
+        .await
+        .expect("record usage at spend limit");
+
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {api_key}")).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-test",
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .await;
+
+    assert_eq!(response.status_code(), 403);
+    let body: serde_json::Value = response.json();
+    assert_eq!(
+        body.get("message").and_then(|v| v.as_str()),
+        Some("API key spend limit exceeded")
+    );
+
+    let received = mock_upstream
+        .received_requests()
+        .await
+        .expect("received requests");
+    assert_eq!(
+        received.len(),
+        0,
+        "Request should be blocked before it reaches the upstream LLM"
+    );
+}
+
+#[tokio::test]
+async fn test_agent_api_key_spend_limit_allows_chat_completions_below_limit() {
+    let mock_upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "gpt-test",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Hello"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        })))
+        .expect(1)
+        .mount(&mock_upstream)
+        .await;
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        proxy_base_url: Some(mock_upstream.uri()),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({ "free": { "providers": {}, "monthly_credits": { "max": 1_000_000_000 } } }),
+    )
+    .await;
+
+    let email = format!("spend-limit-allowed-{}@example.com", Uuid::new_v4());
+    let (user_id, instance_id, api_key_id, api_key) =
+        create_bound_agent_api_key(&server, &db, &email, Some(2_000)).await;
+
+    db.user_usage_repository()
+        .record_usage(RecordUsageParams {
+            user_id,
+            metric_key: METRIC_KEY_LLM_TOKENS.to_string(),
+            quantity: 10,
+            cost_nano_usd: Some(1_000),
+            model_id: Some("gpt-test".to_string()),
+            instance_id: Some(instance_id),
+            api_key_id: Some(api_key_id),
+            details: Some(json!({ "request_type": "chat_completion" })),
+        })
+        .await
+        .expect("record usage below spend limit");
+
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {api_key}")).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-test",
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .await;
+
+    assert_eq!(response.status_code(), 200);
 }
