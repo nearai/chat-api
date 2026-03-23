@@ -2639,7 +2639,7 @@ async fn test_admin_delete_stripe_canceled_too_recent_not_allowed() {
 
     // Insert Stripe subscription with 'canceled' status but period_end is recent (within 18 days)
     let stripe_sub_id = format!("sub_test_{}", uuid::Uuid::new_v4());
-    let period_end = chrono::Utc::now() + chrono::Duration::days(5); // Only 5 days from now
+    let period_end = chrono::Utc::now() - chrono::Duration::days(10);
 
     let client = db.pool().get().await.expect("get pool client");
     client
@@ -2662,7 +2662,7 @@ async fn test_admin_delete_stripe_canceled_too_recent_not_allowed() {
         .await
         .expect("insert canceled subscription");
 
-    // Try to delete - should fail because period hasn't ended long enough
+    // Try to delete - should fail because period ended less than 18 days ago
     let response = server
         .delete(&format!("/v1/admin/subscriptions/{}", stripe_sub_id))
         .add_header(
@@ -2682,6 +2682,86 @@ async fn test_admin_delete_stripe_canceled_too_recent_not_allowed() {
         body["message"].as_str().unwrap_or("").contains("Must wait"),
         "Error message should mention waiting period"
     );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_admin_delete_stripe_canceled_after_retention_allowed() {
+    ensure_stripe_env_for_gating();
+
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": { "stripe": { "price_id": "price_test_basic" } },
+                "agent_instances": { "max": 1 },
+                "monthly_credits": { "max": 1000000 }
+            }
+        }),
+    )
+    .await;
+
+    let admin_email = "test_admin_delete_canceled_allowed@admin.org";
+    let user_email = "test_admin_delete_canceled_allowed_user@example.com";
+
+    let admin_token = mock_login(&server, admin_email).await;
+    let _user_token = mock_login(&server, user_email).await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .expect("get user")
+        .expect("user exists");
+
+    let stripe_sub_id = format!("sub_test_{}", uuid::Uuid::new_v4());
+    let period_end = chrono::Utc::now() - chrono::Duration::days(25);
+
+    let client = db.pool().get().await.expect("get pool client");
+    client
+        .execute(
+            "INSERT INTO subscriptions (
+                subscription_id, user_id, provider, customer_id, price_id, status,
+                current_period_end, cancel_at_period_end
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            &[
+                &stripe_sub_id,
+                &user.id,
+                &"stripe",
+                &"cus_test",
+                &"price_test_basic",
+                &"canceled",
+                &period_end,
+                &true,
+            ],
+        )
+        .await
+        .expect("insert canceled subscription");
+
+    let response = server
+        .delete(&format!("/v1/admin/subscriptions/{}", stripe_sub_id))
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        204,
+        "Deleting expired canceled Stripe subscription should return 204"
+    );
+
+    let row = client
+        .query_opt(
+            "SELECT subscription_id FROM subscriptions WHERE subscription_id = $1",
+            &[&stripe_sub_id],
+        )
+        .await
+        .expect("query");
+    assert!(row.is_none(), "Stripe subscription should be deleted");
 }
 
 #[tokio::test]

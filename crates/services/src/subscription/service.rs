@@ -2299,14 +2299,10 @@ impl SubscriptionService for SubscriptionServiceImpl {
             + Duration::days(CANCELED_SUBSCRIPTION_DELETE_AFTER_PERIOD_END_DAYS);
 
         if now < earliest_deletion_time {
-            let days_remaining = (earliest_deletion_time - now).num_days();
-            return Err(SubscriptionError::SubscriptionDeletionNotAllowed(
-                format!(
-                    "Subscription period ended at {}. Must wait {} more days before deletion (retention + grace period).",
-                    subscription.current_period_end.format("%Y-%m-%d"),
-                    days_remaining
-                )
-            ));
+            return Err(SubscriptionError::SubscriptionDeletionNotAllowed(format!(
+                "Subscription cannot be deleted until {}. (retention + grace period).",
+                earliest_deletion_time.to_rfc3339()
+            )));
         }
 
         // Delete the subscription

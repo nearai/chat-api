@@ -870,7 +870,7 @@ pub async fn admin_list_subscriptions(
 /// Admin endpoint: Delete a subscription by ID
 ///
 /// Allows admin to delete a subscription record.
-/// - For Stripe subscriptions: only allowed if status is 'canceled' (or equivalent inactive)
+/// - For Stripe subscriptions: only allowed if status is exactly 'canceled'
 ///   and current_period_end has passed by 18 days (15 days retention + 3 days grace period).
 /// - For admin-created subscriptions (subscription_id starts with 'admin_sub_'): always allowed.
 #[utoipa::path(
@@ -894,25 +894,24 @@ pub async fn admin_delete_subscription(
     State(app_state): State<AppState>,
     Path(subscription_id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    tracing::info!(
-        "Admin: Deleting subscription - subscription_id={}",
-        subscription_id
-    );
-
     app_state
         .subscription_service
         .admin_delete_subscription(subscription_id)
         .await
-        .map_err(|e| {
-            tracing::error!("Failed to delete subscription: {}", e);
-            match e {
-                services::subscription::ports::SubscriptionError::SubscriptionNotFound => {
-                    ApiError::not_found("Subscription not found")
-                }
-                services::subscription::ports::SubscriptionError::SubscriptionDeletionNotAllowed(msg) => {
-                    ApiError::bad_request(&msg)
-                }
-                _ => ApiError::internal_server_error("Failed to delete subscription"),
+        .map_err(|e| match e {
+            services::subscription::ports::SubscriptionError::SubscriptionNotFound => {
+                tracing::warn!("Subscription not found during deletion");
+                ApiError::not_found("Subscription not found")
+            }
+            services::subscription::ports::SubscriptionError::SubscriptionDeletionNotAllowed(
+                msg,
+            ) => {
+                tracing::warn!("Subscription deletion not allowed: {}", msg);
+                ApiError::bad_request(&msg)
+            }
+            _ => {
+                tracing::error!("Failed to delete subscription: {}", e);
+                ApiError::internal_server_error("Failed to delete subscription")
             }
         })?;
 

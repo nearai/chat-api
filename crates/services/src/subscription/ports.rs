@@ -536,7 +536,7 @@ pub trait SubscriptionService: Send + Sync {
     ) -> Result<(), SubscriptionError>;
 
     /// Admin only: Delete a subscription record.
-    /// - For Stripe subscriptions: only allowed if status is 'canceled' (or equivalent inactive)
+    /// - For Stripe subscriptions: only allowed if status is exactly 'canceled'
     ///   and current_period_end has passed by RETENTION_DAYS + GRACE_PERIOD (18 days).
     /// - For admin-created subscriptions (subscription_id starts with 'admin_sub_'): always allowed.
     async fn admin_delete_subscription(
