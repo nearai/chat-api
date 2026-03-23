@@ -181,6 +181,10 @@ impl AgentServiceImpl {
         }
 
         if let Some(spend_limit) = api_key_info.spend_limit {
+            // `spend_limit` is currently a lifetime cap based on all recorded usage for the key.
+            // This is best-effort enforcement: concurrent requests can both pass this preflight
+            // check before their usage is recorded. A hard cap would need atomic reservation or
+            // enforcement at usage-recording time.
             let total_spend = self
                 .repository
                 .get_api_key_total_spend(api_key_info.id)

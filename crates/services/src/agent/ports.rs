@@ -78,6 +78,7 @@ pub struct AgentApiKey {
     pub instance_id: Option<Uuid>,
     pub user_id: UserId,
     pub name: String,
+    /// Optional lifetime spend cap in nano-dollars for this key.
     pub spend_limit: Option<i64>,
     pub expires_at: Option<DateTime<Utc>>,
     pub last_used_at: Option<DateTime<Utc>>,
@@ -438,6 +439,8 @@ pub trait AgentService: Send + Sync {
     async fn revoke_api_key(&self, api_key_id: Uuid, user_id: UserId) -> anyhow::Result<()>;
 
     // API key validation and usage
+    // Centralized service entry point used by HTTP auth middleware so key validation logic
+    // (active/expiry/spend limit) lives in one place.
     async fn authenticate_api_key(
         &self,
         api_key: &str,
