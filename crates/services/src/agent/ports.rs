@@ -438,6 +438,11 @@ pub trait AgentService: Send + Sync {
     async fn revoke_api_key(&self, api_key_id: Uuid, user_id: UserId) -> anyhow::Result<()>;
 
     // API key validation and usage
+    async fn authenticate_api_key(
+        &self,
+        api_key: &str,
+    ) -> anyhow::Result<(AgentInstance, AgentApiKey)>;
+
     async fn validate_and_use_api_key(&self, api_key: &str) -> anyhow::Result<AgentApiKey>;
 
     // Usage tracking and balance

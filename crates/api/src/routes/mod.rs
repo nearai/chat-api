@@ -162,7 +162,6 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         auth_state: auth_state.clone(),
         agent_auth_state: crate::middleware::AgentAuthState {
             agent_service: app_state.agent_service.clone(),
-            agent_repository: app_state.agent_repository.clone(),
         },
     };
 

@@ -30,7 +30,6 @@ pub struct AuthenticatedApiKey {
 #[derive(Clone)]
 pub struct AgentAuthState {
     pub agent_service: Arc<dyn services::agent::AgentService>,
-    pub agent_repository: Arc<dyn services::agent::ports::AgentRepository>,
 }
 
 /// Combined state for dual auth (session OR agent API key).
@@ -409,13 +408,6 @@ fn extract_agent_api_key_from_request(request: &Request) -> Result<String, ApiEr
     Ok(token.to_string())
 }
 
-/// Hash an API key for lookup
-fn hash_api_key(key: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(key.as_bytes());
-    format!("{:x}", hasher.finalize())
-}
-
 /// Dual auth middleware: accepts either session token OR agent API key.
 /// Agents use Bearer sk-agent-xxxxx; users use Bearer sess_xxxxx.
 /// Used by chat completions, image generation/edit, and responses endpoints.
@@ -430,70 +422,31 @@ pub async fn dual_auth_middleware(
         // Agent API key auth
         let api_key =
             extract_agent_api_key_from_request(&request).map_err(|e| e.into_response())?;
-        let key_hash = hash_api_key(&api_key);
-
         let (instance, api_key_info) = state
             .agent_auth_state
-            .agent_repository
-            .get_instance_by_api_key_hash(&key_hash)
+            .agent_service
+            .authenticate_api_key(&api_key)
             .await
             .map_err(|e| {
-                tracing::error!("Failed to get API key from repository: {}", e);
-                ApiError::internal_server_error("Failed to authenticate API key").into_response()
-            })?
-            .ok_or_else(|| {
-                tracing::warn!("Agent API key not found or inactive");
-                ApiError::invalid_token().into_response()
+                let message = e.to_string();
+                match message.as_str() {
+                    "Invalid API key" | "Invalid API key format" | "API key is not active"
+                    | "API key has expired" => ApiError::invalid_token().into_response(),
+                    "API key spend limit exceeded" => ApiError::forbidden(message)
+                        .with_details(
+                            "This API key has reached its configured spend limit and can no longer be used.",
+                        )
+                        .into_response(),
+                    "Instance not properly configured" => {
+                        ApiError::internal_server_error(message).into_response()
+                    }
+                    _ => {
+                        tracing::error!("Failed to authenticate API key: {}", e);
+                        ApiError::internal_server_error("Failed to authenticate API key")
+                            .into_response()
+                    }
+                }
             })?;
-
-        if let Some(expires_at) = api_key_info.expires_at {
-            if expires_at < Utc::now() {
-                return Err(ApiError::invalid_token().into_response());
-            }
-        }
-
-        if instance.instance_url.is_none() || instance.instance_token.is_none() {
-            return Err(
-                ApiError::internal_server_error("Instance not properly configured").into_response(),
-            );
-        }
-
-        if let Some(spend_limit) = api_key_info.spend_limit {
-            let total_spend = state
-                .agent_auth_state
-                .agent_repository
-                .get_api_key_total_spend(api_key_info.id)
-                .await
-                .map_err(|e| {
-                    tracing::error!(
-                        "Failed to load API key spend for api_key_id={}: {}",
-                        api_key_info.id,
-                        e
-                    );
-                    ApiError::internal_server_error("Failed to authenticate API key")
-                        .into_response()
-                })?;
-
-            if total_spend >= spend_limit {
-                tracing::warn!(
-                    api_key_id = %api_key_info.id,
-                    total_spend,
-                    spend_limit,
-                    "Agent API key spend limit exceeded"
-                );
-                return Err(ApiError::forbidden("API key spend limit exceeded")
-                    .with_details(
-                        "This API key has reached its configured spend limit and can no longer be used.",
-                    )
-                    .into_response());
-            }
-        }
-
-        let _ = state
-            .agent_auth_state
-            .agent_repository
-            .update_api_key_last_used(api_key_info.id)
-            .await;
 
         let authenticated_api_key = AuthenticatedApiKey {
             api_key_info: api_key_info.clone(),

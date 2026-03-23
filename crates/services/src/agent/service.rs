@@ -167,6 +167,42 @@ impl AgentServiceImpl {
         key.starts_with("sk-agent-") && key.len() == 41
     }
 
+    async fn ensure_api_key_can_be_used(&self, api_key_info: &AgentApiKey) -> anyhow::Result<()> {
+        if !api_key_info.is_active {
+            tracing::warn!("API key is not active: api_key_id={}", api_key_info.id);
+            return Err(anyhow!("API key is not active"));
+        }
+
+        if let Some(expires_at) = api_key_info.expires_at {
+            if expires_at < Utc::now() {
+                tracing::warn!("API key has expired: api_key_id={}", api_key_info.id);
+                return Err(anyhow!("API key has expired"));
+            }
+        }
+
+        if let Some(spend_limit) = api_key_info.spend_limit {
+            let total_spend = self
+                .repository
+                .get_api_key_total_spend(api_key_info.id)
+                .await?;
+            if total_spend >= spend_limit {
+                tracing::warn!(
+                    "API key spend limit exceeded: api_key_id={}, total_spend={}, spend_limit={}",
+                    api_key_info.id,
+                    total_spend,
+                    spend_limit
+                );
+                return Err(anyhow!("API key spend limit exceeded"));
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn mark_api_key_used(&self, api_key_id: Uuid) -> anyhow::Result<()> {
+        self.repository.update_api_key_last_used(api_key_id).await
+    }
+
     /// Call Agent API to create an instance on a specific manager
     ///
     /// # Security Note
@@ -2097,40 +2133,10 @@ impl AgentService for AgentServiceImpl {
                 anyhow!("Invalid API key")
             })?;
 
-        // Check if active
-        if !api_key_info.is_active {
-            tracing::warn!("API key is not active: api_key_id={}", api_key_info.id);
-            return Err(anyhow!("API key is not active"));
-        }
-
-        // Check expiration
-        if let Some(expires_at) = api_key_info.expires_at {
-            if expires_at < Utc::now() {
-                tracing::warn!("API key has expired: api_key_id={}", api_key_info.id);
-                return Err(anyhow!("API key has expired"));
-            }
-        }
-
-        if let Some(spend_limit) = api_key_info.spend_limit {
-            let total_spend = self
-                .repository
-                .get_api_key_total_spend(api_key_info.id)
-                .await?;
-            if total_spend >= spend_limit {
-                tracing::warn!(
-                    "API key spend limit exceeded: api_key_id={}, total_spend={}, spend_limit={}",
-                    api_key_info.id,
-                    total_spend,
-                    spend_limit
-                );
-                return Err(anyhow!("API key spend limit exceeded"));
-            }
-        }
+        self.ensure_api_key_can_be_used(&api_key_info).await?;
 
         // Update last used
-        self.repository
-            .update_api_key_last_used(api_key_info.id)
-            .await?;
+        self.mark_api_key_used(api_key_info.id).await?;
 
         tracing::debug!(
             "API key validated successfully: api_key_id={}",
@@ -2138,6 +2144,48 @@ impl AgentService for AgentServiceImpl {
         );
 
         Ok(api_key_info)
+    }
+
+    async fn authenticate_api_key(
+        &self,
+        api_key: &str,
+    ) -> anyhow::Result<(AgentInstance, AgentApiKey)> {
+        if !Self::validate_api_key_format(api_key) {
+            tracing::warn!("Invalid API key format");
+            return Err(anyhow!("Invalid API key format"));
+        }
+
+        let key_hash = Self::hash_api_key(api_key);
+
+        let (instance, api_key_info) = self
+            .repository
+            .get_instance_by_api_key_hash(&key_hash)
+            .await?
+            .ok_or_else(|| {
+                tracing::warn!("API key not found or inactive");
+                anyhow!("Invalid API key")
+            })?;
+
+        self.ensure_api_key_can_be_used(&api_key_info).await?;
+
+        if instance.instance_url.is_none() || instance.instance_token.is_none() {
+            tracing::warn!(
+                "Instance not properly configured for authenticated API key: instance_id={}, api_key_id={}",
+                instance.id,
+                api_key_info.id
+            );
+            return Err(anyhow!("Instance not properly configured"));
+        }
+
+        self.mark_api_key_used(api_key_info.id).await?;
+
+        tracing::debug!(
+            "API key authenticated successfully: api_key_id={}, instance_id={}",
+            api_key_info.id,
+            instance.id
+        );
+
+        Ok((instance, api_key_info))
     }
 
     async fn get_instance_usage(
