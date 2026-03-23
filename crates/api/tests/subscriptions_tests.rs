@@ -2679,8 +2679,11 @@ async fn test_admin_delete_stripe_canceled_too_recent_not_allowed() {
 
     let body: serde_json::Value = response.json();
     assert!(
-        body["message"].as_str().unwrap_or("").contains("Must wait"),
-        "Error message should mention waiting period"
+        body["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("cannot be deleted until"),
+        "Error message should mention the earliest deletion time"
     );
 }
 
