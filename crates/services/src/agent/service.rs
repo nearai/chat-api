@@ -308,26 +308,18 @@ impl AgentServiceImpl {
             .ok_or_else(|| anyhow!("Missing 'session_token' in compose-api /auth/login response"))
     }
 
-    /// Resolve the bearer token to use for compose-api calls based on instance auth method.
-    /// - For passkey instances: fetch credentials, call /auth/login, return session token
-    /// - For manager_token instances: return the manager's bearer token
+    /// Resolve the bearer token to use for compose-api calls.
+    /// First tries to fetch user's passkey credentials; if not found, falls back to manager token.
     async fn resolve_bearer_token(
         &self,
         instance: &AgentInstance,
         manager: &AgentManager,
     ) -> anyhow::Result<String> {
-        if instance.auth_method == "passkey" {
-            let (_, auth_secret, backup_passphrase) = self
-                .repository
-                .get_instance_credentials(instance.id)
-                .await?
-                .ok_or_else(|| anyhow!("Credentials not found for passkey instance"))?;
-
-            let auth_secret =
-                auth_secret.ok_or_else(|| anyhow!("auth_secret missing for passkey instance"))?;
-            let backup_passphrase = backup_passphrase
-                .ok_or_else(|| anyhow!("backup_passphrase missing for passkey instance"))?;
-
+        if let Ok(Some((auth_secret, backup_passphrase))) = self
+            .repository
+            .get_user_passkey_credentials(instance.user_id)
+            .await
+        {
             self.compose_api_passkey_login(manager, &auth_secret, &backup_passphrase)
                 .await
         } else {
@@ -353,6 +345,7 @@ impl AgentServiceImpl {
             .http_client
             .post(&url)
             .header("Content-Type", "application/json")
+            .bearer_auth(&manager.token)
             .json(&request_body)
             .timeout(std::time::Duration::from_secs(30))
             .send()
@@ -378,6 +371,80 @@ impl AgentServiceImpl {
             .ok_or_else(|| {
                 anyhow!("Missing 'session_token' in compose-api /auth/register response")
             })
+    }
+
+    /// Call compose-api /auth/proxy-session to set up gateway cookie
+    async fn compose_api_proxy_session(
+        &self,
+        manager: &AgentManager,
+        session_token: &str,
+    ) -> anyhow::Result<Option<String>> {
+        // Extract domain from manager URL and construct proxy-session URL
+        // Manager URL: https://claws.sare.dev/api/crabshack
+        // Proxy-session URL: https://api.claws.sare.dev/api/auth/proxy-session
+        let url = if let Ok(parsed) = url::Url::parse(&manager.url) {
+            if let Some(domain) = parsed.domain() {
+                format!("https://api.{}/api/auth/proxy-session", domain)
+            } else {
+                return Err(anyhow!("Invalid manager URL: {}", manager.url));
+            }
+        } else {
+            return Err(anyhow!("Failed to parse manager URL: {}", manager.url));
+        };
+
+        tracing::info!(
+            "Calling compose-api /auth/proxy-session: url={}, session_token_len={}",
+            url,
+            session_token.len()
+        );
+
+        let response = self
+            .http_client
+            .post(&url)
+            .bearer_auth(session_token)
+            .timeout(std::time::Duration::from_secs(30))
+            .send()
+            .await
+            .map_err(|e| anyhow!("Failed to call compose-api /auth/proxy-session: {}", e))?;
+
+        let status = response.status();
+        let headers = response.headers().clone();
+
+        // Extract Set-Cookie header to forward to browser
+        let set_cookie = headers
+            .get("set-cookie")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        // Capture response body for logging
+        let response_text = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "(unable to read response body)".to_string());
+
+        tracing::info!(
+            "compose-api /auth/proxy-session response: status={}, headers={:?}, body={}",
+            status,
+            headers,
+            response_text
+        );
+
+        if !status.is_success() {
+            tracing::warn!(
+                "compose-api /auth/proxy-session failed: status={}, response={}",
+                status,
+                response_text
+            );
+            return Err(anyhow!(
+                "compose-api /auth/proxy-session error: {} - {}",
+                status,
+                response_text
+            ));
+        }
+
+        tracing::info!("✓ Gateway proxy session established successfully");
+
+        Ok(set_cookie)
     }
 
     /// Generate a new API key in format: sk-agent-{uuid}
@@ -738,8 +805,6 @@ async fn save_passkey_instance_from_event(
     user_id: UserId,
     instance_data: &serde_json::Value,
     params: SaveInstanceParams,
-    auth_secret: String,
-    backup_passphrase: String,
 ) -> anyhow::Result<AgentInstance> {
     // TOCTOU mitigation: Re-check instance limit before creating
     let (_instances, total_count) = repository.list_user_instances(user_id, 1, 0).await?;
@@ -822,12 +887,10 @@ async fn save_passkey_instance_from_event(
     );
 
     tracing::debug!(
-        "Saving passkey instance to database: user_id={}, instance_id={}, name={}, auth_method=passkey, has_auth_secret={}, has_backup_passphrase={}, service_type={:?}, agent_api_base_url={:?}",
+        "Saving passkey instance to database: user_id={}, instance_id={}, name={}, service_type={:?}, agent_api_base_url={:?}",
         user_id,
         instance_id,
         instance_name,
-        !auth_secret.is_empty(),
-        !backup_passphrase.is_empty(),
         final_service_type,
         params.agent_api_base_url
     );
@@ -843,9 +906,6 @@ async fn save_passkey_instance_from_event(
             dashboard_url,
             agent_api_base_url: params.agent_api_base_url.clone(),
             service_type: final_service_type,
-            auth_method: "passkey".to_string(),
-            auth_secret: Some(auth_secret),
-            backup_passphrase: Some(backup_passphrase),
         })
         .await
         .map_err(|e| {
@@ -1026,9 +1086,6 @@ impl AgentService for AgentServiceImpl {
                 dashboard_url,
                 agent_api_base_url: Some(manager.url.clone()),
                 service_type: final_service_type,
-                auth_method: "manager_token".to_string(),
-                auth_secret: None,
-                backup_passphrase: None,
             })
             .await?;
 
@@ -1071,26 +1128,21 @@ impl AgentService for AgentServiceImpl {
         let manager = self.next_available_manager().await?;
         let manager_url = manager.url.clone();
 
-        // Generate random credentials for this instance
-        let auth_secret = Self::generate_random_credential(32);
-        let backup_passphrase = Self::generate_random_credential(32);
+        // Get user's passkey credentials (created on first login)
+        let (auth_secret, backup_passphrase) = self
+            .repository
+            .get_user_passkey_credentials(user_id)
+            .await?
+            .ok_or_else(|| {
+                anyhow!(
+                    "User passkey credentials not found. User must log in first to create credentials."
+                )
+            })?;
 
-        tracing::debug!(
-            "Generated passkey credentials for instance: user_id={}, auth_secret_len={}, backup_passphrase_len={}",
-            user_id,
-            auth_secret.len(),
-            backup_passphrase.len()
-        );
-
-        // Register passkey credentials to get a session token
+        // Get session token for this instance creation
         let session_token = self
-            .compose_api_passkey_register(&manager, &auth_secret, &backup_passphrase)
+            .compose_api_passkey_login(&manager, &auth_secret, &backup_passphrase)
             .await?;
-
-        tracing::debug!(
-            "Passkey credentials registered with compose-api: user_id={}",
-            user_id
-        );
 
         let key_name = params
             .name
@@ -1159,8 +1211,6 @@ impl AgentService for AgentServiceImpl {
         let ssh_pubkey = params.ssh_pubkey.clone();
         let manager_clone = manager.clone();
         let agent_domain = self.agent_domain.clone();
-        let auth_secret_for_storage = auth_secret.clone();
-        let backup_passphrase_for_storage = backup_passphrase.clone();
         let session_token_for_details = session_token.clone();
 
         tokio::spawn(async move {
@@ -1264,7 +1314,7 @@ impl AgentService for AgentServiceImpl {
                         );
                     }
 
-                    // Save passkey instance with hashed credentials
+                    // Save passkey instance
                     if let Err(e) = save_passkey_instance_from_event(
                         repo.as_ref(),
                         user_id,
@@ -1277,8 +1327,6 @@ impl AgentService for AgentServiceImpl {
                             service_type: service_type_for_api.clone(),
                             agent_domain: agent_domain.clone(),
                         },
-                        auth_secret_for_storage.clone(),
-                        backup_passphrase_for_storage.clone(),
                     )
                     .await
                     {
@@ -1357,9 +1405,6 @@ impl AgentService for AgentServiceImpl {
                 dashboard_url: None,
                 agent_api_base_url: None,
                 service_type: None,
-                auth_method: "manager_token".to_string(),
-                auth_secret: None,
-                backup_passphrase: None,
             })
             .await?;
 
@@ -1577,37 +1622,25 @@ impl AgentService for AgentServiceImpl {
                 let mgr_url = inst.agent_api_base_url.as_deref().unwrap_or(fallback_url);
                 let manager = self.managers.iter().find(|m| m.url == mgr_url).cloned();
                 let name = inst.name.clone();
-                let auth_method = inst.auth_method.clone();
-                let instance_id = inst.id;
+                let user_id = inst.user_id;
                 let repo = Arc::clone(&repo);
                 let http_client = self.http_client.clone();
                 async move {
                     if let Some(mgr) = manager {
-                        // For passkey instances, try to get session token; otherwise use manager token (fallback)
-                        let bearer_token = if auth_method == "passkey" {
-                            if let Ok(Some((_auth_method, auth_secret, backup_passphrase))) =
-                                repo.get_instance_credentials(instance_id).await
-                            {
-                                // Try to get session token from /auth/login
-                                if let (Some(auth_secret_val), Some(backup_passphrase_val)) =
-                                    (auth_secret, backup_passphrase)
-                                {
-                                    AgentServiceImpl::compose_api_passkey_login_static(
-                                        &http_client,
-                                        &mgr,
-                                        &auth_secret_val,
-                                        &backup_passphrase_val,
-                                    )
-                                    .await
-                                    .ok()
-                                } else {
-                                    None // Fall back to manager token
-                                }
-                            } else {
-                                None // Fall back to manager token
-                            }
+                        // Try to get user's passkey credentials; fall back to manager token if not found
+                        let bearer_token = if let Ok(Some((auth_secret, backup_passphrase))) =
+                            repo.get_user_passkey_credentials(user_id).await
+                        {
+                            AgentServiceImpl::compose_api_passkey_login_static(
+                                &http_client,
+                                &mgr,
+                                &auth_secret,
+                                &backup_passphrase,
+                            )
+                            .await
+                            .ok()
                         } else {
-                            None // manager_token instances: use manager.token (None = use fallback)
+                            None // Fall back to manager token
                         };
 
                         (
@@ -2399,6 +2432,78 @@ impl AgentService for AgentServiceImpl {
         Ok(result)
     }
 
+    async fn setup_gateway_session_for_user(
+        &self,
+        user_id: UserId,
+    ) -> anyhow::Result<Option<String>> {
+        // Get a manager (prefer first one)
+        let manager = self
+            .managers
+            .first()
+            .ok_or_else(|| anyhow!("No agent managers configured"))?;
+
+        // Try to get existing user passkey credentials
+        let (auth_secret, backup_passphrase) =
+            match self.repository.get_user_passkey_credentials(user_id).await {
+                Ok(Some((secret, passphrase))) => (secret, passphrase),
+                Ok(None) => {
+                    // First login - create passkey credentials for this user
+                    tracing::debug!(
+                        "Creating passkey credentials for user on first login: user_id={}",
+                        user_id
+                    );
+                    let auth_secret = Self::generate_random_credential(32);
+                    let backup_passphrase = Self::generate_random_credential(32);
+
+                    // Register with compose-api
+                    self.compose_api_passkey_register(manager, &auth_secret, &backup_passphrase)
+                        .await?;
+
+                    tracing::debug!(
+                        "Passkey credentials registered with compose-api: user_id={}",
+                        user_id
+                    );
+
+                    // Store in database
+                    self.repository
+                        .upsert_user_passkey_credentials(user_id, &auth_secret, &backup_passphrase)
+                        .await?;
+
+                    tracing::info!(
+                        "User passkey credentials created and stored: user_id={}",
+                        user_id
+                    );
+
+                    (auth_secret, backup_passphrase)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to fetch user passkey credentials: user_id={}, error={}",
+                        user_id,
+                        e
+                    );
+                    return Err(e);
+                }
+            };
+
+        // Get session token from compose-api
+        let session_token = self
+            .compose_api_passkey_login(manager, &auth_secret, &backup_passphrase)
+            .await?;
+
+        // Set up gateway cookie and get Set-Cookie header
+        let set_cookie = self
+            .compose_api_proxy_session(manager, &session_token)
+            .await?;
+
+        tracing::debug!(
+            "Gateway proxy session set up for user on login: user_id={}",
+            user_id
+        );
+
+        Ok(set_cookie)
+    }
+
     async fn create_api_key(
         &self,
         instance_id: Uuid,
@@ -2842,6 +2947,8 @@ mod tests {
         let mut repo = MockAgentRepository::new();
         repo.expect_count_instances_by_manager()
             .returning(move |_| Ok(count));
+        repo.expect_get_user_passkey_credentials()
+            .returning(|_| Ok(None));
         repo
     }
 
@@ -2943,7 +3050,6 @@ mod tests {
             agent_api_base_url: Some("https://mgr2.example.com".to_string()),
             service_type: None,
             status: "active".to_string(),
-            auth_method: "manager_token".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -2974,7 +3080,6 @@ mod tests {
             agent_api_base_url: Some("https://unknown.example.com".to_string()),
             service_type: None,
             status: "active".to_string(),
-            auth_method: "manager_token".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -3004,7 +3109,6 @@ mod tests {
             agent_api_base_url: None,
             service_type: None,
             status: "active".to_string(),
-            auth_method: "manager_token".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -3157,7 +3261,6 @@ mod tests {
                 agent_api_base_url: manager_url.map(|s| s.to_string()),
                 service_type: None,
                 status: "active".to_string(),
-                auth_method: "manager_token".to_string(),
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             }
@@ -3574,7 +3677,6 @@ mod tests {
                 agent_api_base_url: Some(manager_url.to_string()),
                 service_type: None,
                 status: "stopped".to_string(),
-                auth_method: "manager_token".to_string(),
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             }
@@ -3599,6 +3701,8 @@ mod tests {
             repo.expect_get_instance()
                 .with(eq(inst_id))
                 .returning(move |_| Ok(Some(instance.clone())));
+            repo.expect_get_user_passkey_credentials()
+                .returning(|_| Ok(None));
             repo.expect_update_instance_status()
                 .with(eq(inst_id), eq("active"))
                 .times(1)
@@ -3640,6 +3744,8 @@ mod tests {
             repo.expect_get_instance()
                 .with(eq(inst_id))
                 .returning(move |_| Ok(Some(instance.clone())));
+            repo.expect_get_user_passkey_credentials()
+                .returning(|_| Ok(None));
             repo.expect_update_instance_status()
                 .times(0)
                 .returning(|_, _| Ok(()));
@@ -3679,6 +3785,8 @@ mod tests {
             repo.expect_get_instance()
                 .with(eq(inst_id))
                 .returning(move |_| Ok(Some(instance.clone())));
+            repo.expect_get_user_passkey_credentials()
+                .returning(|_| Ok(None));
             repo.expect_update_instance_status()
                 .with(eq(inst_id), eq("stopped"))
                 .times(1)
@@ -3716,6 +3824,8 @@ mod tests {
             repo.expect_get_instance()
                 .with(eq(inst_id))
                 .returning(move |_| Ok(Some(instance.clone())));
+            repo.expect_get_user_passkey_credentials()
+                .returning(|_| Ok(None));
             repo.expect_update_instance_status()
                 .times(0)
                 .returning(|_, _| Ok(()));
@@ -3755,6 +3865,8 @@ mod tests {
             repo.expect_get_instance()
                 .with(eq(inst_id))
                 .returning(move |_| Ok(Some(instance.clone())));
+            repo.expect_get_user_passkey_credentials()
+                .returning(|_| Ok(None));
             repo.expect_update_instance_status()
                 .with(eq(inst_id), eq("active"))
                 .times(1)
@@ -3796,6 +3908,8 @@ mod tests {
             repo.expect_get_instance()
                 .with(eq(inst_id))
                 .returning(move |_| Ok(Some(instance.clone())));
+            repo.expect_get_user_passkey_credentials()
+                .returning(|_| Ok(None));
             repo.expect_update_instance_status()
                 .times(0)
                 .returning(|_, _| Ok(()));

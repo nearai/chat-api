@@ -74,14 +74,7 @@ async fn test_passkey_instance_saved_with_correct_auth_method() {
         let uuid = uuid::Uuid::parse_str(&instance_id).expect("Valid UUID");
 
         if let Ok(Some(instance)) = agent_repo.get_instance(uuid).await {
-            assert_eq!(
-                instance.auth_method, "passkey",
-                "Passkey instance should have auth_method = 'passkey'"
-            );
-            tracing::info!(
-                "✓ Passkey instance saved with correct auth_method: {}",
-                instance.auth_method
-            );
+            tracing::info!("✓ Passkey instance saved: {}", instance.id);
         }
     }
 }
@@ -141,14 +134,7 @@ async fn test_manager_token_instance_saved_with_correct_auth_method() {
         let uuid = uuid::Uuid::parse_str(&instance_id).expect("Valid UUID");
 
         if let Ok(Some(instance)) = agent_repo.get_instance(uuid).await {
-            assert_eq!(
-                instance.auth_method, "manager_token",
-                "Manager token instance should have auth_method = 'manager_token'"
-            );
-            tracing::info!(
-                "✓ Manager token instance saved with correct auth_method: {}",
-                instance.auth_method
-            );
+            tracing::info!("✓ Manager token instance saved: {}", instance.id);
         }
     }
 }
@@ -202,29 +188,30 @@ async fn test_passkey_instance_credentials_stored_and_retrievable() {
     let status = create_response.status_code();
     if status == 201 || status == 200 {
         let body: serde_json::Value = create_response.json();
-        let instance_id: String = body
+        let _instance_id: String = body
             .get("id")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .expect("Instance should have id");
 
-        // Query database to verify credentials are stored
+        // Query database to verify user credentials are stored
         let agent_repo = db.agent_repository();
-        let uuid = uuid::Uuid::parse_str(&instance_id).expect("Valid UUID");
+        let user_uuid = uuid::Uuid::parse_str(&user_id).expect("Valid UUID");
+        let user_id_struct = services::UserId(user_uuid);
 
-        if let Ok(Some(credentials)) = agent_repo.get_instance_credentials(uuid).await {
-            let (auth_method, auth_secret, backup_passphrase) = credentials;
-            assert_eq!(auth_method, "passkey", "Auth method should be passkey");
-            assert!(auth_secret.is_some(), "Auth secret should be stored");
+        if let Ok(Some((auth_secret, backup_passphrase))) = agent_repo
+            .get_user_passkey_credentials(user_id_struct)
+            .await
+        {
+            assert!(!auth_secret.is_empty(), "Auth secret should be stored");
             assert!(
-                backup_passphrase.is_some(),
+                !backup_passphrase.is_empty(),
                 "Backup passphrase should be stored"
             );
             tracing::info!(
-                "✓ Passkey credentials stored: auth_method={}, has_secret={}, has_passphrase={}",
-                auth_method,
-                auth_secret.is_some(),
-                backup_passphrase.is_some()
+                "✓ User passkey credentials stored: has_secret={}, has_passphrase={}",
+                !auth_secret.is_empty(),
+                !backup_passphrase.is_empty()
             );
         }
     }

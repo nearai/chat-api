@@ -2,7 +2,7 @@ use crate::{error::ApiError, middleware::AuthenticatedUser, state::AppState};
 use axum::extract::Query;
 use axum::{
     extract::{Extension, State},
-    http::StatusCode,
+    http::{header::LOCATION, HeaderMap, StatusCode},
     response::Redirect,
     routing::{get, post},
     Json, Router,
@@ -209,7 +209,7 @@ pub async fn google_login(
 pub async fn oauth_callback(
     State(app_state): State<AppState>,
     Query(params): Query<OAuthCallbackQuery>,
-) -> Result<Redirect, ApiError> {
+) -> Result<(StatusCode, HeaderMap), ApiError> {
     tracing::info!(
         "OAuth callback received - code length: {}, state: {}",
         params.code.len(),
@@ -312,7 +312,17 @@ pub async fn oauth_callback(
 
     tracing::debug!("Final callback URL: {}", callback_url);
 
-    Ok(Redirect::temporary(&callback_url))
+    // Build response with redirect location
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        LOCATION,
+        callback_url.parse().map_err(|_| {
+            tracing::error!("Failed to parse callback URL as header value");
+            ApiError::internal_server_error("Invalid callback URL")
+        })?,
+    );
+
+    Ok((StatusCode::FOUND, headers))
 }
 
 /// Handler for initiating Github OAuth flow
@@ -446,7 +456,7 @@ pub async fn logout(
 pub async fn mock_login(
     State(app_state): State<AppState>,
     axum::Json(request): axum::Json<MockLoginRequest>,
-) -> Result<axum::Json<crate::models::AuthResponse>, ApiError> {
+) -> Result<(HeaderMap, axum::Json<crate::models::AuthResponse>), ApiError> {
     tracing::info!("Mock login requested for email: {}", request.email);
 
     // Check if user already exists

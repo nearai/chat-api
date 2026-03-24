@@ -5,9 +5,6 @@ use uuid::Uuid;
 
 use crate::UserId;
 
-/// Instance credentials: (auth_method, auth_secret, backup_passphrase)
-pub type InstanceCredentials = (String, Option<String>, Option<String>);
-
 /// Result of sync_all_instance_statuses.
 ///
 /// Counter semantics:
@@ -69,8 +66,6 @@ pub struct AgentInstance {
     pub service_type: Option<String>,
     /// DB-tracked status: active, stopped, deleted, provisioning, error
     pub status: String,
-    /// Authentication method: "manager_token" or "passkey"
-    pub auth_method: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -151,12 +146,6 @@ pub struct CreateInstanceParams {
     pub agent_api_base_url: Option<String>,
     /// Service type selected at creation time
     pub service_type: Option<String>,
-    /// Authentication method: "manager_token" or "passkey"
-    pub auth_method: String,
-    /// auth_secret for passkey instances (plaintext in DB, protected by encryption at rest)
-    pub auth_secret: Option<String>,
-    /// backup_passphrase for passkey instances (plaintext in DB, protected by encryption at rest)
-    pub backup_passphrase: Option<String>,
 }
 
 /// Parameters for creating an instance via Agent API
@@ -191,12 +180,19 @@ pub trait AgentRepository: Send + Sync {
         key_hash: &str,
     ) -> anyhow::Result<Option<(AgentInstance, AgentApiKey)>>;
 
-    /// Get auth method and credentials for an instance (passkey instances only)
-    /// Returns (auth_method, auth_secret, backup_passphrase)
-    async fn get_instance_credentials(
+    /// Get user's passkey credentials (auth_secret, backup_passphrase)
+    async fn get_user_passkey_credentials(
         &self,
-        instance_id: Uuid,
-    ) -> anyhow::Result<Option<InstanceCredentials>>;
+        user_id: UserId,
+    ) -> anyhow::Result<Option<(String, String)>>;
+
+    /// Store or update user's passkey credentials
+    async fn upsert_user_passkey_credentials(
+        &self,
+        user_id: UserId,
+        auth_secret: &str,
+        backup_passphrase: &str,
+    ) -> anyhow::Result<()>;
 
     async fn list_user_instances(
         &self,
@@ -406,6 +402,16 @@ pub trait AgentService: Send + Sync {
     /// Fetches live status via GET /instances per manager, maps "running" -> "active", others -> "stopped".
     /// Skips deleted instances; only updates when status differs.
     async fn sync_all_instance_statuses(&self) -> anyhow::Result<SyncStatusResult>;
+
+    // Gateway session management
+    /// Setup gateway session for a user.
+    /// Creates user passkey credentials on first login, then sets the gateway cookie via /auth/proxy-session.
+    /// Returns the Set-Cookie header value to be forwarded to the browser, or None if not available.
+    /// Safe to call multiple times (idempotent on subsequent logins).
+    async fn setup_gateway_session_for_user(
+        &self,
+        user_id: UserId,
+    ) -> anyhow::Result<Option<String>>;
 
     // API key management
     /// Create an API key for a specific instance - returns (api_key_info, plaintext_key)
