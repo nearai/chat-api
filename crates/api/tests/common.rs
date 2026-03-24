@@ -152,6 +152,7 @@ pub async fn create_test_server_and_db(
         config.agent.instance_default_mem_limit.clone(),
         config.agent.instance_default_storage_size.clone(),
         config.agent.channel_relay_url.clone(),
+        config.infrastructure.non_tee_infra,
     ));
 
     // Initialize subscription service for testing

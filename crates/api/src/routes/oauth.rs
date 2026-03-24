@@ -582,10 +582,13 @@ pub async fn mock_login(
         session.session_id
     );
 
-    Ok(axum::Json(crate::models::AuthResponse {
-        token,
-        expires_at: session.expires_at.to_rfc3339(),
-    }))
+    Ok((
+        HeaderMap::new(),
+        axum::Json(crate::models::AuthResponse {
+            token,
+            expires_at: session.expires_at.to_rfc3339(),
+        }),
+    ))
 }
 
 /// Handler for NEAR wallet authentication

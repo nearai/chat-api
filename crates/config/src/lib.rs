@@ -356,9 +356,9 @@ pub struct AgentConfig {
     pub nearai_api_url: String,
     /// Domain where agent instances are accessible (e.g., claws.sare.dev)
     /// Used to construct instance_url and dashboard_url as {instance_name}.{agent_domain}
-    /// Configured via AGENT_DOMAIN environment variable.
-    #[serde(default = "default_agent_domain")]
-    pub agent_domain: String,
+    /// Configured via AGENT_DOMAIN environment variable. Only used in non-TEE mode.
+    #[serde(default)]
+    pub agent_domain: Option<String>,
     /// Default CPU allocation for new instances (configurable via INSTANCE_DEFAULT_CPUS)
     #[serde(default = "default_instance_cpus")]
     pub instance_default_cpus: String,
@@ -387,36 +387,82 @@ fn split_csv(value: &str) -> Vec<String> {
 
 impl Default for AgentConfig {
     fn default() -> Self {
-        // Comma-separated lists: AGENT_MANAGER_URLS=url1,url2  AGENT_MANAGER_TOKENS=tok1,tok2
-        let managers = if let Ok(urls_raw) = std::env::var("AGENT_MANAGER_URLS") {
-            let urls = split_csv(&urls_raw);
-            if urls.is_empty() {
-                // AGENT_MANAGER_URLS is set but empty/blank — fall through to legacy
+        // Check if non-TEE infrastructure mode is enabled
+        let non_tee_infra = std::env::var("NON_TEE_INFRA")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(false);
+
+        // Load managers based on infrastructure mode
+        // Non-TEE mode: use AGENT_MANAGER_URLS (configured for non-TEE infra like claws.sare.dev)
+        // TEE mode: use AGENT_MANAGER_URLS_TEE (or fall back to AGENT_API_BASE_URL for cloud API)
+        let managers = if non_tee_infra {
+            // Non-TEE mode: use AGENT_MANAGER_URLS
+            if let Ok(urls_raw) = std::env::var("AGENT_MANAGER_URLS") {
+                let urls = split_csv(&urls_raw);
+                if urls.is_empty() {
+                    let url = std::env::var("AGENT_API_BASE_URL")
+                        .unwrap_or_else(|_| "https://api.agent.near.ai".to_string());
+                    let token = std::env::var("AGENT_API_TOKEN").unwrap_or_default();
+                    vec![AgentManager { url, token }]
+                } else {
+                    let tokens_raw = std::env::var("AGENT_MANAGER_TOKENS").unwrap_or_default();
+                    let tokens = split_csv(&tokens_raw);
+                    if urls.len() != tokens.len() {
+                        panic!(
+                            "AGENT_MANAGER_URLS has {} entries but AGENT_MANAGER_TOKENS has {} — they must match",
+                            urls.len(),
+                            tokens.len()
+                        );
+                    }
+                    let mut mgrs: Vec<AgentManager> = urls
+                        .into_iter()
+                        .zip(tokens)
+                        .map(|(url, token)| AgentManager { url, token })
+                        .collect();
+                    mgrs.sort_by(|a, b| a.url.cmp(&b.url));
+                    mgrs
+                }
+            } else {
                 let url = std::env::var("AGENT_API_BASE_URL")
                     .unwrap_or_else(|_| "https://api.agent.near.ai".to_string());
                 let token = std::env::var("AGENT_API_TOKEN").unwrap_or_default();
                 vec![AgentManager { url, token }]
-            } else {
-                let tokens_raw = std::env::var("AGENT_MANAGER_TOKENS").unwrap_or_default();
-                let tokens = split_csv(&tokens_raw);
-                if urls.len() != tokens.len() {
-                    panic!(
-                        "AGENT_MANAGER_URLS has {} entries but AGENT_MANAGER_TOKENS has {} — they must match",
-                        urls.len(),
-                        tokens.len()
-                    );
-                }
-                let mut mgrs: Vec<AgentManager> = urls
-                    .into_iter()
-                    .zip(tokens)
-                    .map(|(url, token)| AgentManager { url, token })
-                    .collect();
-                // Sort by URL for deterministic ordering across restarts
-                mgrs.sort_by(|a, b| a.url.cmp(&b.url));
-                mgrs
             }
         } else {
-            // Legacy: single AGENT_API_BASE_URL + AGENT_API_TOKEN
+            // TEE mode: use AGENT_MANAGER_URLS_TEE (separate TEE-specific configuration)
+            if let Ok(urls_raw) = std::env::var("AGENT_MANAGER_URLS_TEE") {
+                let urls = split_csv(&urls_raw);
+                if !urls.is_empty() {
+                    let tokens_raw = std::env::var("AGENT_MANAGER_TOKENS_TEE").unwrap_or_default();
+                    let tokens = split_csv(&tokens_raw);
+                    if urls.len() != tokens.len() {
+                        panic!(
+                            "AGENT_MANAGER_URLS_TEE has {} entries but AGENT_MANAGER_TOKENS_TEE has {} — they must match",
+                            urls.len(),
+                            tokens.len()
+                        );
+                    }
+                    let mut mgrs: Vec<AgentManager> = urls
+                        .into_iter()
+                        .zip(tokens)
+                        .map(|(url, token)| AgentManager { url, token })
+                        .collect();
+                    mgrs.sort_by(|a, b| a.url.cmp(&b.url));
+                    return Self {
+                        managers: mgrs,
+                        nearai_api_url: std::env::var("BACKEND_URL")
+                            .map(|url| url.trim_end_matches('/').to_string() + "/v1")
+                            .unwrap_or_else(|_| "https://private.near.ai/v1".to_string()),
+                        agent_domain: None,
+                        instance_default_cpus: default_instance_cpus(),
+                        instance_default_mem_limit: default_instance_mem_limit(),
+                        instance_default_storage_size: default_instance_storage_size(),
+                        channel_relay_url: std::env::var("CHANNEL_RELAY_URL").ok(),
+                    };
+                }
+            }
+            // Fall back to AGENT_API_BASE_URL for cloud API (TEE default)
             let url = std::env::var("AGENT_API_BASE_URL")
                 .unwrap_or_else(|_| "https://api.agent.near.ai".to_string());
             let token = std::env::var("AGENT_API_TOKEN").unwrap_or_default();
@@ -428,11 +474,38 @@ impl Default for AgentConfig {
             nearai_api_url: std::env::var("BACKEND_URL")
                 .map(|url| url.trim_end_matches('/').to_string() + "/v1")
                 .unwrap_or_else(|_| "https://private.near.ai/v1".to_string()),
-            agent_domain: default_agent_domain(),
+            // Only set agent_domain in non-TEE mode
+            agent_domain: if non_tee_infra {
+                Some(default_agent_domain())
+            } else {
+                None
+            },
+            // Set instance resource defaults for both modes
+            // Agent API requires these fields in both TEE and non-TEE modes
             instance_default_cpus: default_instance_cpus(),
             instance_default_mem_limit: default_instance_mem_limit(),
             instance_default_storage_size: default_instance_storage_size(),
             channel_relay_url: std::env::var("CHANNEL_RELAY_URL").ok(),
+        }
+    }
+}
+
+/// Infrastructure mode configuration (TEE vs non-TEE)
+#[derive(Debug, Clone, Deserialize)]
+pub struct InfrastructureConfig {
+    /// Use non-TEE infrastructure (false = TEE/cloud, true = non-TEE)
+    /// When true, uses agent_domain for URL construction and instance resource configuration
+    /// When false, expects Agent API to provide URLs (traditional TEE mode)
+    pub non_tee_infra: bool,
+}
+
+impl Default for InfrastructureConfig {
+    fn default() -> Self {
+        Self {
+            non_tee_infra: std::env::var("NON_TEE_INFRA")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(false),
         }
     }
 }
@@ -491,6 +564,8 @@ pub struct Config {
     pub telemetry: TelemetryConfig,
     pub logging: LoggingConfig,
     pub agent: AgentConfig,
+    /// Infrastructure mode (TEE vs non-TEE)
+    pub infrastructure: InfrastructureConfig,
 }
 
 impl Config {
@@ -508,6 +583,7 @@ impl Config {
             telemetry: TelemetryConfig::default(),
             logging: LoggingConfig::default(),
             agent: AgentConfig::default(),
+            infrastructure: InfrastructureConfig::default(),
         }
     }
 }
@@ -622,6 +698,8 @@ mod tests {
     #[test]
     #[serial]
     fn test_agent_config_csv_multiple_managers() {
+        // CSV managers are used in non-TEE mode
+        std::env::set_var("NON_TEE_INFRA", "true");
         std::env::set_var(
             "AGENT_MANAGER_URLS",
             "https://mgr2.example.com,https://mgr1.example.com",
@@ -634,6 +712,7 @@ mod tests {
         assert_eq!(config.managers[0].token, "tok1");
         assert_eq!(config.managers[1].url, "https://mgr2.example.com");
         assert_eq!(config.managers[1].token, "tok2");
+        std::env::remove_var("NON_TEE_INFRA");
         std::env::remove_var("AGENT_MANAGER_URLS");
         std::env::remove_var("AGENT_MANAGER_TOKENS");
     }
@@ -641,6 +720,8 @@ mod tests {
     #[test]
     #[serial]
     fn test_agent_config_csv_overrides_legacy() {
+        // CSV managers are used in non-TEE mode
+        std::env::set_var("NON_TEE_INFRA", "true");
         std::env::set_var("AGENT_MANAGER_URLS", "https://csv.example.com");
         std::env::set_var("AGENT_MANAGER_TOKENS", "csv-tok");
         std::env::set_var("AGENT_API_BASE_URL", "https://legacy.example.com");
@@ -650,6 +731,7 @@ mod tests {
         assert_eq!(config.managers.len(), 1);
         assert_eq!(config.managers[0].url, "https://csv.example.com");
         assert_eq!(config.managers[0].token, "csv-tok");
+        std::env::remove_var("NON_TEE_INFRA");
         std::env::remove_var("AGENT_MANAGER_URLS");
         std::env::remove_var("AGENT_MANAGER_TOKENS");
         std::env::remove_var("AGENT_API_BASE_URL");
@@ -660,17 +742,25 @@ mod tests {
     #[serial]
     #[should_panic(expected = "AGENT_MANAGER_URLS has 2 entries but AGENT_MANAGER_TOKENS has 1")]
     fn test_agent_config_csv_mismatched_lengths_panics() {
+        // CSV managers are validated in non-TEE mode
+        std::env::set_var("NON_TEE_INFRA", "true");
         std::env::set_var(
             "AGENT_MANAGER_URLS",
             "https://mgr1.example.com,https://mgr2.example.com",
         );
         std::env::set_var("AGENT_MANAGER_TOKENS", "tok1");
         let _ = AgentConfig::default();
+        // Cleanup happens after panic
+        std::env::remove_var("NON_TEE_INFRA");
+        std::env::remove_var("AGENT_MANAGER_URLS");
+        std::env::remove_var("AGENT_MANAGER_TOKENS");
     }
 
     #[test]
     #[serial]
     fn test_agent_config_csv_whitespace_and_trailing_commas() {
+        // CSV managers are used in non-TEE mode
+        std::env::set_var("NON_TEE_INFRA", "true");
         std::env::set_var(
             "AGENT_MANAGER_URLS",
             " https://mgr1.example.com , https://mgr2.example.com , ",
@@ -682,6 +772,7 @@ mod tests {
         assert_eq!(config.managers[0].token, "tok1");
         assert_eq!(config.managers[1].url, "https://mgr2.example.com");
         assert_eq!(config.managers[1].token, "tok2");
+        std::env::remove_var("NON_TEE_INFRA");
         std::env::remove_var("AGENT_MANAGER_URLS");
         std::env::remove_var("AGENT_MANAGER_TOKENS");
     }
@@ -697,5 +788,249 @@ mod tests {
         assert!(debug_output.contains("https://test.com"));
         assert!(!debug_output.contains("super-secret"));
         assert!(debug_output.contains("REDACTED"));
+    }
+
+    // ============================================================================
+    // Infrastructure Configuration Tests (TEE vs non-TEE mode)
+    // ============================================================================
+
+    #[test]
+    #[serial]
+    fn test_infrastructure_config_default_is_tee_mode() {
+        std::env::remove_var("NON_TEE_INFRA");
+        let config = InfrastructureConfig::default();
+        assert!(!config.non_tee_infra, "Default should be TEE mode (false)");
+    }
+
+    #[test]
+    #[serial]
+    fn test_infrastructure_config_non_tee_enabled() {
+        std::env::set_var("NON_TEE_INFRA", "true");
+        let config = InfrastructureConfig::default();
+        assert!(
+            config.non_tee_infra,
+            "NON_TEE_INFRA=true should enable non-TEE mode"
+        );
+        std::env::remove_var("NON_TEE_INFRA");
+    }
+
+    #[test]
+    #[serial]
+    fn test_infrastructure_config_non_tee_disabled() {
+        std::env::set_var("NON_TEE_INFRA", "false");
+        let config = InfrastructureConfig::default();
+        assert!(
+            !config.non_tee_infra,
+            "NON_TEE_INFRA=false should disable non-TEE mode (TEE mode)"
+        );
+        std::env::remove_var("NON_TEE_INFRA");
+    }
+
+    #[test]
+    #[serial]
+    fn test_infrastructure_config_invalid_value_defaults_to_tee() {
+        std::env::set_var("NON_TEE_INFRA", "invalid");
+        let config = InfrastructureConfig::default();
+        assert!(
+            !config.non_tee_infra,
+            "Invalid NON_TEE_INFRA value should default to TEE mode"
+        );
+        std::env::remove_var("NON_TEE_INFRA");
+    }
+
+    // ============================================================================
+    // Agent Config Tests with Infrastructure Mode Switching
+    // ============================================================================
+
+    #[test]
+    #[serial]
+    fn test_agent_config_tee_mode_leaves_fields_empty() {
+        // TEE mode: NON_TEE_INFRA=false or unset
+        std::env::remove_var("NON_TEE_INFRA");
+        std::env::remove_var("AGENT_DOMAIN");
+        std::env::remove_var("INSTANCE_DEFAULT_CPUS");
+        std::env::remove_var("INSTANCE_DEFAULT_MEM_LIMIT");
+        std::env::remove_var("INSTANCE_DEFAULT_STORAGE_SIZE");
+
+        let config = AgentConfig::default();
+
+        // In TEE mode, agent_domain should be None
+        assert_eq!(
+            config.agent_domain, None,
+            "TEE mode should have None agent_domain"
+        );
+        // Resource defaults are provided in both modes (Agent API requires them)
+        assert_eq!(
+            config.instance_default_cpus, "1",
+            "TEE mode should have default instance_default_cpus"
+        );
+        assert_eq!(
+            config.instance_default_mem_limit, "4g",
+            "TEE mode should have default instance_default_mem_limit"
+        );
+        assert_eq!(
+            config.instance_default_storage_size, "10G",
+            "TEE mode should have default instance_default_storage_size"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_agent_config_non_tee_mode_sets_fields() {
+        // Clean up any leftover env vars from other tests
+        std::env::remove_var("AGENT_MANAGER_URLS");
+        std::env::remove_var("AGENT_MANAGER_TOKENS");
+        std::env::remove_var("AGENT_MANAGER_URLS_TEE");
+        std::env::remove_var("AGENT_MANAGER_TOKENS_TEE");
+
+        // Non-TEE mode: NON_TEE_INFRA=true
+        std::env::set_var("NON_TEE_INFRA", "true");
+        std::env::set_var("AGENT_DOMAIN", "test.sare.dev");
+        std::env::set_var("INSTANCE_DEFAULT_CPUS", "2");
+        std::env::set_var("INSTANCE_DEFAULT_MEM_LIMIT", "8g");
+        std::env::set_var("INSTANCE_DEFAULT_STORAGE_SIZE", "20G");
+
+        let config = AgentConfig::default();
+
+        // In non-TEE mode, these should be set from env
+        assert_eq!(
+            config.agent_domain,
+            Some("test.sare.dev".to_string()),
+            "Non-TEE mode should read agent_domain from env"
+        );
+        assert_eq!(
+            config.instance_default_cpus, "2",
+            "Non-TEE mode should read instance_default_cpus from env"
+        );
+        assert_eq!(
+            config.instance_default_mem_limit, "8g",
+            "Non-TEE mode should read instance_default_mem_limit from env"
+        );
+        assert_eq!(
+            config.instance_default_storage_size, "20G",
+            "Non-TEE mode should read instance_default_storage_size from env"
+        );
+
+        std::env::remove_var("NON_TEE_INFRA");
+        std::env::remove_var("AGENT_DOMAIN");
+        std::env::remove_var("INSTANCE_DEFAULT_CPUS");
+        std::env::remove_var("INSTANCE_DEFAULT_MEM_LIMIT");
+        std::env::remove_var("INSTANCE_DEFAULT_STORAGE_SIZE");
+        std::env::remove_var("AGENT_MANAGER_URLS");
+        std::env::remove_var("AGENT_MANAGER_TOKENS");
+        std::env::remove_var("AGENT_MANAGER_URLS_TEE");
+        std::env::remove_var("AGENT_MANAGER_TOKENS_TEE");
+    }
+
+    #[test]
+    #[serial]
+    fn test_agent_config_non_tee_mode_uses_defaults_when_env_not_set() {
+        // Clean up any leftover env vars from other tests
+        std::env::remove_var("AGENT_MANAGER_URLS");
+        std::env::remove_var("AGENT_MANAGER_TOKENS");
+        std::env::remove_var("AGENT_MANAGER_URLS_TEE");
+        std::env::remove_var("AGENT_MANAGER_TOKENS_TEE");
+
+        // Non-TEE mode with defaults
+        std::env::set_var("NON_TEE_INFRA", "true");
+        std::env::remove_var("AGENT_DOMAIN");
+        std::env::remove_var("INSTANCE_DEFAULT_CPUS");
+        std::env::remove_var("INSTANCE_DEFAULT_MEM_LIMIT");
+        std::env::remove_var("INSTANCE_DEFAULT_STORAGE_SIZE");
+
+        let config = AgentConfig::default();
+
+        // Should use hardcoded defaults from default_* functions
+        assert_eq!(
+            config.agent_domain,
+            Some("localhost".to_string()),
+            "Non-TEE mode without AGENT_DOMAIN should default to localhost"
+        );
+        assert_eq!(
+            config.instance_default_cpus, "1",
+            "Non-TEE mode should default to 1 CPU"
+        );
+        assert_eq!(
+            config.instance_default_mem_limit, "4g",
+            "Non-TEE mode should default to 4g memory"
+        );
+        assert_eq!(
+            config.instance_default_storage_size, "10G",
+            "Non-TEE mode should default to 10G storage"
+        );
+
+        std::env::remove_var("NON_TEE_INFRA");
+        std::env::remove_var("AGENT_MANAGER_URLS");
+        std::env::remove_var("AGENT_MANAGER_TOKENS");
+        std::env::remove_var("AGENT_MANAGER_URLS_TEE");
+        std::env::remove_var("AGENT_MANAGER_TOKENS_TEE");
+    }
+
+    #[test]
+    #[serial]
+    fn test_agent_config_switching_modes() {
+        // Clean up any leftover env vars from other tests
+        std::env::remove_var("AGENT_MANAGER_URLS");
+        std::env::remove_var("AGENT_MANAGER_TOKENS");
+
+        // Test switching from TEE to non-TEE
+        std::env::set_var("NON_TEE_INFRA", "false");
+        std::env::set_var("AGENT_DOMAIN", "ignored.dev");
+        let tee_config = AgentConfig::default();
+        assert_eq!(
+            tee_config.agent_domain, None,
+            "TEE mode should ignore AGENT_DOMAIN"
+        );
+
+        // Switch to non-TEE
+        std::env::set_var("NON_TEE_INFRA", "true");
+        let non_tee_config = AgentConfig::default();
+        assert_eq!(
+            non_tee_config.agent_domain,
+            Some("ignored.dev".to_string()),
+            "Non-TEE mode should read AGENT_DOMAIN"
+        );
+
+        std::env::remove_var("NON_TEE_INFRA");
+        std::env::remove_var("AGENT_DOMAIN");
+        std::env::remove_var("AGENT_MANAGER_URLS");
+        std::env::remove_var("AGENT_MANAGER_TOKENS");
+    }
+
+    #[test]
+    #[serial]
+    fn test_config_struct_includes_infrastructure() {
+        std::env::remove_var("NON_TEE_INFRA");
+        let config = Config::from_env();
+
+        // Verify infrastructure config is part of Config struct
+        assert!(
+            !config.infrastructure.non_tee_infra,
+            "Config should include infrastructure with default TEE mode"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_config_struct_non_tee_mode() {
+        std::env::set_var("NON_TEE_INFRA", "true");
+        std::env::set_var("AGENT_DOMAIN", "production.dev");
+
+        let config = Config::from_env();
+
+        assert!(
+            config.infrastructure.non_tee_infra,
+            "Config infrastructure should reflect NON_TEE_INFRA setting"
+        );
+        assert_eq!(
+            config.agent.agent_domain,
+            Some("production.dev".to_string()),
+            "Config agent should have agent_domain in non-TEE mode"
+        );
+
+        std::env::remove_var("NON_TEE_INFRA");
+        std::env::remove_var("AGENT_DOMAIN");
+        std::env::remove_var("AGENT_MANAGER_URLS");
+        std::env::remove_var("AGENT_MANAGER_TOKENS");
     }
 }
