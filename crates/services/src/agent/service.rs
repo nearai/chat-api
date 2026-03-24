@@ -397,7 +397,8 @@ impl AgentServiceImpl {
         // Manager type is determined by the actual manager URL the instance was created with,
         // not by the current global NON_TEE_INFRA setting. This allows instances created in one mode
         // to be accessed correctly even if the system is now running in a different mode.
-        let is_non_tee_manager = manager.url.contains("claws.sare.dev") || manager.url.contains("/api/crabshack");
+        let is_non_tee_manager =
+            manager.url.contains("claws.sare.dev") || manager.url.contains("/api/crabshack");
 
         if !is_non_tee_manager {
             // TEE manager: use manager token directly (no passkey/compose-api)
