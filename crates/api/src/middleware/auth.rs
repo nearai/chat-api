@@ -89,10 +89,7 @@ fn extract_token_from_request(request: &Request) -> Result<String, ApiError> {
     })?;
 
     let token = auth_value.strip_prefix("Bearer ").ok_or_else(|| {
-        tracing::warn!(
-            "Authorization header does not start with 'Bearer ', header: {}",
-            auth_value
-        );
+        tracing::warn!("Authorization header does not start with 'Bearer '");
         ApiError::invalid_auth_header()
     })?;
 
@@ -348,22 +345,18 @@ pub async fn admin_auth_middleware(
         })?;
 
     let user_email = &user_profile.user.email;
-    tracing::debug!("Checking admin access for email: {}", user_email);
 
     if !is_admin_domain(user_email, &state.admin_domains) {
         tracing::warn!(
-            "Admin access denied for user_id={}, email={}, domain not in allowed list: {:?}",
-            authenticated_user.user_id,
-            user_email,
-            &state.admin_domains
+            "Admin access denied for user_id={}",
+            authenticated_user.user_id
         );
         return Err(ApiError::forbidden("Admin access required").into_response());
     }
 
     tracing::info!(
-        "Admin access granted for user_id={}, email={}",
-        authenticated_user.user_id,
-        user_email
+        "Admin access granted for user_id={}",
+        authenticated_user.user_id
     );
 
     // Add authenticated user to request extensions
@@ -385,10 +378,7 @@ fn extract_agent_api_key_from_request(request: &Request) -> Result<String, ApiEr
     })?;
 
     let token = auth_value.strip_prefix("Bearer ").ok_or_else(|| {
-        tracing::warn!(
-            "Authorization header does not start with 'Bearer ', header: {}",
-            auth_value
-        );
+        tracing::warn!("Authorization header does not start with 'Bearer '");
         ApiError::invalid_auth_header()
     })?;
 

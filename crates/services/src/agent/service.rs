@@ -2,7 +2,7 @@ use crate::system_configs::ports::SystemConfigsService;
 use crate::UserId;
 use anyhow::anyhow;
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use config::AgentManager;
 use reqwest::Client;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -74,6 +74,8 @@ pub struct AgentServiceImpl {
     instance_default_mem_limit: String,
     /// Default storage size for new instances (configured via INSTANCE_DEFAULT_STORAGE_SIZE env var)
     instance_default_storage_size: String,
+    /// Channel-relay URL for provisioning relay config to IronClaw instances
+    channel_relay_url: Option<String>,
 }
 
 /// Static helper: Fetch instance details from Agent API GET /instances/{name}.
@@ -142,6 +144,7 @@ impl AgentServiceImpl {
         instance_default_cpus: String,
         instance_default_mem_limit: String,
         instance_default_storage_size: String,
+        channel_relay_url: Option<String>,
     ) -> Self {
         // Validate required configuration
         if managers.is_empty() {
@@ -181,6 +184,7 @@ impl AgentServiceImpl {
             instance_default_cpus,
             instance_default_mem_limit,
             instance_default_storage_size,
+            channel_relay_url,
         }
     }
 
@@ -486,8 +490,9 @@ impl AgentServiceImpl {
             .as_deref()
             .unwrap_or(DEFAULT_SERVICE_TYPE);
         let image = get_image_for_service_type(service_type);
-        let request_body = serde_json::json!({
+        let mut request_body = serde_json::json!({
             "image": image,
+            "name": params.name,
             "cpus": params.cpus.as_deref().unwrap_or(&self.instance_default_cpus),
             "mem_limit": params.mem_limit.as_deref().unwrap_or(&self.instance_default_mem_limit),
             "storage_size": params.storage_size.as_deref().unwrap_or(&self.instance_default_storage_size),
@@ -496,6 +501,17 @@ impl AgentServiceImpl {
             "ssh_pubkey": params.ssh_pubkey,
             "service_type": service_type,
         });
+        // Inject channel-relay config for IronClaw instances.
+        // CHANNEL_RELAY_SIGNING_SECRET is no longer passed: each IronClaw
+        // instance uses its own OPENCLAW_GATEWAY_TOKEN as the signing secret.
+        if service_type == "ironclaw" {
+            if let Some(ref relay_url) = self.channel_relay_url {
+                request_body["extra_env"] = serde_json::json!({
+                    "CHANNEL_RELAY_URL": relay_url,
+                    "CHANNEL_RELAY_API_KEY": nearai_api_key,
+                });
+            }
+        }
 
         let response = self
             .http_client
@@ -660,8 +676,9 @@ impl AgentServiceImpl {
         let image = get_image_for_service_type(service_type);
 
         // Build request body with base fields
-        let request_body = serde_json::json!({
+        let mut request_body = serde_json::json!({
             "image": image,
+            "name": params.name,
             "cpus": params.cpus.as_deref().unwrap_or(&self.instance_default_cpus),
             "mem_limit": params.mem_limit.as_deref().unwrap_or(&self.instance_default_mem_limit),
             "storage_size": params.storage_size.as_deref().unwrap_or(&self.instance_default_storage_size),
@@ -670,6 +687,17 @@ impl AgentServiceImpl {
             "ssh_pubkey": params.ssh_pubkey,
             "service_type": service_type,
         });
+        // Inject channel-relay config for IronClaw instances.
+        // CHANNEL_RELAY_SIGNING_SECRET is no longer passed: each IronClaw
+        // instance uses its own OPENCLAW_GATEWAY_TOKEN as the signing secret.
+        if service_type == "ironclaw" {
+            if let Some(ref relay_url) = self.channel_relay_url {
+                request_body["extra_env"] = serde_json::json!({
+                    "CHANNEL_RELAY_URL": relay_url,
+                    "CHANNEL_RELAY_API_KEY": nearai_api_key,
+                });
+            }
+        }
 
         let mut request = self
             .http_client
@@ -796,6 +824,16 @@ impl AgentServiceImpl {
     }
 }
 
+/// Validate that a URL from the Agent API response uses an allowed scheme (http or https).
+/// Rejects URLs with unexpected schemes (e.g., javascript:, file:, data:) that could be
+/// injected by a compromised or malicious Agent Manager.
+fn validate_agent_api_url(url: &str, field_name: &str) -> anyhow::Result<()> {
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        anyhow::bail!("Invalid {field_name}: must use http or https scheme");
+    }
+    Ok(())
+}
+
 /// Save instance data from a lifecycle event to database.
 /// `agent_api_base_url` is the manager URL that created this instance (for routing future operations).
 /// Save passkey instance data from a lifecycle event to database.
@@ -846,6 +884,13 @@ async fn save_passkey_instance_from_event(
         instance_data.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()).unwrap_or_default()
     );
 
+    // Reject empty instance_token if present (defense-in-depth)
+    if let Some(ref token) = &instance_token {
+        if token.is_empty() {
+            anyhow::bail!("Invalid instance_token: must be non-empty");
+        }
+    }
+
     // Extract instance_url from API response if available
     let instance_url = instance_data
         .get("url")
@@ -862,6 +907,15 @@ async fn save_passkey_instance_from_event(
                 None
             }
         });
+    // Validate instance_url scheme to prevent injection from a compromised Agent Manager
+    if let Some(ref url) = &instance_url {
+        validate_agent_api_url(url, "instance_url")?;
+    }
+
+    let gateway_port = instance_data
+        .get("gateway_port")
+        .and_then(|v| v.as_i64())
+        .map(|p| p as i32);
 
     // Use dashboard_url from API response if available, otherwise use instance_url
     let dashboard_url = instance_data
@@ -869,6 +923,10 @@ async fn save_passkey_instance_from_event(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .or_else(|| instance_url.clone());
+    // Validate dashboard_url scheme to prevent injection from a compromised Agent Manager
+    if let Some(ref url) = &dashboard_url {
+        validate_agent_api_url(url, "dashboard_url")?;
+    }
 
     // Extract service_type from instance_data if present and valid, otherwise use provided value
     let service_type_from_response = instance_data
@@ -998,8 +1056,9 @@ impl AgentService for AgentServiceImpl {
             .as_deref()
             .map(|n| format!("instance-{}", n))
             .unwrap_or_else(|| "instance".to_string());
+        let default_expiry = Some(Utc::now() + Duration::days(90));
         let (api_key, plaintext_key) = self
-            .create_unbound_api_key(user_id, key_name, None, None)
+            .create_unbound_api_key(user_id, key_name, None, default_expiry)
             .await?;
 
         // Apply default service type if not provided
@@ -1051,16 +1110,30 @@ impl AgentService for AgentServiceImpl {
             .get("url")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        // Validate instance_url scheme to prevent injection from a compromised Agent Manager
+        if let Some(ref url) = instance_url {
+            validate_agent_api_url(url, "instance_url")?;
+        }
 
         let instance_token = instance_data
             .get("token")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        // Reject empty instance_token if present (defense-in-depth)
+        if let Some(ref token) = instance_token {
+            if token.is_empty() {
+                anyhow::bail!("Invalid instance_token: must be non-empty");
+            }
+        }
 
         let dashboard_url = instance_data
             .get("dashboard_url")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        // Validate dashboard_url scheme to prevent injection from a compromised Agent Manager
+        if let Some(ref url) = dashboard_url {
+            validate_agent_api_url(url, "dashboard_url")?;
+        }
 
         // Generate a unique instance_id based on the Agent API name
         let instance_id = format!("agent-{}-{}", instance_name, Uuid::new_v4());
@@ -1149,8 +1222,9 @@ impl AgentService for AgentServiceImpl {
             .as_deref()
             .map(|n| format!("instance-{}", n))
             .unwrap_or_else(|| "instance".to_string());
+        let default_expiry = Some(Utc::now() + Duration::days(90));
         let (api_key, plaintext_key) = self
-            .create_unbound_api_key(user_id, key_name, None, None)
+            .create_unbound_api_key(user_id, key_name, None, default_expiry)
             .await?;
 
         // Apply default service type if not provided
@@ -2975,6 +3049,7 @@ mod tests {
             "1".to_string(),   // instance_default_cpus
             "4g".to_string(),  // instance_default_mem_limit
             "10G".to_string(), // instance_default_storage_size
+            None,              // channel_relay_url
         )
     }
 
@@ -4318,5 +4393,45 @@ mod tests {
             assert_eq!(r.error_skipped, 1);
             assert!(!r.errors.is_empty());
         }
+    }
+
+    #[test]
+    fn validate_agent_api_url_accepts_https() {
+        assert!(validate_agent_api_url("https://example.com/path", "test_url").is_ok());
+    }
+
+    #[test]
+    fn validate_agent_api_url_accepts_http() {
+        assert!(validate_agent_api_url("http://example.com/path", "test_url").is_ok());
+    }
+
+    #[test]
+    fn validate_agent_api_url_rejects_javascript() {
+        let result = validate_agent_api_url("javascript:alert(1)", "test_url");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must use http or https scheme"));
+    }
+
+    #[test]
+    fn validate_agent_api_url_rejects_file() {
+        assert!(validate_agent_api_url("file:///etc/passwd", "test_url").is_err());
+    }
+
+    #[test]
+    fn validate_agent_api_url_rejects_data() {
+        assert!(validate_agent_api_url("data:text/html,<h1>hi</h1>", "test_url").is_err());
+    }
+
+    #[test]
+    fn validate_agent_api_url_rejects_empty() {
+        assert!(validate_agent_api_url("", "test_url").is_err());
+    }
+
+    #[test]
+    fn validate_agent_api_url_rejects_relative() {
+        assert!(validate_agent_api_url("/foo/bar", "test_url").is_err());
     }
 }

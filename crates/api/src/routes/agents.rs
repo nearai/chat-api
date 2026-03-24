@@ -1272,3 +1272,75 @@ pub struct UpgradeAvailabilityResponse {
     pub current_image: Option<String>,
     pub latest_image: String,
 }
+
+/// Response for agent key verification
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct VerifyAgentKeyResponse {
+    pub id: Uuid,
+    pub instance_id: String,
+    pub user_id: Uuid,
+    pub service_type: Option<String>,
+    pub name: String,
+    pub status: String,
+    pub instance_url: Option<String>,
+}
+
+/// Verify an agent API key and return instance metadata.
+/// Lightweight endpoint for channel-relay to verify tokens
+/// without triggering rate limits or usage tracking.
+pub async fn verify_agent_key(
+    State(app_state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<VerifyAgentKeyResponse>, ApiError> {
+    use sha2::{Digest, Sha256};
+
+    let auth_header = headers
+        .get("authorization")
+        .and_then(|h| h.to_str().ok())
+        .ok_or_else(|| ApiError::unauthorized("Missing authorization header"))?;
+
+    let token = auth_header
+        .strip_prefix("Bearer ")
+        .ok_or_else(|| ApiError::unauthorized("Invalid authorization header"))?;
+
+    if !token.starts_with("sk-agent-") || token.len() != 41 {
+        return Err(ApiError::unauthorized("Invalid token"));
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    let key_hash = format!("{:x}", hasher.finalize());
+
+    let (instance, api_key_info) = app_state
+        .agent_repository
+        .get_instance_by_api_key_hash(&key_hash)
+        .await
+        .map_err(|_| ApiError::internal_server_error("Authentication failed"))?
+        .ok_or_else(|| ApiError::unauthorized("Invalid token"))?;
+
+    if let Some(expires_at) = api_key_info.expires_at {
+        if expires_at < chrono::Utc::now() {
+            return Err(ApiError::unauthorized("Invalid token"));
+        }
+    }
+
+    // Reject non-active instances (e.g., stopped, deleted)
+    if instance.status != "active" {
+        return Err(ApiError::unauthorized("Invalid token"));
+    }
+
+    let _ = app_state
+        .agent_repository
+        .update_api_key_last_used(api_key_info.id)
+        .await;
+
+    Ok(Json(VerifyAgentKeyResponse {
+        id: instance.id,
+        instance_id: instance.instance_id,
+        user_id: instance.user_id.0,
+        service_type: instance.service_type,
+        name: instance.name,
+        status: instance.status,
+        instance_url: instance.instance_url,
+    }))
+}

@@ -81,6 +81,11 @@ impl SubscriptionServiceImpl {
     }
 
     pub fn new(config: SubscriptionServiceConfig) -> Self {
+        tracing::info!(
+            "SubscriptionService init: stripe_key_len={}, webhook_secret_len={}",
+            config.stripe_secret_key.len(),
+            config.stripe_webhook_secret.len(),
+        );
         Self {
             db_pool: config.db_pool,
             stripe_customer_repo: config.stripe_customer_repo,

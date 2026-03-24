@@ -368,6 +368,12 @@ pub struct AgentConfig {
     /// Default storage size for new instances (configurable via INSTANCE_DEFAULT_STORAGE_SIZE)
     #[serde(default = "default_instance_storage_size")]
     pub instance_default_storage_size: String,
+    /// Channel-relay URL for Slack integration. When set, provisioned IronClaw
+    /// instances receive CHANNEL_RELAY_URL and CHANNEL_RELAY_API_KEY in their
+    /// environment. The per-instance OPENCLAW_GATEWAY_TOKEN is used as the
+    /// signing secret instead of the former shared CHANNEL_RELAY_SIGNING_SECRET.
+    #[serde(default)]
+    pub channel_relay_url: Option<String>,
 }
 
 /// Split a comma-separated env var value into non-empty trimmed entries.
@@ -426,6 +432,7 @@ impl Default for AgentConfig {
             instance_default_cpus: default_instance_cpus(),
             instance_default_mem_limit: default_instance_mem_limit(),
             instance_default_storage_size: default_instance_storage_size(),
+            channel_relay_url: std::env::var("CHANNEL_RELAY_URL").ok(),
         }
     }
 }
