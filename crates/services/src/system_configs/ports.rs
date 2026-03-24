@@ -137,12 +137,6 @@ pub struct CreditsProviderConfig {
     /// Stripe: price id for a $1 "credit" unit (quantity == credits count).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub price_id: Option<String>,
-=======
-    /// List of model IDs allowed for this plan (e.g. ["gpt-3.5-turbo", "gpt-4o"])
-    /// None = allow all models (default); Some(vec) = only allow models in the list
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub allowed_models: Option<Vec<String>>,
->>>>>>> 12c40cd (feat: add model allowlist for subscription plans)
 }
 
 impl Default for RateLimitConfig {

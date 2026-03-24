@@ -434,7 +434,6 @@ pub struct SubscriptionPlan {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allowed_models: Option<Vec<String>>,
 }
-}
 
 /// Service trait for subscription management
 #[async_trait]
