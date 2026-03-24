@@ -448,7 +448,9 @@ impl SubscriptionServiceImpl {
                     .get("free")
                     .map(Self::plan_limit_max)
                     .unwrap_or(DEFAULT_MONTHLY_CREDITS_NANO_USD);
-                let (period_start, period_end) = current_calendar_month_period(Utc::now());
+                let (period_start, period_end) = self
+                    .resolve_free_plan_period_for_user(user_id)
+                    .await?;
                 (plan_credits, period_start, period_end)
             }
         };
@@ -676,6 +678,20 @@ impl SubscriptionServiceImpl {
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
         Ok(updated)
     }
+
+    /// Billing window for users without an active paid subscription: calendar month by default,
+    /// or monthly periods aligned to the end of the last stored subscription period (cancellation boundary).
+    async fn resolve_free_plan_period_for_user(
+        &self,
+        user_id: UserId,
+    ) -> Result<(chrono::DateTime<Utc>, chrono::DateTime<Utc>), SubscriptionError> {
+        let anchor = self
+            .subscription_repo
+            .max_current_period_end_for_user(user_id)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+        Ok(free_plan_period_for_user(anchor, Utc::now()))
+    }
 }
 
 /// Subtract one calendar month from a datetime, keeping the same day when possible.
@@ -699,6 +715,53 @@ fn sub_one_month_same_day(dt: chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
             })
     });
     chrono::DateTime::from_naive_utc_and_offset(new_d.and_time(dt.time()), Utc)
+}
+
+/// Add one calendar month, mirroring [`sub_one_month_same_day`] (end-of-month rules).
+fn add_one_month_same_day(dt: chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
+    use chrono::NaiveDate;
+    let d = dt.date_naive();
+    let (y, m, day) = (d.year(), d.month(), d.day());
+    let (new_y, new_m) = if m == 12 { (y + 1, 1) } else { (y, m + 1) };
+    let new_d = NaiveDate::from_ymd_opt(new_y, new_m, day).unwrap_or_else(|| {
+        let (next_y, next_m) = if new_m == 12 {
+            (new_y + 1, 1)
+        } else {
+            (new_y, new_m + 1)
+        };
+        NaiveDate::from_ymd_opt(next_y, next_m, 1)
+            .and_then(|first_of_next| first_of_next.pred_opt())
+            .unwrap_or_else(|| {
+                NaiveDate::from_ymd_opt(new_y, new_m, 28).expect("28th day of month exists")
+            })
+    });
+    chrono::DateTime::from_naive_utc_and_offset(new_d.and_time(dt.time()), Utc)
+}
+
+/// Free-plan month starting when the paid period ended (`cancellation_period_end`), same length as Stripe monthly cycles.
+fn free_plan_monthly_period_from_cancellation_anchor(
+    cancellation_period_end: chrono::DateTime<Utc>,
+    now: chrono::DateTime<Utc>,
+) -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
+    let mut period_start = cancellation_period_end;
+    let mut period_end = add_one_month_same_day(cancellation_period_end);
+    while now >= period_end {
+        period_start = period_end;
+        period_end = add_one_month_same_day(period_start);
+    }
+    (period_start, period_end)
+}
+
+fn free_plan_period_for_user(
+    latest_subscription_period_end: Option<chrono::DateTime<Utc>>,
+    now: chrono::DateTime<Utc>,
+) -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
+    match latest_subscription_period_end {
+        Some(anchor) if now >= anchor => {
+            free_plan_monthly_period_from_cancellation_anchor(anchor, now)
+        }
+        _ => current_calendar_month_period(now),
+    }
 }
 
 /// Returns (period_start, period_end) for the current calendar month.
@@ -2068,8 +2131,10 @@ impl SubscriptionService for SubscriptionServiceImpl {
                                 );
                                 DEFAULT_MONTHLY_CREDITS_NANO_USD
                             });
-                        // Free users: calendar month — 00:00 on 1st through 24:00 on last day
-                        let (period_start, period_end) = current_calendar_month_period(Utc::now());
+                        let (period_start, period_end) = self
+                            .resolve_free_plan_period_for_user(user_id)
+                            .await
+                            .map_err(|e| SubscriptionError::InternalError(e.to_string()))?;
                         (plan_credits, period_start, period_end)
                     }
                 };

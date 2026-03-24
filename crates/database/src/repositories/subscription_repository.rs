@@ -191,6 +191,20 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
         Ok(row.as_ref().map(row_to_subscription))
     }
 
+    async fn max_current_period_end_for_user(
+        &self,
+        user_id: UserId,
+    ) -> anyhow::Result<Option<chrono::DateTime<chrono::Utc>>> {
+        let client = self.pool.get().await?;
+        let row = client
+            .query_one(
+                "SELECT MAX(current_period_end) AS m FROM subscriptions WHERE user_id = $1",
+                &[&user_id],
+            )
+            .await?;
+        Ok(row.get::<_, Option<chrono::DateTime<chrono::Utc>>>("m"))
+    }
+
     async fn list_subscriptions(
         &self,
         user_id: Option<UserId>,

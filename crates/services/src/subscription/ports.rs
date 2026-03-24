@@ -272,6 +272,13 @@ pub trait SubscriptionRepository: Send + Sync {
         user_id: UserId,
     ) -> anyhow::Result<Option<Subscription>>;
 
+    /// Maximum `current_period_end` across all subscription rows for this user.
+    /// Used to align free-plan billing months with the last paid period boundary after cancellation.
+    async fn max_current_period_end_for_user(
+        &self,
+        user_id: UserId,
+    ) -> anyhow::Result<Option<DateTime<Utc>>>;
+
     /// List subscriptions with pagination, optionally filtered by user_id.
     /// Returns (items, total_count).
     async fn list_subscriptions(
