@@ -2626,6 +2626,7 @@ mod tests {
             agent_instances: Some(crate::system_configs::ports::PlanLimitConfig { max: instances }),
             monthly_tokens: Some(crate::system_configs::ports::PlanLimitConfig { max: tokens }),
             monthly_credits: None,
+            allowed_models: None,
         }
     }
 
