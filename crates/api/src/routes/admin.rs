@@ -1776,7 +1776,8 @@ pub struct AdminCreateApiKeyRequest {
     pub user_id: Uuid,
     /// Human-readable key name
     pub name: String,
-    /// Optional spend limit in nano-dollars ($1.00 = 1,000,000,000 nano-dollars)
+    /// Optional lifetime spend limit in nano-dollars ($1.00 = 1,000,000,000 nano-dollars).
+    /// Must be greater than zero when provided.
     pub spend_limit: Option<i64>,
     /// Optional expiration timestamp (RFC3339)
     pub expires_at: Option<String>,
@@ -1843,6 +1844,10 @@ pub async fn admin_create_unbound_api_key(
         )
         .await
         .map_err(|e| {
+            let message = e.to_string();
+            if message.contains("Invalid spend limit") {
+                return ApiError::bad_request(message);
+            }
             tracing::error!("Failed to create unbound API key: error={}", e);
             ApiError::internal_server_error("Failed to create API key")
         })?;

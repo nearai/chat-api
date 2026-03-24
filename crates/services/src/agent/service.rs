@@ -167,6 +167,16 @@ impl AgentServiceImpl {
         key.starts_with("sk-agent-") && key.len() == 41
     }
 
+    fn validate_spend_limit_for_creation(spend_limit: Option<i64>) -> anyhow::Result<()> {
+        if matches!(spend_limit, Some(limit) if limit <= 0) {
+            return Err(anyhow!(
+                "Invalid spend limit: must be greater than 0 when provided"
+            ));
+        }
+
+        Ok(())
+    }
+
     async fn ensure_api_key_can_be_used(&self, api_key_info: &AgentApiKey) -> anyhow::Result<()> {
         if !api_key_info.is_active {
             tracing::warn!("API key is not active: api_key_id={}", api_key_info.id);
@@ -181,14 +191,21 @@ impl AgentServiceImpl {
         }
 
         if let Some(spend_limit) = api_key_info.spend_limit {
-            // `spend_limit` is currently a lifetime cap based on all recorded usage for the key.
+            if spend_limit <= 0 {
+                tracing::warn!(
+                    "Ignoring non-positive spend_limit on existing API key: api_key_id={}, spend_limit={}",
+                    api_key_info.id,
+                    spend_limit
+                );
+                return Ok(());
+            }
+
+            // `spend_limit` is currently a lifetime cap based on the cached total_spent counter
+            // stored on agent_api_keys.
             // This is best-effort enforcement: concurrent requests can both pass this preflight
             // check before their usage is recorded. A hard cap would need atomic reservation or
             // enforcement at usage-recording time.
-            let total_spend = self
-                .repository
-                .get_api_key_total_spend(api_key_info.id)
-                .await?;
+            let total_spend = api_key_info.total_spent;
             if total_spend >= spend_limit {
                 tracing::warn!(
                     "API key spend limit exceeded: api_key_id={}, total_spend={}, spend_limit={}",
@@ -1881,6 +1898,8 @@ impl AgentService for AgentServiceImpl {
             return Err(anyhow!("Invalid name format"));
         }
 
+        Self::validate_spend_limit_for_creation(spend_limit)?;
+
         // Generate and hash key
         let plaintext_key = Self::generate_api_key();
         let key_hash = Self::hash_api_key(&plaintext_key);
@@ -1919,6 +1938,8 @@ impl AgentService for AgentServiceImpl {
         if name.is_empty() || name.len() > 255 {
             return Err(anyhow!("Invalid name format"));
         }
+
+        Self::validate_spend_limit_for_creation(spend_limit)?;
 
         // Generate and hash key
         let plaintext_key = Self::generate_api_key();

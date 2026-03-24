@@ -444,6 +444,10 @@ pub async fn create_api_key(
         )
         .await
         .map_err(|e| {
+            let message = e.to_string();
+            if message.contains("Invalid spend limit") {
+                return ApiError::bad_request(message);
+            }
             tracing::error!(
                 "Failed to create API key: instance_id={}, error={}",
                 instance_uuid,

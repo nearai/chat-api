@@ -1046,6 +1046,7 @@ pub struct CreateApiKeyRequest {
     /// Human-readable key name
     pub name: String,
     /// Optional lifetime spend limit in nano-dollars ($1.00 = 1,000,000,000 nano-dollars).
+    /// Must be greater than zero when provided.
     /// Once the recorded lifetime spend for this key reaches the limit, future requests are rejected.
     pub spend_limit: Option<i64>,
     /// Optional expiration timestamp

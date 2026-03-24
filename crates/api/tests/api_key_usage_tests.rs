@@ -5,6 +5,7 @@ use serde_json::json;
 use services::user::ports::UserRepository;
 use services::user_usage::{RecordUsageParams, UserUsageRepository, METRIC_KEY_LLM_TOKENS};
 use services::UserId;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -68,6 +69,12 @@ async fn create_bound_agent_api_key(
         .to_string();
 
     (user.id, instance_id, api_key_id, api_key)
+}
+
+fn hash_agent_api_key(key: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(key.as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 /// Test that the dual auth middleware provides both user and API key extensions
@@ -251,6 +258,58 @@ async fn test_auth_middleware_handles_both_methods() {
 }
 
 #[tokio::test]
+async fn test_create_api_key_rejects_non_positive_spend_limit() {
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    let email = format!("invalid-spend-limit-{}@example.com", Uuid::new_v4());
+    let token = mock_login(&server, &email).await;
+    let user = db
+        .user_repository()
+        .get_user_by_email(&email)
+        .await
+        .expect("db")
+        .expect("user");
+
+    let instance_id = Uuid::new_v4();
+    let client = db.pool().get().await.expect("db client");
+    client
+        .execute(
+            "INSERT INTO agent_instances (id, user_id, instance_id, name, instance_url, instance_token, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())",
+            &[
+                &instance_id,
+                &user.id,
+                &format!("inst_test_{}", Uuid::new_v4().simple()),
+                &"invalid-spend-limit-instance",
+                &"http://test-instance.local",
+                &"tok_test_instance_secret",
+            ],
+        )
+        .await
+        .expect("insert instance");
+
+    let response = server
+        .post(&format!("/v1/agents/instances/{instance_id}/keys"))
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .json(&json!({
+            "name": "bad-key",
+            "spend_limit": 0,
+            "expires_at": null
+        }))
+        .await;
+
+    assert_eq!(response.status_code(), 400);
+    let body: serde_json::Value = response.json();
+    assert_eq!(
+        body.get("message").and_then(|v| v.as_str()),
+        Some("Invalid spend limit: must be greater than 0 when provided")
+    );
+}
+
+#[tokio::test]
 async fn test_agent_api_key_spend_limit_blocks_chat_completions_once_limit_reached() {
     let mock_upstream = MockServer::start().await;
     Mock::given(method("POST"))
@@ -300,6 +359,17 @@ async fn test_agent_api_key_spend_limit_blocks_chat_completions_once_limit_reach
         .await
         .expect("record usage at spend limit");
 
+    let client = db.pool().get().await.expect("db client");
+    let total_spent: i64 = client
+        .query_one(
+            "SELECT total_spent FROM agent_api_keys WHERE id = $1",
+            &[&api_key_id],
+        )
+        .await
+        .expect("load api key total_spent")
+        .get(0);
+    assert_eq!(total_spent, 1_000);
+
     let response = server
         .post("/v1/chat/completions")
         .add_header(
@@ -328,6 +398,100 @@ async fn test_agent_api_key_spend_limit_blocks_chat_completions_once_limit_reach
         0,
         "Request should be blocked before it reaches the upstream LLM"
     );
+}
+
+#[tokio::test]
+async fn test_legacy_non_positive_spend_limit_does_not_immediately_block_api_key() {
+    let mock_upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "gpt-test",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Hello"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        })))
+        .expect(1)
+        .mount(&mock_upstream)
+        .await;
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        proxy_base_url: Some(mock_upstream.uri()),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({ "free": { "providers": {}, "monthly_credits": { "max": 1_000_000_000 } } }),
+    )
+    .await;
+
+    let email = format!("legacy-zero-limit-{}@example.com", Uuid::new_v4());
+    let _token = mock_login(&server, &email).await;
+    let user = db
+        .user_repository()
+        .get_user_by_email(&email)
+        .await
+        .expect("db")
+        .expect("user");
+
+    let instance_id = Uuid::new_v4();
+    let client = db.pool().get().await.expect("db client");
+    client
+        .execute(
+            "INSERT INTO agent_instances (id, user_id, instance_id, name, instance_url, instance_token, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())",
+            &[
+                &instance_id,
+                &user.id,
+                &format!("inst_test_{}", Uuid::new_v4().simple()),
+                &"legacy-zero-limit-instance",
+                &"http://test-instance.local",
+                &"tok_test_instance_secret",
+            ],
+        )
+        .await
+        .expect("insert instance");
+
+    let api_key = format!("sk-agent-{}", Uuid::new_v4().simple());
+    let api_key_hash = hash_agent_api_key(&api_key);
+    let api_key_id = Uuid::new_v4();
+    client
+        .execute(
+            "INSERT INTO agent_api_keys (id, instance_id, user_id, key_hash, name, spend_limit, is_active)
+             VALUES ($1, $2, $3, $4, $5, $6, true)",
+            &[
+                &api_key_id,
+                &instance_id,
+                &user.id,
+                &api_key_hash,
+                &"legacy-zero-limit-key",
+                &0_i64,
+            ],
+        )
+        .await
+        .expect("insert legacy api key");
+
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {api_key}")).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-test",
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .await;
+
+    assert_eq!(response.status_code(), 200);
 }
 
 #[tokio::test]
