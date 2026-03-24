@@ -1,3 +1,4 @@
+use crate::encryption;
 use crate::pool::DbPool;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -7,6 +8,18 @@ use services::agent::ports::{
 };
 use services::UserId;
 use uuid::Uuid;
+
+fn encrypt_token(token: Option<String>) -> Result<Option<String>, anyhow::Error> {
+    match token {
+        Some(t) => Ok(Some(encryption::encrypt(&t)?)),
+        None => Ok(None),
+    }
+}
+
+fn decrypt_token(token: Option<String>) -> Option<String> {
+    // Decrypt is allowed to fall back for migration of existing plaintext data
+    token.map(|t| encryption::decrypt(&t).unwrap_or(t))
+}
 
 pub struct PostgresAgentRepository {
     pool: DbPool,
@@ -31,13 +44,15 @@ impl AgentRepository for PostgresAgentRepository {
 
         // Default to 'openclaw' if service_type not provided (matches DEFAULT_SERVICE_TYPE in service layer)
         let service_type = params.service_type.as_deref().unwrap_or("openclaw");
+        let encrypted_token = encrypt_token(params.instance_token)
+            .map_err(|e| anyhow::anyhow!("Failed to encrypt instance token: {e}"))?;
 
         let row = client
             .query_one(
                 "INSERT INTO agent_instances (user_id, instance_id, name, type, public_ssh_key, instance_url, instance_token, gateway_port, dashboard_url, agent_api_base_url)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                  RETURNING id, user_id, instance_id, name, type, public_ssh_key, instance_url, instance_token, gateway_port, dashboard_url, agent_api_base_url, status, created_at, updated_at",
-                &[&params.user_id, &params.instance_id, &params.name, &service_type, &params.public_ssh_key, &params.instance_url, &params.instance_token, &params.gateway_port, &params.dashboard_url, &params.agent_api_base_url],
+                &[&params.user_id, &params.instance_id, &params.name, &service_type, &params.public_ssh_key, &params.instance_url, &encrypted_token, &params.gateway_port, &params.dashboard_url, &params.agent_api_base_url],
             )
             .await?;
 
@@ -48,7 +63,7 @@ impl AgentRepository for PostgresAgentRepository {
             name: row.get(3),
             public_ssh_key: row.get(5),
             instance_url: row.get(6),
-            instance_token: row.get(7),
+            instance_token: decrypt_token(row.get(7)),
             gateway_port: row.get(8),
             dashboard_url: row.get(9),
             agent_api_base_url: row.get(10),
@@ -80,7 +95,7 @@ impl AgentRepository for PostgresAgentRepository {
             name: r.get(3),
             public_ssh_key: r.get(5),
             instance_url: r.get(6),
-            instance_token: r.get(7),
+            instance_token: decrypt_token(r.get(7)),
             gateway_port: r.get(8),
             dashboard_url: r.get(9),
             agent_api_base_url: r.get(10),
@@ -113,7 +128,7 @@ impl AgentRepository for PostgresAgentRepository {
             name: r.get(3),
             public_ssh_key: r.get(5),
             instance_url: r.get(6),
-            instance_token: r.get(7),
+            instance_token: decrypt_token(r.get(7)),
             gateway_port: r.get(8),
             dashboard_url: r.get(9),
             agent_api_base_url: r.get(10),
@@ -152,7 +167,7 @@ impl AgentRepository for PostgresAgentRepository {
                 name: r.get(3),
                 public_ssh_key: r.get(5),
                 instance_url: r.get(6),
-                instance_token: r.get(7),
+                instance_token: decrypt_token(r.get(7)),
                 gateway_port: r.get(8),
                 dashboard_url: r.get(9),
                 agent_api_base_url: r.get(10),
@@ -215,7 +230,7 @@ impl AgentRepository for PostgresAgentRepository {
                 name: r.get(3),
                 public_ssh_key: r.get(5),
                 instance_url: r.get(6),
-                instance_token: r.get(7),
+                instance_token: decrypt_token(r.get(7)),
                 gateway_port: r.get(8),
                 dashboard_url: r.get(9),
                 agent_api_base_url: r.get(10),
@@ -282,7 +297,7 @@ impl AgentRepository for PostgresAgentRepository {
                 name: r.get(3),
                 public_ssh_key: r.get(5),
                 instance_url: r.get(6),
-                instance_token: r.get(7),
+                instance_token: decrypt_token(r.get(7)),
                 gateway_port: r.get(8),
                 dashboard_url: r.get(9),
                 agent_api_base_url: r.get(10),
@@ -324,7 +339,7 @@ impl AgentRepository for PostgresAgentRepository {
                     name: row.get(3),
                     public_ssh_key: row.get(5),
                     instance_url: row.get(6),
-                    instance_token: row.get(7),
+                    instance_token: decrypt_token(row.get(7)),
                     gateway_port: row.get(8),
                     dashboard_url: row.get(9),
                     agent_api_base_url: row.get(10),
@@ -352,7 +367,7 @@ impl AgentRepository for PostgresAgentRepository {
                     name: row.get(3),
                     public_ssh_key: row.get(5),
                     instance_url: row.get(6),
-                    instance_token: row.get(7),
+                    instance_token: decrypt_token(row.get(7)),
                     gateway_port: row.get(8),
                     dashboard_url: row.get(9),
                     agent_api_base_url: row.get(10),
@@ -380,7 +395,7 @@ impl AgentRepository for PostgresAgentRepository {
                     name: row.get(3),
                     public_ssh_key: row.get(5),
                     instance_url: row.get(6),
-                    instance_token: row.get(7),
+                    instance_token: decrypt_token(row.get(7)),
                     gateway_port: row.get(8),
                     dashboard_url: row.get(9),
                     agent_api_base_url: row.get(10),
@@ -408,7 +423,7 @@ impl AgentRepository for PostgresAgentRepository {
                     name: row.get(3),
                     public_ssh_key: row.get(5),
                     instance_url: row.get(6),
-                    instance_token: row.get(7),
+                    instance_token: decrypt_token(row.get(7)),
                     gateway_port: row.get(8),
                     dashboard_url: row.get(9),
                     agent_api_base_url: row.get(10),

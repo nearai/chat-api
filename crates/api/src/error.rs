@@ -107,8 +107,7 @@ impl ApiError {
 
     /// Invalid or malformed session token
     pub fn invalid_token() -> Self {
-        Self::unauthorized("Invalid or malformed session token")
-            .with_details("Session token must start with 'sess_' and be 37 characters long")
+        Self::unauthorized("Invalid or expired authentication token")
     }
 
     /// Session id not found
@@ -207,6 +206,6 @@ mod tests {
     fn test_auth_specific_errors() {
         let err = ApiError::invalid_token();
         assert_eq!(err.status, StatusCode::UNAUTHORIZED);
-        assert!(err.response.details.is_some());
+        assert!(err.response.details.is_none());
     }
 }

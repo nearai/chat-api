@@ -127,6 +127,10 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         crate::middleware::auth_middleware,
     ));
 
+    // Agent key verification route (uses its own auth via agent API key, no session middleware)
+    let verify_agent_key_route =
+        Router::new().route("/v1/auth/verify-agent-key", get(agents::verify_agent_key));
+
     // Get rate limit state from app state
     let rate_limit_state = app_state.rate_limit_state.clone();
 
@@ -191,6 +195,7 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         .nest("/v1/auth", logout_route) // Logout route with auth middleware
         .nest("/v1/users", user_routes)
         .nest("/v1/agents", agent_routes) // Agent routes (requires user auth)
+        .merge(verify_agent_key_route) // Agent key verification (no session auth)
         .nest("/v1/admin", admin_routes)
         .merge(optional_auth_routes) // Conversation read routes (optional auth)
         .merge(api_routes) // API routes: llm proxy, models proxy, conversations, share groups, files
