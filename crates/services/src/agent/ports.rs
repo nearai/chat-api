@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 use uuid::Uuid;
 
 use crate::UserId;
@@ -87,6 +88,24 @@ pub struct AgentApiKey {
     pub is_active: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum AgentApiKeyAuthError {
+    #[error("Invalid API key format")]
+    InvalidFormat,
+    #[error("Invalid API key")]
+    Invalid,
+    #[error("API key is not active")]
+    Inactive,
+    #[error("API key has expired")]
+    Expired,
+    #[error("API key spend limit exceeded")]
+    SpendLimitExceeded,
+    #[error("Instance not properly configured")]
+    InstanceNotConfigured,
+    #[error("Internal authentication error")]
+    Internal,
 }
 
 /// Usage log entry for tracking API consumption
@@ -443,7 +462,7 @@ pub trait AgentService: Send + Sync {
     async fn authenticate_api_key(
         &self,
         api_key: &str,
-    ) -> anyhow::Result<(AgentInstance, AgentApiKey)>;
+    ) -> Result<(AgentInstance, AgentApiKey), AgentApiKeyAuthError>;
 
     async fn validate_and_use_api_key(&self, api_key: &str) -> anyhow::Result<AgentApiKey>;
 

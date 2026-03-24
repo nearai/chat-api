@@ -427,24 +427,27 @@ pub async fn dual_auth_middleware(
             .agent_service
             .authenticate_api_key(&api_key)
             .await
-            .map_err(|e| {
-                let message = e.to_string();
-                match message.as_str() {
-                    "Invalid API key" | "Invalid API key format" | "API key is not active"
-                    | "API key has expired" => ApiError::invalid_token().into_response(),
-                    "API key spend limit exceeded" => ApiError::forbidden(message)
+            .map_err(|e| match e {
+                services::agent::ports::AgentApiKeyAuthError::InvalidFormat
+                | services::agent::ports::AgentApiKeyAuthError::Invalid
+                | services::agent::ports::AgentApiKeyAuthError::Inactive
+                | services::agent::ports::AgentApiKeyAuthError::Expired => {
+                    ApiError::invalid_token().into_response()
+                }
+                services::agent::ports::AgentApiKeyAuthError::SpendLimitExceeded => {
+                    ApiError::forbidden("API key spend limit exceeded")
                         .with_details(
                             "This API key has reached its configured spend limit and can no longer be used.",
                         )
-                        .into_response(),
-                    "Instance not properly configured" => {
-                        ApiError::internal_server_error(message).into_response()
-                    }
-                    _ => {
-                        tracing::error!("Failed to authenticate API key: {}", e);
-                        ApiError::internal_server_error("Failed to authenticate API key")
-                            .into_response()
-                    }
+                        .into_response()
+                }
+                services::agent::ports::AgentApiKeyAuthError::InstanceNotConfigured => {
+                    ApiError::internal_server_error("Instance not properly configured")
+                        .into_response()
+                }
+                services::agent::ports::AgentApiKeyAuthError::Internal => {
+                    ApiError::internal_server_error("Failed to authenticate API key")
+                        .into_response()
                 }
             })?;
 

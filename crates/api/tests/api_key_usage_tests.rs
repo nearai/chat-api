@@ -310,6 +310,72 @@ async fn test_create_api_key_rejects_non_positive_spend_limit() {
 }
 
 #[tokio::test]
+async fn test_inactive_agent_api_key_returns_401_without_hitting_upstream() {
+    let mock_upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "gpt-test",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Hello"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        })))
+        .mount(&mock_upstream)
+        .await;
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        proxy_base_url: Some(mock_upstream.uri()),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({ "free": { "providers": {}, "monthly_credits": { "max": 1_000_000_000 } } }),
+    )
+    .await;
+
+    let email = format!("inactive-key-{}@example.com", Uuid::new_v4());
+    let (_user_id, _instance_id, api_key_id, api_key) =
+        create_bound_agent_api_key(&server, &db, &email, None).await;
+
+    let client = db.pool().get().await.expect("db client");
+    client
+        .execute(
+            "UPDATE agent_api_keys SET is_active = false WHERE id = $1",
+            &[&api_key_id],
+        )
+        .await
+        .expect("deactivate api key");
+
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {api_key}")).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-test",
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .await;
+
+    assert_eq!(response.status_code(), 401);
+
+    let received = mock_upstream
+        .received_requests()
+        .await
+        .expect("received requests");
+    assert_eq!(received.len(), 0);
+}
+
+#[tokio::test]
 async fn test_agent_api_key_spend_limit_blocks_chat_completions_once_limit_reached() {
     let mock_upstream = MockServer::start().await;
     Mock::given(method("POST"))
