@@ -2165,15 +2165,25 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
         // Determine which allowlist to use
-        let allowed_models = match active_subscription {
+        let allowed_models: Option<&Vec<String>> = match active_subscription {
             Some(ref sub) => {
                 // User has an active subscription - use plan's allowlist
                 if let Some(plans) = subscription_plans {
                     let plan_name = resolve_plan_name_from_config(
                         "stripe",
                         &sub.price_id,
-                        &plans.clone().into_iter().collect(),
-                    );
+                        plans,
+                    )
+                    .ok_or_else(|| {
+                        tracing::error!(
+                            "Failed to resolve plan name for user_id={}: price_id='{}' does not match any configured plan",
+                            user_id,
+                            sub.price_id
+                        );
+                        SubscriptionError::InternalError(
+                            "Failed to resolve subscription plan configuration".to_string(),
+                        )
+                    })?;
                     plans
                         .get(&plan_name)
                         .and_then(|config| config.allowed_models.as_ref())
@@ -2209,19 +2219,12 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     Ok(())
                 } else {
                     // Model is not in the allowlist
-                    let plan_name = match active_subscription {
-                        Some(ref sub) => {
-                            if let Some(plans) = subscription_plans {
-                                resolve_plan_name_from_config(
-                                    "stripe",
-                                    &sub.price_id,
-                                    &plans.clone().into_iter().collect(),
-                                )
-                            } else {
-                                "unknown".to_string()
-                            }
+                    let plan_name = match (&active_subscription, subscription_plans) {
+                        (Some(sub), Some(plans)) => {
+                            resolve_plan_name_from_config("stripe", &sub.price_id, plans)
+                                .unwrap_or_else(|| "default".to_string())
                         }
-                        None => "default".to_string(),
+                        _ => "default".to_string(),
                     };
 
                     tracing::info!(
