@@ -425,17 +425,6 @@ async fn test_agent_api_key_spend_limit_blocks_chat_completions_once_limit_reach
         .await
         .expect("record usage at spend limit");
 
-    let client = db.pool().get().await.expect("db client");
-    let total_spent: i64 = client
-        .query_one(
-            "SELECT total_spent FROM agent_api_keys WHERE id = $1",
-            &[&api_key_id],
-        )
-        .await
-        .expect("load api key total_spent")
-        .get(0);
-    assert_eq!(total_spent, 1_000);
-
     let response = server
         .post("/v1/chat/completions")
         .add_header(

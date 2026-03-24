@@ -81,8 +81,6 @@ pub struct AgentApiKey {
     pub name: String,
     /// Optional lifetime spend cap in nano-dollars for this key.
     pub spend_limit: Option<i64>,
-    #[serde(skip)]
-    pub total_spent: i64,
     pub expires_at: Option<DateTime<Utc>>,
     pub last_used_at: Option<DateTime<Utc>>,
     pub is_active: bool,
@@ -257,6 +255,8 @@ pub trait AgentRepository: Send + Sync {
     async fn get_api_key_by_hash(&self, key_hash: &str) -> anyhow::Result<Option<AgentApiKey>>;
 
     async fn get_api_key_by_id(&self, api_key_id: Uuid) -> anyhow::Result<Option<AgentApiKey>>;
+
+    async fn get_api_key_total_spend(&self, api_key_id: Uuid) -> anyhow::Result<i64>;
 
     async fn list_instance_keys(
         &self,

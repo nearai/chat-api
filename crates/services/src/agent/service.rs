@@ -203,12 +203,23 @@ impl AgentServiceImpl {
                 return Ok(());
             }
 
-            // `spend_limit` is currently a lifetime cap based on the cached total_spent counter
-            // stored on agent_api_keys.
+            // `spend_limit` is currently a lifetime cap based on all recorded usage events for
+            // this API key.
             // This is best-effort enforcement: concurrent requests can both pass this preflight
             // check before their usage is recorded. A hard cap would need atomic reservation or
             // enforcement at usage-recording time.
-            let total_spend = api_key_info.total_spent;
+            let total_spend = self
+                .repository
+                .get_api_key_total_spend(api_key_info.id)
+                .await
+                .map_err(|e| {
+                    tracing::error!(
+                        "Failed to load API key spend total: api_key_id={}, error={}",
+                        api_key_info.id,
+                        e
+                    );
+                    AgentApiKeyAuthError::Internal
+                })?;
             if total_spend >= spend_limit {
                 tracing::warn!(
                     "API key spend limit exceeded: api_key_id={}, total_spend={}, spend_limit={}",

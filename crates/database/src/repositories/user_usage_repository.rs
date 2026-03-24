@@ -43,8 +43,6 @@ impl UserUsageRepository for PostgresUserUsageRepository {
     }
 
     async fn record_usage(&self, params: RecordUsageParams) -> anyhow::Result<()> {
-        let total_cost = params.cost_nano_usd.unwrap_or(0);
-
         let mut client = self.pool.get().await?;
         let transaction = client.transaction().await?;
 
@@ -68,20 +66,6 @@ impl UserUsageRepository for PostgresUserUsageRepository {
                 ],
             )
             .await?;
-
-        if let Some(api_key_id) = params.api_key_id {
-            transaction
-                .execute(
-                    r#"
-                    UPDATE agent_api_keys
-                    SET total_spent = total_spent + $1,
-                        updated_at = NOW()
-                    WHERE id = $2
-                    "#,
-                    &[&total_cost, &api_key_id],
-                )
-                .await?;
-        }
 
         transaction.commit().await?;
         Ok(())
@@ -137,20 +121,6 @@ impl UserUsageRepository for PostgresUserUsageRepository {
                 &[&total_cost, &total_tokens, &instance_id],
             )
             .await?;
-
-        if let Some(api_key_id) = params.api_key_id {
-            transaction
-                .execute(
-                    r#"
-                    UPDATE agent_api_keys
-                    SET total_spent = total_spent + $1,
-                        updated_at = NOW()
-                    WHERE id = $2
-                    "#,
-                    &[&total_cost, &api_key_id],
-                )
-                .await?;
-        }
 
         transaction.commit().await?;
         Ok(())

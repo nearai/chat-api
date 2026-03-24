@@ -135,7 +135,7 @@ impl AgentRepository for PostgresAgentRepository {
                 "SELECT oi.id, oi.user_id, oi.instance_id, oi.name, oi.type, oi.public_ssh_key,
                         oi.instance_url, oi.instance_token, oi.gateway_port, oi.dashboard_url,
                         oi.agent_api_base_url, oi.status, oi.created_at, oi.updated_at,
-                        ak.id, ak.instance_id, ak.user_id, ak.name, ak.spend_limit, ak.total_spent,
+                        ak.id, ak.instance_id, ak.user_id, ak.name, ak.spend_limit,
                         ak.expires_at, ak.last_used_at, ak.is_active, ak.created_at, ak.updated_at
                  FROM agent_api_keys ak
                  JOIN agent_instances oi ON ak.instance_id = oi.id
@@ -167,12 +167,11 @@ impl AgentRepository for PostgresAgentRepository {
                 user_id: r.get(16),
                 name: r.get(17),
                 spend_limit: r.get(18),
-                total_spent: r.get(19),
-                expires_at: r.get(20),
-                last_used_at: r.get(21),
-                is_active: r.get(22),
-                created_at: r.get(23),
-                updated_at: r.get(24),
+                expires_at: r.get(19),
+                last_used_at: r.get(20),
+                is_active: r.get(21),
+                created_at: r.get(22),
+                updated_at: r.get(23),
             };
             (instance, api_key)
         }))
@@ -479,7 +478,7 @@ impl AgentRepository for PostgresAgentRepository {
                 "INSERT INTO agent_api_keys
                  (instance_id, user_id, key_hash, name, spend_limit, expires_at, is_active)
                  VALUES ($1, $2, $3, $4, $5, $6, true)
-                 RETURNING id, instance_id, user_id, name, spend_limit, total_spent, expires_at,
+                 RETURNING id, instance_id, user_id, name, spend_limit, expires_at,
                            last_used_at, is_active, created_at, updated_at",
                 &[
                     &instance_id,
@@ -498,12 +497,11 @@ impl AgentRepository for PostgresAgentRepository {
             user_id: row.get(2),
             name: row.get(3),
             spend_limit: row.get(4),
-            total_spent: row.get(5),
-            expires_at: row.get(6),
-            last_used_at: row.get(7),
-            is_active: row.get(8),
-            created_at: row.get(9),
-            updated_at: row.get(10),
+            expires_at: row.get(5),
+            last_used_at: row.get(6),
+            is_active: row.get(7),
+            created_at: row.get(8),
+            updated_at: row.get(9),
         };
 
         Ok(api_key)
@@ -525,7 +523,7 @@ impl AgentRepository for PostgresAgentRepository {
             .query_one(
                 "INSERT INTO agent_api_keys (instance_id, user_id, key_hash, name, spend_limit, expires_at)
                  VALUES (NULL, $1, $2, $3, $4, $5)
-                 RETURNING id, instance_id, user_id, name, spend_limit, total_spent, expires_at,
+                 RETURNING id, instance_id, user_id, name, spend_limit, expires_at,
                            last_used_at, is_active, created_at, updated_at",
                 &[&user_id, &key_hash, &name, &spend_limit, &expires_at],
             )
@@ -537,12 +535,11 @@ impl AgentRepository for PostgresAgentRepository {
             user_id: row.get(2),
             name: row.get(3),
             spend_limit: row.get(4),
-            total_spent: row.get(5),
-            expires_at: row.get(6),
-            last_used_at: row.get(7),
-            is_active: row.get(8),
-            created_at: row.get(9),
-            updated_at: row.get(10),
+            expires_at: row.get(5),
+            last_used_at: row.get(6),
+            is_active: row.get(7),
+            created_at: row.get(8),
+            updated_at: row.get(9),
         };
 
         Ok(api_key)
@@ -576,7 +573,7 @@ impl AgentRepository for PostgresAgentRepository {
 
         let row = client
             .query_opt(
-                "SELECT id, instance_id, user_id, name, spend_limit, total_spent, expires_at,
+                "SELECT id, instance_id, user_id, name, spend_limit, expires_at,
                         last_used_at, is_active, created_at, updated_at
                  FROM agent_api_keys
                  WHERE key_hash = $1",
@@ -590,12 +587,11 @@ impl AgentRepository for PostgresAgentRepository {
             user_id: r.get(2),
             name: r.get(3),
             spend_limit: r.get(4),
-            total_spent: r.get(5),
-            expires_at: r.get(6),
-            last_used_at: r.get(7),
-            is_active: r.get(8),
-            created_at: r.get(9),
-            updated_at: r.get(10),
+            expires_at: r.get(5),
+            last_used_at: r.get(6),
+            is_active: r.get(7),
+            created_at: r.get(8),
+            updated_at: r.get(9),
         }))
     }
 
@@ -604,7 +600,7 @@ impl AgentRepository for PostgresAgentRepository {
 
         let row = client
             .query_opt(
-                "SELECT id, instance_id, user_id, name, spend_limit, total_spent, expires_at,
+                "SELECT id, instance_id, user_id, name, spend_limit, expires_at,
                         last_used_at, is_active, created_at, updated_at
                  FROM agent_api_keys
                  WHERE id = $1",
@@ -618,13 +614,27 @@ impl AgentRepository for PostgresAgentRepository {
             user_id: r.get(2),
             name: r.get(3),
             spend_limit: r.get(4),
-            total_spent: r.get(5),
-            expires_at: r.get(6),
-            last_used_at: r.get(7),
-            is_active: r.get(8),
-            created_at: r.get(9),
-            updated_at: r.get(10),
+            expires_at: r.get(5),
+            last_used_at: r.get(6),
+            is_active: r.get(7),
+            created_at: r.get(8),
+            updated_at: r.get(9),
         }))
+    }
+
+    async fn get_api_key_total_spend(&self, api_key_id: Uuid) -> anyhow::Result<i64> {
+        let client = self.pool.get().await?;
+
+        let row = client
+            .query_one(
+                "SELECT COALESCE(SUM(COALESCE(cost_nano_usd, 0)), 0)::bigint
+                 FROM user_usage_event
+                 WHERE api_key_id = $1",
+                &[&api_key_id],
+            )
+            .await?;
+
+        Ok(row.get(0))
     }
 
     async fn list_instance_keys(
@@ -647,7 +657,7 @@ impl AgentRepository for PostgresAgentRepository {
         // Get paginated results
         let rows = client
             .query(
-                "SELECT id, instance_id, user_id, name, spend_limit, total_spent, expires_at,
+                "SELECT id, instance_id, user_id, name, spend_limit, expires_at,
                         last_used_at, is_active, created_at, updated_at
                  FROM agent_api_keys
                  WHERE instance_id = $1
@@ -665,12 +675,11 @@ impl AgentRepository for PostgresAgentRepository {
                 user_id: r.get(2),
                 name: r.get(3),
                 spend_limit: r.get(4),
-                total_spent: r.get(5),
-                expires_at: r.get(6),
-                last_used_at: r.get(7),
-                is_active: r.get(8),
-                created_at: r.get(9),
-                updated_at: r.get(10),
+                expires_at: r.get(5),
+                last_used_at: r.get(6),
+                is_active: r.get(7),
+                created_at: r.get(8),
+                updated_at: r.get(9),
             })
             .collect();
 
