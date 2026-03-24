@@ -1305,6 +1305,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
         };
         let params = stripe::UpdateSubscription {
             items: Some(vec![update_item]),
+            cancel_at_period_end: Some(false),
             proration_behavior: Some(
                 stripe::generated::billing::subscription::SubscriptionProrationBehavior::AlwaysInvoice,
             ),
