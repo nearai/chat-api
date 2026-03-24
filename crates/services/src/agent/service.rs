@@ -394,11 +394,10 @@ impl AgentServiceImpl {
         instance: &AgentInstance,
         manager: &AgentManager,
     ) -> anyhow::Result<String> {
-        // Determine if this manager is TEE or non-TEE based on URL
-        // TEE managers: api.openclaw-dev.near.ai (cloud API)
-        // Non-TEE managers: claws.sare.dev (compose-api)
-        let is_non_tee_manager =
-            manager.url.contains("claws.sare.dev") || manager.url.contains("/api/crabshack");
+        // Manager type is determined by the actual manager URL the instance was created with,
+        // not by the current global NON_TEE_INFRA setting. This allows instances created in one mode
+        // to be accessed correctly even if the system is now running in a different mode.
+        let is_non_tee_manager = manager.url.contains("claws.sare.dev") || manager.url.contains("/api/crabshack");
 
         if !is_non_tee_manager {
             // TEE manager: use manager token directly (no passkey/compose-api)
@@ -1502,6 +1501,7 @@ impl AgentService for AgentServiceImpl {
         let manager_clone = manager.clone();
         let agent_domain = self.agent_domain.clone();
         let session_token_for_details = session_token.clone();
+        let requested_instance_name = params.name.clone();
 
         tokio::spawn(async move {
             let mut accumulated_data = serde_json::json!({});
@@ -1564,12 +1564,14 @@ impl AgentService for AgentServiceImpl {
                 );
 
                 // Validate that critical field (instance_name) is present before saving.
-                // Instance name can be at top level or nested under "instance" object
+                // Instance name can be at top level or nested under "instance" object.
+                // Fall back to the requested instance name if the stream didn't include one.
                 let instance_name_str = accumulated_data
                     .get("instance")
                     .and_then(|v| v.get("name"))
                     .and_then(|v| v.as_str())
-                    .or_else(|| accumulated_data.get("name").and_then(|v| v.as_str()));
+                    .or_else(|| accumulated_data.get("name").and_then(|v| v.as_str()))
+                    .or(requested_instance_name.as_deref());
 
                 if let Some(instance_name_str) = instance_name_str {
                     let instance_name = instance_name_str.to_string();
@@ -1831,6 +1833,11 @@ impl AgentService for AgentServiceImpl {
             by_manager.entry(mgr_url).or_default().push(&inst.name);
         }
 
+        // Cache session tokens by (user_id, manager_url) to avoid redundant /auth/login calls
+        // All instances for a user share the same credentials, so we only need to login once per manager
+        let session_token_cache: std::collections::HashMap<(UserId, String), Option<String>> =
+            std::collections::HashMap::new();
+
         // Query only the managers that own at least one instance in the list
         let futures: Vec<_> = by_manager
             .keys()
@@ -1896,7 +1903,9 @@ impl AgentService for AgentServiceImpl {
 
         // Fetch SSH commands for all requested instances
         // NOTE: This creates O(n) concurrent HTTP requests to the Agent API (one per instance).
-        // If a user has many instances, this will result in a burst of requests to the Agent API.
+        // However, login calls are cached by (user_id, manager_url), reducing compose-api /auth/login
+        // from O(n) to O(m) where m = number of distinct (user, manager) pairs.
+        // If a user has many instances, this will result in a burst of SSH command requests to the Agent API.
         // The requests are concurrent (not sequential) to minimize total time, but each request
         // still counts toward Agent API rate limits. With many instances, this could:
         // - Hit per-client rate limits on the Agent API
@@ -1906,10 +1915,11 @@ impl AgentService for AgentServiceImpl {
         // - Implement response caching (e.g., short TTL in-memory or Redis)
         // - Fall back to skipping SSH commands if fetch times out for large instance lists
         tracing::debug!(
-            "Fetching SSH commands for {} instances (O(n) concurrent HTTP calls)",
+            "Fetching SSH commands for {} instances (O(n) concurrent HTTP calls, cached logins)",
             instances.len()
         );
         let repo = Arc::clone(&self.repository);
+        let session_token_cache = std::sync::Arc::new(tokio::sync::Mutex::new(session_token_cache));
         let ssh_futures: Vec<_> = instances
             .iter()
             .map(|inst| {
@@ -1920,22 +1930,38 @@ impl AgentService for AgentServiceImpl {
                 let user_id = inst.user_id;
                 let repo = Arc::clone(&repo);
                 let http_client = self.http_client.clone();
+                let cache = Arc::clone(&session_token_cache);
                 async move {
                     if let Some(mgr) = manager {
-                        // Try to get user's passkey credentials; fall back to manager token if not found
-                        let bearer_token = if let Ok(Some((auth_secret, backup_passphrase))) =
-                            repo.get_user_passkey_credentials(user_id).await
-                        {
-                            AgentServiceImpl::compose_api_passkey_login_static(
-                                &http_client,
-                                &mgr,
-                                &auth_secret,
-                                &backup_passphrase,
-                            )
-                            .await
-                            .ok()
+                        // Check cache first to avoid redundant login calls
+                        // All instances for a user on the same manager share credentials
+                        let cache_key = (user_id, mgr.url.clone());
+                        let cached = cache.lock().await;
+                        let bearer_token = if let Some(cached_token) = cached.get(&cache_key) {
+                            cached_token.clone()
                         } else {
-                            None // Fall back to manager token
+                            drop(cached); // Release lock before async call
+
+                            // Try to get user's passkey credentials; fall back to manager token if not found
+                            let token = if let Ok(Some((auth_secret, backup_passphrase))) =
+                                repo.get_user_passkey_credentials(user_id).await
+                            {
+                                AgentServiceImpl::compose_api_passkey_login_static(
+                                    &http_client,
+                                    &mgr,
+                                    &auth_secret,
+                                    &backup_passphrase,
+                                )
+                                .await
+                                .ok()
+                            } else {
+                                None // Fall back to manager token
+                            };
+
+                            // Cache the result (whether Some or None) for subsequent instances
+                            let mut cached = cache.lock().await;
+                            cached.insert(cache_key, token.clone());
+                            token
                         };
 
                         (
@@ -2819,22 +2845,24 @@ impl AgentService for AgentServiceImpl {
                     let auth_secret = Self::generate_random_credential(32);
                     let backup_passphrase = Self::generate_random_credential(32);
 
-                    // Register with compose-api
-                    self.compose_api_passkey_register(manager, &auth_secret, &backup_passphrase)
-                        .await?;
-
-                    tracing::debug!(
-                        "Passkey credentials registered with compose-api: user_id={}",
-                        user_id
-                    );
-
-                    // Store in database
+                    // Write to database first - if DB succeeds but compose-api fails, we can retry
+                    // (upsert will overwrite). If we did it the other way around, DB failure after
+                    // successful compose-api registration would orphan the credentials permanently.
                     self.repository
                         .upsert_user_passkey_credentials(user_id, &auth_secret, &backup_passphrase)
                         .await?;
 
+                    tracing::debug!(
+                        "User passkey credentials stored in database: user_id={}",
+                        user_id
+                    );
+
+                    // Then register with compose-api (external API call)
+                    self.compose_api_passkey_register(manager, &auth_secret, &backup_passphrase)
+                        .await?;
+
                     tracing::info!(
-                        "User passkey credentials created and stored: user_id={}",
+                        "User passkey credentials registered with compose-api: user_id={}",
                         user_id
                     );
 
