@@ -1,4 +1,4 @@
-use super::is_valid_service_type;
+use super::{is_valid_service_type, VALID_SERVICE_TYPES};
 use crate::{error::ApiError, middleware::AuthenticatedUser, models::*, state::AppState};
 use axum::{
     extract::{Extension, Path, Query, State},
@@ -122,10 +122,11 @@ pub async fn create_instance(
     // Validate service_type if provided
     if let Some(service_type) = request.service_type.as_deref() {
         if !is_valid_service_type(service_type) {
+            let valid_types = VALID_SERVICE_TYPES.join(", ");
             return Err(ApiError::new(
                 axum::http::StatusCode::BAD_REQUEST,
                 "invalid_service_type",
-                "Service type must be 'openclaw' or 'ironclaw'",
+                format!("Service type must be one of: {}", valid_types),
             ));
         }
     }
@@ -273,11 +274,37 @@ pub async fn create_instance(
             }
         }
 
-        // Return the accumulated instance data as JSON
+        // Fetch the saved instance from database and return typed InstanceResponse
+        // Extract instance name from accumulated stream data to look it up
+        let instance_name = accumulated_data
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                ApiError::internal_server_error("Instance name not found in response")
+            })?;
+
+        // Fetch the created instance from the database (most recent instance with this name)
+        let (instances, _total) = app_state
+            .agent_service
+            .list_instances(user.user_id, 1, 0)
+            .await
+            .map_err(|_| ApiError::internal_server_error("Failed to fetch created instance"))?;
+
+        // Find the instance we just created (should be the most recent with matching name)
+        let instance = instances
+            .into_iter()
+            .find(|inst| inst.name == instance_name)
+            .ok_or_else(|| {
+                ApiError::internal_server_error("Created instance not found in database")
+            })?;
+
+        let response: InstanceResponse = instance.into();
         Ok(Response::builder()
             .status(StatusCode::CREATED)
             .header("content-type", "application/json")
-            .body(axum::body::Body::from(accumulated_data.to_string()))
+            .body(axum::body::Body::from(
+                serde_json::to_string(&response).unwrap_or_default(),
+            ))
             .map_err(|_| ApiError::internal_server_error("Failed to construct response"))?)
     }
 }

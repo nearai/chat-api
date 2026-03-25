@@ -233,86 +233,10 @@ async fn test_passkey_instance_credentials_stored_for_bearer_token_resolution() 
     );
 }
 
-/// Test documentation: Bearer Token Resolution in Operations
-///
-/// This test documents how bearer tokens should be resolved for different instance types
-/// and operations. This is critical for security and correct authentication to compose-api.
-///
-/// The implementation uses the following logic:
-/// 1. During instance creation:
-///    - Passkey instances: call /auth/register with credentials to get session_token
-///    - Manager instances: use AGENT_MANAGER_TOKENS
-///
-/// 2. During instance details fetch (/instances/{{name}}):
-///    - Passkey instances: call /auth/login to get fresh session_token, use it
-///    - Manager instances: use AGENT_MANAGER_TOKENS
-///
-/// 3. During SSH command fetch (/instances/{{name}}/ssh):
-///    - Passkey instances: call /auth/login for session_token, use it
-///    - Manager instances: use AGENT_MANAGER_TOKENS
-///
-/// 4. During other operations (stop, start, delete, restart, upgrade):
-///    - Passkey instances: call /auth/login to get session_token, use it
-///    - Manager instances: use AGENT_MANAGER_TOKENS
-///
-/// 5. Fallback strategy:
-///    - If /auth/login fails or is unavailable, fall back to AGENT_MANAGER_TOKENS
-///    - This provides graceful degradation if compose-api is misconfigured
-///
-/// Testing these scenarios requires mocking compose-api endpoints. The current test
-/// suite documents this requirement and provides basic verification of database state.
-#[tokio::test]
-#[serial]
-async fn test_bearer_token_resolution_documentation() {
-    println!(
-        r#"
-╔═══════════════════════════════════════════════════════════════════════════╗
-║               Bearer Token Resolution Implementation Guide                 ║
-╠═══════════════════════════════════════════════════════════════════════════╣
-║                                                                             ║
-║  PASSKEY INSTANCE FLOW:                                                    ║
-║  ─────────────────────────                                                 ║
-║                                                                             ║
-║  1. Create Instance:                                                       ║
-║     POST /v1/agents/instances                                              ║
-║     └─ Backend calls /auth/register(auth_secret, backup_passphrase)        ║
-║        └─ Returns: session_token                                           ║
-║        └─ Store: credentials in DB (auth_method="passkey")                 ║
-║        └─ Use session_token to call: POST /instances (create streaming)    ║
-║                                                                             ║
-║  2. Fetch Instance Details:                                                ║
-║     During instance creation, call GET /instances/{{name}}                   ║
-║     └─ Backend calls /auth/login(auth_secret, backup_passphrase)           ║
-║        └─ Returns: session_token                                           ║
-║        └─ Use session_token: GET /instances/{{name}}                       ║
-║                                                                             ║
-║  3. Fetch SSH Command:                                                     ║
-║     During list/enrichment, call GET /instances/{{name}}/ssh                 ║
-║     └─ Backend fetches credentials from DB (instance_id)                   ║
-║        └─ Calls /auth/login(auth_secret, backup_passphrase)                ║
-║        └─ Returns: session_token                                           ║
-║        └─ Use session_token: GET /instances/{{name}}/ssh                     ║
-║                                                                             ║
-║  4. Instance Operations (stop, start, delete, etc):                        ║
-║     Backend calls resolve_bearer_token(instance_id)                        ║
-║     └─ If auth_method="passkey":                                           ║
-║        └─ Fetch credentials from DB                                        ║
-║        └─ Call /auth/login(auth_secret, backup_passphrase)                 ║
-║        └─ Return session_token for Bearer auth                             ║
-║     └─ If auth_method="manager_token":                                     ║
-║        └─ Return AGENT_MANAGER_TOKENS                                      ║
-║                                                                             ║
-║  KEY SECURITY PROPERTIES:                                                  ║
-║  ─────────────────────────                                                 ║
-║  • Credentials stored in DB are not the same as session tokens             ║
-║  • Session tokens are short-lived (compose-api responsibility)             ║
-║  • Each operation gets a fresh session token (no token reuse)               ║
-║  • Fallback to manager tokens ensures robustness                           ║
-║  • Bearer tokens are never logged                                          ║
-║                                                                             ║
-╚═══════════════════════════════════════════════════════════════════════════╝
-    "#
-    );
-
-    // This test serves as documentation of the bearer token resolution implementation
-}
+// Bearer token resolution documentation moved to code comments in agent/service.rs
+// and routes/agents.rs. The implementation ensures:
+// • Credentials stored in DB are separate from session tokens
+// • Session tokens are short-lived (compose-api responsibility)
+// • Each operation fetches a fresh session token (no token reuse)
+// • Fallback to manager tokens ensures robustness
+// • Bearer tokens are never logged (see CLAUDE.md privacy rules)

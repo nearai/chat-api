@@ -182,6 +182,7 @@ async fn main() -> anyhow::Result<()> {
         config.agent.instance_default_storage_size.clone(),
         config.agent.channel_relay_url.clone(),
         config.infrastructure.non_tee_infra,
+        config.agent.non_tee_agent_url_pattern.clone(),
     ));
 
     // Initialize agent proxy service

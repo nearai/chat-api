@@ -309,10 +309,6 @@ fn default_nearai_api_url() -> String {
         .unwrap_or_else(|_| "https://private.near.ai/v1".to_string())
 }
 
-fn default_agent_domain() -> String {
-    std::env::var("AGENT_DOMAIN").unwrap_or_else(|_| "localhost".to_string())
-}
-
 fn default_instance_cpus() -> String {
     std::env::var("INSTANCE_DEFAULT_CPUS").unwrap_or_else(|_| "1".to_string())
 }
@@ -325,11 +321,35 @@ fn default_instance_storage_size() -> String {
     std::env::var("INSTANCE_DEFAULT_STORAGE_SIZE").unwrap_or_else(|_| "10G".to_string())
 }
 
+fn default_non_tee_agent_url() -> String {
+    std::env::var("NON_TEE_AGENT_URL").unwrap_or_else(|_| "claws".to_string())
+}
+
 /// A single agent manager endpoint with its URL and bearer token
 #[derive(Clone, serde::Deserialize)]
 pub struct AgentManager {
     pub url: String,
     pub token: String,
+    /// Whether this manager is non-TEE (true) or TEE (false)
+    /// Set at construction time based on infrastructure mode
+    #[serde(default)]
+    pub is_non_tee: bool,
+}
+
+impl AgentManager {
+    /// Compute whether this manager is non-TEE based on URL pattern.
+    /// Non-TEE URLs contain the configured non_tee_agent_url_pattern (e.g., "claws").
+    /// This is computed dynamically to support mixed TEE+non-TEE environments.
+    pub fn infer_type_from_url(url: &str) -> bool {
+        let non_tee_pattern =
+            std::env::var("NON_TEE_AGENT_URL").unwrap_or_else(|_| "claws".to_string());
+        url.contains(&non_tee_pattern)
+    }
+
+    /// Get the effective is_non_tee value, preferring URL-based detection over stored value
+    pub fn get_is_non_tee(&self) -> bool {
+        Self::infer_type_from_url(&self.url)
+    }
 }
 
 // Custom Debug to redact bearer tokens from log output (CLAUDE.md: never log credentials)
@@ -337,6 +357,7 @@ impl std::fmt::Debug for AgentManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AgentManager")
             .field("url", &self.url)
+            .field("is_non_tee", &self.get_is_non_tee())
             .field("token", &"[REDACTED]")
             .finish()
     }
@@ -374,6 +395,10 @@ pub struct AgentConfig {
     /// signing secret instead of the former shared CHANNEL_RELAY_SIGNING_SECRET.
     #[serde(default)]
     pub channel_relay_url: Option<String>,
+    /// URL pattern to identify non-TEE (compose-api) endpoints for instance type detection
+    /// Configurable via NON_TEE_AGENT_URL environment variable (defaults to "claws")
+    #[serde(default = "default_non_tee_agent_url")]
+    pub non_tee_agent_url_pattern: String,
 }
 
 /// Split a comma-separated env var value into non-empty trimmed entries.
@@ -393,90 +418,87 @@ impl Default for AgentConfig {
             .and_then(|v| v.parse().ok())
             .unwrap_or(false);
 
-        // Load managers based on infrastructure mode
-        // Non-TEE mode: use AGENT_MANAGER_URLS (configured for non-TEE infra like claws.sare.dev)
-        // TEE mode: use AGENT_MANAGER_URLS_TEE (or fall back to AGENT_API_BASE_URL for cloud API)
-        let managers = if non_tee_infra {
-            // Non-TEE mode: use AGENT_MANAGER_URLS
-            if let Ok(urls_raw) = std::env::var("AGENT_MANAGER_URLS") {
-                let urls = split_csv(&urls_raw);
-                if urls.is_empty() {
-                    let url = std::env::var("AGENT_API_BASE_URL")
-                        .unwrap_or_else(|_| "https://api.agent.near.ai".to_string());
-                    let token = std::env::var("AGENT_API_TOKEN").unwrap_or_default();
-                    vec![AgentManager { url, token }]
-                } else {
-                    let tokens_raw = std::env::var("AGENT_MANAGER_TOKENS").unwrap_or_default();
-                    let tokens = split_csv(&tokens_raw);
-                    if urls.len() != tokens.len() {
-                        panic!(
-                            "AGENT_MANAGER_URLS has {} entries but AGENT_MANAGER_TOKENS has {} — they must match",
-                            urls.len(),
-                            tokens.len()
-                        );
-                    }
-                    let mut mgrs: Vec<AgentManager> = urls
-                        .into_iter()
-                        .zip(tokens)
-                        .map(|(url, token)| AgentManager { url, token })
-                        .collect();
-                    mgrs.sort_by(|a, b| a.url.cmp(&b.url));
-                    mgrs
+        // Load managers from both TEE and non-TEE configurations
+        // This supports mixed environments with both manager types available
+        // Manager type is determined dynamically from URL pattern, not from this setting
+        let mut managers: Vec<AgentManager> = Vec::new();
+
+        // Load TEE managers from AGENT_MANAGER_URLS_TEE
+        if let Ok(urls_raw) = std::env::var("AGENT_MANAGER_URLS_TEE") {
+            let urls = split_csv(&urls_raw);
+            if !urls.is_empty() {
+                let tokens_raw = std::env::var("AGENT_MANAGER_TOKENS_TEE").unwrap_or_default();
+                let tokens = split_csv(&tokens_raw);
+                if urls.len() != tokens.len() {
+                    panic!(
+                        "AGENT_MANAGER_URLS_TEE has {} entries but AGENT_MANAGER_TOKENS_TEE has {} — they must match",
+                        urls.len(),
+                        tokens.len()
+                    );
                 }
-            } else {
-                let url = std::env::var("AGENT_API_BASE_URL")
-                    .unwrap_or_else(|_| "https://api.agent.near.ai".to_string());
-                let token = std::env::var("AGENT_API_TOKEN").unwrap_or_default();
-                vec![AgentManager { url, token }]
+                let tee_mgrs: Vec<AgentManager> = urls
+                    .into_iter()
+                    .zip(tokens)
+                    .map(|(url, token)| AgentManager {
+                        url,
+                        token,
+                        is_non_tee: false,
+                    })
+                    .collect();
+                managers.extend(tee_mgrs);
             }
-        } else {
-            // TEE mode: use AGENT_MANAGER_URLS_TEE (separate TEE-specific configuration)
-            if let Ok(urls_raw) = std::env::var("AGENT_MANAGER_URLS_TEE") {
-                let urls = split_csv(&urls_raw);
-                if !urls.is_empty() {
-                    let tokens_raw = std::env::var("AGENT_MANAGER_TOKENS_TEE").unwrap_or_default();
-                    let tokens = split_csv(&tokens_raw);
-                    if urls.len() != tokens.len() {
-                        panic!(
-                            "AGENT_MANAGER_URLS_TEE has {} entries but AGENT_MANAGER_TOKENS_TEE has {} — they must match",
-                            urls.len(),
-                            tokens.len()
-                        );
-                    }
-                    let mut mgrs: Vec<AgentManager> = urls
-                        .into_iter()
-                        .zip(tokens)
-                        .map(|(url, token)| AgentManager { url, token })
-                        .collect();
-                    mgrs.sort_by(|a, b| a.url.cmp(&b.url));
-                    return Self {
-                        managers: mgrs,
-                        nearai_api_url: std::env::var("BACKEND_URL")
-                            .map(|url| url.trim_end_matches('/').to_string() + "/v1")
-                            .unwrap_or_else(|_| "https://private.near.ai/v1".to_string()),
-                        agent_domain: None,
-                        instance_default_cpus: default_instance_cpus(),
-                        instance_default_mem_limit: default_instance_mem_limit(),
-                        instance_default_storage_size: default_instance_storage_size(),
-                        channel_relay_url: std::env::var("CHANNEL_RELAY_URL").ok(),
-                    };
+        }
+
+        // Load non-TEE managers from AGENT_MANAGER_URLS
+        if let Ok(urls_raw) = std::env::var("AGENT_MANAGER_URLS") {
+            let urls = split_csv(&urls_raw);
+            if !urls.is_empty() {
+                let tokens_raw = std::env::var("AGENT_MANAGER_TOKENS").unwrap_or_default();
+                let tokens = split_csv(&tokens_raw);
+                if urls.len() != tokens.len() {
+                    panic!(
+                        "AGENT_MANAGER_URLS has {} entries but AGENT_MANAGER_TOKENS has {} — they must match",
+                        urls.len(),
+                        tokens.len()
+                    );
                 }
+                let non_tee_mgrs: Vec<AgentManager> = urls
+                    .into_iter()
+                    .zip(tokens)
+                    .map(|(url, token)| AgentManager {
+                        url,
+                        token,
+                        is_non_tee: true,
+                    })
+                    .collect();
+                managers.extend(non_tee_mgrs);
             }
-            // Fall back to AGENT_API_BASE_URL for cloud API (TEE default)
+        }
+
+        // If no managers configured, fall back to legacy AGENT_API_BASE_URL
+        // This will be interpreted as TEE if no "claws" pattern in URL
+        if managers.is_empty() {
             let url = std::env::var("AGENT_API_BASE_URL")
                 .unwrap_or_else(|_| "https://api.agent.near.ai".to_string());
             let token = std::env::var("AGENT_API_TOKEN").unwrap_or_default();
-            vec![AgentManager { url, token }]
-        };
+            managers.push(AgentManager {
+                url,
+                token,
+                is_non_tee: false,
+            });
+        }
+
+        // Sort for deterministic ordering
+        managers.sort_by(|a, b| a.url.cmp(&b.url));
 
         Self {
             managers,
             nearai_api_url: std::env::var("BACKEND_URL")
                 .map(|url| url.trim_end_matches('/').to_string() + "/v1")
                 .unwrap_or_else(|_| "https://private.near.ai/v1".to_string()),
-            // Only set agent_domain in non-TEE mode
+            // Only set agent_domain in non-TEE mode (defaults to localhost if not set)
             agent_domain: if non_tee_infra {
-                Some(default_agent_domain())
+                Some(std::env::var("AGENT_DOMAIN").unwrap_or_else(|_| "localhost".to_string()))
             } else {
                 None
             },
@@ -486,6 +508,7 @@ impl Default for AgentConfig {
             instance_default_mem_limit: default_instance_mem_limit(),
             instance_default_storage_size: default_instance_storage_size(),
             channel_relay_url: std::env::var("CHANNEL_RELAY_URL").ok(),
+            non_tee_agent_url_pattern: default_non_tee_agent_url(),
         }
     }
 }
@@ -783,6 +806,7 @@ mod tests {
         let mgr = AgentManager {
             url: "https://test.com".to_string(),
             token: "super-secret".to_string(),
+            is_non_tee: false,
         };
         let debug_output = format!("{:?}", mgr);
         assert!(debug_output.contains("https://test.com"));
@@ -1001,6 +1025,11 @@ mod tests {
     #[serial]
     fn test_config_struct_includes_infrastructure() {
         std::env::remove_var("NON_TEE_INFRA");
+        // Clean up any leftover env vars from previous tests (especially from panicking tests)
+        std::env::remove_var("AGENT_MANAGER_URLS");
+        std::env::remove_var("AGENT_MANAGER_TOKENS");
+        std::env::remove_var("AGENT_MANAGER_URLS_TEE");
+        std::env::remove_var("AGENT_MANAGER_TOKENS_TEE");
         let config = Config::from_env();
 
         // Verify infrastructure config is part of Config struct
@@ -1032,5 +1061,48 @@ mod tests {
         std::env::remove_var("AGENT_DOMAIN");
         std::env::remove_var("AGENT_MANAGER_URLS");
         std::env::remove_var("AGENT_MANAGER_TOKENS");
+    }
+
+    #[test]
+    #[serial]
+    fn test_agent_manager_type_detection_from_url() {
+        // Test that manager type is correctly inferred from URL pattern
+        std::env::set_var("NON_TEE_AGENT_URL", "claws");
+
+        // Manager with "claws" in URL should be detected as non-TEE
+        let non_tee_mgr = AgentManager {
+            url: "https://claws.sare.dev/api/crabshack".to_string(),
+            token: "token1".to_string(),
+            is_non_tee: false, // This field is ignored - detection uses URL
+        };
+        assert!(
+            non_tee_mgr.get_is_non_tee(),
+            "claws URL should be detected as non-TEE"
+        );
+
+        // Manager without "claws" in URL should be detected as TEE
+        let tee_mgr = AgentManager {
+            url: "https://api.openclaw-dev.near.ai".to_string(),
+            token: "token2".to_string(),
+            is_non_tee: true, // This field is ignored - detection uses URL
+        };
+        assert!(
+            !tee_mgr.get_is_non_tee(),
+            "api.openclaw URL should be detected as TEE"
+        );
+
+        // Test with different non_tee_agent_url_pattern
+        std::env::set_var("NON_TEE_AGENT_URL", "compose");
+        let compose_mgr = AgentManager {
+            url: "https://compose.example.com".to_string(),
+            token: "token3".to_string(),
+            is_non_tee: false,
+        };
+        assert!(
+            compose_mgr.get_is_non_tee(),
+            "compose URL should be non-TEE when pattern is 'compose'"
+        );
+
+        std::env::remove_var("NON_TEE_AGENT_URL");
     }
 }

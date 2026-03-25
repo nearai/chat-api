@@ -936,7 +936,15 @@ impl AgentRepository for PostgresAgentRepository {
             )
             .await?;
 
-        Ok(row.map(|r| (r.get(0), r.get(1))))
+        Ok(row.map(|r| {
+            let encrypted_secret: String = r.get(0);
+            let encrypted_passphrase: String = r.get(1);
+            // Decrypt credentials; fall back to plaintext if decryption fails (backward compatibility)
+            let secret = encryption::decrypt(&encrypted_secret).unwrap_or(encrypted_secret);
+            let passphrase =
+                encryption::decrypt(&encrypted_passphrase).unwrap_or(encrypted_passphrase);
+            (secret, passphrase)
+        }))
     }
 
     async fn upsert_user_passkey_credentials(
@@ -947,6 +955,10 @@ impl AgentRepository for PostgresAgentRepository {
     ) -> anyhow::Result<()> {
         let client = self.pool.get().await?;
 
+        // Encrypt credentials before storage
+        let encrypted_secret = encryption::encrypt(auth_secret)?;
+        let encrypted_passphrase = encryption::encrypt(backup_passphrase)?;
+
         client
             .execute(
                 "INSERT INTO user_passkey_credentials (user_id, auth_secret, backup_passphrase, created_at, updated_at)
@@ -955,7 +967,7 @@ impl AgentRepository for PostgresAgentRepository {
                  SET auth_secret = EXCLUDED.auth_secret,
                      backup_passphrase = EXCLUDED.backup_passphrase,
                      updated_at = NOW()",
-                &[&user_id, &auth_secret, &backup_passphrase],
+                &[&user_id, &encrypted_secret, &encrypted_passphrase],
             )
             .await?;
 
