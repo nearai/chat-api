@@ -424,8 +424,63 @@ pub async fn insert_test_subscription_with_price_id(
     cancel_at_period_end: bool,
     price_id: &str,
 ) {
-    insert_test_subscription_with_price(server, db, user_email, price_id, cancel_at_period_end)
-        .await;
+    insert_test_subscription_with_provider_and_price(
+        server,
+        db,
+        user_email,
+        "stripe",
+        price_id,
+        cancel_at_period_end,
+    )
+    .await;
+}
+
+/// Insert a test subscription with custom provider and price_id (for testing provider-specific behavior).
+pub async fn insert_test_subscription_with_provider_and_price(
+    server: &TestServer,
+    db: &database::Database,
+    user_email: &str,
+    provider: &str,
+    price_id: &str,
+    cancel_at_period_end: bool,
+) {
+    let _token = mock_login(server, user_email).await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .expect("get user")
+        .expect("user created by mock_login");
+
+    // Use now+1day so "now" falls within [period_start, period_end) for usage queries.
+    let period_end = chrono::Utc::now() + chrono::Duration::days(1);
+    let sub_id = format!("sub_test_{}", Uuid::new_v4());
+
+    let client = db.pool().get().await.expect("get pool client");
+    client
+        .execute(
+            "INSERT INTO subscriptions (
+                subscription_id, user_id, provider, customer_id, price_id, status,
+                current_period_end, cancel_at_period_end
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (subscription_id) DO UPDATE SET
+                price_id = EXCLUDED.price_id,
+                cancel_at_period_end = EXCLUDED.cancel_at_period_end,
+                updated_at = NOW()",
+            &[
+                &sub_id,
+                &user.id,
+                &provider,
+                &"cus_test",
+                &price_id,
+                &"active",
+                &period_end,
+                &cancel_at_period_end,
+            ],
+        )
+        .await
+        .expect("insert subscription");
 }
 
 /// Insert a test subscription with custom status (for testing BI subscription filtering).
@@ -479,43 +534,15 @@ pub async fn insert_test_subscription_with_price(
     price_id: &str,
     cancel_at_period_end: bool,
 ) {
-    let _token = mock_login(server, user_email).await;
-
-    let user = db
-        .user_repository()
-        .get_user_by_email(user_email)
-        .await
-        .expect("get user")
-        .expect("user created by mock_login");
-
-    // Use now+1day so "now" falls within [period_start, period_end) for usage queries.
-    let period_end = chrono::Utc::now() + chrono::Duration::days(1);
-    let sub_id = format!("sub_test_{}", Uuid::new_v4());
-
-    let client = db.pool().get().await.expect("get pool client");
-    client
-        .execute(
-            "INSERT INTO subscriptions (
-                subscription_id, user_id, provider, customer_id, price_id, status,
-                current_period_end, cancel_at_period_end
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            ON CONFLICT (subscription_id) DO UPDATE SET
-                price_id = EXCLUDED.price_id,
-                cancel_at_period_end = EXCLUDED.cancel_at_period_end,
-                updated_at = NOW()",
-            &[
-                &sub_id,
-                &user.id,
-                &"stripe",
-                &"cus_test",
-                &price_id,
-                &"active",
-                &period_end,
-                &cancel_at_period_end,
-            ],
-        )
-        .await
-        .expect("insert subscription");
+    insert_test_subscription_with_provider_and_price(
+        server,
+        db,
+        user_email,
+        "stripe",
+        price_id,
+        cancel_at_period_end,
+    )
+    .await;
 }
 
 /// Insert agent instances for a user (for testing instance limit validation).

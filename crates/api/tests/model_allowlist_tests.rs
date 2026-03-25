@@ -2,7 +2,8 @@ mod common;
 
 use common::{
     cleanup_user_subscriptions, create_test_server, create_test_server_and_db,
-    insert_test_subscription_with_price, mock_login, set_subscription_plans, TestServerConfig,
+    insert_test_subscription_with_price, insert_test_subscription_with_provider_and_price,
+    mock_login, set_subscription_plans, TestServerConfig,
 };
 use serde_json::json;
 use serial_test::serial;
@@ -128,9 +129,13 @@ async fn test_no_subscription_default_allowed_models_blocks_unlisted_model() {
         "User without subscription should be blocked from using model not in default_allowed_models"
     );
 
-    let body = response.text();
+    let body: serde_json::Value = response.json();
+    let error = body
+        .get("error")
+        .and_then(|value| value.as_str())
+        .expect("Error response should contain string error field");
     assert!(
-        body.contains("gpt-4o") && body.contains("not available"),
+        error.contains("gpt-4o") && error.contains("not available"),
         "Error message should mention the model and that it's not available"
     );
 }
@@ -233,11 +238,15 @@ async fn test_subscription_plan_allowed_models_blocks_unlisted_model() {
         "Basic plan user should be blocked from using premium models"
     );
 
-    let body = response.text();
+    let body: serde_json::Value = response.json();
+    let error = body
+        .get("error")
+        .and_then(|value| value.as_str())
+        .expect("Error response should contain string error field");
     assert!(
-        body.contains("gpt-4o") && body.contains("not available"),
+        error.contains("gpt-4o") && error.contains("not available"),
         "Error message should mention the model: {}",
-        body
+        error
     );
 }
 
@@ -384,10 +393,147 @@ async fn test_responses_endpoint_respects_model_allowlist() {
         "Responses endpoint should also enforce model allowlist"
     );
 
-    let body = response.text();
+    let body: serde_json::Value = response.json();
+    let error = body
+        .get("error")
+        .and_then(|value| value.as_str())
+        .expect("Error response should contain string error field");
     assert!(
-        body.contains("gpt-4o") && body.contains("not available"),
+        error.contains("gpt-4o") && error.contains("not available"),
         "Error message should mention the model"
+    );
+}
+
+#[tokio::test]
+#[serial(model_allowlist_tests)]
+async fn test_model_allowlist_resolves_non_stripe_provider_subscription() {
+    ensure_stripe_env_for_gating();
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "near_basic": {
+                "providers": { "near": { "price_id": "price_near_basic" } },
+                "monthly_tokens": { "max": 1000000 },
+                "allowed_models": ["gpt-4o-mini"]
+            }
+        }),
+    )
+    .await;
+
+    let user_email = "near-provider-user@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+    insert_test_subscription_with_provider_and_price(
+        &server,
+        &db,
+        user_email,
+        "near",
+        "price_near_basic",
+        false,
+    )
+    .await;
+    let user_token = mock_login(&server, user_email).await;
+
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", user_token)).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}]
+        }))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        403,
+        "Non-stripe subscriptions should still resolve their configured plan allowlist"
+    );
+
+    let body: serde_json::Value = response.json();
+    let error = body
+        .get("error")
+        .and_then(|value| value.as_str())
+        .expect("Error response should contain string error field");
+    assert!(
+        error.contains("gpt-4o") && error.contains("near_basic"),
+        "Error message should mention blocked model and resolved plan: {}",
+        error
+    );
+}
+
+#[tokio::test]
+#[serial(model_allowlist_tests)]
+async fn test_model_allowlist_internal_resolution_error_returns_json_500_for_both_endpoints() {
+    ensure_stripe_env_for_gating();
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": { "stripe": { "price_id": "price_basic" } },
+                "monthly_tokens": { "max": 1000000 },
+                "allowed_models": ["gpt-4o-mini"]
+            }
+        }),
+    )
+    .await;
+
+    let user_email = "model-resolution-error@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+    insert_test_subscription_with_price(&server, &db, user_email, "price_unknown", false).await;
+    let user_token = mock_login(&server, user_email).await;
+
+    let chat_response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", user_token)).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}]
+        }))
+        .await;
+
+    assert_eq!(
+        chat_response.status_code(),
+        500,
+        "Chat completions should surface plan resolution failures as internal errors"
+    );
+    let chat_body: serde_json::Value = chat_response.json();
+    assert_eq!(
+        chat_body,
+        json!({ "error": "Failed to validate model access" }),
+        "Chat completions should return the shared JSON error body"
+    );
+
+    let responses_response = server
+        .post("/v1/responses")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", user_token)).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-4o",
+            "prompt": "Hello"
+        }))
+        .await;
+
+    assert_eq!(
+        responses_response.status_code(),
+        500,
+        "Responses should surface plan resolution failures as internal errors"
+    );
+    let responses_body: serde_json::Value = responses_response.json();
+    assert_eq!(
+        responses_body,
+        json!({ "error": "Failed to validate model access" }),
+        "Responses should return the shared JSON error body"
     );
 }
 

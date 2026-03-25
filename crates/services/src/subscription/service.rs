@@ -2170,7 +2170,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 // User has an active subscription - use plan's allowlist
                 if let Some(plans) = subscription_plans {
                     let plan_name = resolve_plan_name_from_config(
-                        "stripe",
+                        sub.provider.as_str(),
                         &sub.price_id,
                         plans,
                     )
@@ -2220,10 +2220,12 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 } else {
                     // Model is not in the allowlist
                     let plan_name = match (&active_subscription, subscription_plans) {
-                        (Some(sub), Some(plans)) => {
-                            resolve_plan_name_from_config("stripe", &sub.price_id, plans)
-                                .unwrap_or_else(|| "default".to_string())
-                        }
+                        (Some(sub), Some(plans)) => resolve_plan_name_from_config(
+                            sub.provider.as_str(),
+                            &sub.price_id,
+                            plans,
+                        )
+                        .unwrap_or_else(|| "default".to_string()),
                         _ => "default".to_string(),
                     };
 

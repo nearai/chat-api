@@ -31,6 +31,7 @@ use services::metrics::consts::{
     METRIC_CONVERSATION_CREATED, METRIC_FILE_UPLOADED, METRIC_RESPONSE_CREATED,
 };
 use services::response::ports::ProxyResponse;
+use services::subscription::ports::SubscriptionError;
 use services::user::ports::{BanType, OAuthProvider};
 use services::UserId;
 use std::io::Read;
@@ -2315,21 +2316,7 @@ async fn proxy_responses(
     // Check model access based on subscription plan
     if let Some(ref body) = body_json {
         if let Some(model_id) = body.get("model").and_then(|v| v.as_str()) {
-            if let Err(e) = state
-                .subscription_service
-                .check_model_access(user.user_id, model_id)
-                .await
-            {
-                tracing::info!(
-                    "Model access denied: user_id={}, model_id={}",
-                    user.user_id,
-                    model_id
-                );
-                return Err(Response::builder()
-                    .status(StatusCode::FORBIDDEN)
-                    .body(Body::from(e.to_string()))
-                    .unwrap());
-            }
+            enforce_model_access(&state, &user, model_id).await?;
         }
     }
 
@@ -3275,6 +3262,42 @@ async fn get_system_configs_cached(
     configs
 }
 
+async fn enforce_model_access(
+    state: &crate::state::AppState,
+    user: &AuthenticatedUser,
+    model_id: &str,
+) -> Result<(), Response> {
+    match state
+        .subscription_service
+        .check_model_access(user.user_id, model_id)
+        .await
+    {
+        Ok(()) => Ok(()),
+        Err(SubscriptionError::ModelNotAllowedInPlan { model, plan }) => Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: SubscriptionError::ModelNotAllowedInPlan { model, plan }.to_string(),
+            }),
+        )
+            .into_response()),
+        Err(err) => {
+            tracing::error!(
+                "Failed to validate model access for user_id={}, model_id={}: {}",
+                user.user_id,
+                model_id,
+                err
+            );
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Failed to validate model access".to_string(),
+                }),
+            )
+                .into_response())
+        }
+    }
+}
+
 /// Helper function to get model settings with caching support.
 /// Returns (system_prompt, cache_hit) if model is found and public.
 /// Validates model visibility and populates cache if needed.
@@ -3457,21 +3480,7 @@ async fn prepare_chat_completions_body(
                     .and_then(|b| b.get("model"))
                     .and_then(|v| v.as_str())
                 {
-                    if let Err(e) = state
-                        .subscription_service
-                        .check_model_access(user.user_id, model_id)
-                        .await
-                    {
-                        tracing::info!(
-                            "Model access denied: user_id={}, model_id={}",
-                            user.user_id,
-                            model_id
-                        );
-                        return Err(Response::builder()
-                            .status(StatusCode::FORBIDDEN)
-                            .body(Body::from(e.to_string()))
-                            .unwrap());
-                    }
+                    enforce_model_access(state, user, model_id).await?;
                 }
 
                 if let Some(model_id) = body_json
