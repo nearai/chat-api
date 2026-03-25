@@ -728,15 +728,28 @@ impl AgentServiceImpl {
         bearer_token: Option<&str>,
     ) -> Option<String> {
         let encoded_name = urlencoding::encode(instance_name);
-        let url = format!("{}/instances/{}/ssh", manager.url, encoded_name);
+
+        // Detect if this manager is TEE or non-TEE based on URL pattern
+        let is_non_tee_manager =
+            manager.url.contains("claws.sare.dev") || manager.url.contains("/api/crabshack");
+
+        // Use different endpoints based on deployment mode
+        let url = if is_non_tee_manager {
+            // Non-TEE: separate /ssh endpoint
+            format!("{}/instances/{}/ssh", manager.url, encoded_name)
+        } else {
+            // TEE: ssh_command is in the main instance details endpoint
+            format!("{}/instances/{}", manager.url, encoded_name)
+        };
 
         // Use provided bearer token (e.g., session token from passkey login), fall back to manager token
         let token = bearer_token.unwrap_or(&manager.token);
 
         tracing::debug!(
-            "Fetching SSH command from Agent API: instance_name={}, url={}",
+            "Fetching SSH command from Agent API: instance_name={}, url={}, tee={}",
             instance_name,
-            url
+            url,
+            !is_non_tee_manager
         );
 
         let response = http_client
@@ -766,9 +779,15 @@ impl AgentServiceImpl {
         match response.json::<serde_json::Value>().await {
             Ok(data) => {
                 tracing::debug!("SSH command fetched: instance_name={}", instance_name);
-                data.get("command")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
+                // Different field names based on deployment mode
+                let ssh_command = if is_non_tee_manager {
+                    // Non-TEE: /ssh endpoint returns "command" field
+                    data.get("command")
+                } else {
+                    // TEE: /instances/{name} endpoint returns "ssh_command" field
+                    data.get("ssh_command")
+                };
+                ssh_command.and_then(|v| v.as_str()).map(|s| s.to_string())
             }
             Err(e) => {
                 tracing::warn!(
@@ -1070,8 +1089,11 @@ async fn save_passkey_instance_from_event(
     }
 
     // Extract instance_url from API response if available
+    // Try "instance_url" first (returned by non-TEE Agent API in final event),
+    // then fall back to "url" (used by other API responses)
     let instance_url = instance_data
-        .get("url")
+        .get("instance_url")
+        .or_else(|| instance_data.get("url"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .or_else(|| {
@@ -1503,6 +1525,7 @@ impl AgentService for AgentServiceImpl {
         let agent_domain = self.agent_domain.clone();
         let session_token_for_details = session_token.clone();
         let requested_instance_name = params.name.clone();
+        let is_non_tee_manager_for_stream = is_non_tee_manager;
 
         tokio::spawn(async move {
             let mut accumulated_data = serde_json::json!({});
@@ -1613,7 +1636,7 @@ impl AgentService for AgentServiceImpl {
                     }
 
                     // Save passkey instance
-                    if let Err(e) = save_passkey_instance_from_event(
+                    match save_passkey_instance_from_event(
                         repo.as_ref(),
                         user_id,
                         &accumulated_data,
@@ -1628,21 +1651,45 @@ impl AgentService for AgentServiceImpl {
                     )
                     .await
                     {
-                        tracing::error!(
-                            "Failed to save passkey instance: user_id={}, error_details={:#}",
-                            user_id,
-                            e
-                        );
-                        if let Err(cleanup_err) = repo.revoke_api_key(api_key_id).await {
-                            tracing::warn!(
-                                "Failed to revoke API key on save failure: user_id={}, api_key_id={}, error={}",
-                                user_id,
-                                api_key_id,
-                                cleanup_err
-                            );
+                        Ok(instance) => {
+                            tracing::info!("Passkey instance saved successfully: user_id={}, dashboard_url={:?}", user_id, instance.dashboard_url);
+
+                            // Send final event with dashboard_url and instance_url to frontend
+                            // This is essential for non-TEE where Agent API doesn't return these fields
+                            if is_non_tee_manager_for_stream {
+                                let final_event = serde_json::json!({
+                                    "instance": {
+                                        "name": instance.name,
+                                        "dashboard_url": instance.dashboard_url,
+                                        "instance_url": instance.instance_url,
+                                        "token": instance.instance_token,
+                                    }
+                                });
+
+                                if let Err(send_err) = tx.send(Ok(final_event)).await {
+                                    tracing::warn!(
+                                        "Failed to send final event to frontend: user_id={}, error={}",
+                                        user_id,
+                                        send_err
+                                    );
+                                }
+                            }
                         }
-                    } else {
-                        tracing::info!("Passkey instance saved successfully: user_id={}", user_id);
+                        Err(e) => {
+                            tracing::error!(
+                                "Failed to save passkey instance: user_id={}, error_details={:#}",
+                                user_id,
+                                e
+                            );
+                            if let Err(cleanup_err) = repo.revoke_api_key(api_key_id).await {
+                                tracing::warn!(
+                                    "Failed to revoke API key on save failure: user_id={}, api_key_id={}, error={}",
+                                    user_id,
+                                    api_key_id,
+                                    cleanup_err
+                                );
+                            }
+                        }
                     }
                 } else {
                     tracing::warn!(
