@@ -737,15 +737,6 @@ fn add_one_month_same_day(dt: chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
     chrono::DateTime::from_naive_utc_and_offset(new_d.and_time(dt.time()), Utc)
 }
 
-/// `anchor` advanced by `months` steps of [`add_one_month_same_day`] (Stripe-aligned month boundaries).
-fn add_months_same_day_iter(anchor: chrono::DateTime<Utc>, months: u32) -> chrono::DateTime<Utc> {
-    let mut t = anchor;
-    for _ in 0..months {
-        t = add_one_month_same_day(t);
-    }
-    t
-}
-
 /// Free-plan month starting when the paid period ended (`cancellation_period_end`), same length as Stripe monthly cycles.
 /// Steps month-by-month from the anchor, which is cheap for realistic spans (tens of months, even hundreds).
 fn free_plan_monthly_period_from_cancellation_anchor(
@@ -2805,7 +2796,18 @@ mod tests {
         assert_eq!((s, e), (cs, ce));
     }
 
-    /// Alternate construction: find `k` with `B(k) <= now < B(k+1)` using [`add_months_same_day_iter`].
+    fn add_months_same_day_iter(
+        anchor: chrono::DateTime<Utc>,
+        months: u32,
+    ) -> chrono::DateTime<Utc> {
+        let mut t = anchor;
+        for _ in 0..months {
+            t = add_one_month_same_day(t);
+        }
+        t
+    }
+
+    /// Alternate construction: find `k` with `B(k) <= now < B(k+1)` using `add_months_same_day_iter`.
     fn free_plan_period_via_month_index_from_anchor(
         anchor: chrono::DateTime<Utc>,
         now: chrono::DateTime<Utc>,
