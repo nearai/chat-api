@@ -1,5 +1,9 @@
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
+use aws_smithy_http_client::{
+    tls::{self, rustls_provider::CryptoMode},
+    Builder as AwsHttpClientBuilder,
+};
 use chrono::{Duration, Utc};
 use services::jobs::{CleanupCanceledInstancesTaskPayload, NoopTaskPayload, TaskExecutor};
 use services::{agent::ports::AgentService, UserId};
@@ -195,7 +199,12 @@ async fn main() -> anyhow::Result<()> {
         config.agent.channel_relay_url.clone(),
     ));
 
+    let http_client = AwsHttpClientBuilder::new()
+        .tls_provider(tls::Provider::Rustls(CryptoMode::AwsLc))
+        .build_https();
+
     let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .http_client(http_client)
         .region(aws_sdk_sqs::config::Region::new(region))
         .load()
         .await;

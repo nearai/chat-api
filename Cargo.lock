@@ -491,6 +491,7 @@ dependencies = [
  "aws-config",
  "aws-sdk-scheduler",
  "aws-sdk-sqs",
+ "aws-smithy-http-client",
  "axum",
  "axum-extra",
  "axum-test",
