@@ -143,7 +143,7 @@ impl TaskScheduler for AwsTaskScheduler {
 
                     update.send().await.map_err(|e| {
                         anyhow!(
-                            "failed to update existing schedule for task_id={}: {}",
+                            "failed to update existing schedule for task_id={}: {:?}",
                             request.task_id,
                             e
                         )
@@ -151,7 +151,7 @@ impl TaskScheduler for AwsTaskScheduler {
                     Ok(())
                 } else {
                     Err(anyhow!(
-                        "failed to create schedule for task_id={}: {}",
+                        "failed to create schedule for task_id={}: {:?}",
                         request.task_id,
                         err
                     ))

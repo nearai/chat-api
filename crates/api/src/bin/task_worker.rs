@@ -176,10 +176,6 @@ async fn main() -> anyhow::Result<()> {
         .clone()
         .ok_or_else(|| anyhow!("TASKS_SQS_QUEUE_URL is required"))?;
 
-    api::tasks::ensure_daily_cleanup_task(&tasks)
-        .await
-        .context("failed to ensure daily cleanup schedule")?;
-
     let db = database::Database::from_config(&config.database)
         .await
         .context("failed to connect database for task worker")?;
@@ -196,6 +192,7 @@ async fn main() -> anyhow::Result<()> {
         config.agent.managers.clone(),
         config.agent.nearai_api_url.clone(),
         system_configs_service as Arc<dyn services::system_configs::ports::SystemConfigsService>,
+        config.agent.channel_relay_url.clone(),
     ));
 
     let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
