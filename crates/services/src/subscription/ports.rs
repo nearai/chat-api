@@ -159,6 +159,8 @@ pub enum SubscriptionError {
     InstanceLimitExceeded { current: u64, max: u64 },
     /// Subscription is not scheduled for cancellation (cannot resume)
     SubscriptionNotScheduledForCancellation,
+    /// Subscription is already scheduled for cancellation and must be resumed before changing plan
+    SubscriptionScheduledForCancellation,
     /// User has no Stripe customer record
     NoStripeCustomer,
     /// Stripe API error
@@ -205,6 +207,9 @@ impl fmt::Display for SubscriptionError {
             }
             Self::SubscriptionNotScheduledForCancellation => {
                 write!(f, "Subscription is not scheduled for cancellation")
+            }
+            Self::SubscriptionScheduledForCancellation => {
+                write!(f, "Subscription is scheduled for cancellation")
             }
             Self::NoStripeCustomer => write!(f, "User has no Stripe customer record"),
             Self::StripeError(msg) => write!(f, "Stripe error: {}", msg),

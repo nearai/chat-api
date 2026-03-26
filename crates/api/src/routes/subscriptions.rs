@@ -203,6 +203,10 @@ pub async fn create_subscription(
                 tracing::error!("Unexpected SubscriptionNotScheduledForCancellation in create");
                 ApiError::internal_server_error("Failed to create subscription")
             }
+            SubscriptionError::SubscriptionScheduledForCancellation => {
+                tracing::error!("Unexpected SubscriptionScheduledForCancellation in create");
+                ApiError::internal_server_error("Failed to create subscription")
+            }
             SubscriptionError::CreditLimitExceeded { .. } => {
                 tracing::error!("Unexpected CreditLimitExceeded in create");
                 ApiError::internal_server_error("Failed to create subscription")
@@ -374,6 +378,9 @@ pub async fn change_plan(
             }
             SubscriptionError::NoActiveSubscription => {
                 ApiError::not_found("No active subscription found")
+            }
+            SubscriptionError::SubscriptionScheduledForCancellation => {
+                ApiError::bad_request("Subscription is scheduled for cancellation; resume it before changing plans")
             }
             SubscriptionError::NotConfigured => {
                 ApiError::service_unavailable("Stripe is not configured")
