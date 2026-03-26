@@ -187,30 +187,6 @@ pub async fn create_subscription(
                 tracing::error!(error = ?msg, "Internal error creating subscription");
                 ApiError::internal_server_error("Failed to create subscription")
             }
-            SubscriptionError::NoActiveSubscription => {
-                tracing::error!("Unexpected NoActiveSubscription in create");
-                ApiError::internal_server_error("Failed to create subscription")
-            }
-            SubscriptionError::NoStripeCustomer => {
-                tracing::error!("Unexpected NoStripeCustomer in create");
-                ApiError::internal_server_error("Failed to create subscription")
-            }
-            SubscriptionError::WebhookVerificationFailed(msg) => {
-                tracing::error!(error = ?msg, "Unexpected webhook error in create");
-                ApiError::internal_server_error("Failed to create subscription")
-            }
-            SubscriptionError::SubscriptionNotScheduledForCancellation => {
-                tracing::error!("Unexpected SubscriptionNotScheduledForCancellation in create");
-                ApiError::internal_server_error("Failed to create subscription")
-            }
-            SubscriptionError::SubscriptionScheduledForCancellation => {
-                tracing::error!("Unexpected SubscriptionScheduledForCancellation in create");
-                ApiError::internal_server_error("Failed to create subscription")
-            }
-            SubscriptionError::CreditLimitExceeded { .. } => {
-                tracing::error!("Unexpected CreditLimitExceeded in create");
-                ApiError::internal_server_error("Failed to create subscription")
-            }
             SubscriptionError::CreditsNotConfigured => {
                 ApiError::service_unavailable("Credit purchase is not configured")
             }
@@ -224,8 +200,8 @@ pub async fn create_subscription(
             SubscriptionError::TestClockNotAllowedForExistingCustomer => ApiError::bad_request(
                 "Cannot associate test clock with existing Stripe customer".to_string(),
             ),
-            SubscriptionError::NoPendingDowngrade => {
-                tracing::error!("Unexpected NoPendingDowngrade in create");
+            unexpected => {
+                tracing::error!(error = ?unexpected, "Unexpected subscription error in create");
                 ApiError::internal_server_error("Failed to create subscription")
             }
         })?;
