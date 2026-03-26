@@ -870,11 +870,16 @@ mod tests {
     #[serial]
     fn test_agent_config_tee_mode_leaves_fields_empty() {
         // TEE mode: NON_TEE_INFRA=false or unset
+        // Clean up any leftover env vars from other tests
         std::env::remove_var("NON_TEE_INFRA");
         std::env::remove_var("AGENT_DOMAIN");
         std::env::remove_var("INSTANCE_DEFAULT_CPUS");
         std::env::remove_var("INSTANCE_DEFAULT_MEM_LIMIT");
         std::env::remove_var("INSTANCE_DEFAULT_STORAGE_SIZE");
+        std::env::remove_var("AGENT_MANAGER_URLS");
+        std::env::remove_var("AGENT_MANAGER_TOKENS");
+        std::env::remove_var("AGENT_MANAGER_URLS_TEE");
+        std::env::remove_var("AGENT_MANAGER_TOKENS_TEE");
 
         let config = AgentConfig::default();
 
@@ -1042,6 +1047,12 @@ mod tests {
     #[test]
     #[serial]
     fn test_config_struct_non_tee_mode() {
+        // Clean up any leftover env vars from other tests
+        std::env::remove_var("AGENT_MANAGER_URLS");
+        std::env::remove_var("AGENT_MANAGER_TOKENS");
+        std::env::remove_var("AGENT_MANAGER_URLS_TEE");
+        std::env::remove_var("AGENT_MANAGER_TOKENS_TEE");
+
         std::env::set_var("NON_TEE_INFRA", "true");
         std::env::set_var("AGENT_DOMAIN", "production.dev");
 
@@ -1066,43 +1077,39 @@ mod tests {
     #[test]
     #[serial]
     fn test_agent_manager_type_detection_from_url() {
-        // Test that manager type is correctly inferred from URL pattern
-        std::env::set_var("NON_TEE_AGENT_URL", "claws");
+        // Test that manager type uses explicit is_non_tee field (not URL pattern detection)
 
-        // Manager with "claws" in URL should be detected as non-TEE
+        // Manager with is_non_tee=true should be detected as non-TEE
         let non_tee_mgr = AgentManager {
-            url: "https://claws.sare.dev/api/crabshack".to_string(),
+            url: "https://api.openclaw-dev.near.ai".to_string(),
             token: "token1".to_string(),
-            is_non_tee: false, // This field is ignored - detection uses URL
+            is_non_tee: true,
         };
         assert!(
             non_tee_mgr.get_is_non_tee(),
-            "claws URL should be detected as non-TEE"
+            "Manager with is_non_tee=true should be non-TEE"
         );
 
-        // Manager without "claws" in URL should be detected as TEE
+        // Manager with is_non_tee=false should be detected as TEE
         let tee_mgr = AgentManager {
-            url: "https://api.openclaw-dev.near.ai".to_string(),
+            url: "https://claws.sare.dev/api/crabshack".to_string(),
             token: "token2".to_string(),
-            is_non_tee: true, // This field is ignored - detection uses URL
-        };
-        assert!(
-            !tee_mgr.get_is_non_tee(),
-            "api.openclaw URL should be detected as TEE"
-        );
-
-        // Test with different non_tee_agent_url_pattern
-        std::env::set_var("NON_TEE_AGENT_URL", "compose");
-        let compose_mgr = AgentManager {
-            url: "https://compose.example.com".to_string(),
-            token: "token3".to_string(),
             is_non_tee: false,
         };
         assert!(
-            compose_mgr.get_is_non_tee(),
-            "compose URL should be non-TEE when pattern is 'compose'"
+            !tee_mgr.get_is_non_tee(),
+            "Manager with is_non_tee=false should be TEE"
         );
 
-        std::env::remove_var("NON_TEE_AGENT_URL");
+        // Test that is_non_tee field is respected regardless of URL
+        let compose_mgr = AgentManager {
+            url: "https://compose.example.com".to_string(),
+            token: "token3".to_string(),
+            is_non_tee: true,
+        };
+        assert!(
+            compose_mgr.get_is_non_tee(),
+            "Manager with is_non_tee=true should be non-TEE even with generic URL"
+        );
     }
 }

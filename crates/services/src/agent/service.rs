@@ -3645,6 +3645,15 @@ mod tests {
             Self { configs: None }
         }
 
+        fn with_non_tee_infra(non_tee_infra: bool) -> Self {
+            Self {
+                configs: Some(SystemConfigs {
+                    non_tee_infra: Some(non_tee_infra),
+                    ..Default::default()
+                }),
+            }
+        }
+
         fn with_manager_limit(max: u64) -> Self {
             Self {
                 configs: Some(SystemConfigs {
@@ -5424,12 +5433,15 @@ mod tests {
 
     #[test]
     fn test_service_type_normalization_non_tee_mode() {
-        // Non-TEE mode: should keep -dind suffix
+        // Non-TEE mode: should convert ironclaw to ironclaw-dind
         assert_eq!(
             normalize_service_type_for_api("ironclaw-dind", true),
             "ironclaw-dind"
         );
-        assert_eq!(normalize_service_type_for_api("ironclaw", true), "ironclaw");
+        assert_eq!(
+            normalize_service_type_for_api("ironclaw", true),
+            "ironclaw-dind"
+        );
         assert_eq!(normalize_service_type_for_api("openclaw", true), "openclaw");
     }
 
@@ -5580,7 +5592,7 @@ mod tests {
         let svc = make_service_with_config(
             managers,
             Arc::new(mock_repo_with_manager_count(0)),
-            Arc::new(MockSystemConfigsService::no_config()),
+            Arc::new(MockSystemConfigsService::with_non_tee_infra(true)),
             true, // NON_TEE_INFRA=true
         );
 
@@ -5646,7 +5658,7 @@ mod tests {
         let svc = make_service_with_config(
             managers,
             Arc::new(mock_repo_with_manager_count(0)),
-            Arc::new(MockSystemConfigsService::no_config()),
+            Arc::new(MockSystemConfigsService::with_non_tee_infra(true)),
             true, // NON_TEE_INFRA=true but all managers are TEE
         );
 
@@ -5775,7 +5787,7 @@ mod tests {
         let svc = make_service_with_config(
             managers,
             Arc::new(mock_repo_with_manager_count(0)),
-            Arc::new(MockSystemConfigsService::no_config()),
+            Arc::new(MockSystemConfigsService::with_non_tee_infra(true)),
             true, // NON_TEE_INFRA=true
         );
 
@@ -5861,13 +5873,16 @@ mod tests {
             "ironclaw"
         );
 
-        // Non-TEE mode: service types should be passed as-is
+        // Non-TEE mode: ironclaw should be converted to ironclaw-dind
         assert_eq!(
             normalize_service_type_for_api("ironclaw-dind", true),
             "ironclaw-dind"
         );
         assert_eq!(normalize_service_type_for_api("openclaw", true), "openclaw");
-        assert_eq!(normalize_service_type_for_api("ironclaw", true), "ironclaw");
+        assert_eq!(
+            normalize_service_type_for_api("ironclaw", true),
+            "ironclaw-dind"
+        );
     }
 
     #[test]
@@ -5903,7 +5918,7 @@ mod tests {
         let svc = make_service_with_config(
             managers,
             Arc::new(mock_repo_with_manager_count(0)),
-            Arc::new(MockSystemConfigsService::no_config()),
+            Arc::new(MockSystemConfigsService::with_non_tee_infra(true)),
             true, // NON_TEE_INFRA=true but only TEE managers configured
         );
 
