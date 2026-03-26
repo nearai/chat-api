@@ -34,7 +34,7 @@ pub fn is_valid_service_type(service_type: &str) -> bool {
     VALID_SERVICE_TYPES.contains(&service_type)
 }
 
-/// Enrichment data from Agent API (compose-api) for instance responses
+/// Enrichment data from the agent compose-api (TEE or non-TEE) for instance responses
 #[derive(Debug, Clone, Default)]
 pub struct AgentApiInstanceEnrichment {
     pub status: Option<String>,
@@ -314,9 +314,9 @@ pub trait AgentService: Send + Sync {
         params: InstanceCreationParams,
     ) -> anyhow::Result<AgentInstance>;
 
-    /// Create instance via TEE Agent API with streaming lifecycle events.
-    /// Streams events from the Agent API as they occur during instance creation.
-    /// Returns a receiver that yields raw JSON events from the Agent API.
+    /// Create instance via TEE compose-api with streaming lifecycle events.
+    /// Streams events from the agent API as they occur during instance creation.
+    /// Returns a receiver that yields raw JSON events from the agent API.
     async fn create_instance_from_agent_api_streaming(
         &self,
         user_id: UserId,
@@ -325,7 +325,7 @@ pub trait AgentService: Send + Sync {
     ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<serde_json::Value>>>;
 
     /// Create instance with per-instance passkey credentials and streaming lifecycle events.
-    /// Calls compose-api /auth/register to set up the instance with unique credentials,
+    /// Calls non-TEE compose-api /auth/register to set up the instance with unique credentials,
     /// then creates the instance using the session token instead of manager token.
     /// Returns a receiver that yields raw JSON events as they occur during instance creation.
     async fn create_passkey_instance_streaming(
@@ -388,7 +388,7 @@ pub trait AgentService: Send + Sync {
     async fn restart_instance(&self, instance_id: Uuid, user_id: UserId) -> anyhow::Result<()>;
 
     /// Upgrade instance with streaming SSE progress.
-    /// Returns a receiver that yields SSE chunks from the compose-api restart stream.
+    /// Returns a receiver that yields SSE chunks from the agent compose-api restart stream.
     /// Uses a 5-minute timeout to allow the full upgrade to complete.
     async fn upgrade_instance_stream(
         &self,

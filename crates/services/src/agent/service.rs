@@ -35,18 +35,18 @@ fn get_image_for_service_type(service_type: &str) -> &'static str {
     }
 }
 
-/// Normalize service type for API calls.
-/// TEE mode's cloud API only accepts 'openclaw' or 'ironclaw' (without -dind suffix).
-/// Non-TEE mode's compose-api needs 'ironclaw-dind' variant for ironclaw deployments.
+/// Normalize service type for compose-api calls.
+/// TEE compose-api accepts only `openclaw` or `ironclaw` (strip `-dind` suffix).
+/// Non-TEE compose-api expects `ironclaw-dind` for ironclaw deployments.
 fn normalize_service_type_for_api(service_type: &str, non_tee: bool) -> String {
     if non_tee {
-        // Non-TEE: convert ironclaw to ironclaw-dind for compose-api
+        // Non-TEE compose-api: map ironclaw → ironclaw-dind
         match service_type {
             "ironclaw" => "ironclaw-dind".to_string(),
             _ => service_type.to_string(),
         }
     } else {
-        // TEE: strip -dind suffix for cloud API
+        // TEE compose-api: strip -dind suffix
         service_type
             .strip_suffix("-dind")
             .unwrap_or(service_type)
@@ -99,7 +99,7 @@ pub struct AgentServiceImpl {
     /// Channel-relay URL for provisioning relay config to IronClaw instances
     channel_relay_url: Option<String>,
     /// Infrastructure mode: true = non-TEE, false = TEE
-    /// Used to determine whether to call compose-api (non-TEE only)
+    /// Selects which agent manager endpoints are used (non-TEE compose-api vs TEE compose-api).
     non_tee_infra: bool,
     /// URL pattern to identify non-TEE manager endpoints (e.g., "claws")
     /// Used to determine instance type when routing to managers
@@ -329,7 +329,7 @@ impl AgentServiceImpl {
         let fallback_manager = if let Some(ref stored_url) = instance.agent_api_base_url {
             // Determine expected manager type based on URL pattern:
             // - Non-TEE: URLs containing the configured non_tee_agent_url_pattern (e.g., "claws")
-            // - TEE: all other URLs (cloud-api pattern)
+            // - TEE: all other URLs (TEE compose-api / manager hostnames)
             let expected_is_non_tee = stored_url.contains(&self.non_tee_agent_url_pattern);
 
             // Find a manager of the matching type
@@ -454,7 +454,7 @@ impl AgentServiceImpl {
 
     /// Resolve the bearer token to use for agent API calls.
     /// In non-TEE mode: tries to fetch user's passkey credentials and login to compose-api.
-    /// In TEE mode: always uses manager token (cloud API doesn't support passkey login).
+    /// In TEE mode: always uses manager token (TEE compose-api does not support passkey login).
     async fn resolve_bearer_token(
         &self,
         instance: &AgentInstance,
@@ -1158,7 +1158,7 @@ async fn save_passkey_instance_from_event(
     }
 
     // Extract instance_url from API response if available
-    // Try "instance_url" first (returned by non-TEE Agent API in final event),
+    // Try "instance_url" first (returned by non-TEE compose-api in final event),
     // then fall back to "url" (used by other API responses)
     let instance_url = instance_data
         .get("instance_url")
@@ -1471,7 +1471,7 @@ impl AgentService for AgentServiceImpl {
         Ok(instance)
     }
 
-    /// Create instance via TEE Agent API with streaming lifecycle events.
+    /// Create instance via TEE compose-api with streaming lifecycle events.
     /// Similar to create_instance_from_agent_api but streams events as they occur.
     async fn create_instance_from_agent_api_streaming(
         &self,
@@ -5174,7 +5174,7 @@ mod tests {
         async fn test_e2e_tee_mode_flow() {
             let server = setup_mock_server().await;
 
-            // TEE mode: Mock cloud API response
+            // TEE mode: mock TEE compose-api response
             // Should receive normalized service type (ironclaw, not ironclaw-dind)
             Mock::given(method("POST"))
                 .and(path("/instances"))
@@ -5350,7 +5350,7 @@ mod tests {
 
             // TEE Mode:
             // Config: NON_TEE_INFRA not set or false
-            // Manager: Cloud API (api.agent.near.ai or AGENT_MANAGER_URLS_TEE)
+            // Manager: TEE compose-api (e.g. api.agent.near.ai via AGENT_MANAGER_URLS_TEE)
             // Auth: Manager token only, NO passkey login
             // Service Type: Normalized (ironclaw-dind -> ironclaw)
             let tee_mode = false;
@@ -5361,7 +5361,7 @@ mod tests {
 
             // Non-TEE Mode:
             // Config: NON_TEE_INFRA=true
-            // Manager: Compose API (claws.sare.dev via AGENT_MANAGER_URLS)
+            // Manager: non-TEE compose-api (e.g. claws.sare.dev via AGENT_MANAGER_URLS)
             // Auth: Passkey login available, falls back to manager token
             // Service Type: Kept as-is (ironclaw-dind stays ironclaw-dind)
             let non_tee_mode = true;
@@ -5542,7 +5542,7 @@ mod tests {
     #[test]
     fn test_tee_mode_configuration_summary() {
         // TEE Mode Flow:
-        // 1. Uses cloud API endpoint (AGENT_API_BASE_URL or AGENT_MANAGER_URLS_TEE)
+        // 1. Uses TEE compose-api (AGENT_API_BASE_URL or AGENT_MANAGER_URLS_TEE)
         // 2. NO passkey login (resolve_bearer_token returns manager token directly)
         // 3. Service type normalized: "ironclaw-dind" -> "ironclaw"
         // 4. Manager token used for all API calls
@@ -5561,7 +5561,7 @@ mod tests {
     #[test]
     fn test_non_tee_mode_configuration_summary() {
         // Non-TEE Mode Flow:
-        // 1. Uses compose-api endpoint (AGENT_MANAGER_URLS pointing to claws.sare.dev)
+        // 1. Uses non-TEE compose-api (AGENT_MANAGER_URLS, e.g. claws.sare.dev)
         // 2. Passkey login enabled (resolve_bearer_token attempts passkey login)
         // 3. Service type kept as-is: "ironclaw-dind" stays "ironclaw-dind"
         // 4. Session token from passkey or manager token used for API calls

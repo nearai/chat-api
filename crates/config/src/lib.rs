@@ -395,7 +395,7 @@ pub struct AgentConfig {
     /// signing secret instead of the former shared CHANNEL_RELAY_SIGNING_SECRET.
     #[serde(default)]
     pub channel_relay_url: Option<String>,
-    /// URL pattern to identify non-TEE (compose-api) endpoints for instance type detection
+    /// URL pattern to identify non-TEE compose-api endpoints for instance type detection
     /// Configurable via NON_TEE_AGENT_URL environment variable (defaults to "claws")
     #[serde(default = "default_non_tee_agent_url")]
     pub non_tee_agent_url_pattern: String,

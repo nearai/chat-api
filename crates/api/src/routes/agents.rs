@@ -93,7 +93,7 @@ async fn get_instance_limit(
 /// - Unsubscribed users: no instances allowed (active subscription required)
 ///
 /// Each instance receives unique auth_secret and backup_passphrase credentials generated on the backend.
-/// These credentials are used for compose-api /auth/register and /auth/login.
+/// These credentials are used for non-TEE compose-api /auth/register and /auth/login.
 ///
 /// Supports two response modes via content negotiation:
 /// - Accept: text/event-stream → Returns SSE stream of lifecycle events
@@ -181,7 +181,7 @@ pub async fn create_instance(
     if wants_stream {
         // SSE streaming response
         let rx = if non_tee_infra {
-            // Non-TEE mode: use passkey/compose-api flow
+            // Non-TEE mode: passkey flow against non-TEE compose-api
             app_state
                 .agent_service
                 .create_passkey_instance_streaming(
@@ -205,7 +205,7 @@ pub async fn create_instance(
                     ApiError::internal_server_error("Failed to start instance creation")
                 })?
         } else {
-            // TEE mode: use Agent API streaming flow
+            // TEE mode: streaming flow against TEE compose-api
             app_state
                 .agent_service
                 .create_instance_from_agent_api_streaming(
@@ -271,7 +271,7 @@ pub async fn create_instance(
         // Non-streaming fallback: Collect stream and return final instance as JSON
         // Note: This blocks the request until instance creation completes
         let instance = if non_tee_infra {
-            // Non-TEE mode: use passkey/compose-api flow
+            // Non-TEE mode: passkey flow against non-TEE compose-api
             let mut rx = app_state
                 .agent_service
                 .create_passkey_instance_streaming(
@@ -337,7 +337,7 @@ pub async fn create_instance(
                     ApiError::internal_server_error("Created instance not found in database")
                 })?
         } else {
-            // TEE mode: use Agent API streaming flow, collect events
+            // TEE mode: TEE compose-api streaming flow; collect events
             let mut rx = app_state
                 .agent_service
                 .create_instance_from_agent_api_streaming(
