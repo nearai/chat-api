@@ -84,7 +84,7 @@ pub struct AgentServiceImpl {
     round_robin_counter: AtomicUsize,
     /// Chat-API base URL passed to the Agent API as nearai_api_url when creating instances
     nearai_api_url: String,
-    /// Domain where agent instances are accessible (e.g., claws.sare.dev)
+    /// Domain where agent instances are accessible (e.g., agents.example.com)
     /// Used to construct instance_url as https://{name}.{agent_domain}/?token={token}
     /// Only used in non-TEE mode; None in TEE mode
     agent_domain: Option<String>,
@@ -536,8 +536,8 @@ impl AgentServiceImpl {
         session_token: &str,
     ) -> anyhow::Result<Option<String>> {
         // Extract domain from manager URL and construct proxy-session URL
-        // Manager URL: https://claws.sare.dev/api/crabshack
-        // Proxy-session URL: https://api.claws.sare.dev/api/auth/proxy-session
+        // Manager URL: https://agents.example.com/api/crabshack
+        // Proxy-session URL: https://api.agents.example.com/api/auth/proxy-session
         let url = if let Ok(parsed) = url::Url::parse(&manager.url) {
             if let Some(domain) = parsed.domain() {
                 format!("https://api.{}/api/auth/proxy-session", domain)
@@ -5361,7 +5361,7 @@ mod tests {
 
             // Non-TEE Mode:
             // Config: NON_TEE_INFRA=true
-            // Manager: non-TEE compose-api (e.g. claws.sare.dev via AGENT_MANAGER_URLS)
+            // Manager: non-TEE compose-api (AGENT_MANAGER_URLS)
             // Auth: Passkey login available, falls back to manager token
             // Service Type: Kept as-is (ironclaw-dind stays ironclaw-dind)
             let non_tee_mode = true;
@@ -5561,7 +5561,7 @@ mod tests {
     #[test]
     fn test_non_tee_mode_configuration_summary() {
         // Non-TEE Mode Flow:
-        // 1. Uses non-TEE compose-api (AGENT_MANAGER_URLS, e.g. claws.sare.dev)
+        // 1. Uses non-TEE compose-api (AGENT_MANAGER_URLS)
         // 2. Passkey login enabled (resolve_bearer_token attempts passkey login)
         // 3. Service type kept as-is: "ironclaw-dind" stays "ironclaw-dind"
         // 4. Session token from passkey or manager token used for API calls
@@ -5736,13 +5736,12 @@ mod tests {
     fn test_manager_type_detection_from_url() {
         // Test the manager type detection logic (non-TEE vs TEE)
         let non_tee_urls = vec![
-            "https://claws.sare.dev/api/crabshack",
             "https://claws.example.com/api/crabshack",
             "https://other.host/api/crabshack",
         ];
 
         for url in non_tee_urls {
-            let is_non_tee = url.contains("claws.sare.dev") || url.contains("/api/crabshack");
+            let is_non_tee = url.contains("/api/crabshack");
             assert!(is_non_tee, "Expected {} to be detected as non-TEE", url);
         }
 
@@ -5753,7 +5752,7 @@ mod tests {
         ];
 
         for url in tee_urls {
-            let is_non_tee = url.contains("claws.sare.dev") || url.contains("/api/crabshack");
+            let is_non_tee = url.contains("/api/crabshack");
             assert!(!is_non_tee, "Expected {} to be detected as TEE", url);
         }
     }

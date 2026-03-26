@@ -375,7 +375,7 @@ pub struct AgentConfig {
     /// Used as nearai_api_url when creating instances so the agent knows where to authenticate.
     #[serde(default = "default_nearai_api_url")]
     pub nearai_api_url: String,
-    /// Domain where agent instances are accessible (e.g., claws.sare.dev)
+    /// Domain where agent instances are accessible (e.g., agents.example.com)
     /// Used to construct instance_url and dashboard_url as {instance_name}.{agent_domain}
     /// Configured via AGENT_DOMAIN environment variable. Only used in non-TEE mode.
     #[serde(default)]
@@ -1092,7 +1092,7 @@ mod tests {
 
         // Manager with is_non_tee=false should be detected as TEE
         let tee_mgr = AgentManager {
-            url: "https://claws.sare.dev/api/crabshack".to_string(),
+            url: "https://agents.example.com/api/crabshack".to_string(),
             token: "token2".to_string(),
             is_non_tee: false,
         };
