@@ -86,14 +86,15 @@ async fn get_instance_limit(
     Ok((total as u64, max_allowed))
 }
 
-/// Create a new agent instance with per-instance passkey credentials.
+/// Create a new agent instance.
 ///
 /// Agent instance limits are enforced for all users to prevent resource exhaustion:
 /// - Subscribed users: plan limit from subscription_plans config
 /// - Unsubscribed users: no instances allowed (active subscription required)
 ///
-/// Each instance receives unique auth_secret and backup_passphrase credentials generated on the backend.
-/// These credentials are used for non-TEE compose-api /auth/register and /auth/login.
+/// In non-TEE mode, the user authenticates to compose-api with passkey credentials (`auth_secret` /
+/// `backup_passphrase`) stored once per user (created on first use) and reused for later instances.
+/// Those credentials are registered via non-TEE compose-api `/auth/register` and `/auth/login`.
 ///
 /// Supports two response modes via content negotiation:
 /// - Accept: text/event-stream → Returns SSE stream of lifecycle events
