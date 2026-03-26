@@ -181,7 +181,7 @@ async fn main() -> anyhow::Result<()> {
         config.agent.instance_default_mem_limit.clone(),
         config.agent.instance_default_storage_size.clone(),
         config.agent.channel_relay_url.clone(),
-        config.infrastructure.non_tee_infra,
+        false, // non_tee_infra is now read from system configs at runtime
         config.agent.non_tee_agent_url_pattern.clone(),
     ));
 

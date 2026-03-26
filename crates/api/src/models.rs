@@ -760,6 +760,10 @@ pub struct SystemConfigsResponse {
     /// Auto-routing configuration for `model: "auto"` requests
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_route: Option<AutoRouteConfig>,
+    /// Infrastructure mode: true = non-TEE, false = TEE (default)
+    /// When true, only non-TEE managers are used for instance creation
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub non_tee_infra: Option<bool>,
 }
 
 impl From<services::system_configs::ports::SystemConfigs> for SystemConfigsResponse {
@@ -772,6 +776,7 @@ impl From<services::system_configs::ports::SystemConfigs> for SystemConfigsRespo
             credits: config.credits,
             max_instances_by_manager_url: config.max_instances_by_manager_url,
             auto_route: config.auto_route,
+            non_tee_infra: config.non_tee_infra,
         }
     }
 }
@@ -800,6 +805,10 @@ pub struct UpsertSystemConfigsRequest {
     /// Auto-routing configuration for `model: "auto"` requests
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_route: Option<AutoRouteConfig>,
+    /// Infrastructure mode: true = non-TEE, false = TEE (default)
+    /// When true, only non-TEE managers are used for instance creation
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub non_tee_infra: Option<bool>,
 }
 
 impl TryFrom<UpsertSystemConfigsRequest> for services::system_configs::ports::PartialSystemConfigs {
@@ -820,6 +829,7 @@ impl TryFrom<UpsertSystemConfigsRequest> for services::system_configs::ports::Pa
             credits: req.credits,
             max_instances_by_manager_url: req.max_instances_by_manager_url,
             auto_route: req.auto_route,
+            non_tee_infra: req.non_tee_infra,
         })
     }
 }

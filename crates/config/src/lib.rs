@@ -346,9 +346,9 @@ impl AgentManager {
         url.contains(&non_tee_pattern)
     }
 
-    /// Get the effective is_non_tee value, preferring URL-based detection over stored value
+    /// Get the effective is_non_tee value based on explicit configuration
     pub fn get_is_non_tee(&self) -> bool {
-        Self::infer_type_from_url(&self.url)
+        self.is_non_tee
     }
 }
 

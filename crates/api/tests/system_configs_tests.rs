@@ -726,3 +726,309 @@ async fn test_rate_limit_config_hot_reload() {
         );
     }
 }
+
+#[tokio::test]
+#[serial(write_system_configs)]
+async fn test_non_tee_infra_default_value() {
+    let server = create_test_server().await;
+
+    let admin_email = "test_admin_non_tee_default@admin.org";
+    let admin_token = mock_login(&server, admin_email).await;
+
+    // Reset to known state first (ensure false)
+    let reset_body = json!({ "non_tee_infra": false });
+    let response = server
+        .patch("/v1/admin/configs")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&reset_body)
+        .await;
+
+    assert!(response.status_code().is_success());
+
+    // Get system configs to verify non_tee_infra is false
+    let response = server
+        .get("/v1/admin/configs")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 200);
+    let body: serde_json::Value = response.json();
+
+    // non_tee_infra should be false (TEE mode, the default)
+    assert_eq!(
+        body.get("non_tee_infra"),
+        Some(&json!(false)),
+        "non_tee_infra should be false (TEE mode is the default)"
+    );
+}
+
+#[tokio::test]
+#[serial(write_system_configs)]
+async fn test_non_tee_infra_set_to_true() {
+    let server = create_test_server().await;
+
+    let admin_email = "test_admin_non_tee_true@admin.org";
+    let admin_token = mock_login(&server, admin_email).await;
+
+    // Set non_tee_infra to true
+    let update_body = json!({
+        "non_tee_infra": true
+    });
+
+    let response = server
+        .patch("/v1/admin/configs")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&update_body)
+        .await;
+
+    assert!(
+        response.status_code().is_success(),
+        "Should be able to set non_tee_infra to true"
+    );
+
+    let body: serde_json::Value = response.json();
+    assert_eq!(
+        body.get("non_tee_infra"),
+        Some(&json!(true)),
+        "non_tee_infra should be set to true"
+    );
+
+    // Verify persistence via GET
+    let response = server
+        .get("/v1/admin/configs")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 200);
+    let body: serde_json::Value = response.json();
+    assert_eq!(
+        body.get("non_tee_infra"),
+        Some(&json!(true)),
+        "non_tee_infra should be persisted as true"
+    );
+}
+
+#[tokio::test]
+#[serial(write_system_configs)]
+async fn test_non_tee_infra_set_to_false() {
+    let server = create_test_server().await;
+
+    let admin_email = "test_admin_non_tee_false@admin.org";
+    let admin_token = mock_login(&server, admin_email).await;
+
+    // First set to true
+    let set_true = json!({ "non_tee_infra": true });
+    let response = server
+        .patch("/v1/admin/configs")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&set_true)
+        .await;
+
+    assert!(response.status_code().is_success());
+
+    // Then set to false
+    let set_false = json!({ "non_tee_infra": false });
+    let response = server
+        .patch("/v1/admin/configs")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&set_false)
+        .await;
+
+    assert!(response.status_code().is_success());
+    let body: serde_json::Value = response.json();
+    assert_eq!(
+        body.get("non_tee_infra"),
+        Some(&json!(false)),
+        "non_tee_infra should be set to false (back to TEE mode)"
+    );
+}
+
+#[tokio::test]
+#[serial(write_system_configs)]
+async fn test_non_tee_infra_partial_update_preserves_other_fields() {
+    let server = create_test_server().await;
+
+    let admin_email = "test_admin_non_tee_partial@admin.org";
+    let admin_token = mock_login(&server, admin_email).await;
+
+    // First set a default_model and non_tee_infra
+    let initial_config = json!({
+        "default_model": "gpt-4",
+        "non_tee_infra": false
+    });
+
+    let response = server
+        .patch("/v1/admin/configs")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&initial_config)
+        .await;
+
+    assert!(response.status_code().is_success());
+
+    // Update only non_tee_infra
+    let update_only_non_tee = json!({ "non_tee_infra": true });
+    let response = server
+        .patch("/v1/admin/configs")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&update_only_non_tee)
+        .await;
+
+    assert!(response.status_code().is_success());
+    let body: serde_json::Value = response.json();
+
+    // Both fields should be present
+    assert_eq!(
+        body.get("non_tee_infra"),
+        Some(&json!(true)),
+        "non_tee_infra should be updated to true"
+    );
+    assert_eq!(
+        body.get("default_model"),
+        Some(&json!("gpt-4")),
+        "default_model should be preserved"
+    );
+}
+
+#[tokio::test]
+#[serial(write_system_configs)]
+async fn test_non_tee_infra_toggle_multiple_times() {
+    let server = create_test_server().await;
+
+    let admin_email = "test_admin_non_tee_toggle@admin.org";
+    let admin_token = mock_login(&server, admin_email).await;
+
+    // Test toggling between true and false multiple times
+    for expected_value in [true, false, true, false] {
+        let update_body = json!({ "non_tee_infra": expected_value });
+        let response = server
+            .patch("/v1/admin/configs")
+            .add_header(
+                http::HeaderName::from_static("authorization"),
+                http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+            )
+            .add_header(
+                http::HeaderName::from_static("content-type"),
+                http::HeaderValue::from_static("application/json"),
+            )
+            .json(&update_body)
+            .await;
+
+        assert!(response.status_code().is_success());
+        let body: serde_json::Value = response.json();
+        assert_eq!(
+            body.get("non_tee_infra"),
+            Some(&serde_json::json!(expected_value)),
+            "non_tee_infra should toggle correctly"
+        );
+    }
+}
+
+#[tokio::test]
+#[serial(write_system_configs)]
+async fn test_non_tee_infra_not_visible_in_public_config() {
+    let server = create_test_server().await;
+
+    let non_admin_email = "test_user_non_tee_public@no-admin.org";
+    let non_admin_token = mock_login(&server, non_admin_email).await;
+
+    let admin_email = "test_admin_non_tee_public@admin.org";
+    let admin_token = mock_login(&server, admin_email).await;
+
+    // Admin sets non_tee_infra to true
+    let update_body = json!({ "non_tee_infra": true });
+    let response = server
+        .patch("/v1/admin/configs")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&update_body)
+        .await;
+
+    assert!(response.status_code().is_success());
+
+    // Non-admin GET /v1/configs should NOT show non_tee_infra
+    let response = server
+        .get("/v1/configs")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {non_admin_token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 200);
+    let body: serde_json::Value = response.json();
+    assert!(
+        body.get("non_tee_infra").is_none(),
+        "Public config should NOT expose non_tee_infra"
+    );
+
+    // Admin GET /v1/admin/configs SHOULD show non_tee_infra
+    let response = server
+        .get("/v1/admin/configs")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 200);
+    let body: serde_json::Value = response.json();
+    assert_eq!(
+        body.get("non_tee_infra"),
+        Some(&json!(true)),
+        "Admin config should expose non_tee_infra"
+    );
+}

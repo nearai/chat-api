@@ -193,6 +193,10 @@ pub struct SystemConfigs {
     /// Auto-routing configuration for `model: "auto"` requests
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_route: Option<AutoRouteConfig>,
+    /// Infrastructure mode: true = non-TEE, false = TEE (default)
+    /// When true, only non-TEE managers are used for instance creation
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub non_tee_infra: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -204,6 +208,7 @@ pub struct PartialSystemConfigs {
     pub credits: Option<CreditsConfig>,
     pub max_instances_by_manager_url: Option<HashMap<String, u64>>,
     pub auto_route: Option<AutoRouteConfig>,
+    pub non_tee_infra: Option<bool>,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -217,6 +222,7 @@ impl Default for SystemConfigs {
             credits: None,
             max_instances_by_manager_url: None,
             auto_route: None,
+            non_tee_infra: Some(false),
         }
     }
 }
@@ -235,6 +241,7 @@ impl SystemConfigs {
                 .max_instances_by_manager_url
                 .or(self.max_instances_by_manager_url),
             auto_route: partial.auto_route.or(self.auto_route),
+            non_tee_infra: partial.non_tee_infra.or(self.non_tee_infra),
         }
     }
 

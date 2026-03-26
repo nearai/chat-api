@@ -29,7 +29,7 @@ const DEFAULT_SERVICE_TYPE: &str = "openclaw";
 fn get_image_for_service_type(service_type: &str) -> &'static str {
     match service_type {
         "ironclaw" => "ironclaw-nearai-worker:local",
-        "ironclaw-dind" => "ironclaw-dind:latest",
+        "ironclaw-dind" => "ghcr.io/nearai/ironclaw-dind:0.21.0",
         "openclaw" => "openclaw-nearai-worker:local",
         _ => "openclaw-nearai-worker:local", // default to openclaw
     }
@@ -37,14 +37,20 @@ fn get_image_for_service_type(service_type: &str) -> &'static str {
 
 /// Normalize service type for API calls.
 /// TEE mode's cloud API only accepts 'openclaw' or 'ironclaw' (without -dind suffix).
-/// Non-TEE mode's compose-api accepts the full variant names including 'ironclaw-dind'.
-fn normalize_service_type_for_api(service_type: &str, non_tee: bool) -> &str {
+/// Non-TEE mode's compose-api needs 'ironclaw-dind' variant for ironclaw deployments.
+fn normalize_service_type_for_api(service_type: &str, non_tee: bool) -> String {
     if non_tee {
-        // Non-TEE: send as-is (compose-api accepts all variants)
-        service_type
+        // Non-TEE: convert ironclaw to ironclaw-dind for compose-api
+        match service_type {
+            "ironclaw" => "ironclaw-dind".to_string(),
+            _ => service_type.to_string(),
+        }
     } else {
         // TEE: strip -dind suffix for cloud API
-        service_type.strip_suffix("-dind").unwrap_or(service_type)
+        service_type
+            .strip_suffix("-dind")
+            .unwrap_or(service_type)
+            .to_string()
     }
 }
 
@@ -223,20 +229,23 @@ impl AgentServiceImpl {
             .flatten()
             .unwrap_or_default();
 
+        // Read NON_TEE_INFRA setting from system configs
+        let non_tee_infra = configs.non_tee_infra.unwrap_or(false);
+
         // Filter managers based on NON_TEE_INFRA setting
         let available_managers: Vec<_> = self
             .managers
             .iter()
             .filter(|mgr| {
                 // If NON_TEE_INFRA is true, only use non-TEE managers; otherwise use all managers
-                !self.non_tee_infra || mgr.get_is_non_tee()
+                !non_tee_infra || mgr.get_is_non_tee()
             })
             .collect();
 
         if available_managers.is_empty() {
             return Err(anyhow!(
                 "No suitable managers available: NON_TEE_INFRA={}, configured_managers={}",
-                self.non_tee_infra,
+                non_tee_infra,
                 self.managers.len()
             ));
         }
@@ -266,7 +275,7 @@ impl AgentServiceImpl {
         Err(anyhow!(
             "All {} suitable agent manager(s) are at capacity (NON_TEE_INFRA={})",
             n,
-            self.non_tee_infra
+            non_tee_infra
         ))
     }
 
@@ -626,11 +635,24 @@ impl AgentServiceImpl {
             .service_type
             .as_deref()
             .unwrap_or(DEFAULT_SERVICE_TYPE);
-        let image = get_image_for_service_type(service_type);
-        // Normalize service_type for API call (TEE mode may not accept -dind suffix)
-        let service_type_for_api = normalize_service_type_for_api(service_type, self.non_tee_infra);
+        // Normalize service_type for API call based on manager type
+        let service_type_for_api =
+            normalize_service_type_for_api(service_type, manager.get_is_non_tee());
+
+        // Determine image to use based on manager type
+        let image_to_use = if let Some(img) = params.image {
+            Some(img)
+        } else if manager.get_is_non_tee() {
+            // Non-TEE manager requires image; use normalized service_type to map to correct image
+            // e.g., user selects "ironclaw" → normalize to "ironclaw-dind" → map to ghcr.io/nearai/ironclaw-dind:0.21.0
+            Some(get_image_for_service_type(&service_type_for_api).to_string())
+        } else {
+            // TEE manager: image is optional, let Agent API determine it
+            None
+        };
+
         let mut request_body = serde_json::json!({
-            "image": image,
+            "image": image_to_use,
             "name": params.name,
             "nearai_api_key": nearai_api_key,
             "nearai_api_url": nearai_api_url,
@@ -701,8 +723,16 @@ impl AgentServiceImpl {
 
         if !response.status().is_success() {
             let status = response.status();
-            // Don't expose upstream error details for security; log only status code
-            tracing::warn!("Agent API create instance failed: status={}", status);
+            let error_body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "(unable to read response)".to_string());
+            // Log full error for debugging, but don't expose to clients
+            tracing::warn!(
+                "Agent API create instance failed: status={}, body={}",
+                status,
+                error_body
+            );
             return Err(anyhow!("Agent API error: {}", status));
         }
 
@@ -873,8 +903,9 @@ impl AgentServiceImpl {
         let image_to_use = if let Some(img) = params.image {
             Some(img)
         } else if manager.get_is_non_tee() {
-            // Non-TEE manager requires image; use default based on service_type
-            Some(get_image_for_service_type(service_type).to_string())
+            // Non-TEE manager requires image; use normalized service_type to map to correct image
+            // e.g., user selects "ironclaw" → normalize to "ironclaw-dind" → map to ghcr.io/nearai/ironclaw-dind:0.21.0
+            Some(get_image_for_service_type(&service_type_for_api).to_string())
         } else {
             // TEE manager: image is optional, let Agent API determine it
             None
@@ -958,9 +989,16 @@ impl AgentServiceImpl {
 
         if !response.status().is_success() {
             let status = response.status();
-            let _ = response.text().await;
-            tracing::warn!("Agent API create instance failed: status={}", status);
-            return Err(anyhow!("Agent API error: {}", status));
+            let error_body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "(unable to read response)".to_string());
+            tracing::warn!(
+                "Agent API create instance failed: status={}, body={}",
+                status,
+                error_body
+            );
+            return Err(anyhow!("Agent API error: {} - {}", status, error_body));
         }
 
         tracing::info!(
@@ -1128,8 +1166,21 @@ async fn save_passkey_instance_from_event(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .or_else(|| {
-            // Fall back to constructing instance_url if API didn't provide one
-            // Only possible if agent_domain is configured (non-TEE mode)
+            // Fall back to constructing instance_url from manager domain (non-TEE mode)
+            // Extract domain from agent_api_base_url (e.g., https://venice-staging.near-dev.org/api/crabshack -> venice-staging.near-dev.org)
+            if let (Some(token), Some(manager_url)) = (&instance_token, &params.agent_api_base_url)
+            {
+                if let Ok(url) = url::Url::parse(manager_url) {
+                    if let Some(domain) = url.host_str() {
+                        return Some(format!(
+                            "https://{}.{}/?token={}",
+                            instance_name, domain, token
+                        ));
+                    }
+                }
+            }
+
+            // Legacy fallback: use agent_domain if provided (for backwards compatibility)
             if let (Some(token), Some(domain)) = (&instance_token, &params.agent_domain) {
                 Some(format!(
                     "https://{}.{}/?token={}",
@@ -1420,6 +1471,150 @@ impl AgentService for AgentServiceImpl {
         Ok(instance)
     }
 
+    /// Create instance via TEE Agent API with streaming lifecycle events.
+    /// Similar to create_instance_from_agent_api but streams events as they occur.
+    async fn create_instance_from_agent_api_streaming(
+        &self,
+        user_id: UserId,
+        params: super::ports::InstanceCreationParams,
+        max_allowed: u64,
+    ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<serde_json::Value>>> {
+        tracing::info!(
+            "Creating instance from Agent API with streaming: user_id={}",
+            user_id
+        );
+
+        // Check instance limit before starting
+        let current_count = self.repository.count_user_instances(user_id).await?;
+        if current_count >= max_allowed as i64 {
+            anyhow::bail!(
+                "Agent instance limit of {} exceeded for your plan",
+                max_allowed
+            );
+        }
+
+        // Pick next manager with available capacity
+        let manager = self.next_available_manager().await?;
+
+        // Create an unbound API key on behalf of the user
+        let key_name = params
+            .name
+            .as_deref()
+            .map(|n| format!("instance-{}", n))
+            .unwrap_or_else(|| "instance".to_string());
+        let default_expiry = Some(Utc::now() + Duration::days(90));
+        let (_api_key, plaintext_key) = self
+            .create_unbound_api_key(user_id, key_name, None, default_expiry)
+            .await?;
+
+        // Validate service type
+        if let Some(ref st) = &params.service_type {
+            if !is_valid_service_type(st) {
+                return Err(anyhow!(
+                    "Invalid service type '{}'. Valid types are: {}",
+                    st,
+                    VALID_SERVICE_TYPES.join(", ")
+                ));
+            }
+        }
+
+        let service_type_for_api = params
+            .service_type
+            .clone()
+            .or_else(|| Some(DEFAULT_SERVICE_TYPE.to_string()));
+
+        // Get streaming receiver from Agent API
+        let mut agent_api_rx = self
+            .call_agent_api_create_streaming(
+                &manager,
+                &plaintext_key,
+                &self.nearai_api_url,
+                AgentApiCreateParams {
+                    image: params.image.clone(),
+                    name: params.name.clone(),
+                    ssh_pubkey: params.ssh_pubkey.clone(),
+                    service_type: service_type_for_api.clone(),
+                    cpus: params.cpus.clone(),
+                    mem_limit: params.mem_limit.clone(),
+                    storage_size: params.storage_size.clone(),
+                },
+                AuthMethod::BearerToken(&manager.token),
+            )
+            .await?;
+
+        // Wrap the streaming receiver to process events and save instance to DB
+        let (tx, rx) = tokio::sync::mpsc::channel(10);
+        let repository = self.repository.clone();
+        let ssh_pubkey = params.ssh_pubkey.clone();
+        let manager_url = manager.url.clone();
+        let service_type = service_type_for_api.clone();
+
+        tokio::spawn(async move {
+            let mut instance_saved = false;
+
+            while let Some(event_result) = agent_api_rx.recv().await {
+                match event_result {
+                    Ok(event) => {
+                        // Check if this is the instance creation event (contains instance data)
+                        if !instance_saved {
+                            if let Some(instance_data) = event.get("instance") {
+                                // Extract instance information and save to DB
+                                if let Ok(instance_name) = instance_data
+                                    .get("name")
+                                    .and_then(|v| v.as_str())
+                                    .ok_or_else(|| anyhow!("Missing instance name"))
+                                {
+                                    let instance_url = instance_data
+                                        .get("url")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.to_string());
+                                    let instance_token = instance_data
+                                        .get("token")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.to_string());
+                                    let dashboard_url = instance_data
+                                        .get("dashboard_url")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.to_string());
+
+                                    let instance_id =
+                                        format!("agent-{}-{}", instance_name, Uuid::new_v4());
+
+                                    // Save to database
+                                    if let Ok(_instance) = repository
+                                        .create_instance(CreateInstanceParams {
+                                            user_id,
+                                            instance_id: instance_id.clone(),
+                                            name: instance_name.to_string(),
+                                            public_ssh_key: ssh_pubkey.clone(),
+                                            instance_url,
+                                            instance_token,
+                                            dashboard_url,
+                                            agent_api_base_url: Some(manager_url.clone()),
+                                            service_type: service_type.clone(),
+                                        })
+                                        .await
+                                    {
+                                        instance_saved = true;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Forward event to caller
+                        let _ = tx.send(Ok(event)).await;
+                    }
+                    Err(e) => {
+                        tracing::error!("Error in Agent API streaming: {}", e);
+                        let _ = tx.send(Err(e)).await;
+                    }
+                }
+            }
+        });
+
+        Ok(rx)
+    }
+
     async fn create_passkey_instance_streaming(
         &self,
         user_id: UserId,
@@ -1450,17 +1645,62 @@ impl AgentService for AgentServiceImpl {
             );
             manager.token.clone()
         } else {
-            // Non-TEE manager: Get user's passkey credentials and login to compose-api
+            // Non-TEE manager: Get or create user's passkey credentials and login to compose-api
             tracing::info!("create_passkey_instance_streaming: Non-TEE manager detected, logging in via compose-api");
-            let (auth_secret, backup_passphrase) = self
+
+            let (auth_secret, backup_passphrase) = match self
                 .repository
                 .get_user_passkey_credentials(user_id)
-                .await?
-                .ok_or_else(|| {
-                    anyhow!(
-                        "User passkey credentials not found. User must log in first to create credentials."
-                    )
-                })?;
+                .await
+            {
+                Ok(Some((secret, passphrase))) => {
+                    tracing::debug!(
+                        "Using existing passkey credentials for user: user_id={}",
+                        user_id
+                    );
+                    (secret, passphrase)
+                }
+                Ok(None) => {
+                    // First non-TEE instance creation - auto-generate passkey credentials
+                    tracing::info!(
+                        "Auto-generating passkey credentials for user on first non-TEE instance creation: user_id={}",
+                        user_id
+                    );
+                    let auth_secret = Self::generate_random_credential(32);
+                    let backup_passphrase = Self::generate_random_credential(32);
+
+                    // Write to database first - if DB succeeds but compose-api fails, we can retry
+                    // (upsert will overwrite). If we did it the other way around, DB failure after
+                    // successful compose-api registration would orphan the credentials permanently.
+                    self.repository
+                        .upsert_user_passkey_credentials(user_id, &auth_secret, &backup_passphrase)
+                        .await?;
+
+                    tracing::debug!(
+                        "Auto-generated passkey credentials stored in database: user_id={}",
+                        user_id
+                    );
+
+                    // Then register with compose-api (external API call)
+                    self.compose_api_passkey_register(&manager, &auth_secret, &backup_passphrase)
+                        .await?;
+
+                    tracing::info!(
+                        "Auto-generated passkey credentials registered with compose-api: user_id={}",
+                        user_id
+                    );
+
+                    (auth_secret, backup_passphrase)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to fetch user passkey credentials: user_id={}, error={}",
+                        user_id,
+                        e
+                    );
+                    return Err(e);
+                }
+            };
 
             // Get session token for this instance creation
             self.compose_api_passkey_login(&manager, &auth_secret, &backup_passphrase)
@@ -5262,7 +5502,7 @@ mod tests {
         );
         assert_eq!(
             get_image_for_service_type("ironclaw-dind"),
-            "ironclaw-dind:latest"
+            "ghcr.io/nearai/ironclaw-dind:0.21.0"
         );
         assert_eq!(
             get_image_for_service_type("openclaw"),
@@ -5639,7 +5879,7 @@ mod tests {
         );
         assert_eq!(
             get_image_for_service_type("ironclaw-dind"),
-            "ironclaw-dind:latest"
+            "ghcr.io/nearai/ironclaw-dind:0.21.0"
         );
         assert_eq!(
             get_image_for_service_type("openclaw"),

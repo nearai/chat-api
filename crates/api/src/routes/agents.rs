@@ -168,30 +168,67 @@ pub async fn create_instance(
             .unwrap_or(false)
     });
 
+    // Check infrastructure mode to determine which flow to use
+    let configs = app_state
+        .system_configs_service
+        .get_configs()
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let non_tee_infra = configs.non_tee_infra.unwrap_or(false);
+
     if wants_stream {
         // SSE streaming response
-        let rx = app_state
-            .agent_service
-            .create_passkey_instance_streaming(
-                user.user_id,
-                services::agent::ports::InstanceCreationParams {
-                    image: request.image,
-                    name: request.name,
-                    ssh_pubkey: request.ssh_pubkey,
-                    service_type: request.service_type,
-                    cpus: None,
-                    mem_limit: None,
-                    storage_size: None,
-                    nearai_api_url: None,
-                    nearai_api_key: None,
-                },
-                max_allowed,
-            )
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to start instance creation stream: {}", e);
-                ApiError::internal_server_error("Failed to start instance creation")
-            })?;
+        let rx = if non_tee_infra {
+            // Non-TEE mode: use passkey/compose-api flow
+            app_state
+                .agent_service
+                .create_passkey_instance_streaming(
+                    user.user_id,
+                    services::agent::ports::InstanceCreationParams {
+                        image: request.image,
+                        name: request.name,
+                        ssh_pubkey: request.ssh_pubkey,
+                        service_type: request.service_type,
+                        cpus: None,
+                        mem_limit: None,
+                        storage_size: None,
+                        nearai_api_url: None,
+                        nearai_api_key: None,
+                    },
+                    max_allowed,
+                )
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to start passkey instance creation stream: {}", e);
+                    ApiError::internal_server_error("Failed to start instance creation")
+                })?
+        } else {
+            // TEE mode: use Agent API streaming flow
+            app_state
+                .agent_service
+                .create_instance_from_agent_api_streaming(
+                    user.user_id,
+                    services::agent::ports::InstanceCreationParams {
+                        image: request.image,
+                        name: request.name,
+                        ssh_pubkey: request.ssh_pubkey,
+                        service_type: request.service_type,
+                        cpus: None,
+                        mem_limit: None,
+                        storage_size: None,
+                        nearai_api_url: None,
+                        nearai_api_key: None,
+                    },
+                    max_allowed,
+                )
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to start Agent API instance creation stream: {}", e);
+                    ApiError::internal_server_error("Failed to start instance creation")
+                })?
+        };
 
         use futures::stream::StreamExt;
         use tokio_stream::wrappers::ReceiverStream;
@@ -233,70 +270,139 @@ pub async fn create_instance(
     } else {
         // Non-streaming fallback: Collect stream and return final instance as JSON
         // Note: This blocks the request until instance creation completes
-        let mut rx = app_state
-            .agent_service
-            .create_passkey_instance_streaming(
-                user.user_id,
-                services::agent::ports::InstanceCreationParams {
-                    image: request.image,
-                    name: request.name,
-                    ssh_pubkey: request.ssh_pubkey,
-                    service_type: request.service_type,
-                    cpus: None,
-                    mem_limit: None,
-                    storage_size: None,
-                    nearai_api_url: None,
-                    nearai_api_key: None,
-                },
-                max_allowed,
-            )
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to start instance creation stream: {}", e);
-                ApiError::internal_server_error("Failed to start instance creation")
-            })?;
+        let instance = if non_tee_infra {
+            // Non-TEE mode: use passkey/compose-api flow
+            let mut rx = app_state
+                .agent_service
+                .create_passkey_instance_streaming(
+                    user.user_id,
+                    services::agent::ports::InstanceCreationParams {
+                        image: request.image,
+                        name: request.name,
+                        ssh_pubkey: request.ssh_pubkey,
+                        service_type: request.service_type,
+                        cpus: None,
+                        mem_limit: None,
+                        storage_size: None,
+                        nearai_api_url: None,
+                        nearai_api_key: None,
+                    },
+                    max_allowed,
+                )
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to start passkey instance creation stream: {}", e);
+                    ApiError::internal_server_error("Failed to start instance creation")
+                })?;
 
-        // Collect all events from the stream
-        let mut accumulated_data = serde_json::json!({});
-        while let Some(event_result) = rx.recv().await {
-            match event_result {
-                Ok(event) => {
-                    if let Some(obj) = event.as_object() {
-                        for (key, value) in obj.iter() {
-                            accumulated_data[key] = value.clone();
+            // Collect all events from the stream
+            let mut accumulated_data = serde_json::json!({});
+            while let Some(event_result) = rx.recv().await {
+                match event_result {
+                    Ok(event) => {
+                        if let Some(obj) = event.as_object() {
+                            for (key, value) in obj.iter() {
+                                accumulated_data[key] = value.clone();
+                            }
                         }
                     }
-                }
-                Err(e) => {
-                    tracing::error!("Error during instance creation: {}", e);
-                    return Err(ApiError::internal_server_error("Instance creation failed"));
+                    Err(e) => {
+                        tracing::error!("Error during instance creation: {}", e);
+                        return Err(ApiError::internal_server_error("Instance creation failed"));
+                    }
                 }
             }
-        }
 
-        // Fetch the saved instance from database and return typed InstanceResponse
-        // Extract instance name from accumulated stream data to look it up
-        let instance_name = accumulated_data
-            .get("name")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                ApiError::internal_server_error("Instance name not found in response")
-            })?;
+            // Fetch the saved instance from database and return typed InstanceResponse
+            // Extract instance name from accumulated stream data to look it up
+            let instance_name = accumulated_data
+                .get("name")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    ApiError::internal_server_error("Instance name not found in response")
+                })?;
 
-        // Fetch the created instance from the database (most recent instance with this name)
-        let (instances, _total) = app_state
-            .agent_service
-            .list_instances(user.user_id, 1, 0)
-            .await
-            .map_err(|_| ApiError::internal_server_error("Failed to fetch created instance"))?;
+            // Fetch the created instance from the database (most recent instance with this name)
+            let (instances, _total) = app_state
+                .agent_service
+                .list_instances(user.user_id, 1, 0)
+                .await
+                .map_err(|_| ApiError::internal_server_error("Failed to fetch created instance"))?;
 
-        // Find the instance we just created (should be the most recent with matching name)
-        let instance = instances
-            .into_iter()
-            .find(|inst| inst.name == instance_name)
-            .ok_or_else(|| {
-                ApiError::internal_server_error("Created instance not found in database")
-            })?;
+            // Find the instance we just created (should be the most recent with matching name)
+            instances
+                .into_iter()
+                .find(|inst| inst.name == instance_name)
+                .ok_or_else(|| {
+                    ApiError::internal_server_error("Created instance not found in database")
+                })?
+        } else {
+            // TEE mode: use Agent API streaming flow, collect events
+            let mut rx = app_state
+                .agent_service
+                .create_instance_from_agent_api_streaming(
+                    user.user_id,
+                    services::agent::ports::InstanceCreationParams {
+                        image: request.image,
+                        name: request.name,
+                        ssh_pubkey: request.ssh_pubkey,
+                        service_type: request.service_type,
+                        cpus: None,
+                        mem_limit: None,
+                        storage_size: None,
+                        nearai_api_url: None,
+                        nearai_api_key: None,
+                    },
+                    max_allowed,
+                )
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to start Agent API instance creation stream: {}", e);
+                    ApiError::internal_server_error("Failed to create instance")
+                })?;
+
+            // Collect all events from the stream
+            let mut accumulated_data = serde_json::json!({});
+            while let Some(event_result) = rx.recv().await {
+                match event_result {
+                    Ok(event) => {
+                        if let Some(obj) = event.as_object() {
+                            for (key, value) in obj.iter() {
+                                accumulated_data[key] = value.clone();
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Error during Agent API instance creation: {}", e);
+                        return Err(ApiError::internal_server_error("Instance creation failed"));
+                    }
+                }
+            }
+
+            // Fetch the saved instance from database and return typed InstanceResponse
+            // Extract instance name from accumulated stream data to look it up
+            let instance_name = accumulated_data
+                .get("name")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    ApiError::internal_server_error("Instance name not found in response")
+                })?;
+
+            // Fetch the created instance from the database (most recent instance with this name)
+            let (instances, _total) = app_state
+                .agent_service
+                .list_instances(user.user_id, 1, 0)
+                .await
+                .map_err(|_| ApiError::internal_server_error("Failed to fetch created instance"))?;
+
+            // Find the instance we just created (should be the most recent with matching name)
+            instances
+                .into_iter()
+                .find(|inst| inst.name == instance_name)
+                .ok_or_else(|| {
+                    ApiError::internal_server_error("Created instance not found in database")
+                })?
+        };
 
         let response: InstanceResponse = instance.into();
         Ok(Response::builder()

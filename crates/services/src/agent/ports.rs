@@ -314,6 +314,16 @@ pub trait AgentService: Send + Sync {
         params: InstanceCreationParams,
     ) -> anyhow::Result<AgentInstance>;
 
+    /// Create instance via TEE Agent API with streaming lifecycle events.
+    /// Streams events from the Agent API as they occur during instance creation.
+    /// Returns a receiver that yields raw JSON events from the Agent API.
+    async fn create_instance_from_agent_api_streaming(
+        &self,
+        user_id: UserId,
+        params: InstanceCreationParams,
+        max_allowed: u64,
+    ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<serde_json::Value>>>;
+
     /// Create instance with per-instance passkey credentials and streaming lifecycle events.
     /// Calls compose-api /auth/register to set up the instance with unique credentials,
     /// then creates the instance using the session token instead of manager token.
