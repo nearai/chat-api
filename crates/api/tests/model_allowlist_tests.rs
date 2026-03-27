@@ -1,5 +1,6 @@
 mod common;
 
+use bytes::Bytes;
 use common::{
     cleanup_user_subscriptions, create_test_server, create_test_server_and_db,
     insert_test_subscription_with_price, insert_test_subscription_with_provider_and_price,
@@ -18,6 +19,27 @@ fn ensure_stripe_env_for_gating() {
         "STRIPE_WEBHOOK_SECRET",
         std::env::var("STRIPE_WEBHOOK_SECRET").unwrap_or_else(|_| "whsec_dummy".to_string()),
     );
+}
+
+fn create_image_edits_multipart_body(model: &str) -> (String, Bytes) {
+    let boundary = "----nearaiModelAllowlistBoundary";
+    let body = format!(
+        "--{boundary}\r\n\
+Content-Disposition: form-data; name=\"model\"\r\n\r\n\
+{model}\r\n\
+--{boundary}\r\n\
+Content-Disposition: form-data; name=\"n\"\r\n\r\n\
+1\r\n\
+--{boundary}\r\n\
+Content-Disposition: form-data; name=\"image\"; filename=\"input.png\"\r\n\
+Content-Type: image/png\r\n\r\n\
+not-a-real-png\r\n\
+--{boundary}--\r\n"
+    );
+    (
+        format!("multipart/form-data; boundary={boundary}"),
+        Bytes::from(body),
+    )
 }
 
 // ============================================================================
@@ -498,6 +520,92 @@ async fn test_responses_endpoint_respects_model_allowlist() {
     assert!(
         error.contains("gpt-4o") && error.contains("not available"),
         "Error message should mention the model"
+    );
+}
+
+#[tokio::test]
+#[serial(model_allowlist_tests)]
+async fn test_image_generations_endpoint_respects_model_allowlist() {
+    ensure_stripe_env_for_gating();
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": { "stripe": { "price_id": "price_basic" } },
+                "monthly_tokens": { "max": 1000000 },
+                "allowed_models": ["gpt-image-1"]
+            }
+        }),
+    )
+    .await;
+
+    let user_email = "image-generations-restricted@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+    insert_test_subscription_with_price(&server, &db, user_email, "price_basic", false).await;
+    let user_token = mock_login(&server, user_email).await;
+
+    let response = server
+        .post("/v1/images/generations")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", user_token)).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-image-2",
+            "prompt": "A cat with sunglasses"
+        }))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        403,
+        "Image generations should enforce model allowlist"
+    );
+}
+
+#[tokio::test]
+#[serial(model_allowlist_tests)]
+async fn test_image_edits_endpoint_respects_model_allowlist_with_multipart() {
+    ensure_stripe_env_for_gating();
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": { "stripe": { "price_id": "price_basic" } },
+                "monthly_tokens": { "max": 1000000 },
+                "allowed_models": ["gpt-image-1"]
+            }
+        }),
+    )
+    .await;
+
+    let user_email = "image-edits-restricted@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+    insert_test_subscription_with_price(&server, &db, user_email, "price_basic", false).await;
+    let user_token = mock_login(&server, user_email).await;
+
+    let (content_type, multipart_body) = create_image_edits_multipart_body("gpt-image-2");
+    let response = server
+        .post("/v1/images/edits")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", user_token)).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_str(&content_type).unwrap(),
+        )
+        .bytes(multipart_body)
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        403,
+        "Image edits should enforce model allowlist for multipart requests"
     );
 }
 
