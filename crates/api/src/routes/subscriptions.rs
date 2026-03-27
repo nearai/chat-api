@@ -200,8 +200,12 @@ pub async fn create_subscription(
             SubscriptionError::TestClockNotAllowedForExistingCustomer => ApiError::bad_request(
                 "Cannot associate test clock with existing Stripe customer".to_string(),
             ),
-            SubscriptionError::ModelNotAllowedInPlan { .. } => {
-                tracing::error!("Unexpected ModelNotAllowedInPlan in create_subscription");
+            SubscriptionError::ModelNotAllowedInPlan { model, plan } => {
+                tracing::error!(
+                    model = ?model,
+                    plan = ?plan,
+                    "Unexpected ModelNotAllowedInPlan in create_subscription"
+                );
                 ApiError::internal_server_error("Failed to create subscription")
             }
             unexpected => {

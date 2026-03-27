@@ -50,7 +50,7 @@ struct CachedCreditLimit {
 
 /// Cached system configs snapshot for model access checks.
 struct CachedSystemConfigs {
-    configs: Option<SystemConfigs>,
+    configs: Option<Arc<SystemConfigs>>,
     cached_at: Instant,
 }
 
@@ -119,7 +119,9 @@ impl SubscriptionServiceImpl {
         tracing::debug!("Invalidated credit limit cache for user_id={}", user_id);
     }
 
-    async fn get_system_configs_cached(&self) -> Result<Option<SystemConfigs>, SubscriptionError> {
+    async fn get_system_configs_cached(
+        &self,
+    ) -> Result<Option<Arc<SystemConfigs>>, SubscriptionError> {
         if let Some(cached) = self.system_configs_cache.read().await.as_ref() {
             if cached.cached_at.elapsed().as_secs() < SYSTEM_CONFIGS_TTL_CACHE_SECS {
                 return Ok(cached.configs.clone());
@@ -131,6 +133,8 @@ impl SubscriptionServiceImpl {
             .get_configs()
             .await
             .map_err(|e| SubscriptionError::InternalError(e.to_string()))?;
+
+        let configs = configs.map(Arc::new);
 
         *self.system_configs_cache.write().await = Some(CachedSystemConfigs {
             configs: configs.clone(),
@@ -390,7 +394,7 @@ impl SubscriptionServiceImpl {
     ) -> Result<HashMap<String, SubscriptionPlanConfig>, SubscriptionError> {
         let configs = self.get_system_configs_cached().await?;
         Ok(configs
-            .and_then(|c| c.subscription_plans)
+            .and_then(|c| c.subscription_plans.clone())
             .unwrap_or_default())
     }
 
@@ -2258,7 +2262,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
         let configs = self.get_system_configs_cached().await?;
 
         // Extract subscription plans
-        let subscription_plans = configs.as_ref().and_then(|c| c.subscription_plans.as_ref());
+        let subscription_plans = configs
+            .as_deref()
+            .and_then(|c| c.subscription_plans.as_ref());
 
         // Try to get user's active subscription
         let active_subscription = self
