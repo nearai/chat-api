@@ -1241,6 +1241,10 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
             .ok_or(SubscriptionError::NoActiveSubscription)?;
 
+        if subscription.cancel_at_period_end {
+            return Err(SubscriptionError::SubscriptionScheduledForCancellation);
+        }
+
         // Same plan requested: cancel pending downgrade if one exists, otherwise no-op
         if subscription.price_id == price_id {
             if subscription.pending_downgrade_status == Some(DowngradeIntentStatus::Pending) {
