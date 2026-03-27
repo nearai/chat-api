@@ -2358,7 +2358,7 @@ async fn test_subscription_gating_full_flow() {
 
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn integration_last_cancelled_period_is_max_of_canceled_rows() {
+async fn integration_last_cancelled_period_uses_most_recent_canceled_row() {
     let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
 
     let user_email = "test_free_anchor_max_canceled@example.com";
@@ -2372,30 +2372,42 @@ async fn integration_last_cancelled_period_is_max_of_canceled_rows() {
         .expect("user should exist");
 
     let client = db.pool().get().await.unwrap();
-    let earlier = Utc.with_ymd_and_hms(2026, 3, 19, 8, 0, 0).unwrap();
-    let later = Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap();
+    let older_row_period_end = Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap();
+    let newer_row_period_end = Utc.with_ymd_and_hms(2026, 3, 19, 8, 0, 0).unwrap();
+    let older_updated_at = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+    let newer_updated_at = Utc.with_ymd_and_hms(2026, 1, 2, 0, 0, 0).unwrap();
 
-    for (subscription_id, period_end) in
-        [("sub_free_anchor_a", earlier), ("sub_free_anchor_b", later)]
-    {
-        client
-            .execute(
-                "INSERT INTO subscriptions (
-                    subscription_id, user_id, provider, customer_id, price_id, status,
-                    current_period_end, cancel_at_period_end
-                ) VALUES ($1, $2, 'stripe', 'cus_anchor', 'price_test_basic', 'canceled', $3, false)",
-                &[&subscription_id, &user.id, &period_end],
-            )
-            .await
-            .unwrap();
-    }
+    client
+        .execute(
+            "INSERT INTO subscriptions (
+                subscription_id, user_id, provider, customer_id, price_id, status,
+                current_period_end, cancel_at_period_end, created_at, updated_at
+            ) VALUES ($1, $2, 'stripe', 'cus_anchor', 'price_test_basic', 'canceled', $3, false, $4, $4)",
+            &[&"sub_free_anchor_old", &user.id, &older_row_period_end, &older_updated_at],
+        )
+        .await
+        .unwrap();
+    client
+        .execute(
+            "INSERT INTO subscriptions (
+                subscription_id, user_id, provider, customer_id, price_id, status,
+                current_period_end, cancel_at_period_end, created_at, updated_at
+            ) VALUES ($1, $2, 'stripe', 'cus_anchor', 'price_test_basic', 'canceled', $3, false, $4, $4)",
+            &[&"sub_free_anchor_new", &user.id, &newer_row_period_end, &newer_updated_at],
+        )
+        .await
+        .unwrap();
 
     let got = db
         .subscription_repository()
         .last_cancelled_subscription_period_end_for_user(user.id)
         .await
         .unwrap();
-    assert_eq!(got, Some(later));
+    assert_eq!(
+        got,
+        Some(newer_row_period_end),
+        "latest canceled row (by updated_at) should win, not greatest period_end"
+    );
 }
 
 #[tokio::test]
@@ -2417,6 +2429,7 @@ async fn integration_last_cancelled_period_ignores_non_canceled_statuses() {
     let canceled_end = Utc.with_ymd_and_hms(2026, 3, 19, 0, 0, 0).unwrap();
     let active_end = Utc.with_ymd_and_hms(2027, 12, 31, 23, 59, 59).unwrap();
     let incomplete_end = Utc.with_ymd_and_hms(2028, 1, 1, 0, 0, 0).unwrap();
+    let other_provider_canceled_end = Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap();
 
     client
         .execute(
@@ -2448,6 +2461,20 @@ async fn integration_last_cancelled_period_ignores_non_canceled_statuses() {
         )
         .await
         .unwrap();
+    client
+        .execute(
+            "INSERT INTO subscriptions (
+                subscription_id, user_id, provider, customer_id, price_id, status,
+                current_period_end, cancel_at_period_end
+            ) VALUES ($1, $2, 'other', 'cus_x', 'price_test_basic', 'canceled', $3, false)",
+            &[
+                &"sub_other_provider_canceled",
+                &user.id,
+                &other_provider_canceled_end,
+            ],
+        )
+        .await
+        .unwrap();
 
     let got = db
         .subscription_repository()
@@ -2456,8 +2483,8 @@ async fn integration_last_cancelled_period_ignores_non_canceled_statuses() {
         .unwrap();
     assert_eq!(
         got,
-        Some(canceled_end),
-        "only canceled rows should contribute to the anchor"
+        Some(other_provider_canceled_end),
+        "latest canceled row should win regardless of provider"
     );
 }
 

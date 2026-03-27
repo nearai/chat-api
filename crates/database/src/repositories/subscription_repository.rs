@@ -196,15 +196,18 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
         user_id: UserId,
     ) -> anyhow::Result<Option<chrono::DateTime<chrono::Utc>>> {
         let client = self.pool.get().await?;
-        // Stripe `SubscriptionStatus::Canceled` serializes as `canceled` (US spelling).
+        // Use the most recently canceled row (by updated_at), not MAX(period_end),
+        // so stale rows with far-future period ends do not override the latest cancellation boundary.
         let row = client
-            .query_one(
-                "SELECT MAX(current_period_end) AS m FROM subscriptions \
-                 WHERE user_id = $1 AND status = 'canceled'",
+            .query_opt(
+                "SELECT current_period_end FROM subscriptions \
+                 WHERE user_id = $1 AND status = 'canceled' \
+                 ORDER BY updated_at DESC, created_at DESC, subscription_id DESC \
+                 LIMIT 1",
                 &[&user_id],
             )
             .await?;
-        Ok(row.get::<_, Option<chrono::DateTime<chrono::Utc>>>("m"))
+        Ok(row.map(|r| r.get::<_, chrono::DateTime<chrono::Utc>>("current_period_end")))
     }
 
     async fn list_subscriptions(
