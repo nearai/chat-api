@@ -11,8 +11,8 @@ use uuid::Uuid;
 
 use super::ports::{
     is_valid_service_type, AgentApiInstanceEnrichment, AgentApiKey, AgentApiKeyAuthError,
-    AgentInstance, AgentRepository, AgentService, CreateInstanceParams, InstanceBalance,
-    UpgradeAvailability, UsageLogEntry, VALID_SERVICE_TYPES,
+    AgentApiKeyCreationError, AgentInstance, AgentRepository, AgentService, CreateInstanceParams,
+    InstanceBalance, UpgradeAvailability, UsageLogEntry, VALID_SERVICE_TYPES,
 };
 
 /// Maximum size for the Agent API SSE stream buffer (100 KB).
@@ -171,11 +171,11 @@ impl AgentServiceImpl {
         key.starts_with("sk-agent-") && key.len() == 41
     }
 
-    fn validate_spend_limit_for_creation(spend_limit: Option<i64>) -> anyhow::Result<()> {
-        if matches!(spend_limit, Some(limit) if limit <= 0) {
-            return Err(anyhow!(
-                "Invalid spend limit: must be greater than 0 when provided"
-            ));
+    fn validate_api_key_spend_limit(
+        spend_limit: Option<i64>,
+    ) -> Result<(), AgentApiKeyCreationError> {
+        if matches!(spend_limit, Some(limit) if limit < 0) {
+            return Err(AgentApiKeyCreationError::InvalidSpendLimit);
         }
 
         Ok(())
@@ -198,15 +198,6 @@ impl AgentServiceImpl {
         }
 
         if let Some(spend_limit) = api_key_info.spend_limit {
-            if spend_limit <= 0 {
-                tracing::warn!(
-                    "Ignoring non-positive spend_limit on existing API key: api_key_id={}, spend_limit={}",
-                    api_key_info.id,
-                    spend_limit
-                );
-                return Ok(());
-            }
-
             // `spend_limit` is currently a lifetime cap based on all recorded usage events for
             // this API key.
             // This is best-effort enforcement: concurrent requests can both pass this preflight
@@ -1966,7 +1957,7 @@ impl AgentService for AgentServiceImpl {
         name: String,
         spend_limit: Option<i64>,
         expires_at: Option<chrono::DateTime<Utc>>,
-    ) -> anyhow::Result<(AgentApiKey, String)> {
+    ) -> Result<(AgentApiKey, String), AgentApiKeyCreationError> {
         tracing::info!(
             "Creating API key: instance_id={}, user_id={}",
             instance_id,
@@ -1981,14 +1972,14 @@ impl AgentService for AgentServiceImpl {
             .ok_or_else(|| anyhow!("Instance not found"))?;
 
         if instance.user_id != user_id {
-            return Err(anyhow!("Access denied"));
+            return Err(anyhow!("Access denied").into());
         }
 
         if name.is_empty() || name.len() > 255 {
-            return Err(anyhow!("Invalid name format"));
+            return Err(anyhow!("Invalid name format").into());
         }
 
-        Self::validate_spend_limit_for_creation(spend_limit)?;
+        Self::validate_api_key_spend_limit(spend_limit)?;
 
         // Generate and hash key
         let plaintext_key = Self::generate_api_key();
@@ -2022,14 +2013,14 @@ impl AgentService for AgentServiceImpl {
         name: String,
         spend_limit: Option<i64>,
         expires_at: Option<DateTime<Utc>>,
-    ) -> anyhow::Result<(AgentApiKey, String)> {
+    ) -> Result<(AgentApiKey, String), AgentApiKeyCreationError> {
         tracing::info!("Creating unbound API key: user_id={}", user_id);
 
         if name.is_empty() || name.len() > 255 {
-            return Err(anyhow!("Invalid name format"));
+            return Err(anyhow!("Invalid name format").into());
         }
 
-        Self::validate_spend_limit_for_creation(spend_limit)?;
+        Self::validate_api_key_spend_limit(spend_limit)?;
 
         // Generate and hash key
         let plaintext_key = Self::generate_api_key();

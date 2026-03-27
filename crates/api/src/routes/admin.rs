@@ -1777,7 +1777,7 @@ pub struct AdminCreateApiKeyRequest {
     /// Human-readable key name
     pub name: String,
     /// Optional lifetime spend limit in nano-dollars ($1.00 = 1,000,000,000 nano-dollars).
-    /// Must be greater than zero when provided.
+    /// Must be non-negative when provided. Use `null` for no limit.
     pub spend_limit: Option<i64>,
     /// Optional expiration timestamp (RFC3339)
     pub expires_at: Option<String>,
@@ -1843,13 +1843,14 @@ pub async fn admin_create_unbound_api_key(
             }),
         )
         .await
-        .map_err(|e| {
-            let message = e.to_string();
-            if message.contains("Invalid spend limit") {
-                return ApiError::bad_request(message);
+        .map_err(|e| match e {
+            services::agent::ports::AgentApiKeyCreationError::InvalidSpendLimit => {
+                ApiError::bad_request(e.to_string())
             }
-            tracing::error!("Failed to create unbound API key: error={}", e);
-            ApiError::internal_server_error("Failed to create API key")
+            services::agent::ports::AgentApiKeyCreationError::Internal(err) => {
+                tracing::error!("Failed to create unbound API key: error={}", err);
+                ApiError::internal_server_error("Failed to create API key")
+            }
         })?;
 
     Ok(Json(CreateApiKeyResponse {

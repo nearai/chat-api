@@ -154,7 +154,7 @@ impl AgentRepository for PostgresAgentRepository {
                         ak.expires_at, ak.last_used_at, ak.is_active, ak.created_at, ak.updated_at
                  FROM agent_api_keys ak
                  JOIN agent_instances oi ON ak.instance_id = oi.id
-                 WHERE ak.key_hash = $1 AND oi.status != 'deleted'",
+                 WHERE ak.key_hash = $1 AND ak.is_active = true AND oi.status != 'deleted'",
                 &[&key_hash],
             )
             .await?;

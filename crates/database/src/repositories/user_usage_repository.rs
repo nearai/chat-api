@@ -43,10 +43,9 @@ impl UserUsageRepository for PostgresUserUsageRepository {
     }
 
     async fn record_usage(&self, params: RecordUsageParams) -> anyhow::Result<()> {
-        let mut client = self.pool.get().await?;
-        let transaction = client.transaction().await?;
+        let client = self.pool.get().await?;
 
-        transaction
+        client
             .execute(
                 r#"
                 INSERT INTO user_usage_event
@@ -66,8 +65,6 @@ impl UserUsageRepository for PostgresUserUsageRepository {
                 ],
             )
             .await?;
-
-        transaction.commit().await?;
         Ok(())
     }
 

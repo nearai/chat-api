@@ -106,6 +106,14 @@ pub enum AgentApiKeyAuthError {
     Internal,
 }
 
+#[derive(Debug, Error)]
+pub enum AgentApiKeyCreationError {
+    #[error("Invalid spend limit: must be non-negative when provided")]
+    InvalidSpendLimit,
+    #[error(transparent)]
+    Internal(#[from] anyhow::Error),
+}
+
 /// Usage log entry for tracking API consumption
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageLogEntry {
@@ -416,7 +424,7 @@ pub trait AgentService: Send + Sync {
         name: String,
         spend_limit: Option<i64>,
         expires_at: Option<DateTime<Utc>>,
-    ) -> anyhow::Result<(AgentApiKey, String)>;
+    ) -> Result<(AgentApiKey, String), AgentApiKeyCreationError>;
 
     /// Create an unbound API key (pre-deployment key without instance_id)
     /// Used for deploying agents before we know their instance ID.
@@ -428,7 +436,7 @@ pub trait AgentService: Send + Sync {
         name: String,
         spend_limit: Option<i64>,
         expires_at: Option<DateTime<Utc>>,
-    ) -> anyhow::Result<(AgentApiKey, String)>;
+    ) -> Result<(AgentApiKey, String), AgentApiKeyCreationError>;
 
     /// Bind an unbound API key to an instance
     /// Used when an agent registers itself after deployment.

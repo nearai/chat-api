@@ -258,7 +258,7 @@ async fn test_auth_middleware_handles_both_methods() {
 }
 
 #[tokio::test]
-async fn test_create_api_key_rejects_non_positive_spend_limit() {
+async fn test_create_api_key_rejects_negative_spend_limit() {
     let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
 
     let email = format!("invalid-spend-limit-{}@example.com", Uuid::new_v4());
@@ -296,7 +296,7 @@ async fn test_create_api_key_rejects_non_positive_spend_limit() {
         )
         .json(&json!({
             "name": "bad-key",
-            "spend_limit": 0,
+            "spend_limit": -1,
             "expires_at": null
         }))
         .await;
@@ -305,7 +305,43 @@ async fn test_create_api_key_rejects_non_positive_spend_limit() {
     let body: serde_json::Value = response.json();
     assert_eq!(
         body.get("message").and_then(|v| v.as_str()),
-        Some("Invalid spend limit: must be greater than 0 when provided")
+        Some("Invalid spend limit: must be non-negative when provided")
+    );
+}
+
+#[tokio::test]
+async fn test_admin_create_unbound_api_key_rejects_negative_spend_limit() {
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    let admin_token = mock_login(&server, "api-key-admin@admin.org").await;
+    let user_email = format!("invalid-unbound-spend-limit-{}@example.com", Uuid::new_v4());
+    let _user_token = mock_login(&server, &user_email).await;
+    let user = db
+        .user_repository()
+        .get_user_by_email(&user_email)
+        .await
+        .expect("db")
+        .expect("user");
+
+    let response = server
+        .post("/v1/admin/agents/keys")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .json(&json!({
+            "user_id": user.id.0,
+            "name": "bad-unbound-key",
+            "spend_limit": -1,
+            "expires_at": null
+        }))
+        .await;
+
+    assert_eq!(response.status_code(), 400);
+    let body: serde_json::Value = response.json();
+    assert_eq!(
+        body.get("message").and_then(|v| v.as_str()),
+        Some("Invalid spend limit: must be non-negative when provided")
     );
 }
 
@@ -373,6 +409,34 @@ async fn test_inactive_agent_api_key_returns_401_without_hitting_upstream() {
         .await
         .expect("received requests");
     assert_eq!(received.len(), 0);
+}
+
+#[tokio::test]
+async fn test_inactive_agent_api_key_returns_401_for_verify_route() {
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    let email = format!("inactive-verify-key-{}@example.com", Uuid::new_v4());
+    let (_user_id, _instance_id, api_key_id, api_key) =
+        create_bound_agent_api_key(&server, &db, &email, None).await;
+
+    let client = db.pool().get().await.expect("db client");
+    client
+        .execute(
+            "UPDATE agent_api_keys SET is_active = false WHERE id = $1",
+            &[&api_key_id],
+        )
+        .await
+        .expect("deactivate api key");
+
+    let response = server
+        .get("/v1/auth/verify-agent-key")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {api_key}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 401);
 }
 
 #[tokio::test]
@@ -456,7 +520,7 @@ async fn test_agent_api_key_spend_limit_blocks_chat_completions_once_limit_reach
 }
 
 #[tokio::test]
-async fn test_legacy_non_positive_spend_limit_does_not_immediately_block_api_key() {
+async fn test_zero_spend_limit_immediately_blocks_api_key() {
     let mock_upstream = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
@@ -472,7 +536,6 @@ async fn test_legacy_non_positive_spend_limit_does_not_immediately_block_api_key
             }],
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
         })))
-        .expect(1)
         .mount(&mock_upstream)
         .await;
 
@@ -488,7 +551,69 @@ async fn test_legacy_non_positive_spend_limit_does_not_immediately_block_api_key
     )
     .await;
 
-    let email = format!("legacy-zero-limit-{}@example.com", Uuid::new_v4());
+    let email = format!("zero-spend-limit-{}@example.com", Uuid::new_v4());
+    let (_user_id, _instance_id, _api_key_id, api_key) =
+        create_bound_agent_api_key(&server, &db, &email, Some(0)).await;
+
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {api_key}")).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-test",
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .await;
+
+    assert_eq!(response.status_code(), 403);
+    let body: serde_json::Value = response.json();
+    assert_eq!(
+        body.get("message").and_then(|v| v.as_str()),
+        Some("API key spend limit exceeded")
+    );
+
+    let received = mock_upstream
+        .received_requests()
+        .await
+        .expect("received requests");
+    assert_eq!(received.len(), 0);
+}
+
+#[tokio::test]
+async fn test_legacy_negative_spend_limit_immediately_blocks_api_key() {
+    let mock_upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "gpt-test",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Hello"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        })))
+        .mount(&mock_upstream)
+        .await;
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        proxy_base_url: Some(mock_upstream.uri()),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({ "free": { "providers": {}, "monthly_credits": { "max": 1_000_000_000 } } }),
+    )
+    .await;
+
+    let email = format!("legacy-negative-limit-{}@example.com", Uuid::new_v4());
     let _token = mock_login(&server, &email).await;
     let user = db
         .user_repository()
@@ -507,7 +632,7 @@ async fn test_legacy_non_positive_spend_limit_does_not_immediately_block_api_key
                 &instance_id,
                 &user.id,
                 &format!("inst_test_{}", Uuid::new_v4().simple()),
-                &"legacy-zero-limit-instance",
+                &"legacy-negative-limit-instance",
                 &"http://test-instance.local",
                 &"tok_test_instance_secret",
             ],
@@ -527,8 +652,8 @@ async fn test_legacy_non_positive_spend_limit_does_not_immediately_block_api_key
                 &instance_id,
                 &user.id,
                 &api_key_hash,
-                &"legacy-zero-limit-key",
-                &0_i64,
+                &"legacy-negative-limit-key",
+                &-1_i64,
             ],
         )
         .await
@@ -546,7 +671,18 @@ async fn test_legacy_non_positive_spend_limit_does_not_immediately_block_api_key
         }))
         .await;
 
-    assert_eq!(response.status_code(), 200);
+    assert_eq!(response.status_code(), 403);
+    let body: serde_json::Value = response.json();
+    assert_eq!(
+        body.get("message").and_then(|v| v.as_str()),
+        Some("API key spend limit exceeded")
+    );
+
+    let received = mock_upstream
+        .received_requests()
+        .await
+        .expect("received requests");
+    assert_eq!(received.len(), 0);
 }
 
 #[tokio::test]
