@@ -139,6 +139,7 @@ async fn test_agent_complete_workflow() {
         )
         .await;
 
+    // Returns 500 because we're not mocking the agent server, but confirms auth works
     assert_eq!(
         stop_response.status_code(),
         500,

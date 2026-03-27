@@ -28,6 +28,7 @@ pub struct SyncStatusResult {
 // ============ Service Type Validation ============
 
 /// Valid service types for agent instances.
+/// Note: ironclaw-dind and openclaw-dind are internal normalized types used for non-TEE compose-api calls.
 pub const VALID_SERVICE_TYPES: &[&str] = &["openclaw", "ironclaw"];
 
 /// Validates that a service type is in the list of allowed values.
@@ -35,7 +36,7 @@ pub fn is_valid_service_type(service_type: &str) -> bool {
     VALID_SERVICE_TYPES.contains(&service_type)
 }
 
-/// Enrichment data from Agent API (compose-api) for instance responses
+/// Enrichment data from the agent compose-api (TEE or non-TEE) for instance responses
 #[derive(Debug, Clone, Default)]
 pub struct AgentApiInstanceEnrichment {
     pub status: Option<String>,
@@ -60,7 +61,6 @@ pub struct AgentInstance {
     pub public_ssh_key: Option<String>,
     pub instance_url: Option<String>,
     pub instance_token: Option<String>,
-    pub gateway_port: Option<i32>,
     pub dashboard_url: Option<String>,
     /// The agent manager URL that owns this instance (for routing operations)
     pub agent_api_base_url: Option<String>,
@@ -170,12 +170,25 @@ pub struct CreateInstanceParams {
     pub public_ssh_key: Option<String>,
     pub instance_url: Option<String>,
     pub instance_token: Option<String>,
-    pub gateway_port: Option<i32>,
     pub dashboard_url: Option<String>,
     /// The agent manager URL that created this instance
     pub agent_api_base_url: Option<String>,
     /// Service type selected at creation time
     pub service_type: Option<String>,
+}
+
+/// Parameters for creating an instance via Agent API
+#[derive(Debug, Clone)]
+pub struct InstanceCreationParams {
+    pub image: Option<String>,
+    pub name: Option<String>,
+    pub ssh_pubkey: Option<String>,
+    pub service_type: Option<String>,
+    pub cpus: Option<String>,
+    pub mem_limit: Option<String>,
+    pub storage_size: Option<String>,
+    pub nearai_api_url: Option<String>,
+    pub nearai_api_key: Option<String>,
 }
 
 #[cfg_attr(test, mockall::automock)]
@@ -195,6 +208,20 @@ pub trait AgentRepository: Send + Sync {
         &self,
         key_hash: &str,
     ) -> anyhow::Result<Option<(AgentInstance, AgentApiKey)>>;
+
+    /// Get user's passkey credentials (auth_secret, backup_passphrase)
+    async fn get_user_passkey_credentials(
+        &self,
+        user_id: UserId,
+    ) -> anyhow::Result<Option<(String, String)>>;
+
+    /// Store or update user's passkey credentials
+    async fn upsert_user_passkey_credentials(
+        &self,
+        user_id: UserId,
+        auth_secret: &str,
+        backup_passphrase: &str,
+    ) -> anyhow::Result<()>;
 
     async fn list_user_instances(
         &self,
@@ -315,24 +342,27 @@ pub trait AgentService: Send + Sync {
     async fn create_instance_from_agent_api(
         &self,
         user_id: UserId,
-        image: Option<String>,
-        name: Option<String>,
-        ssh_pubkey: Option<String>,
-        service_type: Option<String>,
+        params: InstanceCreationParams,
     ) -> anyhow::Result<AgentInstance>;
 
-    /// Create instance with streaming lifecycle events.
-    /// Returns a receiver that yields raw JSON events as they occur during instance creation.
-    ///
-    /// **TOCTOU Mitigation**: The `max_allowed` parameter enables re-checking the instance limit
-    /// just before instance creation in the spawned task, preventing race conditions from concurrent requests.
+    /// Create instance via TEE compose-api with streaming lifecycle events.
+    /// Streams events from the agent API as they occur during instance creation.
+    /// Returns a receiver that yields raw JSON events from the agent API.
     async fn create_instance_from_agent_api_streaming(
         &self,
         user_id: UserId,
-        image: Option<String>,
-        name: Option<String>,
-        ssh_pubkey: Option<String>,
-        service_type: Option<String>,
+        params: InstanceCreationParams,
+        max_allowed: u64,
+    ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<serde_json::Value>>>;
+
+    /// Create instance with per-instance passkey credentials and streaming lifecycle events.
+    /// Calls non-TEE compose-api /auth/register to set up the instance with unique credentials,
+    /// then creates the instance using the session token instead of manager token.
+    /// Returns a receiver that yields raw JSON events as they occur during instance creation.
+    async fn create_passkey_instance_streaming(
+        &self,
+        user_id: UserId,
+        params: InstanceCreationParams,
         max_allowed: u64,
     ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<serde_json::Value>>>;
 
@@ -389,7 +419,7 @@ pub trait AgentService: Send + Sync {
     async fn restart_instance(&self, instance_id: Uuid, user_id: UserId) -> anyhow::Result<()>;
 
     /// Upgrade instance with streaming SSE progress.
-    /// Returns a receiver that yields SSE chunks from the compose-api restart stream.
+    /// Returns a receiver that yields SSE chunks from the agent compose-api restart stream.
     /// Uses a 5-minute timeout to allow the full upgrade to complete.
     async fn upgrade_instance_stream(
         &self,
@@ -413,6 +443,16 @@ pub trait AgentService: Send + Sync {
     /// Fetches live status via GET /instances per manager, maps "running" -> "active", others -> "stopped".
     /// Skips deleted instances; only updates when status differs.
     async fn sync_all_instance_statuses(&self) -> anyhow::Result<SyncStatusResult>;
+
+    // Gateway session management
+    /// Setup gateway session for a user.
+    /// Creates user passkey credentials on first login, then sets the gateway cookie via /auth/proxy-session.
+    /// Returns the Set-Cookie header value to be forwarded to the browser, or None if not available.
+    /// Safe to call multiple times (idempotent on subsequent logins).
+    async fn setup_gateway_session_for_user(
+        &self,
+        user_id: UserId,
+    ) -> anyhow::Result<Option<String>>;
 
     // API key management
     /// Create an API key for a specific instance - returns (api_key_info, plaintext_key)

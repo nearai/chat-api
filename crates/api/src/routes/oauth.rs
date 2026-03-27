@@ -2,7 +2,7 @@ use crate::{error::ApiError, middleware::AuthenticatedUser, state::AppState};
 use axum::extract::Query;
 use axum::{
     extract::{Extension, State},
-    http::StatusCode,
+    http::{header::LOCATION, HeaderMap, StatusCode},
     response::Redirect,
     routing::{get, post},
     Json, Router,
@@ -209,7 +209,7 @@ pub async fn google_login(
 pub async fn oauth_callback(
     State(app_state): State<AppState>,
     Query(params): Query<OAuthCallbackQuery>,
-) -> Result<Redirect, ApiError> {
+) -> Result<(StatusCode, HeaderMap), ApiError> {
     tracing::info!(
         "OAuth callback received - code length: {}, state: {}",
         params.code.len(),
@@ -286,6 +286,20 @@ pub async fn oauth_callback(
 
     tracing::debug!("Session token generated, length: {}", token.len());
 
+    // For non-TEE mode: set up gateway session (authenticate with compose-api)
+    if let Err(e) = app_state
+        .agent_service
+        .setup_gateway_session_for_user(session.user_id)
+        .await
+    {
+        tracing::warn!(
+            "Failed to set up gateway session for user: user_id={}, error={}",
+            session.user_id,
+            e
+        );
+        // Continue anyway - not critical for OAuth callback
+    }
+
     // Use frontend_callback from OAuth state, or fall back to FRONTEND_URL env var
     let frontend_url = frontend_callback.clone().unwrap_or_else(|| {
         let fallback =
@@ -312,7 +326,17 @@ pub async fn oauth_callback(
 
     tracing::debug!("Final callback URL: {}", callback_url);
 
-    Ok(Redirect::temporary(&callback_url))
+    // Build response with redirect location
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        LOCATION,
+        callback_url.parse().map_err(|_| {
+            tracing::error!("Failed to parse callback URL as header value");
+            ApiError::internal_server_error("Invalid callback URL")
+        })?,
+    );
+
+    Ok((StatusCode::FOUND, headers))
 }
 
 /// Handler for initiating Github OAuth flow
@@ -446,7 +470,7 @@ pub async fn logout(
 pub async fn mock_login(
     State(app_state): State<AppState>,
     axum::Json(request): axum::Json<MockLoginRequest>,
-) -> Result<axum::Json<crate::models::AuthResponse>, ApiError> {
+) -> Result<(HeaderMap, axum::Json<crate::models::AuthResponse>), ApiError> {
     tracing::info!("Mock login requested for email: {}", request.email);
 
     // Check if user already exists
@@ -572,10 +596,27 @@ pub async fn mock_login(
         session.session_id
     );
 
-    Ok(axum::Json(crate::models::AuthResponse {
-        token,
-        expires_at: session.expires_at.to_rfc3339(),
-    }))
+    // For non-TEE mode: set up gateway session (authenticate with compose-api)
+    if let Err(e) = app_state
+        .agent_service
+        .setup_gateway_session_for_user(user.id)
+        .await
+    {
+        tracing::warn!(
+            "Failed to set up gateway session for user: user_id={}, error={}",
+            user.id,
+            e
+        );
+        // Continue anyway - not critical for mock login
+    }
+
+    Ok((
+        HeaderMap::new(),
+        axum::Json(crate::models::AuthResponse {
+            token,
+            expires_at: session.expires_at.to_rfc3339(),
+        }),
+    ))
 }
 
 /// Handler for NEAR wallet authentication
@@ -671,6 +712,20 @@ pub async fn near_auth(
         session.user_id,
         is_new_user
     );
+
+    // For non-TEE mode: set up gateway session (authenticate with compose-api)
+    if let Err(e) = app_state
+        .agent_service
+        .setup_gateway_session_for_user(session.user_id)
+        .await
+    {
+        tracing::warn!(
+            "Failed to set up gateway session for user: user_id={}, error={}",
+            session.user_id,
+            e
+        );
+        // Continue anyway - not critical for NEAR auth
+    }
 
     Ok(Json(NearAuthResponse {
         token,
