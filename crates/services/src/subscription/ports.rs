@@ -280,9 +280,11 @@ pub trait SubscriptionRepository: Send + Sync {
         user_id: UserId,
     ) -> anyhow::Result<Option<Subscription>>;
 
-    /// Maximum `current_period_end` across all subscription rows for this user.
-    /// Used to align free-plan billing months with the last paid period boundary after cancellation.
-    async fn max_current_period_end_for_user(
+    /// Greatest `current_period_end` among **canceled** Stripe subscriptions for this user
+    /// ([`SubscriptionStatus::Canceled`](https://docs.rs/async-stripe/latest/stripe/enum.SubscriptionStatus.html)
+    /// is spelled `canceled` in the API). Used to align free-plan billing months with the boundary
+    /// where the last canceled subscription’s period ended; if none exist, callers fall back to a calendar month.
+    async fn last_cancelled_subscription_period_end_for_user(
         &self,
         user_id: UserId,
     ) -> anyhow::Result<Option<DateTime<Utc>>>;

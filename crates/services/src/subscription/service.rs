@@ -679,14 +679,14 @@ impl SubscriptionServiceImpl {
     }
 
     /// Billing window for users without an active paid subscription: calendar month by default,
-    /// or monthly periods aligned to the end of the last stored subscription period (cancellation boundary).
+    /// or monthly periods aligned to `current_period_end` of the user’s latest **canceled** subscription row.
     async fn resolve_free_plan_period_for_user(
         &self,
         user_id: UserId,
     ) -> Result<(chrono::DateTime<Utc>, chrono::DateTime<Utc>), SubscriptionError> {
         let anchor = self
             .subscription_repo
-            .max_current_period_end_for_user(user_id)
+            .last_cancelled_subscription_period_end_for_user(user_id)
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
         Ok(free_plan_period_for_user(anchor, Utc::now()))
@@ -730,9 +730,7 @@ fn add_one_month_same_day(dt: chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
         };
         NaiveDate::from_ymd_opt(next_y, next_m, 1)
             .and_then(|first_of_next| first_of_next.pred_opt())
-            .unwrap_or_else(|| {
-                NaiveDate::from_ymd_opt(new_y, new_m, 28).expect("28th day of month exists")
-            })
+            .expect("last day of target month after month arithmetic")
     });
     chrono::DateTime::from_naive_utc_and_offset(new_d.and_time(dt.time()), Utc)
 }
@@ -2136,10 +2134,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
                                 );
                                 DEFAULT_MONTHLY_CREDITS_NANO_USD
                             });
-                        let (period_start, period_end) = self
-                            .resolve_free_plan_period_for_user(user_id)
-                            .await
-                            .map_err(|e| SubscriptionError::InternalError(e.to_string()))?;
+                        let (period_start, period_end) =
+                            self.resolve_free_plan_period_for_user(user_id).await?;
                         (plan_credits, period_start, period_end)
                     }
                 };
