@@ -762,6 +762,7 @@ pub struct SystemConfigsResponse {
     pub auto_route: Option<AutoRouteConfig>,
     /// Default model allowlist for users without active subscription
     /// None = allow all models (default); Some(vec) = only allow models in the list
+    /// An empty list denies all models.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_allowed_models: Option<Vec<String>>,
 }
@@ -807,6 +808,7 @@ pub struct UpsertSystemConfigsRequest {
     pub auto_route: Option<AutoRouteConfig>,
     /// Default model allowlist for users without active subscription
     /// None = allow all models (default); Some(vec) = only allow models in the list
+    /// An empty list denies all models.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_allowed_models: Option<Vec<String>>,
 }

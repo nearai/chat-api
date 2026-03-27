@@ -53,8 +53,8 @@ async fn test_list_models_response_structure() {
         .and_then(|v| v.as_i64())
         .expect("Should have total as number");
 
-    // Verify pagination structure is correct.
-    // Another test may create models concurrently, so only require a valid page.
+    // This test module is not serialized, and other tests may write to the shared models table.
+    // Only require that the returned page is self-consistent.
     assert!(
         models.len() as i64 <= total,
         "Models array length should not exceed total"

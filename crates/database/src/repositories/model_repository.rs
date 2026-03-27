@@ -79,9 +79,11 @@ impl ModelsRepository for PostgresModelRepository {
             .await?;
 
         let mut models = Vec::new();
-        let mut total: i64 = 0;
+        let mut total = rows
+            .first()
+            .map(|row| row.get("total_count"))
+            .unwrap_or(0_i64);
         for row in &rows {
-            total = row.get("total_count");
             let settings_json: serde_json::Value = row.get("settings");
 
             let default_settings = ModelSettings::default();

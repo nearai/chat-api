@@ -140,6 +140,52 @@ async fn test_no_subscription_default_allowed_models_blocks_unlisted_model() {
     );
 }
 
+#[tokio::test]
+#[serial(model_allowlist_tests)]
+async fn test_no_subscription_empty_default_allowed_models_denies_all_models() {
+    ensure_stripe_env_for_gating();
+    let server = create_test_server().await;
+
+    let admin_token = mock_login(&server, "test_admin_empty_default_allowlist@admin.org").await;
+    let response = server
+        .patch("/v1/admin/configs")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", admin_token)).unwrap(),
+        )
+        .json(&json!({
+            "default_allowed_models": [],
+            "subscription_plans": {
+                "basic": {
+                    "providers": { "stripe": { "price_id": "price_basic" } },
+                    "monthly_tokens": { "max": 1000000 }
+                }
+            }
+        }))
+        .await;
+
+    assert_eq!(response.status_code(), 200);
+
+    let user_token = mock_login(&server, "no_subscription_empty_allowlist@example.com").await;
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", user_token)).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-3.5-turbo",
+            "messages": [{"role": "user", "content": "Hello"}]
+        }))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        403,
+        "An empty default_allowed_models list should deny all models"
+    );
+}
+
 // ============================================================================
 // Test: Users with subscription (using plan-specific allowed_models)
 // ============================================================================
@@ -247,6 +293,48 @@ async fn test_subscription_plan_allowed_models_blocks_unlisted_model() {
         error.contains("gpt-4o") && error.contains("not available"),
         "Error message should mention the model: {}",
         error
+    );
+}
+
+#[tokio::test]
+#[serial(model_allowlist_tests)]
+async fn test_subscription_plan_empty_allowed_models_denies_all_models() {
+    ensure_stripe_env_for_gating();
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": { "stripe": { "price_id": "price_basic" } },
+                "monthly_tokens": { "max": 1000000 },
+                "allowed_models": []
+            }
+        }),
+    )
+    .await;
+
+    let user_email = "basic_plan_empty_allowlist@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+    insert_test_subscription_with_price(&server, &db, user_email, "price_basic", false).await;
+    let user_token = mock_login(&server, user_email).await;
+
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", user_token)).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-3.5-turbo",
+            "messages": [{"role": "user", "content": "Hello"}]
+        }))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        403,
+        "An empty plan allowed_models list should deny all models"
     );
 }
 
