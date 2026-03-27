@@ -198,11 +198,6 @@ pub struct SystemConfigs {
     /// Auto-routing configuration for `model: "auto"` requests
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_route: Option<AutoRouteConfig>,
-    /// Default model allowlist for users without active subscription
-    /// None = allow all models (default); Some(vec) = only allow models in the list
-    /// An empty list denies all models.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_allowed_models: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -214,7 +209,6 @@ pub struct PartialSystemConfigs {
     pub credits: Option<CreditsConfig>,
     pub max_instances_by_manager_url: Option<HashMap<String, u64>>,
     pub auto_route: Option<AutoRouteConfig>,
-    pub default_allowed_models: Option<Vec<String>>,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -228,7 +222,6 @@ impl Default for SystemConfigs {
             credits: None,
             max_instances_by_manager_url: None,
             auto_route: None,
-            default_allowed_models: None,
         }
     }
 }
@@ -247,9 +240,6 @@ impl SystemConfigs {
                 .max_instances_by_manager_url
                 .or(self.max_instances_by_manager_url),
             auto_route: partial.auto_route.or(self.auto_route),
-            default_allowed_models: partial
-                .default_allowed_models
-                .or(self.default_allowed_models),
         }
     }
 

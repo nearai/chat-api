@@ -525,7 +525,7 @@ pub trait SubscriptionService: Send + Sync {
     /// Check if the user has access to the specified model based on their subscription plan.
     /// Returns Ok(()) if allowed, Err(ModelNotAllowedInPlan) if the model is not in the plan's allowlist.
     /// If the plan has no allowlist (None), all models are allowed.
-    /// If the user has no active subscription, uses system-level default_allowed_models config.
+    /// If the user has no active subscription, uses `subscription_plans.free.allowed_models` as fallback.
     async fn check_model_access(
         &self,
         user_id: UserId,

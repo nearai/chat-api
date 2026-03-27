@@ -760,11 +760,6 @@ pub struct SystemConfigsResponse {
     /// Auto-routing configuration for `model: "auto"` requests
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_route: Option<AutoRouteConfig>,
-    /// Default model allowlist for users without active subscription
-    /// None = allow all models (default); Some(vec) = only allow models in the list
-    /// An empty list denies all models.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub default_allowed_models: Option<Vec<String>>,
 }
 
 impl From<services::system_configs::ports::SystemConfigs> for SystemConfigsResponse {
@@ -777,7 +772,6 @@ impl From<services::system_configs::ports::SystemConfigs> for SystemConfigsRespo
             credits: config.credits,
             max_instances_by_manager_url: config.max_instances_by_manager_url,
             auto_route: config.auto_route,
-            default_allowed_models: config.default_allowed_models,
         }
     }
 }
@@ -806,11 +800,6 @@ pub struct UpsertSystemConfigsRequest {
     /// Auto-routing configuration for `model: "auto"` requests
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_route: Option<AutoRouteConfig>,
-    /// Default model allowlist for users without active subscription
-    /// None = allow all models (default); Some(vec) = only allow models in the list
-    /// An empty list denies all models.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub default_allowed_models: Option<Vec<String>>,
 }
 
 impl TryFrom<UpsertSystemConfigsRequest> for services::system_configs::ports::PartialSystemConfigs {
@@ -831,7 +820,6 @@ impl TryFrom<UpsertSystemConfigsRequest> for services::system_configs::ports::Pa
             credits: req.credits,
             max_instances_by_manager_url: req.max_instances_by_manager_url,
             auto_route: req.auto_route,
-            default_allowed_models: req.default_allowed_models,
         })
     }
 }

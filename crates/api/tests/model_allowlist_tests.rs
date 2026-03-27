@@ -21,16 +21,16 @@ fn ensure_stripe_env_for_gating() {
 }
 
 // ============================================================================
-// Test: Users without subscription (using default_allowed_models)
+// Test: Users without subscription (using free plan allowed_models)
 // ============================================================================
 
 #[tokio::test]
 #[serial(model_allowlist_tests)]
-async fn test_no_subscription_default_allowed_models_allows_listed_model() {
+async fn test_no_subscription_free_plan_allowed_models_allows_listed_model() {
     ensure_stripe_env_for_gating();
     let server = create_test_server().await;
 
-    // Configure subscription plans with default_allowed_models (admin auth required)
+    // Configure subscription plans with free plan allowed_models (admin auth required)
     let admin_token = mock_login(&server, "test_admin_model_allowlist@admin.org").await;
     let response = server
         .patch("/v1/admin/configs")
@@ -39,8 +39,11 @@ async fn test_no_subscription_default_allowed_models_allows_listed_model() {
             http::HeaderValue::from_str(&format!("Bearer {}", admin_token)).unwrap(),
         )
         .json(&json!({
-            "default_allowed_models": ["gpt-3.5-turbo", "gpt-4o-mini"],
             "subscription_plans": {
+                "free": {
+                    "providers": { "stripe": { "price_id": "price_free" } },
+                    "allowed_models": ["gpt-3.5-turbo", "gpt-4o-mini"]
+                },
                 "basic": {
                     "providers": { "stripe": { "price_id": "price_basic" } },
                     "monthly_tokens": { "max": 1000000 }
@@ -52,13 +55,13 @@ async fn test_no_subscription_default_allowed_models_allows_listed_model() {
     assert_eq!(
         response.status_code(),
         200,
-        "Failed to configure default_allowed_models"
+        "Failed to configure free plan allowed_models"
     );
 
     let user_email = "no_subscription_allowed@example.com";
     let user_token = mock_login(&server, user_email).await;
 
-    // Try to use a model that's in the default allowlist
+    // Try to use a model that's in the free plan allowlist
     let response = server
         .post("/v1/chat/completions")
         .add_header(
@@ -75,17 +78,17 @@ async fn test_no_subscription_default_allowed_models_allows_listed_model() {
     assert_ne!(
         response.status_code(),
         403,
-        "User should be allowed to use model in default_allowed_models"
+        "User should be allowed to use model in free plan allowed_models"
     );
 }
 
 #[tokio::test]
 #[serial(model_allowlist_tests)]
-async fn test_no_subscription_default_allowed_models_blocks_unlisted_model() {
+async fn test_no_subscription_free_plan_allowed_models_blocks_unlisted_model() {
     ensure_stripe_env_for_gating();
     let server = create_test_server().await;
 
-    // Configure subscription plans with default_allowed_models (admin auth required)
+    // Configure subscription plans with free plan allowed_models (admin auth required)
     let admin_token = mock_login(&server, "test_admin_model_blocked@admin.org").await;
     let response = server
         .patch("/v1/admin/configs")
@@ -94,8 +97,11 @@ async fn test_no_subscription_default_allowed_models_blocks_unlisted_model() {
             http::HeaderValue::from_str(&format!("Bearer {}", admin_token)).unwrap(),
         )
         .json(&json!({
-            "default_allowed_models": ["gpt-3.5-turbo", "gpt-4o-mini"],
             "subscription_plans": {
+                "free": {
+                    "providers": { "stripe": { "price_id": "price_free" } },
+                    "allowed_models": ["gpt-3.5-turbo", "gpt-4o-mini"]
+                },
                 "basic": {
                     "providers": { "stripe": { "price_id": "price_basic" } },
                     "monthly_tokens": { "max": 1000000 }
@@ -109,7 +115,7 @@ async fn test_no_subscription_default_allowed_models_blocks_unlisted_model() {
     let user_email = "no_subscription_blocked@example.com";
     let user_token = mock_login(&server, user_email).await;
 
-    // Try to use a model NOT in the default allowlist
+    // Try to use a model NOT in the free plan allowlist
     let response = server
         .post("/v1/chat/completions")
         .add_header(
@@ -126,7 +132,7 @@ async fn test_no_subscription_default_allowed_models_blocks_unlisted_model() {
     assert_eq!(
         response.status_code(),
         403,
-        "User without subscription should be blocked from using model not in default_allowed_models"
+        "User without subscription should be blocked from using model not in free plan allowed_models"
     );
 
     let body: serde_json::Value = response.json();
@@ -142,11 +148,11 @@ async fn test_no_subscription_default_allowed_models_blocks_unlisted_model() {
 
 #[tokio::test]
 #[serial(model_allowlist_tests)]
-async fn test_no_subscription_empty_default_allowed_models_denies_all_models() {
+async fn test_no_subscription_empty_free_plan_allowed_models_denies_all_models() {
     ensure_stripe_env_for_gating();
     let server = create_test_server().await;
 
-    let admin_token = mock_login(&server, "test_admin_empty_default_allowlist@admin.org").await;
+    let admin_token = mock_login(&server, "test_admin_empty_free_allowlist@admin.org").await;
     let response = server
         .patch("/v1/admin/configs")
         .add_header(
@@ -154,8 +160,11 @@ async fn test_no_subscription_empty_default_allowed_models_denies_all_models() {
             http::HeaderValue::from_str(&format!("Bearer {}", admin_token)).unwrap(),
         )
         .json(&json!({
-            "default_allowed_models": [],
             "subscription_plans": {
+                "free": {
+                    "providers": { "stripe": { "price_id": "price_free" } },
+                    "allowed_models": []
+                },
                 "basic": {
                     "providers": { "stripe": { "price_id": "price_basic" } },
                     "monthly_tokens": { "max": 1000000 }
@@ -182,7 +191,7 @@ async fn test_no_subscription_empty_default_allowed_models_denies_all_models() {
     assert_eq!(
         response.status_code(),
         403,
-        "An empty default_allowed_models list should deny all models"
+        "An empty free plan allowed_models list should deny all models"
     );
 }
 
@@ -636,7 +645,7 @@ async fn test_admin_config_returns_allowed_models_fields() {
 
     let admin_token = mock_login(&server, "test_admin_config_return@admin.org").await;
 
-    // Configure with both default_allowed_models and plan-specific allowed_models
+    // Configure plan-specific allowed_models including free plan fallback
     let response = server
         .patch("/v1/admin/configs")
         .add_header(
@@ -644,8 +653,11 @@ async fn test_admin_config_returns_allowed_models_fields() {
             http::HeaderValue::from_str(&format!("Bearer {}", admin_token)).unwrap(),
         )
         .json(&json!({
-            "default_allowed_models": ["gpt-3.5-turbo", "gpt-4o-mini"],
             "subscription_plans": {
+                "free": {
+                    "providers": { "stripe": { "price_id": "price_free" } },
+                    "allowed_models": ["gpt-3.5-turbo", "gpt-4o-mini"]
+                },
                 "basic": {
                     "providers": { "stripe": { "price_id": "price_basic" } },
                     "monthly_tokens": { "max": 1000000 },
@@ -675,14 +687,12 @@ async fn test_admin_config_returns_allowed_models_fields() {
 
     let body: serde_json::Value = response.json();
 
-    // Verify default_allowed_models is present
-    assert_eq!(
-        body["default_allowed_models"],
-        json!(["gpt-3.5-turbo", "gpt-4o-mini"]),
-        "default_allowed_models should be returned"
-    );
-
     // Verify plan-specific allowed_models
+    assert_eq!(
+        body["subscription_plans"]["free"]["allowed_models"],
+        json!(["gpt-3.5-turbo", "gpt-4o-mini"]),
+        "free plan allowed_models should be returned"
+    );
     assert_eq!(
         body["subscription_plans"]["basic"]["allowed_models"],
         json!(["gpt-3.5-turbo"]),

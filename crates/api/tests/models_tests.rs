@@ -329,13 +329,18 @@ async fn test_responses_block_non_public_model() {
             http::HeaderValue::from_static("application/json"),
         )
         .json(&json!({
-            "default_allowed_models": ["test-non-public-model"]
+            "subscription_plans": {
+                "free": {
+                    "providers": { "stripe": { "price_id": "price_free" } },
+                    "allowed_models": ["test-non-public-model"]
+                }
+            }
         }))
         .await;
 
     assert!(
         response.status_code().is_success(),
-        "Admin should be able to configure default_allowed_models"
+        "Admin should be able to configure free plan allowed_models"
     );
 
     // Explicitly create a non-public model via admin API
@@ -417,13 +422,18 @@ async fn test_responses_allow_public_model() {
             http::HeaderValue::from_static("application/json"),
         )
         .json(&json!({
-            "default_allowed_models": ["test-public-model"]
+            "subscription_plans": {
+                "free": {
+                    "providers": { "stripe": { "price_id": "price_free" } },
+                    "allowed_models": ["test-public-model"]
+                }
+            }
         }))
         .await;
 
     assert!(
         response.status_code().is_success(),
-        "Admin should be able to configure default_allowed_models"
+        "Admin should be able to configure free plan allowed_models"
     );
 
     // Mark the model as public via admin API
@@ -501,13 +511,18 @@ async fn test_responses_injects_system_prompt_when_instructions_missing() {
             http::HeaderValue::from_static("application/json"),
         )
         .json(&json!({
-            "default_allowed_models": ["test-system-prompt-model-1"]
+            "subscription_plans": {
+                "free": {
+                    "providers": { "stripe": { "price_id": "price_free" } },
+                    "allowed_models": ["test-system-prompt-model-1"]
+                }
+            }
         }))
         .await;
 
     assert!(
         response.status_code().is_success(),
-        "Admin should be able to configure default_allowed_models"
+        "Admin should be able to configure free plan allowed_models"
     );
 
     let system_prompt = "You are a helpful assistant (model-level).";
@@ -591,13 +606,18 @@ async fn test_responses_prepends_system_prompt_when_instructions_present() {
             http::HeaderValue::from_static("application/json"),
         )
         .json(&json!({
-            "default_allowed_models": ["test-system-prompt-model-2"]
+            "subscription_plans": {
+                "free": {
+                    "providers": { "stripe": { "price_id": "price_free" } },
+                    "allowed_models": ["test-system-prompt-model-2"]
+                }
+            }
         }))
         .await;
 
     assert!(
         response.status_code().is_success(),
-        "Admin should be able to configure default_allowed_models"
+        "Admin should be able to configure free plan allowed_models"
     );
 
     let system_prompt = "You are a helpful assistant (model-level, prepend).";

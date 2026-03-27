@@ -2257,14 +2257,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
         // Get system configs
         let configs = self.get_system_configs_cached().await?;
 
-        // Extract subscription plans and default allowed models
-        let (subscription_plans, default_allowed_models) = match configs {
-            Some(ref c) => (
-                c.subscription_plans.as_ref(),
-                c.default_allowed_models.as_ref(),
-            ),
-            None => (None, None),
-        };
+        // Extract subscription plans
+        let subscription_plans = configs.as_ref().and_then(|c| c.subscription_plans.as_ref());
 
         // Try to get user's active subscription
         let active_subscription = self
@@ -2301,8 +2295,10 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 }
             }
             None => {
-                // User has no active subscription - use default allowlist
-                default_allowed_models
+                // User has no active subscription - use the free plan allowlist as fallback
+                subscription_plans
+                    .and_then(|plans| plans.get("free"))
+                    .and_then(|config| config.allowed_models.as_ref())
             }
         };
 
@@ -2335,7 +2331,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                             plans,
                         )
                         .unwrap_or_else(|| "default".to_string()),
-                        _ => "default".to_string(),
+                        _ => "free".to_string(),
                     };
 
                     tracing::info!(
