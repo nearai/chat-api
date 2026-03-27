@@ -191,6 +191,25 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
         Ok(row.as_ref().map(row_to_subscription))
     }
 
+    async fn last_cancelled_subscription_period_end_for_user(
+        &self,
+        user_id: UserId,
+    ) -> anyhow::Result<Option<chrono::DateTime<chrono::Utc>>> {
+        let client = self.pool.get().await?;
+        // Use the most recently canceled row (by updated_at), not MAX(period_end),
+        // so stale rows with far-future period ends do not override the latest cancellation boundary.
+        let row = client
+            .query_opt(
+                "SELECT current_period_end FROM subscriptions \
+                 WHERE user_id = $1 AND status = 'canceled' \
+                 ORDER BY updated_at DESC, created_at DESC, subscription_id DESC \
+                 LIMIT 1",
+                &[&user_id],
+            )
+            .await?;
+        Ok(row.map(|r| r.get::<_, chrono::DateTime<chrono::Utc>>("current_period_end")))
+    }
+
     async fn list_subscriptions(
         &self,
         user_id: Option<UserId>,

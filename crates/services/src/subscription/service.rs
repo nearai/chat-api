@@ -448,7 +448,8 @@ impl SubscriptionServiceImpl {
                     .get("free")
                     .map(Self::plan_limit_max)
                     .unwrap_or(DEFAULT_MONTHLY_CREDITS_NANO_USD);
-                let (period_start, period_end) = current_calendar_month_period(Utc::now());
+                let (period_start, period_end) =
+                    self.resolve_free_plan_period_for_user(user_id).await?;
                 (plan_credits, period_start, period_end)
             }
         };
@@ -676,6 +677,20 @@ impl SubscriptionServiceImpl {
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
         Ok(updated)
     }
+
+    /// Billing window for users without an active paid subscription: calendar month by default,
+    /// or monthly periods aligned to `current_period_end` of the user’s latest **canceled** subscription row.
+    async fn resolve_free_plan_period_for_user(
+        &self,
+        user_id: UserId,
+    ) -> Result<(chrono::DateTime<Utc>, chrono::DateTime<Utc>), SubscriptionError> {
+        let anchor = self
+            .subscription_repo
+            .last_cancelled_subscription_period_end_for_user(user_id)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+        Ok(free_plan_period_for_user(anchor, Utc::now()))
+    }
 }
 
 /// Subtract one calendar month from a datetime, keeping the same day when possible.
@@ -699,6 +714,74 @@ fn sub_one_month_same_day(dt: chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
             })
     });
     chrono::DateTime::from_naive_utc_and_offset(new_d.and_time(dt.time()), Utc)
+}
+
+/// Add `months_to_add` whole calendar months to `anchor` in **one step** (same rules as
+/// `sub_one_month_same_day` for day overflow). This matches Stripe-style billing: e.g. anchor Jan 31
+/// → +1 month Feb 28/29, → +2 months **Mar 31** (not Mar 28 from chaining one-month steps).
+fn add_months_same_day_from_anchor(
+    anchor: chrono::DateTime<Utc>,
+    months_to_add: u32,
+) -> chrono::DateTime<Utc> {
+    use chrono::NaiveDate;
+    let d = anchor.date_naive();
+    let (y, m, day) = (d.year(), d.month(), d.day());
+    let total = (i64::from(y)) * 12 + (i64::from(m) - 1) + i64::from(months_to_add);
+    let new_y = (total / 12) as i32;
+    let new_m = ((total % 12) + 1) as u32;
+    let new_d = NaiveDate::from_ymd_opt(new_y, new_m, day).unwrap_or_else(|| {
+        let (next_y, next_m) = if new_m == 12 {
+            (new_y + 1, 1)
+        } else {
+            (new_y, new_m + 1)
+        };
+        NaiveDate::from_ymd_opt(next_y, next_m, 1)
+            .and_then(|first_of_next| first_of_next.pred_opt())
+            .expect("last day of target month after month arithmetic")
+    });
+    chrono::DateTime::from_naive_utc_and_offset(new_d.and_time(anchor.time()), Utc)
+}
+
+/// Free-plan month starting when the paid period ended (`cancellation_period_end`), same length as Stripe monthly cycles.
+/// Period boundaries are **indexed from the anchor** (`anchor + k months`), not by chaining one-month hops (which
+/// drifts for end-of-month anchors).
+fn free_plan_monthly_period_from_cancellation_anchor(
+    cancellation_period_end: chrono::DateTime<Utc>,
+    now: chrono::DateTime<Utc>,
+) -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
+    let anchor = cancellation_period_end;
+    // Fast estimate by calendar month index, then adjust to exact boundary.
+    let month_delta = (i64::from(now.year()) - i64::from(anchor.year())) * 12
+        + (i64::from(now.month()) - i64::from(anchor.month()));
+    let mut k: i64 = month_delta.max(0);
+
+    let mut period_start = add_months_same_day_from_anchor(anchor, k as u32);
+    while k > 0 && now < period_start {
+        k -= 1;
+        period_start = add_months_same_day_from_anchor(anchor, k as u32);
+    }
+
+    let mut period_end = add_months_same_day_from_anchor(anchor, (k + 1) as u32);
+    while now >= period_end {
+        k += 1;
+        period_start = period_end;
+        period_end = add_months_same_day_from_anchor(anchor, (k + 1) as u32);
+        debug_assert!(k < 500_000, "free plan month index unrealistically large");
+    }
+
+    (period_start, period_end)
+}
+
+fn free_plan_period_for_user(
+    latest_subscription_period_end: Option<chrono::DateTime<Utc>>,
+    now: chrono::DateTime<Utc>,
+) -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
+    match latest_subscription_period_end {
+        Some(anchor) if now >= anchor => {
+            free_plan_monthly_period_from_cancellation_anchor(anchor, now)
+        }
+        _ => current_calendar_month_period(now),
+    }
 }
 
 /// Returns (period_start, period_end) for the current calendar month.
@@ -2072,8 +2155,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
                                 );
                                 DEFAULT_MONTHLY_CREDITS_NANO_USD
                             });
-                        // Free users: calendar month — 00:00 on 1st through 24:00 on last day
-                        let (period_start, period_end) = current_calendar_month_period(Utc::now());
+                        let (period_start, period_end) =
+                            self.resolve_free_plan_period_for_user(user_id).await?;
                         (plan_credits, period_start, period_end)
                     }
                 };
@@ -2506,6 +2589,7 @@ mod tests {
     use super::*;
     use crate::system_configs::ports::{PaymentProviderConfig, SubscriptionPlanConfig};
     use crate::UserId;
+    use chrono::TimeZone;
     use std::collections::HashMap;
 
     fn plan_config(price_id: &str, tokens: u64, instances: u64) -> SubscriptionPlanConfig {
@@ -2688,6 +2772,162 @@ mod tests {
         assert_eq!(
             resolve_plan_name_from_config("stripe", "price_unknown", &plans),
             None
+        );
+    }
+
+    #[test]
+    fn test_free_plan_first_month_starts_at_cancellation_boundary() {
+        let anchor = Utc.with_ymd_and_hms(2026, 3, 19, 8, 22, 16).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 3, 25, 12, 0, 0).unwrap();
+        let (start, end) = free_plan_monthly_period_from_cancellation_anchor(anchor, now);
+        assert_eq!(start, anchor);
+        assert_eq!(end, add_months_same_day_from_anchor(anchor, 1));
+    }
+
+    #[test]
+    fn test_free_plan_advances_monthly_after_anchor() {
+        let anchor = Utc.with_ymd_and_hms(2026, 3, 19, 0, 0, 0).unwrap();
+        let first_end = add_months_same_day_from_anchor(anchor, 1);
+        let now = first_end + Duration::hours(2);
+        let (start, end) = free_plan_monthly_period_from_cancellation_anchor(anchor, now);
+        assert_eq!(start, first_end);
+        assert_eq!(end, add_months_same_day_from_anchor(anchor, 2));
+    }
+
+    #[test]
+    fn test_add_then_sub_one_month_mid_month_roundtrip() {
+        let t = Utc.with_ymd_and_hms(2026, 3, 15, 14, 30, 0).unwrap();
+        assert_eq!(
+            sub_one_month_same_day(add_months_same_day_from_anchor(t, 1)),
+            t
+        );
+    }
+
+    #[test]
+    fn test_free_plan_period_no_subscription_row_uses_calendar_month() {
+        let now = Utc.with_ymd_and_hms(2026, 3, 25, 0, 0, 0).unwrap();
+        let (s, e) = free_plan_period_for_user(None, now);
+        let (cs, ce) = current_calendar_month_period(now);
+        assert_eq!((s, e), (cs, ce));
+    }
+
+    #[test]
+    fn test_free_plan_period_anchor_in_future_uses_calendar_month() {
+        let anchor = Utc.with_ymd_and_hms(2026, 4, 1, 0, 0, 0).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 3, 25, 0, 0, 0).unwrap();
+        let (s, e) = free_plan_period_for_user(Some(anchor), now);
+        let (cs, ce) = current_calendar_month_period(now);
+        assert_eq!((s, e), (cs, ce));
+    }
+
+    /// Test oracle: same as production (`add_months_same_day_from_anchor` indexed from anchor).
+    fn add_months_same_day_iter(
+        anchor: chrono::DateTime<Utc>,
+        months: u32,
+    ) -> chrono::DateTime<Utc> {
+        add_months_same_day_from_anchor(anchor, months)
+    }
+
+    /// Brute-force construction of the current period by scanning month index `k`.
+    fn free_plan_period_via_month_index_from_anchor(
+        anchor: chrono::DateTime<Utc>,
+        now: chrono::DateTime<Utc>,
+    ) -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
+        let first_end = add_months_same_day_from_anchor(anchor, 1);
+        if now < first_end {
+            return (anchor, first_end);
+        }
+        let mut k = 1u32;
+        while add_months_same_day_from_anchor(anchor, k + 1) <= now {
+            k += 1;
+            assert!(k < 50_000, "unbounded month walk in test oracle");
+        }
+        let period_start = add_months_same_day_from_anchor(anchor, k);
+        let period_end = add_months_same_day_from_anchor(anchor, k + 1);
+        (period_start, period_end)
+    }
+
+    #[test]
+    fn test_add_months_from_anchor_matches_stripe_end_of_month_pattern() {
+        let anchor = Utc.with_ymd_and_hms(2026, 1, 31, 12, 0, 0).unwrap();
+        assert_eq!(
+            add_months_same_day_from_anchor(anchor, 1),
+            Utc.with_ymd_and_hms(2026, 2, 28, 12, 0, 0).unwrap()
+        );
+        assert_eq!(
+            add_months_same_day_from_anchor(anchor, 2),
+            Utc.with_ymd_and_hms(2026, 3, 31, 12, 0, 0).unwrap()
+        );
+        assert_ne!(
+            Utc.with_ymd_and_hms(2026, 3, 28, 12, 0, 0).unwrap(),
+            add_months_same_day_from_anchor(anchor, 2),
+            "chained +1 month drifts to Mar 28; anchor indexing keeps Mar 31"
+        );
+    }
+
+    #[test]
+    fn test_add_months_same_day_iter_mid_month_matches_chained_one_month() {
+        let anchor = Utc.with_ymd_and_hms(2021, 3, 15, 9, 30, 0).unwrap();
+        for k in [0u32, 1, 2, 12, 24, 48, 120] {
+            assert_eq!(
+                add_months_same_day_iter(anchor, k),
+                add_months_same_day_from_anchor(anchor, k),
+                "k={k}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_free_plan_months_after_cancel_matches_month_index_oracle() {
+        let anchor = Utc.with_ymd_and_hms(2025, 3, 19, 0, 0, 0).unwrap();
+        // ~14 months later: still same cycle day 19
+        let now = Utc.with_ymd_and_hms(2026, 5, 10, 0, 0, 0).unwrap();
+        let fast = free_plan_monthly_period_from_cancellation_anchor(anchor, now);
+        let slow = free_plan_period_via_month_index_from_anchor(anchor, now);
+        assert_eq!(fast, slow);
+        let expected_start = Utc.with_ymd_and_hms(2026, 4, 19, 0, 0, 0).unwrap();
+        assert_eq!(fast.0, expected_start);
+    }
+
+    #[test]
+    fn test_free_plan_many_years_after_cancel_matches_month_index_oracle() {
+        let anchor = Utc.with_ymd_and_hms(2019, 11, 7, 11, 30, 0).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 3, 24, 18, 0, 0).unwrap();
+        assert_eq!(
+            free_plan_monthly_period_from_cancellation_anchor(anchor, now),
+            free_plan_period_via_month_index_from_anchor(anchor, now),
+        );
+    }
+
+    #[test]
+    fn test_free_plan_decade_span_random_now_points_match_month_index_oracle() {
+        let anchor = Utc.with_ymd_and_hms(2015, 3, 19, 8, 22, 16).unwrap();
+        let mut probe = anchor + Duration::days(1);
+        for _ in 0..150 {
+            probe += Duration::days(19);
+            let fast = free_plan_monthly_period_from_cancellation_anchor(anchor, probe);
+            let slow = free_plan_period_via_month_index_from_anchor(anchor, probe);
+            assert_eq!(fast, slow, "probe={probe:?}");
+        }
+    }
+
+    #[test]
+    fn test_free_plan_jan_31_anchor_many_months_matches_month_index_oracle() {
+        let anchor = Utc.with_ymd_and_hms(2018, 1, 31, 9, 0, 0).unwrap();
+        let now = Utc.with_ymd_and_hms(2025, 8, 2, 0, 0, 0).unwrap();
+        assert_eq!(
+            free_plan_monthly_period_from_cancellation_anchor(anchor, now),
+            free_plan_period_via_month_index_from_anchor(anchor, now),
+        );
+    }
+
+    #[test]
+    fn test_free_plan_matches_oracle_after_many_years_same_anniversary() {
+        let anchor = Utc.with_ymd_and_hms(2000, 6, 10, 12, 0, 0).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 6, 10, 12, 0, 0).unwrap();
+        assert_eq!(
+            free_plan_monthly_period_from_cancellation_anchor(anchor, now),
+            free_plan_period_via_month_index_from_anchor(anchor, now),
         );
     }
 }

@@ -280,6 +280,15 @@ pub trait SubscriptionRepository: Send + Sync {
         user_id: UserId,
     ) -> anyhow::Result<Option<Subscription>>;
 
+    /// `current_period_end` of the most recently canceled subscription row for this user
+    /// (ordered by `updated_at`; [`SubscriptionStatus::Canceled`](https://docs.rs/async-stripe/latest/stripe/enum.SubscriptionStatus.html)
+    /// is spelled `canceled` in the API). Used to align free-plan billing months with the boundary
+    /// where the latest cancellation period ended; if none exist, callers fall back to a calendar month.
+    async fn last_cancelled_subscription_period_end_for_user(
+        &self,
+        user_id: UserId,
+    ) -> anyhow::Result<Option<DateTime<Utc>>>;
+
     /// List subscriptions with pagination, optionally filtered by user_id.
     /// Returns (items, total_count).
     async fn list_subscriptions(
