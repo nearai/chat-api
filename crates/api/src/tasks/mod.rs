@@ -8,7 +8,12 @@ use services::jobs::{
     TaskExecutor, TaskId, TaskMessage, TaskScheduler,
 };
 use std::sync::Arc;
-use tokio::sync::Semaphore;
+use tokio::{
+    sync::Semaphore,
+    time::{sleep, Duration},
+};
+
+const SQS_RECEIVE_RETRY_DELAY: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
 pub struct AwsTaskScheduler {
@@ -207,7 +212,7 @@ impl<E: TaskExecutor + 'static> AwsSqsTaskWorker<E> {
         let semaphore = Arc::new(Semaphore::new(self.max_concurrency.max(1)));
 
         loop {
-            let response = self
+            let response = match self
                 .client
                 .receive_message()
                 .queue_url(&self.queue_url)
@@ -216,7 +221,18 @@ impl<E: TaskExecutor + 'static> AwsSqsTaskWorker<E> {
                 .visibility_timeout(self.visibility_timeout.max(1))
                 .send()
                 .await
-                .context("failed to receive SQS messages")?;
+            {
+                Ok(response) => response,
+                Err(err) => {
+                    tracing::warn!(
+                        "failed to receive SQS messages; retrying in {}s: {}",
+                        SQS_RECEIVE_RETRY_DELAY.as_secs(),
+                        err
+                    );
+                    sleep(SQS_RECEIVE_RETRY_DELAY).await;
+                    continue;
+                }
+            };
 
             for message in response.messages() {
                 let permit = semaphore.clone().acquire_owned().await?;
@@ -236,30 +252,70 @@ impl<E: TaskExecutor + 'static> AwsSqsTaskWorker<E> {
     }
 }
 
+async fn delete_message(
+    client: &aws_sdk_sqs::Client,
+    queue_url: &str,
+    receipt_handle: &str,
+) -> anyhow::Result<()> {
+    client
+        .delete_message()
+        .queue_url(queue_url)
+        .receipt_handle(receipt_handle)
+        .send()
+        .await
+        .context("failed to delete SQS message")?;
+
+    Ok(())
+}
+
+enum ParsedSqsMessage {
+    Task(TaskMessage),
+    Drop { reason: String },
+}
+
+fn parse_sqs_message(message: &aws_sdk_sqs::types::Message) -> ParsedSqsMessage {
+    let body = match message.body() {
+        Some(body) => body,
+        None => {
+            return ParsedSqsMessage::Drop {
+                reason: "SQS message missing body".to_string(),
+            };
+        }
+    };
+
+    match parse_task_message(body) {
+        Ok(task_message) => ParsedSqsMessage::Task(task_message),
+        Err(err) => ParsedSqsMessage::Drop {
+            reason: err.to_string(),
+        },
+    }
+}
+
 async fn process_message<E: TaskExecutor + 'static>(
     client: aws_sdk_sqs::Client,
     queue_url: String,
     executor: Arc<E>,
     message: aws_sdk_sqs::types::Message,
 ) -> anyhow::Result<()> {
-    let body = message
-        .body()
-        .ok_or_else(|| anyhow!("SQS message missing body"))?;
+    let receipt_handle = message.receipt_handle().map(str::to_owned);
 
-    let task_message = parse_task_message(body)?;
+    let task_message = match parse_sqs_message(&message) {
+        ParsedSqsMessage::Task(task_message) => task_message,
+        ParsedSqsMessage::Drop { reason } => {
+            tracing::warn!("dropping invalid SQS task message: {}", reason);
+            if let Some(receipt_handle) = receipt_handle.as_deref() {
+                delete_message(&client, &queue_url, receipt_handle).await?;
+            }
+            return Ok(());
+        }
+    };
 
     dispatch_task(executor.as_ref(), &task_message.payload)
         .await
         .context("task handler execution failed")?;
 
-    if let Some(receipt_handle) = message.receipt_handle() {
-        client
-            .delete_message()
-            .queue_url(queue_url)
-            .receipt_handle(receipt_handle)
-            .send()
-            .await
-            .context("failed to delete SQS message")?;
+    if let Some(receipt_handle) = receipt_handle.as_deref() {
+        delete_message(&client, &queue_url, receipt_handle).await?;
     }
 
     Ok(())
@@ -361,6 +417,55 @@ mod tests {
     fn test_parse_task_message_invalid_json() {
         let body = r#"{"task_id":"bad","payload":{"task_type":"unknown"}}"#;
         assert!(parse_task_message(body).is_err());
+    }
+
+    #[test]
+    fn test_parse_sqs_message_drops_missing_body() {
+        let message = aws_sdk_sqs::types::Message::builder()
+            .receipt_handle("receipt")
+            .build();
+
+        match parse_sqs_message(&message) {
+            ParsedSqsMessage::Drop { reason } => {
+                assert!(reason.contains("missing body"));
+            }
+            ParsedSqsMessage::Task(_) => panic!("expected drop for missing body"),
+        }
+    }
+
+    #[test]
+    fn test_parse_sqs_message_drops_invalid_json() {
+        let message = aws_sdk_sqs::types::Message::builder()
+            .body(r#"{"task_id":"bad","payload":{"task_type":"unknown"}}"#)
+            .receipt_handle("receipt")
+            .build();
+
+        match parse_sqs_message(&message) {
+            ParsedSqsMessage::Drop { reason } => {
+                assert!(reason.contains("failed to parse task message"));
+            }
+            ParsedSqsMessage::Task(_) => panic!("expected drop for invalid JSON"),
+        }
+    }
+
+    #[test]
+    fn test_parse_sqs_message_parses_valid_message() {
+        let message = aws_sdk_sqs::types::Message::builder()
+            .body(
+                r#"{
+                    "task_id":"daily_cleanup",
+                    "payload":{"task_type":"noop","payload":{"note":"ok"}}
+                }"#,
+            )
+            .receipt_handle("receipt")
+            .build();
+
+        match parse_sqs_message(&message) {
+            ParsedSqsMessage::Task(task_message) => {
+                assert_eq!(task_message.task_id.as_str(), "daily_cleanup");
+            }
+            ParsedSqsMessage::Drop { .. } => panic!("expected parsed task message"),
+        }
     }
 
     #[tokio::test]

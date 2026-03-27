@@ -16,8 +16,8 @@ struct DefaultTaskExecutor {
 
 #[async_trait]
 impl TaskExecutor for DefaultTaskExecutor {
-    async fn execute_noop(&self, payload: &NoopTaskPayload) -> anyhow::Result<()> {
-        tracing::info!("noop task received: note={:?}", payload.note);
+    async fn execute_noop(&self, _payload: &NoopTaskPayload) -> anyhow::Result<()> {
+        tracing::info!("noop task received");
         Ok(())
     }
 

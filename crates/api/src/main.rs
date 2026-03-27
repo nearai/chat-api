@@ -1,4 +1,3 @@
-use anyhow::Context;
 use api::middleware::RateLimitState;
 use api::{create_router_with_cors, ApiDoc, AppState};
 use config::LoggingConfig;
@@ -42,9 +41,15 @@ async fn main() -> anyhow::Result<()> {
     // Initialize tracing based on configuration
     init_tracing(&config.logging);
 
-    api::tasks::ensure_daily_cleanup_task(&config.tasks)
-        .await
-        .context("failed to ensure daily cleanup schedule")?;
+    if config.tasks.enabled {
+        if config.tasks.is_scheduler_configured() {
+            if let Err(err) = api::tasks::ensure_daily_cleanup_task(&config.tasks).await {
+                tracing::warn!("failed to ensure daily cleanup schedule: {}", err);
+            }
+        } else {
+            tracing::info!("tasks scheduler not configured; skipping daily cleanup schedule setup");
+        }
+    }
 
     tracing::info!("Starting API server...");
 
