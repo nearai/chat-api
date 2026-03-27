@@ -615,13 +615,18 @@ pub async fn create_api_key(
             expires_at,
         )
         .await
-        .map_err(|e| {
-            tracing::error!(
-                "Failed to create API key: instance_id={}, error={}",
-                instance_uuid,
-                e
-            );
-            ApiError::internal_server_error("Failed to create API key")
+        .map_err(|e| match e {
+            services::agent::ports::AgentApiKeyCreationError::InvalidSpendLimit => {
+                ApiError::bad_request(e.to_string())
+            }
+            services::agent::ports::AgentApiKeyCreationError::Internal(err) => {
+                tracing::error!(
+                    "Failed to create API key: instance_id={}, error={}",
+                    instance_uuid,
+                    err
+                );
+                ApiError::internal_server_error("Failed to create API key")
+            }
         })?;
 
     let response = CreateApiKeyResponse {

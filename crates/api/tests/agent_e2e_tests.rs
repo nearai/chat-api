@@ -45,7 +45,14 @@ async fn test_agent_complete_workflow() {
     // Subscription gating: set free plan with monthly_credits so users without subscription can use proxy
     set_subscription_plans(
         &server,
-        json!({ "free": { "providers": {}, "monthly_credits": { "max": 1_000_000 } } }),
+        json!({
+            "free": { "providers": {}, "monthly_credits": { "max": 1_000_000 } },
+            "basic": {
+                "providers": { "stripe": { "price_id": "price_test_basic" } },
+                "agent_instances": { "max": 10 },
+                "monthly_credits": { "max": 1_000_000 }
+            }
+        }),
     )
     .await;
 

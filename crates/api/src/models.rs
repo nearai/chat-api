@@ -748,7 +748,9 @@ pub struct SystemConfigsResponse {
     pub default_model: Option<String>,
     /// Rate limit configuration (always present, uses defaults if not set)
     pub rate_limit: RateLimitConfig,
-    /// Subscription plan configurations mapping plan names to provider-specific configs
+    /// Subscription plan configurations mapping plan names to provider-specific configs.
+    /// Note: model access for users without an active subscription falls back to
+    /// `subscription_plans["free"].allowed_models` when that plan key exists.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subscription_plans: Option<HashMap<String, SubscriptionPlanConfig>>,
     /// Maximum number of agent instances per manager (round-robin skips full managers)
@@ -796,7 +798,9 @@ pub struct UpsertSystemConfigsRequest {
     /// Rate limit configuration
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate_limit: Option<RateLimitConfig>,
-    /// Subscription plan configurations (plan name -> config with providers, agent_instances, monthly_credits)
+    /// Subscription plan configurations (plan name -> config with providers, agent_instances, monthly_credits).
+    /// Note: to restrict models for users without an active subscription, configure
+    /// `allowed_models` under the `"free"` plan key.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subscription_plans: Option<HashMap<String, SubscriptionPlanConfig>>,
     /// Maximum number of agent instances per manager (round-robin skips full managers)
@@ -1064,7 +1068,9 @@ fn status_from_agent_api(agent_api_status: &str) -> InstanceStatus {
 pub struct CreateApiKeyRequest {
     /// Human-readable key name
     pub name: String,
-    /// Optional spend limit in nano-dollars ($1.00 = 1,000,000,000 nano-dollars)
+    /// Optional lifetime spend limit in nano-dollars ($1.00 = 1,000,000,000 nano-dollars).
+    /// Must be non-negative when provided. Use `null` for no limit.
+    /// Once the recorded lifetime spend for this key reaches the limit, future requests are rejected.
     pub spend_limit: Option<i64>,
     /// Optional expiration timestamp
     pub expires_at: Option<String>,

@@ -66,16 +66,11 @@ impl ModelsRepository for PostgresModelRepository {
 
         let client = self.pool.get().await?;
 
-        // Get total count
-        let count_row = client
-            .query_one("SELECT COUNT(*) as count FROM models", &[])
-            .await?;
-        let total: i64 = count_row.get("count");
-
-        // Get paginated models
+        // Use a window function to get total count in the same query,
+        // avoiding a race between a separate COUNT(*) and SELECT in concurrent tests.
         let rows = client
             .query(
-                "SELECT id, model_id, settings, created_at, updated_at
+                "SELECT id, model_id, settings, created_at, updated_at, COUNT(*) OVER() as total_count
                  FROM models
                  ORDER BY model_id ASC
                  LIMIT $1 OFFSET $2",
@@ -84,7 +79,11 @@ impl ModelsRepository for PostgresModelRepository {
             .await?;
 
         let mut models = Vec::new();
-        for row in rows {
+        let mut total = rows
+            .first()
+            .map(|row| row.get("total_count"))
+            .unwrap_or(0_i64);
+        for row in &rows {
             let settings_json: serde_json::Value = row.get("settings");
 
             let default_settings = ModelSettings::default();
@@ -98,6 +97,15 @@ impl ModelsRepository for PostgresModelRepository {
                 created_at: row.get("created_at"),
                 updated_at: row.get("updated_at"),
             });
+        }
+
+        // When offset is beyond the last row, the window function returns no rows and total stays 0.
+        // Fall back to a separate count query to get the correct total.
+        if rows.is_empty() {
+            let count_row = client
+                .query_one("SELECT COUNT(*) as total_count FROM models", &[])
+                .await?;
+            total = count_row.get("total_count");
         }
 
         Ok((models, total))

@@ -1,7 +1,7 @@
 mod common;
 
 use api::routes::api::SUBSCRIPTION_REQUIRED_ERROR_MESSAGE;
-use chrono::Duration;
+use chrono::{Duration, TimeZone, Utc};
 use common::{
     cleanup_user_agent_instances, cleanup_user_subscriptions, clear_subscription_plans,
     create_test_server, create_test_server_and_db, insert_test_agent_instances,
@@ -10,6 +10,7 @@ use common::{
 };
 use serde_json::json;
 use serial_test::serial;
+use services::subscription::ports::SubscriptionRepository;
 use services::system_configs::ports::RateLimitConfig;
 use services::user::ports::UserRepository;
 use services::user_usage::{UserUsageRepository, METRIC_KEY_LLM_TOKENS};
@@ -1383,7 +1384,8 @@ async fn test_proxy_allows_when_subscription_not_configured() {
     let user_email = "test_proxy_no_plans@example.com";
     let user_token = mock_login(&server, user_email).await;
 
-    // No plans configured - gating is skipped, should not get 403
+    // No plans configured - subscription gating is skipped, so this should not fail with the
+    // subscription-required 403. Omit `model` to avoid unrelated model gating affecting the test.
     let response = server
         .post("/v1/chat/completions")
         .add_header(
@@ -1391,7 +1393,6 @@ async fn test_proxy_allows_when_subscription_not_configured() {
             http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
         )
         .json(&json!({
-            "model": "gpt-4o",
             "messages": [{"role": "user", "content": "Hello"}]
         }))
         .await;
@@ -1407,7 +1408,8 @@ async fn test_proxy_allows_when_subscription_not_configured() {
         Some(SUBSCRIPTION_REQUIRED_ERROR_MESSAGE)
     );
 
-    // Also verify /v1/responses allows when subscription not configured
+    // Also verify /v1/responses allows when subscription not configured.
+    // Omit `model` to avoid unrelated model gating affecting the test.
     let response = server
         .post("/v1/responses")
         .add_header(
@@ -1415,7 +1417,6 @@ async fn test_proxy_allows_when_subscription_not_configured() {
             http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
         )
         .json(&json!({
-            "model": "gpt-4o",
             "input": "Hello"
         }))
         .await;
@@ -2347,6 +2348,287 @@ async fn test_subscription_gating_full_flow() {
         error_msg.contains("subscription") || error_msg.contains("limit"),
         "Error should mention subscription or limit requirement, got: {}",
         error_msg
+    );
+}
+
+// --- Free-plan anchor: `last_cancelled_subscription_period_end` (Postgres + repository) ---
+//
+// Stripe subscription webhooks re-fetch the subscription from Stripe; these tests model the
+// resulting database rows (and admin tooling) without calling Stripe.
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn last_cancelled_period_uses_most_recent_canceled_row() {
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    let user_email = "test_free_anchor_max_canceled@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+    let _ = mock_login(&server, user_email).await;
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .unwrap()
+        .expect("user should exist");
+
+    let client = db.pool().get().await.unwrap();
+    let older_row_period_end = Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap();
+    let newer_row_period_end = Utc.with_ymd_and_hms(2026, 3, 19, 8, 0, 0).unwrap();
+    let older_updated_at = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+    let newer_updated_at = Utc.with_ymd_and_hms(2026, 1, 2, 0, 0, 0).unwrap();
+
+    client
+        .execute(
+            "INSERT INTO subscriptions (
+                subscription_id, user_id, provider, customer_id, price_id, status,
+                current_period_end, cancel_at_period_end, created_at, updated_at
+            ) VALUES ($1, $2, 'stripe', 'cus_anchor', 'price_test_basic', 'canceled', $3, false, $4, $4)",
+            &[&"sub_free_anchor_old", &user.id, &older_row_period_end, &older_updated_at],
+        )
+        .await
+        .unwrap();
+    client
+        .execute(
+            "INSERT INTO subscriptions (
+                subscription_id, user_id, provider, customer_id, price_id, status,
+                current_period_end, cancel_at_period_end, created_at, updated_at
+            ) VALUES ($1, $2, 'stripe', 'cus_anchor', 'price_test_basic', 'canceled', $3, false, $4, $4)",
+            &[&"sub_free_anchor_new", &user.id, &newer_row_period_end, &newer_updated_at],
+        )
+        .await
+        .unwrap();
+
+    let got = db
+        .subscription_repository()
+        .last_cancelled_subscription_period_end_for_user(user.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        got,
+        Some(newer_row_period_end),
+        "latest canceled row (by updated_at) should win, not greatest period_end"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn last_cancelled_period_ignores_non_canceled_statuses() {
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    let user_email = "test_free_anchor_ignore_non_canceled@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+    let _ = mock_login(&server, user_email).await;
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .unwrap()
+        .expect("user should exist");
+
+    let client = db.pool().get().await.unwrap();
+    let canceled_end = Utc.with_ymd_and_hms(2026, 3, 19, 0, 0, 0).unwrap();
+    let active_end = Utc.with_ymd_and_hms(2027, 12, 31, 23, 59, 59).unwrap();
+    let incomplete_end = Utc.with_ymd_and_hms(2028, 1, 1, 0, 0, 0).unwrap();
+    let other_provider_canceled_end = Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap();
+
+    client
+        .execute(
+            "INSERT INTO subscriptions (
+                subscription_id, user_id, provider, customer_id, price_id, status,
+                current_period_end, cancel_at_period_end
+            ) VALUES ($1, $2, 'stripe', 'cus_x', 'price_test_basic', 'canceled', $3, false)",
+            &[&"sub_only_canceled", &user.id, &canceled_end],
+        )
+        .await
+        .unwrap();
+    client
+        .execute(
+            "INSERT INTO subscriptions (
+                subscription_id, user_id, provider, customer_id, price_id, status,
+                current_period_end, cancel_at_period_end
+            ) VALUES ($1, $2, 'stripe', 'cus_x', 'price_test_basic', 'active', $3, false)",
+            &[&"sub_active_later", &user.id, &active_end],
+        )
+        .await
+        .unwrap();
+    client
+        .execute(
+            "INSERT INTO subscriptions (
+                subscription_id, user_id, provider, customer_id, price_id, status,
+                current_period_end, cancel_at_period_end
+            ) VALUES ($1, $2, 'stripe', 'cus_x', 'price_test_basic', 'incomplete', $3, false)",
+            &[&"sub_incomplete_later", &user.id, &incomplete_end],
+        )
+        .await
+        .unwrap();
+    client
+        .execute(
+            "INSERT INTO subscriptions (
+                subscription_id, user_id, provider, customer_id, price_id, status,
+                current_period_end, cancel_at_period_end
+            ) VALUES ($1, $2, 'other', 'cus_x', 'price_test_basic', 'canceled', $3, false)",
+            &[
+                &"sub_other_provider_canceled",
+                &user.id,
+                &other_provider_canceled_end,
+            ],
+        )
+        .await
+        .unwrap();
+
+    let got = db
+        .subscription_repository()
+        .last_cancelled_subscription_period_end_for_user(user.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        got,
+        Some(other_provider_canceled_end),
+        "latest canceled row should win regardless of provider"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn last_cancelled_period_none_when_no_canceled_rows() {
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    let user_email = "test_free_anchor_no_canceled@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+    insert_test_subscription(&server, &db, user_email, false).await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .unwrap()
+        .expect("user should exist");
+
+    let got = db
+        .subscription_repository()
+        .last_cancelled_subscription_period_end_for_user(user.id)
+        .await
+        .unwrap();
+    assert_eq!(got, None);
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn active_to_canceled_transition_sets_free_plan_anchor() {
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    let user_email = "test_free_anchor_active_to_canceled@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } } }
+        }),
+    )
+    .await;
+
+    insert_test_subscription(&server, &db, user_email, false).await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .unwrap()
+        .expect("user should exist");
+
+    let subscription_id: String = {
+        let client = db.pool().get().await.unwrap();
+        let row = client
+            .query_one(
+                "SELECT subscription_id, current_period_end FROM subscriptions WHERE user_id = $1",
+                &[&user.id],
+            )
+            .await
+            .unwrap();
+        let sid: String = row.get(0);
+        let new_end = Utc.with_ymd_and_hms(2026, 3, 22, 12, 0, 0).unwrap();
+        client
+            .execute(
+                "UPDATE subscriptions SET current_period_end = $2 WHERE subscription_id = $1",
+                &[&sid, &new_end],
+            )
+            .await
+            .unwrap();
+        sid
+    };
+
+    assert_eq!(
+        db.subscription_repository()
+            .last_cancelled_subscription_period_end_for_user(user.id)
+            .await
+            .unwrap(),
+        None,
+        "no canceled row yet"
+    );
+
+    let client = db.pool().get().await.unwrap();
+    client
+        .execute(
+            "UPDATE subscriptions SET status = 'canceled' WHERE subscription_id = $1",
+            &[&subscription_id],
+        )
+        .await
+        .unwrap();
+
+    let expected_end = Utc.with_ymd_and_hms(2026, 3, 22, 12, 0, 0).unwrap();
+    let got = db
+        .subscription_repository()
+        .last_cancelled_subscription_period_end_for_user(user.id)
+        .await
+        .unwrap();
+    assert_eq!(got, Some(expected_end));
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn admin_cancel_deletes_rows_no_cancel_anchor() {
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": { "providers": { "stripe": { "price_id": "price_test_basic" } } }
+        }),
+    )
+    .await;
+
+    let user_email = "test_free_anchor_admin_delete@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+    insert_test_subscription(&server, &db, user_email, false).await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .unwrap()
+        .expect("user should exist");
+
+    let admin_token = mock_login(&server, "test_free_anchor_admin@admin.org").await;
+
+    let response = server
+        .delete(&format!("/v1/admin/users/{}/subscription", user.id))
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 200);
+
+    let got = db
+        .subscription_repository()
+        .last_cancelled_subscription_period_end_for_user(user.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        got, None,
+        "admin cancel removes subscription rows, so there is no canceled stripe row to anchor on"
     );
 }
 
