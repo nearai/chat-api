@@ -1,7 +1,9 @@
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
-use aws_sdk_scheduler::types::{
-    ActionAfterCompletion, FlexibleTimeWindow, FlexibleTimeWindowMode, Target,
+use aws_sdk_scheduler::{
+    error::SdkError,
+    operation::create_schedule::CreateScheduleError,
+    types::{ActionAfterCompletion, FlexibleTimeWindow, FlexibleTimeWindowMode, Target},
 };
 use services::jobs::{
     daily_cleanup_canceled_instances_request, dispatch_task, ScheduleSpec, ScheduledTaskRequest,
@@ -14,6 +16,15 @@ use tokio::{
 };
 
 const SQS_RECEIVE_RETRY_DELAY: Duration = Duration::from_secs(5);
+
+fn is_conflict_error<E>(err: &SdkError<E>) -> bool
+where
+    E: std::error::Error + aws_sdk_scheduler::error::ProvideErrorMetadata,
+{
+    err.as_service_error()
+        .and_then(|service_err| service_err.code())
+        == Some("ConflictException")
+}
 
 #[derive(Clone)]
 pub struct AwsTaskScheduler {
@@ -82,23 +93,19 @@ impl AwsTaskScheduler {
                 );
                 Ok(())
             }
-            Err(err) => {
-                let err_text = err.to_string();
-                if err_text.contains("ConflictException") || err_text.contains("already exists") {
-                    tracing::info!(
-                        "schedule already exists, skipping create task_id={} group={}",
-                        request.task_id,
-                        self.scheduler_group
-                    );
-                    Ok(())
-                } else {
-                    Err(anyhow!(
-                        "failed to create schedule for task_id={}: {}",
-                        request.task_id,
-                        err
-                    ))
-                }
+            Err(err) if is_conflict_error::<CreateScheduleError>(&err) => {
+                tracing::info!(
+                    "schedule already exists, skipping create task_id={} group={}",
+                    request.task_id,
+                    self.scheduler_group
+                );
+                Ok(())
             }
+            Err(err) => Err(anyhow!(
+                "failed to create schedule for task_id={}: {}",
+                request.task_id,
+                err
+            )),
         }
     }
 }
@@ -130,38 +137,34 @@ impl TaskScheduler for AwsTaskScheduler {
 
         match create.send().await {
             Ok(_) => Ok(()),
-            Err(err) => {
-                let err_text = err.to_string();
-                if err_text.contains("ConflictException") || err_text.contains("already exists") {
-                    let mut update = self
-                        .client
-                        .update_schedule()
-                        .name(request.task_id.as_str())
-                        .group_name(&self.scheduler_group)
-                        .schedule_expression(&expression)
-                        .flexible_time_window(flex_window)
-                        .target(target);
+            Err(err) if is_conflict_error::<CreateScheduleError>(&err) => {
+                let mut update = self
+                    .client
+                    .update_schedule()
+                    .name(request.task_id.as_str())
+                    .group_name(&self.scheduler_group)
+                    .schedule_expression(&expression)
+                    .flexible_time_window(flex_window)
+                    .target(target);
 
-                    if matches!(request.schedule, ScheduleSpec::At(_)) {
-                        update = update.action_after_completion(ActionAfterCompletion::Delete);
-                    }
-
-                    update.send().await.map_err(|e| {
-                        anyhow!(
-                            "failed to update existing schedule for task_id={}: {:?}",
-                            request.task_id,
-                            e
-                        )
-                    })?;
-                    Ok(())
-                } else {
-                    Err(anyhow!(
-                        "failed to create schedule for task_id={}: {:?}",
-                        request.task_id,
-                        err
-                    ))
+                if matches!(request.schedule, ScheduleSpec::At(_)) {
+                    update = update.action_after_completion(ActionAfterCompletion::Delete);
                 }
+
+                update.send().await.map_err(|e| {
+                    anyhow!(
+                        "failed to update existing schedule for task_id={}: {:?}",
+                        request.task_id,
+                        e
+                    )
+                })?;
+                Ok(())
             }
+            Err(err) => Err(anyhow!(
+                "failed to create schedule for task_id={}: {:?}",
+                request.task_id,
+                err
+            )),
         }
     }
 
