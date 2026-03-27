@@ -716,12 +716,19 @@ fn sub_one_month_same_day(dt: chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
     chrono::DateTime::from_naive_utc_and_offset(new_d.and_time(dt.time()), Utc)
 }
 
-/// Add one calendar month, mirroring [`sub_one_month_same_day`] (end-of-month rules).
-fn add_one_month_same_day(dt: chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
+/// Add `months_to_add` whole calendar months to `anchor` in **one step** (same rules as
+/// `sub_one_month_same_day` for day overflow). This matches Stripe-style billing: e.g. anchor Jan 31
+/// → +1 month Feb 28/29, → +2 months **Mar 31** (not Mar 28 from chaining one-month steps).
+fn add_months_same_day_from_anchor(
+    anchor: chrono::DateTime<Utc>,
+    months_to_add: u32,
+) -> chrono::DateTime<Utc> {
     use chrono::NaiveDate;
-    let d = dt.date_naive();
+    let d = anchor.date_naive();
     let (y, m, day) = (d.year(), d.month(), d.day());
-    let (new_y, new_m) = if m == 12 { (y + 1, 1) } else { (y, m + 1) };
+    let total = (i64::from(y)) * 12 + (i64::from(m) - 1) + i64::from(months_to_add);
+    let new_y = (total / 12) as i32;
+    let new_m = ((total % 12) + 1) as u32;
     let new_d = NaiveDate::from_ymd_opt(new_y, new_m, day).unwrap_or_else(|| {
         let (next_y, next_m) = if new_m == 12 {
             (new_y + 1, 1)
@@ -732,22 +739,36 @@ fn add_one_month_same_day(dt: chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
             .and_then(|first_of_next| first_of_next.pred_opt())
             .expect("last day of target month after month arithmetic")
     });
-    chrono::DateTime::from_naive_utc_and_offset(new_d.and_time(dt.time()), Utc)
+    chrono::DateTime::from_naive_utc_and_offset(new_d.and_time(anchor.time()), Utc)
 }
 
 /// Free-plan month starting when the paid period ended (`cancellation_period_end`), same length as Stripe monthly cycles.
-/// Steps month-by-month from the anchor, which is cheap for realistic spans (tens of months, even hundreds).
+/// Period boundaries are **indexed from the anchor** (`anchor + k months`), not by chaining one-month hops (which
+/// drifts for end-of-month anchors).
 fn free_plan_monthly_period_from_cancellation_anchor(
     cancellation_period_end: chrono::DateTime<Utc>,
     now: chrono::DateTime<Utc>,
 ) -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
     let anchor = cancellation_period_end;
-    let mut period_start = anchor;
-    let mut period_end = add_one_month_same_day(anchor);
-    while now >= period_end {
-        period_start = period_end;
-        period_end = add_one_month_same_day(period_start);
+    // Fast estimate by calendar month index, then adjust to exact boundary.
+    let month_delta = (i64::from(now.year()) - i64::from(anchor.year())) * 12
+        + (i64::from(now.month()) - i64::from(anchor.month()));
+    let mut k: i64 = month_delta.max(0);
+
+    let mut period_start = add_months_same_day_from_anchor(anchor, k as u32);
+    while k > 0 && now < period_start {
+        k -= 1;
+        period_start = add_months_same_day_from_anchor(anchor, k as u32);
     }
+
+    let mut period_end = add_months_same_day_from_anchor(anchor, (k + 1) as u32);
+    while now >= period_end {
+        k += 1;
+        period_start = period_end;
+        period_end = add_months_same_day_from_anchor(anchor, (k + 1) as u32);
+        debug_assert!(k < 500_000, "free plan month index unrealistically large");
+    }
+
     (period_start, period_end)
 }
 
@@ -2760,23 +2781,26 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 3, 25, 12, 0, 0).unwrap();
         let (start, end) = free_plan_monthly_period_from_cancellation_anchor(anchor, now);
         assert_eq!(start, anchor);
-        assert_eq!(end, add_one_month_same_day(anchor));
+        assert_eq!(end, add_months_same_day_from_anchor(anchor, 1));
     }
 
     #[test]
     fn test_free_plan_advances_monthly_after_anchor() {
         let anchor = Utc.with_ymd_and_hms(2026, 3, 19, 0, 0, 0).unwrap();
-        let first_end = add_one_month_same_day(anchor);
+        let first_end = add_months_same_day_from_anchor(anchor, 1);
         let now = first_end + Duration::hours(2);
         let (start, end) = free_plan_monthly_period_from_cancellation_anchor(anchor, now);
         assert_eq!(start, first_end);
-        assert_eq!(end, add_one_month_same_day(first_end));
+        assert_eq!(end, add_months_same_day_from_anchor(anchor, 2));
     }
 
     #[test]
     fn test_add_then_sub_one_month_mid_month_roundtrip() {
         let t = Utc.with_ymd_and_hms(2026, 3, 15, 14, 30, 0).unwrap();
-        assert_eq!(sub_one_month_same_day(add_one_month_same_day(t)), t);
+        assert_eq!(
+            sub_one_month_same_day(add_months_same_day_from_anchor(t, 1)),
+            t
+        );
     }
 
     #[test]
@@ -2796,45 +2820,60 @@ mod tests {
         assert_eq!((s, e), (cs, ce));
     }
 
+    /// Test oracle: same as production (`add_months_same_day_from_anchor` indexed from anchor).
     fn add_months_same_day_iter(
         anchor: chrono::DateTime<Utc>,
         months: u32,
     ) -> chrono::DateTime<Utc> {
-        let mut t = anchor;
-        for _ in 0..months {
-            t = add_one_month_same_day(t);
-        }
-        t
+        add_months_same_day_from_anchor(anchor, months)
     }
 
-    /// Alternate construction: find `k` with `B(k) <= now < B(k+1)` using `add_months_same_day_iter`.
+    /// Brute-force construction of the current period by scanning month index `k`.
     fn free_plan_period_via_month_index_from_anchor(
         anchor: chrono::DateTime<Utc>,
         now: chrono::DateTime<Utc>,
     ) -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
-        let first_end = add_one_month_same_day(anchor);
+        let first_end = add_months_same_day_from_anchor(anchor, 1);
         if now < first_end {
             return (anchor, first_end);
         }
         let mut k = 1u32;
-        while add_months_same_day_iter(anchor, k + 1) <= now {
+        while add_months_same_day_from_anchor(anchor, k + 1) <= now {
             k += 1;
             assert!(k < 50_000, "unbounded month walk in test oracle");
         }
-        let period_start = add_months_same_day_iter(anchor, k);
-        let period_end = add_one_month_same_day(period_start);
+        let period_start = add_months_same_day_from_anchor(anchor, k);
+        let period_end = add_months_same_day_from_anchor(anchor, k + 1);
         (period_start, period_end)
     }
 
     #[test]
-    fn test_add_months_same_day_iter_matches_stepping() {
-        let anchor = Utc.with_ymd_and_hms(2021, 1, 31, 15, 45, 30).unwrap();
+    fn test_add_months_from_anchor_matches_stripe_end_of_month_pattern() {
+        let anchor = Utc.with_ymd_and_hms(2026, 1, 31, 12, 0, 0).unwrap();
+        assert_eq!(
+            add_months_same_day_from_anchor(anchor, 1),
+            Utc.with_ymd_and_hms(2026, 2, 28, 12, 0, 0).unwrap()
+        );
+        assert_eq!(
+            add_months_same_day_from_anchor(anchor, 2),
+            Utc.with_ymd_and_hms(2026, 3, 31, 12, 0, 0).unwrap()
+        );
+        assert_ne!(
+            Utc.with_ymd_and_hms(2026, 3, 28, 12, 0, 0).unwrap(),
+            add_months_same_day_from_anchor(anchor, 2),
+            "chained +1 month drifts to Mar 28; anchor indexing keeps Mar 31"
+        );
+    }
+
+    #[test]
+    fn test_add_months_same_day_iter_mid_month_matches_chained_one_month() {
+        let anchor = Utc.with_ymd_and_hms(2021, 3, 15, 9, 30, 0).unwrap();
         for k in [0u32, 1, 2, 12, 24, 48, 120] {
-            let mut t = anchor;
-            for _ in 0..k {
-                t = add_one_month_same_day(t);
-            }
-            assert_eq!(add_months_same_day_iter(anchor, k), t, "k={k}");
+            assert_eq!(
+                add_months_same_day_iter(anchor, k),
+                add_months_same_day_from_anchor(anchor, k),
+                "k={k}"
+            );
         }
     }
 

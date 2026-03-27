@@ -2375,10 +2375,9 @@ async fn integration_last_cancelled_period_is_max_of_canceled_rows() {
     let earlier = Utc.with_ymd_and_hms(2026, 3, 19, 8, 0, 0).unwrap();
     let later = Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap();
 
-    for (subscription_id, period_end) in [
-        ("sub_free_anchor_a", earlier),
-        ("sub_free_anchor_b", later),
-    ] {
+    for (subscription_id, period_end) in
+        [("sub_free_anchor_a", earlier), ("sub_free_anchor_b", later)]
+    {
         client
             .execute(
                 "INSERT INTO subscriptions (
