@@ -1,9 +1,9 @@
 use anyhow::anyhow;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct TaskId(String);
 
@@ -26,6 +26,16 @@ impl TaskId {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for TaskId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        TaskId::new(value).map_err(D::Error::custom)
     }
 }
 
@@ -168,6 +178,15 @@ mod tests {
         assert!(TaskId::new("with space".to_string()).is_err());
         assert!(TaskId::new("slash/not-allowed".to_string()).is_err());
         assert!(TaskId::new("a".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn test_task_id_deserialize_validates_input() {
+        let valid: TaskId = serde_json::from_str(r#""cleanup.canceled_15d-1""#).unwrap();
+        assert_eq!(valid.as_str(), "cleanup.canceled_15d-1");
+
+        let err = serde_json::from_str::<TaskId>(r#""with space""#).unwrap_err();
+        assert!(err.to_string().contains("invalid task id"));
     }
 
     #[test]
