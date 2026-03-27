@@ -2358,7 +2358,7 @@ async fn test_subscription_gating_full_flow() {
 
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn integration_last_cancelled_period_uses_most_recent_canceled_row() {
+async fn last_cancelled_period_uses_most_recent_canceled_row() {
     let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
 
     let user_email = "test_free_anchor_max_canceled@example.com";
@@ -2412,7 +2412,7 @@ async fn integration_last_cancelled_period_uses_most_recent_canceled_row() {
 
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn integration_last_cancelled_period_ignores_non_canceled_statuses() {
+async fn last_cancelled_period_ignores_non_canceled_statuses() {
     let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
 
     let user_email = "test_free_anchor_ignore_non_canceled@example.com";
@@ -2490,7 +2490,7 @@ async fn integration_last_cancelled_period_ignores_non_canceled_statuses() {
 
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn integration_last_cancelled_period_none_when_no_canceled_rows() {
+async fn last_cancelled_period_none_when_no_canceled_rows() {
     let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
 
     let user_email = "test_free_anchor_no_canceled@example.com";
@@ -2514,7 +2514,7 @@ async fn integration_last_cancelled_period_none_when_no_canceled_rows() {
 
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn integration_active_to_canceled_transition_sets_free_plan_anchor() {
+async fn active_to_canceled_transition_sets_free_plan_anchor() {
     let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
 
     let user_email = "test_free_anchor_active_to_canceled@example.com";
@@ -2587,7 +2587,7 @@ async fn integration_active_to_canceled_transition_sets_free_plan_anchor() {
 
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn integration_admin_cancel_deletes_rows_no_cancel_anchor() {
+async fn admin_cancel_deletes_rows_no_cancel_anchor() {
     let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
 
     set_subscription_plans(
