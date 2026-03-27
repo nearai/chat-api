@@ -551,23 +551,21 @@ impl AgentServiceImpl {
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
 
-        // Capture response body for logging
+        // Capture response body for debug logging only (do not include in errors per CLAUDE.md)
         let response_text = response
             .text()
             .await
             .unwrap_or_else(|_| "(unable to read response body)".to_string());
 
-        tracing::info!(
-            "compose-api /auth/proxy-session response: status={}",
-            status
-        );
-
         if !status.is_success() {
             tracing::warn!("compose-api /auth/proxy-session failed: status={}", status);
-            return Err(anyhow!(
-                "compose-api /auth/proxy-session error: {} - {}",
-                status,
+            tracing::debug!(
+                "compose-api /auth/proxy-session response body (debug only): {}",
                 response_text
+            );
+            return Err(anyhow!(
+                "compose-api /auth/proxy-session error: status {}",
+                status
             ));
         }
 
