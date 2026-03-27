@@ -447,7 +447,8 @@ pub struct SubscriptionPlan {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub monthly_credits: Option<PlanLimitConfig>,
     /// List of model IDs allowed for this plan (e.g. ["gpt-3.5-turbo", "gpt-4o"])
-    /// None = allow all models (default); Some(vec) = only allow models in the list
+    /// None = allow all models (default); Some(vec) = only allow models in the list.
+    /// An empty list denies all models.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allowed_models: Option<Vec<String>>,
 }

@@ -6,7 +6,7 @@ use super::ports::{
 };
 use crate::agent::ports::AgentRepository;
 use crate::agent::ports::AgentService;
-use crate::system_configs::ports::{SubscriptionPlanConfig, SystemConfigsService};
+use crate::system_configs::ports::{SubscriptionPlanConfig, SystemConfigs, SystemConfigsService};
 use crate::user::ports::UserRepository;
 use crate::user_usage::ports::UserUsageRepository;
 use crate::UserId;
@@ -48,7 +48,14 @@ struct CachedCreditLimit {
     cached_at: Instant,
 }
 
+/// Cached system configs snapshot for model access checks.
+struct CachedSystemConfigs {
+    configs: Option<SystemConfigs>,
+    cached_at: Instant,
+}
+
 const TTL_CACHE_SECS: u64 = 600; // 10 minutes
+const SYSTEM_CONFIGS_TTL_CACHE_SECS: u64 = 60; // 1 minute
 /// Default monthly credits when plan has no monthly_credits config. 1 USD in nano-dollars ($1 = 1_000_000_000).
 const DEFAULT_MONTHLY_CREDITS_NANO_USD: u64 = 1_000_000_000;
 /// When falling back from monthly_tokens: 1.5 USD per M tokens. M = 1 million tokens.
@@ -72,6 +79,7 @@ pub struct SubscriptionServiceImpl {
     stripe_secret_key: String,
     stripe_webhook_secret: String,
     credit_limit_cache: Arc<RwLock<HashMap<UserId, CachedCreditLimit>>>,
+    system_configs_cache: Arc<RwLock<Option<CachedSystemConfigs>>>,
 }
 
 impl SubscriptionServiceImpl {
@@ -100,6 +108,7 @@ impl SubscriptionServiceImpl {
             stripe_secret_key: config.stripe_secret_key,
             stripe_webhook_secret: config.stripe_webhook_secret,
             credit_limit_cache: Arc::new(RwLock::new(HashMap::new())),
+            system_configs_cache: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -108,6 +117,27 @@ impl SubscriptionServiceImpl {
         let mut guard = self.credit_limit_cache.write().await;
         guard.remove(&user_id);
         tracing::debug!("Invalidated credit limit cache for user_id={}", user_id);
+    }
+
+    async fn get_system_configs_cached(&self) -> Result<Option<SystemConfigs>, SubscriptionError> {
+        if let Some(cached) = self.system_configs_cache.read().await.as_ref() {
+            if cached.cached_at.elapsed().as_secs() < SYSTEM_CONFIGS_TTL_CACHE_SECS {
+                return Ok(cached.configs.clone());
+            }
+        }
+
+        let configs = self
+            .system_configs_service
+            .get_configs()
+            .await
+            .map_err(|e| SubscriptionError::InternalError(e.to_string()))?;
+
+        *self.system_configs_cache.write().await = Some(CachedSystemConfigs {
+            configs: configs.clone(),
+            cached_at: Instant::now(),
+        });
+
+        Ok(configs)
     }
 
     /// Convert a whole-number credit count into nano-USD (1 credit == $1 == 1_000_000_000 nano-USD).
@@ -358,11 +388,7 @@ impl SubscriptionServiceImpl {
     async fn get_subscription_plans(
         &self,
     ) -> Result<HashMap<String, SubscriptionPlanConfig>, SubscriptionError> {
-        let configs = self
-            .system_configs_service
-            .get_configs()
-            .await
-            .map_err(|e| SubscriptionError::InternalError(e.to_string()))?;
+        let configs = self.get_system_configs_cached().await?;
         Ok(configs
             .and_then(|c| c.subscription_plans)
             .unwrap_or_default())
@@ -2229,11 +2255,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
         model_id: &str,
     ) -> Result<(), SubscriptionError> {
         // Get system configs
-        let configs = self
-            .system_configs_service
-            .get_configs()
-            .await
-            .map_err(|e| SubscriptionError::InternalError(e.to_string()))?;
+        let configs = self.get_system_configs_cached().await?;
 
         // Extract subscription plans and default allowed models
         let (subscription_plans, default_allowed_models) = match configs {
@@ -2296,7 +2318,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 Ok(())
             }
             Some(allowed_list) => {
-                if allowed_list.contains(&model_id.to_string()) {
+                if allowed_list.iter().any(|m| m == model_id) {
                     // Model is in the allowlist
                     tracing::debug!(
                         "Model access allowed: user_id={}, model_id={}",
