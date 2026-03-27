@@ -952,7 +952,11 @@ async fn test_non_tee_infra_toggle_multiple_times() {
 
     // Test toggling between true and false multiple times
     for expected_value in [true, false, true, false] {
-        let update_body = json!({ "non_tee_infra": expected_value });
+        let update_body = json!({
+            "agent_hosting": {
+                "new_agent_with_non_tee_infra": expected_value
+            }
+        });
         let response = server
             .patch("/v1/admin/configs")
             .add_header(
@@ -972,7 +976,7 @@ async fn test_non_tee_infra_toggle_multiple_times() {
             body.get("agent_hosting")
                 .and_then(|cfg| cfg.get("new_agent_with_non_tee_infra")),
             Some(&serde_json::json!(expected_value)),
-            "non_tee_infra should toggle correctly"
+            "new_agent_with_non_tee_infra should toggle correctly"
         );
     }
 }

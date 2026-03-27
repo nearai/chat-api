@@ -37,8 +37,8 @@ fn get_image_for_service_type(service_type: &str) -> &'static str {
 }
 
 /// Normalize service type for compose-api calls.
-/// TEE compose-api accepts only `openclaw` or `ironclaw`.
-/// Non-TEE compose-api expects `-dind` suffix: `ironclaw-dind`, `openclaw-dind`.
+/// For non-TEE deployments, append `-dind` suffix for compose-api.
+/// For TEE deployments, use service type as-is.
 fn normalize_service_type_for_api(service_type: &str, non_tee: bool) -> String {
     if non_tee {
         // Non-TEE compose-api: append -dind suffix
