@@ -2219,43 +2219,6 @@ impl AgentService for AgentServiceImpl {
         Ok(())
     }
 
-    async fn validate_and_use_api_key(&self, api_key: &str) -> anyhow::Result<AgentApiKey> {
-        // Validate format
-        if !Self::validate_api_key_format(api_key) {
-            tracing::warn!("Invalid API key format");
-            return Err(anyhow!("Invalid API key format"));
-        }
-
-        // Hash the key
-        let key_hash = Self::hash_api_key(api_key);
-
-        // Look up by hash
-        let api_key_info = self
-            .repository
-            .get_api_key_by_hash(&key_hash)
-            .await?
-            .ok_or_else(|| {
-                tracing::warn!("API key not found or invalid");
-                anyhow!("Invalid API key")
-            })?;
-
-        self.ensure_api_key_can_be_used(&api_key_info)
-            .await
-            .map_err(anyhow::Error::new)?;
-
-        // Update last used
-        self.mark_api_key_used(api_key_info.id)
-            .await
-            .map_err(anyhow::Error::new)?;
-
-        tracing::debug!(
-            "API key validated successfully: api_key_id={}",
-            api_key_info.id
-        );
-
-        Ok(api_key_info)
-    }
-
     async fn authenticate_api_key(
         &self,
         api_key: &str,

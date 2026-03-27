@@ -472,8 +472,6 @@ pub trait AgentService: Send + Sync {
         api_key: &str,
     ) -> Result<(AgentInstance, AgentApiKey), AgentApiKeyAuthError>;
 
-    async fn validate_and_use_api_key(&self, api_key: &str) -> anyhow::Result<AgentApiKey>;
-
     // Usage tracking and balance
     async fn get_instance_usage(
         &self,
