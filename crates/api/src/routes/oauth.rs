@@ -287,17 +287,16 @@ pub async fn oauth_callback(
     tracing::debug!("Session token generated, length: {}", token.len());
 
     // For non-TEE mode: set up gateway session (authenticate with compose-api)
-    if let Err(e) = app_state
+    let mut headers = HeaderMap::new();
+    if let Ok(Some(set_cookie)) = app_state
         .agent_service
         .setup_gateway_session_for_user(session.user_id)
         .await
     {
-        tracing::warn!(
-            "Failed to set up gateway session for user: user_id={}, error={}",
-            session.user_id,
-            e
-        );
-        // Continue anyway - not critical for OAuth callback
+        // Forward Set-Cookie header from compose-api to browser
+        if let Ok(cookie_value) = set_cookie.parse() {
+            headers.insert(http::header::SET_COOKIE, cookie_value);
+        }
     }
 
     // Use frontend_callback from OAuth state, or fall back to FRONTEND_URL env var
@@ -325,9 +324,6 @@ pub async fn oauth_callback(
     }
 
     tracing::debug!("Final callback URL: {}", callback_url);
-
-    // Build response with redirect location
-    let mut headers = HeaderMap::new();
     headers.insert(
         LOCATION,
         callback_url.parse().map_err(|_| {
@@ -597,21 +593,20 @@ pub async fn mock_login(
     );
 
     // For non-TEE mode: set up gateway session (authenticate with compose-api)
-    if let Err(e) = app_state
+    let mut response_headers = HeaderMap::new();
+    if let Ok(Some(set_cookie)) = app_state
         .agent_service
         .setup_gateway_session_for_user(user.id)
         .await
     {
-        tracing::warn!(
-            "Failed to set up gateway session for user: user_id={}, error={}",
-            user.id,
-            e
-        );
-        // Continue anyway - not critical for mock login
+        // Forward Set-Cookie header from compose-api to browser
+        if let Ok(cookie_value) = set_cookie.parse() {
+            response_headers.insert(http::header::SET_COOKIE, cookie_value);
+        }
     }
 
     Ok((
-        HeaderMap::new(),
+        response_headers,
         axum::Json(crate::models::AuthResponse {
             token,
             expires_at: session.expires_at.to_rfc3339(),
@@ -634,7 +629,7 @@ pub async fn mock_login(
 pub async fn near_auth(
     State(app_state): State<AppState>,
     Json(request): Json<NearAuthRequest>,
-) -> Result<Json<NearAuthResponse>, ApiError> {
+) -> Result<(HeaderMap, Json<NearAuthResponse>), ApiError> {
     tracing::info!(
         "NEAR authentication request for account: {}",
         request.signed_message.account_id
@@ -714,25 +709,27 @@ pub async fn near_auth(
     );
 
     // For non-TEE mode: set up gateway session (authenticate with compose-api)
-    if let Err(e) = app_state
+    let mut response_headers = HeaderMap::new();
+    if let Ok(Some(set_cookie)) = app_state
         .agent_service
         .setup_gateway_session_for_user(session.user_id)
         .await
     {
-        tracing::warn!(
-            "Failed to set up gateway session for user: user_id={}, error={}",
-            session.user_id,
-            e
-        );
-        // Continue anyway - not critical for NEAR auth
+        // Forward Set-Cookie header from compose-api to browser
+        if let Ok(cookie_value) = set_cookie.parse() {
+            response_headers.insert(http::header::SET_COOKIE, cookie_value);
+        }
     }
 
-    Ok(Json(NearAuthResponse {
-        token,
-        session_id: session.session_id.to_string(),
-        expires_at: session.expires_at.to_rfc3339(),
-        is_new_user,
-    }))
+    Ok((
+        response_headers,
+        Json(NearAuthResponse {
+            token,
+            session_id: session.session_id.to_string(),
+            expires_at: session.expires_at.to_rfc3339(),
+            is_new_user,
+        }),
+    ))
 }
 
 /// Create OAuth router with all routes (excluding logout, which requires auth)

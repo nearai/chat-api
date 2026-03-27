@@ -557,11 +557,6 @@ impl AgentServiceImpl {
             .await
             .unwrap_or_else(|_| "(unable to read response body)".to_string());
 
-        tracing::info!(
-            "compose-api /auth/proxy-session response: status={}",
-            status
-        );
-
         if !status.is_success() {
             tracing::warn!("compose-api /auth/proxy-session failed: status={}", status);
             return Err(anyhow!(
