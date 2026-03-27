@@ -44,6 +44,7 @@ impl UserUsageRepository for PostgresUserUsageRepository {
 
     async fn record_usage(&self, params: RecordUsageParams) -> anyhow::Result<()> {
         let client = self.pool.get().await?;
+
         client
             .execute(
                 r#"

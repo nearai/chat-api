@@ -1045,7 +1045,9 @@ fn status_from_agent_api(agent_api_status: &str) -> InstanceStatus {
 pub struct CreateApiKeyRequest {
     /// Human-readable key name
     pub name: String,
-    /// Optional spend limit in nano-dollars ($1.00 = 1,000,000,000 nano-dollars)
+    /// Optional lifetime spend limit in nano-dollars ($1.00 = 1,000,000,000 nano-dollars).
+    /// Must be non-negative when provided. Use `null` for no limit.
+    /// Once the recorded lifetime spend for this key reaches the limit, future requests are rejected.
     pub spend_limit: Option<i64>,
     /// Optional expiration timestamp
     pub expires_at: Option<String>,
