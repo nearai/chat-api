@@ -187,26 +187,6 @@ pub async fn create_subscription(
                 tracing::error!(error = ?msg, "Internal error creating subscription");
                 ApiError::internal_server_error("Failed to create subscription")
             }
-            SubscriptionError::NoActiveSubscription => {
-                tracing::error!("Unexpected NoActiveSubscription in create");
-                ApiError::internal_server_error("Failed to create subscription")
-            }
-            SubscriptionError::NoStripeCustomer => {
-                tracing::error!("Unexpected NoStripeCustomer in create");
-                ApiError::internal_server_error("Failed to create subscription")
-            }
-            SubscriptionError::WebhookVerificationFailed(msg) => {
-                tracing::error!(error = ?msg, "Unexpected webhook error in create");
-                ApiError::internal_server_error("Failed to create subscription")
-            }
-            SubscriptionError::SubscriptionNotScheduledForCancellation => {
-                tracing::error!("Unexpected SubscriptionNotScheduledForCancellation in create");
-                ApiError::internal_server_error("Failed to create subscription")
-            }
-            SubscriptionError::CreditLimitExceeded { .. } => {
-                tracing::error!("Unexpected CreditLimitExceeded in create");
-                ApiError::internal_server_error("Failed to create subscription")
-            }
             SubscriptionError::CreditsNotConfigured => {
                 ApiError::service_unavailable("Credit purchase is not configured")
             }
@@ -220,8 +200,8 @@ pub async fn create_subscription(
             SubscriptionError::TestClockNotAllowedForExistingCustomer => ApiError::bad_request(
                 "Cannot associate test clock with existing Stripe customer".to_string(),
             ),
-            SubscriptionError::NoPendingDowngrade => {
-                tracing::error!("Unexpected NoPendingDowngrade in create");
+            unexpected => {
+                tracing::error!(error = ?unexpected, "Unexpected subscription error in create");
                 ApiError::internal_server_error("Failed to create subscription")
             }
         })?;
@@ -337,7 +317,7 @@ pub async fn resume_subscription(
     request_body = ChangePlanRequest,
     responses(
         (status = 200, description = "Plan changed successfully", body = ChangePlanResponse),
-        (status = 400, description = "Invalid plan or instance limit exceeded", body = crate::error::ApiErrorResponse),
+        (status = 400, description = "Invalid plan, instance limit exceeded, or subscription is scheduled for cancellation", body = crate::error::ApiErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 404, description = "No active subscription found", body = crate::error::ApiErrorResponse),
         (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse),
@@ -374,6 +354,9 @@ pub async fn change_plan(
             }
             SubscriptionError::NoActiveSubscription => {
                 ApiError::not_found("No active subscription found")
+            }
+            SubscriptionError::SubscriptionScheduledForCancellation => {
+                ApiError::bad_request("Subscription is scheduled for cancellation; resume it before changing plans")
             }
             SubscriptionError::NotConfigured => {
                 ApiError::service_unavailable("Stripe is not configured")
