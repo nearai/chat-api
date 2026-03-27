@@ -41,6 +41,16 @@ async fn main() -> anyhow::Result<()> {
     // Initialize tracing based on configuration
     init_tracing(&config.logging);
 
+    if config.tasks.enabled {
+        if config.tasks.is_scheduler_configured() {
+            if let Err(err) = api::tasks::ensure_daily_cleanup_task(&config.tasks).await {
+                tracing::warn!("failed to ensure daily cleanup schedule: {}", err);
+            }
+        } else {
+            tracing::info!("tasks scheduler not configured; skipping daily cleanup schedule setup");
+        }
+    }
+
     tracing::info!("Starting API server...");
 
     tracing::info!(
