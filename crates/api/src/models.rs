@@ -2,7 +2,10 @@ use crate::consts::SYSTEM_PROMPT_MAX_LEN;
 use crate::ApiError;
 use serde::{Deserialize, Serialize};
 use services::file::ports::FileData;
-use services::system_configs::ports::{AutoRouteConfig, CreditsConfig, SubscriptionPlanConfig};
+use services::system_configs::ports::{
+    AgentHostingConfig, AutoRouteConfig, CreditsConfig, InstanceDefaultsConfig,
+    SubscriptionPlanConfig,
+};
 use services::UserId;
 use std::collections::HashMap;
 use utoipa::ToSchema;
@@ -760,10 +763,12 @@ pub struct SystemConfigsResponse {
     /// Auto-routing configuration for `model: "auto"` requests
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_route: Option<AutoRouteConfig>,
-    /// Infrastructure mode: true = non-TEE, false = TEE (default)
-    /// When true, only non-TEE managers are used for instance creation
+    /// Default resource allocation for new instances
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub non_tee_infra: Option<bool>,
+    pub instance_defaults: Option<InstanceDefaultsConfig>,
+    /// Agent hosting infrastructure configuration
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_hosting: Option<AgentHostingConfig>,
 }
 
 impl From<services::system_configs::ports::SystemConfigs> for SystemConfigsResponse {
@@ -776,7 +781,8 @@ impl From<services::system_configs::ports::SystemConfigs> for SystemConfigsRespo
             credits: config.credits,
             max_instances_by_manager_url: config.max_instances_by_manager_url,
             auto_route: config.auto_route,
-            non_tee_infra: config.non_tee_infra,
+            instance_defaults: config.instance_defaults,
+            agent_hosting: config.agent_hosting,
         }
     }
 }
@@ -805,10 +811,12 @@ pub struct UpsertSystemConfigsRequest {
     /// Auto-routing configuration for `model: "auto"` requests
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_route: Option<AutoRouteConfig>,
-    /// Infrastructure mode: true = non-TEE, false = TEE (default)
-    /// When true, only non-TEE managers are used for instance creation
+    /// Default resource allocation for new instances
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub non_tee_infra: Option<bool>,
+    pub instance_defaults: Option<InstanceDefaultsConfig>,
+    /// Agent hosting infrastructure configuration
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_hosting: Option<AgentHostingConfig>,
 }
 
 impl TryFrom<UpsertSystemConfigsRequest> for services::system_configs::ports::PartialSystemConfigs {
@@ -829,7 +837,8 @@ impl TryFrom<UpsertSystemConfigsRequest> for services::system_configs::ports::Pa
             credits: req.credits,
             max_instances_by_manager_url: req.max_instances_by_manager_url,
             auto_route: req.auto_route,
-            non_tee_infra: req.non_tee_infra,
+            instance_defaults: req.instance_defaults,
+            agent_hosting: req.agent_hosting,
         })
     }
 }

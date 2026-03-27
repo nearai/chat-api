@@ -736,7 +736,7 @@ async fn test_non_tee_infra_default_value() {
     let admin_token = mock_login(&server, admin_email).await;
 
     // Reset to known state first (ensure false)
-    let reset_body = json!({ "non_tee_infra": false });
+    let reset_body = json!({ "agent_hosting": { "new_agent_with_non_tee_infra": false } });
     let response = server
         .patch("/v1/admin/configs")
         .add_header(
@@ -764,11 +764,12 @@ async fn test_non_tee_infra_default_value() {
     assert_eq!(response.status_code(), 200);
     let body: serde_json::Value = response.json();
 
-    // non_tee_infra should be false (TEE mode, the default)
+    // new_agent_with_non_tee_infra should be false (TEE mode, the default)
     assert_eq!(
-        body.get("non_tee_infra"),
+        body.get("agent_hosting")
+            .and_then(|cfg| cfg.get("new_agent_with_non_tee_infra")),
         Some(&json!(false)),
-        "non_tee_infra should be false (TEE mode is the default)"
+        "new_agent_with_non_tee_infra should be false (TEE mode is the default)"
     );
 }
 
@@ -782,7 +783,7 @@ async fn test_non_tee_infra_set_to_true() {
 
     // Set non_tee_infra to true
     let update_body = json!({
-        "non_tee_infra": true
+        "agent_hosting": { "new_agent_with_non_tee_infra": true }
     });
 
     let response = server
@@ -805,9 +806,10 @@ async fn test_non_tee_infra_set_to_true() {
 
     let body: serde_json::Value = response.json();
     assert_eq!(
-        body.get("non_tee_infra"),
+        body.get("agent_hosting")
+            .and_then(|cfg| cfg.get("new_agent_with_non_tee_infra")),
         Some(&json!(true)),
-        "non_tee_infra should be set to true"
+        "new_agent_with_non_tee_infra should be set to true"
     );
 
     // Verify persistence via GET
@@ -822,9 +824,10 @@ async fn test_non_tee_infra_set_to_true() {
     assert_eq!(response.status_code(), 200);
     let body: serde_json::Value = response.json();
     assert_eq!(
-        body.get("non_tee_infra"),
+        body.get("agent_hosting")
+            .and_then(|cfg| cfg.get("new_agent_with_non_tee_infra")),
         Some(&json!(true)),
-        "non_tee_infra should be persisted as true"
+        "new_agent_with_non_tee_infra should be persisted as true"
     );
 }
 
@@ -837,7 +840,7 @@ async fn test_non_tee_infra_set_to_false() {
     let admin_token = mock_login(&server, admin_email).await;
 
     // First set to true
-    let set_true = json!({ "non_tee_infra": true });
+    let set_true = json!({ "agent_hosting": { "new_agent_with_non_tee_infra": true } });
     let response = server
         .patch("/v1/admin/configs")
         .add_header(
@@ -854,7 +857,7 @@ async fn test_non_tee_infra_set_to_false() {
     assert!(response.status_code().is_success());
 
     // Then set to false
-    let set_false = json!({ "non_tee_infra": false });
+    let set_false = json!({ "agent_hosting": { "new_agent_with_non_tee_infra": false } });
     let response = server
         .patch("/v1/admin/configs")
         .add_header(
@@ -871,7 +874,8 @@ async fn test_non_tee_infra_set_to_false() {
     assert!(response.status_code().is_success());
     let body: serde_json::Value = response.json();
     assert_eq!(
-        body.get("non_tee_infra"),
+        body.get("agent_hosting")
+            .and_then(|cfg| cfg.get("new_agent_with_non_tee_infra")),
         Some(&json!(false)),
         "non_tee_infra should be set to false (back to TEE mode)"
     );
@@ -888,7 +892,7 @@ async fn test_non_tee_infra_partial_update_preserves_other_fields() {
     // First set a default_model and non_tee_infra
     let initial_config = json!({
         "default_model": "gpt-4",
-        "non_tee_infra": false
+        "agent_hosting": { "new_agent_with_non_tee_infra": false }
     });
 
     let response = server
@@ -907,7 +911,7 @@ async fn test_non_tee_infra_partial_update_preserves_other_fields() {
     assert!(response.status_code().is_success());
 
     // Update only non_tee_infra
-    let update_only_non_tee = json!({ "non_tee_infra": true });
+    let update_only_non_tee = json!({ "agent_hosting": { "new_agent_with_non_tee_infra": true } });
     let response = server
         .patch("/v1/admin/configs")
         .add_header(
@@ -926,7 +930,8 @@ async fn test_non_tee_infra_partial_update_preserves_other_fields() {
 
     // Both fields should be present
     assert_eq!(
-        body.get("non_tee_infra"),
+        body.get("agent_hosting")
+            .and_then(|cfg| cfg.get("new_agent_with_non_tee_infra")),
         Some(&json!(true)),
         "non_tee_infra should be updated to true"
     );
@@ -964,7 +969,8 @@ async fn test_non_tee_infra_toggle_multiple_times() {
         assert!(response.status_code().is_success());
         let body: serde_json::Value = response.json();
         assert_eq!(
-            body.get("non_tee_infra"),
+            body.get("agent_hosting")
+                .and_then(|cfg| cfg.get("new_agent_with_non_tee_infra")),
             Some(&serde_json::json!(expected_value)),
             "non_tee_infra should toggle correctly"
         );
@@ -983,7 +989,7 @@ async fn test_non_tee_infra_not_visible_in_public_config() {
     let admin_token = mock_login(&server, admin_email).await;
 
     // Admin sets non_tee_infra to true
-    let update_body = json!({ "non_tee_infra": true });
+    let update_body = json!({ "agent_hosting": { "new_agent_with_non_tee_infra": true } });
     let response = server
         .patch("/v1/admin/configs")
         .add_header(
@@ -1011,8 +1017,10 @@ async fn test_non_tee_infra_not_visible_in_public_config() {
     assert_eq!(response.status_code(), 200);
     let body: serde_json::Value = response.json();
     assert!(
-        body.get("non_tee_infra").is_none(),
-        "Public config should NOT expose non_tee_infra"
+        body.get("agent_hosting")
+            .and_then(|cfg| cfg.get("new_agent_with_non_tee_infra"))
+            .is_none(),
+        "Public config should NOT expose agent_hosting"
     );
 
     // Admin GET /v1/admin/configs SHOULD show non_tee_infra
@@ -1027,8 +1035,9 @@ async fn test_non_tee_infra_not_visible_in_public_config() {
     assert_eq!(response.status_code(), 200);
     let body: serde_json::Value = response.json();
     assert_eq!(
-        body.get("non_tee_infra"),
+        body.get("agent_hosting")
+            .and_then(|cfg| cfg.get("new_agent_with_non_tee_infra")),
         Some(&json!(true)),
-        "Admin config should expose non_tee_infra"
+        "Admin config should expose agent_hosting"
     );
 }

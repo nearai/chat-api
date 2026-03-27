@@ -174,14 +174,9 @@ async fn main() -> anyhow::Result<()> {
         agent_repo.clone(),
         config.agent.managers.clone(),
         config.agent.nearai_api_url.clone(),
-        config.agent.agent_domain.clone(),
         system_configs_service.clone()
             as Arc<dyn services::system_configs::ports::SystemConfigsService>,
-        config.agent.instance_default_cpus.clone(),
-        config.agent.instance_default_mem_limit.clone(),
-        config.agent.instance_default_storage_size.clone(),
         config.agent.channel_relay_url.clone(),
-        false, // non_tee_infra is now read from system configs at runtime
         config.agent.non_tee_agent_url_pattern.clone(),
     ));
 

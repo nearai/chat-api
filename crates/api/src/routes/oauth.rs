@@ -286,6 +286,20 @@ pub async fn oauth_callback(
 
     tracing::debug!("Session token generated, length: {}", token.len());
 
+    // For non-TEE mode: set up gateway session (authenticate with compose-api)
+    if let Err(e) = app_state
+        .agent_service
+        .setup_gateway_session_for_user(session.user_id)
+        .await
+    {
+        tracing::warn!(
+            "Failed to set up gateway session for user: user_id={}, error={}",
+            session.user_id,
+            e
+        );
+        // Continue anyway - not critical for OAuth callback
+    }
+
     // Use frontend_callback from OAuth state, or fall back to FRONTEND_URL env var
     let frontend_url = frontend_callback.clone().unwrap_or_else(|| {
         let fallback =
@@ -582,6 +596,20 @@ pub async fn mock_login(
         session.session_id
     );
 
+    // For non-TEE mode: set up gateway session (authenticate with compose-api)
+    if let Err(e) = app_state
+        .agent_service
+        .setup_gateway_session_for_user(user.id)
+        .await
+    {
+        tracing::warn!(
+            "Failed to set up gateway session for user: user_id={}, error={}",
+            user.id,
+            e
+        );
+        // Continue anyway - not critical for mock login
+    }
+
     Ok((
         HeaderMap::new(),
         axum::Json(crate::models::AuthResponse {
@@ -684,6 +712,20 @@ pub async fn near_auth(
         session.user_id,
         is_new_user
     );
+
+    // For non-TEE mode: set up gateway session (authenticate with compose-api)
+    if let Err(e) = app_state
+        .agent_service
+        .setup_gateway_session_for_user(session.user_id)
+        .await
+    {
+        tracing::warn!(
+            "Failed to set up gateway session for user: user_id={}, error={}",
+            session.user_id,
+            e
+        );
+        // Continue anyway - not critical for NEAR auth
+    }
 
     Ok(Json(NearAuthResponse {
         token,

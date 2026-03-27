@@ -168,6 +168,31 @@ pub struct AutoRouteConfig {
     pub max_tokens: Option<u64>,
 }
 
+/// Default resource allocation for new agent instances
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstanceDefaultsConfig {
+    /// Default CPU allocation (e.g., "1", "2")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpus: Option<String>,
+    /// Default memory limit (e.g., "4g", "8g")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mem_limit: Option<String>,
+    /// Default storage size (e.g., "10G", "20G")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_size: Option<String>,
+}
+
+/// Agent hosting infrastructure configuration
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentHostingConfig {
+    /// Use non-TEE infrastructure (true = non-TEE, false = TEE/default)
+    /// When true, only non-TEE managers are used for instance creation
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_agent_with_non_tee_infra: Option<bool>,
+}
+
 /// Application-wide configuration stored in `system_configs` table
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemConfigs {
@@ -193,10 +218,12 @@ pub struct SystemConfigs {
     /// Auto-routing configuration for `model: "auto"` requests
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_route: Option<AutoRouteConfig>,
-    /// Infrastructure mode: true = non-TEE, false = TEE (default)
-    /// When true, only non-TEE managers are used for instance creation
+    /// Default resource allocation for new instances
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub non_tee_infra: Option<bool>,
+    pub instance_defaults: Option<InstanceDefaultsConfig>,
+    /// Agent hosting configuration
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_hosting: Option<AgentHostingConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -208,7 +235,8 @@ pub struct PartialSystemConfigs {
     pub credits: Option<CreditsConfig>,
     pub max_instances_by_manager_url: Option<HashMap<String, u64>>,
     pub auto_route: Option<AutoRouteConfig>,
-    pub non_tee_infra: Option<bool>,
+    pub instance_defaults: Option<InstanceDefaultsConfig>,
+    pub agent_hosting: Option<AgentHostingConfig>,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -222,7 +250,14 @@ impl Default for SystemConfigs {
             credits: None,
             max_instances_by_manager_url: None,
             auto_route: None,
-            non_tee_infra: Some(false),
+            instance_defaults: Some(InstanceDefaultsConfig {
+                cpus: Some("1".to_string()),
+                mem_limit: Some("4g".to_string()),
+                storage_size: Some("10G".to_string()),
+            }),
+            agent_hosting: Some(AgentHostingConfig {
+                new_agent_with_non_tee_infra: Some(false),
+            }),
         }
     }
 }
@@ -241,7 +276,8 @@ impl SystemConfigs {
                 .max_instances_by_manager_url
                 .or(self.max_instances_by_manager_url),
             auto_route: partial.auto_route.or(self.auto_route),
-            non_tee_infra: partial.non_tee_infra.or(self.non_tee_infra),
+            instance_defaults: partial.instance_defaults.or(self.instance_defaults),
+            agent_hosting: partial.agent_hosting.or(self.agent_hosting),
         }
     }
 

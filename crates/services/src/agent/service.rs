@@ -31,26 +31,26 @@ fn get_image_for_service_type(service_type: &str) -> &'static str {
         "ironclaw" => "ironclaw-nearai-worker:local",
         "ironclaw-dind" => "ghcr.io/nearai/ironclaw-dind:0.21.0",
         "openclaw" => "openclaw-nearai-worker:local",
+        "openclaw-dind" => "docker.io/nearaidev/openclaw-dind:2026.2.22",
         _ => "openclaw-nearai-worker:local", // default to openclaw
     }
 }
 
 /// Normalize service type for compose-api calls.
-/// TEE compose-api accepts only `openclaw` or `ironclaw` (strip `-dind` suffix).
-/// Non-TEE compose-api expects `ironclaw-dind` for ironclaw deployments.
+/// TEE compose-api accepts only `openclaw` or `ironclaw`.
+/// Non-TEE compose-api expects `-dind` suffix: `ironclaw-dind`, `openclaw-dind`.
 fn normalize_service_type_for_api(service_type: &str, non_tee: bool) -> String {
     if non_tee {
-        // Non-TEE compose-api: map ironclaw → ironclaw-dind
+        // Non-TEE compose-api: append -dind suffix
         match service_type {
             "ironclaw" => "ironclaw-dind".to_string(),
-            _ => service_type.to_string(),
+            "openclaw" => "openclaw-dind".to_string(),
+            // Already normalized (shouldn't happen with VALID_SERVICE_TYPES check)
+            s => s.to_string(),
         }
     } else {
-        // TEE compose-api: strip -dind suffix
-        service_type
-            .strip_suffix("-dind")
-            .unwrap_or(service_type)
-            .to_string()
+        // TEE compose-api: use as-is
+        service_type.to_string()
     }
 }
 
@@ -72,7 +72,6 @@ struct SaveInstanceParams {
     max_allowed: u64,
     agent_api_base_url: Option<String>,
     service_type: Option<String>,
-    agent_domain: Option<String>,
 }
 
 pub struct AgentServiceImpl {
@@ -84,23 +83,10 @@ pub struct AgentServiceImpl {
     round_robin_counter: AtomicUsize,
     /// Chat-API base URL passed to the Agent API as nearai_api_url when creating instances
     nearai_api_url: String,
-    /// Domain where agent instances are accessible (e.g., agents.example.com)
-    /// Used to construct instance_url as https://{name}.{agent_domain}/?token={token}
-    /// Only used in non-TEE mode; None in TEE mode
-    agent_domain: Option<String>,
-    /// System configs for reading instance limits
+    /// System configs for reading instance limits and defaults
     system_configs_service: Arc<dyn SystemConfigsService>,
-    /// Default CPU allocation for new instances (configured via INSTANCE_DEFAULT_CPUS env var)
-    instance_default_cpus: String,
-    /// Default memory limit for new instances (configured via INSTANCE_DEFAULT_MEM_LIMIT env var)
-    instance_default_mem_limit: String,
-    /// Default storage size for new instances (configured via INSTANCE_DEFAULT_STORAGE_SIZE env var)
-    instance_default_storage_size: String,
     /// Channel-relay URL for provisioning relay config to IronClaw instances
     channel_relay_url: Option<String>,
-    /// Infrastructure mode: true = non-TEE, false = TEE
-    /// Selects which agent manager endpoints are used (non-TEE compose-api vs TEE compose-api).
-    non_tee_infra: bool,
     /// URL pattern to identify non-TEE manager endpoints (e.g., "claws")
     /// Used to determine instance type when routing to managers
     non_tee_agent_url_pattern: String,
@@ -158,18 +144,12 @@ impl AgentServiceImpl {
         hex::encode(bytes)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         repository: Arc<dyn AgentRepository>,
         managers: Vec<AgentManager>,
         nearai_api_url: String,
-        agent_domain: Option<String>,
         system_configs_service: Arc<dyn SystemConfigsService>,
-        instance_default_cpus: String,
-        instance_default_mem_limit: String,
-        instance_default_storage_size: String,
         channel_relay_url: Option<String>,
-        non_tee_infra: bool,
         non_tee_agent_url_pattern: String,
     ) -> Self {
         // Validate required configuration
@@ -195,13 +175,8 @@ impl AgentServiceImpl {
             managers,
             round_robin_counter: AtomicUsize::new(0),
             nearai_api_url,
-            agent_domain,
             system_configs_service,
-            instance_default_cpus,
-            instance_default_mem_limit,
-            instance_default_storage_size,
             channel_relay_url,
-            non_tee_infra,
             non_tee_agent_url_pattern,
         }
     }
@@ -230,15 +205,19 @@ impl AgentServiceImpl {
             .unwrap_or_default();
 
         // Read NON_TEE_INFRA setting from system configs
-        let non_tee_infra = configs.non_tee_infra.unwrap_or(false);
+        let non_tee_infra = configs
+            .agent_hosting
+            .as_ref()
+            .and_then(|cfg| cfg.new_agent_with_non_tee_infra)
+            .unwrap_or(false);
 
         // Filter managers based on NON_TEE_INFRA setting
         let available_managers: Vec<_> = self
             .managers
             .iter()
             .filter(|mgr| {
-                // If NON_TEE_INFRA is true, only use non-TEE managers; otherwise use all managers
-                !non_tee_infra || mgr.get_is_non_tee()
+                // Infrastructure mode must match: non_tee_infra=true means only non-TEE, false means only TEE
+                non_tee_infra == mgr.get_is_non_tee()
             })
             .collect();
 
@@ -629,6 +608,25 @@ impl AgentServiceImpl {
         nearai_api_url: &str,
         params: AgentApiCreateParams,
     ) -> anyhow::Result<serde_json::Value> {
+        // Get instance defaults from system configs
+        let configs = self
+            .system_configs_service
+            .get_configs()
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let instance_defaults = configs.instance_defaults.as_ref();
+        let default_cpus = instance_defaults
+            .and_then(|d| d.cpus.as_deref())
+            .unwrap_or("1");
+        let default_mem_limit = instance_defaults
+            .and_then(|d| d.mem_limit.as_deref())
+            .unwrap_or("4g");
+        let default_storage_size = instance_defaults
+            .and_then(|d| d.storage_size.as_deref())
+            .unwrap_or("10G");
+
         let url = format!("{}/instances", manager.url);
 
         let service_type = params
@@ -662,38 +660,20 @@ impl AgentServiceImpl {
 
         // Only include resource fields if they're explicitly set or available
         // In non-TEE mode, use configured defaults; in TEE mode, let Agent API use its defaults
-        let cpus = params.cpus.as_deref().or_else(|| {
-            let default = &self.instance_default_cpus;
-            if !default.is_empty() {
-                Some(default)
-            } else {
-                None
-            }
-        });
+        let cpus = params.cpus.as_deref().or(Some(default_cpus));
         if let Some(cpu) = cpus {
             request_body["cpus"] = serde_json::json!(cpu);
         }
 
-        let mem_limit = params.mem_limit.as_deref().or_else(|| {
-            let default = &self.instance_default_mem_limit;
-            if !default.is_empty() {
-                Some(default)
-            } else {
-                None
-            }
-        });
+        let mem_limit = params.mem_limit.as_deref().or(Some(default_mem_limit));
         if let Some(mem) = mem_limit {
             request_body["mem_limit"] = serde_json::json!(mem);
         }
 
-        let storage_size = params.storage_size.as_deref().or_else(|| {
-            let default = &self.instance_default_storage_size;
-            if !default.is_empty() {
-                Some(default)
-            } else {
-                None
-            }
-        });
+        let storage_size = params
+            .storage_size
+            .as_deref()
+            .or(Some(default_storage_size));
         if let Some(storage) = storage_size {
             request_body["storage_size"] = serde_json::json!(storage);
         }
@@ -887,6 +867,24 @@ impl AgentServiceImpl {
         params: AgentApiCreateParams,
         auth_method: AuthMethod<'_>,
     ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<serde_json::Value>>> {
+        let configs = self
+            .system_configs_service
+            .get_configs()
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let instance_defaults = configs.instance_defaults.as_ref();
+        let default_cpus = instance_defaults
+            .and_then(|d| d.cpus.as_deref())
+            .unwrap_or("1");
+        let default_mem_limit = instance_defaults
+            .and_then(|d| d.mem_limit.as_deref())
+            .unwrap_or("4g");
+        let default_storage_size = instance_defaults
+            .and_then(|d| d.storage_size.as_deref())
+            .unwrap_or("10G");
+
         let url = format!("{}/instances", manager.url);
 
         let service_type = params
@@ -922,38 +920,20 @@ impl AgentServiceImpl {
 
         // Only include resource fields if they're explicitly set or available
         // In non-TEE mode, use configured defaults; in TEE mode, let Agent API use its defaults
-        let cpus = params.cpus.as_deref().or_else(|| {
-            let default = &self.instance_default_cpus;
-            if !default.is_empty() {
-                Some(default)
-            } else {
-                None
-            }
-        });
+        let cpus = params.cpus.as_deref().or(Some(default_cpus));
         if let Some(cpu) = cpus {
             request_body["cpus"] = serde_json::json!(cpu);
         }
 
-        let mem_limit = params.mem_limit.as_deref().or_else(|| {
-            let default = &self.instance_default_mem_limit;
-            if !default.is_empty() {
-                Some(default)
-            } else {
-                None
-            }
-        });
+        let mem_limit = params.mem_limit.as_deref().or(Some(default_mem_limit));
         if let Some(mem) = mem_limit {
             request_body["mem_limit"] = serde_json::json!(mem);
         }
 
-        let storage_size = params.storage_size.as_deref().or_else(|| {
-            let default = &self.instance_default_storage_size;
-            if !default.is_empty() {
-                Some(default)
-            } else {
-                None
-            }
-        });
+        let storage_size = params
+            .storage_size
+            .as_deref()
+            .or(Some(default_storage_size));
         if let Some(storage) = storage_size {
             request_body["storage_size"] = serde_json::json!(storage);
         }
@@ -1180,15 +1160,8 @@ async fn save_passkey_instance_from_event(
                 }
             }
 
-            // Legacy fallback: use agent_domain if provided (for backwards compatibility)
-            if let (Some(token), Some(domain)) = (&instance_token, &params.agent_domain) {
-                Some(format!(
-                    "https://{}.{}/?token={}",
-                    instance_name, domain, token
-                ))
-            } else {
-                None
-            }
+            // No fallback: instance_url must come from Agent API
+            None
         });
     // Validate instance_url scheme to prevent injection from a compromised Agent Manager
     if let Some(ref url) = &instance_url {
@@ -1631,9 +1604,9 @@ impl AgentService for AgentServiceImpl {
         let manager_url = manager.url.clone();
 
         tracing::info!(
-            "create_passkey_instance_streaming: selected manager_url={}, non_tee_infra={}, user_id={}",
+            "create_passkey_instance_streaming: selected manager_url={}, is_non_tee_manager={}, user_id={}",
             manager_url,
-            self.non_tee_infra,
+            manager.get_is_non_tee(),
             user_id
         );
 
@@ -1788,7 +1761,6 @@ impl AgentService for AgentServiceImpl {
         let api_key_id = api_key.id;
         let ssh_pubkey = params.ssh_pubkey.clone();
         let manager_clone = manager.clone();
-        let agent_domain = self.agent_domain.clone();
         let session_token_for_details = session_token.clone();
         let requested_instance_name = params.name.clone();
 
@@ -1919,7 +1891,6 @@ impl AgentService for AgentServiceImpl {
                             max_allowed,
                             agent_api_base_url: Some(manager_url.clone()),
                             service_type: service_type_for_api.clone(),
-                            agent_domain: agent_domain.clone(),
                         },
                     )
                     .await
@@ -3172,10 +3143,6 @@ impl AgentService for AgentServiceImpl {
         Ok(result)
     }
 
-    // TODO: Wire gateway session setup into oauth_callback and mock_login handlers
-    // This method is fully implemented but not yet called by any auth flow.
-    // It returns Set-Cookie headers for gateway sessions that should be sent to clients.
-    #[allow(dead_code)]
     async fn setup_gateway_session_for_user(
         &self,
         user_id: UserId,
@@ -3645,26 +3612,47 @@ mod tests {
             Self { configs: None }
         }
 
-        fn with_non_tee_infra(non_tee_infra: bool) -> Self {
+        /// No config row with non-TEE infra enabled
+        fn no_config_with_non_tee() -> Self {
+            use crate::system_configs::ports::AgentHostingConfig;
             Self {
                 configs: Some(SystemConfigs {
-                    non_tee_infra: Some(non_tee_infra),
+                    agent_hosting: Some(AgentHostingConfig {
+                        new_agent_with_non_tee_infra: Some(true),
+                    }),
                     ..Default::default()
                 }),
             }
         }
 
-        fn with_manager_limit(max: u64) -> Self {
+        fn with_non_tee_infra(non_tee_infra: bool) -> Self {
+            use crate::system_configs::ports::AgentHostingConfig;
+            Self {
+                configs: Some(SystemConfigs {
+                    agent_hosting: Some(AgentHostingConfig {
+                        new_agent_with_non_tee_infra: Some(non_tee_infra),
+                    }),
+                    ..Default::default()
+                }),
+            }
+        }
+
+        fn with_manager_limit_and_non_tee(max: u64, non_tee: bool) -> Self {
+            use crate::system_configs::ports::AgentHostingConfig;
             Self {
                 configs: Some(SystemConfigs {
                     max_instances_per_manager: Some(max),
+                    agent_hosting: Some(AgentHostingConfig {
+                        new_agent_with_non_tee_infra: Some(non_tee),
+                    }),
                     ..Default::default()
                 }),
             }
         }
 
-        /// Per-URL limits: mgr0 gets 5, mgr1 gets 15. Used to test max_instances_by_manager_url.
-        fn with_per_url_limits() -> Self {
+        /// Per-URL limits with non-TEE infra enabled
+        fn with_per_url_limits_and_non_tee() -> Self {
+            use crate::system_configs::ports::AgentHostingConfig;
             use std::collections::HashMap;
             let mut per_url = HashMap::new();
             per_url.insert(
@@ -3679,6 +3667,9 @@ mod tests {
                 configs: Some(SystemConfigs {
                     max_instances_per_manager: Some(200),
                     max_instances_by_manager_url: Some(per_url),
+                    agent_hosting: Some(AgentHostingConfig {
+                        new_agent_with_non_tee_infra: Some(true),
+                    }),
                     ..Default::default()
                 }),
             }
@@ -3724,38 +3715,19 @@ mod tests {
             .collect()
     }
 
-    fn make_service_with_config(
-        managers: Vec<AgentManager>,
-        repo: Arc<dyn AgentRepository>,
-        configs: Arc<dyn SystemConfigsService>,
-        non_tee_infra: bool,
-    ) -> AgentServiceImpl {
-        AgentServiceImpl::new(
-            repo,
-            managers,
-            "https://nearai.test/v1".to_string(),
-            if non_tee_infra {
-                Some("claws.example.com".to_string())
-            } else {
-                None
-            },
-            configs,
-            "1".to_string(),   // instance_default_cpus
-            "4g".to_string(),  // instance_default_mem_limit
-            "10G".to_string(), // instance_default_storage_size
-            None,              // channel_relay_url
-            non_tee_infra,
-            "claws".to_string(), // non_tee_agent_url_pattern
-        )
-    }
-
     fn make_service(
         managers: Vec<AgentManager>,
         repo: Arc<dyn AgentRepository>,
         configs: Arc<dyn SystemConfigsService>,
     ) -> AgentServiceImpl {
-        // Default to non-TEE mode for tests
-        make_service_with_config(managers, repo, configs, true)
+        AgentServiceImpl::new(
+            repo,
+            managers,
+            "https://nearai.test/v1".to_string(),
+            configs,
+            None,                // channel_relay_url
+            "claws".to_string(), // non_tee_agent_url_pattern
+        )
     }
 
     // --- Tests ---
@@ -3935,7 +3907,7 @@ mod tests {
         let svc = make_service(
             make_managers(2),
             Arc::new(mock_repo_with_manager_count(50)),
-            Arc::new(MockSystemConfigsService::no_config()),
+            Arc::new(MockSystemConfigsService::no_config_with_non_tee()),
         );
 
         // count=50 < default 200 → manager is available
@@ -3964,7 +3936,9 @@ mod tests {
         let svc = make_service(
             make_managers(2),
             Arc::new(mock_repo_with_manager_count(3)),
-            Arc::new(MockSystemConfigsService::with_manager_limit(10)),
+            Arc::new(MockSystemConfigsService::with_manager_limit_and_non_tee(
+                10, true,
+            )),
         );
 
         let mgr = svc.next_available_manager().await.unwrap();
@@ -3978,7 +3952,9 @@ mod tests {
         let svc = make_service(
             make_managers(2),
             Arc::new(mock_repo_with_manager_count(100)),
-            Arc::new(MockSystemConfigsService::with_manager_limit(100)),
+            Arc::new(MockSystemConfigsService::with_manager_limit_and_non_tee(
+                100, true,
+            )),
         );
 
         let result = svc.next_available_manager().await;
@@ -4000,7 +3976,9 @@ mod tests {
         let svc = make_service(
             make_managers(2),
             Arc::new(repo),
-            Arc::new(MockSystemConfigsService::with_manager_limit(10)),
+            Arc::new(MockSystemConfigsService::with_manager_limit_and_non_tee(
+                10, true,
+            )),
         );
 
         let mgr = svc.next_available_manager().await.unwrap();
@@ -4021,7 +3999,7 @@ mod tests {
         let svc = make_service(
             make_managers(2),
             Arc::new(repo),
-            Arc::new(MockSystemConfigsService::with_per_url_limits()),
+            Arc::new(MockSystemConfigsService::with_per_url_limits_and_non_tee()),
         );
 
         let mgr = svc.next_available_manager().await.unwrap();
@@ -5235,13 +5213,8 @@ mod tests {
                     is_non_tee: false,
                 }],
                 "https://nearai.example.com/v1".to_string(),
-                None, // TEE mode: no agent_domain
                 Arc::new(MockSystemConfigsService::no_config()),
-                "2".to_string(),
-                "8g".to_string(),
-                "20G".to_string(),
                 None,
-                false,               // TEE mode
                 "claws".to_string(), // non_tee_agent_url_pattern
             );
 
@@ -5249,10 +5222,9 @@ mod tests {
             // 1. Service type should be normalized (ironclaw-dind -> ironclaw)
             // 2. No passkey login attempted
             // 3. Manager token used
-            assert!(!service.non_tee_infra, "Should be in TEE mode");
-            assert_eq!(
-                service.agent_domain, None,
-                "TEE mode should have no agent_domain"
+            assert!(
+                !service.managers[0].is_non_tee,
+                "Manager should be TEE mode"
             );
         }
 
@@ -5319,28 +5291,20 @@ mod tests {
                 vec![AgentManager {
                     url: server_uri.clone(),
                     token: "compose-token".to_string(),
-                    is_non_tee: false,
+                    is_non_tee: true,
                 }],
                 "https://nearai.example.com/v1".to_string(),
-                Some("claws.example.com".to_string()), // Non-TEE mode: agent_domain is set
                 Arc::new(MockSystemConfigsService::no_config()),
-                "1".to_string(),
-                "4g".to_string(),
-                "10G".to_string(),
                 None,
-                true,                // Non-TEE mode
                 "claws".to_string(), // non_tee_agent_url_pattern
             );
 
             // Verify non-TEE mode behavior:
             // 1. Service type should be kept as-is (ironclaw-dind)
             // 2. Passkey login can be attempted
-            // 3. Agent domain is configured
-            assert!(service.non_tee_infra, "Should be in non-TEE mode");
-            assert_eq!(
-                service.agent_domain,
-                Some("claws.example.com".to_string()),
-                "Non-TEE mode should have agent_domain"
+            assert!(
+                service.managers[0].is_non_tee,
+                "Manager should be non-TEE mode"
             );
         }
 
@@ -5352,10 +5316,10 @@ mod tests {
             // Config: NON_TEE_INFRA not set or false
             // Manager: TEE compose-api (e.g. api.agent.near.ai via AGENT_MANAGER_URLS_TEE)
             // Auth: Manager token only, NO passkey login
-            // Service Type: Normalized (ironclaw-dind -> ironclaw)
+            // Service Type: Used as-is (ironclaw stays ironclaw)
             let tee_mode = false;
             assert_eq!(
-                normalize_service_type_for_api("ironclaw-dind", tee_mode),
+                normalize_service_type_for_api("ironclaw", tee_mode),
                 "ironclaw"
             );
 
@@ -5363,10 +5327,10 @@ mod tests {
             // Config: NON_TEE_INFRA=true
             // Manager: non-TEE compose-api (AGENT_MANAGER_URLS)
             // Auth: Passkey login available, falls back to manager token
-            // Service Type: Kept as-is (ironclaw-dind stays ironclaw-dind)
+            // Service Type: Normalized with -dind suffix (ironclaw -> ironclaw-dind)
             let non_tee_mode = true;
             assert_eq!(
-                normalize_service_type_for_api("ironclaw-dind", non_tee_mode),
+                normalize_service_type_for_api("ironclaw", non_tee_mode),
                 "ironclaw-dind"
             );
         }
@@ -5416,11 +5380,7 @@ mod tests {
 
     #[test]
     fn test_service_type_normalization_tee_mode() {
-        // TEE mode: should strip -dind suffix
-        assert_eq!(
-            normalize_service_type_for_api("ironclaw-dind", false),
-            "ironclaw"
-        );
+        // TEE mode: use service types as-is (no -dind suffix)
         assert_eq!(
             normalize_service_type_for_api("ironclaw", false),
             "ironclaw"
@@ -5433,21 +5393,20 @@ mod tests {
 
     #[test]
     fn test_service_type_normalization_non_tee_mode() {
-        // Non-TEE mode: should convert ironclaw to ironclaw-dind
-        assert_eq!(
-            normalize_service_type_for_api("ironclaw-dind", true),
-            "ironclaw-dind"
-        );
+        // Non-TEE mode: append -dind suffix to service types
         assert_eq!(
             normalize_service_type_for_api("ironclaw", true),
             "ironclaw-dind"
         );
-        assert_eq!(normalize_service_type_for_api("openclaw", true), "openclaw");
+        assert_eq!(
+            normalize_service_type_for_api("openclaw", true),
+            "openclaw-dind"
+        );
     }
 
     #[test]
     fn test_agent_service_creation_tee_mode() {
-        // TEE mode: non_tee_infra = false
+        // TEE mode: manager with is_non_tee = false
         let repo = Arc::new(MockAgentRepository::new());
         let manager = AgentManager {
             url: "https://api.cloud.example.com".to_string(),
@@ -5456,28 +5415,22 @@ mod tests {
         };
         let configs = Arc::new(MockSystemConfigsService::no_config());
 
-        let service = AgentServiceImpl::new(
+        let _service = AgentServiceImpl::new(
             repo,
-            vec![manager],
+            vec![manager.clone()],
             "https://nearai.example.com/v1".to_string(),
-            None, // agent_domain is None in TEE mode
             configs,
-            "2".to_string(),
-            "8g".to_string(),
-            "20G".to_string(),
             None,
-            false,               // non_tee_infra = false (TEE mode)
             "claws".to_string(), // non_tee_agent_url_pattern
         );
 
-        // Verify TEE mode configuration
-        assert!(!service.non_tee_infra);
-        assert_eq!(service.agent_domain, None);
+        // Verify TEE mode configuration: manager is TEE
+        assert!(!manager.is_non_tee);
     }
 
     #[test]
     fn test_agent_service_creation_non_tee_mode() {
-        // Non-TEE mode: non_tee_infra = true
+        // Non-TEE mode: manager with is_non_tee = true
         let repo = Arc::new(MockAgentRepository::new());
         let manager = AgentManager {
             url: "https://claws.example.com/api/crabshack".to_string(),
@@ -5486,23 +5439,17 @@ mod tests {
         };
         let configs = Arc::new(MockSystemConfigsService::no_config());
 
-        let service = AgentServiceImpl::new(
+        let _service = AgentServiceImpl::new(
             repo,
-            vec![manager],
+            vec![manager.clone()],
             "https://nearai.example.com/v1".to_string(),
-            Some("claws.example.com".to_string()), // agent_domain is set in non-TEE mode
             configs,
-            "1".to_string(),
-            "4g".to_string(),
-            "10G".to_string(),
             None,
-            true,                // non_tee_infra = true (non-TEE mode)
             "claws".to_string(), // non_tee_agent_url_pattern
         );
 
-        // Verify non-TEE mode configuration
-        assert!(service.non_tee_infra);
-        assert_eq!(service.agent_domain, Some("claws.example.com".to_string()));
+        // Verify non-TEE mode configuration: manager is non-TEE
+        assert!(manager.is_non_tee);
     }
 
     #[test]
@@ -5544,12 +5491,12 @@ mod tests {
         // TEE Mode Flow:
         // 1. Uses TEE compose-api (AGENT_API_BASE_URL or AGENT_MANAGER_URLS_TEE)
         // 2. NO passkey login (resolve_bearer_token returns manager token directly)
-        // 3. Service type normalized: "ironclaw-dind" -> "ironclaw"
+        // 3. Service types used as-is: "ironclaw" stays "ironclaw", "openclaw" stays "openclaw"
         // 4. Manager token used for all API calls
 
         // Verify service type normalization for TEE
         assert_eq!(
-            normalize_service_type_for_api("ironclaw-dind", false),
+            normalize_service_type_for_api("ironclaw", false),
             "ironclaw"
         );
         assert_eq!(
@@ -5563,15 +5510,18 @@ mod tests {
         // Non-TEE Mode Flow:
         // 1. Uses non-TEE compose-api (AGENT_MANAGER_URLS)
         // 2. Passkey login enabled (resolve_bearer_token attempts passkey login)
-        // 3. Service type kept as-is: "ironclaw-dind" stays "ironclaw-dind"
+        // 3. Service types normalized with -dind suffix: "ironclaw" -> "ironclaw-dind", "openclaw" -> "openclaw-dind"
         // 4. Session token from passkey or manager token used for API calls
 
         // Verify service type normalization for non-TEE
         assert_eq!(
-            normalize_service_type_for_api("ironclaw-dind", true),
+            normalize_service_type_for_api("ironclaw", true),
             "ironclaw-dind"
         );
-        assert_eq!(normalize_service_type_for_api("openclaw", true), "openclaw");
+        assert_eq!(
+            normalize_service_type_for_api("openclaw", true),
+            "openclaw-dind"
+        );
     }
 
     // ============================================================================
@@ -5589,11 +5539,10 @@ mod tests {
             is_non_tee: false,
         });
 
-        let svc = make_service_with_config(
+        let svc = make_service(
             managers,
             Arc::new(mock_repo_with_manager_count(0)),
             Arc::new(MockSystemConfigsService::with_non_tee_infra(true)),
-            true, // NON_TEE_INFRA=true
         );
 
         // Should only return non-TEE managers
@@ -5623,11 +5572,10 @@ mod tests {
             is_non_tee: false,
         });
 
-        let svc = make_service_with_config(
+        let svc = make_service(
             managers.clone(),
             Arc::new(mock_repo_with_manager_count(0)),
             Arc::new(MockSystemConfigsService::no_config()),
-            false, // NON_TEE_INFRA=false (TEE mode)
         );
 
         // Should return all managers in round-robin
@@ -5655,11 +5603,10 @@ mod tests {
             },
         ];
 
-        let svc = make_service_with_config(
+        let svc = make_service(
             managers,
             Arc::new(mock_repo_with_manager_count(0)),
             Arc::new(MockSystemConfigsService::with_non_tee_infra(true)),
-            true, // NON_TEE_INFRA=true but all managers are TEE
         );
 
         let result = svc.next_available_manager().await;
@@ -5681,11 +5628,12 @@ mod tests {
         repo.expect_count_instances_by_manager()
             .returning(|_| Ok(100)); // At capacity
 
-        let svc = make_service_with_config(
+        let svc = make_service(
             managers,
             Arc::new(repo),
-            Arc::new(MockSystemConfigsService::with_manager_limit(50)),
-            true, // NON_TEE_INFRA=true
+            Arc::new(MockSystemConfigsService::with_manager_limit_and_non_tee(
+                50, true,
+            )),
         );
 
         let result = svc.next_available_manager().await;
@@ -5721,11 +5669,12 @@ mod tests {
             },
         ];
 
-        let svc = make_service_with_config(
+        let svc = make_service(
             managers,
             Arc::new(mock_repo_with_manager_count(10)),
-            Arc::new(MockSystemConfigsService::with_manager_limit(100)),
-            true, // NON_TEE_INFRA=true
+            Arc::new(MockSystemConfigsService::with_manager_limit_and_non_tee(
+                100, true,
+            )),
         );
 
         let mgr = svc.next_available_manager().await.unwrap();
@@ -5783,11 +5732,10 @@ mod tests {
             },
         ];
 
-        let svc = make_service_with_config(
+        let svc = make_service(
             managers,
             Arc::new(mock_repo_with_manager_count(0)),
             Arc::new(MockSystemConfigsService::with_non_tee_infra(true)),
-            true, // NON_TEE_INFRA=true
         );
 
         // next_available_manager should only return non-TEE managers, skipping the TEE one
@@ -5839,11 +5787,12 @@ mod tests {
             .withf(|url: &str| url.contains("api.example.com"))
             .returning(|_| Ok(100)); // TEE manager: 100 instances (at capacity)
 
-        let svc = make_service_with_config(
+        let svc = make_service(
             managers,
             Arc::new(repo),
-            Arc::new(MockSystemConfigsService::with_manager_limit(50)),
-            true, // NON_TEE_INFRA=true
+            Arc::new(MockSystemConfigsService::with_manager_limit_and_non_tee(
+                50, true,
+            )),
         );
 
         // Should succeed by using a non-TEE manager (even though TEE is at capacity)
@@ -5858,11 +5807,7 @@ mod tests {
     fn test_service_type_normalization_by_manager_type() {
         // Test that service type normalization is correct for both manager types
 
-        // TEE mode: -dind suffix should be stripped
-        assert_eq!(
-            normalize_service_type_for_api("ironclaw-dind", false),
-            "ironclaw"
-        );
+        // TEE mode: use service types as-is (no suffix)
         assert_eq!(
             normalize_service_type_for_api("openclaw", false),
             "openclaw"
@@ -5872,12 +5817,11 @@ mod tests {
             "ironclaw"
         );
 
-        // Non-TEE mode: ironclaw should be converted to ironclaw-dind
+        // Non-TEE mode: append -dind suffix to service types
         assert_eq!(
-            normalize_service_type_for_api("ironclaw-dind", true),
-            "ironclaw-dind"
+            normalize_service_type_for_api("openclaw", true),
+            "openclaw-dind"
         );
-        assert_eq!(normalize_service_type_for_api("openclaw", true), "openclaw");
         assert_eq!(
             normalize_service_type_for_api("ironclaw", true),
             "ironclaw-dind"
@@ -5914,11 +5858,10 @@ mod tests {
             is_non_tee: false,
         }];
 
-        let svc = make_service_with_config(
+        let svc = make_service(
             managers,
             Arc::new(mock_repo_with_manager_count(0)),
             Arc::new(MockSystemConfigsService::with_non_tee_infra(true)),
-            true, // NON_TEE_INFRA=true but only TEE managers configured
         );
 
         let result = svc.next_available_manager().await;
@@ -5932,11 +5875,10 @@ mod tests {
         // Single non-TEE manager should work correctly
         let managers = make_managers(1);
 
-        let svc = make_service_with_config(
+        let svc = make_service(
             managers,
             Arc::new(mock_repo_with_manager_count(0)),
-            Arc::new(MockSystemConfigsService::no_config()),
-            true, // NON_TEE_INFRA=true
+            Arc::new(MockSystemConfigsService::no_config_with_non_tee()),
         );
 
         // Should always return the same manager
@@ -5951,11 +5893,10 @@ mod tests {
         // Multiple non-TEE managers should alternate properly
         let managers = make_managers(3);
 
-        let svc = make_service_with_config(
+        let svc = make_service(
             managers,
             Arc::new(mock_repo_with_manager_count(0)),
-            Arc::new(MockSystemConfigsService::no_config()),
-            true, // NON_TEE_INFRA=true
+            Arc::new(MockSystemConfigsService::no_config_with_non_tee()),
         );
 
         let mut urls = Vec::new();

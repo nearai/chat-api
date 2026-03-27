@@ -309,18 +309,6 @@ fn default_nearai_api_url() -> String {
         .unwrap_or_else(|_| "https://private.near.ai/v1".to_string())
 }
 
-fn default_instance_cpus() -> String {
-    std::env::var("INSTANCE_DEFAULT_CPUS").unwrap_or_else(|_| "1".to_string())
-}
-
-fn default_instance_mem_limit() -> String {
-    std::env::var("INSTANCE_DEFAULT_MEM_LIMIT").unwrap_or_else(|_| "4g".to_string())
-}
-
-fn default_instance_storage_size() -> String {
-    std::env::var("INSTANCE_DEFAULT_STORAGE_SIZE").unwrap_or_else(|_| "10G".to_string())
-}
-
 fn default_non_tee_agent_url() -> String {
     std::env::var("NON_TEE_AGENT_URL").unwrap_or_else(|_| "claws".to_string())
 }
@@ -337,15 +325,6 @@ pub struct AgentManager {
 }
 
 impl AgentManager {
-    /// Compute whether this manager is non-TEE based on URL pattern.
-    /// Non-TEE URLs contain the configured non_tee_agent_url_pattern (e.g., "claws").
-    /// This is computed dynamically to support mixed TEE+non-TEE environments.
-    pub fn infer_type_from_url(url: &str) -> bool {
-        let non_tee_pattern =
-            std::env::var("NON_TEE_AGENT_URL").unwrap_or_else(|_| "claws".to_string());
-        url.contains(&non_tee_pattern)
-    }
-
     /// Get the effective is_non_tee value based on explicit configuration
     pub fn get_is_non_tee(&self) -> bool {
         self.is_non_tee
@@ -375,20 +354,6 @@ pub struct AgentConfig {
     /// Used as nearai_api_url when creating instances so the agent knows where to authenticate.
     #[serde(default = "default_nearai_api_url")]
     pub nearai_api_url: String,
-    /// Domain where agent instances are accessible (e.g., agents.example.com)
-    /// Used to construct instance_url and dashboard_url as {instance_name}.{agent_domain}
-    /// Configured via AGENT_DOMAIN environment variable. Only used in non-TEE mode.
-    #[serde(default)]
-    pub agent_domain: Option<String>,
-    /// Default CPU allocation for new instances (configurable via INSTANCE_DEFAULT_CPUS)
-    #[serde(default = "default_instance_cpus")]
-    pub instance_default_cpus: String,
-    /// Default memory limit for new instances (configurable via INSTANCE_DEFAULT_MEM_LIMIT)
-    #[serde(default = "default_instance_mem_limit")]
-    pub instance_default_mem_limit: String,
-    /// Default storage size for new instances (configurable via INSTANCE_DEFAULT_STORAGE_SIZE)
-    #[serde(default = "default_instance_storage_size")]
-    pub instance_default_storage_size: String,
     /// Channel-relay URL for Slack integration. When set, provisioned IronClaw
     /// instances receive CHANNEL_RELAY_URL and CHANNEL_RELAY_API_KEY in their
     /// environment. The per-instance OPENCLAW_GATEWAY_TOKEN is used as the
@@ -412,12 +377,6 @@ fn split_csv(value: &str) -> Vec<String> {
 
 impl Default for AgentConfig {
     fn default() -> Self {
-        // Check if non-TEE infrastructure mode is enabled
-        let non_tee_infra = std::env::var("NON_TEE_INFRA")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(false);
-
         // Load managers from both TEE and non-TEE configurations
         // This supports mixed environments with both manager types available
         // Manager type is determined dynamically from URL pattern, not from this setting
@@ -496,17 +455,6 @@ impl Default for AgentConfig {
             nearai_api_url: std::env::var("BACKEND_URL")
                 .map(|url| url.trim_end_matches('/').to_string() + "/v1")
                 .unwrap_or_else(|_| "https://private.near.ai/v1".to_string()),
-            // Only set agent_domain in non-TEE mode (defaults to localhost if not set)
-            agent_domain: if non_tee_infra {
-                Some(std::env::var("AGENT_DOMAIN").unwrap_or_else(|_| "localhost".to_string()))
-            } else {
-                None
-            },
-            // Set instance resource defaults for both modes
-            // Agent API requires these fields in both TEE and non-TEE modes
-            instance_default_cpus: default_instance_cpus(),
-            instance_default_mem_limit: default_instance_mem_limit(),
-            instance_default_storage_size: default_instance_storage_size(),
             channel_relay_url: std::env::var("CHANNEL_RELAY_URL").ok(),
             non_tee_agent_url_pattern: default_non_tee_agent_url(),
         }
@@ -517,7 +465,7 @@ impl Default for AgentConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct InfrastructureConfig {
     /// Use non-TEE infrastructure (false = TEE/cloud, true = non-TEE)
-    /// When true, uses agent_domain for URL construction and instance resource configuration
+    /// When true, expects Agent API to provide instance URLs
     /// When false, expects Agent API to provide URLs (traditional TEE mode)
     pub non_tee_infra: bool,
 }
@@ -883,24 +831,8 @@ mod tests {
 
         let config = AgentConfig::default();
 
-        // In TEE mode, agent_domain should be None
-        assert_eq!(
-            config.agent_domain, None,
-            "TEE mode should have None agent_domain"
-        );
-        // Resource defaults are provided in both modes (Agent API requires them)
-        assert_eq!(
-            config.instance_default_cpus, "1",
-            "TEE mode should have default instance_default_cpus"
-        );
-        assert_eq!(
-            config.instance_default_mem_limit, "4g",
-            "TEE mode should have default instance_default_mem_limit"
-        );
-        assert_eq!(
-            config.instance_default_storage_size, "10G",
-            "TEE mode should have default instance_default_storage_size"
-        );
+        // Config creation should succeed (instance defaults now configured via system_configs)
+        assert!(!config.managers.is_empty());
     }
 
     #[test]
@@ -915,36 +847,14 @@ mod tests {
         // Non-TEE mode: NON_TEE_INFRA=true
         std::env::set_var("NON_TEE_INFRA", "true");
         std::env::set_var("AGENT_DOMAIN", "test.sare.dev");
-        std::env::set_var("INSTANCE_DEFAULT_CPUS", "2");
-        std::env::set_var("INSTANCE_DEFAULT_MEM_LIMIT", "8g");
-        std::env::set_var("INSTANCE_DEFAULT_STORAGE_SIZE", "20G");
 
         let config = AgentConfig::default();
 
-        // In non-TEE mode, these should be set from env
-        assert_eq!(
-            config.agent_domain,
-            Some("test.sare.dev".to_string()),
-            "Non-TEE mode should read agent_domain from env"
-        );
-        assert_eq!(
-            config.instance_default_cpus, "2",
-            "Non-TEE mode should read instance_default_cpus from env"
-        );
-        assert_eq!(
-            config.instance_default_mem_limit, "8g",
-            "Non-TEE mode should read instance_default_mem_limit from env"
-        );
-        assert_eq!(
-            config.instance_default_storage_size, "20G",
-            "Non-TEE mode should read instance_default_storage_size from env"
-        );
+        // Config creation should succeed (instance defaults now configured via system_configs)
+        assert!(!config.managers.is_empty());
 
         std::env::remove_var("NON_TEE_INFRA");
         std::env::remove_var("AGENT_DOMAIN");
-        std::env::remove_var("INSTANCE_DEFAULT_CPUS");
-        std::env::remove_var("INSTANCE_DEFAULT_MEM_LIMIT");
-        std::env::remove_var("INSTANCE_DEFAULT_STORAGE_SIZE");
         std::env::remove_var("AGENT_MANAGER_URLS");
         std::env::remove_var("AGENT_MANAGER_TOKENS");
         std::env::remove_var("AGENT_MANAGER_URLS_TEE");
@@ -969,24 +879,8 @@ mod tests {
 
         let config = AgentConfig::default();
 
-        // Should use hardcoded defaults from default_* functions
-        assert_eq!(
-            config.agent_domain,
-            Some("localhost".to_string()),
-            "Non-TEE mode without AGENT_DOMAIN should default to localhost"
-        );
-        assert_eq!(
-            config.instance_default_cpus, "1",
-            "Non-TEE mode should default to 1 CPU"
-        );
-        assert_eq!(
-            config.instance_default_mem_limit, "4g",
-            "Non-TEE mode should default to 4g memory"
-        );
-        assert_eq!(
-            config.instance_default_storage_size, "10G",
-            "Non-TEE mode should default to 10G storage"
-        );
+        // Config creation should succeed (instance defaults now configured via system_configs)
+        assert!(!config.managers.is_empty());
 
         std::env::remove_var("NON_TEE_INFRA");
         std::env::remove_var("AGENT_MANAGER_URLS");
@@ -1005,20 +899,11 @@ mod tests {
         // Test switching from TEE to non-TEE
         std::env::set_var("NON_TEE_INFRA", "false");
         std::env::set_var("AGENT_DOMAIN", "ignored.dev");
-        let tee_config = AgentConfig::default();
-        assert_eq!(
-            tee_config.agent_domain, None,
-            "TEE mode should ignore AGENT_DOMAIN"
-        );
+        let _tee_config = AgentConfig::default();
 
         // Switch to non-TEE
         std::env::set_var("NON_TEE_INFRA", "true");
-        let non_tee_config = AgentConfig::default();
-        assert_eq!(
-            non_tee_config.agent_domain,
-            Some("ignored.dev".to_string()),
-            "Non-TEE mode should read AGENT_DOMAIN"
-        );
+        let _non_tee_config = AgentConfig::default();
 
         std::env::remove_var("NON_TEE_INFRA");
         std::env::remove_var("AGENT_DOMAIN");
@@ -1061,11 +946,6 @@ mod tests {
         assert!(
             config.infrastructure.non_tee_infra,
             "Config infrastructure should reflect NON_TEE_INFRA setting"
-        );
-        assert_eq!(
-            config.agent.agent_domain,
-            Some("production.dev".to_string()),
-            "Config agent should have agent_domain in non-TEE mode"
         );
 
         std::env::remove_var("NON_TEE_INFRA");

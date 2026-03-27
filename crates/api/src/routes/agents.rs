@@ -177,7 +177,11 @@ pub async fn create_instance(
         .ok()
         .flatten()
         .unwrap_or_default();
-    let non_tee_infra = configs.non_tee_infra.unwrap_or(false);
+    let non_tee_infra = configs
+        .agent_hosting
+        .as_ref()
+        .and_then(|cfg| cfg.new_agent_with_non_tee_infra)
+        .unwrap_or(false);
 
     if wants_stream {
         // SSE streaming response
