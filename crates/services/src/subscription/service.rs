@@ -595,7 +595,10 @@ impl SubscriptionServiceImpl {
             return Ok(Some(updated));
         }
 
-        if current_model.current_period_end != expected_period_end {
+        // Stripe can advance `current_period_end` by the time `invoice.created` fires at
+        // renewal. Treat only backward drift as a terminal mismatch; forward drift should
+        // still allow applying the pending downgrade.
+        if current_model.current_period_end < expected_period_end {
             Self::mark_downgrade_terminal(&mut current_model, DowngradeIntentStatus::Missed);
             let updated = self
                 .subscription_repo
@@ -605,9 +608,7 @@ impl SubscriptionServiceImpl {
             return Ok(Some(updated));
         }
 
-        if current_model.price_id == from_price_id
-            && current_model.current_period_end == expected_period_end
-        {
+        if current_model.price_id == from_price_id {
             let plans = self.get_subscription_plans().await?;
             let target_plan_name =
                 resolve_plan_name_from_config(&pending.provider, &target_price_id, &plans)
