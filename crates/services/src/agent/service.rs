@@ -10,9 +10,9 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use super::ports::{
-    is_valid_service_type, AgentApiInstanceEnrichment, AgentApiKey, AgentInstance, AgentRepository,
-    AgentService, CreateInstanceParams, InstanceBalance, UpgradeAvailability, UsageLogEntry,
-    VALID_SERVICE_TYPES,
+    is_valid_service_type, AgentApiInstanceEnrichment, AgentApiKey, AgentApiKeyAuthError,
+    AgentApiKeyCreationError, AgentInstance, AgentRepository, AgentService, CreateInstanceParams,
+    InstanceBalance, UpgradeAvailability, UsageLogEntry, VALID_SERVICE_TYPES,
 };
 
 /// Maximum size for the Agent API SSE stream buffer (100 KB).
@@ -169,6 +169,78 @@ impl AgentServiceImpl {
     /// Validate API key format (must start with "sk-agent-" and be 41 chars total)
     fn validate_api_key_format(key: &str) -> bool {
         key.starts_with("sk-agent-") && key.len() == 41
+    }
+
+    fn validate_api_key_spend_limit(
+        spend_limit: Option<i64>,
+    ) -> Result<(), AgentApiKeyCreationError> {
+        if matches!(spend_limit, Some(limit) if limit < 0) {
+            return Err(AgentApiKeyCreationError::InvalidSpendLimit);
+        }
+
+        Ok(())
+    }
+
+    async fn ensure_api_key_can_be_used(
+        &self,
+        api_key_info: &AgentApiKey,
+    ) -> Result<(), AgentApiKeyAuthError> {
+        if !api_key_info.is_active {
+            tracing::warn!("API key is not active: api_key_id={}", api_key_info.id);
+            return Err(AgentApiKeyAuthError::Inactive);
+        }
+
+        if let Some(expires_at) = api_key_info.expires_at {
+            if expires_at < Utc::now() {
+                tracing::warn!("API key has expired: api_key_id={}", api_key_info.id);
+                return Err(AgentApiKeyAuthError::Expired);
+            }
+        }
+
+        if let Some(spend_limit) = api_key_info.spend_limit {
+            // `spend_limit` is currently a lifetime cap based on all recorded usage events for
+            // this API key.
+            // This is best-effort enforcement: concurrent requests can both pass this preflight
+            // check before their usage is recorded. A hard cap would need atomic reservation or
+            // enforcement at usage-recording time.
+            let total_spend = self
+                .repository
+                .get_api_key_total_spend(api_key_info.id)
+                .await
+                .map_err(|e| {
+                    tracing::error!(
+                        "Failed to load API key spend total: api_key_id={}, error={}",
+                        api_key_info.id,
+                        e
+                    );
+                    AgentApiKeyAuthError::Internal
+                })?;
+            if total_spend >= spend_limit {
+                tracing::warn!(
+                    "API key spend limit exceeded: api_key_id={}, total_spend={}, spend_limit={}",
+                    api_key_info.id,
+                    total_spend,
+                    spend_limit
+                );
+                return Err(AgentApiKeyAuthError::SpendLimitExceeded);
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn mark_api_key_used(&self, api_key_id: Uuid) -> Result<(), AgentApiKeyAuthError> {
+        self.repository
+            .update_api_key_last_used(api_key_id)
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    "Failed to update last_used_at for api_key_id={}: {}",
+                    api_key_id,
+                    e
+                );
+                AgentApiKeyAuthError::Internal
+            })
     }
 
     /// Call Agent API to create an instance on a specific manager
@@ -1885,7 +1957,7 @@ impl AgentService for AgentServiceImpl {
         name: String,
         spend_limit: Option<i64>,
         expires_at: Option<chrono::DateTime<Utc>>,
-    ) -> anyhow::Result<(AgentApiKey, String)> {
+    ) -> Result<(AgentApiKey, String), AgentApiKeyCreationError> {
         tracing::info!(
             "Creating API key: instance_id={}, user_id={}",
             instance_id,
@@ -1900,12 +1972,14 @@ impl AgentService for AgentServiceImpl {
             .ok_or_else(|| anyhow!("Instance not found"))?;
 
         if instance.user_id != user_id {
-            return Err(anyhow!("Access denied"));
+            return Err(anyhow!("Access denied").into());
         }
 
         if name.is_empty() || name.len() > 255 {
-            return Err(anyhow!("Invalid name format"));
+            return Err(anyhow!("Invalid name format").into());
         }
+
+        Self::validate_api_key_spend_limit(spend_limit)?;
 
         // Generate and hash key
         let plaintext_key = Self::generate_api_key();
@@ -1939,12 +2013,14 @@ impl AgentService for AgentServiceImpl {
         name: String,
         spend_limit: Option<i64>,
         expires_at: Option<DateTime<Utc>>,
-    ) -> anyhow::Result<(AgentApiKey, String)> {
+    ) -> Result<(AgentApiKey, String), AgentApiKeyCreationError> {
         tracing::info!("Creating unbound API key: user_id={}", user_id);
 
         if name.is_empty() || name.len() > 255 {
-            return Err(anyhow!("Invalid name format"));
+            return Err(anyhow!("Invalid name format").into());
         }
+
+        Self::validate_api_key_spend_limit(spend_limit)?;
 
         // Generate and hash key
         let plaintext_key = Self::generate_api_key();
@@ -2143,51 +2219,58 @@ impl AgentService for AgentServiceImpl {
         Ok(())
     }
 
-    async fn validate_and_use_api_key(&self, api_key: &str) -> anyhow::Result<AgentApiKey> {
-        // Validate format
+    async fn authenticate_api_key(
+        &self,
+        api_key: &str,
+    ) -> Result<(AgentInstance, AgentApiKey), AgentApiKeyAuthError> {
         if !Self::validate_api_key_format(api_key) {
             tracing::warn!("Invalid API key format");
-            return Err(anyhow!("Invalid API key format"));
+            return Err(AgentApiKeyAuthError::InvalidFormat);
         }
 
-        // Hash the key
         let key_hash = Self::hash_api_key(api_key);
 
-        // Look up by hash
-        let api_key_info = self
+        let (instance, api_key_info) = self
             .repository
-            .get_api_key_by_hash(&key_hash)
-            .await?
+            .get_instance_by_api_key_hash(&key_hash)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to fetch API key by hash: {}", e);
+                AgentApiKeyAuthError::Internal
+            })?
             .ok_or_else(|| {
-                tracing::warn!("API key not found or invalid");
-                anyhow!("Invalid API key")
+                tracing::warn!("API key not found or inactive");
+                AgentApiKeyAuthError::Invalid
             })?;
 
-        // Check if active
-        if !api_key_info.is_active {
-            tracing::warn!("API key is not active: api_key_id={}", api_key_info.id);
-            return Err(anyhow!("API key is not active"));
+        self.ensure_api_key_can_be_used(&api_key_info).await?;
+
+        if instance.instance_url.is_none() || instance.instance_token.is_none() {
+            tracing::warn!(
+                "Instance not properly configured for authenticated API key: instance_id={}, api_key_id={}",
+                instance.id,
+                api_key_info.id
+            );
+            return Err(AgentApiKeyAuthError::InstanceNotConfigured);
         }
 
-        // Check expiration
-        if let Some(expires_at) = api_key_info.expires_at {
-            if expires_at < Utc::now() {
-                tracing::warn!("API key has expired: api_key_id={}", api_key_info.id);
-                return Err(anyhow!("API key has expired"));
-            }
+        // Preserve request availability for the HTTP auth path: last_used_at tracking is
+        // best-effort and should not block otherwise valid requests on transient write failures.
+        if let Err(err) = self.mark_api_key_used(api_key_info.id).await {
+            tracing::error!(
+                "Failed to mark API key as used: api_key_id={}, error={:?}",
+                api_key_info.id,
+                err
+            );
         }
-
-        // Update last used
-        self.repository
-            .update_api_key_last_used(api_key_info.id)
-            .await?;
 
         tracing::debug!(
-            "API key validated successfully: api_key_id={}",
-            api_key_info.id
+            "API key authenticated successfully: api_key_id={}, instance_id={}",
+            api_key_info.id,
+            instance.id
         );
 
-        Ok(api_key_info)
+        Ok((instance, api_key_info))
     }
 
     async fn get_instance_usage(

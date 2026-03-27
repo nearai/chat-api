@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 use uuid::Uuid;
 
 use crate::UserId;
@@ -78,12 +79,39 @@ pub struct AgentApiKey {
     pub instance_id: Option<Uuid>,
     pub user_id: UserId,
     pub name: String,
+    /// Optional lifetime spend cap in nano-dollars for this key.
     pub spend_limit: Option<i64>,
     pub expires_at: Option<DateTime<Utc>>,
     pub last_used_at: Option<DateTime<Utc>>,
     pub is_active: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum AgentApiKeyAuthError {
+    #[error("Invalid API key format")]
+    InvalidFormat,
+    #[error("Invalid API key")]
+    Invalid,
+    #[error("API key is not active")]
+    Inactive,
+    #[error("API key has expired")]
+    Expired,
+    #[error("API key spend limit exceeded")]
+    SpendLimitExceeded,
+    #[error("Instance not properly configured")]
+    InstanceNotConfigured,
+    #[error("Internal authentication error")]
+    Internal,
+}
+
+#[derive(Debug, Error)]
+pub enum AgentApiKeyCreationError {
+    #[error("Invalid spend limit: must be non-negative when provided")]
+    InvalidSpendLimit,
+    #[error(transparent)]
+    Internal(#[from] anyhow::Error),
 }
 
 /// Usage log entry for tracking API consumption
@@ -235,6 +263,8 @@ pub trait AgentRepository: Send + Sync {
     async fn get_api_key_by_hash(&self, key_hash: &str) -> anyhow::Result<Option<AgentApiKey>>;
 
     async fn get_api_key_by_id(&self, api_key_id: Uuid) -> anyhow::Result<Option<AgentApiKey>>;
+
+    async fn get_api_key_total_spend(&self, api_key_id: Uuid) -> anyhow::Result<i64>;
 
     async fn list_instance_keys(
         &self,
@@ -394,7 +424,7 @@ pub trait AgentService: Send + Sync {
         name: String,
         spend_limit: Option<i64>,
         expires_at: Option<DateTime<Utc>>,
-    ) -> anyhow::Result<(AgentApiKey, String)>;
+    ) -> Result<(AgentApiKey, String), AgentApiKeyCreationError>;
 
     /// Create an unbound API key (pre-deployment key without instance_id)
     /// Used for deploying agents before we know their instance ID.
@@ -406,7 +436,7 @@ pub trait AgentService: Send + Sync {
         name: String,
         spend_limit: Option<i64>,
         expires_at: Option<DateTime<Utc>>,
-    ) -> anyhow::Result<(AgentApiKey, String)>;
+    ) -> Result<(AgentApiKey, String), AgentApiKeyCreationError>;
 
     /// Bind an unbound API key to an instance
     /// Used when an agent registers itself after deployment.
@@ -435,7 +465,12 @@ pub trait AgentService: Send + Sync {
     async fn revoke_api_key(&self, api_key_id: Uuid, user_id: UserId) -> anyhow::Result<()>;
 
     // API key validation and usage
-    async fn validate_and_use_api_key(&self, api_key: &str) -> anyhow::Result<AgentApiKey>;
+    // Centralized service entry point used by HTTP auth middleware so key validation logic
+    // (active/expiry/spend limit) lives in one place.
+    async fn authenticate_api_key(
+        &self,
+        api_key: &str,
+    ) -> Result<(AgentInstance, AgentApiKey), AgentApiKeyAuthError>;
 
     // Usage tracking and balance
     async fn get_instance_usage(
