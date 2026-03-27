@@ -25,14 +25,12 @@ fn get_encryption_key() -> Result<[u8; 32]> {
     Ok(key)
 }
 
-/// Encrypt sensitive data (instance tokens, etc.)
+/// Encrypt sensitive data using an explicit key.
 /// Returns hex-encoded ciphertext with format: "nonce:ciphertext"
-pub fn encrypt(plaintext: &str) -> Result<String> {
-    let key = get_encryption_key()?;
-    let cipher = Aes256Gcm::new_from_slice(&key)
+pub fn encrypt_with_key(key: &[u8; 32], plaintext: &str) -> Result<String> {
+    let cipher = Aes256Gcm::new_from_slice(key)
         .map_err(|e| anyhow::anyhow!("Failed to create cipher: {}", e))?;
 
-    // Generate random nonce (96 bits for GCM)
     let nonce_bytes = rand::random::<[u8; 12]>();
     let nonce = Nonce::from_slice(&nonce_bytes);
 
@@ -40,20 +38,17 @@ pub fn encrypt(plaintext: &str) -> Result<String> {
         .encrypt(nonce, Payload::from(plaintext.as_bytes()))
         .map_err(|e| anyhow::anyhow!("Encryption failed: {}", e))?;
 
-    // Format: nonce:ciphertext (both hex-encoded)
     let nonce_hex = hex::encode(nonce_bytes);
     let ciphertext_hex = hex::encode(ciphertext);
     Ok(format!("{}:{}", nonce_hex, ciphertext_hex))
 }
 
-/// Decrypt sensitive data
+/// Decrypt sensitive data using an explicit key.
 /// Input should be in format: "nonce:ciphertext" (both hex-encoded)
-pub fn decrypt(encrypted: &str) -> Result<String> {
-    let key = get_encryption_key()?;
-    let cipher = Aes256Gcm::new_from_slice(&key)
+pub fn decrypt_with_key(key: &[u8; 32], encrypted: &str) -> Result<String> {
+    let cipher = Aes256Gcm::new_from_slice(key)
         .map_err(|e| anyhow::anyhow!("Failed to create cipher: {}", e))?;
 
-    // Split nonce and ciphertext
     let parts: Vec<&str> = encrypted.split(':').collect();
     if parts.len() != 2 {
         return Err(anyhow::anyhow!("Invalid encrypted format"));
@@ -77,12 +72,65 @@ pub fn decrypt(encrypted: &str) -> Result<String> {
         .map_err(|e| anyhow::anyhow!("Failed to convert decrypted bytes to string: {}", e))
 }
 
+/// Encrypt sensitive data (instance tokens, etc.)
+/// Returns hex-encoded ciphertext with format: "nonce:ciphertext"
+pub fn encrypt(plaintext: &str) -> Result<String> {
+    let key = get_encryption_key()?;
+    encrypt_with_key(&key, plaintext)
+}
+
+/// Decrypt sensitive data
+/// Input should be in format: "nonce:ciphertext" (both hex-encoded)
+pub fn decrypt(encrypted: &str) -> Result<String> {
+    let key = get_encryption_key()?;
+    decrypt_with_key(&key, encrypted)
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    fn test_key() -> [u8; 32] {
+        let mut key = [0u8; 32];
+        key[..16].copy_from_slice(b"0123456789abcdef");
+        key[16..].copy_from_slice(b"fedcba9876543210");
+        key
+    }
 
     #[test]
-    fn test_encrypt_decrypt() {
-        // This test would require ENCRYPTION_KEY to be set
-        // In production, ensure the key is properly configured
+    fn test_encrypt_decrypt_roundtrip() {
+        let key = test_key();
+        let plaintext = "my-secret-instance-token-12345";
+        let encrypted = encrypt_with_key(&key, plaintext).unwrap();
+        let decrypted = decrypt_with_key(&key, &encrypted).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_encrypt_produces_different_ciphertexts() {
+        let key = test_key();
+        let plaintext = "same-plaintext";
+        let encrypted1 = encrypt_with_key(&key, plaintext).unwrap();
+        let encrypted2 = encrypt_with_key(&key, plaintext).unwrap();
+        assert_ne!(encrypted1, encrypted2);
+        assert_eq!(decrypt_with_key(&key, &encrypted1).unwrap(), plaintext);
+        assert_eq!(decrypt_with_key(&key, &encrypted2).unwrap(), plaintext);
+    }
+
+    #[test]
+    fn test_decrypt_with_wrong_key_fails() {
+        let key = test_key();
+        let mut wrong_key = [0u8; 32];
+        wrong_key[0] = 0xFF;
+        let encrypted = encrypt_with_key(&key, "secret").unwrap();
+        assert!(decrypt_with_key(&wrong_key, &encrypted).is_err());
+    }
+
+    #[test]
+    fn test_decrypt_invalid_format_fails() {
+        let key = test_key();
+        assert!(decrypt_with_key(&key, "not-valid-format").is_err());
+        assert!(decrypt_with_key(&key, "aabbcc:").is_err());
+        assert!(decrypt_with_key(&key, ":aabbcc").is_err());
     }
 }

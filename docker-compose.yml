@@ -5,11 +5,11 @@ services:
   postgres:
     image: postgres:16-alpine
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     environment:
       POSTGRES_DB: chat_api
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: dlSHYV705E3MGlOeCVtrbT3I8Xcz3E5E
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -65,7 +65,7 @@ services:
       DATABASE_PORT: 5432
       DATABASE_NAME: chat_api
       DATABASE_USER: postgres
-      DATABASE_PASSWORD: postgres
+      DATABASE_PASSWORD: dlSHYV705E3MGlOeCVtrbT3I8Xcz3E5E
       # Server
       SERVER_HOST: 0.0.0.0
       SERVER_PORT: 8080
