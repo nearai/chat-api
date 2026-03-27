@@ -521,6 +521,26 @@ impl SubscriptionServiceImpl {
         Utc::now() >= check_from
     }
 
+    /// True when Stripe reports an earlier period end than we stored at downgrade scheduling time.
+    /// In that case the pending downgrade intent is considered stale and marked `missed`.
+    fn is_backward_period_drift(
+        current_period_end: chrono::DateTime<Utc>,
+        expected_period_end: chrono::DateTime<Utc>,
+    ) -> bool {
+        current_period_end < expected_period_end
+    }
+
+    /// Eligible to call Stripe to apply the pending downgrade: still on the "from" price and
+    /// period end has reached or passed the expected boundary (including forward drift at renewal).
+    fn should_attempt_pending_downgrade_apply(
+        current_price_id: &str,
+        from_price_id: &str,
+        current_period_end: chrono::DateTime<Utc>,
+        expected_period_end: chrono::DateTime<Utc>,
+    ) -> bool {
+        current_price_id == from_price_id && current_period_end >= expected_period_end
+    }
+
     async fn try_apply_pending_downgrade_in_txn(
         &self,
         txn: &tokio_postgres::Transaction<'_>,
@@ -598,7 +618,7 @@ impl SubscriptionServiceImpl {
         // Stripe can advance `current_period_end` by the time `invoice.created` fires at
         // renewal. Treat only backward drift as a terminal mismatch; forward drift should
         // still allow applying the pending downgrade.
-        if current_model.current_period_end < expected_period_end {
+        if Self::is_backward_period_drift(current_model.current_period_end, expected_period_end) {
             Self::mark_downgrade_terminal(&mut current_model, DowngradeIntentStatus::Missed);
             let updated = self
                 .subscription_repo
@@ -608,7 +628,12 @@ impl SubscriptionServiceImpl {
             return Ok(Some(updated));
         }
 
-        if current_model.price_id == from_price_id {
+        if Self::should_attempt_pending_downgrade_apply(
+            &current_model.price_id,
+            &from_price_id,
+            current_model.current_period_end,
+            expected_period_end,
+        ) {
             let plans = self.get_subscription_plans().await?;
             let target_plan_name =
                 resolve_plan_name_from_config(&pending.provider, &target_price_id, &plans)
@@ -2890,6 +2915,59 @@ mod tests {
         assert_eq!(
             sub.pending_downgrade_status,
             Some(DowngradeIntentStatus::Applied)
+        );
+    }
+
+    #[test]
+    fn test_pending_downgrade_backward_period_drift_marks_missed_predicate() {
+        let expected = Utc::now();
+        assert!(SubscriptionServiceImpl::is_backward_period_drift(
+            expected - Duration::seconds(1),
+            expected
+        ));
+        assert!(!SubscriptionServiceImpl::is_backward_period_drift(
+            expected, expected
+        ));
+        assert!(!SubscriptionServiceImpl::is_backward_period_drift(
+            expected + Duration::seconds(1),
+            expected
+        ));
+    }
+
+    #[test]
+    fn test_pending_downgrade_apply_predicate_allows_forward_period_end_drift() {
+        let expected = Utc::now();
+        assert!(
+            SubscriptionServiceImpl::should_attempt_pending_downgrade_apply(
+                "price_pro",
+                "price_pro",
+                expected + Duration::seconds(1),
+                expected
+            )
+        );
+        assert!(
+            SubscriptionServiceImpl::should_attempt_pending_downgrade_apply(
+                "price_pro",
+                "price_pro",
+                expected,
+                expected
+            )
+        );
+        assert!(
+            !SubscriptionServiceImpl::should_attempt_pending_downgrade_apply(
+                "price_basic",
+                "price_pro",
+                expected + Duration::seconds(1),
+                expected
+            )
+        );
+        assert!(
+            !SubscriptionServiceImpl::should_attempt_pending_downgrade_apply(
+                "price_pro",
+                "price_pro",
+                expected - Duration::seconds(1),
+                expected
+            )
         );
     }
 
