@@ -745,7 +745,9 @@ pub struct SystemConfigsResponse {
     pub default_model: Option<String>,
     /// Rate limit configuration (always present, uses defaults if not set)
     pub rate_limit: RateLimitConfig,
-    /// Subscription plan configurations mapping plan names to provider-specific configs
+    /// Subscription plan configurations mapping plan names to provider-specific configs.
+    /// Note: model access for users without an active subscription falls back to
+    /// `subscription_plans["free"].allowed_models` when that plan key exists.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subscription_plans: Option<HashMap<String, SubscriptionPlanConfig>>,
     /// Maximum number of agent instances per manager (round-robin skips full managers)
@@ -785,7 +787,9 @@ pub struct UpsertSystemConfigsRequest {
     /// Rate limit configuration
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate_limit: Option<RateLimitConfig>,
-    /// Subscription plan configurations (plan name -> config with providers, agent_instances, monthly_credits)
+    /// Subscription plan configurations (plan name -> config with providers, agent_instances, monthly_credits).
+    /// Note: to restrict models for users without an active subscription, configure
+    /// `allowed_models` under the `"free"` plan key.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subscription_plans: Option<HashMap<String, SubscriptionPlanConfig>>,
     /// Maximum number of agent instances per manager (round-robin skips full managers)

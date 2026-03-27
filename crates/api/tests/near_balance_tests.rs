@@ -2,19 +2,30 @@ mod common;
 
 use api::routes::api::USER_BANNED_ERROR_MESSAGE;
 use common::{
-    cleanup_user_subscriptions, create_test_server, create_test_server_and_db,
-    insert_test_subscription, insert_test_subscription_with_price_id, mock_login,
-    set_subscription_plans,
+    cleanup_user_subscriptions, create_test_server_and_db, insert_test_subscription,
+    insert_test_subscription_with_price_id, mock_login, set_subscription_plans,
 };
 use serde_json::json;
 use serial_test::serial;
 use tokio::time::sleep;
 
+async fn clear_near_balance_bans(db: &database::Database) {
+    let client = db.pool().get().await.expect("DB pool");
+    client
+        .execute(
+            "UPDATE user_bans SET revoked_at = NOW() WHERE revoked_at IS NULL AND ban_type = 'near_balance_low'",
+            &[],
+        )
+        .await
+        .ok();
+}
+
 /// When user has no NEAR-linked account, NEAR balance check should be skipped
 /// and /v1/responses should not return 403 due to balance.
 #[tokio::test]
 async fn test_near_balance_skipped_when_no_near_linked_account() {
-    let server = create_test_server().await;
+    let (server, db) = create_test_server_and_db(Default::default()).await;
+    clear_near_balance_bans(&db).await;
 
     // Use mock_login helper which does NOT set oauth_provider, so no NEAR linked account
     let token = mock_login(&server, "no-near@example.com").await;
@@ -26,7 +37,6 @@ async fn test_near_balance_skipped_when_no_near_linked_account() {
             http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
         )
         .json(&json!({
-            "model": "test-model",
             "input": "Hello"
         }))
         .await;
@@ -41,7 +51,8 @@ async fn test_near_balance_skipped_when_no_near_linked_account() {
 /// Integration test that verifies NEAR balance gating for a real NEAR account.
 #[tokio::test]
 async fn test_near_balance_allows_rich_account() {
-    let server = create_test_server().await;
+    let (server, db) = create_test_server_and_db(Default::default()).await;
+    clear_near_balance_bans(&db).await;
 
     // Real account in mainnet
     let rich_account = "near";
@@ -76,7 +87,6 @@ async fn test_near_balance_allows_rich_account() {
             http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
         )
         .json(&json!({
-            "model": "test-model",
             "input": "Hello"
         }))
         .await;
@@ -91,7 +101,8 @@ async fn test_near_balance_allows_rich_account() {
 /// Integration test that verifies NEAR balance gating blocks a "poor" NEAR account.
 #[tokio::test]
 async fn test_near_balance_blocks_poor_account() {
-    let server = create_test_server().await;
+    let (server, db) = create_test_server_and_db(Default::default()).await;
+    clear_near_balance_bans(&db).await;
 
     // Real account in mainnet
     let poor_account = "zero-balance.near";
@@ -126,7 +137,6 @@ async fn test_near_balance_blocks_poor_account() {
             http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
         )
         .json(&json!({
-            "model": "test-model",
             "input": "Hello"
         }))
         .await;
@@ -149,7 +159,6 @@ async fn test_near_balance_blocks_poor_account() {
             http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
         )
         .json(&json!({
-            "model": "test-model",
             "input": "Hello again"
         }))
         .await;
@@ -174,6 +183,7 @@ async fn test_near_balance_blocks_poor_account() {
 #[serial(subscription_tests)]
 async fn test_near_balance_skipped_for_paid_subscription() {
     let (server, db) = create_test_server_and_db(Default::default()).await;
+    clear_near_balance_bans(&db).await;
 
     // Plan with price 999 (paid) - matches insert_test_subscription's price_test_basic
     set_subscription_plans(
@@ -217,7 +227,6 @@ async fn test_near_balance_skipped_for_paid_subscription() {
             http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
         )
         .json(&json!({
-            "model": "test-model",
             "input": "Hello"
         }))
         .await;
@@ -234,6 +243,7 @@ async fn test_near_balance_skipped_for_paid_subscription() {
 #[serial(subscription_tests)]
 async fn test_near_balance_check_applied_for_free_plan_subscription() {
     let (server, db) = create_test_server_and_db(Default::default()).await;
+    clear_near_balance_bans(&db).await;
 
     set_subscription_plans(
         &server,
@@ -277,7 +287,6 @@ async fn test_near_balance_check_applied_for_free_plan_subscription() {
             http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
         )
         .json(&json!({
-            "model": "test-model",
             "input": "Hello"
         }))
         .await;
@@ -297,7 +306,6 @@ async fn test_near_balance_check_applied_for_free_plan_subscription() {
             http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
         )
         .json(&json!({
-            "model": "test-model",
             "input": "Hello again"
         }))
         .await;
@@ -314,6 +322,7 @@ async fn test_near_balance_check_applied_for_free_plan_subscription() {
 #[serial(subscription_tests)]
 async fn test_near_balance_check_applied_for_unknown_price_id() {
     let (server, db) = create_test_server_and_db(Default::default()).await;
+    clear_near_balance_bans(&db).await;
 
     // Config only has "basic" - subscription uses price_unknown which is not in config
     set_subscription_plans(
@@ -357,7 +366,6 @@ async fn test_near_balance_check_applied_for_unknown_price_id() {
             http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
         )
         .json(&json!({
-            "model": "test-model",
             "input": "Hello"
         }))
         .await;
@@ -377,7 +385,6 @@ async fn test_near_balance_check_applied_for_unknown_price_id() {
             http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
         )
         .json(&json!({
-            "model": "test-model",
             "input": "Hello again"
         }))
         .await;

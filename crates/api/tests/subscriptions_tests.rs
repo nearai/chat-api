@@ -1384,7 +1384,8 @@ async fn test_proxy_allows_when_subscription_not_configured() {
     let user_email = "test_proxy_no_plans@example.com";
     let user_token = mock_login(&server, user_email).await;
 
-    // No plans configured - gating is skipped, should not get 403
+    // No plans configured - subscription gating is skipped, so this should not fail with the
+    // subscription-required 403. Omit `model` to avoid unrelated model gating affecting the test.
     let response = server
         .post("/v1/chat/completions")
         .add_header(
@@ -1392,7 +1393,6 @@ async fn test_proxy_allows_when_subscription_not_configured() {
             http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
         )
         .json(&json!({
-            "model": "gpt-4o",
             "messages": [{"role": "user", "content": "Hello"}]
         }))
         .await;
@@ -1408,7 +1408,8 @@ async fn test_proxy_allows_when_subscription_not_configured() {
         Some(SUBSCRIPTION_REQUIRED_ERROR_MESSAGE)
     );
 
-    // Also verify /v1/responses allows when subscription not configured
+    // Also verify /v1/responses allows when subscription not configured.
+    // Omit `model` to avoid unrelated model gating affecting the test.
     let response = server
         .post("/v1/responses")
         .add_header(
@@ -1416,7 +1417,6 @@ async fn test_proxy_allows_when_subscription_not_configured() {
             http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
         )
         .json(&json!({
-            "model": "gpt-4o",
             "input": "Hello"
         }))
         .await;

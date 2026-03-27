@@ -1,0 +1,973 @@
+mod common;
+
+use bytes::Bytes;
+use common::{
+    cleanup_user_subscriptions, create_test_server, create_test_server_and_db,
+    insert_test_subscription_with_price, insert_test_subscription_with_provider_and_price,
+    mock_login, set_subscription_plans, TestServerConfig,
+};
+use serde_json::json;
+use serial_test::serial;
+
+/// Stripe secrets must be non-empty for subscription gating; otherwise requests reach upstream (401).
+fn ensure_stripe_env_for_gating() {
+    std::env::set_var(
+        "STRIPE_SECRET_KEY",
+        std::env::var("STRIPE_SECRET_KEY").unwrap_or_else(|_| "sk_test_dummy".to_string()),
+    );
+    std::env::set_var(
+        "STRIPE_WEBHOOK_SECRET",
+        std::env::var("STRIPE_WEBHOOK_SECRET").unwrap_or_else(|_| "whsec_dummy".to_string()),
+    );
+}
+
+fn create_image_edits_multipart_body(model: &str) -> (String, Bytes) {
+    let boundary = "----nearaiModelAllowlistBoundary";
+    let body = format!(
+        "--{boundary}\r\n\
+Content-Disposition: form-data; name=\"model\"\r\n\r\n\
+{model}\r\n\
+--{boundary}\r\n\
+Content-Disposition: form-data; name=\"n\"\r\n\r\n\
+1\r\n\
+--{boundary}\r\n\
+Content-Disposition: form-data; name=\"image\"; filename=\"input.png\"\r\n\
+Content-Type: image/png\r\n\r\n\
+not-a-real-png\r\n\
+--{boundary}--\r\n"
+    );
+    (
+        format!("multipart/form-data; boundary={boundary}"),
+        Bytes::from(body),
+    )
+}
+
+// ============================================================================
+// Test: Users without subscription (using free plan allowed_models)
+// ============================================================================
+
+#[tokio::test]
+#[serial(model_allowlist_tests)]
+async fn test_no_subscription_free_plan_allowed_models_allows_listed_model() {
+    ensure_stripe_env_for_gating();
+    let server = create_test_server().await;
+
+    // Configure subscription plans with free plan allowed_models (admin auth required)
+    let admin_token = mock_login(&server, "test_admin_model_allowlist@admin.org").await;
+    let response = server
+        .patch("/v1/admin/configs")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", admin_token)).unwrap(),
+        )
+        .json(&json!({
+            "subscription_plans": {
+                "free": {
+                    "providers": { "stripe": { "price_id": "price_free" } },
+                    "allowed_models": ["gpt-3.5-turbo", "gpt-4o-mini"]
+                },
+                "basic": {
+                    "providers": { "stripe": { "price_id": "price_basic" } },
+                    "monthly_tokens": { "max": 1000000 }
+                }
+            }
+        }))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        200,
+        "Failed to configure free plan allowed_models"
+    );
+
+    let user_email = "no_subscription_allowed@example.com";
+    let user_token = mock_login(&server, user_email).await;
+
+    // Try to use a model that's in the free plan allowlist
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", user_token)).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-3.5-turbo",
+            "messages": [{"role": "user", "content": "Hello"}]
+        }))
+        .await;
+
+    // Should NOT be 403 (will likely be 401/502 due to no upstream, but not 403)
+    assert_ne!(
+        response.status_code(),
+        403,
+        "User should be allowed to use model in free plan allowed_models"
+    );
+}
+
+#[tokio::test]
+#[serial(model_allowlist_tests)]
+async fn test_no_subscription_free_plan_allowed_models_blocks_unlisted_model() {
+    ensure_stripe_env_for_gating();
+    let server = create_test_server().await;
+
+    // Configure subscription plans with free plan allowed_models (admin auth required)
+    let admin_token = mock_login(&server, "test_admin_model_blocked@admin.org").await;
+    let response = server
+        .patch("/v1/admin/configs")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", admin_token)).unwrap(),
+        )
+        .json(&json!({
+            "subscription_plans": {
+                "free": {
+                    "providers": { "stripe": { "price_id": "price_free" } },
+                    "allowed_models": ["gpt-3.5-turbo", "gpt-4o-mini"]
+                },
+                "basic": {
+                    "providers": { "stripe": { "price_id": "price_basic" } },
+                    "monthly_tokens": { "max": 1000000 }
+                }
+            }
+        }))
+        .await;
+
+    assert_eq!(response.status_code(), 200);
+
+    let user_email = "no_subscription_blocked@example.com";
+    let user_token = mock_login(&server, user_email).await;
+
+    // Try to use a model NOT in the free plan allowlist
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", user_token)).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}]
+        }))
+        .await;
+
+    // Should be 403 Forbidden
+    assert_eq!(
+        response.status_code(),
+        403,
+        "User without subscription should be blocked from using model not in free plan allowed_models"
+    );
+
+    let body: serde_json::Value = response.json();
+    let error = body
+        .get("error")
+        .and_then(|value| value.as_str())
+        .expect("Error response should contain string error field");
+    assert!(
+        error.contains("gpt-4o") && error.contains("not available"),
+        "Error message should mention the model and that it's not available"
+    );
+}
+
+#[tokio::test]
+#[serial(model_allowlist_tests)]
+async fn test_no_subscription_empty_free_plan_allowed_models_denies_all_models() {
+    ensure_stripe_env_for_gating();
+    let server = create_test_server().await;
+
+    let admin_token = mock_login(&server, "test_admin_empty_free_allowlist@admin.org").await;
+    let response = server
+        .patch("/v1/admin/configs")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", admin_token)).unwrap(),
+        )
+        .json(&json!({
+            "subscription_plans": {
+                "free": {
+                    "providers": { "stripe": { "price_id": "price_free" } },
+                    "allowed_models": []
+                },
+                "basic": {
+                    "providers": { "stripe": { "price_id": "price_basic" } },
+                    "monthly_tokens": { "max": 1000000 }
+                }
+            }
+        }))
+        .await;
+
+    assert_eq!(response.status_code(), 200);
+
+    let user_token = mock_login(&server, "no_subscription_empty_allowlist@example.com").await;
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", user_token)).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-3.5-turbo",
+            "messages": [{"role": "user", "content": "Hello"}]
+        }))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        403,
+        "An empty free plan allowed_models list should deny all models"
+    );
+}
+
+// ============================================================================
+// Test: Users with subscription (using plan-specific allowed_models)
+// ============================================================================
+
+#[tokio::test]
+#[serial(model_allowlist_tests)]
+async fn test_subscription_plan_allowed_models_allows_listed_model() {
+    ensure_stripe_env_for_gating();
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    // Configure subscription plans with plan-specific allowed_models
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": { "stripe": { "price_id": "price_basic" } },
+                "monthly_tokens": { "max": 1000000 },
+                "allowed_models": ["gpt-3.5-turbo", "gpt-4o-mini"]
+            },
+            "pro": {
+                "providers": { "stripe": { "price_id": "price_pro" } },
+                "monthly_tokens": { "max": 10000000 },
+                "allowed_models": ["gpt-3.5-turbo", "gpt-4o-mini", "gpt-4o", "gpt-4-turbo"]
+            }
+        }),
+    )
+    .await;
+
+    let user_email = "basic_plan_allowed@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+    insert_test_subscription_with_price(&server, &db, user_email, "price_basic", false).await;
+    let user_token = mock_login(&server, user_email).await;
+
+    // Try to use a model in the basic plan allowlist
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", user_token)).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-3.5-turbo",
+            "messages": [{"role": "user", "content": "Hello"}]
+        }))
+        .await;
+
+    // Should NOT be 403
+    assert_ne!(
+        response.status_code(),
+        403,
+        "Basic plan user should be allowed to use model in their plan's allowlist"
+    );
+}
+
+#[tokio::test]
+#[serial(model_allowlist_tests)]
+async fn test_subscription_plan_allowed_models_blocks_unlisted_model() {
+    ensure_stripe_env_for_gating();
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    // Configure subscription plans
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": { "stripe": { "price_id": "price_basic" } },
+                "monthly_tokens": { "max": 1000000 },
+                "allowed_models": ["gpt-3.5-turbo", "gpt-4o-mini"]
+            }
+        }),
+    )
+    .await;
+
+    let user_email = "basic_plan_blocked@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+    insert_test_subscription_with_price(&server, &db, user_email, "price_basic", false).await;
+    let user_token = mock_login(&server, user_email).await;
+
+    // Try to use a premium model NOT in the basic plan allowlist
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", user_token)).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}]
+        }))
+        .await;
+
+    // Should be 403 Forbidden
+    assert_eq!(
+        response.status_code(),
+        403,
+        "Basic plan user should be blocked from using premium models"
+    );
+
+    let body: serde_json::Value = response.json();
+    let error = body
+        .get("error")
+        .and_then(|value| value.as_str())
+        .expect("Error response should contain string error field");
+    assert!(
+        error.contains("gpt-4o") && error.contains("not available"),
+        "Error message should mention the model: {}",
+        error
+    );
+}
+
+#[tokio::test]
+#[serial(model_allowlist_tests)]
+async fn test_subscription_plan_empty_allowed_models_denies_all_models() {
+    ensure_stripe_env_for_gating();
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": { "stripe": { "price_id": "price_basic" } },
+                "monthly_tokens": { "max": 1000000 },
+                "allowed_models": []
+            }
+        }),
+    )
+    .await;
+
+    let user_email = "basic_plan_empty_allowlist@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+    insert_test_subscription_with_price(&server, &db, user_email, "price_basic", false).await;
+    let user_token = mock_login(&server, user_email).await;
+
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", user_token)).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-3.5-turbo",
+            "messages": [{"role": "user", "content": "Hello"}]
+        }))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        403,
+        "An empty plan allowed_models list should deny all models"
+    );
+}
+
+#[tokio::test]
+#[serial(model_allowlist_tests)]
+async fn test_pro_plan_allows_more_models() {
+    ensure_stripe_env_for_gating();
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    // Configure subscription plans
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": { "stripe": { "price_id": "price_basic" } },
+                "monthly_tokens": { "max": 1000000 },
+                "allowed_models": ["gpt-3.5-turbo", "gpt-4o-mini"]
+            },
+            "pro": {
+                "providers": { "stripe": { "price_id": "price_pro" } },
+                "monthly_tokens": { "max": 10000000 },
+                "allowed_models": ["gpt-3.5-turbo", "gpt-4o-mini", "gpt-4o", "gpt-4-turbo"]
+            }
+        }),
+    )
+    .await;
+
+    let user_email = "pro_plan_user@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+    insert_test_subscription_with_price(&server, &db, user_email, "price_pro", false).await;
+    let user_token = mock_login(&server, user_email).await;
+
+    // Try to use a premium model (should be allowed for pro)
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", user_token)).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}]
+        }))
+        .await;
+
+    // Should NOT be 403
+    assert_ne!(
+        response.status_code(),
+        403,
+        "Pro plan user should be allowed to use premium models"
+    );
+}
+
+#[tokio::test]
+#[serial(model_allowlist_tests)]
+async fn test_plan_without_allowlist_allows_all_models() {
+    ensure_stripe_env_for_gating();
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    // Configure subscription plan WITHOUT allowed_models (None = allow all)
+    set_subscription_plans(
+        &server,
+        json!({
+            "enterprise": {
+                "providers": { "stripe": { "price_id": "price_enterprise" } },
+                "monthly_tokens": { "max": 100000000 }
+                // No allowed_models field
+            }
+        }),
+    )
+    .await;
+
+    let user_email = "enterprise_plan_user@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+    insert_test_subscription_with_price(&server, &db, user_email, "price_enterprise", false).await;
+    let user_token = mock_login(&server, user_email).await;
+
+    // Try to use any model (should be allowed)
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", user_token)).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}]
+        }))
+        .await;
+
+    // Should NOT be 403
+    assert_ne!(
+        response.status_code(),
+        403,
+        "Enterprise plan user without allowlist should be allowed all models"
+    );
+}
+
+// ============================================================================
+// Test: /v1/responses endpoint (same logic should apply)
+// ============================================================================
+
+#[tokio::test]
+#[serial(model_allowlist_tests)]
+async fn test_responses_endpoint_respects_model_allowlist() {
+    ensure_stripe_env_for_gating();
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    // Configure subscription plans with restricted allowlist
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": { "stripe": { "price_id": "price_basic" } },
+                "monthly_tokens": { "max": 1000000 },
+                "allowed_models": ["gpt-3.5-turbo"]
+            }
+        }),
+    )
+    .await;
+
+    let user_email = "responses_restricted@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+    insert_test_subscription_with_price(&server, &db, user_email, "price_basic", false).await;
+    let user_token = mock_login(&server, user_email).await;
+
+    // Try to use a model NOT in the allowlist via /v1/responses
+    let response = server
+        .post("/v1/responses")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", user_token)).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-4o",
+            "prompt": "Hello"
+        }))
+        .await;
+
+    // Should be 403 Forbidden
+    assert_eq!(
+        response.status_code(),
+        403,
+        "Responses endpoint should also enforce model allowlist"
+    );
+
+    let body: serde_json::Value = response.json();
+    let error = body
+        .get("error")
+        .and_then(|value| value.as_str())
+        .expect("Error response should contain string error field");
+    assert!(
+        error.contains("gpt-4o") && error.contains("not available"),
+        "Error message should mention the model"
+    );
+}
+
+#[tokio::test]
+#[serial(model_allowlist_tests)]
+async fn test_image_generations_endpoint_respects_model_allowlist() {
+    ensure_stripe_env_for_gating();
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": { "stripe": { "price_id": "price_basic" } },
+                "monthly_tokens": { "max": 1000000 },
+                "allowed_models": ["gpt-image-1"]
+            }
+        }),
+    )
+    .await;
+
+    let user_email = "image-generations-restricted@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+    insert_test_subscription_with_price(&server, &db, user_email, "price_basic", false).await;
+    let user_token = mock_login(&server, user_email).await;
+
+    let response = server
+        .post("/v1/images/generations")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", user_token)).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-image-2",
+            "prompt": "A cat with sunglasses"
+        }))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        403,
+        "Image generations should enforce model allowlist"
+    );
+}
+
+#[tokio::test]
+#[serial(model_allowlist_tests)]
+async fn test_image_generations_endpoint_allows_listed_model() {
+    ensure_stripe_env_for_gating();
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": { "stripe": { "price_id": "price_basic" } },
+                "monthly_tokens": { "max": 1000000 },
+                "allowed_models": ["gpt-image-1"]
+            }
+        }),
+    )
+    .await;
+
+    let user_email = "image-generations-allowed@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+    insert_test_subscription_with_price(&server, &db, user_email, "price_basic", false).await;
+    let user_token = mock_login(&server, user_email).await;
+
+    let response = server
+        .post("/v1/images/generations")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", user_token)).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-image-1",
+            "prompt": "A cat with sunglasses"
+        }))
+        .await;
+
+    // Upstream may still fail in tests, but allowlist gate should not deny.
+    assert_ne!(
+        response.status_code(),
+        403,
+        "Image generations should allow models that are in the plan allowlist"
+    );
+}
+
+#[tokio::test]
+#[serial(model_allowlist_tests)]
+async fn test_image_edits_endpoint_respects_model_allowlist_with_multipart() {
+    ensure_stripe_env_for_gating();
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": { "stripe": { "price_id": "price_basic" } },
+                "monthly_tokens": { "max": 1000000 },
+                "allowed_models": ["gpt-image-1"]
+            }
+        }),
+    )
+    .await;
+
+    let user_email = "image-edits-restricted@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+    insert_test_subscription_with_price(&server, &db, user_email, "price_basic", false).await;
+    let user_token = mock_login(&server, user_email).await;
+
+    let (content_type, multipart_body) = create_image_edits_multipart_body("gpt-image-2");
+    let response = server
+        .post("/v1/images/edits")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", user_token)).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_str(&content_type).unwrap(),
+        )
+        .bytes(multipart_body)
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        403,
+        "Image edits should enforce model allowlist for multipart requests"
+    );
+}
+
+#[tokio::test]
+#[serial(model_allowlist_tests)]
+async fn test_image_edits_endpoint_allows_listed_model_with_multipart() {
+    ensure_stripe_env_for_gating();
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": { "stripe": { "price_id": "price_basic" } },
+                "monthly_tokens": { "max": 1000000 },
+                "allowed_models": ["gpt-image-1"]
+            }
+        }),
+    )
+    .await;
+
+    let user_email = "image-edits-allowed@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+    insert_test_subscription_with_price(&server, &db, user_email, "price_basic", false).await;
+    let user_token = mock_login(&server, user_email).await;
+
+    let (content_type, multipart_body) = create_image_edits_multipart_body("gpt-image-1");
+    let response = server
+        .post("/v1/images/edits")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", user_token)).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_str(&content_type).unwrap(),
+        )
+        .bytes(multipart_body)
+        .await;
+
+    // Upstream may still fail in tests, but allowlist gate should not deny.
+    assert_ne!(
+        response.status_code(),
+        403,
+        "Image edits should allow models that are in the plan allowlist"
+    );
+}
+
+#[tokio::test]
+#[serial(model_allowlist_tests)]
+async fn test_model_allowlist_resolves_non_stripe_provider_subscription() {
+    ensure_stripe_env_for_gating();
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "near_basic": {
+                "providers": { "near": { "price_id": "price_near_basic" } },
+                "monthly_tokens": { "max": 1000000 },
+                "allowed_models": ["gpt-4o-mini"]
+            }
+        }),
+    )
+    .await;
+
+    let user_email = "near-provider-user@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+    insert_test_subscription_with_provider_and_price(
+        &server,
+        &db,
+        user_email,
+        "near",
+        "price_near_basic",
+        false,
+    )
+    .await;
+    let user_token = mock_login(&server, user_email).await;
+
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", user_token)).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}]
+        }))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        403,
+        "Non-stripe subscriptions should still resolve their configured plan allowlist"
+    );
+
+    let body: serde_json::Value = response.json();
+    let error = body
+        .get("error")
+        .and_then(|value| value.as_str())
+        .expect("Error response should contain string error field");
+    assert!(
+        error.contains("gpt-4o") && error.contains("near_basic"),
+        "Error message should mention blocked model and resolved plan: {}",
+        error
+    );
+}
+
+#[tokio::test]
+#[serial(model_allowlist_tests)]
+async fn test_model_allowlist_internal_resolution_error_returns_json_500_for_both_endpoints() {
+    ensure_stripe_env_for_gating();
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": { "stripe": { "price_id": "price_basic" } },
+                "monthly_tokens": { "max": 1000000 },
+                "allowed_models": ["gpt-4o-mini"]
+            }
+        }),
+    )
+    .await;
+
+    let user_email = "model-resolution-error@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+    insert_test_subscription_with_price(&server, &db, user_email, "price_unknown", false).await;
+    let user_token = mock_login(&server, user_email).await;
+
+    let chat_response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", user_token)).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}]
+        }))
+        .await;
+
+    assert_eq!(
+        chat_response.status_code(),
+        500,
+        "Chat completions should surface plan resolution failures as internal errors"
+    );
+    let chat_body: serde_json::Value = chat_response.json();
+    assert_eq!(
+        chat_body,
+        json!({ "error": "Failed to validate model access" }),
+        "Chat completions should return the shared JSON error body"
+    );
+
+    let responses_response = server
+        .post("/v1/responses")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", user_token)).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-4o",
+            "prompt": "Hello"
+        }))
+        .await;
+
+    assert_eq!(
+        responses_response.status_code(),
+        500,
+        "Responses should surface plan resolution failures as internal errors"
+    );
+    let responses_body: serde_json::Value = responses_response.json();
+    assert_eq!(
+        responses_body,
+        json!({ "error": "Failed to validate model access" }),
+        "Responses should return the shared JSON error body"
+    );
+}
+
+// ============================================================================
+// Test: Admin config endpoint returns allowed_models fields
+// ============================================================================
+
+#[tokio::test]
+#[serial(model_allowlist_tests)]
+async fn test_admin_config_returns_allowed_models_fields() {
+    let server = create_test_server().await;
+
+    let admin_token = mock_login(&server, "test_admin_config_return@admin.org").await;
+
+    // Configure plan-specific allowed_models including free plan fallback
+    let response = server
+        .patch("/v1/admin/configs")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", admin_token)).unwrap(),
+        )
+        .json(&json!({
+            "subscription_plans": {
+                "free": {
+                    "providers": { "stripe": { "price_id": "price_free" } },
+                    "allowed_models": ["gpt-3.5-turbo", "gpt-4o-mini"]
+                },
+                "basic": {
+                    "providers": { "stripe": { "price_id": "price_basic" } },
+                    "monthly_tokens": { "max": 1000000 },
+                    "allowed_models": ["gpt-3.5-turbo"]
+                },
+                "pro": {
+                    "providers": { "stripe": { "price_id": "price_pro" } },
+                    "monthly_tokens": { "max": 10000000 }
+                    // No allowed_models
+                }
+            }
+        }))
+        .await;
+
+    assert_eq!(response.status_code(), 200);
+
+    // Retrieve the config
+    let response = server
+        .get("/v1/admin/configs")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", admin_token)).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 200);
+
+    let body: serde_json::Value = response.json();
+
+    // Verify plan-specific allowed_models
+    assert_eq!(
+        body["subscription_plans"]["free"]["allowed_models"],
+        json!(["gpt-3.5-turbo", "gpt-4o-mini"]),
+        "free plan allowed_models should be returned"
+    );
+    assert_eq!(
+        body["subscription_plans"]["basic"]["allowed_models"],
+        json!(["gpt-3.5-turbo"]),
+        "basic plan allowed_models should be returned"
+    );
+
+    // Verify pro plan has no allowed_models field (or null)
+    assert!(
+        body["subscription_plans"]["pro"]["allowed_models"].is_null()
+            || !body["subscription_plans"]["pro"]
+                .as_object()
+                .unwrap()
+                .contains_key("allowed_models"),
+        "pro plan should not have allowed_models field"
+    );
+}
+
+// ============================================================================
+// Test: GET /v1/subscriptions/plans includes allowed_models
+// ============================================================================
+
+#[tokio::test]
+#[serial(model_allowlist_tests)]
+async fn test_get_subscription_plans_includes_allowed_models() {
+    ensure_stripe_env_for_gating();
+    let server = create_test_server().await;
+
+    // Configure subscription plans with allowed_models
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": { "stripe": { "price_id": "price_basic" } },
+                "monthly_tokens": { "max": 1000000 },
+                "allowed_models": ["gpt-3.5-turbo", "gpt-4o-mini"]
+            },
+            "pro": {
+                "providers": { "stripe": { "price_id": "price_pro" } },
+                "monthly_tokens": { "max": 10000000 }
+                // No allowed_models
+            }
+        }),
+    )
+    .await;
+
+    let response = server.get("/v1/subscriptions/plans").await;
+
+    assert_eq!(
+        response.status_code(),
+        200,
+        "Should return 200 when plans are configured"
+    );
+
+    let body: serde_json::Value = response.json();
+    let plans_array = body["plans"]
+        .as_array()
+        .unwrap_or_else(|| panic!("Response should have 'plans' array, got: {:?}", body));
+
+    // Find basic plan
+    let basic_plan = plans_array
+        .iter()
+        .find(|p| p["name"] == "basic")
+        .expect("Should have basic plan");
+
+    assert_eq!(
+        basic_plan["allowed_models"],
+        json!(["gpt-3.5-turbo", "gpt-4o-mini"]),
+        "basic plan should include allowed_models"
+    );
+
+    // Find pro plan
+    let pro_plan = plans_array
+        .iter()
+        .find(|p| p["name"] == "pro")
+        .expect("Should have pro plan");
+
+    assert!(
+        pro_plan["allowed_models"].is_null()
+            || !pro_plan.as_object().unwrap().contains_key("allowed_models"),
+        "pro plan should not have allowed_models field or it should be null"
+    );
+}
