@@ -567,6 +567,49 @@ async fn test_image_generations_endpoint_respects_model_allowlist() {
 
 #[tokio::test]
 #[serial(model_allowlist_tests)]
+async fn test_image_generations_endpoint_allows_listed_model() {
+    ensure_stripe_env_for_gating();
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": { "stripe": { "price_id": "price_basic" } },
+                "monthly_tokens": { "max": 1000000 },
+                "allowed_models": ["gpt-image-1"]
+            }
+        }),
+    )
+    .await;
+
+    let user_email = "image-generations-allowed@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+    insert_test_subscription_with_price(&server, &db, user_email, "price_basic", false).await;
+    let user_token = mock_login(&server, user_email).await;
+
+    let response = server
+        .post("/v1/images/generations")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", user_token)).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-image-1",
+            "prompt": "A cat with sunglasses"
+        }))
+        .await;
+
+    // Upstream may still fail in tests, but allowlist gate should not deny.
+    assert_ne!(
+        response.status_code(),
+        403,
+        "Image generations should allow models that are in the plan allowlist"
+    );
+}
+
+#[tokio::test]
+#[serial(model_allowlist_tests)]
 async fn test_image_edits_endpoint_respects_model_allowlist_with_multipart() {
     ensure_stripe_env_for_gating();
     let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
@@ -606,6 +649,51 @@ async fn test_image_edits_endpoint_respects_model_allowlist_with_multipart() {
         response.status_code(),
         403,
         "Image edits should enforce model allowlist for multipart requests"
+    );
+}
+
+#[tokio::test]
+#[serial(model_allowlist_tests)]
+async fn test_image_edits_endpoint_allows_listed_model_with_multipart() {
+    ensure_stripe_env_for_gating();
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": { "stripe": { "price_id": "price_basic" } },
+                "monthly_tokens": { "max": 1000000 },
+                "allowed_models": ["gpt-image-1"]
+            }
+        }),
+    )
+    .await;
+
+    let user_email = "image-edits-allowed@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+    insert_test_subscription_with_price(&server, &db, user_email, "price_basic", false).await;
+    let user_token = mock_login(&server, user_email).await;
+
+    let (content_type, multipart_body) = create_image_edits_multipart_body("gpt-image-1");
+    let response = server
+        .post("/v1/images/edits")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {}", user_token)).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_str(&content_type).unwrap(),
+        )
+        .bytes(multipart_body)
+        .await;
+
+    // Upstream may still fail in tests, but allowlist gate should not deny.
+    assert_ne!(
+        response.status_code(),
+        403,
+        "Image edits should allow models that are in the plan allowlist"
     );
 }
 
