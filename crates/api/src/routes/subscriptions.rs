@@ -317,7 +317,7 @@ pub async fn resume_subscription(
     request_body = ChangePlanRequest,
     responses(
         (status = 200, description = "Plan changed successfully", body = ChangePlanResponse),
-        (status = 400, description = "Invalid plan or instance limit exceeded", body = crate::error::ApiErrorResponse),
+        (status = 400, description = "Invalid plan, instance limit exceeded, or subscription is scheduled for cancellation", body = crate::error::ApiErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 404, description = "No active subscription found", body = crate::error::ApiErrorResponse),
         (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse),
