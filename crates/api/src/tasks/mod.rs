@@ -17,13 +17,24 @@ use tokio::{
 
 const SQS_RECEIVE_RETRY_DELAY: Duration = Duration::from_secs(5);
 
-fn is_conflict_error<E>(err: &SdkError<E>) -> bool
-where
-    E: std::error::Error + aws_sdk_scheduler::error::ProvideErrorMetadata,
-{
-    err.as_service_error()
-        .and_then(|service_err| service_err.code())
-        == Some("ConflictException")
+struct ScheduleRequestParts {
+    target: Target,
+    expression: String,
+    flex_window: FlexibleTimeWindow,
+    delete_after_completion: bool,
+}
+
+enum CreateScheduleOutcome {
+    Created,
+    Conflict(Box<ScheduleRequestParts>),
+}
+
+fn is_conflict_error(err: &SdkError<CreateScheduleError>) -> bool {
+    matches!(
+        err,
+        SdkError::ServiceError(service_error)
+            if matches!(service_error.err(), CreateScheduleError::ConflictException(_))
+    )
 }
 
 #[derive(Clone)]
@@ -61,31 +72,62 @@ impl AwsTaskScheduler {
             .map_err(|e| anyhow!("failed to build scheduler target: {}", e))
     }
 
-    pub async fn create_task_if_absent(&self, request: ScheduledTaskRequest) -> anyhow::Result<()> {
-        request.validate()?;
-
-        let target = self.build_target(&request)?;
+    fn prepare_schedule_request_parts(
+        &self,
+        request: &ScheduledTaskRequest,
+    ) -> anyhow::Result<ScheduleRequestParts> {
+        let target = self.build_target(request)?;
         let expression = request.schedule.to_aws_expression();
         let flex_window = FlexibleTimeWindow::builder()
             .mode(FlexibleTimeWindowMode::Off)
             .build()
             .map_err(|e| anyhow!("failed to build flexible time window: {}", e))?;
 
+        Ok(ScheduleRequestParts {
+            target,
+            expression,
+            flex_window,
+            delete_after_completion: matches!(request.schedule, ScheduleSpec::At(_)),
+        })
+    }
+
+    async fn try_create_schedule(
+        &self,
+        request: &ScheduledTaskRequest,
+    ) -> anyhow::Result<CreateScheduleOutcome> {
+        let parts = self.prepare_schedule_request_parts(request)?;
+
         let mut create = self
             .client
             .create_schedule()
             .name(request.task_id.as_str())
             .group_name(&self.scheduler_group)
-            .schedule_expression(&expression)
-            .flexible_time_window(flex_window)
-            .target(target);
+            .schedule_expression(&parts.expression)
+            .flexible_time_window(parts.flex_window.clone())
+            .target(parts.target.clone());
 
-        if matches!(request.schedule, ScheduleSpec::At(_)) {
+        if parts.delete_after_completion {
             create = create.action_after_completion(ActionAfterCompletion::Delete);
         }
 
         match create.send().await {
-            Ok(_) => {
+            Ok(_) => Ok(CreateScheduleOutcome::Created),
+            Err(err) if is_conflict_error(&err) => {
+                Ok(CreateScheduleOutcome::Conflict(Box::new(parts)))
+            }
+            Err(err) => Err(anyhow!(
+                "failed to create schedule for task_id={}: {}",
+                request.task_id,
+                err
+            )),
+        }
+    }
+
+    pub async fn create_task_if_absent(&self, request: ScheduledTaskRequest) -> anyhow::Result<()> {
+        request.validate()?;
+
+        match self.try_create_schedule(&request).await? {
+            CreateScheduleOutcome::Created => {
                 tracing::info!(
                     "created schedule task_id={} group={}",
                     request.task_id,
@@ -93,7 +135,7 @@ impl AwsTaskScheduler {
                 );
                 Ok(())
             }
-            Err(err) if is_conflict_error::<CreateScheduleError>(&err) => {
+            CreateScheduleOutcome::Conflict(_) => {
                 tracing::info!(
                     "schedule already exists, skipping create task_id={} group={}",
                     request.task_id,
@@ -101,11 +143,6 @@ impl AwsTaskScheduler {
                 );
                 Ok(())
             }
-            Err(err) => Err(anyhow!(
-                "failed to create schedule for task_id={}: {}",
-                request.task_id,
-                err
-            )),
         }
     }
 }
@@ -115,39 +152,19 @@ impl TaskScheduler for AwsTaskScheduler {
     async fn upsert_task(&self, request: ScheduledTaskRequest) -> anyhow::Result<()> {
         request.validate()?;
 
-        let target = self.build_target(&request)?;
-        let expression = request.schedule.to_aws_expression();
-        let flex_window = FlexibleTimeWindow::builder()
-            .mode(FlexibleTimeWindowMode::Off)
-            .build()
-            .map_err(|e| anyhow!("failed to build flexible time window: {}", e))?;
-
-        let mut create = self
-            .client
-            .create_schedule()
-            .name(request.task_id.as_str())
-            .group_name(&self.scheduler_group)
-            .schedule_expression(&expression)
-            .flexible_time_window(flex_window.clone())
-            .target(target.clone());
-
-        if matches!(request.schedule, ScheduleSpec::At(_)) {
-            create = create.action_after_completion(ActionAfterCompletion::Delete);
-        }
-
-        match create.send().await {
-            Ok(_) => Ok(()),
-            Err(err) if is_conflict_error::<CreateScheduleError>(&err) => {
+        match self.try_create_schedule(&request).await? {
+            CreateScheduleOutcome::Created => Ok(()),
+            CreateScheduleOutcome::Conflict(parts) => {
                 let mut update = self
                     .client
                     .update_schedule()
                     .name(request.task_id.as_str())
                     .group_name(&self.scheduler_group)
-                    .schedule_expression(&expression)
-                    .flexible_time_window(flex_window)
-                    .target(target);
+                    .schedule_expression(&parts.expression)
+                    .flexible_time_window(parts.flex_window)
+                    .target(parts.target);
 
-                if matches!(request.schedule, ScheduleSpec::At(_)) {
+                if parts.delete_after_completion {
                     update = update.action_after_completion(ActionAfterCompletion::Delete);
                 }
 
@@ -160,11 +177,6 @@ impl TaskScheduler for AwsTaskScheduler {
                 })?;
                 Ok(())
             }
-            Err(err) => Err(anyhow!(
-                "failed to create schedule for task_id={}: {:?}",
-                request.task_id,
-                err
-            )),
         }
     }
 
