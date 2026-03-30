@@ -4,6 +4,7 @@ use api::routes::api::{
     AUTO_ROUTE_MAX_TOKENS, AUTO_ROUTE_MODEL, AUTO_ROUTE_TEMPERATURE, AUTO_ROUTE_TOP_P,
     USER_BANNED_ERROR_MESSAGE,
 };
+use axum_test::TestServer;
 use chrono::Duration;
 use common::{
     clear_subscription_plans, create_test_server, create_test_server_and_db,
@@ -24,6 +25,39 @@ async fn create_rate_limited_test_server() -> axum_test::TestServer {
         ..Default::default()
     })
     .await
+}
+
+async fn wait_for_near_balance_ban_on_chat_completions(
+    server: &TestServer,
+    token: &str,
+    request_body: serde_json::Value,
+) -> axum_test::TestResponse {
+    let mut last_response = None;
+
+    for _ in 0..10 {
+        sleep(std::time::Duration::from_millis(300)).await;
+
+        let response = server
+            .post("/v1/chat/completions")
+            .add_header(
+                http::HeaderName::from_static("authorization"),
+                http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
+            )
+            .json(&request_body)
+            .await;
+
+        if response.status_code() == 403 {
+            return response;
+        }
+
+        last_response = Some(response);
+    }
+
+    let response = last_response.expect("should have attempted at least one follow-up request");
+    panic!(
+        "expected NEAR balance ban to return 403 for chat completions, got {} after waiting for async check",
+        response.status_code()
+    );
 }
 
 /// Test rate limiting for /v1/chat/completions endpoint
@@ -445,21 +479,15 @@ async fn test_chat_completions_near_balance_blocks_poor_account() {
         "First request from poor NEAR account should not be synchronously blocked"
     );
 
-    // Wait long enough to avoid being affected by per-user rate limit (1 req/sec)
-    sleep(std::time::Duration::from_millis(1100)).await;
-
-    // Second call should be blocked by blacklist (user ban), after async NEAR check has run
-    let second_response = server
-        .post("/v1/chat/completions")
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
-        )
-        .json(&json!({
+    let second_response = wait_for_near_balance_ban_on_chat_completions(
+        &server,
+        token,
+        json!({
             "model": "gpt-4o",
             "messages": [{"role": "user", "content": "Hello again"}]
-        }))
-        .await;
+        }),
+    )
+    .await;
 
     assert_eq!(
         second_response.status_code(),

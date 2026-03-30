@@ -182,20 +182,14 @@ async fn test_near_balance_blocks_poor_account() {
         "First request from poor NEAR account should not be synchronously blocked"
     );
 
-    // Wait long enough to avoid being affected by per-user rate limit (1 req/sec)
-    sleep(std::time::Duration::from_millis(1100)).await;
-
-    // Second call should be blocked by blacklist (user ban), after async NEAR check has run
-    let second_response = server
-        .post("/v1/responses")
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
-        )
-        .json(&json!({
+    let second_response = wait_for_near_balance_ban(
+        &server,
+        token,
+        json!({
             "input": "Hello again"
-        }))
-        .await;
+        }),
+    )
+    .await;
 
     assert_eq!(
         second_response.status_code(),
