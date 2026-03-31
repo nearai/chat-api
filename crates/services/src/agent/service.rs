@@ -26,13 +26,14 @@ const DEFAULT_SERVICE_TYPE: &str = "openclaw";
 // are struct fields accessible via self.instance_default_cpus, etc.
 
 /// Map service type to worker image
-fn get_image_for_service_type(service_type: &str) -> &'static str {
+fn get_image_for_service_type(service_type: &str) -> String {
     match service_type {
-        "ironclaw" => "ironclaw-nearai-worker:local",
-        "ironclaw-dind" => "docker.io/nearaidev/ironclaw-dind:dev",
-        "openclaw" => "openclaw-nearai-worker:local",
-        "openclaw-dind" => "docker.io/nearaidev/openclaw-dind:2026.2.22",
-        _ => "openclaw-nearai-worker:local", // default to openclaw
+        "ironclaw" => "ironclaw-nearai-worker:local".to_string(),
+        "ironclaw-dind" => std::env::var("IRONCLAW_DIND_IMAGE")
+            .unwrap_or_else(|_| "docker.io/nearaidev/ironclaw-dind:latest".to_string()),
+        "openclaw" => "openclaw-nearai-worker:local".to_string(),
+        "openclaw-dind" => "docker.io/nearaidev/openclaw-dind:2026.2.22".to_string(),
+        _ => "openclaw-nearai-worker:local".to_string(), // default to openclaw
     }
 }
 
@@ -508,6 +509,45 @@ impl AgentServiceImpl {
             })
     }
 
+    /// Try to login, or if user not found (404), register and return session token.
+    /// This avoids making redundant API calls and handles both existing and new users.
+    async fn compose_api_get_session_token(
+        &self,
+        manager: &AgentManager,
+        auth_secret: &str,
+        backup_passphrase: &str,
+        user_id: UserId,
+    ) -> anyhow::Result<String> {
+        // Try login first - if user is already registered on this manager, login succeeds
+        match self
+            .compose_api_passkey_login(manager, auth_secret, backup_passphrase)
+            .await
+        {
+            Ok(token) => {
+                tracing::info!(
+                    "User already registered on compose-api, login successful: user_id={}",
+                    user_id
+                );
+                Ok(token)
+            }
+            Err(e) => {
+                let error_str = e.to_string();
+                if error_str.contains("404") {
+                    tracing::info!(
+                        "User not found on compose-api, registering: user_id={}",
+                        user_id
+                    );
+                    // Register credentials with compose-api for this manager (returns session token)
+                    self.compose_api_passkey_register(manager, auth_secret, backup_passphrase)
+                        .await
+                } else {
+                    // Some other error, not a "user not found" - propagate it
+                    Err(e)
+                }
+            }
+        }
+    }
+
     /// Call compose-api /auth/proxy-session to set up gateway cookie
     async fn compose_api_proxy_session(
         &self,
@@ -713,7 +753,7 @@ impl AgentServiceImpl {
         } else if manager.get_is_non_tee() {
             // Non-TEE manager requires image; use normalized service_type to map to correct image
             // e.g., user selects "ironclaw" → normalize to "ironclaw-dind" → map to ghcr.io/nearai/ironclaw-dind:0.21.0
-            Some(get_image_for_service_type(&service_type_for_api).to_string())
+            Some(get_image_for_service_type(&service_type_for_api))
         } else {
             // TEE manager: image is optional, let Agent API determine it
             None
@@ -973,7 +1013,7 @@ impl AgentServiceImpl {
         } else if manager.get_is_non_tee() {
             // Non-TEE manager requires image; use normalized service_type to map to correct image
             // e.g., user selects "ironclaw" → normalize to "ironclaw-dind" → map to ghcr.io/nearai/ironclaw-dind:0.21.0
-            Some(get_image_for_service_type(&service_type_for_api).to_string())
+            Some(get_image_for_service_type(&service_type_for_api))
         } else {
             // TEE manager: image is optional, let Agent API determine it
             None
@@ -1807,48 +1847,9 @@ impl AgentService for AgentServiceImpl {
                 }
             };
 
-            // Try to login first - if user is already registered on this manager, login succeeds
-            // If user not found (404), register them and then login
-            match self
-                .compose_api_passkey_login(&manager, &auth_secret, &backup_passphrase)
-                .await
-            {
-                Ok(token) => {
-                    tracing::info!(
-                        "User already registered on compose-api, login successful: user_id={}",
-                        user_id
-                    );
-                    token
-                }
-                Err(e) => {
-                    let error_str = e.to_string();
-                    if error_str.contains("404") && error_str.contains("User not found") {
-                        tracing::info!(
-                            "User not found on compose-api, registering: user_id={}",
-                            user_id
-                        );
-                        // Register credentials with compose-api for this manager
-                        self.compose_api_passkey_register(
-                            &manager,
-                            &auth_secret,
-                            &backup_passphrase,
-                        )
-                        .await?;
-
-                        tracing::info!(
-                            "Passkey credentials registered with compose-api: user_id={}",
-                            user_id
-                        );
-
-                        // Now login after registration
-                        self.compose_api_passkey_login(&manager, &auth_secret, &backup_passphrase)
-                            .await?
-                    } else {
-                        // Some other error, not a "user not found" - propagate it
-                        return Err(e);
-                    }
-                }
-            }
+            // Get session token: try login first, register on 404
+            self.compose_api_get_session_token(&manager, &auth_secret, &backup_passphrase, user_id)
+                .await?
         };
 
         let key_name = params
@@ -3361,44 +3362,10 @@ impl AgentService for AgentServiceImpl {
                 }
             };
 
-        // Try to login first - if user is already registered on this manager, login succeeds
-        // If user not found (404), register them and then login
-        let session_token = match self
-            .compose_api_passkey_login(manager, &auth_secret, &backup_passphrase)
-            .await
-        {
-            Ok(token) => {
-                tracing::info!(
-                    "User already registered on compose-api, login successful: user_id={}",
-                    user_id
-                );
-                token
-            }
-            Err(e) => {
-                let error_str = e.to_string();
-                if error_str.contains("404") && error_str.contains("User not found") {
-                    tracing::info!(
-                        "User not found on compose-api, registering: user_id={}",
-                        user_id
-                    );
-                    // Register credentials with compose-api for this manager
-                    self.compose_api_passkey_register(manager, &auth_secret, &backup_passphrase)
-                        .await?;
-
-                    tracing::info!(
-                        "User passkey credentials registered with compose-api: user_id={}",
-                        user_id
-                    );
-
-                    // Now login after registration
-                    self.compose_api_passkey_login(manager, &auth_secret, &backup_passphrase)
-                        .await?
-                } else {
-                    // Some other error, not a "user not found" - propagate it
-                    return Err(e);
-                }
-            }
-        };
+        // Get session token: try login first, register on 404
+        let session_token = self
+            .compose_api_get_session_token(manager, &auth_secret, &backup_passphrase, user_id)
+            .await?;
 
         // Set up gateway cookie and get Set-Cookie header
         let set_cookie = self
@@ -5666,9 +5633,12 @@ mod tests {
             get_image_for_service_type("ironclaw"),
             "ironclaw-nearai-worker:local"
         );
-        assert_eq!(
-            get_image_for_service_type("ironclaw-dind"),
-            "ghcr.io/nearai/ironclaw-dind:0.21.0"
+        // ironclaw-dind uses IRONCLAW_DIND_IMAGE env var, defaults to :latest
+        let ironclaw_dind_image = get_image_for_service_type("ironclaw-dind");
+        assert!(
+            ironclaw_dind_image.contains("docker.io/nearaidev/ironclaw-dind:"),
+            "Expected docker.io/nearaidev/ironclaw-dind image, got {}",
+            ironclaw_dind_image
         );
         assert_eq!(
             get_image_for_service_type("openclaw"),
@@ -6042,9 +6012,12 @@ mod tests {
             get_image_for_service_type("ironclaw"),
             "ironclaw-nearai-worker:local"
         );
-        assert_eq!(
-            get_image_for_service_type("ironclaw-dind"),
-            "ghcr.io/nearai/ironclaw-dind:0.21.0"
+        // ironclaw-dind uses IRONCLAW_DIND_IMAGE env var, defaults to :latest
+        let ironclaw_dind_image = get_image_for_service_type("ironclaw-dind");
+        assert!(
+            ironclaw_dind_image.contains("docker.io/nearaidev/ironclaw-dind:"),
+            "Expected docker.io/nearaidev/ironclaw-dind image, got {}",
+            ironclaw_dind_image
         );
         assert_eq!(
             get_image_for_service_type("openclaw"),
