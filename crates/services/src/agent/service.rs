@@ -1546,9 +1546,10 @@ impl AgentService for AgentServiceImpl {
             .map(|n| format!("instance-{}", n))
             .unwrap_or_else(|| "instance".to_string());
         let default_expiry = Some(Utc::now() + Duration::days(90));
-        let (_api_key, plaintext_key) = self
+        let (api_key, plaintext_key) = self
             .create_unbound_api_key(user_id, key_name, None, default_expiry)
             .await?;
+        let api_key_id = api_key.id;
 
         // Validate service type
         if let Some(ref st) = &params.service_type {
@@ -1599,7 +1600,8 @@ impl AgentService for AgentServiceImpl {
                 match event_result {
                     Ok(event) => {
                         // Check if this is the instance creation event (contains instance data)
-                        if !instance_saved {
+                        let has_instance_data = event.get("instance").is_some();
+                        if !instance_saved && has_instance_data {
                             if let Some(instance_data) = event.get("instance") {
                                 // Extract instance information and save to DB
                                 if let Ok(instance_name) = instance_data
@@ -1624,7 +1626,7 @@ impl AgentService for AgentServiceImpl {
                                         format!("agent-{}-{}", instance_name, Uuid::new_v4());
 
                                     // Save to database
-                                    if let Ok(_instance) = repository
+                                    match repository
                                         .create_instance(CreateInstanceParams {
                                             user_id,
                                             instance_id: instance_id.clone(),
@@ -1638,14 +1640,83 @@ impl AgentService for AgentServiceImpl {
                                         })
                                         .await
                                     {
-                                        instance_saved = true;
+                                        Ok(instance) => {
+                                            // Bind the unbound API key to this instance
+                                            // Validate before binding: key exists, is unbound, and belongs to user
+                                            let bind_result = async {
+                                                let api_key = repository
+                                                    .get_api_key_by_id(api_key_id)
+                                                    .await?
+                                                    .ok_or_else(|| anyhow!("API key not found"))?;
+
+                                                if api_key.user_id != user_id {
+                                                    return Err(anyhow!(
+                                                        "API key does not belong to user"
+                                                    ));
+                                                }
+
+                                                if api_key.instance_id.is_some() {
+                                                    return Err(anyhow!(
+                                                        "API key is already bound"
+                                                    ));
+                                                }
+
+                                                // Verify instance belongs to user
+                                                let db_instance = repository
+                                                    .get_instance(instance.id)
+                                                    .await?
+                                                    .ok_or_else(|| {
+                                                        anyhow!("Instance not found in database")
+                                                    })?;
+
+                                                if db_instance.user_id != user_id {
+                                                    return Err(anyhow!(
+                                                        "Instance does not belong to user"
+                                                    ));
+                                                }
+
+                                                // Now safe to bind
+                                                repository
+                                                    .bind_api_key_to_instance(
+                                                        api_key_id,
+                                                        instance.id,
+                                                    )
+                                                    .await?;
+
+                                                anyhow::Ok(())
+                                            }
+                                            .await;
+
+                                            if let Err(e) = bind_result {
+                                                let err_msg = format!(
+                                                    "Failed to bind API key to instance: \
+                                                     instance_id={}, api_key_id={}, error={}",
+                                                    instance.id, api_key_id, e
+                                                );
+                                                tracing::error!("{}", err_msg);
+                                                let _ = tx.send(Err(anyhow!(err_msg))).await;
+                                                break;
+                                            }
+                                            instance_saved = true;
+                                            // Forward event to caller
+                                            let _ = tx.send(Ok(event)).await;
+                                        }
+                                        Err(e) => {
+                                            let err_msg = format!(
+                                                "Failed to create instance in database: {}",
+                                                e
+                                            );
+                                            tracing::error!("{}", err_msg);
+                                            let _ = tx.send(Err(anyhow!(err_msg))).await;
+                                            break;
+                                        }
                                     }
                                 }
                             }
+                        } else if !has_instance_data {
+                            // Forward non-instance events to caller
+                            let _ = tx.send(Ok(event)).await;
                         }
-
-                        // Forward event to caller
-                        let _ = tx.send(Ok(event)).await;
                     }
                     Err(e) => {
                         tracing::error!("Error in Agent API streaming: {}", e);
