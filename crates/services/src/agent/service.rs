@@ -29,7 +29,7 @@ const DEFAULT_SERVICE_TYPE: &str = "openclaw";
 fn get_image_for_service_type(service_type: &str) -> &'static str {
     match service_type {
         "ironclaw" => "ironclaw-nearai-worker:local",
-        "ironclaw-dind" => "ghcr.io/nearai/ironclaw-dind:0.21.0",
+        "ironclaw-dind" => "docker.io/nearaidev/ironclaw-dind:dev",
         "openclaw" => "openclaw-nearai-worker:local",
         "openclaw-dind" => "docker.io/nearaidev/openclaw-dind:2026.2.22",
         _ => "openclaw-nearai-worker:local", // default to openclaw
@@ -1795,15 +1795,6 @@ impl AgentService for AgentServiceImpl {
                         user_id
                     );
 
-                    // Then register with compose-api (external API call)
-                    self.compose_api_passkey_register(&manager, &auth_secret, &backup_passphrase)
-                        .await?;
-
-                    tracing::info!(
-                        "Auto-generated passkey credentials registered with compose-api: user_id={}",
-                        user_id
-                    );
-
                     (auth_secret, backup_passphrase)
                 }
                 Err(e) => {
@@ -1816,9 +1807,48 @@ impl AgentService for AgentServiceImpl {
                 }
             };
 
-            // Get session token for this instance creation
-            self.compose_api_passkey_login(&manager, &auth_secret, &backup_passphrase)
-                .await?
+            // Try to login first - if user is already registered on this manager, login succeeds
+            // If user not found (404), register them and then login
+            match self
+                .compose_api_passkey_login(&manager, &auth_secret, &backup_passphrase)
+                .await
+            {
+                Ok(token) => {
+                    tracing::info!(
+                        "User already registered on compose-api, login successful: user_id={}",
+                        user_id
+                    );
+                    token
+                }
+                Err(e) => {
+                    let error_str = e.to_string();
+                    if error_str.contains("404") && error_str.contains("User not found") {
+                        tracing::info!(
+                            "User not found on compose-api, registering: user_id={}",
+                            user_id
+                        );
+                        // Register credentials with compose-api for this manager
+                        self.compose_api_passkey_register(
+                            &manager,
+                            &auth_secret,
+                            &backup_passphrase,
+                        )
+                        .await?;
+
+                        tracing::info!(
+                            "Passkey credentials registered with compose-api: user_id={}",
+                            user_id
+                        );
+
+                        // Now login after registration
+                        self.compose_api_passkey_login(&manager, &auth_secret, &backup_passphrase)
+                            .await?
+                    } else {
+                        // Some other error, not a "user not found" - propagate it
+                        return Err(e);
+                    }
+                }
+            }
         };
 
         let key_name = params
@@ -3319,15 +3349,6 @@ impl AgentService for AgentServiceImpl {
                         user_id
                     );
 
-                    // Then register with compose-api (external API call)
-                    self.compose_api_passkey_register(manager, &auth_secret, &backup_passphrase)
-                        .await?;
-
-                    tracing::info!(
-                        "User passkey credentials registered with compose-api: user_id={}",
-                        user_id
-                    );
-
                     (auth_secret, backup_passphrase)
                 }
                 Err(e) => {
@@ -3340,10 +3361,44 @@ impl AgentService for AgentServiceImpl {
                 }
             };
 
-        // Get session token from compose-api
-        let session_token = self
+        // Try to login first - if user is already registered on this manager, login succeeds
+        // If user not found (404), register them and then login
+        let session_token = match self
             .compose_api_passkey_login(manager, &auth_secret, &backup_passphrase)
-            .await?;
+            .await
+        {
+            Ok(token) => {
+                tracing::info!(
+                    "User already registered on compose-api, login successful: user_id={}",
+                    user_id
+                );
+                token
+            }
+            Err(e) => {
+                let error_str = e.to_string();
+                if error_str.contains("404") && error_str.contains("User not found") {
+                    tracing::info!(
+                        "User not found on compose-api, registering: user_id={}",
+                        user_id
+                    );
+                    // Register credentials with compose-api for this manager
+                    self.compose_api_passkey_register(manager, &auth_secret, &backup_passphrase)
+                        .await?;
+
+                    tracing::info!(
+                        "User passkey credentials registered with compose-api: user_id={}",
+                        user_id
+                    );
+
+                    // Now login after registration
+                    self.compose_api_passkey_login(manager, &auth_secret, &backup_passphrase)
+                        .await?
+                } else {
+                    // Some other error, not a "user not found" - propagate it
+                    return Err(e);
+                }
+            }
+        };
 
         // Set up gateway cookie and get Set-Cookie header
         let set_cookie = self
