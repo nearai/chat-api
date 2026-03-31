@@ -377,7 +377,10 @@ pub async fn ensure_daily_cleanup_task(task_config: &config::TaskConfig) -> anyh
     );
 
     scheduler
-        .create_task_if_absent(daily_cleanup_canceled_instances_request()?)
+        .create_task_if_absent(daily_cleanup_canceled_instances_request(
+            task_config.cleanup_canceled_instances_daily_cron.clone(),
+            task_config.cleanup_canceled_instances_grace_days,
+        )?)
         .await
 }
 

@@ -481,6 +481,9 @@ impl Default for InfrastructureConfig {
     }
 }
 
+pub const TASKS_CLEANUP_CANCELED_INSTANCES_DAILY_CRON_DEFAULT: &str = "cron(0 0 * * ? *)";
+pub const TASKS_CLEANUP_CANCELED_INSTANCES_GRACE_DAYS_DEFAULT: i64 = 15;
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct TaskConfig {
     pub enabled: bool,
@@ -489,6 +492,8 @@ pub struct TaskConfig {
     pub sqs_queue_arn: Option<String>,
     pub scheduler_role_arn: Option<String>,
     pub scheduler_group: String,
+    pub cleanup_canceled_instances_daily_cron: String,
+    pub cleanup_canceled_instances_grace_days: i64,
     pub worker_wait_seconds: i32,
     pub worker_visibility_timeout: i32,
     pub worker_max_messages: i32,
@@ -510,6 +515,16 @@ impl Default for TaskConfig {
             scheduler_role_arn: std::env::var("TASKS_SCHEDULER_ROLE_ARN").ok(),
             scheduler_group: std::env::var("TASKS_SCHEDULER_GROUP")
                 .unwrap_or_else(|_| "chat-api".to_string()),
+            cleanup_canceled_instances_daily_cron: std::env::var(
+                "TASKS_CLEANUP_CANCELED_INSTANCES_DAILY_CRON",
+            )
+            .unwrap_or_else(|_| TASKS_CLEANUP_CANCELED_INSTANCES_DAILY_CRON_DEFAULT.to_string()),
+            cleanup_canceled_instances_grace_days: std::env::var(
+                "TASKS_CLEANUP_CANCELED_INSTANCES_GRACE_DAYS",
+            )
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(TASKS_CLEANUP_CANCELED_INSTANCES_GRACE_DAYS_DEFAULT),
             worker_wait_seconds: std::env::var("TASKS_WORKER_WAIT_SECONDS")
                 .ok()
                 .and_then(|v| v.parse().ok())

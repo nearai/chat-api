@@ -125,12 +125,15 @@ impl ScheduledTaskRequest {
     }
 }
 
-pub fn daily_cleanup_canceled_instances_request() -> anyhow::Result<ScheduledTaskRequest> {
+pub fn daily_cleanup_canceled_instances_request(
+    cron: String,
+    grace_days: i64,
+) -> anyhow::Result<ScheduledTaskRequest> {
     Ok(ScheduledTaskRequest {
         task_id: TaskId::new(CLEANUP_CANCELED_INSTANCES_DAILY_TASK_ID.to_string())?,
-        schedule: ScheduleSpec::Cron(CLEANUP_CANCELED_INSTANCES_DAILY_CRON_UTC.to_string()),
+        schedule: ScheduleSpec::Cron(cron),
         payload: TaskPayload::CleanupCanceledInstances(CleanupCanceledInstancesTaskPayload {
-            grace_days: CLEANUP_CANCELED_INSTANCES_DEFAULT_GRACE_DAYS,
+            grace_days,
             dry_run: false,
         }),
     })
@@ -245,7 +248,11 @@ mod tests {
 
     #[test]
     fn test_daily_cleanup_request_shape() {
-        let req = daily_cleanup_canceled_instances_request().unwrap();
+        let req = daily_cleanup_canceled_instances_request(
+            CLEANUP_CANCELED_INSTANCES_DAILY_CRON_UTC.to_string(),
+            CLEANUP_CANCELED_INSTANCES_DEFAULT_GRACE_DAYS,
+        )
+        .unwrap();
         assert_eq!(
             req.task_id.as_str(),
             CLEANUP_CANCELED_INSTANCES_DAILY_TASK_ID
