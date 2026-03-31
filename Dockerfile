@@ -102,8 +102,8 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates/ ./crates/
 COPY .cargo/ ./.cargo/
 
-# Build the application in release mode
-RUN cargo build --release --locked --bin api
+# Build the application binaries in release mode
+RUN cargo build --release --locked --bin api --bin task_worker
 
 
 # Stage 3: Runtime stage
@@ -147,8 +147,9 @@ RUN useradd -m -u 1000 app \
 # Create app directory
 WORKDIR /app
 
-# Copy the built binary
+# Copy the built binaries
 COPY --from=backend-builder --chmod=0775 /app/target/release/api /app/api
+COPY --from=backend-builder --chmod=0775 /app/target/release/task_worker /app/task_worker
 
 # Copy the migration SQL files
 RUN mkdir -p /app/crates/database/src/migrations/sql
