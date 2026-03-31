@@ -1546,9 +1546,10 @@ impl AgentService for AgentServiceImpl {
             .map(|n| format!("instance-{}", n))
             .unwrap_or_else(|| "instance".to_string());
         let default_expiry = Some(Utc::now() + Duration::days(90));
-        let (_api_key, plaintext_key) = self
+        let (api_key, plaintext_key) = self
             .create_unbound_api_key(user_id, key_name, None, default_expiry)
             .await?;
+        let api_key_id = api_key.id;
 
         // Validate service type
         if let Some(ref st) = &params.service_type {
@@ -1624,7 +1625,7 @@ impl AgentService for AgentServiceImpl {
                                         format!("agent-{}-{}", instance_name, Uuid::new_v4());
 
                                     // Save to database
-                                    if let Ok(_instance) = repository
+                                    if let Ok(instance) = repository
                                         .create_instance(CreateInstanceParams {
                                             user_id,
                                             instance_id: instance_id.clone(),
@@ -1639,6 +1640,17 @@ impl AgentService for AgentServiceImpl {
                                         .await
                                     {
                                         instance_saved = true;
+                                        // Bind the unbound API key to this instance
+                                        if let Err(e) = repository
+                                            .bind_api_key_to_instance(api_key_id, instance.id)
+                                            .await
+                                        {
+                                            tracing::error!(
+                                                "Failed to bind API key to instance (manual cleanup may be needed): \
+                                                 instance_id={}, api_key_id={}, error={}",
+                                                instance.id, api_key_id, e
+                                            );
+                                        }
                                     }
                                 }
                             }
