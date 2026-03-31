@@ -47,7 +47,7 @@ impl TaskExecutor for DefaultTaskExecutor {
                     "SELECT DISTINCT s.user_id
                      FROM subscriptions s
                      WHERE s.status = 'canceled'
-                       AND s.updated_at <= $1
+                       AND s.current_period_end <= $1
                        AND NOT EXISTS (
                            SELECT 1
                            FROM subscriptions active_sub
