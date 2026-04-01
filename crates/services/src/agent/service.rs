@@ -22,6 +22,10 @@ const MAX_BUFFER_SIZE: usize = 100 * 1024;
 /// Default service type for agent instances when not specified.
 const DEFAULT_SERVICE_TYPE: &str = "openclaw";
 
+/// How many instances to load when deciding if gateway session setup should run for legacy non-TEE users
+/// (global TEE flag but instances on a non-TEE manager). Cap keeps login-path DB work bounded.
+const GATEWAY_SESSION_INSTANCE_SCAN_LIMIT: i64 = 50;
+
 // Resource sizing defaults (instance_default_cpus, instance_default_mem_limit, instance_default_storage_size)
 // are struct fields accessible via self.instance_default_cpus, etc.
 
@@ -3369,7 +3373,10 @@ impl AgentService for AgentServiceImpl {
                     "Gateway session: user has passkey credentials while global infra is TEE — still attempting compose session"
                 );
             } else {
-                let (instances, _) = self.repository.list_user_instances(user_id, 500, 0).await?;
+                let (instances, _) = self
+                    .repository
+                    .list_user_instances(user_id, GATEWAY_SESSION_INSTANCE_SCAN_LIMIT, 0)
+                    .await?;
                 if self.user_has_non_tee_routed_instance(&instances) {
                     needs_non_tee_gateway = true;
                     tracing::debug!(
