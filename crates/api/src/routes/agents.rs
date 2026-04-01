@@ -1306,29 +1306,24 @@ pub async fn upgrade_instance(
     use futures::stream::StreamExt;
     use tokio_stream::wrappers::ReceiverStream;
 
-    let stream = ReceiverStream::new(rx)
-        .then(|chunk_result| async move {
-            match chunk_result {
-                Ok(bytes) => {
-                    // Pass through all manager API events as-is to the client
-                    Ok::<_, anyhow::Error>(bytes)
-                }
-                Err(e) => {
-                    tracing::error!("Error in upgrade stream: {}", e);
-                    let error_json = serde_json::json!({
-                        "error": "Upgrade failed",
-                        "code": "UPGRADE_STREAM_ERROR"
-                    })
-                    .to_string();
-                    Ok(axum::body::Bytes::from(format!("data: {}\n\n", error_json)))
-                }
+    let stream = ReceiverStream::new(rx).then(|chunk_result| async move {
+        match chunk_result {
+            Ok(bytes) => {
+                // Pass through all manager API events as-is to the client
+                // (includes completion event sent by service layer on successful stream end)
+                Ok::<_, anyhow::Error>(bytes)
             }
-        })
-        .chain(futures::stream::once(async {
-            // Send completion event with expected format for frontend
-            let completion = serde_json::json!({"stage": "ready"}).to_string();
-            Ok(axum::body::Bytes::from(format!("data: {}\n\n", completion)))
-        }));
+            Err(e) => {
+                tracing::error!("Error in upgrade stream: {}", e);
+                let error_json = serde_json::json!({
+                    "error": "Upgrade failed",
+                    "code": "UPGRADE_STREAM_ERROR"
+                })
+                .to_string();
+                Ok(axum::body::Bytes::from(format!("data: {}\n\n", error_json)))
+            }
+        }
+    });
 
     let body = axum::body::Body::from_stream(stream);
 

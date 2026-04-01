@@ -29,13 +29,29 @@ const GATEWAY_SESSION_INSTANCE_SCAN_LIMIT: i64 = 50;
 // Resource sizing defaults (instance_default_cpus, instance_default_mem_limit, instance_default_storage_size)
 // are struct fields accessible via self.instance_default_cpus, etc.
 
-/// Extract version tag from image ref (e.g., "0.23.0" from "docker.io/nearaidev/ironclaw-dind:0.23.0")
-/// Returns None for non-numeric tags like "latest" or "dev"
+/// Extract version tag from Docker/OCI image ref
+///
+/// Properly parses image references like:
+/// - `docker.io/repo/image:0.23.0` → `Some("0.23.0")`
+/// - `localhost:5000/image:v1.0` → `Some("v1.0")`
+/// - `image@sha256:abc123` → `None` (digest, not tag)
+/// - `image:latest` → `None` (non-numeric tag)
+/// - `image` → `None` (no tag)
+///
+/// Returns None for non-numeric tags like "latest", "dev", or digest references.
 fn extract_version_from_image(image_ref: &str) -> Option<String> {
-    // Get everything after the last colon
-    let tag = image_ref.rsplit(':').next()?;
+    // Split off the digest part if present (OCI format: image@sha256:...)
+    let before_digest = image_ref.split('@').next().unwrap_or(image_ref);
 
-    // Check if it looks like a version (starts with a digit)
+    // Find the last '/' to separate repository from tag
+    let last_slash_pos = before_digest.rfind('/')?;
+    let after_slash = &before_digest[last_slash_pos + 1..];
+
+    // Look for ':' in the part after the last '/' to find the tag
+    // (avoids confusion with port numbers in registry URLs like localhost:5000)
+    let tag = after_slash.rsplit(':').next()?;
+
+    // Check if it's a numeric version (starts with a digit)
     if tag.chars().next()?.is_ascii_digit() {
         Some(tag.to_string())
     } else {
@@ -4290,13 +4306,18 @@ impl AgentServiceImpl {
                 }
             }
 
-            // Stream ended naturally
-            // NOTE: Do not send completion event here - route handler adds it to avoid duplicates
+            // Stream ended naturally - send completion event
             tracing::info!(
-                "Upgrade stream ended: instance_id={}, image={}",
+                "Upgrade stream ended successfully: instance_id={}, image={}",
                 instance_id,
                 image_for_task
             );
+
+            // Emit completion event with expected format for frontend
+            let completion = serde_json::json!({"stage": "ready"}).to_string();
+            let _ = tx
+                .send(Ok(bytes::Bytes::from(format!("data: {}\n\n", completion))))
+                .await;
         });
 
         Ok(rx)
@@ -6775,5 +6796,83 @@ mod tests {
         assert!(urls[3].contains("mgr0"));
         assert!(urls[4].contains("mgr1"));
         assert!(urls[5].contains("mgr2"));
+    }
+
+    #[test]
+    fn test_extract_version_from_image_standard_refs() {
+        // Standard Docker Hub references
+        assert_eq!(
+            extract_version_from_image("docker.io/nearaidev/ironclaw-dind:0.23.0"),
+            Some("0.23.0".to_string())
+        );
+        assert_eq!(
+            extract_version_from_image("docker.io/nearaidev/openclaw-dind:0.21.0"),
+            Some("0.21.0".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_version_from_image_with_registry_port() {
+        // Registry with port number - should extract tag correctly
+        assert_eq!(
+            extract_version_from_image("localhost:5000/image:1.0.0"),
+            Some("1.0.0".to_string())
+        );
+        assert_eq!(
+            extract_version_from_image("registry.example.com:443/app/image:2.3.4"),
+            Some("2.3.4".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_version_from_image_with_digest() {
+        // OCI digest references should not be parsed as versions
+        assert_eq!(
+            extract_version_from_image("image@sha256:abc123def456"),
+            None
+        );
+        assert_eq!(
+            extract_version_from_image("docker.io/repo/image:1.0.0@sha256:abc123"),
+            Some("1.0.0".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_version_from_image_non_numeric_tags() {
+        // Non-numeric tags should return None
+        assert_eq!(
+            extract_version_from_image("docker.io/repo/image:latest"),
+            None
+        );
+        assert_eq!(extract_version_from_image("docker.io/repo/image:dev"), None);
+        assert_eq!(
+            extract_version_from_image("docker.io/repo/image:main"),
+            None
+        );
+        assert_eq!(
+            extract_version_from_image("localhost:5000/app/image:latest"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_extract_version_from_image_no_tag() {
+        // References without tags should return None
+        // Note: bare "image" without "/" is not a valid Docker image ref format for this function
+        assert_eq!(extract_version_from_image("docker.io/repo/image"), None);
+        assert_eq!(extract_version_from_image("localhost:5000/image"), None);
+    }
+
+    #[test]
+    fn test_extract_version_from_image_prerelease_versions() {
+        // Pre-release versions starting with digits
+        assert_eq!(
+            extract_version_from_image("docker.io/repo/image:1.0.0-rc1"),
+            Some("1.0.0-rc1".to_string())
+        );
+        assert_eq!(
+            extract_version_from_image("docker.io/repo/image:2.0.0-alpha"),
+            Some("2.0.0-alpha".to_string())
+        );
     }
 }

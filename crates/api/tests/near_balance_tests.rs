@@ -95,10 +95,11 @@ async fn test_near_balance_allows_rich_account() {
 
     // Real account in mainnet
     let rich_account = "near";
-    cleanup_user_completely(&db, &format!("{}@near", rich_account)).await;
+    let user_email = format!("{}@near", rich_account);
+    cleanup_user_completely(&db, &user_email).await;
 
     let login_request = json!({
-        "email": format!("{}@near", rich_account),
+        "email": user_email.clone(),
         "name": "Rich NEAR User",
         "oauth_provider": "near"
     });
