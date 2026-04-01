@@ -253,9 +253,24 @@ async fn test_get_instance_balance_includes_current_period_usage() {
     let client = db.pool().get().await.expect("get pool client");
     let instance_id = Uuid::new_v4();
     let external_instance_id = format!("balance-test-{}", Uuid::new_v4());
+    // Note: billing period for free users is based on Utc::now() called at runtime,
+    // so we must insert events relative to current time.
+    // To ensure current event falls within current billing period:
+    // - Calculate start of current month at midnight
+    // - Insert current event at start of month + 1 day (guaranteed to be within period)
+    // - Insert previous event at start of month - 35 days (guaranteed to be in previous period)
     let now = Utc::now();
-    let current_created_at = now - Duration::hours(1);
-    let previous_created_at = now - Duration::days(40);
+    let today = now.date_naive();
+    let start_of_month = chrono::NaiveDate::from_ymd_opt(today.year(), today.month(), 1)
+        .expect("valid date")
+        .and_hms_opt(0, 0, 0)
+        .expect("valid time");
+    let start_of_month = chrono::DateTime::<Utc>::from_naive_utc_and_offset(start_of_month, Utc);
+
+    // Current event: 1 day into the month (guaranteed to be in current period)
+    let current_created_at = start_of_month + Duration::days(1);
+    // Previous event: 35 days before start of month (guaranteed to be in previous period)
+    let previous_created_at = start_of_month - Duration::days(35);
 
     client
         .execute(
