@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fmt;
 
 use crate::system_configs::ports::PlanLimitConfig;
@@ -278,6 +279,178 @@ impl From<anyhow::Error> for SubscriptionError {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct StripeUpdateSubscriptionParams {
+    pub cancel_at_period_end: Option<bool>,
+    pub item_id: Option<String>,
+    pub price_id: Option<String>,
+    pub proration_behavior: Option<ProrationBehavior>,
+    pub payment_behavior: Option<PaymentBehavior>,
+    pub billing_cycle_anchor: Option<BillingCycleAnchor>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ProrationBehavior {
+    CreateProrations,
+    AlwaysInvoice,
+    None,
+}
+
+impl ProrationBehavior {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ProrationBehavior::CreateProrations => "create_prorations",
+            ProrationBehavior::AlwaysInvoice => "always_invoice",
+            ProrationBehavior::None => "none",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum PaymentBehavior {
+    PendingIfIncomplete,
+    ErrorIfIncomplete,
+    DefaultIncomplete,
+}
+
+impl PaymentBehavior {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PaymentBehavior::PendingIfIncomplete => "pending_if_incomplete",
+            PaymentBehavior::ErrorIfIncomplete => "error_if_incomplete",
+            PaymentBehavior::DefaultIncomplete => "default_incomplete",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum BillingCycleAnchor {
+    Unchanged,
+    Automatic,
+}
+
+impl BillingCycleAnchor {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BillingCycleAnchor::Unchanged => "unchanged",
+            BillingCycleAnchor::Automatic => "automatic",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct StripePortalSessionResult {
+    pub id: String,
+    pub url: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct StripeCheckoutLineItemRef {
+    pub price_id: String,
+    pub quantity: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct StripeCheckoutSessionResult {
+    pub id: String,
+    pub url: Option<String>,
+    pub line_items: Option<Vec<StripeCheckoutLineItemRef>>,
+    pub line_items_has_more: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct StripeSubscriptionSnapshot {
+    pub id: String,
+    pub customer_id: String,
+    pub price_id: String,
+    pub status: String,
+    pub current_period_end: DateTime<Utc>,
+    pub cancel_at_period_end: bool,
+    pub first_item_id: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct StripeCustomerRef {
+    pub id: String,
+    pub metadata: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StripeCreateSubscriptionCheckoutParams {
+    pub customer_id: String,
+    pub price_id: String,
+    pub success_url: String,
+    pub cancel_url: String,
+    pub trial_period_days: Option<u32>,
+    pub idempotency_key: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct StripeCreateCreditsCheckoutParams {
+    pub customer_id: String,
+    pub price_id: String,
+    pub credits: u64,
+    pub success_url: String,
+    pub cancel_url: String,
+    pub user_id: String,
+    pub idempotency_key: String,
+}
+
+#[async_trait]
+pub trait StripeClientPort: Send + Sync {
+    async fn verify_webhook_signature(
+        &self,
+        payload: &[u8],
+        signature: &str,
+        secret: &str,
+    ) -> Result<(), SubscriptionError>;
+
+    async fn create_customer(
+        &self,
+        email: Option<&str>,
+        name: Option<&str>,
+        user_id: &str,
+        test_clock_id: Option<&str>,
+    ) -> Result<String, SubscriptionError>;
+
+    async fn retrieve_customer(
+        &self,
+        customer_id: &str,
+    ) -> Result<StripeCustomerRef, SubscriptionError>;
+
+    async fn create_subscription_checkout_session(
+        &self,
+        params: StripeCreateSubscriptionCheckoutParams,
+    ) -> Result<StripeCheckoutSessionResult, SubscriptionError>;
+
+    async fn create_credits_checkout_session(
+        &self,
+        params: StripeCreateCreditsCheckoutParams,
+    ) -> Result<StripeCheckoutSessionResult, SubscriptionError>;
+
+    async fn retrieve_checkout_session(
+        &self,
+        checkout_session_id: &str,
+    ) -> Result<StripeCheckoutSessionResult, SubscriptionError>;
+
+    async fn retrieve_subscription(
+        &self,
+        subscription_id: &str,
+    ) -> Result<StripeSubscriptionSnapshot, SubscriptionError>;
+
+    async fn update_subscription(
+        &self,
+        subscription_id: &str,
+        params: StripeUpdateSubscriptionParams,
+    ) -> Result<StripeSubscriptionSnapshot, SubscriptionError>;
+
+    async fn create_billing_portal_session(
+        &self,
+        customer_id: &str,
+        return_url: &str,
+    ) -> Result<StripePortalSessionResult, SubscriptionError>;
+}
+
 /// Repository trait for Stripe customer mappings
 #[async_trait]
 pub trait StripeCustomerRepository: Send + Sync {
@@ -315,8 +488,7 @@ pub trait SubscriptionRepository: Send + Sync {
     ) -> anyhow::Result<Option<Subscription>>;
 
     /// `current_period_end` of the most recently canceled subscription row for this user
-    /// (ordered by `updated_at`; [`SubscriptionStatus::Canceled`](https://docs.rs/async-stripe/latest/stripe/enum.SubscriptionStatus.html)
-    /// is spelled `canceled` in the API). Used to align free-plan billing months with the boundary
+    /// (ordered by `updated_at`; canceled status is stored as the string `canceled`). Used to align free-plan billing months with the boundary
     /// where the latest cancellation period ended; if none exist, callers fall back to a calendar month.
     async fn last_cancelled_subscription_period_end_for_user(
         &self,

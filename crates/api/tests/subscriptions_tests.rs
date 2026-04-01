@@ -8,6 +8,7 @@ use common::{
     insert_test_subscription, insert_test_subscription_with_price_id, mock_login,
     set_subscription_plans, TestServerConfig,
 };
+use hmac::Mac;
 use serde_json::json;
 use serial_test::serial;
 use services::subscription::ports::SubscriptionRepository;
@@ -671,23 +672,18 @@ async fn test_change_plan_success_validates_before_stripe() {
         .json(&request_body)
         .await;
 
-    // Validation passes (auth, subscription, valid plan, instance limit).
-    // Stripe API call fails with fake sub_test_* ID -> 500.
-    // This confirms we reach the Stripe update step; full success would need Stripe mocking.
-    let status = response.status_code();
-    assert!(
-        status == 200 || status == 500,
-        "Should pass validation (200) or fail at Stripe (500), got {}",
-        status
+    // Validation + Stripe update should now succeed through the internal Stripe client implementation.
+    assert_eq!(
+        response.status_code(),
+        200,
+        "Expected successful plan change"
     );
-    if status == 200 {
-        let body: serde_json::Value = response.json();
-        let result = body.get("result").and_then(|v| v.as_str()).unwrap_or("");
-        assert_eq!(
-            result, "changed_immediately",
-            "Successful upgrade should return changed_immediately"
-        );
-    }
+    let body: serde_json::Value = response.json();
+    let result = body.get("result").and_then(|v| v.as_str()).unwrap_or("");
+    assert_eq!(
+        result, "changed_immediately",
+        "Successful upgrade should return changed_immediately"
+    );
 }
 
 #[tokio::test]
@@ -769,6 +765,46 @@ async fn test_webhook_requires_signature() {
         response.status_code(),
         400,
         "Webhook should require Stripe-Signature header"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_webhook_accepts_when_any_v1_signature_matches() {
+    let server = create_test_server().await;
+
+    let webhook_payload = json!({
+        "id": "evt_test_multi_v1",
+        "type": "customer.subscription.created",
+        "data": { "object": { "id": "sub_test_multi_v1" } }
+    });
+    let payload = webhook_payload.to_string();
+    let ts = chrono::Utc::now().timestamp();
+
+    type HmacSha256 = hmac::Hmac<sha2::Sha256>;
+    let signed_payload = format!("{ts}.{payload}");
+    let mut mac = <HmacSha256 as hmac::Mac>::new_from_slice(b"whsec_dummy").unwrap();
+    mac.update(signed_payload.as_bytes());
+    let good_sig = hex::encode(mac.finalize().into_bytes());
+    let signature_header = format!("t={ts},v1=deadbeef,v1={good_sig}");
+
+    let response = server
+        .post("/v1/subscriptions/stripe/webhook")
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .add_header(
+            http::HeaderName::from_static("stripe-signature"),
+            http::HeaderValue::from_str(&signature_header).unwrap(),
+        )
+        .text(&payload)
+        .await;
+
+    assert_ne!(
+        response.status_code(),
+        400,
+        "Webhook should accept request when any v1 signature matches"
     );
 }
 
