@@ -29,6 +29,71 @@ const GATEWAY_SESSION_INSTANCE_SCAN_LIMIT: i64 = 50;
 // Resource sizing defaults (instance_default_cpus, instance_default_mem_limit, instance_default_storage_size)
 // are struct fields accessible via self.instance_default_cpus, etc.
 
+/// Extract version tag from Docker/OCI image ref
+///
+/// Properly parses image references like:
+/// - `docker.io/repo/image:0.23.0` → `Some("0.23.0")`
+/// - `localhost:5000/image:v1.0` → `Some("v1.0")`
+/// - `image@sha256:abc123` → `None` (digest, not tag)
+/// - `image:latest` → `None` (non-numeric tag)
+/// - `image` → `None` (no tag)
+///
+/// Returns None for non-numeric tags like "latest", "dev", or digest references.
+fn extract_version_from_image(image_ref: &str) -> Option<String> {
+    // Split off the digest part if present (OCI format: image@sha256:...)
+    let before_digest = image_ref.split('@').next().unwrap_or(image_ref);
+
+    // Find the last '/' to separate repository from tag
+    let last_slash_pos = before_digest.rfind('/')?;
+    let after_slash = &before_digest[last_slash_pos + 1..];
+
+    // Look for ':' in the part after the last '/' to find the tag
+    // (avoids confusion with port numbers in registry URLs like localhost:5000)
+    let tag = after_slash.rsplit(':').next()?;
+
+    // Check if it's a numeric version (starts with a digit)
+    if tag.chars().next()?.is_ascii_digit() {
+        Some(tag.to_string())
+    } else {
+        // Not a semantic version (e.g., "dev", "latest")
+        None
+    }
+}
+
+/// Parse semantic version string (e.g., "0.23.0" -> (0, 23, 0))
+fn parse_semantic_version(v: &str) -> (u32, u32, u32) {
+    let parts: Vec<&str> = v.split('.').collect();
+
+    // Extract numeric prefix from each part (handles versions like 1.2.3-rc1)
+    let parse_part = |s: &str| {
+        s.chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .parse::<u32>()
+            .ok()
+    };
+
+    let major = parts.first().and_then(|s| parse_part(s)).unwrap_or(0);
+    let minor = parts.get(1).and_then(|s| parse_part(s)).unwrap_or(0);
+    let patch = parts.get(2).and_then(|s| parse_part(s)).unwrap_or(0);
+    (major, minor, patch)
+}
+
+/// Compare two semantic versions
+fn compare_semantic_versions(a: &str, b: &str) -> std::cmp::Ordering {
+    let (major_a, minor_a, patch_a) = parse_semantic_version(a);
+    let (major_b, minor_b, patch_b) = parse_semantic_version(b);
+
+    use std::cmp::Ordering;
+    match major_a.cmp(&major_b) {
+        Ordering::Equal => match minor_a.cmp(&minor_b) {
+            Ordering::Equal => patch_a.cmp(&patch_b),
+            other => other,
+        },
+        other => other,
+    }
+}
+
 /// Map service type to worker image
 fn get_image_for_service_type(service_type: &str) -> String {
     match service_type {
@@ -2723,8 +2788,6 @@ impl AgentService for AgentServiceImpl {
         instance_id: Uuid,
         user_id: UserId,
     ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<bytes::Bytes>>> {
-        use futures::stream::StreamExt;
-
         tracing::info!(
             "Upgrading instance (streaming): instance_id={}",
             instance_id
@@ -2743,124 +2806,21 @@ impl AgentService for AgentServiceImpl {
 
         let manager = self.resolve_manager(&instance)?;
 
-        // Resolve bearer token: for passkey instances, login to get a fresh token
-        let bearer_token = self.resolve_bearer_token(&instance, manager).await?;
+        tracing::info!(
+            "Upgrade: manager_url={}, is_non_tee={}, instance_name={}",
+            manager.url,
+            manager.get_is_non_tee(),
+            instance.name
+        );
 
-        // Fetch latest images from compose-api
-        let version_url = format!("{}/version", manager.url);
-        let version_resp = self
-            .http_client
-            .get(&version_url)
-            .bearer_auth(&bearer_token)
-            .timeout(std::time::Duration::from_secs(30))
-            .send()
-            .await
-            .map_err(|e| anyhow!("Failed to fetch compose-api version: {}", e))?;
-
-        if !version_resp.status().is_success() {
-            return Err(anyhow!(
-                "Failed to fetch compose-api version: status={}",
-                version_resp.status()
-            ));
-        }
-
-        #[derive(serde::Deserialize)]
-        struct VersionResponse {
-            images: std::collections::HashMap<String, String>,
-        }
-
-        let version: VersionResponse = version_resp
-            .json()
-            .await
-            .map_err(|e| anyhow!("Failed to parse compose-api version response: {}", e))?;
-
-        // Map service_type to image key in the version response
-        let service_type = instance
-            .service_type
-            .as_deref()
-            .unwrap_or(DEFAULT_SERVICE_TYPE);
-        let image_key = match service_type {
-            "ironclaw" => "ironclaw",
-            _ => "worker",
-        };
-
-        let image = version.images.get(image_key).cloned().ok_or_else(|| {
-            anyhow!(
-                "No image found for service type '{}' (key '{}')",
-                service_type,
-                image_key
-            )
-        })?;
-
-        // Restart with the latest image (5-minute timeout; compose-api yields SSE stream)
-        let encoded_name = urlencoding::encode(&instance.name);
-        let restart_url = format!("{}/instances/{}/restart", manager.url, encoded_name);
-
-        #[derive(serde::Serialize)]
-        struct RestartBody {
-            image: String,
-        }
-
-        // Spawn task to proxy compose-api SSE stream to channel
-        let (tx, rx) = tokio::sync::mpsc::channel::<anyhow::Result<bytes::Bytes>>(32);
-
-        let http_client = self.http_client.clone();
-        let token = bearer_token.clone();
-        let instance_name = instance.name.clone();
-
-        tokio::spawn(async move {
-            let response = match http_client
-                .post(&restart_url)
-                .bearer_auth(&token)
-                .json(&RestartBody {
-                    image: image.clone(),
-                })
-                .timeout(std::time::Duration::from_secs(300))
-                .send()
+        // Route to appropriate logic based on infrastructure type
+        if manager.get_is_non_tee() {
+            self.upgrade_instance_stream_non_tee(&instance, manager, instance_id)
                 .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    let _ = tx.send(Err(anyhow!("Failed to call restart: {}", e))).await;
-                    return;
-                }
-            };
-
-            if !response.status().is_success() {
-                tracing::error!(
-                    "Compose-api upgrade failed: instance_id={}, instance_name={}, image={}, restart_url={}, status={}",
-                    instance_id,
-                    instance_name,
-                    image,
-                    restart_url,
-                    response.status()
-                );
-                let _ = tx
-                    .send(Err(anyhow!(
-                        "Upgrade failed with status {}",
-                        response.status()
-                    )))
-                    .await;
-                return;
-            }
-
-            let mut stream = response.bytes_stream();
-            while let Some(chunk_result) = stream.next().await {
-                match chunk_result {
-                    Ok(bytes) => {
-                        if tx.send(Ok(bytes)).await.is_err() {
-                            return;
-                        }
-                    }
-                    Err(e) => {
-                        let _ = tx.send(Err(anyhow!("Stream error: {}", e))).await;
-                        return;
-                    }
-                }
-            }
-        });
-
-        Ok(rx)
+        } else {
+            self.upgrade_instance_stream_tee(&instance, manager, instance_id)
+                .await
+        }
     }
 
     async fn check_upgrade_available(
@@ -2885,117 +2845,21 @@ impl AgentService for AgentServiceImpl {
         }
 
         let manager = self.resolve_manager(&instance)?;
-
-        // Resolve bearer token: for passkey instances, login to get a fresh token
-        let bearer_token = self.resolve_bearer_token(&instance, manager).await?;
-
-        // Fetch latest versions from compose-api
-        let version_url = format!("{}/version", manager.url);
-        let version_resp = self
-            .http_client
-            .get(&version_url)
-            .bearer_auth(&bearer_token)
-            .send()
-            .await
-            .map_err(|e| anyhow!("Failed to fetch compose-api version: {}", e))?;
-
-        if !version_resp.status().is_success() {
-            return Err(anyhow!(
-                "Failed to fetch compose-api version: status={}",
-                version_resp.status()
-            ));
-        }
-
-        #[derive(serde::Deserialize)]
-        struct VersionResponse {
-            images: std::collections::HashMap<String, String>,
-        }
-
-        let version: VersionResponse = version_resp
-            .json()
-            .await
-            .map_err(|e| anyhow!("Failed to parse compose-api version response: {}", e))?;
-
-        // Map service_type to image key in the version response
-        let service_type = instance
-            .service_type
-            .as_deref()
-            .unwrap_or(DEFAULT_SERVICE_TYPE);
-        let image_key = match service_type {
-            "ironclaw" => "ironclaw",
-            _ => "worker",
-        };
-
-        let latest_image = version
-            .images
-            .get(image_key)
-            .ok_or_else(|| {
-                anyhow!(
-                    "No image found for service type '{}' (key '{}')",
-                    service_type,
-                    image_key
-                )
-            })?
-            .clone();
-
-        // Fetch current instance status from compose-api
-        let encoded_name = urlencoding::encode(&instance.name);
-        let instance_url = format!("{}/instances/{}", manager.url, encoded_name);
-        let instance_resp = self
-            .http_client
-            .get(&instance_url)
-            .bearer_auth(&bearer_token)
-            .send()
-            .await
-            .map_err(|e| anyhow!("Failed to fetch instance status: {}", e))?;
-
-        // If instance not found (404), block upgrade until instance is synced
-        // This handles cases where instance is not yet fully provisioned or synced
-        if instance_resp.status() == reqwest::StatusCode::NOT_FOUND {
-            tracing::warn!(
-                "Instance not found on Agent Manager: instance_id={}. Blocking upgrade until instance is synced.",
-                instance_id
-            );
-            return Ok(UpgradeAvailability {
-                has_upgrade: false,
-                current_image: None,
-                latest_image,
-            });
-        }
-
-        if !instance_resp.status().is_success() {
-            return Err(anyhow!(
-                "Failed to fetch instance status: status={}",
-                instance_resp.status()
-            ));
-        }
-
-        #[derive(serde::Deserialize)]
-        struct InstanceResponse {
-            image: String,
-        }
-
-        let instance_status: InstanceResponse = instance_resp
-            .json()
-            .await
-            .map_err(|e| anyhow!("Failed to parse instance response: {}", e))?;
-
-        let current_image = instance_status.image;
-        let has_upgrade = current_image != latest_image;
-
         tracing::info!(
-            "Upgrade check completed: instance_id={}, current_image={}, latest_image={}, has_upgrade={}",
-            instance_id,
-            current_image,
-            latest_image,
-            has_upgrade
+            "Upgrade check: manager_url={}, is_non_tee={}, instance_name={}",
+            manager.url,
+            manager.get_is_non_tee(),
+            instance.name
         );
 
-        Ok(UpgradeAvailability {
-            has_upgrade,
-            current_image: Some(current_image),
-            latest_image,
-        })
+        // Route to appropriate logic based on infrastructure type
+        if manager.get_is_non_tee() {
+            self.check_upgrade_available_non_tee(&instance, manager, instance_id)
+                .await
+        } else {
+            self.check_upgrade_available_tee(&instance, manager, instance_id)
+                .await
+        }
     }
 
     async fn stop_instance(&self, instance_id: Uuid, user_id: UserId) -> anyhow::Result<()> {
@@ -3830,6 +3694,633 @@ impl AgentService for AgentServiceImpl {
         let balance = self.repository.get_instance_balance(instance_id).await?;
 
         Ok(balance)
+    }
+}
+
+/// Response structure from crabshack /images endpoint
+/// Used to parse and filter non-TEE image allowlist
+#[derive(serde::Deserialize, Debug, Clone)]
+#[allow(dead_code)]
+struct CrabshackImageEntry {
+    #[serde(rename = "ref")]
+    ref_: String,
+    service_type: String,
+    status: String,
+    created_at: String,
+}
+
+impl AgentServiceImpl {
+    /// Check upgrade availability for TEE infrastructure (compose-api)
+    async fn check_upgrade_available_tee(
+        &self,
+        instance: &AgentInstance,
+        manager: &AgentManager,
+        instance_id: Uuid,
+    ) -> anyhow::Result<UpgradeAvailability> {
+        tracing::info!(
+            "Checking upgrade availability (TEE): instance_id={}, instance_name={}",
+            instance_id,
+            instance.name
+        );
+
+        // Resolve bearer token: for passkey instances, login to get a fresh token
+        let bearer_token = self.resolve_bearer_token(instance, manager).await?;
+
+        // Fetch latest versions from compose-api
+        let version_url = format!("{}/version", manager.url);
+        tracing::debug!("TEE: Fetching versions from: {}", version_url);
+        let version_resp = self
+            .http_client
+            .get(&version_url)
+            .bearer_auth(&bearer_token)
+            .send()
+            .await
+            .map_err(|e| anyhow!("Failed to fetch compose-api version: {}", e))?;
+
+        tracing::debug!("TEE: /version response status: {}", version_resp.status());
+        if !version_resp.status().is_success() {
+            return Err(anyhow!(
+                "Failed to fetch compose-api version: status={}",
+                version_resp.status()
+            ));
+        }
+
+        #[derive(serde::Deserialize, Debug)]
+        struct VersionResponse {
+            images: std::collections::HashMap<String, String>,
+        }
+
+        let version: VersionResponse = version_resp
+            .json()
+            .await
+            .map_err(|e| anyhow!("Failed to parse compose-api version response: {}", e))?;
+
+        tracing::debug!("TEE: /version response body: {:?}", version);
+
+        // Map service_type to image key in the version response
+        let service_type = instance
+            .service_type
+            .as_deref()
+            .unwrap_or(DEFAULT_SERVICE_TYPE);
+        let image_key = match service_type {
+            "ironclaw" => "ironclaw",
+            _ => "worker",
+        };
+
+        let latest_image = version
+            .images
+            .get(image_key)
+            .ok_or_else(|| {
+                anyhow!(
+                    "No image found for service type '{}' (key '{}')",
+                    service_type,
+                    image_key
+                )
+            })?
+            .clone();
+
+        tracing::debug!(
+            "TEE: Latest image for service_type='{}': {}",
+            service_type,
+            latest_image
+        );
+
+        // Fetch current instance status from compose-api
+        let encoded_name = urlencoding::encode(&instance.name);
+        let instance_url = format!("{}/instances/{}", manager.url, encoded_name);
+        tracing::debug!("TEE: Fetching instance status from: {}", instance_url);
+        let instance_resp = self
+            .http_client
+            .get(&instance_url)
+            .bearer_auth(&bearer_token)
+            .send()
+            .await
+            .map_err(|e| anyhow!("Failed to fetch instance status: {}", e))?;
+
+        tracing::debug!(
+            "TEE: /instances/{} response status: {}",
+            encoded_name,
+            instance_resp.status()
+        );
+
+        // If instance not found (404), block upgrade until instance is synced
+        // This handles cases where instance is not yet fully provisioned or synced
+        if instance_resp.status() == reqwest::StatusCode::NOT_FOUND {
+            tracing::warn!(
+                "Instance not found on Agent Manager: instance_id={}. Blocking upgrade until instance is synced.",
+                instance_id
+            );
+            return Ok(UpgradeAvailability {
+                has_upgrade: false,
+                current_image: None,
+                latest_image,
+            });
+        }
+
+        if !instance_resp.status().is_success() {
+            return Err(anyhow!(
+                "Failed to fetch instance status: status={}",
+                instance_resp.status()
+            ));
+        }
+
+        #[derive(serde::Deserialize)]
+        struct InstanceResponse {
+            image: String,
+        }
+
+        let instance_status: InstanceResponse = instance_resp
+            .json()
+            .await
+            .map_err(|e| anyhow!("Failed to parse instance response: {}", e))?;
+
+        let current_image = instance_status.image;
+        tracing::debug!("TEE: Current instance image: {}", current_image);
+
+        let has_upgrade = current_image != latest_image;
+
+        tracing::info!(
+            "TEE upgrade check completed: instance_id={}, current_image={}, latest_image={}, has_upgrade={}",
+            instance_id,
+            current_image,
+            latest_image,
+            has_upgrade
+        );
+
+        Ok(UpgradeAvailability {
+            has_upgrade,
+            current_image: Some(current_image),
+            latest_image,
+        })
+    }
+
+    /// Fetch the latest image from crabshack allowlist for a non-TEE instance
+    /// Returns the image ref and semantic version
+    async fn get_latest_image_non_tee(
+        &self,
+        manager: &AgentManager,
+        instance: &AgentInstance,
+        context: &str, // For logging: "check" or "upgrade"
+    ) -> anyhow::Result<(String, String)> {
+        let bearer_token = &manager.token;
+
+        // Fetch available images from crabshack allowlist
+        let images_url = format!("{}/images", manager.url);
+        tracing::debug!(
+            "Non-TEE ({}): Fetching image allowlist from: {}",
+            context,
+            images_url
+        );
+        let images_resp = self
+            .http_client
+            .get(&images_url)
+            .bearer_auth(bearer_token)
+            .timeout(std::time::Duration::from_secs(30))
+            .send()
+            .await
+            .map_err(|e| anyhow!("Failed to fetch non-TEE images allowlist: {}", e))?;
+
+        tracing::debug!(
+            "Non-TEE ({}): /images response status: {}",
+            context,
+            images_resp.status()
+        );
+
+        if !images_resp.status().is_success() {
+            return Err(anyhow!(
+                "Failed to fetch non-TEE images allowlist: status={}",
+                images_resp.status()
+            ));
+        }
+
+        let response_body = images_resp
+            .text()
+            .await
+            .map_err(|e| anyhow!("Failed to read non-TEE images response body: {}", e))?;
+
+        let image_entries: Vec<CrabshackImageEntry> = serde_json::from_str(&response_body)
+            .map_err(|e| anyhow!("Failed to parse non-TEE images response: {}", e))?;
+
+        tracing::debug!(
+            "Non-TEE ({}): Parsed {} total images from allowlist",
+            context,
+            image_entries.len()
+        );
+
+        // Determine which service type we're looking for
+        let target_service_type = instance
+            .service_type
+            .as_deref()
+            .unwrap_or(DEFAULT_SERVICE_TYPE);
+
+        // Normalize service type to match crabshack format (append -dind for non-TEE)
+        let crabshack_service_type = normalize_service_type_for_api(target_service_type, true);
+
+        tracing::debug!(
+            "Non-TEE ({}): Filtering for service_type='{}' with status='allow-create'",
+            context,
+            crabshack_service_type
+        );
+
+        // Filter images: must match service_type and have status='allow-create'
+        let available_images: Vec<CrabshackImageEntry> = image_entries
+            .iter()
+            .filter(|img| {
+                img.service_type == crabshack_service_type && img.status == "allow-create"
+            })
+            .cloned()
+            .collect();
+
+        tracing::debug!(
+            "Non-TEE ({}): Available images after filtering: {} images",
+            context,
+            available_images.len()
+        );
+
+        // Extract versions from image refs and log them
+        let images_with_versions: Vec<(String, Option<String>)> = available_images
+            .iter()
+            .map(|img| {
+                let version = extract_version_from_image(&img.ref_);
+                if let Some(ref v) = version {
+                    tracing::debug!(
+                        "Non-TEE ({}): Available image: ref={}, version={}",
+                        context,
+                        img.ref_,
+                        v
+                    );
+                } else {
+                    tracing::debug!(
+                        "Non-TEE ({}): Available image (non-numeric tag): ref={}",
+                        context,
+                        img.ref_
+                    );
+                }
+                (img.ref_.clone(), version)
+            })
+            .collect();
+
+        // Find the newest image by comparing semantic versions
+        let latest_image_entry = images_with_versions
+            .iter()
+            .filter_map(|(ref_, version)| version.as_ref().map(|v| (ref_.clone(), v.clone())))
+            .max_by(|a, b| compare_semantic_versions(&a.1, &b.1))
+            .ok_or_else(|| {
+                anyhow!(
+                    "No images with numeric versions available in allowlist for service_type='{}'",
+                    crabshack_service_type
+                )
+            })?;
+
+        tracing::debug!(
+            "Non-TEE ({}): Latest image: ref={}, version={}",
+            context,
+            latest_image_entry.0,
+            latest_image_entry.1
+        );
+
+        Ok((latest_image_entry.0, latest_image_entry.1))
+    }
+
+    /// Check upgrade availability for non-TEE infrastructure (crabshack)
+    async fn check_upgrade_available_non_tee(
+        &self,
+        instance: &AgentInstance,
+        manager: &AgentManager,
+        instance_id: Uuid,
+    ) -> anyhow::Result<UpgradeAvailability> {
+        tracing::info!(
+            "Checking upgrade availability (non-TEE): instance_id={}, instance_name={}",
+            instance_id,
+            instance.name
+        );
+
+        // Use manager token (admin secret) for non-TEE crabshack API
+        let bearer_token = &manager.token;
+
+        // Fetch current instance status from crabshack
+        let encoded_name = urlencoding::encode(&instance.name);
+        let instance_url = format!("{}/instances/{}", manager.url, encoded_name);
+        tracing::debug!("Non-TEE: Fetching instance status from: {}", instance_url);
+        let instance_resp = self
+            .http_client
+            .get(&instance_url)
+            .bearer_auth(bearer_token)
+            .send()
+            .await
+            .map_err(|e| anyhow!("Failed to fetch non-TEE instance status: {}", e))?;
+
+        tracing::debug!(
+            "Non-TEE: /instances/{} response status: {}",
+            encoded_name,
+            instance_resp.status()
+        );
+
+        // If instance not found (404), fetch allowlist to determine latest image and block upgrade
+        let instance_not_found = instance_resp.status() == reqwest::StatusCode::NOT_FOUND;
+        if instance_not_found {
+            tracing::warn!(
+                "Instance not found on crabshack: instance_id={}. Blocking upgrade until instance is synced.",
+                instance_id
+            );
+        } else if !instance_resp.status().is_success() {
+            return Err(anyhow!(
+                "Failed to fetch non-TEE instance status: status={}",
+                instance_resp.status()
+            ));
+        }
+
+        let current_image = if !instance_not_found {
+            #[derive(serde::Deserialize)]
+            struct NonTeeInstanceResponse {
+                image: String,
+            }
+
+            let instance_status: NonTeeInstanceResponse = instance_resp
+                .json()
+                .await
+                .map_err(|e| anyhow!("Failed to parse non-TEE instance response: {}", e))?;
+
+            tracing::debug!("Non-TEE: Current instance image: {}", instance_status.image);
+            Some(instance_status.image)
+        } else {
+            None
+        };
+
+        // Fetch the latest image from crabshack allowlist
+        let (latest_image, latest_version) = self
+            .get_latest_image_non_tee(manager, instance, "check")
+            .await?;
+
+        // If instance not found (404), block upgrade until instance is synced
+        // This handles cases where instance is not yet fully provisioned or synced
+        if instance_not_found {
+            tracing::info!(
+                "Non-TEE upgrade check blocked: instance_id={}, instance not synced. latest_image={}",
+                instance_id,
+                latest_image
+            );
+            return Ok(UpgradeAvailability {
+                has_upgrade: false,
+                current_image: None,
+                latest_image,
+            });
+        }
+
+        // Determine upgrade availability by comparing semantic versions
+        let current_version = extract_version_from_image(current_image.as_ref().unwrap());
+        if let Some(ref v) = current_version {
+            tracing::debug!(
+                "Non-TEE: Current image version extracted: ref={}, version={}",
+                current_image.as_ref().unwrap(),
+                v
+            );
+        } else {
+            tracing::debug!(
+                "Non-TEE: Current image has non-numeric tag: ref={}",
+                current_image.as_ref().unwrap()
+            );
+        }
+
+        let has_upgrade = match current_version {
+            Some(curr_v) => {
+                compare_semantic_versions(&curr_v, &latest_version) == std::cmp::Ordering::Less
+            }
+            None => {
+                // If current image has non-numeric tag (like "dev", "latest"), assume upgrade available
+                tracing::warn!(
+                    "Non-TEE: Current image has non-numeric tag, assuming upgrade available"
+                );
+                true
+            }
+        };
+
+        tracing::info!(
+            "Non-TEE upgrade check completed: instance_id={}, current_image={}, latest_image={}, has_upgrade={}",
+            instance_id,
+            current_image.as_ref().unwrap(),
+            latest_image,
+            has_upgrade
+        );
+
+        Ok(UpgradeAvailability {
+            has_upgrade,
+            current_image,
+            latest_image,
+        })
+    }
+}
+
+impl AgentServiceImpl {
+    /// Upgrade instance with SSE stream for TEE infrastructure (compose-api)
+    async fn upgrade_instance_stream_tee(
+        &self,
+        instance: &AgentInstance,
+        manager: &AgentManager,
+        instance_id: Uuid,
+    ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<bytes::Bytes>>> {
+        tracing::info!(
+            "Upgrading instance (TEE streaming): instance_id={}, instance_name={}",
+            instance_id,
+            instance.name
+        );
+
+        // Resolve bearer token: for passkey instances, login to get a fresh token
+        let bearer_token = self.resolve_bearer_token(instance, manager).await?;
+
+        // Fetch latest images from compose-api
+        let version_url = format!("{}/version", manager.url);
+        tracing::debug!("TEE upgrade: Fetching versions from: {}", version_url);
+        let version_resp = self
+            .http_client
+            .get(&version_url)
+            .bearer_auth(&bearer_token)
+            .timeout(std::time::Duration::from_secs(30))
+            .send()
+            .await
+            .map_err(|e| anyhow!("Failed to fetch compose-api version: {}", e))?;
+
+        if !version_resp.status().is_success() {
+            return Err(anyhow!(
+                "Failed to fetch compose-api version: status={}",
+                version_resp.status()
+            ));
+        }
+
+        #[derive(serde::Deserialize)]
+        struct VersionResponse {
+            images: std::collections::HashMap<String, String>,
+        }
+
+        let version: VersionResponse = version_resp
+            .json()
+            .await
+            .map_err(|e| anyhow!("Failed to parse compose-api version response: {}", e))?;
+
+        // Map service_type to image key in the version response
+        let service_type = instance
+            .service_type
+            .as_deref()
+            .unwrap_or(DEFAULT_SERVICE_TYPE);
+        let image_key = match service_type {
+            "ironclaw" => "ironclaw",
+            _ => "worker",
+        };
+
+        let image = version.images.get(image_key).cloned().ok_or_else(|| {
+            anyhow!(
+                "No image found for service type '{}' (key '{}')",
+                service_type,
+                image_key
+            )
+        })?;
+
+        tracing::debug!(
+            "TEE upgrade: Latest image for service_type='{}': {}",
+            service_type,
+            image
+        );
+
+        // Restart with the latest image (5-minute timeout; compose-api yields SSE stream)
+        self.call_restart_streaming(manager, instance, &image, instance_id)
+            .await
+    }
+
+    /// Upgrade instance with SSE stream for non-TEE infrastructure (crabshack)
+    async fn upgrade_instance_stream_non_tee(
+        &self,
+        instance: &AgentInstance,
+        manager: &AgentManager,
+        instance_id: Uuid,
+    ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<bytes::Bytes>>> {
+        tracing::info!(
+            "Upgrading instance (non-TEE streaming): instance_id={}, instance_name={}",
+            instance_id,
+            instance.name
+        );
+
+        // Fetch the latest image from crabshack allowlist
+        let (image, _version) = self
+            .get_latest_image_non_tee(manager, instance, "upgrade")
+            .await?;
+
+        // Restart with the latest image (5-minute timeout; crabshack yields SSE stream)
+        self.call_restart_streaming(manager, instance, &image, instance_id)
+            .await
+    }
+
+    /// Call /instances/{name}/restart with image and stream the response
+    async fn call_restart_streaming(
+        &self,
+        manager: &AgentManager,
+        instance: &AgentInstance,
+        image: &str,
+        instance_id: Uuid,
+    ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<bytes::Bytes>>> {
+        use futures::stream::StreamExt;
+
+        let bearer_token = &manager.token;
+        let encoded_name = urlencoding::encode(&instance.name);
+        let restart_url = format!("{}/instances/{}/restart", manager.url, encoded_name);
+
+        tracing::debug!(
+            "Calling restart endpoint for streaming: url={}, image={}",
+            restart_url,
+            image
+        );
+
+        #[derive(serde::Serialize)]
+        struct RestartBody {
+            image: String,
+        }
+
+        // Spawn task to proxy SSE stream to channel
+        let (tx, rx) = tokio::sync::mpsc::channel::<anyhow::Result<bytes::Bytes>>(32);
+
+        let http_client = self.http_client.clone();
+        let token = bearer_token.clone();
+        let instance_name = instance.name.clone();
+        let image_for_task = image.to_string();
+
+        tokio::spawn(async move {
+            let response = match http_client
+                .post(&restart_url)
+                .bearer_auth(&token)
+                .json(&RestartBody {
+                    image: image_for_task.clone(),
+                })
+                .timeout(std::time::Duration::from_secs(300))
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = tx.send(Err(anyhow!("Failed to call restart: {}", e))).await;
+                    return;
+                }
+            };
+
+            if !response.status().is_success() {
+                tracing::error!(
+                    "Upgrade restart failed: instance_id={}, instance_name={}, image={}, restart_url={}, status={}",
+                    instance_id,
+                    instance_name,
+                    image_for_task,
+                    restart_url,
+                    response.status()
+                );
+                let _ = tx
+                    .send(Err(anyhow!(
+                        "Upgrade restart failed with status {}",
+                        response.status()
+                    )))
+                    .await;
+                return;
+            }
+
+            tracing::info!(
+                "Upgrade restart initiated: instance_id={}, image={}",
+                instance_id,
+                image_for_task
+            );
+
+            let mut stream = response.bytes_stream();
+
+            while let Some(chunk_result) = stream.next().await {
+                match chunk_result {
+                    Ok(bytes) => {
+                        // Forward the chunk from manager API to client
+                        if tx.send(Ok(bytes)).await.is_err() {
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "Upgrade stream error: instance_id={}, error={}",
+                            instance_id,
+                            e
+                        );
+                        let _ = tx.send(Err(anyhow!("Stream error: {}", e))).await;
+                        return;
+                    }
+                }
+            }
+
+            // Stream ended naturally - send completion event
+            tracing::info!(
+                "Upgrade stream ended successfully: instance_id={}, image={}",
+                instance_id,
+                image_for_task
+            );
+
+            // Emit completion event with expected format for frontend
+            let completion = serde_json::json!({"stage": "ready"}).to_string();
+            let _ = tx
+                .send(Ok(bytes::Bytes::from(format!("data: {}\n\n", completion))))
+                .await;
+        });
+
+        Ok(rx)
     }
 }
 
@@ -6305,5 +6796,83 @@ mod tests {
         assert!(urls[3].contains("mgr0"));
         assert!(urls[4].contains("mgr1"));
         assert!(urls[5].contains("mgr2"));
+    }
+
+    #[test]
+    fn test_extract_version_from_image_standard_refs() {
+        // Standard Docker Hub references
+        assert_eq!(
+            extract_version_from_image("docker.io/nearaidev/ironclaw-dind:0.23.0"),
+            Some("0.23.0".to_string())
+        );
+        assert_eq!(
+            extract_version_from_image("docker.io/nearaidev/openclaw-dind:0.21.0"),
+            Some("0.21.0".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_version_from_image_with_registry_port() {
+        // Registry with port number - should extract tag correctly
+        assert_eq!(
+            extract_version_from_image("localhost:5000/image:1.0.0"),
+            Some("1.0.0".to_string())
+        );
+        assert_eq!(
+            extract_version_from_image("registry.example.com:443/app/image:2.3.4"),
+            Some("2.3.4".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_version_from_image_with_digest() {
+        // OCI digest references should not be parsed as versions
+        assert_eq!(
+            extract_version_from_image("image@sha256:abc123def456"),
+            None
+        );
+        assert_eq!(
+            extract_version_from_image("docker.io/repo/image:1.0.0@sha256:abc123"),
+            Some("1.0.0".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_version_from_image_non_numeric_tags() {
+        // Non-numeric tags should return None
+        assert_eq!(
+            extract_version_from_image("docker.io/repo/image:latest"),
+            None
+        );
+        assert_eq!(extract_version_from_image("docker.io/repo/image:dev"), None);
+        assert_eq!(
+            extract_version_from_image("docker.io/repo/image:main"),
+            None
+        );
+        assert_eq!(
+            extract_version_from_image("localhost:5000/app/image:latest"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_extract_version_from_image_no_tag() {
+        // References without tags should return None
+        // Note: bare "image" without "/" is not a valid Docker image ref format for this function
+        assert_eq!(extract_version_from_image("docker.io/repo/image"), None);
+        assert_eq!(extract_version_from_image("localhost:5000/image"), None);
+    }
+
+    #[test]
+    fn test_extract_version_from_image_prerelease_versions() {
+        // Pre-release versions starting with digits
+        assert_eq!(
+            extract_version_from_image("docker.io/repo/image:1.0.0-rc1"),
+            Some("1.0.0-rc1".to_string())
+        );
+        assert_eq!(
+            extract_version_from_image("docker.io/repo/image:2.0.0-alpha"),
+            Some("2.0.0-alpha".to_string())
+        );
     }
 }

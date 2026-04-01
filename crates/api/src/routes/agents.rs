@@ -1308,7 +1308,11 @@ pub async fn upgrade_instance(
 
     let stream = ReceiverStream::new(rx).then(|chunk_result| async move {
         match chunk_result {
-            Ok(bytes) => Ok::<_, anyhow::Error>(bytes),
+            Ok(bytes) => {
+                // Pass through all manager API events as-is to the client
+                // (includes completion event sent by service layer on successful stream end)
+                Ok::<_, anyhow::Error>(bytes)
+            }
             Err(e) => {
                 tracing::error!("Error in upgrade stream: {}", e);
                 let error_json = serde_json::json!({
