@@ -3319,11 +3319,38 @@ impl AgentService for AgentServiceImpl {
         &self,
         user_id: UserId,
     ) -> anyhow::Result<Option<String>> {
-        // Get a manager (prefer first one)
+        let configs = self
+            .system_configs_service
+            .get_configs()
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+
+        let non_tee_infra = configs
+            .agent_hosting
+            .as_ref()
+            .and_then(|cfg| cfg.new_agent_with_non_tee_infra)
+            .unwrap_or(false);
+
+        // Gateway cookie + passkey flow is non-TEE only (see `resolve_bearer_token`).
+        if !non_tee_infra {
+            tracing::debug!(
+                "Skipping gateway session setup: TEE mode (new_agent_with_non_tee_infra=false)"
+            );
+            return Ok(None);
+        }
+
         let manager = self
             .managers
-            .first()
-            .ok_or_else(|| anyhow!("No agent managers configured"))?;
+            .iter()
+            .find(|mgr| mgr.get_is_non_tee())
+            .ok_or_else(|| {
+                anyhow!(
+                    "No non-TEE agent manager configured (have {} manager(s))",
+                    self.managers.len()
+                )
+            })?;
 
         // Try to get existing user passkey credentials
         let (auth_secret, backup_passphrase) =
