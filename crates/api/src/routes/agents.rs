@@ -1325,7 +1325,9 @@ pub async fn upgrade_instance(
             }
         })
         .chain(futures::stream::once(async {
-            Ok(axum::body::Bytes::from("data: [DONE]\n\n"))
+            // Send completion event with expected format for frontend
+            let completion = serde_json::json!({"stage": "ready"}).to_string();
+            Ok(axum::body::Bytes::from(format!("data: {}\n\n", completion)))
         }));
 
     let body = axum::body::Body::from_stream(stream);

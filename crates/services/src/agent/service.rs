@@ -43,9 +43,19 @@ fn extract_version_from_image(image_ref: &str) -> Option<String> {
 /// Parse semantic version string (e.g., "0.23.0" -> (0, 23, 0))
 fn parse_semantic_version(v: &str) -> (u32, u32, u32) {
     let parts: Vec<&str> = v.split('.').collect();
-    let major = parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
-    let minor = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-    let patch = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+
+    // Extract numeric prefix from each part (handles versions like 1.2.3-rc1)
+    let parse_part = |s: &str| {
+        s.chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .parse::<u32>()
+            .ok()
+    };
+
+    let major = parts.first().and_then(|s| parse_part(s)).unwrap_or(0);
+    let minor = parts.get(1).and_then(|s| parse_part(s)).unwrap_or(0);
+    let patch = parts.get(2).and_then(|s| parse_part(s)).unwrap_or(0);
     (major, minor, patch)
 }
 
@@ -3605,6 +3615,18 @@ impl AgentService for AgentServiceImpl {
     }
 }
 
+/// Response structure from crabshack /images endpoint
+/// Used to parse and filter non-TEE image allowlist
+#[derive(serde::Deserialize, Debug, Clone)]
+#[allow(dead_code)]
+struct CrabshackImageEntry {
+    #[serde(rename = "ref")]
+    ref_: String,
+    service_type: String,
+    status: String,
+    created_at: String,
+}
+
 impl AgentServiceImpl {
     /// Check upgrade availability for TEE infrastructure (compose-api)
     async fn check_upgrade_available_tee(
@@ -3750,6 +3772,134 @@ impl AgentServiceImpl {
         })
     }
 
+    /// Fetch the latest image from crabshack allowlist for a non-TEE instance
+    /// Returns the image ref and semantic version
+    async fn get_latest_image_non_tee(
+        &self,
+        manager: &AgentManager,
+        instance: &AgentInstance,
+        context: &str, // For logging: "check" or "upgrade"
+    ) -> anyhow::Result<(String, String)> {
+        let bearer_token = &manager.token;
+
+        // Fetch available images from crabshack allowlist
+        let images_url = format!("{}/images", manager.url);
+        tracing::debug!(
+            "Non-TEE ({}): Fetching image allowlist from: {}",
+            context,
+            images_url
+        );
+        let images_resp = self
+            .http_client
+            .get(&images_url)
+            .bearer_auth(bearer_token)
+            .timeout(std::time::Duration::from_secs(30))
+            .send()
+            .await
+            .map_err(|e| anyhow!("Failed to fetch non-TEE images allowlist: {}", e))?;
+
+        tracing::debug!(
+            "Non-TEE ({}): /images response status: {}",
+            context,
+            images_resp.status()
+        );
+
+        if !images_resp.status().is_success() {
+            return Err(anyhow!(
+                "Failed to fetch non-TEE images allowlist: status={}",
+                images_resp.status()
+            ));
+        }
+
+        let response_body = images_resp
+            .text()
+            .await
+            .map_err(|e| anyhow!("Failed to read non-TEE images response body: {}", e))?;
+
+        let image_entries: Vec<CrabshackImageEntry> = serde_json::from_str(&response_body)
+            .map_err(|e| anyhow!("Failed to parse non-TEE images response: {}", e))?;
+
+        tracing::debug!(
+            "Non-TEE ({}): Parsed {} total images from allowlist",
+            context,
+            image_entries.len()
+        );
+
+        // Determine which service type we're looking for
+        let target_service_type = instance
+            .service_type
+            .as_deref()
+            .unwrap_or(DEFAULT_SERVICE_TYPE);
+
+        // Normalize service type to match crabshack format (append -dind for non-TEE)
+        let crabshack_service_type = normalize_service_type_for_api(target_service_type, true);
+
+        tracing::debug!(
+            "Non-TEE ({}): Filtering for service_type='{}' with status='allow-create'",
+            context,
+            crabshack_service_type
+        );
+
+        // Filter images: must match service_type and have status='allow-create'
+        let available_images: Vec<CrabshackImageEntry> = image_entries
+            .iter()
+            .filter(|img| {
+                img.service_type == crabshack_service_type && img.status == "allow-create"
+            })
+            .cloned()
+            .collect();
+
+        tracing::debug!(
+            "Non-TEE ({}): Available images after filtering: {} images",
+            context,
+            available_images.len()
+        );
+
+        // Extract versions from image refs and log them
+        let images_with_versions: Vec<(String, Option<String>)> = available_images
+            .iter()
+            .map(|img| {
+                let version = extract_version_from_image(&img.ref_);
+                if let Some(ref v) = version {
+                    tracing::debug!(
+                        "Non-TEE ({}): Available image: ref={}, version={}",
+                        context,
+                        img.ref_,
+                        v
+                    );
+                } else {
+                    tracing::debug!(
+                        "Non-TEE ({}): Available image (non-numeric tag): ref={}",
+                        context,
+                        img.ref_
+                    );
+                }
+                (img.ref_.clone(), version)
+            })
+            .collect();
+
+        // Find the newest image by comparing semantic versions
+        let latest_image_entry = images_with_versions
+            .iter()
+            .filter_map(|(ref_, version)| version.as_ref().map(|v| (ref_.clone(), v.clone())))
+            .max_by(|a, b| compare_semantic_versions(&a.1, &b.1))
+            .ok_or_else(|| {
+                anyhow!(
+                    "No images with numeric versions available in allowlist for service_type='{}'",
+                    crabshack_service_type
+                )
+            })?;
+
+        tracing::debug!(
+            "Non-TEE ({}): Latest image: ref={}, version={}",
+            context,
+            latest_image_entry.0,
+            latest_image_entry.1
+        );
+
+        Ok((latest_image_entry.0, latest_image_entry.1))
+    }
+
     /// Check upgrade availability for non-TEE infrastructure (crabshack)
     async fn check_upgrade_available_non_tee(
         &self,
@@ -3784,162 +3934,72 @@ impl AgentServiceImpl {
             instance_resp.status()
         );
 
-        if !instance_resp.status().is_success() {
+        // If instance not found (404), fetch allowlist to determine latest image and block upgrade
+        let instance_not_found = instance_resp.status() == reqwest::StatusCode::NOT_FOUND;
+        if instance_not_found {
+            tracing::warn!(
+                "Instance not found on crabshack: instance_id={}. Blocking upgrade until instance is synced.",
+                instance_id
+            );
+        } else if !instance_resp.status().is_success() {
             return Err(anyhow!(
                 "Failed to fetch non-TEE instance status: status={}",
                 instance_resp.status()
             ));
         }
 
-        #[derive(serde::Deserialize)]
-        struct NonTeeInstanceResponse {
-            image: String,
-        }
+        let current_image = if !instance_not_found {
+            #[derive(serde::Deserialize)]
+            struct NonTeeInstanceResponse {
+                image: String,
+            }
 
-        let instance_status: NonTeeInstanceResponse = instance_resp
-            .json()
-            .await
-            .map_err(|e| anyhow!("Failed to parse non-TEE instance response: {}", e))?;
+            let instance_status: NonTeeInstanceResponse = instance_resp
+                .json()
+                .await
+                .map_err(|e| anyhow!("Failed to parse non-TEE instance response: {}", e))?;
 
-        let current_image = instance_status.image;
-        tracing::debug!("Non-TEE: Current instance image: {}", current_image);
-
-        // Fetch available images from crabshack allowlist
-        let images_url = format!("{}/images", manager.url);
-        tracing::debug!("Non-TEE: Fetching image allowlist from: {}", images_url);
-        let images_resp = self
-            .http_client
-            .get(&images_url)
-            .bearer_auth(bearer_token)
-            .send()
-            .await
-            .map_err(|e| anyhow!("Failed to fetch non-TEE images allowlist: {}", e))?;
-
-        tracing::debug!("Non-TEE: /images response status: {}", images_resp.status());
-
-        if !images_resp.status().is_success() {
-            return Err(anyhow!(
-                "Failed to fetch non-TEE images allowlist: status={}",
-                images_resp.status()
-            ));
-        }
-
-        // Read response body for logging and parsing
-        let response_body = images_resp
-            .text()
-            .await
-            .map_err(|e| anyhow!("Failed to read non-TEE images response body: {}", e))?;
-
-        tracing::debug!("Non-TEE: /images raw response body: {}", response_body);
-
-        #[derive(serde::Deserialize, Debug, Clone)]
-        #[allow(dead_code)]
-        struct ImageEntry {
-            #[serde(rename = "ref")]
-            ref_: String,
-            service_type: String,
-            status: String,
-            created_at: String,
-        }
-
-        let image_entries: Vec<ImageEntry> = serde_json::from_str(&response_body).map_err(|e| {
-            anyhow!(
-                "Failed to parse non-TEE images response as array of objects: {}",
-                e
-            )
-        })?;
-
-        tracing::debug!(
-            "Non-TEE: Parsed {} total images from allowlist",
-            image_entries.len()
-        );
-
-        // Determine which service type we're looking for
-        let target_service_type = instance
-            .service_type
-            .as_deref()
-            .unwrap_or(DEFAULT_SERVICE_TYPE);
-
-        // Normalize service type to match crabshack format (append -dind for non-TEE)
-        let crabshack_service_type = match target_service_type {
-            "ironclaw" => "ironclaw-dind",
-            "openclaw" => "openclaw-dind",
-            other => other,
+            tracing::debug!("Non-TEE: Current instance image: {}", instance_status.image);
+            Some(instance_status.image)
+        } else {
+            None
         };
 
-        tracing::debug!(
-            "Non-TEE: Filtering for service_type='{}' with status='allow-create'",
-            crabshack_service_type
-        );
+        // Fetch the latest image from crabshack allowlist
+        let (latest_image, latest_version) = self
+            .get_latest_image_non_tee(manager, instance, "check")
+            .await?;
 
-        // Filter images: must match service_type and have status='allow-create'
-        let available_images: Vec<ImageEntry> = image_entries
-            .iter()
-            .filter(|img| {
-                img.service_type == crabshack_service_type && img.status == "allow-create"
-            })
-            .cloned()
-            .collect();
+        // If instance not found (404), block upgrade until instance is synced
+        // This handles cases where instance is not yet fully provisioned or synced
+        if instance_not_found {
+            tracing::info!(
+                "Non-TEE upgrade check blocked: instance_id={}, instance not synced. latest_image={}",
+                instance_id,
+                latest_image
+            );
+            return Ok(UpgradeAvailability {
+                has_upgrade: false,
+                current_image: None,
+                latest_image,
+            });
+        }
 
-        tracing::debug!(
-            "Non-TEE: Available images after filtering: {} images",
-            available_images.len()
-        );
-
-        // Extract versions from image refs and log them
-        let images_with_versions: Vec<(String, Option<String>)> = available_images
-            .iter()
-            .map(|img| {
-                let version = extract_version_from_image(&img.ref_);
-                if let Some(ref v) = version {
-                    tracing::debug!("Non-TEE: Available image: ref={}, version={}", img.ref_, v);
-                } else {
-                    tracing::debug!(
-                        "Non-TEE: Available image (non-numeric tag): ref={}",
-                        img.ref_
-                    );
-                }
-                (img.ref_.clone(), version)
-            })
-            .collect();
-
-        // Find current image version
-        let current_version = extract_version_from_image(&current_image);
+        // Determine upgrade availability by comparing semantic versions
+        let current_version = extract_version_from_image(current_image.as_ref().unwrap());
         if let Some(ref v) = current_version {
             tracing::debug!(
                 "Non-TEE: Current image version extracted: ref={}, version={}",
-                current_image,
+                current_image.as_ref().unwrap(),
                 v
             );
         } else {
             tracing::debug!(
                 "Non-TEE: Current image has non-numeric tag: ref={}",
-                current_image
+                current_image.as_ref().unwrap()
             );
         }
 
-        // Find the newest image by comparing semantic versions
-        let latest_image_entry = images_with_versions
-            .iter()
-            .filter_map(|(ref_, version)| version.as_ref().map(|v| (ref_.clone(), v.clone())))
-            .max_by(|a, b| compare_semantic_versions(&a.1, &b.1))
-            .ok_or_else(|| {
-                anyhow!(
-                    "No images with numeric versions available in allowlist for service_type='{}'",
-                    crabshack_service_type
-                )
-            })?;
-
-        tracing::debug!(
-            "Non-TEE: Latest image by semantic version: ref={}, version={}",
-            latest_image_entry.0,
-            latest_image_entry.1
-        );
-
-        let latest_image = latest_image_entry.0.clone();
-        let latest_version = latest_image_entry.1.clone();
-
-        // Determine upgrade availability by comparing semantic versions
         let has_upgrade = match current_version {
             Some(curr_v) => {
                 compare_semantic_versions(&curr_v, &latest_version) == std::cmp::Ordering::Less
@@ -3956,14 +4016,14 @@ impl AgentServiceImpl {
         tracing::info!(
             "Non-TEE upgrade check completed: instance_id={}, current_image={}, latest_image={}, has_upgrade={}",
             instance_id,
-            current_image,
+            current_image.as_ref().unwrap(),
             latest_image,
             has_upgrade
         );
 
         Ok(UpgradeAvailability {
             has_upgrade,
-            current_image: Some(current_image),
+            current_image,
             latest_image,
         })
     }
@@ -4057,127 +4117,10 @@ impl AgentServiceImpl {
             instance.name
         );
 
-        // Use manager token (admin secret) for non-TEE crabshack API
-        let bearer_token = &manager.token;
-
-        // Fetch available images from crabshack allowlist
-        let images_url = format!("{}/images", manager.url);
-        tracing::debug!(
-            "Non-TEE upgrade: Fetching image allowlist from: {}",
-            images_url
-        );
-        let images_resp = self
-            .http_client
-            .get(&images_url)
-            .bearer_auth(bearer_token)
-            .timeout(std::time::Duration::from_secs(30))
-            .send()
-            .await
-            .map_err(|e| {
-                anyhow!(
-                    "Failed to fetch non-TEE images allowlist for upgrade: {}",
-                    e
-                )
-            })?;
-
-        tracing::debug!(
-            "Non-TEE upgrade: /images response status: {}",
-            images_resp.status()
-        );
-
-        if !images_resp.status().is_success() {
-            return Err(anyhow!(
-                "Failed to fetch non-TEE images allowlist for upgrade: status={}",
-                images_resp.status()
-            ));
-        }
-
-        let response_body = images_resp
-            .text()
-            .await
-            .map_err(|e| anyhow!("Failed to read non-TEE images response body: {}", e))?;
-
-        #[derive(serde::Deserialize, Debug, Clone)]
-        #[allow(dead_code)]
-        struct ImageEntry {
-            #[serde(rename = "ref")]
-            ref_: String,
-            service_type: String,
-            status: String,
-            created_at: String,
-        }
-
-        let image_entries: Vec<ImageEntry> = serde_json::from_str(&response_body)
-            .map_err(|e| anyhow!("Failed to parse non-TEE images response for upgrade: {}", e))?;
-
-        // Determine which service type we're looking for
-        let target_service_type = instance
-            .service_type
-            .as_deref()
-            .unwrap_or(DEFAULT_SERVICE_TYPE);
-
-        // Normalize service type to match crabshack format (append -dind for non-TEE)
-        let crabshack_service_type = match target_service_type {
-            "ironclaw" => "ironclaw-dind",
-            "openclaw" => "openclaw-dind",
-            other => other,
-        };
-
-        // Filter images: must match service_type and have status='allow-create'
-        let available_images: Vec<ImageEntry> = image_entries
-            .iter()
-            .filter(|img| {
-                img.service_type == crabshack_service_type && img.status == "allow-create"
-            })
-            .cloned()
-            .collect();
-
-        tracing::debug!(
-            "Non-TEE upgrade: Found {} available images for service_type='{}'",
-            available_images.len(),
-            crabshack_service_type
-        );
-
-        // Extract versions from image refs
-        let images_with_versions: Vec<(String, Option<String>)> = available_images
-            .iter()
-            .map(|img| {
-                let version = extract_version_from_image(&img.ref_);
-                if let Some(ref v) = version {
-                    tracing::debug!(
-                        "Non-TEE upgrade: Available image: ref={}, version={}",
-                        img.ref_,
-                        v
-                    );
-                } else {
-                    tracing::debug!(
-                        "Non-TEE upgrade: Available image (non-numeric tag): ref={}",
-                        img.ref_
-                    );
-                }
-                (img.ref_.clone(), version)
-            })
-            .collect();
-
-        // Find the newest image by comparing semantic versions
-        let latest_image_entry = images_with_versions
-            .iter()
-            .filter_map(|(ref_, version)| version.as_ref().map(|v| (ref_.clone(), v.clone())))
-            .max_by(|a, b| compare_semantic_versions(&a.1, &b.1))
-            .ok_or_else(|| {
-                anyhow!(
-                    "No images with numeric versions available in allowlist for upgrade: service_type='{}'",
-                    crabshack_service_type
-                )
-            })?;
-
-        let image = latest_image_entry.0.clone();
-        let version = latest_image_entry.1.clone();
-        tracing::debug!(
-            "Non-TEE upgrade: Latest image for upgrade: ref={}, version={}",
-            image,
-            version
-        );
+        // Fetch the latest image from crabshack allowlist
+        let (image, _version) = self
+            .get_latest_image_non_tee(manager, instance, "upgrade")
+            .await?;
 
         // Restart with the latest image (5-minute timeout; crabshack yields SSE stream)
         self.call_restart_streaming(manager, instance, &image, instance_id)
@@ -4281,26 +4224,13 @@ impl AgentServiceImpl {
                 }
             }
 
-            // Stream ended naturally - send completion event
+            // Stream ended naturally
+            // NOTE: Do not send completion event here - route handler adds it to avoid duplicates
             tracing::info!(
                 "Upgrade stream ended: instance_id={}, image={}",
                 instance_id,
                 image_for_task
             );
-
-            let final_event = serde_json::json!({
-                "stage": "ready"
-            })
-            .to_string();
-
-            // Send in SSE format (route handler passes through as-is)
-            let final_data = format!("data: {}\n\n", final_event);
-            tracing::info!(
-                "Sending upgrade completion event: instance_id={}, final_event={}",
-                instance_id,
-                final_event
-            );
-            let _ = tx.send(Ok(bytes::Bytes::from(final_data))).await;
         });
 
         Ok(rx)

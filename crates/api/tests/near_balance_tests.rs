@@ -2,19 +2,59 @@ mod common;
 
 use api::routes::api::USER_BANNED_ERROR_MESSAGE;
 use common::{
-    cleanup_user_subscriptions, create_test_server_and_db, insert_test_subscription,
-    insert_test_subscription_with_price_id, mock_login, set_subscription_plans,
+    create_test_server_and_db, insert_test_subscription, insert_test_subscription_with_price_id,
+    mock_login, set_subscription_plans,
 };
 use serde_json::json;
 use serial_test::serial;
+use services::user::ports::UserRepository;
 use tokio::time::sleep;
 
-async fn clear_near_balance_bans(db: &database::Database) {
-    let client = db.pool().get().await.expect("DB pool");
+/// Comprehensive cleanup for a user: clear bans, subscriptions, sessions, and oauth links
+/// This prevents state from one test leaking into another when reusing the same email.
+/// NOTE: Does NOT delete the user itself to avoid affecting other tests that query users.
+async fn cleanup_user_completely(db: &database::Database, user_email: &str) {
+    let user = match db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .expect("get user")
+    {
+        Some(u) => u,
+        None => return, // User doesn't exist, nothing to clean
+    };
+
+    let client = db.pool().get().await.expect("get pool client");
+
+    // Delete subscriptions
+    client
+        .execute("DELETE FROM subscriptions WHERE user_id = $1", &[&user.id])
+        .await
+        .ok();
+
+    // Delete or revoke sessions (set expires_at to now so they're invalid)
     client
         .execute(
-            "UPDATE user_bans SET revoked_at = NOW() WHERE revoked_at IS NULL AND ban_type = 'near_balance_low'",
-            &[],
+            "UPDATE user_sessions SET expires_at = NOW() WHERE user_id = $1",
+            &[&user.id],
+        )
+        .await
+        .ok();
+
+    // Revoke user bans
+    client
+        .execute(
+            "UPDATE user_bans SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL",
+            &[&user.id],
+        )
+        .await
+        .ok();
+
+    // Delete oauth links
+    client
+        .execute(
+            "DELETE FROM user_oauth_links WHERE user_id = $1",
+            &[&user.id],
         )
         .await
         .ok();
@@ -25,7 +65,7 @@ async fn clear_near_balance_bans(db: &database::Database) {
 #[tokio::test]
 async fn test_near_balance_skipped_when_no_near_linked_account() {
     let (server, db) = create_test_server_and_db(Default::default()).await;
-    clear_near_balance_bans(&db).await;
+    cleanup_user_completely(&db, "no-near@example.com").await;
 
     // Use mock_login helper which does NOT set oauth_provider, so no NEAR linked account
     let token = mock_login(&server, "no-near@example.com").await;
@@ -52,10 +92,10 @@ async fn test_near_balance_skipped_when_no_near_linked_account() {
 #[tokio::test]
 async fn test_near_balance_allows_rich_account() {
     let (server, db) = create_test_server_and_db(Default::default()).await;
-    clear_near_balance_bans(&db).await;
 
     // Real account in mainnet
     let rich_account = "near";
+    cleanup_user_completely(&db, &format!("{}@near", rich_account)).await;
 
     let login_request = json!({
         "email": format!("{}@near", rich_account),
@@ -102,10 +142,11 @@ async fn test_near_balance_allows_rich_account() {
 #[tokio::test]
 async fn test_near_balance_blocks_poor_account() {
     let (server, db) = create_test_server_and_db(Default::default()).await;
-    clear_near_balance_bans(&db).await;
 
     // Real account in mainnet
     let poor_account = "zero-balance.near";
+    let user_email = format!("{}@near", poor_account);
+    cleanup_user_completely(&db, &user_email).await;
 
     let login_request = json!({
         "email": format!("{}@near", poor_account),
@@ -183,7 +224,6 @@ async fn test_near_balance_blocks_poor_account() {
 #[serial(subscription_tests)]
 async fn test_near_balance_skipped_for_paid_subscription() {
     let (server, db) = create_test_server_and_db(Default::default()).await;
-    clear_near_balance_bans(&db).await;
 
     // Plan with price 999 (paid) - matches insert_test_subscription's price_test_basic
     set_subscription_plans(
@@ -199,7 +239,7 @@ async fn test_near_balance_skipped_for_paid_subscription() {
     .await;
 
     let user_email = "near@near";
-    cleanup_user_subscriptions(&db, user_email).await;
+    cleanup_user_completely(&db, user_email).await;
 
     // Login with NEAR provider (rich account "near" to avoid balance issues)
     let login_request = json!({
@@ -243,7 +283,6 @@ async fn test_near_balance_skipped_for_paid_subscription() {
 #[serial(subscription_tests)]
 async fn test_near_balance_check_applied_for_free_plan_subscription() {
     let (server, db) = create_test_server_and_db(Default::default()).await;
-    clear_near_balance_bans(&db).await;
 
     set_subscription_plans(
         &server,
@@ -259,7 +298,7 @@ async fn test_near_balance_check_applied_for_free_plan_subscription() {
 
     let poor_account = "zero-balance-3.near";
     let user_email = format!("{}@near", poor_account);
-    cleanup_user_subscriptions(&db, &user_email).await;
+    cleanup_user_completely(&db, &user_email).await;
 
     let login_request = json!({
         "email": user_email,
@@ -322,7 +361,6 @@ async fn test_near_balance_check_applied_for_free_plan_subscription() {
 #[serial(subscription_tests)]
 async fn test_near_balance_check_applied_for_unknown_price_id() {
     let (server, db) = create_test_server_and_db(Default::default()).await;
-    clear_near_balance_bans(&db).await;
 
     // Config only has "basic" - subscription uses price_unknown which is not in config
     set_subscription_plans(
@@ -339,7 +377,7 @@ async fn test_near_balance_check_applied_for_unknown_price_id() {
 
     let poor_account = "zero-balance-4.near";
     let user_email = format!("{}@near", poor_account);
-    cleanup_user_subscriptions(&db, &user_email).await;
+    cleanup_user_completely(&db, &user_email).await;
 
     let login_request = json!({
         "email": user_email,
