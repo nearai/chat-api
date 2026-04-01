@@ -3345,6 +3345,7 @@ impl AgentService for AgentServiceImpl {
 
         let non_tee_global = Self::is_non_tee_infra(&configs);
 
+        // Try to get existing user passkey credentials
         let passkey_existing = match self.repository.get_user_passkey_credentials(user_id).await {
             Ok(v) => v,
             Err(e) => {
@@ -3399,6 +3400,7 @@ impl AgentService for AgentServiceImpl {
         let (auth_secret, backup_passphrase) = match passkey_existing {
             Some((secret, passphrase)) => (secret, passphrase),
             None => {
+                // First login - create passkey credentials for this user
                 tracing::debug!(
                     "Creating passkey credentials for user on first login: user_id={}",
                     user_id
