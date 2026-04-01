@@ -1,4 +1,4 @@
-use crate::system_configs::ports::SystemConfigsService;
+use crate::system_configs::ports::{SystemConfigs, SystemConfigsService};
 use crate::UserId;
 use anyhow::anyhow;
 use async_trait::async_trait;
@@ -190,6 +190,36 @@ impl AgentServiceImpl {
         &self.managers[idx % self.managers.len()]
     }
 
+    /// System configs from DB; on error or missing row, use `SystemConfigs::default()`.
+    async fn get_system_configs(&self) -> SystemConfigs {
+        self.system_configs_service
+            .get_configs()
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    }
+
+    /// `true` when admin config says new agents use non-TEE infra (passkey / non-TEE managers).
+    fn is_non_tee_infra(configs: &SystemConfigs) -> bool {
+        configs
+            .agent_hosting
+            .as_ref()
+            .and_then(|cfg| cfg.new_agent_with_non_tee_infra)
+            .unwrap_or(false)
+    }
+
+    /// User has at least one instance whose stored manager URL matches a configured non-TEE manager.
+    fn user_has_non_tee_routed_instance(&self, instances: &[AgentInstance]) -> bool {
+        instances.iter().any(|inst| {
+            inst.agent_api_base_url.as_ref().is_some_and(|url| {
+                self.managers
+                    .iter()
+                    .any(|m| m.url == *url && m.get_is_non_tee())
+            })
+        })
+    }
+
     /// Pick the next manager with available capacity, starting from the round-robin position.
     /// Tries each manager once. Returns Err if all managers are at capacity.
     ///
@@ -197,22 +227,11 @@ impl AgentServiceImpl {
     /// under capacity and both create instances there, temporarily exceeding the limit.
     /// For a hard cap, DB-level enforcement (e.g. INSERT ... WHERE count < max) would be needed.
     async fn next_available_manager(&self) -> anyhow::Result<AgentManager> {
-        let configs = self
-            .system_configs_service
-            .get_configs()
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_default();
+        let configs = self.get_system_configs().await;
 
-        // Read NON_TEE_INFRA setting from system configs
-        let non_tee_infra = configs
-            .agent_hosting
-            .as_ref()
-            .and_then(|cfg| cfg.new_agent_with_non_tee_infra)
-            .unwrap_or(false);
+        let non_tee_infra = Self::is_non_tee_infra(&configs);
 
-        // Filter managers based on NON_TEE_INFRA setting
+        // Filter managers based on agent_hosting.new_agent_with_non_tee_infra
         let available_managers: Vec<_> = self
             .managers
             .iter()
@@ -224,7 +243,7 @@ impl AgentServiceImpl {
 
         if available_managers.is_empty() {
             return Err(anyhow!(
-                "No suitable managers available: NON_TEE_INFRA={}, configured_managers={}",
+                "No suitable managers available: non_tee_infra={}, configured_managers={}",
                 non_tee_infra,
                 self.managers.len()
             ));
@@ -253,7 +272,7 @@ impl AgentServiceImpl {
         }
 
         Err(anyhow!(
-            "All {} suitable agent manager(s) are at capacity (NON_TEE_INFRA={})",
+            "All {} suitable agent manager(s) are at capacity (non_tee_infra={})",
             n,
             non_tee_infra
         ))
@@ -719,13 +738,7 @@ impl AgentServiceImpl {
         params: AgentApiCreateParams,
     ) -> anyhow::Result<serde_json::Value> {
         // Get instance defaults from system configs
-        let configs = self
-            .system_configs_service
-            .get_configs()
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_default();
+        let configs = self.get_system_configs().await;
         let instance_defaults = configs.instance_defaults.as_ref();
         let default_cpus = instance_defaults
             .and_then(|d| d.cpus.as_deref())
@@ -977,13 +990,7 @@ impl AgentServiceImpl {
         params: AgentApiCreateParams,
         auth_method: AuthMethod<'_>,
     ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<serde_json::Value>>> {
-        let configs = self
-            .system_configs_service
-            .get_configs()
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_default();
+        let configs = self.get_system_configs().await;
         let instance_defaults = configs.instance_defaults.as_ref();
         let default_cpus = instance_defaults
             .and_then(|d| d.cpus.as_deref())
@@ -3319,24 +3326,61 @@ impl AgentService for AgentServiceImpl {
         &self,
         user_id: UserId,
     ) -> anyhow::Result<Option<String>> {
-        let configs = self
-            .system_configs_service
-            .get_configs()
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_default();
+        let configs = match self.system_configs_service.get_configs().await {
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to load system configs for gateway session setup: {}",
+                    e
+                );
+                return Err(e);
+            }
+            Ok(None) => {
+                tracing::debug!(
+                    "No system_configs row; using defaults for gateway session eligibility"
+                );
+                SystemConfigs::default()
+            }
+            Ok(Some(c)) => c,
+        };
 
-        let non_tee_infra = configs
-            .agent_hosting
-            .as_ref()
-            .and_then(|cfg| cfg.new_agent_with_non_tee_infra)
-            .unwrap_or(false);
+        let non_tee_global = Self::is_non_tee_infra(&configs);
 
-        // Gateway cookie + passkey flow is non-TEE only (see `resolve_bearer_token`).
-        if !non_tee_infra {
+        let passkey_existing = match self.repository.get_user_passkey_credentials(user_id).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to fetch user passkey credentials: user_id={}, error={}",
+                    user_id,
+                    e
+                );
+                return Err(e);
+            }
+        };
+
+        // Primary: new agents use non-TEE (admin flag). Also attempt when user still needs
+        // crabshack session after an infra switch: existing passkey or non-TEE routed instances
+        // (mirrors per-instance manager typing in `resolve_bearer_token`).
+        let mut needs_non_tee_gateway = non_tee_global;
+        if !needs_non_tee_gateway {
+            if passkey_existing.is_some() {
+                needs_non_tee_gateway = true;
+                tracing::debug!(
+                    "Gateway session: user has passkey credentials while global infra is TEE — still attempting compose session"
+                );
+            } else {
+                let (instances, _) = self.repository.list_user_instances(user_id, 500, 0).await?;
+                if self.user_has_non_tee_routed_instance(&instances) {
+                    needs_non_tee_gateway = true;
+                    tracing::debug!(
+                        "Gateway session: user has non-TEE instance while global infra is TEE — still attempting compose session"
+                    );
+                }
+            }
+        }
+
+        if !needs_non_tee_gateway {
             tracing::debug!(
-                "Skipping gateway session setup: TEE mode (new_agent_with_non_tee_infra=false)"
+                "Skipping gateway session: TEE infra, no passkey, no non-TEE routed instances"
             );
             return Ok(None);
         }
@@ -3352,42 +3396,28 @@ impl AgentService for AgentServiceImpl {
                 )
             })?;
 
-        // Try to get existing user passkey credentials
-        let (auth_secret, backup_passphrase) =
-            match self.repository.get_user_passkey_credentials(user_id).await {
-                Ok(Some((secret, passphrase))) => (secret, passphrase),
-                Ok(None) => {
-                    // First login - create passkey credentials for this user
-                    tracing::debug!(
-                        "Creating passkey credentials for user on first login: user_id={}",
-                        user_id
-                    );
-                    let auth_secret = Self::generate_random_credential(32);
-                    let backup_passphrase = Self::generate_random_credential(32);
+        let (auth_secret, backup_passphrase) = match passkey_existing {
+            Some((secret, passphrase)) => (secret, passphrase),
+            None => {
+                tracing::debug!(
+                    "Creating passkey credentials for user on first login: user_id={}",
+                    user_id
+                );
+                let auth_secret = Self::generate_random_credential(32);
+                let backup_passphrase = Self::generate_random_credential(32);
 
-                    // Write to database first - if DB succeeds but compose-api fails, we can retry
-                    // (upsert will overwrite). If we did it the other way around, DB failure after
-                    // successful compose-api registration would orphan the credentials permanently.
-                    self.repository
-                        .upsert_user_passkey_credentials(user_id, &auth_secret, &backup_passphrase)
-                        .await?;
+                self.repository
+                    .upsert_user_passkey_credentials(user_id, &auth_secret, &backup_passphrase)
+                    .await?;
 
-                    tracing::debug!(
-                        "User passkey credentials stored in database: user_id={}",
-                        user_id
-                    );
+                tracing::debug!(
+                    "User passkey credentials stored in database: user_id={}",
+                    user_id
+                );
 
-                    (auth_secret, backup_passphrase)
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to fetch user passkey credentials: user_id={}, error={}",
-                        user_id,
-                        e
-                    );
-                    return Err(e);
-                }
-            };
+                (auth_secret, backup_passphrase)
+            }
+        };
 
         // Get session token: try login first, register on 404
         let session_token = self
@@ -3797,6 +3827,7 @@ impl AgentService for AgentServiceImpl {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::ports::AgentService;
     use crate::system_configs::ports::{PartialSystemConfigs, SystemConfigs, SystemConfigsService};
     use chrono::{Duration, Utc};
     use config::AgentManager;
@@ -3893,6 +3924,31 @@ mod tests {
         }
     }
 
+    /// System configs service that always fails `get_configs` (for gateway / error-path tests).
+    struct MockSystemConfigsServiceErr;
+
+    #[async_trait]
+    impl SystemConfigsService for MockSystemConfigsServiceErr {
+        async fn get_configs(&self) -> anyhow::Result<Option<SystemConfigs>> {
+            Err(anyhow!("injected system_configs get_configs failure"))
+        }
+
+        async fn upsert_configs(&self, _configs: SystemConfigs) -> anyhow::Result<SystemConfigs> {
+            Err(anyhow!(
+                "MockSystemConfigsServiceErr: upsert_configs not supported"
+            ))
+        }
+
+        async fn update_configs(
+            &self,
+            _configs: PartialSystemConfigs,
+        ) -> anyhow::Result<SystemConfigs> {
+            Err(anyhow!(
+                "MockSystemConfigsServiceErr: update_configs not supported"
+            ))
+        }
+    }
+
     use crate::agent::ports::MockAgentRepository;
 
     /// Create a MockAgentRepository where every manager has `count` instances
@@ -3932,6 +3988,127 @@ mod tests {
     }
 
     // --- Tests ---
+
+    #[test]
+    fn test_user_has_non_tee_routed_instance_positive() {
+        let ntee_url = "https://claws.example.com/api/crabshack/mgr0".to_string();
+        let managers = vec![
+            AgentManager {
+                url: "https://tee.example/api".to_string(),
+                token: "tee-tok".to_string(),
+                is_non_tee: false,
+            },
+            AgentManager {
+                url: ntee_url.clone(),
+                token: "ntok".to_string(),
+                is_non_tee: true,
+            },
+        ];
+        let svc = make_service(
+            managers,
+            Arc::new(mock_repo_with_manager_count(0)),
+            Arc::new(MockSystemConfigsService::no_config()),
+        );
+
+        let uid = UserId(Uuid::new_v4());
+        let instance = AgentInstance {
+            id: Uuid::new_v4(),
+            user_id: uid,
+            instance_id: "i1".to_string(),
+            name: "n1".to_string(),
+            public_ssh_key: None,
+            instance_url: None,
+            instance_token: None,
+            dashboard_url: None,
+            agent_api_base_url: Some(ntee_url),
+            service_type: None,
+            status: "active".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        assert!(svc.user_has_non_tee_routed_instance(&[instance]));
+    }
+
+    #[test]
+    fn test_user_has_non_tee_routed_instance_false_when_only_tee_manager_url() {
+        let tee_url = "https://tee.example/api".to_string();
+        let managers = vec![AgentManager {
+            url: tee_url.clone(),
+            token: "tee-tok".to_string(),
+            is_non_tee: false,
+        }];
+        let svc = make_service(
+            managers,
+            Arc::new(mock_repo_with_manager_count(0)),
+            Arc::new(MockSystemConfigsService::no_config()),
+        );
+
+        let uid = UserId(Uuid::new_v4());
+        let instance = AgentInstance {
+            id: Uuid::new_v4(),
+            user_id: uid,
+            instance_id: "i1".to_string(),
+            name: "n1".to_string(),
+            public_ssh_key: None,
+            instance_url: None,
+            instance_token: None,
+            dashboard_url: None,
+            agent_api_base_url: Some(tee_url),
+            service_type: None,
+            status: "active".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        assert!(!svc.user_has_non_tee_routed_instance(&[instance]));
+    }
+
+    #[tokio::test]
+    async fn test_setup_gateway_session_skips_when_tee_no_passkey_no_non_tee_instances() {
+        let mut repo = MockAgentRepository::new();
+        repo.expect_get_user_passkey_credentials()
+            .times(1)
+            .returning(|_| Ok(None));
+        repo.expect_list_user_instances()
+            .times(1)
+            .returning(|_, _, _| Ok((vec![], 0)));
+
+        let svc = make_service(
+            make_managers(1),
+            Arc::new(repo),
+            Arc::new(MockSystemConfigsService::with_non_tee_infra(false)),
+        );
+
+        let out = svc
+            .setup_gateway_session_for_user(UserId(Uuid::new_v4()))
+            .await
+            .unwrap();
+        assert!(out.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_setup_gateway_session_propagates_system_config_load_error() {
+        let mut repo = MockAgentRepository::new();
+        repo.expect_get_user_passkey_credentials().times(0);
+        repo.expect_list_user_instances().times(0);
+
+        let svc = make_service(
+            make_managers(1),
+            Arc::new(repo),
+            Arc::new(MockSystemConfigsServiceErr),
+        );
+
+        let err = svc
+            .setup_gateway_session_for_user(UserId(Uuid::new_v4()))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("injected system_configs"),
+            "err={}",
+            err
+        );
+    }
 
     #[test]
     fn test_next_manager_round_robin_single() {
@@ -6074,7 +6251,7 @@ mod tests {
         let result = svc.next_available_manager().await;
         let error_msg = result.unwrap_err().to_string();
         assert!(error_msg.contains("No suitable managers"));
-        assert!(error_msg.contains("NON_TEE_INFRA=true"));
+        assert!(error_msg.contains("non_tee_infra=true"));
     }
 
     #[tokio::test]
