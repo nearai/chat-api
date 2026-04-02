@@ -448,6 +448,9 @@ pub trait AgentService: Send + Sync {
     /// Setup gateway session for a user.
     /// Creates user passkey credentials on first login, then sets the gateway cookie via /auth/proxy-session.
     /// Returns the Set-Cookie header value to be forwarded to the browser, or None if not available.
+    /// Runs when `new_agent_with_non_tee_infra` is set, or when the user already has passkey credentials
+    /// or instances on a non-TEE manager (so crabshack sessions still work after switching global infra to TEE).
+    /// Propagates errors if system configs cannot be loaded (callers typically log and continue).
     /// Safe to call multiple times (idempotent on subsequent logins).
     async fn setup_gateway_session_for_user(
         &self,
