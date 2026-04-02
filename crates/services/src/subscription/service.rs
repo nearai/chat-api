@@ -1320,6 +1320,26 @@ impl SubscriptionService for SubscriptionServiceImpl {
             return Ok(ChangePlanOutcome::ScheduledForPeriodEnd);
         }
 
+        if subscription.pending_downgrade_status.is_some() {
+            let mut client = self
+                .db_pool
+                .get()
+                .await
+                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+            let txn = client
+                .transaction()
+                .await
+                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+            self.subscription_repo
+                .clear_pending_downgrade(&txn, &subscription.subscription_id)
+                .await
+                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+            txn.commit()
+                .await
+                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+            self.invalidate_credit_limit_cache(user_id).await;
+        }
+
         let stripe_sub = self
             .stripe_client
             .retrieve_subscription(&subscription.subscription_id)
