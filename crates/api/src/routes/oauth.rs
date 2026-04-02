@@ -286,37 +286,7 @@ pub async fn oauth_callback(
 
     tracing::debug!("Session token generated, length: {}", token.len());
 
-    // For non-TEE mode: set up gateway session (authenticate with compose-api)
     let mut headers = HeaderMap::new();
-    match app_state
-        .agent_service
-        .setup_gateway_session_for_user(session.user_id)
-        .await
-    {
-        Ok(Some(set_cookie)) => {
-            // Forward Set-Cookie header from compose-api to browser
-            if let Ok(cookie_value) = set_cookie.parse() {
-                headers.insert(http::header::SET_COOKIE, cookie_value);
-            } else {
-                tracing::warn!(
-                    "Failed to parse Set-Cookie header value in oauth_callback: set_cookie_len={}",
-                    set_cookie.len()
-                );
-            }
-        }
-        Ok(None) => {
-            tracing::debug!(
-                "No Set-Cookie header returned from gateway session setup in oauth_callback"
-            );
-        }
-        Err(e) => {
-            tracing::warn!(
-                "Failed to set up gateway session for user in oauth_callback: user_id={}, error={}",
-                session.user_id,
-                e
-            );
-        }
-    }
 
     // Use frontend_callback from OAuth state, or fall back to FRONTEND_URL env var
     let frontend_url = frontend_callback.clone().unwrap_or_else(|| {
@@ -611,37 +581,7 @@ pub async fn mock_login(
         session.session_id
     );
 
-    // For non-TEE mode: set up gateway session (authenticate with compose-api)
-    let mut response_headers = HeaderMap::new();
-    match app_state
-        .agent_service
-        .setup_gateway_session_for_user(user.id)
-        .await
-    {
-        Ok(Some(set_cookie)) => {
-            // Forward Set-Cookie header from compose-api to browser
-            if let Ok(cookie_value) = set_cookie.parse() {
-                response_headers.insert(http::header::SET_COOKIE, cookie_value);
-            } else {
-                tracing::warn!(
-                    "Failed to parse Set-Cookie header value in mock_login: set_cookie_len={}",
-                    set_cookie.len()
-                );
-            }
-        }
-        Ok(None) => {
-            tracing::debug!(
-                "No Set-Cookie header returned from gateway session setup in mock_login"
-            );
-        }
-        Err(e) => {
-            tracing::warn!(
-                "Failed to set up gateway session for user in mock_login: user_id={}, error={}",
-                user.id,
-                e
-            );
-        }
-    }
+    let response_headers = HeaderMap::new();
 
     Ok((
         response_headers,
@@ -746,37 +686,7 @@ pub async fn near_auth(
         is_new_user
     );
 
-    // For non-TEE mode: set up gateway session (authenticate with compose-api)
-    let mut response_headers = HeaderMap::new();
-    match app_state
-        .agent_service
-        .setup_gateway_session_for_user(session.user_id)
-        .await
-    {
-        Ok(Some(set_cookie)) => {
-            // Forward Set-Cookie header from compose-api to browser
-            if let Ok(cookie_value) = set_cookie.parse() {
-                response_headers.insert(http::header::SET_COOKIE, cookie_value);
-            } else {
-                tracing::warn!(
-                    "Failed to parse Set-Cookie header value in near_auth: set_cookie_len={}",
-                    set_cookie.len()
-                );
-            }
-        }
-        Ok(None) => {
-            tracing::debug!(
-                "No Set-Cookie header returned from gateway session setup in near_auth"
-            );
-        }
-        Err(e) => {
-            tracing::warn!(
-                "Failed to set up gateway session for user in near_auth: user_id={}, error={}",
-                session.user_id,
-                e
-            );
-        }
-    }
+    let response_headers = HeaderMap::new();
 
     Ok((
         response_headers,

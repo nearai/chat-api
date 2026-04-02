@@ -2,7 +2,7 @@ use super::{is_valid_service_type, VALID_SERVICE_TYPES};
 use crate::{error::ApiError, middleware::AuthenticatedUser, models::*, state::AppState};
 use axum::{
     extract::{Extension, Path, Query, State},
-    http::{HeaderMap, StatusCode},
+    http::{self, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
@@ -183,6 +183,26 @@ pub async fn create_instance(
         .and_then(|cfg| cfg.new_agent_with_non_tee_infra)
         .unwrap_or(false);
 
+    // Refresh gateway cookie for non-TEE users (or users with existing non-TEE instances).
+    // setup_gateway_session_for_user handles all eligibility checks internally and returns
+    // Ok(None) safely for TEE-only users, so this call is always unconditional.
+    let gateway_cookie: Option<String> = match app_state
+        .agent_service
+        .setup_gateway_session_for_user(user.user_id)
+        .await
+    {
+        Ok(Some(set_cookie)) => Some(set_cookie),
+        Ok(None) => None,
+        Err(e) => {
+            tracing::warn!(
+                "Failed to set up gateway session during instance creation: user_id={}, error={}",
+                user.user_id,
+                e
+            );
+            None
+        }
+    };
+
     if wants_stream {
         // SSE streaming response
         let rx = if non_tee_infra {
@@ -264,12 +284,20 @@ pub async fn create_instance(
 
         let body = axum::body::Body::from_stream(stream);
 
-        Ok(Response::builder()
+        let mut builder = Response::builder()
             .status(StatusCode::OK)
             .header("content-type", "text/event-stream")
             .header("cache-control", "no-cache")
             .header("connection", "keep-alive")
-            .header("x-accel-buffering", "no")
+            .header("x-accel-buffering", "no");
+
+        if let Some(ref cookie) = gateway_cookie {
+            if let Ok(v) = cookie.parse::<http::HeaderValue>() {
+                builder = builder.header(http::header::SET_COOKIE, v);
+            }
+        }
+
+        Ok(builder
             .body(body)
             .map_err(|_| ApiError::internal_server_error("Failed to construct response"))?)
     } else {
@@ -410,9 +438,17 @@ pub async fn create_instance(
         };
 
         let response: InstanceResponse = instance.into();
-        Ok(Response::builder()
+        let mut builder = Response::builder()
             .status(StatusCode::CREATED)
-            .header("content-type", "application/json")
+            .header("content-type", "application/json");
+
+        if let Some(ref cookie) = gateway_cookie {
+            if let Ok(v) = cookie.parse::<http::HeaderValue>() {
+                builder = builder.header(http::header::SET_COOKIE, v);
+            }
+        }
+
+        Ok(builder
             .body(axum::body::Body::from(
                 serde_json::to_string(&response).unwrap_or_default(),
             ))
