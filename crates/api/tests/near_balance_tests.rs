@@ -1,6 +1,7 @@
 mod common;
 
 use api::routes::api::USER_BANNED_ERROR_MESSAGE;
+use axum_test::TestServer;
 use common::{
     create_test_server_and_db, insert_test_subscription, insert_test_subscription_with_price_id,
     mock_login, set_subscription_plans,
@@ -58,6 +59,39 @@ async fn cleanup_user_completely(db: &database::Database, user_email: &str) {
         )
         .await
         .ok();
+}
+
+async fn wait_for_near_balance_ban(
+    server: &TestServer,
+    token: &str,
+    request_body: serde_json::Value,
+) -> axum_test::TestResponse {
+    let mut last_response = None;
+
+    for _ in 0..10 {
+        sleep(std::time::Duration::from_millis(1100)).await;
+
+        let response = server
+            .post("/v1/responses")
+            .add_header(
+                http::HeaderName::from_static("authorization"),
+                http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
+            )
+            .json(&request_body)
+            .await;
+
+        if response.status_code() == 403 {
+            return response;
+        }
+
+        last_response = Some(response);
+    }
+
+    let response = last_response.expect("should have attempted at least one follow-up request");
+    panic!(
+        "expected NEAR balance ban to return 403, got {} after waiting for async check",
+        response.status_code()
+    );
 }
 
 /// When user has no NEAR-linked account, NEAR balance check should be skipped
@@ -190,20 +224,14 @@ async fn test_near_balance_blocks_poor_account() {
         "First request from poor NEAR account should not be synchronously blocked"
     );
 
-    // Wait long enough to avoid being affected by per-user rate limit (1 req/sec)
-    sleep(std::time::Duration::from_millis(1100)).await;
-
-    // Second call should be blocked by blacklist (user ban), after async NEAR check has run
-    let second_response = server
-        .post("/v1/responses")
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
-        )
-        .json(&json!({
+    let second_response = wait_for_near_balance_ban(
+        &server,
+        token,
+        json!({
             "input": "Hello again"
-        }))
-        .await;
+        }),
+    )
+    .await;
 
     assert_eq!(
         second_response.status_code(),
@@ -337,23 +365,27 @@ async fn test_near_balance_check_applied_for_free_plan_subscription() {
         "First request from free plan + poor NEAR should not be synchronously blocked"
     );
 
-    sleep(std::time::Duration::from_millis(1100)).await;
-
-    let second_response = server
-        .post("/v1/responses")
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
-        )
-        .json(&json!({
+    let second_response = wait_for_near_balance_ban(
+        &server,
+        token,
+        json!({
             "input": "Hello again"
-        }))
-        .await;
+        }),
+    )
+    .await;
 
     assert_eq!(
         second_response.status_code(),
         403,
         "Free plan user with poor NEAR account should be blocked after async balance check"
+    );
+
+    let body: serde_json::Value = second_response.json();
+    let error = body.get("error").and_then(|v| v.as_str());
+    assert_eq!(
+        error,
+        Some(USER_BANNED_ERROR_MESSAGE),
+        "Ban error message should indicate a temporary ban without exposing NEAR balance details"
     );
 }
 
@@ -415,22 +447,26 @@ async fn test_near_balance_check_applied_for_unknown_price_id() {
         "First request from unknown price_id + poor NEAR should not be synchronously blocked"
     );
 
-    sleep(std::time::Duration::from_millis(1100)).await;
-
-    let second_response = server
-        .post("/v1/responses")
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
-        )
-        .json(&json!({
+    let second_response = wait_for_near_balance_ban(
+        &server,
+        token,
+        json!({
             "input": "Hello again"
-        }))
-        .await;
+        }),
+    )
+    .await;
 
     assert_eq!(
         second_response.status_code(),
         403,
         "User with unknown price_id and poor NEAR account should be blocked by NEAR balance check"
+    );
+
+    let body: serde_json::Value = second_response.json();
+    let error = body.get("error").and_then(|v| v.as_str());
+    assert_eq!(
+        error,
+        Some(USER_BANNED_ERROR_MESSAGE),
+        "Ban error message should indicate a temporary ban without exposing NEAR balance details"
     );
 }

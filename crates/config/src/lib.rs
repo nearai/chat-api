@@ -481,6 +481,78 @@ impl Default for InfrastructureConfig {
     }
 }
 
+pub const TASKS_CLEANUP_CANCELED_INSTANCES_DAILY_CRON_DEFAULT: &str = "cron(0 0 * * ? *)";
+pub const TASKS_CLEANUP_CANCELED_INSTANCES_GRACE_DAYS_DEFAULT: i64 = 15;
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TaskConfig {
+    pub enabled: bool,
+    pub aws_region: Option<String>,
+    pub sqs_queue_url: Option<String>,
+    pub sqs_queue_arn: Option<String>,
+    pub scheduler_role_arn: Option<String>,
+    pub scheduler_group: String,
+    pub cleanup_canceled_instances_daily_cron: String,
+    pub cleanup_canceled_instances_grace_days: i64,
+    pub worker_wait_seconds: i32,
+    pub worker_visibility_timeout: i32,
+    pub worker_max_messages: i32,
+    pub worker_max_concurrency: usize,
+}
+
+impl Default for TaskConfig {
+    fn default() -> Self {
+        Self {
+            enabled: std::env::var("TASKS_ENABLED")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(false),
+            aws_region: std::env::var("AWS_REGION").ok(),
+            sqs_queue_url: std::env::var("TASKS_SQS_QUEUE_URL").ok(),
+            sqs_queue_arn: std::env::var("TASKS_SQS_QUEUE_ARN").ok(),
+            scheduler_role_arn: std::env::var("TASKS_SCHEDULER_ROLE_ARN").ok(),
+            scheduler_group: std::env::var("TASKS_SCHEDULER_GROUP")
+                .unwrap_or_else(|_| "chat-api".to_string()),
+            cleanup_canceled_instances_daily_cron: std::env::var(
+                "TASKS_CLEANUP_CANCELED_INSTANCES_DAILY_CRON",
+            )
+            .unwrap_or_else(|_| TASKS_CLEANUP_CANCELED_INSTANCES_DAILY_CRON_DEFAULT.to_string()),
+            cleanup_canceled_instances_grace_days: std::env::var(
+                "TASKS_CLEANUP_CANCELED_INSTANCES_GRACE_DAYS",
+            )
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(TASKS_CLEANUP_CANCELED_INSTANCES_GRACE_DAYS_DEFAULT),
+            worker_wait_seconds: std::env::var("TASKS_WORKER_WAIT_SECONDS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(20),
+            worker_visibility_timeout: std::env::var("TASKS_WORKER_VISIBILITY_TIMEOUT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(60),
+            worker_max_messages: std::env::var("TASKS_WORKER_MAX_MESSAGES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(10),
+            worker_max_concurrency: std::env::var("TASKS_WORKER_MAX_CONCURRENCY")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(10),
+        }
+    }
+}
+
+impl TaskConfig {
+    pub fn is_scheduler_configured(&self) -> bool {
+        self.sqs_queue_arn.is_some() && self.scheduler_role_arn.is_some()
+    }
+
+    pub fn is_worker_configured(&self) -> bool {
+        self.sqs_queue_url.is_some()
+    }
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct LoggingConfig {
     /// Global log level for the application.
@@ -537,6 +609,7 @@ pub struct Config {
     pub agent: AgentConfig,
     /// Infrastructure mode (TEE vs non-TEE)
     pub infrastructure: InfrastructureConfig,
+    pub tasks: TaskConfig,
 }
 
 impl Config {
@@ -555,6 +628,7 @@ impl Config {
             logging: LoggingConfig::default(),
             agent: AgentConfig::default(),
             infrastructure: InfrastructureConfig::default(),
+            tasks: TaskConfig::default(),
         }
     }
 }
@@ -776,6 +850,34 @@ mod tests {
 
     #[test]
     #[serial]
+    fn test_task_config_defaults() {
+        std::env::remove_var("TASKS_ENABLED");
+        std::env::remove_var("AWS_REGION");
+        std::env::remove_var("TASKS_SQS_QUEUE_URL");
+        std::env::remove_var("TASKS_SQS_QUEUE_ARN");
+        std::env::remove_var("TASKS_SCHEDULER_ROLE_ARN");
+        std::env::remove_var("TASKS_SCHEDULER_GROUP");
+        std::env::remove_var("TASKS_CLEANUP_CANCELED_INSTANCES_DAILY_CRON");
+        std::env::remove_var("TASKS_CLEANUP_CANCELED_INSTANCES_GRACE_DAYS");
+        std::env::remove_var("TASKS_WORKER_WAIT_SECONDS");
+        std::env::remove_var("TASKS_WORKER_VISIBILITY_TIMEOUT");
+        std::env::remove_var("TASKS_WORKER_MAX_MESSAGES");
+        std::env::remove_var("TASKS_WORKER_MAX_CONCURRENCY");
+
+        let cfg = TaskConfig::default();
+        assert!(!cfg.enabled);
+        assert!(cfg.aws_region.is_none());
+        assert_eq!(cfg.scheduler_group, "chat-api");
+        assert_eq!(cfg.worker_wait_seconds, 20);
+        assert_eq!(cfg.worker_visibility_timeout, 60);
+        assert_eq!(cfg.worker_max_messages, 10);
+        assert_eq!(cfg.worker_max_concurrency, 10);
+        assert!(!cfg.is_scheduler_configured());
+        assert!(!cfg.is_worker_configured());
+    }
+
+    #[test]
+    #[serial]
     fn test_infrastructure_config_non_tee_enabled() {
         std::env::set_var("NON_TEE_INFRA", "true");
         let config = InfrastructureConfig::default();
@@ -991,5 +1093,57 @@ mod tests {
             compose_mgr.get_is_non_tee(),
             "Manager with is_non_tee=true should be non-TEE even with generic URL"
         );
+    }
+
+    #[test]
+    #[serial]
+    fn test_task_config_reads_env_and_region_fallback() {
+        std::env::set_var("TASKS_ENABLED", "true");
+        std::env::set_var("AWS_REGION", "us-west-2");
+        std::env::set_var("TASKS_SQS_QUEUE_URL", "https://example.com/queue");
+        std::env::set_var("TASKS_SQS_QUEUE_ARN", "arn:aws:sqs:us-west-2:123:queue");
+        std::env::set_var(
+            "TASKS_SCHEDULER_ROLE_ARN",
+            "arn:aws:iam::123:role/scheduler",
+        );
+        std::env::set_var("TASKS_SCHEDULER_GROUP", "group-a");
+        std::env::set_var(
+            "TASKS_CLEANUP_CANCELED_INSTANCES_DAILY_CRON",
+            "cron(0 12 * * ? *)",
+        );
+        std::env::set_var("TASKS_CLEANUP_CANCELED_INSTANCES_GRACE_DAYS", "21");
+        std::env::set_var("TASKS_WORKER_WAIT_SECONDS", "12");
+        std::env::set_var("TASKS_WORKER_VISIBILITY_TIMEOUT", "90");
+        std::env::set_var("TASKS_WORKER_MAX_MESSAGES", "7");
+        std::env::set_var("TASKS_WORKER_MAX_CONCURRENCY", "22");
+
+        let cfg = TaskConfig::default();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.aws_region.as_deref(), Some("us-west-2"));
+        assert_eq!(cfg.scheduler_group, "group-a");
+        assert_eq!(
+            cfg.cleanup_canceled_instances_daily_cron,
+            "cron(0 12 * * ? *)"
+        );
+        assert_eq!(cfg.cleanup_canceled_instances_grace_days, 21);
+        assert_eq!(cfg.worker_wait_seconds, 12);
+        assert_eq!(cfg.worker_visibility_timeout, 90);
+        assert_eq!(cfg.worker_max_messages, 7);
+        assert_eq!(cfg.worker_max_concurrency, 22);
+        assert!(cfg.is_scheduler_configured());
+        assert!(cfg.is_worker_configured());
+
+        std::env::remove_var("TASKS_ENABLED");
+        std::env::remove_var("AWS_REGION");
+        std::env::remove_var("TASKS_SQS_QUEUE_URL");
+        std::env::remove_var("TASKS_SQS_QUEUE_ARN");
+        std::env::remove_var("TASKS_SCHEDULER_ROLE_ARN");
+        std::env::remove_var("TASKS_SCHEDULER_GROUP");
+        std::env::remove_var("TASKS_CLEANUP_CANCELED_INSTANCES_DAILY_CRON");
+        std::env::remove_var("TASKS_CLEANUP_CANCELED_INSTANCES_GRACE_DAYS");
+        std::env::remove_var("TASKS_WORKER_WAIT_SECONDS");
+        std::env::remove_var("TASKS_WORKER_VISIBILITY_TIMEOUT");
+        std::env::remove_var("TASKS_WORKER_MAX_MESSAGES");
+        std::env::remove_var("TASKS_WORKER_MAX_CONCURRENCY");
     }
 }
