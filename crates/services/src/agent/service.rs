@@ -491,7 +491,7 @@ impl AgentServiceImpl {
         let request_body = serde_json::json!({
             "auth_secret": auth_secret,
             "backup_passphrase": backup_passphrase,
-            "userid": user_id,
+            "user_id": user_id,
         });
 
         tracing::debug!("Calling compose-api /auth/login: url={}", url);
@@ -571,7 +571,7 @@ impl AgentServiceImpl {
         let request_body = serde_json::json!({
             "auth_secret": auth_secret,
             "backup_passphrase": backup_passphrase,
-            "userid": user_id,
+            "user_id": user_id,
         });
 
         tracing::debug!("Calling compose-api /auth/register: url={}", url);
@@ -682,7 +682,7 @@ impl AgentServiceImpl {
             .http_client
             .post(&url)
             .bearer_auth(session_token)
-            .json(&serde_json::json!({ "userid": user_id }))
+            .json(&serde_json::json!({ "user_id": user_id }))
             .timeout(std::time::Duration::from_secs(30))
             .send()
             .await
@@ -867,7 +867,7 @@ impl AgentServiceImpl {
             "nearai_api_url": nearai_api_url,
             "ssh_pubkey": params.ssh_pubkey,
             "service_type": service_type_for_api,
-            "userid": user_id,
+            "user_id": user_id,
         });
 
         // Only include resource fields if they're explicitly set or available
@@ -1123,7 +1123,7 @@ impl AgentServiceImpl {
             "nearai_api_url": nearai_api_url,
             "ssh_pubkey": params.ssh_pubkey,
             "service_type": service_type_for_api,
-            "userid": user_id,
+            "user_id": user_id,
         });
 
         // Only include resource fields if they're explicitly set or available
@@ -2771,7 +2771,7 @@ impl AgentService for AgentServiceImpl {
             .http_client
             .post(&restart_url)
             .bearer_auth(&bearer_token)
-            .json(&serde_json::json!({ "userid": user_id }))
+            .json(&serde_json::json!({ "user_id": user_id }))
             .send()
             .await
             .map_err(|e| anyhow!("Failed to call Agent API restart: {}", e))?;
@@ -2932,7 +2932,7 @@ impl AgentService for AgentServiceImpl {
             .http_client
             .post(&stop_url)
             .bearer_auth(&bearer_token)
-            .json(&serde_json::json!({ "userid": user_id }))
+            .json(&serde_json::json!({ "user_id": user_id }))
             .send()
             .await
             .map_err(|e| anyhow!("Failed to call Agent API stop: {}", e))?;
@@ -3014,7 +3014,7 @@ impl AgentService for AgentServiceImpl {
             .http_client
             .post(&start_url)
             .bearer_auth(&bearer_token)
-            .json(&serde_json::json!({ "userid": user_id }))
+            .json(&serde_json::json!({ "user_id": user_id }))
             .send()
             .await
             .map_err(|e| anyhow!("Failed to call Agent API start: {}", e))?;
@@ -4264,7 +4264,7 @@ impl AgentServiceImpl {
         #[derive(serde::Serialize)]
         struct RestartBody {
             image: String,
-            userid: UserId,
+            user_id: UserId,
         }
 
         // Spawn task to proxy SSE stream to channel
@@ -4281,7 +4281,7 @@ impl AgentServiceImpl {
                 .bearer_auth(&token)
                 .json(&RestartBody {
                     image: image_for_task.clone(),
-                    userid: user_id,
+                    user_id,
                 })
                 .timeout(std::time::Duration::from_secs(300))
                 .send()
