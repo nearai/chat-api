@@ -5,7 +5,7 @@ use aws_sdk_scheduler::{
     operation::create_schedule::CreateScheduleError,
     types::{ActionAfterCompletion, FlexibleTimeWindow, FlexibleTimeWindowMode, Target},
 };
-use services::jobs::{
+use services::tasks::{
     daily_cleanup_canceled_instances_request, dispatch_task, ScheduleSpec, ScheduledTaskRequest,
     TaskExecutor, TaskId, TaskMessage, TaskPayload, TaskScheduler,
 };
@@ -411,7 +411,7 @@ pub async fn ensure_daily_cleanup_task(task_config: &config::TaskConfig) -> anyh
 #[cfg(test)]
 mod tests {
     use super::*;
-    use services::jobs::{
+    use services::tasks::{
         CleanupCanceledInstancesTaskPayload, NoopTaskPayload, TaskId, TaskPayload,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};

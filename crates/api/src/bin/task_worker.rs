@@ -5,7 +5,7 @@ use aws_smithy_http_client::{
     Builder as AwsHttpClientBuilder,
 };
 use chrono::{Duration, Utc};
-use services::jobs::{CleanupCanceledInstancesTaskPayload, NoopTaskPayload, TaskExecutor};
+use services::tasks::{CleanupCanceledInstancesTaskPayload, NoopTaskPayload, TaskExecutor};
 use services::{agent::ports::AgentService, UserId};
 use std::sync::Arc;
 
