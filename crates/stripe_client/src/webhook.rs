@@ -37,8 +37,7 @@ impl StripeWebhookVerifier {
         }
 
         let header = ParsedStripeSignature::parse(stripe_signature)?;
-        let signed_payload = signed_payload(header.timestamp, raw_body);
-        let expected = compute_signature(secret, &signed_payload);
+        let expected = compute_signature(secret, header.timestamp, raw_body);
 
         let any_match = header
             .v1_signatures
@@ -103,17 +102,13 @@ impl ParsedStripeSignature {
     }
 }
 
-fn signed_payload(timestamp: i64, raw_body: &[u8]) -> Vec<u8> {
-    let mut payload = timestamp.to_string().into_bytes();
-    payload.push(b'.');
-    payload.extend_from_slice(raw_body);
-    payload
-}
-
-fn compute_signature(secret: &str, signed_payload: &[u8]) -> Vec<u8> {
+fn compute_signature(secret: &str, timestamp: i64, raw_body: &[u8]) -> Vec<u8> {
     let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
         .expect("HMAC-SHA256 accepts keys of any length");
-    mac.update(signed_payload);
+    let timestamp = timestamp.to_string();
+    mac.update(timestamp.as_bytes());
+    mac.update(b".");
+    mac.update(raw_body);
     mac.finalize().into_bytes().to_vec()
 }
 
@@ -130,7 +125,7 @@ mod tests {
     use chrono::TimeZone;
 
     fn sign(secret: &str, timestamp: i64, payload: &[u8]) -> String {
-        let sig = compute_signature(secret, &signed_payload(timestamp, payload));
+        let sig = compute_signature(secret, timestamp, payload);
         hex::encode(sig)
     }
 
