@@ -174,6 +174,18 @@ mod tests {
     }
 
     #[test]
+    fn accepts_timestamp_at_tolerance_boundary() {
+        let verifier = StripeWebhookVerifier::default();
+        let payload = br#"{"id":"evt_1"}"#;
+        let ts = 1_700_000_000;
+        let sig = sign("whsec_test", ts, payload);
+        let header = format!("t={ts},v1={sig}");
+        let now = Utc.timestamp_opt(ts + 300, 0).unwrap();
+
+        assert!(verifier.verify(payload, &header, "whsec_test", now).is_ok());
+    }
+
+    #[test]
     fn does_not_use_absolute_timestamp_difference() {
         let verifier = StripeWebhookVerifier::default();
         let payload = br#"{"id":"evt_1"}"#;
@@ -183,5 +195,68 @@ mod tests {
         let now = Utc.timestamp_opt(ts - 301, 0).unwrap();
 
         assert!(verifier.verify(payload, &header, "whsec_test", now).is_ok());
+    }
+
+    #[test]
+    fn rejects_signature_mismatch() {
+        let verifier = StripeWebhookVerifier::default();
+        let payload = br#"{"id":"evt_1"}"#;
+        let ts = 1_700_000_000;
+        let header = format!("t={ts},v1={}", sign("whsec_other", ts, payload));
+        let now = Utc.timestamp_opt(ts + 10, 0).unwrap();
+
+        let err = verifier
+            .verify(payload, &header, "whsec_test", now)
+            .unwrap_err();
+        assert!(matches!(err, StripeWebhookError::SignatureMismatch));
+    }
+
+    #[test]
+    fn rejects_invalid_signature_header() {
+        let verifier = StripeWebhookVerifier::default();
+        let payload = br#"{"id":"evt_1"}"#;
+        let now = Utc.timestamp_opt(1_700_000_010, 0).unwrap();
+
+        let err = verifier
+            .verify(payload, "t=1700000000,v1", "whsec_test", now)
+            .unwrap_err();
+        assert!(matches!(err, StripeWebhookError::InvalidSignatureHeader));
+    }
+
+    #[test]
+    fn rejects_missing_timestamp() {
+        let verifier = StripeWebhookVerifier::default();
+        let payload = br#"{"id":"evt_1"}"#;
+        let sig = sign("whsec_test", 1_700_000_000, payload);
+        let now = Utc.timestamp_opt(1_700_000_010, 0).unwrap();
+
+        let err = verifier
+            .verify(payload, &format!("v1={sig}"), "whsec_test", now)
+            .unwrap_err();
+        assert!(matches!(err, StripeWebhookError::MissingTimestamp));
+    }
+
+    #[test]
+    fn rejects_missing_v1_signature() {
+        let verifier = StripeWebhookVerifier::default();
+        let payload = br#"{"id":"evt_1"}"#;
+        let now = Utc.timestamp_opt(1_700_000_010, 0).unwrap();
+
+        let err = verifier
+            .verify(payload, "t=1700000000", "whsec_test", now)
+            .unwrap_err();
+        assert!(matches!(err, StripeWebhookError::MissingV1Signature));
+    }
+
+    #[test]
+    fn rejects_invalid_signature_encoding() {
+        let verifier = StripeWebhookVerifier::default();
+        let payload = br#"{"id":"evt_1"}"#;
+        let now = Utc.timestamp_opt(1_700_000_010, 0).unwrap();
+
+        let err = verifier
+            .verify(payload, "t=1700000000,v1=not_hex", "whsec_test", now)
+            .unwrap_err();
+        assert!(matches!(err, StripeWebhookError::InvalidSignatureEncoding));
     }
 }

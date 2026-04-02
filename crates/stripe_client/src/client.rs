@@ -296,7 +296,49 @@ async fn decode_response<T: serde::de::DeserializeOwned>(
             .unwrap_or(body);
         return Err(StripeClientError::Http { status, message });
     }
-    Ok(serde_json::from_str(&body)?)
+    match serde_json::from_str(&body) {
+        Ok(parsed) => Ok(parsed),
+        Err(err) => {
+            log_response_shape(&body);
+            Err(StripeClientError::ResponseParse(err))
+        }
+    }
+}
+
+fn log_response_shape(body: &str) {
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        tracing::error!("Failed to parse Stripe response body as JSON for shape logging");
+        return;
+    };
+
+    let top_level_keys = value
+        .as_object()
+        .map(|obj| obj.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let item_keys = value
+        .get("items")
+        .and_then(|items| items.get("data"))
+        .and_then(|data| data.as_array())
+        .and_then(|data| data.first())
+        .and_then(|item| item.as_object())
+        .map(|obj| obj.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let has_current_period_end = value.get("current_period_end").is_some();
+    let item_has_current_period_end = value
+        .get("items")
+        .and_then(|items| items.get("data"))
+        .and_then(|data| data.as_array())
+        .and_then(|data| data.first())
+        .and_then(|item| item.get("current_period_end"))
+        .is_some();
+
+    tracing::error!(
+        top_level_keys = ?top_level_keys,
+        item_keys = ?item_keys,
+        has_current_period_end,
+        item_has_current_period_end,
+        "Stripe response shape did not match expected schema"
+    );
 }
 
 fn map_checkout_session(response: StripeCheckoutSessionResponse) -> StripeCheckoutSession {
@@ -322,23 +364,21 @@ fn map_checkout_session(response: StripeCheckoutSessionResponse) -> StripeChecko
 fn map_subscription(
     response: StripeSubscriptionResponse,
 ) -> Result<StripeSubscriptionSnapshot, StripeClientError> {
-    let price_id = response
+    let first_item = response
         .items
         .data
         .first()
-        .and_then(|item| item.price.as_ref())
+        .ok_or(StripeClientError::InvalidResponse(
+            "missing subscription item",
+        ))?;
+    let price_id = first_item
+        .price
+        .as_ref()
         .map(|price| price.id.clone())
         .ok_or(StripeClientError::InvalidResponse(
             "missing subscription price",
         ))?;
-    let first_item_id = response
-        .items
-        .data
-        .first()
-        .map(|item| item.id.clone())
-        .ok_or(StripeClientError::InvalidResponse(
-            "missing subscription item",
-        ))?;
+    let first_item_id = first_item.id.clone();
     let customer_id = match response.customer {
         Value::String(id) => id,
         Value::Object(map) => map
@@ -348,7 +388,13 @@ fn map_subscription(
             .ok_or(StripeClientError::InvalidResponse("missing customer id"))?,
         _ => return Err(StripeClientError::InvalidResponse("invalid customer value")),
     };
-    let current_period_end = DateTime::from_timestamp(response.current_period_end, 0).ok_or(
+    let current_period_end_ts = response
+        .current_period_end
+        .or(first_item.current_period_end)
+        .ok_or(StripeClientError::InvalidResponse(
+            "missing current_period_end on subscription and first item",
+        ))?;
+    let current_period_end = DateTime::from_timestamp(current_period_end_ts, 0).ok_or(
         StripeClientError::InvalidResponse("invalid current_period_end"),
     )?;
 
