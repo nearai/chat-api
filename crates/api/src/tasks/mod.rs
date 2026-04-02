@@ -333,7 +333,10 @@ async fn process_message<E: TaskExecutor + 'static>(
     // Extend visibility timeout for delete tasks — the external agent-manager delete call
     // can take several seconds under load, so we give it up to 5 minutes before
     // SQS would redeliver the message to another worker.
-    if matches!(task_message.payload, TaskPayload::CleanupCanceledInstances(_)) {
+    if matches!(
+        task_message.payload,
+        TaskPayload::CleanupCanceledInstances(_)
+    ) {
         if let Some(receipt_handle) = receipt_handle.as_deref() {
             client
                 .change_message_visibility()
