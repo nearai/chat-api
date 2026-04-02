@@ -62,7 +62,7 @@ RUN pnpm run build
 
 
 # Stage 2: Rust build stage  
-FROM rust:1.90.0-bookworm@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f AS backend-builder
+FROM rust:1.91.1-bookworm@sha256:c1e5f19e773b7878c3f7a805dd00a495e747acbdc76fb2337a4ebf0418896b33 AS backend-builder
 
 # Install pinned apt dependencies
 RUN --mount=type=bind,source=scripts/pinned-packages-backend-builder.txt,target=/tmp/pinned-packages-backend-builder.txt,ro \
