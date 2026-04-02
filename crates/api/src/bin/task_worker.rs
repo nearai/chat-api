@@ -173,7 +173,7 @@ async fn main() -> anyhow::Result<()> {
     let region = tasks
         .aws_region
         .clone()
-        .ok_or_else(|| anyhow!("TASKS_AWS_REGION or AWS_REGION is required"))?;
+        .ok_or_else(|| anyhow!("AWS_REGION is required"))?;
 
     let queue_url = tasks
         .sqs_queue_url

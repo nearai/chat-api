@@ -507,9 +507,7 @@ impl Default for TaskConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(false),
-            aws_region: std::env::var("TASKS_AWS_REGION")
-                .ok()
-                .or_else(|| std::env::var("AWS_REGION").ok()),
+            aws_region: std::env::var("AWS_REGION").ok(),
             sqs_queue_url: std::env::var("TASKS_SQS_QUEUE_URL").ok(),
             sqs_queue_arn: std::env::var("TASKS_SQS_QUEUE_ARN").ok(),
             scheduler_role_arn: std::env::var("TASKS_SCHEDULER_ROLE_ARN").ok(),
@@ -854,7 +852,6 @@ mod tests {
     #[serial]
     fn test_task_config_defaults() {
         std::env::remove_var("TASKS_ENABLED");
-        std::env::remove_var("TASKS_AWS_REGION");
         std::env::remove_var("AWS_REGION");
         std::env::remove_var("TASKS_SQS_QUEUE_URL");
         std::env::remove_var("TASKS_SQS_QUEUE_ARN");
@@ -1137,7 +1134,6 @@ mod tests {
         assert!(cfg.is_worker_configured());
 
         std::env::remove_var("TASKS_ENABLED");
-        std::env::remove_var("TASKS_AWS_REGION");
         std::env::remove_var("AWS_REGION");
         std::env::remove_var("TASKS_SQS_QUEUE_URL");
         std::env::remove_var("TASKS_SQS_QUEUE_ARN");

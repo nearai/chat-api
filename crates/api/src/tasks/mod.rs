@@ -378,7 +378,7 @@ pub async fn ensure_daily_cleanup_task(task_config: &config::TaskConfig) -> anyh
     let region = task_config
         .aws_region
         .clone()
-        .ok_or_else(|| anyhow!("TASKS_AWS_REGION or AWS_REGION is required for scheduler"))?;
+        .ok_or_else(|| anyhow!("AWS_REGION is required for scheduler"))?;
     let queue_arn = task_config
         .sqs_queue_arn
         .clone()
