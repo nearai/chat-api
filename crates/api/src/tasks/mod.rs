@@ -224,14 +224,19 @@ impl<E: TaskExecutor + 'static> AwsSqsTaskWorker<E> {
     }
 
     pub async fn run_forever(&self) -> anyhow::Result<()> {
-        let semaphore = Arc::new(Semaphore::new(self.max_concurrency.max(1)));
+        let max_concurrency = self.max_concurrency.max(1);
+        let semaphore = Arc::new(Semaphore::new(max_concurrency));
+        let max_number_of_messages = self
+            .max_messages
+            .clamp(1, 10)
+            .min(max_concurrency.min(10) as i32);
 
         loop {
             let response = match self
                 .client
                 .receive_message()
                 .queue_url(&self.queue_url)
-                .max_number_of_messages(self.max_messages.clamp(1, 10))
+                .max_number_of_messages(max_number_of_messages)
                 .wait_time_seconds(self.wait_seconds.clamp(1, 20))
                 .visibility_timeout(self.visibility_timeout.max(1))
                 .send()

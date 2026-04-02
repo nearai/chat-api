@@ -860,6 +860,8 @@ mod tests {
         std::env::remove_var("TASKS_SQS_QUEUE_ARN");
         std::env::remove_var("TASKS_SCHEDULER_ROLE_ARN");
         std::env::remove_var("TASKS_SCHEDULER_GROUP");
+        std::env::remove_var("TASKS_CLEANUP_CANCELED_INSTANCES_DAILY_CRON");
+        std::env::remove_var("TASKS_CLEANUP_CANCELED_INSTANCES_GRACE_DAYS");
         std::env::remove_var("TASKS_WORKER_WAIT_SECONDS");
         std::env::remove_var("TASKS_WORKER_VISIBILITY_TIMEOUT");
         std::env::remove_var("TASKS_WORKER_MAX_MESSAGES");
@@ -1108,6 +1110,11 @@ mod tests {
             "arn:aws:iam::123:role/scheduler",
         );
         std::env::set_var("TASKS_SCHEDULER_GROUP", "group-a");
+        std::env::set_var(
+            "TASKS_CLEANUP_CANCELED_INSTANCES_DAILY_CRON",
+            "cron(0 12 * * ? *)",
+        );
+        std::env::set_var("TASKS_CLEANUP_CANCELED_INSTANCES_GRACE_DAYS", "21");
         std::env::set_var("TASKS_WORKER_WAIT_SECONDS", "12");
         std::env::set_var("TASKS_WORKER_VISIBILITY_TIMEOUT", "90");
         std::env::set_var("TASKS_WORKER_MAX_MESSAGES", "7");
@@ -1117,6 +1124,11 @@ mod tests {
         assert!(cfg.enabled);
         assert_eq!(cfg.aws_region.as_deref(), Some("us-west-2"));
         assert_eq!(cfg.scheduler_group, "group-a");
+        assert_eq!(
+            cfg.cleanup_canceled_instances_daily_cron,
+            "cron(0 12 * * ? *)"
+        );
+        assert_eq!(cfg.cleanup_canceled_instances_grace_days, 21);
         assert_eq!(cfg.worker_wait_seconds, 12);
         assert_eq!(cfg.worker_visibility_timeout, 90);
         assert_eq!(cfg.worker_max_messages, 7);
@@ -1131,6 +1143,8 @@ mod tests {
         std::env::remove_var("TASKS_SQS_QUEUE_ARN");
         std::env::remove_var("TASKS_SCHEDULER_ROLE_ARN");
         std::env::remove_var("TASKS_SCHEDULER_GROUP");
+        std::env::remove_var("TASKS_CLEANUP_CANCELED_INSTANCES_DAILY_CRON");
+        std::env::remove_var("TASKS_CLEANUP_CANCELED_INSTANCES_GRACE_DAYS");
         std::env::remove_var("TASKS_WORKER_WAIT_SECONDS");
         std::env::remove_var("TASKS_WORKER_VISIBILITY_TIMEOUT");
         std::env::remove_var("TASKS_WORKER_MAX_MESSAGES");

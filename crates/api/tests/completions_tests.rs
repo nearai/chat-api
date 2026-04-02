@@ -35,7 +35,7 @@ async fn wait_for_near_balance_ban_on_chat_completions(
     let mut last_response = None;
 
     for _ in 0..10 {
-        sleep(std::time::Duration::from_millis(300)).await;
+        sleep(std::time::Duration::from_millis(1100)).await;
 
         let response = server
             .post("/v1/chat/completions")
