@@ -29,6 +29,19 @@ pub struct CreateInstanceRequest {
     pub service_type: Option<String>,
 }
 
+/// Helper to conditionally add a Set-Cookie header to a response builder
+fn add_set_cookie_header(
+    mut builder: http::response::Builder,
+    cookie: &Option<String>,
+) -> http::response::Builder {
+    if let Some(ref cookie) = cookie {
+        if let Ok(v) = cookie.parse::<http::HeaderValue>() {
+            builder = builder.header(http::header::SET_COOKIE, v);
+        }
+    }
+    builder
+}
+
 /// Returns (current_count, max_allowed) for the user based on their active subscription plan.
 async fn get_instance_limit(
     app_state: &AppState,
@@ -186,22 +199,18 @@ pub async fn create_instance(
     // Refresh gateway cookie for non-TEE users (or users with existing non-TEE instances).
     // setup_gateway_session_for_user handles all eligibility checks internally and returns
     // Ok(None) safely for TEE-only users, so this call is always unconditional.
-    let gateway_cookie: Option<String> = match app_state
+    let gateway_cookie = app_state
         .agent_service
         .setup_gateway_session_for_user(user.user_id)
         .await
-    {
-        Ok(Some(set_cookie)) => Some(set_cookie),
-        Ok(None) => None,
-        Err(e) => {
+        .unwrap_or_else(|e| {
             tracing::warn!(
                 "Failed to set up gateway session during instance creation: user_id={}, error={}",
                 user.user_id,
                 e
             );
             None
-        }
-    };
+        });
 
     if wants_stream {
         // SSE streaming response
@@ -284,18 +293,14 @@ pub async fn create_instance(
 
         let body = axum::body::Body::from_stream(stream);
 
-        let mut builder = Response::builder()
+        let builder = Response::builder()
             .status(StatusCode::OK)
             .header("content-type", "text/event-stream")
             .header("cache-control", "no-cache")
             .header("connection", "keep-alive")
             .header("x-accel-buffering", "no");
 
-        if let Some(ref cookie) = gateway_cookie {
-            if let Ok(v) = cookie.parse::<http::HeaderValue>() {
-                builder = builder.header(http::header::SET_COOKIE, v);
-            }
-        }
+        let builder = add_set_cookie_header(builder, &gateway_cookie);
 
         Ok(builder
             .body(body)
@@ -438,15 +443,11 @@ pub async fn create_instance(
         };
 
         let response: InstanceResponse = instance.into();
-        let mut builder = Response::builder()
+        let builder = Response::builder()
             .status(StatusCode::CREATED)
             .header("content-type", "application/json");
 
-        if let Some(ref cookie) = gateway_cookie {
-            if let Ok(v) = cookie.parse::<http::HeaderValue>() {
-                builder = builder.header(http::header::SET_COOKIE, v);
-            }
-        }
+        let builder = add_set_cookie_header(builder, &gateway_cookie);
 
         Ok(builder
             .body(axum::body::Body::from(

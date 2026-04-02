@@ -18,6 +18,26 @@ use services::metrics::consts::{
 use services::SessionId;
 use utoipa::ToSchema;
 
+/// Helper to add a Set-Cookie header to a HeaderMap when available
+fn try_add_gateway_cookie(headers: &mut HeaderMap, cookie: Option<String>, context: &str) {
+    if let Some(cookie) = cookie {
+        if let Ok(cookie_value) = cookie.parse() {
+            headers.insert(axum::http::header::SET_COOKIE, cookie_value);
+        } else {
+            tracing::warn!(
+                "Failed to parse Set-Cookie header value in {}: set_cookie_len={}",
+                context,
+                cookie.len()
+            );
+        }
+    } else {
+        tracing::debug!(
+            "No Set-Cookie header returned from gateway session setup in {}",
+            context
+        );
+    }
+}
+
 /// Query parameters for OAuth callback
 #[derive(Debug, Deserialize)]
 pub struct OAuthCallbackQuery {
@@ -286,7 +306,23 @@ pub async fn oauth_callback(
 
     tracing::debug!("Session token generated, length: {}", token.len());
 
+    // For non-TEE mode: set up gateway session (authenticate with compose-api)
+    // This allows users with existing non-TEE instances to access them immediately upon login
+    let gateway_cookie = app_state
+        .agent_service
+        .setup_gateway_session_for_user(session.user_id)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                "Failed to set up gateway session for user in oauth_callback: user_id={}, error={}",
+                session.user_id,
+                e
+            );
+            None
+        });
+
     let mut headers = HeaderMap::new();
+    try_add_gateway_cookie(&mut headers, gateway_cookie, "oauth_callback");
 
     // Use frontend_callback from OAuth state, or fall back to FRONTEND_URL env var
     let frontend_url = frontend_callback.clone().unwrap_or_else(|| {
@@ -581,7 +617,23 @@ pub async fn mock_login(
         session.session_id
     );
 
-    let response_headers = HeaderMap::new();
+    // For non-TEE mode: set up gateway session (authenticate with compose-api)
+    // This allows users with existing non-TEE instances to access them immediately upon login
+    let gateway_cookie = app_state
+        .agent_service
+        .setup_gateway_session_for_user(user.id)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                "Failed to set up gateway session for user in mock_login: user_id={}, error={}",
+                user.id,
+                e
+            );
+            None
+        });
+
+    let mut response_headers = HeaderMap::new();
+    try_add_gateway_cookie(&mut response_headers, gateway_cookie, "mock_login");
 
     Ok((
         response_headers,
@@ -686,7 +738,23 @@ pub async fn near_auth(
         is_new_user
     );
 
-    let response_headers = HeaderMap::new();
+    // For non-TEE mode: set up gateway session (authenticate with compose-api)
+    // This allows users with existing non-TEE instances to access them immediately upon login
+    let gateway_cookie = app_state
+        .agent_service
+        .setup_gateway_session_for_user(session.user_id)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                "Failed to set up gateway session for user in near_auth: user_id={}, error={}",
+                session.user_id,
+                e
+            );
+            None
+        });
+
+    let mut response_headers = HeaderMap::new();
+    try_add_gateway_cookie(&mut response_headers, gateway_cookie, "near_auth");
 
     Ok((
         response_headers,
