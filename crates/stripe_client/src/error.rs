@@ -31,6 +31,4 @@ pub enum StripeClientError {
     ResponseParse(#[from] serde_json::Error),
     #[error("invalid Stripe response: {0}")]
     InvalidResponse(&'static str),
-    #[error("invalid URL-encoded form value: {0}")]
-    InvalidFormValue(String),
 }

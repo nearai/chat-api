@@ -6,8 +6,9 @@ use crate::types::{
     StripeSubscriptionResponse, StripeSubscriptionSnapshot,
 };
 use chrono::DateTime;
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
+use reqwest::header::AUTHORIZATION;
 use serde_json::Value;
+use std::time::Duration;
 
 const STRIPE_API_BASE: &str = "https://api.stripe.com";
 
@@ -55,7 +56,10 @@ pub struct UpdateSubscriptionParams<'a> {
 impl StripeClient {
     pub fn new(secret_key: String) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .build()
+                .expect("valid reqwest client config"),
             secret_key,
         }
     }
@@ -255,13 +259,12 @@ impl StripeClient {
         form: &[(&str, String)],
         idempotency_key: Option<&str>,
     ) -> Result<T, StripeClientError> {
-        let body = encode_form(form)?;
         let mut request = self
             .http
             .post(format!("{STRIPE_API_BASE}{path}"))
             .header(AUTHORIZATION, format!("Bearer {}", self.secret_key))
-            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
-            .body(body);
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .body(encode_form(form));
         if let Some(idempotency_key) = idempotency_key {
             request = request.header("Idempotency-Key", idempotency_key);
         }
@@ -270,9 +273,8 @@ impl StripeClient {
     }
 }
 
-fn encode_form(form: &[(&str, String)]) -> Result<String, StripeClientError> {
-    Ok(form
-        .iter()
+fn encode_form(form: &[(&str, String)]) -> String {
+    form.iter()
         .map(|(k, v)| {
             format!(
                 "{}={}",
@@ -281,7 +283,7 @@ fn encode_form(form: &[(&str, String)]) -> Result<String, StripeClientError> {
             )
         })
         .collect::<Vec<_>>()
-        .join("&"))
+        .join("&")
 }
 
 async fn decode_response<T: serde::de::DeserializeOwned>(
