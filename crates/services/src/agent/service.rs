@@ -100,21 +100,21 @@ fn get_image_for_service_type(service_type: &str) -> String {
         "ironclaw" => "ironclaw-nearai-worker:local".to_string(),
         "ironclaw-dind" => std::env::var("IRONCLAW_DIND_IMAGE")
             .unwrap_or_else(|_| "docker.io/nearaidev/ironclaw-dind:latest".to_string()),
-        "openclaw" => "openclaw-nearai-worker:local".to_string(),
+        "openclaw" => "docker.io/nearaidev/openclaw-nearai-worker:latest".to_string(),
         "openclaw-dind" => "docker.io/nearaidev/openclaw-dind:2026.2.22".to_string(),
-        _ => "openclaw-nearai-worker:local".to_string(), // default to openclaw
+        _ => "docker.io/nearaidev/openclaw-nearai-worker:latest".to_string(), // default to openclaw
     }
 }
 
 /// Normalize service type for compose-api calls.
-/// For non-TEE deployments, append `-dind` suffix for compose-api.
+/// For non-TEE deployments: append `-dind` suffix to ironclaw only; openclaw stays as-is.
 /// For TEE deployments, use service type as-is.
 fn normalize_service_type_for_api(service_type: &str, non_tee: bool) -> String {
     if non_tee {
-        // Non-TEE compose-api: append -dind suffix
+        // Non-TEE compose-api: append -dind suffix for ironclaw only; openclaw stays as-is
         match service_type {
             "ironclaw" => "ironclaw-dind".to_string(),
-            "openclaw" => "openclaw-dind".to_string(),
+            "openclaw" => "openclaw".to_string(),
             // Already normalized (shouldn't happen with VALID_SERVICE_TYPES check)
             s => s.to_string(),
         }
@@ -6307,15 +6307,12 @@ mod tests {
 
     #[test]
     fn test_service_type_normalization_non_tee_mode() {
-        // Non-TEE mode: append -dind suffix to service types
+        // Non-TEE mode: append -dind suffix to ironclaw only; openclaw stays as-is
         assert_eq!(
             normalize_service_type_for_api("ironclaw", true),
             "ironclaw-dind"
         );
-        assert_eq!(
-            normalize_service_type_for_api("openclaw", true),
-            "openclaw-dind"
-        );
+        assert_eq!(normalize_service_type_for_api("openclaw", true), "openclaw");
     }
 
     #[test]
@@ -6382,11 +6379,11 @@ mod tests {
         );
         assert_eq!(
             get_image_for_service_type("openclaw"),
-            "openclaw-nearai-worker:local"
+            "docker.io/nearaidev/openclaw-nearai-worker:latest"
         );
         assert_eq!(
             get_image_for_service_type("unknown"),
-            "openclaw-nearai-worker:local"
+            "docker.io/nearaidev/openclaw-nearai-worker:latest"
         );
     }
 
@@ -6427,7 +6424,7 @@ mod tests {
         // Non-TEE Mode Flow:
         // 1. Uses non-TEE compose-api (AGENT_MANAGER_URLS)
         // 2. Passkey login enabled (resolve_bearer_token attempts passkey login)
-        // 3. Service types normalized with -dind suffix: "ironclaw" -> "ironclaw-dind", "openclaw" -> "openclaw-dind"
+        // 3. Service types normalized: "ironclaw" -> "ironclaw-dind", "openclaw" -> "openclaw" (no suffix)
         // 4. Session token from passkey or manager token used for API calls
 
         // Verify service type normalization for non-TEE
@@ -6435,10 +6432,7 @@ mod tests {
             normalize_service_type_for_api("ironclaw", true),
             "ironclaw-dind"
         );
-        assert_eq!(
-            normalize_service_type_for_api("openclaw", true),
-            "openclaw-dind"
-        );
+        assert_eq!(normalize_service_type_for_api("openclaw", true), "openclaw");
     }
 
     // ============================================================================
@@ -6734,11 +6728,8 @@ mod tests {
             "ironclaw"
         );
 
-        // Non-TEE mode: append -dind suffix to service types
-        assert_eq!(
-            normalize_service_type_for_api("openclaw", true),
-            "openclaw-dind"
-        );
+        // Non-TEE mode: append -dind suffix to ironclaw only; openclaw stays as-is
+        assert_eq!(normalize_service_type_for_api("openclaw", true), "openclaw");
         assert_eq!(
             normalize_service_type_for_api("ironclaw", true),
             "ironclaw-dind"
@@ -6761,11 +6752,11 @@ mod tests {
         );
         assert_eq!(
             get_image_for_service_type("openclaw"),
-            "openclaw-nearai-worker:local"
+            "docker.io/nearaidev/openclaw-nearai-worker:latest"
         );
         assert_eq!(
             get_image_for_service_type("unknown"),
-            "openclaw-nearai-worker:local"
+            "docker.io/nearaidev/openclaw-nearai-worker:latest"
         );
     }
 
