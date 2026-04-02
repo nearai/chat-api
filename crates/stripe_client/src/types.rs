@@ -96,7 +96,7 @@ pub(crate) struct StripeSubscriptionResponse {
     pub id: String,
     pub customer: serde_json::Value,
     pub status: String,
-    pub current_period_end: i64,
+    pub current_period_end: Option<i64>,
     pub cancel_at_period_end: bool,
     pub items: StripeSubscriptionItemsResponse,
 }
@@ -111,6 +111,7 @@ pub(crate) struct StripeSubscriptionItemsResponse {
 pub(crate) struct StripeSubscriptionItemResponse {
     pub id: String,
     pub price: Option<StripePriceRef>,
+    pub current_period_end: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
