@@ -467,12 +467,14 @@ impl AgentServiceImpl {
         manager: &AgentManager,
         auth_secret: &str,
         backup_passphrase: &str,
+        user_id: UserId,
     ) -> anyhow::Result<String> {
         Self::compose_api_passkey_login_static(
             &self.http_client,
             manager,
             auth_secret,
             backup_passphrase,
+            user_id,
         )
         .await
     }
@@ -483,11 +485,13 @@ impl AgentServiceImpl {
         manager: &AgentManager,
         auth_secret: &str,
         backup_passphrase: &str,
+        user_id: UserId,
     ) -> anyhow::Result<String> {
         let url = format!("{}/auth/login", manager.url);
         let request_body = serde_json::json!({
             "auth_secret": auth_secret,
             "backup_passphrase": backup_passphrase,
+            "user_id": user_id,
         });
 
         tracing::debug!("Calling compose-api /auth/login: url={}", url);
@@ -543,8 +547,13 @@ impl AgentServiceImpl {
             .get_user_passkey_credentials(instance.user_id)
             .await
         {
-            self.compose_api_passkey_login(manager, &auth_secret, &backup_passphrase)
-                .await
+            self.compose_api_passkey_login(
+                manager,
+                &auth_secret,
+                &backup_passphrase,
+                instance.user_id,
+            )
+            .await
         } else {
             // Fallback to manager token if no passkey credentials
             Ok(manager.token.clone())
@@ -556,11 +565,13 @@ impl AgentServiceImpl {
         manager: &AgentManager,
         auth_secret: &str,
         backup_passphrase: &str,
+        user_id: UserId,
     ) -> anyhow::Result<String> {
         let url = format!("{}/auth/register", manager.url);
         let request_body = serde_json::json!({
             "auth_secret": auth_secret,
             "backup_passphrase": backup_passphrase,
+            "user_id": user_id,
         });
 
         tracing::debug!("Calling compose-api /auth/register: url={}", url);
@@ -608,7 +619,7 @@ impl AgentServiceImpl {
     ) -> anyhow::Result<String> {
         // Try login first - if user is already registered on this manager, login succeeds
         match self
-            .compose_api_passkey_login(manager, auth_secret, backup_passphrase)
+            .compose_api_passkey_login(manager, auth_secret, backup_passphrase, user_id)
             .await
         {
             Ok(token) => {
@@ -626,8 +637,13 @@ impl AgentServiceImpl {
                         user_id
                     );
                     // Register credentials with compose-api for this manager (returns session token)
-                    self.compose_api_passkey_register(manager, auth_secret, backup_passphrase)
-                        .await
+                    self.compose_api_passkey_register(
+                        manager,
+                        auth_secret,
+                        backup_passphrase,
+                        user_id,
+                    )
+                    .await
                 } else {
                     // Some other error, not a "user not found" - propagate it
                     Err(e)
@@ -641,6 +657,7 @@ impl AgentServiceImpl {
         &self,
         manager: &AgentManager,
         session_token: &str,
+        user_id: UserId,
     ) -> anyhow::Result<Option<String>> {
         // Extract domain from manager URL and construct proxy-session URL
         // Manager URL: https://agents.example.com/api/crabshack
@@ -665,6 +682,7 @@ impl AgentServiceImpl {
             .http_client
             .post(&url)
             .bearer_auth(session_token)
+            .json(&serde_json::json!({ "user_id": user_id }))
             .timeout(std::time::Duration::from_secs(30))
             .send()
             .await
@@ -805,6 +823,7 @@ impl AgentServiceImpl {
         nearai_api_key: &str,
         nearai_api_url: &str,
         params: AgentApiCreateParams,
+        user_id: UserId,
     ) -> anyhow::Result<serde_json::Value> {
         // Get instance defaults from system configs
         let configs = self.get_system_configs().await;
@@ -848,6 +867,7 @@ impl AgentServiceImpl {
             "nearai_api_url": nearai_api_url,
             "ssh_pubkey": params.ssh_pubkey,
             "service_type": service_type_for_api,
+            "user_id": user_id,
         });
 
         // Only include resource fields if they're explicitly set or available
@@ -1058,6 +1078,7 @@ impl AgentServiceImpl {
         nearai_api_url: &str,
         params: AgentApiCreateParams,
         auth_method: AuthMethod<'_>,
+        user_id: UserId,
     ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<serde_json::Value>>> {
         let configs = self.get_system_configs().await;
         let instance_defaults = configs.instance_defaults.as_ref();
@@ -1102,6 +1123,7 @@ impl AgentServiceImpl {
             "nearai_api_url": nearai_api_url,
             "ssh_pubkey": params.ssh_pubkey,
             "service_type": service_type_for_api,
+            "user_id": user_id,
         });
 
         // Only include resource fields if they're explicitly set or available
@@ -1535,6 +1557,7 @@ impl AgentService for AgentServiceImpl {
                     mem_limit: params.mem_limit.clone(),
                     storage_size: params.storage_size.clone(),
                 },
+                user_id,
             )
             .await?;
 
@@ -1699,6 +1722,7 @@ impl AgentService for AgentServiceImpl {
                     storage_size: params.storage_size.clone(),
                 },
                 AuthMethod::BearerToken(&manager.token),
+                user_id,
             )
             .await?;
 
@@ -1981,6 +2005,7 @@ impl AgentService for AgentServiceImpl {
                     storage_size: params.storage_size.clone(),
                 },
                 AuthMethod::BearerToken(&session_token),
+                user_id,
             )
             .await
         {
@@ -2516,6 +2541,7 @@ impl AgentService for AgentServiceImpl {
                                         &mgr,
                                         &auth_secret,
                                         &backup_passphrase,
+                                        user_id,
                                     )
                                     .await
                                     .ok()
@@ -2745,6 +2771,7 @@ impl AgentService for AgentServiceImpl {
             .http_client
             .post(&restart_url)
             .bearer_auth(&bearer_token)
+            .json(&serde_json::json!({ "user_id": user_id }))
             .send()
             .await
             .map_err(|e| anyhow!("Failed to call Agent API restart: {}", e))?;
@@ -2815,10 +2842,10 @@ impl AgentService for AgentServiceImpl {
 
         // Route to appropriate logic based on infrastructure type
         if manager.get_is_non_tee() {
-            self.upgrade_instance_stream_non_tee(&instance, manager, instance_id)
+            self.upgrade_instance_stream_non_tee(&instance, manager, instance_id, user_id)
                 .await
         } else {
-            self.upgrade_instance_stream_tee(&instance, manager, instance_id)
+            self.upgrade_instance_stream_tee(&instance, manager, instance_id, user_id)
                 .await
         }
     }
@@ -2905,6 +2932,7 @@ impl AgentService for AgentServiceImpl {
             .http_client
             .post(&stop_url)
             .bearer_auth(&bearer_token)
+            .json(&serde_json::json!({ "user_id": user_id }))
             .send()
             .await
             .map_err(|e| anyhow!("Failed to call Agent API stop: {}", e))?;
@@ -2986,6 +3014,7 @@ impl AgentService for AgentServiceImpl {
             .http_client
             .post(&start_url)
             .bearer_auth(&bearer_token)
+            .json(&serde_json::json!({ "user_id": user_id }))
             .send()
             .await
             .map_err(|e| anyhow!("Failed to call Agent API start: {}", e))?;
@@ -3299,7 +3328,7 @@ impl AgentService for AgentServiceImpl {
 
         // Set up gateway cookie and get Set-Cookie header
         let set_cookie = self
-            .compose_api_proxy_session(manager, &session_token)
+            .compose_api_proxy_session(manager, &session_token, user_id)
             .await?;
 
         tracing::debug!(
@@ -4118,6 +4147,7 @@ impl AgentServiceImpl {
         instance: &AgentInstance,
         manager: &AgentManager,
         instance_id: Uuid,
+        user_id: UserId,
     ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<bytes::Bytes>>> {
         tracing::info!(
             "Upgrading instance (TEE streaming): instance_id={}, instance_name={}",
@@ -4182,7 +4212,7 @@ impl AgentServiceImpl {
         );
 
         // Restart with the latest image (5-minute timeout; compose-api yields SSE stream)
-        self.call_restart_streaming(manager, instance, &image, instance_id)
+        self.call_restart_streaming(manager, instance, &image, instance_id, user_id)
             .await
     }
 
@@ -4192,6 +4222,7 @@ impl AgentServiceImpl {
         instance: &AgentInstance,
         manager: &AgentManager,
         instance_id: Uuid,
+        user_id: UserId,
     ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<bytes::Bytes>>> {
         tracing::info!(
             "Upgrading instance (non-TEE streaming): instance_id={}, instance_name={}",
@@ -4205,7 +4236,7 @@ impl AgentServiceImpl {
             .await?;
 
         // Restart with the latest image (5-minute timeout; crabshack yields SSE stream)
-        self.call_restart_streaming(manager, instance, &image, instance_id)
+        self.call_restart_streaming(manager, instance, &image, instance_id, user_id)
             .await
     }
 
@@ -4216,6 +4247,7 @@ impl AgentServiceImpl {
         instance: &AgentInstance,
         image: &str,
         instance_id: Uuid,
+        user_id: UserId,
     ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<bytes::Bytes>>> {
         use futures::stream::StreamExt;
 
@@ -4232,6 +4264,7 @@ impl AgentServiceImpl {
         #[derive(serde::Serialize)]
         struct RestartBody {
             image: String,
+            user_id: UserId,
         }
 
         // Spawn task to proxy SSE stream to channel
@@ -4248,6 +4281,7 @@ impl AgentServiceImpl {
                 .bearer_auth(&token)
                 .json(&RestartBody {
                     image: image_for_task.clone(),
+                    user_id,
                 })
                 .timeout(std::time::Duration::from_secs(300))
                 .send()
@@ -5326,6 +5360,7 @@ mod tests {
                         mem_limit: None,
                         storage_size: None,
                     },
+                    UserId(Uuid::new_v4()),
                 )
                 .await;
             let result2 = svc
@@ -5342,6 +5377,7 @@ mod tests {
                         mem_limit: None,
                         storage_size: None,
                     },
+                    UserId(Uuid::new_v4()),
                 )
                 .await;
 
