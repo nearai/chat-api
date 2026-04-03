@@ -39,14 +39,6 @@ pub fn init_tracing_from_config(logging_config: &LoggingConfig) {
     });
 
     match logging_config.format.as_str() {
-        "json" => {
-            tracing_subscriber::fmt()
-                .json()
-                .with_env_filter(env_filter)
-                .with_current_span(false)
-                .with_span_list(false)
-                .init();
-        }
         "compact" => {
             tracing_subscriber::fmt()
                 .compact()
@@ -63,6 +55,7 @@ pub fn init_tracing_from_config(logging_config: &LoggingConfig) {
                 .init();
         }
         _ => {
+            // Default to JSON for "json" or any unknown format
             tracing_subscriber::fmt()
                 .json()
                 .with_env_filter(env_filter)

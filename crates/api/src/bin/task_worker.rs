@@ -240,7 +240,9 @@ async fn main() -> anyhow::Result<()> {
         let app = Router::new().route("/health", get(health_check));
         tracing::info!("health server listening on http://{}", addr);
         axum::serve(listener, app)
-            .with_graceful_shutdown(async { let _ = shutdown_rx.await; })
+            .with_graceful_shutdown(async {
+                let _ = shutdown_rx.await;
+            })
             .await
             .ok();
     });
