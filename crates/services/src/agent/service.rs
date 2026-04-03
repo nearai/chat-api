@@ -110,9 +110,15 @@ fn get_image_for_service_type(service_type: &str, hosting: Option<&AgentHostingC
     }
 }
 
-/// Normalize service type for compose-api calls (currently a no-op, service types are used as-is).
-fn normalize_service_type_for_api(service_type: &str, _non_tee: bool) -> String {
-    service_type.to_string()
+/// Convert canonical service type to crabshack format for non-TEE.
+/// Crabshack uses inconsistent naming:
+/// - ironclaw → ironclaw-dind (crabshack still uses -dind suffix)
+/// - openclaw → openclaw (crabshack moved to canonical name)
+fn service_type_for_crabshack(canonical_type: &str) -> String {
+    match canonical_type {
+        "ironclaw" => "ironclaw-dind".to_string(),
+        other => other.to_string(), // openclaw and others pass through as-is
+    }
 }
 
 /// Parameters for Agent API instance creation.
@@ -835,9 +841,8 @@ impl AgentServiceImpl {
             .service_type
             .as_deref()
             .unwrap_or(DEFAULT_SERVICE_TYPE);
-        // Normalize service_type for API call based on manager type
-        let service_type_for_api =
-            normalize_service_type_for_api(service_type, manager.get_is_non_tee());
+        // Service type is used as-is for API calls
+        let service_type_for_api = service_type.to_string();
 
         // Determine image to use based on manager type
         let image_to_use = if let Some(img) = params.image {
@@ -1093,9 +1098,8 @@ impl AgentServiceImpl {
             .as_deref()
             .unwrap_or(DEFAULT_SERVICE_TYPE);
 
-        // Normalize service_type for API call based on ACTUAL manager type
-        let service_type_for_api =
-            normalize_service_type_for_api(service_type, manager.get_is_non_tee());
+        // Service type is used as-is for API calls
+        let service_type_for_api = service_type.to_string();
 
         // Build request body with base fields
         // Note: In non-TEE mode, image is required; in TEE mode it's optional
@@ -1970,22 +1974,10 @@ impl AgentService for AgentServiceImpl {
             }
         }
 
-        let mut service_type_for_api = params
+        let service_type_for_api = params
             .service_type
             .clone()
             .or_else(|| Some(DEFAULT_SERVICE_TYPE.to_string()));
-
-        // Normalize service type based on the selected manager (TEE vs non-TEE)
-        if let Some(st) = service_type_for_api.clone() {
-            let normalized = normalize_service_type_for_api(&st, manager.get_is_non_tee());
-            service_type_for_api = Some(normalized.to_string());
-            tracing::debug!(
-                "create_passkey_instance_streaming: normalized service_type from {} to {} for manager_type={}",
-                st,
-                normalized,
-                if manager.get_is_non_tee() { "non-TEE" } else { "TEE" }
-            );
-        }
 
         let mut rx = match self
             .call_agent_api_create_streaming(
@@ -3939,8 +3931,8 @@ impl AgentServiceImpl {
             .as_deref()
             .unwrap_or(DEFAULT_SERVICE_TYPE);
 
-        // Get service type for crabshack API (uses service types as-is)
-        let crabshack_service_type = normalize_service_type_for_api(target_service_type, true);
+        // Transform canonical service type to crabshack format (-dind suffix)
+        let crabshack_service_type = service_type_for_crabshack(target_service_type);
 
         tracing::debug!(
             "Non-TEE ({}): Filtering for service_type='{}' with status='allow-create'",
@@ -6227,32 +6219,7 @@ mod tests {
             );
         }
 
-        #[test]
-        fn test_e2e_mode_flow_summary() {
-            // Complete end-to-end flow verification:
-
-            // TEE Mode:
-            // Config: NON_TEE_INFRA not set or false
-            // Manager: TEE compose-api (e.g. api.agent.near.ai via AGENT_MANAGER_URLS_TEE)
-            // Auth: Manager token only, NO passkey login
-            // Service Type: Used as-is (ironclaw stays ironclaw)
-            let tee_mode = false;
-            assert_eq!(
-                normalize_service_type_for_api("ironclaw", tee_mode),
-                "ironclaw"
-            );
-
-            // Non-TEE Mode:
-            // Config: NON_TEE_INFRA=true
-            // Manager: non-TEE compose-api (AGENT_MANAGER_URLS)
-            // Auth: Passkey login available, falls back to manager token
-            // Service Type: Used as-is (ironclaw stays ironclaw)
-            let non_tee_mode = true;
-            assert_eq!(
-                normalize_service_type_for_api("ironclaw", non_tee_mode),
-                "ironclaw"
-            );
-        }
+        // test_e2e_mode_flow_summary removed: was entirely about the removed normalize_service_type_for_api function
     }
 
     #[test]
@@ -6297,25 +6264,7 @@ mod tests {
 
     // --- TEE and Non-TEE Mode Tests ---
 
-    #[test]
-    fn test_service_type_normalization_tee_mode() {
-        // TEE mode: use service types as-is (no -dind suffix)
-        assert_eq!(
-            normalize_service_type_for_api("ironclaw", false),
-            "ironclaw"
-        );
-        assert_eq!(
-            normalize_service_type_for_api("openclaw", false),
-            "openclaw"
-        );
-    }
-
-    #[test]
-    fn test_service_type_normalization_non_tee_mode() {
-        // Non-TEE mode: service types are used as-is
-        assert_eq!(normalize_service_type_for_api("ironclaw", true), "ironclaw");
-        assert_eq!(normalize_service_type_for_api("openclaw", true), "openclaw");
-    }
+    // Service type normalization tests removed: normalize_service_type_for_api is now a no-op
 
     #[test]
     fn test_agent_service_creation_tee_mode() {
@@ -6385,50 +6334,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_normalize_service_type_edge_cases() {
-        // Edge cases for service type normalization
-        assert_eq!(normalize_service_type_for_api("", false), "");
-        assert_eq!(
-            normalize_service_type_for_api("ironclaw-dind-extra", false),
-            "ironclaw-dind-extra"
-        );
-        assert_eq!(normalize_service_type_for_api("dind", false), "dind");
-    }
-
     // --- Mode Flow Verification Tests ---
 
-    #[test]
-    fn test_tee_mode_configuration_summary() {
-        // TEE Mode Flow:
-        // 1. Uses TEE compose-api (AGENT_API_BASE_URL or AGENT_MANAGER_URLS_TEE)
-        // 2. NO passkey login (resolve_bearer_token returns manager token directly)
-        // 3. Service types used as-is: "ironclaw" stays "ironclaw", "openclaw" stays "openclaw"
-        // 4. Manager token used for all API calls
-
-        // Verify service type normalization for TEE
-        assert_eq!(
-            normalize_service_type_for_api("ironclaw", false),
-            "ironclaw"
-        );
-        assert_eq!(
-            normalize_service_type_for_api("openclaw", false),
-            "openclaw"
-        );
-    }
-
-    #[test]
-    fn test_non_tee_mode_configuration_summary() {
-        // Non-TEE Mode Flow:
-        // 1. Uses non-TEE compose-api (AGENT_MANAGER_URLS)
-        // 2. Passkey login enabled (resolve_bearer_token attempts passkey login)
-        // 3. Service types used as-is: "ironclaw" stays "ironclaw", "openclaw" stays "openclaw"
-        // 4. Session token from passkey or manager token used for API calls
-
-        // Verify service types are used as-is for non-TEE
-        assert_eq!(normalize_service_type_for_api("ironclaw", true), "ironclaw");
-        assert_eq!(normalize_service_type_for_api("openclaw", true), "openclaw");
-    }
+    // test_tee_mode_configuration_summary and test_non_tee_mode_configuration_summary removed:
+    // were entirely about the removed normalize_service_type_for_api function
 
     // ============================================================================
     // Comprehensive tests for manager filtering and image format selection
@@ -6709,24 +6618,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_service_type_normalization_by_manager_type() {
-        // Test that service types are used as-is for both TEE and non-TEE modes
-
-        // TEE mode: use service types as-is
-        assert_eq!(
-            normalize_service_type_for_api("openclaw", false),
-            "openclaw"
-        );
-        assert_eq!(
-            normalize_service_type_for_api("ironclaw", false),
-            "ironclaw"
-        );
-
-        // Non-TEE mode: also use service types as-is
-        assert_eq!(normalize_service_type_for_api("openclaw", true), "openclaw");
-        assert_eq!(normalize_service_type_for_api("ironclaw", true), "ironclaw");
-    }
+    // test_service_type_normalization_by_manager_type removed: entirely about the removed normalize_service_type_for_api function
 
     #[test]
     fn test_image_format_selection_by_manager_type() {

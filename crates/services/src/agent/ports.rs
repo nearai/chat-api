@@ -27,8 +27,8 @@ pub struct SyncStatusResult {
 
 // ============ Service Type Validation ============
 
-/// Valid service types for agent instances.
-/// Note: ironclaw-dind and openclaw-dind are internal normalized types used for non-TEE compose-api calls.
+/// Valid canonical service types for agent instances.
+/// The -dind suffix variants (openclaw-dind, ironclaw-dind) are no longer used.
 pub const VALID_SERVICE_TYPES: &[&str] = &["openclaw", "ironclaw"];
 
 /// Validates that a service type is in the list of allowed values.

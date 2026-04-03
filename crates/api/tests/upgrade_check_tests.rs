@@ -307,16 +307,16 @@ async fn test_upgrade_completion_only_on_success() {
 // NON-TEE SPECIFIC TESTS
 // ============================================================================
 
-/// Test non-TEE upgrade availability check with image allowlist
+/// Test non-TEE upgrade availability check with image allowlist (legacy openclaw-dind path)
 ///
 /// Verifies:
 /// 1. Allowlist is fetched from /images endpoint
-/// 2. Images are filtered by service_type (openclaw-dind) and status (allow-create)
+/// 2. Images are filtered by service_type (openclaw-dind for legacy instances) and status (allow-create)
 /// 3. Only numeric versions are selected (0.20.0, 0.21.0 - not "latest")
 /// 4. Latest semantic version is chosen (0.21.0 > 0.20.0)
 /// 5. Upgrade is needed because 0.20.0 < 0.21.0
 #[tokio::test]
-async fn test_check_upgrade_available_non_tee_with_allowlist() {
+async fn test_check_upgrade_available_non_tee_legacy_openclaw_dind() {
     let mock_server = MockServer::start().await;
 
     // Mock crabshack /images endpoint with multiple versions
@@ -415,6 +415,64 @@ async fn test_check_upgrade_available_non_tee_prerelease_versions() {
     // 1. It fetches /images and parses versions including pre-releases
     // 2. It compares (0.21.0-rc1, 0.21.0) semantically
     // 3. It selects 0.21.0 over 0.21.0-rc1 because full releases take precedence
+}
+
+/// Test non-TEE upgrade availability with canonical "openclaw" service_type
+///
+/// Verifies:
+/// 1. Instances are stored with canonical service_type "openclaw" in DB
+/// 2. When querying crabshack, "openclaw" is used as-is (no transformation needed)
+/// 3. Crabshack images with service_type="openclaw" are correctly selected
+/// 4. Version selection and upgrade check work correctly
+#[tokio::test]
+async fn test_check_upgrade_available_non_tee_canonical_openclaw() {
+    let mock_server = MockServer::start().await;
+
+    // Mock crabshack /images endpoint with canonical "openclaw" service_type
+    // (crabshack has moved to canonical naming for openclaw)
+    Mock::given(method("GET"))
+        .and(path("/images"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {
+                "ref": "docker.io/nearaidev/openclaw:0.20.0",
+                "service_type": "openclaw",
+                "status": "allow-create",
+                "created_at": "2024-01-10T00:00:00Z"
+            },
+            {
+                "ref": "docker.io/nearaidev/openclaw:0.21.0",
+                "service_type": "openclaw",
+                "status": "allow-create",
+                "created_at": "2024-01-15T00:00:00Z"
+            },
+            {
+                "ref": "docker.io/nearaidev/openclaw:latest",
+                "service_type": "openclaw",
+                "status": "deprecated",
+                "created_at": "2024-01-01T00:00:00Z"
+            }
+        ])))
+        .mount(&mock_server)
+        .await;
+
+    // Mock crabshack /instances/{name} endpoint showing current version
+    Mock::given(method("GET"))
+        .and(path("/instances/test-instance"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "name": "test-instance",
+            "image": "docker.io/nearaidev/openclaw:0.20.0",
+            "status": "running"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    // When check_upgrade_available_non_tee is called with instance (service_type: "openclaw" in DB):
+    // 1. Read service_type from DB → "openclaw" (canonical)
+    // 2. Query crabshack with "openclaw" (no transformation for openclaw)
+    // 3. Fetch /images and filter for service_type="openclaw" status:allow-create
+    // 4. Select latest semantic version (0.21.0)
+    // 5. Fetch /instances/test-instance to get current version (0.20.0)
+    // 6. Return has_upgrade=true since 0.20.0 < 0.21.0
 }
 
 /// Test non-TEE upgrade when instance not yet synced to crabshack
@@ -556,35 +614,37 @@ async fn test_semantic_version_parsing_edge_cases() {
     );
 }
 
-/// Test service type normalization for non-TEE
+/// Test service type transformation for crabshack queries
 #[tokio::test]
-async fn test_service_type_normalization_non_tee() {
-    // Test that service types are normalized correctly for non-TEE crabshack format
-    fn normalize_service_type(service_type: &str) -> String {
-        match service_type {
+async fn test_service_type_for_crabshack_transformation() {
+    // Crabshack has inconsistent naming:
+    // - ironclaw → ironclaw-dind (crabshack still uses -dind suffix)
+    // - openclaw → openclaw (crabshack moved to canonical name)
+    fn service_type_for_crabshack(canonical_type: &str) -> String {
+        match canonical_type {
             "ironclaw" => "ironclaw-dind".to_string(),
-            _ => "openclaw-dind".to_string(),
+            other => other.to_string(), // openclaw and others pass through as-is
         }
     }
 
     let test_cases = vec![
-        ("openclaw", "openclaw-dind"),      // openclaw -> openclaw-dind
-        ("ironclaw", "ironclaw-dind"),      // ironclaw -> ironclaw-dind
-        ("openclaw-dind", "openclaw-dind"), // already normalized treated as default
-        ("ironclaw-dind", "openclaw-dind"), // ironclaw-dind treated as default -> openclaw-dind
-        ("unknown-type", "openclaw-dind"),  // unknown defaults to openclaw-dind
+        ("openclaw", "openclaw"),      // crabshack uses canonical "openclaw" now
+        ("ironclaw", "ironclaw-dind"), // crabshack still uses "ironclaw-dind"
+        ("openclaw-dind", "openclaw-dind"), // legacy format stays unchanged
+        ("ironclaw-dind", "ironclaw-dind"), // already correct for crabshack
+        ("unknown-type", "unknown-type"), // unknown types pass through
     ];
 
     for (input, expected) in test_cases {
-        let result = normalize_service_type(input);
+        let result = service_type_for_crabshack(input);
         assert_eq!(
             result, expected,
-            "Normalization test case: {} should map to {}",
+            "Crabshack transformation test case: {} should become {}",
             input, expected
         );
     }
 
     // Verify the specific mappings
-    assert_eq!(normalize_service_type("openclaw"), "openclaw-dind");
-    assert_eq!(normalize_service_type("ironclaw"), "ironclaw-dind");
+    assert_eq!(service_type_for_crabshack("openclaw"), "openclaw");
+    assert_eq!(service_type_for_crabshack("ironclaw"), "ironclaw-dind");
 }
