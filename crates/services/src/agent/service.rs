@@ -97,31 +97,16 @@ fn compare_semantic_versions(a: &str, b: &str) -> std::cmp::Ordering {
 /// Map service type to worker image
 fn get_image_for_service_type(service_type: &str) -> String {
     match service_type {
-        "ironclaw" => "ironclaw-nearai-worker:local".to_string(),
-        "ironclaw-dind" => std::env::var("IRONCLAW_DIND_IMAGE")
+        "ironclaw" => std::env::var("IRONCLAW_DIND_IMAGE")
             .unwrap_or_else(|_| "docker.io/nearaidev/ironclaw-dind:latest".to_string()),
         "openclaw" => "docker.io/nearaidev/openclaw-nearai-worker:latest".to_string(),
-        "openclaw-dind" => "docker.io/nearaidev/openclaw-dind:2026.2.22".to_string(),
         _ => "docker.io/nearaidev/openclaw-nearai-worker:latest".to_string(), // default to openclaw
     }
 }
 
-/// Normalize service type for compose-api calls.
-/// For non-TEE deployments: append `-dind` suffix to ironclaw only; openclaw stays as-is.
-/// For TEE deployments, use service type as-is.
-fn normalize_service_type_for_api(service_type: &str, non_tee: bool) -> String {
-    if non_tee {
-        // Non-TEE compose-api: append -dind suffix for ironclaw only; openclaw stays as-is
-        match service_type {
-            "ironclaw" => "ironclaw-dind".to_string(),
-            "openclaw" => "openclaw".to_string(),
-            // Already normalized (shouldn't happen with VALID_SERVICE_TYPES check)
-            s => s.to_string(),
-        }
-    } else {
-        // TEE compose-api: use as-is
-        service_type.to_string()
-    }
+/// Normalize service type for compose-api calls (currently a no-op, service types are used as-is).
+fn normalize_service_type_for_api(service_type: &str, _non_tee: bool) -> String {
+    service_type.to_string()
 }
 
 /// Parameters for Agent API instance creation.
@@ -852,8 +837,8 @@ impl AgentServiceImpl {
         let image_to_use = if let Some(img) = params.image {
             Some(img)
         } else if manager.get_is_non_tee() {
-            // Non-TEE manager requires image; use normalized service_type to map to correct image
-            // e.g., user selects "ironclaw" → normalize to "ironclaw-dind" → map to ghcr.io/nearai/ironclaw-dind:0.21.0
+            // Non-TEE manager requires image; map service_type to correct image
+            // e.g., user selects "ironclaw" → map to docker.io/nearaidev/ironclaw-dind:latest
             Some(get_image_for_service_type(&service_type_for_api))
         } else {
             // TEE manager: image is optional, let Agent API determine it
@@ -1108,8 +1093,8 @@ impl AgentServiceImpl {
         let image_to_use = if let Some(img) = params.image {
             Some(img)
         } else if manager.get_is_non_tee() {
-            // Non-TEE manager requires image; use normalized service_type to map to correct image
-            // e.g., user selects "ironclaw" → normalize to "ironclaw-dind" → map to ghcr.io/nearai/ironclaw-dind:0.21.0
+            // Non-TEE manager requires image; map service_type to correct image
+            // e.g., user selects "ironclaw" → map to docker.io/nearaidev/ironclaw-dind:latest
             Some(get_image_for_service_type(&service_type_for_api))
         } else {
             // TEE manager: image is optional, let Agent API determine it
@@ -3942,7 +3927,7 @@ impl AgentServiceImpl {
             .as_deref()
             .unwrap_or(DEFAULT_SERVICE_TYPE);
 
-        // Normalize service type to match crabshack format (append -dind for non-TEE)
+        // Get service type for crabshack API (uses service types as-is)
         let crabshack_service_type = normalize_service_type_for_api(target_service_type, true);
 
         tracing::debug!(
@@ -6067,7 +6052,7 @@ mod tests {
             let server = setup_mock_server().await;
 
             // TEE mode: mock TEE compose-api response
-            // Should receive normalized service type (ironclaw, not ironclaw-dind)
+            // Should receive service type as-is (ironclaw)
             Mock::given(method("POST"))
                 .and(path("/instances"))
                 .and(header("Content-Type", "application/json"))
@@ -6133,7 +6118,7 @@ mod tests {
             );
 
             // Verify TEE mode behavior:
-            // 1. Service type should be normalized (ironclaw-dind -> ironclaw)
+            // 1. Service type used as-is (ironclaw)
             // 2. No passkey login attempted
             // 3. Manager token used
             assert!(
@@ -6147,7 +6132,7 @@ mod tests {
             let server = setup_mock_server().await;
 
             // Non-TEE mode: Mock compose-api response
-            // Should accept ironclaw-dind as-is
+            // Should accept ironclaw as-is
             Mock::given(method("POST"))
                 .and(path("/instances"))
                 .and(header("Content-Type", "application/json"))
@@ -6193,7 +6178,7 @@ mod tests {
                     instance_token: Some("instance-token-nontee".to_string()),
                     dashboard_url: None,
                     agent_api_base_url: Some(server_uri_clone.clone()),
-                    service_type: Some("ironclaw-dind".to_string()),
+                    service_type: Some("ironclaw".to_string()),
                     status: "active".to_string(),
                     created_at: Utc::now(),
                     updated_at: Utc::now(),
@@ -6214,7 +6199,7 @@ mod tests {
             );
 
             // Verify non-TEE mode behavior:
-            // 1. Service type should be kept as-is (ironclaw-dind)
+            // 1. Service type used as-is (ironclaw)
             // 2. Passkey login can be attempted
             assert!(
                 service.managers[0].is_non_tee,
@@ -6241,11 +6226,11 @@ mod tests {
             // Config: NON_TEE_INFRA=true
             // Manager: non-TEE compose-api (AGENT_MANAGER_URLS)
             // Auth: Passkey login available, falls back to manager token
-            // Service Type: Normalized with -dind suffix (ironclaw -> ironclaw-dind)
+            // Service Type: Used as-is (ironclaw stays ironclaw)
             let non_tee_mode = true;
             assert_eq!(
                 normalize_service_type_for_api("ironclaw", non_tee_mode),
-                "ironclaw-dind"
+                "ironclaw"
             );
         }
     }
@@ -6307,11 +6292,8 @@ mod tests {
 
     #[test]
     fn test_service_type_normalization_non_tee_mode() {
-        // Non-TEE mode: append -dind suffix to ironclaw only; openclaw stays as-is
-        assert_eq!(
-            normalize_service_type_for_api("ironclaw", true),
-            "ironclaw-dind"
-        );
+        // Non-TEE mode: service types are used as-is
+        assert_eq!(normalize_service_type_for_api("ironclaw", true), "ironclaw");
         assert_eq!(normalize_service_type_for_api("openclaw", true), "openclaw");
     }
 
@@ -6366,16 +6348,12 @@ mod tests {
     #[test]
     fn test_image_mapping_for_service_types() {
         // Verify that image mapping works correctly for all service types
-        assert_eq!(
-            get_image_for_service_type("ironclaw"),
-            "ironclaw-nearai-worker:local"
-        );
-        // ironclaw-dind uses IRONCLAW_DIND_IMAGE env var, defaults to :latest
-        let ironclaw_dind_image = get_image_for_service_type("ironclaw-dind");
+        // ironclaw uses IRONCLAW_DIND_IMAGE env var, defaults to docker.io/nearaidev/ironclaw-dind:latest
+        let ironclaw_image = get_image_for_service_type("ironclaw");
         assert!(
-            ironclaw_dind_image.contains("docker.io/nearaidev/ironclaw-dind:"),
+            ironclaw_image.contains("docker.io/nearaidev/ironclaw-dind:"),
             "Expected docker.io/nearaidev/ironclaw-dind image, got {}",
-            ironclaw_dind_image
+            ironclaw_image
         );
         assert_eq!(
             get_image_for_service_type("openclaw"),
@@ -6424,14 +6402,11 @@ mod tests {
         // Non-TEE Mode Flow:
         // 1. Uses non-TEE compose-api (AGENT_MANAGER_URLS)
         // 2. Passkey login enabled (resolve_bearer_token attempts passkey login)
-        // 3. Service types normalized: "ironclaw" -> "ironclaw-dind", "openclaw" -> "openclaw" (no suffix)
+        // 3. Service types used as-is: "ironclaw" stays "ironclaw", "openclaw" stays "openclaw"
         // 4. Session token from passkey or manager token used for API calls
 
-        // Verify service type normalization for non-TEE
-        assert_eq!(
-            normalize_service_type_for_api("ironclaw", true),
-            "ironclaw-dind"
-        );
+        // Verify service types are used as-is for non-TEE
+        assert_eq!(normalize_service_type_for_api("ironclaw", true), "ironclaw");
         assert_eq!(normalize_service_type_for_api("openclaw", true), "openclaw");
     }
 
@@ -6716,9 +6691,9 @@ mod tests {
 
     #[test]
     fn test_service_type_normalization_by_manager_type() {
-        // Test that service type normalization is correct for both manager types
+        // Test that service types are used as-is for both TEE and non-TEE modes
 
-        // TEE mode: use service types as-is (no suffix)
+        // TEE mode: use service types as-is
         assert_eq!(
             normalize_service_type_for_api("openclaw", false),
             "openclaw"
@@ -6728,27 +6703,20 @@ mod tests {
             "ironclaw"
         );
 
-        // Non-TEE mode: append -dind suffix to ironclaw only; openclaw stays as-is
+        // Non-TEE mode: also use service types as-is
         assert_eq!(normalize_service_type_for_api("openclaw", true), "openclaw");
-        assert_eq!(
-            normalize_service_type_for_api("ironclaw", true),
-            "ironclaw-dind"
-        );
+        assert_eq!(normalize_service_type_for_api("ironclaw", true), "ironclaw");
     }
 
     #[test]
     fn test_image_format_selection_by_manager_type() {
         // Test get_image_for_service_type returns correct formats
-        assert_eq!(
-            get_image_for_service_type("ironclaw"),
-            "ironclaw-nearai-worker:local"
-        );
-        // ironclaw-dind uses IRONCLAW_DIND_IMAGE env var, defaults to :latest
-        let ironclaw_dind_image = get_image_for_service_type("ironclaw-dind");
+        // ironclaw uses IRONCLAW_DIND_IMAGE env var, defaults to docker.io/nearaidev/ironclaw-dind:latest
+        let ironclaw_image = get_image_for_service_type("ironclaw");
         assert!(
-            ironclaw_dind_image.contains("docker.io/nearaidev/ironclaw-dind:"),
+            ironclaw_image.contains("docker.io/nearaidev/ironclaw-dind:"),
             "Expected docker.io/nearaidev/ironclaw-dind image, got {}",
-            ironclaw_dind_image
+            ironclaw_image
         );
         assert_eq!(
             get_image_for_service_type("openclaw"),
