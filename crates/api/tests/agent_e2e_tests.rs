@@ -140,16 +140,19 @@ async fn test_agent_complete_workflow() {
         )
         .await;
 
-    // Auth should work (either 200 or 500 depending on agent API response)
-    // Just verify that auth succeeded (not 401/403)
+    // Stop hits the real route with a real instance id: reject missing route (404) and bad auth.
+    // Upstream agent manager may still fail (e.g. 5xx) since we do not mock it here.
+    let stop_code = stop_response.status_code();
     assert_ne!(
-        stop_response.status_code(),
-        401,
+        stop_code, 404,
+        "POST .../stop should exist, not 404 Not Found"
+    );
+    assert_ne!(
+        stop_code, 401,
         "Auth should work - should not be 401 Unauthorized"
     );
     assert_ne!(
-        stop_response.status_code(),
-        403,
+        stop_code, 403,
         "Auth should work - should not be 403 Forbidden"
     );
 
@@ -162,14 +165,17 @@ async fn test_agent_complete_workflow() {
         )
         .await;
 
+    let start_code = start_response.status_code();
     assert_ne!(
-        start_response.status_code(),
-        401,
+        start_code, 404,
+        "POST .../start should exist, not 404 Not Found"
+    );
+    assert_ne!(
+        start_code, 401,
         "Auth should work - should not be 401 Unauthorized"
     );
     assert_ne!(
-        start_response.status_code(),
-        403,
+        start_code, 403,
         "Auth should work - should not be 403 Forbidden"
     );
 

@@ -312,10 +312,18 @@ async fn test_upgrade_completion_only_on_success() {
 // have access to `MockAgentRepository`. Run:
 //   cargo test -p services non_tee_check_upgrade
 //
-// Covered cases:
-// - `non_tee_check_upgrade_legacy_openclaw_dind_filter_and_semver` — allowlist filter, semver max
+// Crabshack filter key comes from `service_type_for_crabshack` (see also
+// `test_service_type_for_crabshack_transformation` below): by default DB `openclaw` maps to
+// crabshack `openclaw`, and DB `ironclaw` maps to `ironclaw-dind` (both overridable via
+// `agent_hosting.crabshack`). A DB value of `openclaw-dind` is not produced by that mapping but
+// can still exist on legacy rows—it passes through unchanged, so allowlist mocks must use
+// `service_type: "openclaw-dind"` for that path.
+//
+// Covered service tests:
+// - `non_tee_check_upgrade_legacy_openclaw_dind_filter_and_semver` — legacy `openclaw-dind` row +
+//   crabshack allowlist filter + semver
 // - `non_tee_check_upgrade_prerelease_same_numeric_max_picks_later_allowlist_entry` — rc vs release tie
-// - `non_tee_check_upgrade_canonical_openclaw_images` — DB `openclaw` → crabshack `openclaw`
+// - `non_tee_check_upgrade_canonical_openclaw_images` — DB `openclaw` + crabshack `openclaw` images
 // - `non_tee_check_upgrade_instance_404_blocks_upgrade` — unsynced instance / no upgrade
 
 /// Test semantic version parsing with various formats
@@ -426,13 +434,14 @@ async fn test_service_type_for_crabshack_transformation() {
     use services::agent::service_type_for_crabshack;
     use services::system_configs::ports::{AgentHostingConfig, AgentHostingCrabshackConfig};
 
-    // Test with no config (using defaults)
+    // Defaults (no hosting overrides): canonical openclaw → crabshack "openclaw"; ironclaw → "ironclaw-dind".
+    // Strings that are not canonical ironclaw/openclaw (e.g. legacy stored "openclaw-dind") pass through as-is.
     let test_cases = vec![
-        ("openclaw", "openclaw"),           // default: canonical "openclaw"
-        ("ironclaw", "ironclaw-dind"),      // default: "ironclaw-dind"
-        ("openclaw-dind", "openclaw-dind"), // unknown types pass through
-        ("ironclaw-dind", "ironclaw-dind"), // unknown types pass through
-        ("unknown-type", "unknown-type"),   // unknown types pass through
+        ("openclaw", "openclaw"),
+        ("ironclaw", "ironclaw-dind"),
+        ("openclaw-dind", "openclaw-dind"),
+        ("ironclaw-dind", "ironclaw-dind"),
+        ("unknown-type", "unknown-type"),
     ];
 
     for (input, expected) in test_cases {
