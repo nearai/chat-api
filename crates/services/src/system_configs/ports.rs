@@ -196,6 +196,16 @@ pub struct AgentHostingConfig {
     /// When true, only non-TEE managers are used for instance creation
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new_agent_with_non_tee_infra: Option<bool>,
+
+    /// Docker image for ironclaw instances. If not set, defaults to
+    /// "docker.io/nearaidev/ironclaw-dind:latest"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ironclaw_image: Option<String>,
+
+    /// Docker image for openclaw instances. If not set, falls back to
+    /// "docker.io/nearaidev/openclaw-nearai-worker:latest"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openclaw_image: Option<String>,
 }
 
 /// Application-wide configuration stored in `system_configs` table
@@ -262,6 +272,8 @@ impl Default for SystemConfigs {
             }),
             agent_hosting: Some(AgentHostingConfig {
                 new_agent_with_non_tee_infra: Some(false),
+                ironclaw_image: None,
+                openclaw_image: None,
             }),
         }
     }

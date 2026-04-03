@@ -1,4 +1,4 @@
-use crate::system_configs::ports::{SystemConfigs, SystemConfigsService};
+use crate::system_configs::ports::{AgentHostingConfig, SystemConfigs, SystemConfigsService};
 use crate::UserId;
 use anyhow::anyhow;
 use async_trait::async_trait;
@@ -94,13 +94,19 @@ fn compare_semantic_versions(a: &str, b: &str) -> std::cmp::Ordering {
     }
 }
 
-/// Map service type to worker image
-fn get_image_for_service_type(service_type: &str) -> String {
+/// Map service type to worker image.
+///
+/// Fallback chain:
+/// - ironclaw: `hosting.ironclaw_image` → "docker.io/nearaidev/ironclaw-dind:latest"
+/// - openclaw: `hosting.openclaw_image` → "docker.io/nearaidev/openclaw-nearai-worker:latest"
+fn get_image_for_service_type(service_type: &str, hosting: Option<&AgentHostingConfig>) -> String {
     match service_type {
-        "ironclaw" => std::env::var("IRONCLAW_DIND_IMAGE")
-            .unwrap_or_else(|_| "docker.io/nearaidev/ironclaw-dind:latest".to_string()),
-        "openclaw" => "docker.io/nearaidev/openclaw-nearai-worker:latest".to_string(),
-        _ => "docker.io/nearaidev/openclaw-nearai-worker:latest".to_string(), // default to openclaw
+        "ironclaw" => hosting
+            .and_then(|h| h.ironclaw_image.clone())
+            .unwrap_or_else(|| "docker.io/nearaidev/ironclaw-dind:latest".to_string()),
+        _ => hosting
+            .and_then(|h| h.openclaw_image.clone())
+            .unwrap_or_else(|| "docker.io/nearaidev/openclaw-nearai-worker:latest".to_string()),
     }
 }
 
@@ -839,7 +845,10 @@ impl AgentServiceImpl {
         } else if manager.get_is_non_tee() {
             // Non-TEE manager requires image; map service_type to correct image
             // e.g., user selects "ironclaw" → map to docker.io/nearaidev/ironclaw-dind:latest
-            Some(get_image_for_service_type(&service_type_for_api))
+            Some(get_image_for_service_type(
+                &service_type_for_api,
+                configs.agent_hosting.as_ref(),
+            ))
         } else {
             // TEE manager: image is optional, let Agent API determine it
             None
@@ -1095,7 +1104,10 @@ impl AgentServiceImpl {
         } else if manager.get_is_non_tee() {
             // Non-TEE manager requires image; map service_type to correct image
             // e.g., user selects "ironclaw" → map to docker.io/nearaidev/ironclaw-dind:latest
-            Some(get_image_for_service_type(&service_type_for_api))
+            Some(get_image_for_service_type(
+                &service_type_for_api,
+                configs.agent_hosting.as_ref(),
+            ))
         } else {
             // TEE manager: image is optional, let Agent API determine it
             None
@@ -4370,6 +4382,8 @@ mod tests {
                 configs: Some(SystemConfigs {
                     agent_hosting: Some(AgentHostingConfig {
                         new_agent_with_non_tee_infra: Some(true),
+                        ironclaw_image: None,
+                        openclaw_image: None,
                     }),
                     ..Default::default()
                 }),
@@ -4382,6 +4396,8 @@ mod tests {
                 configs: Some(SystemConfigs {
                     agent_hosting: Some(AgentHostingConfig {
                         new_agent_with_non_tee_infra: Some(non_tee_infra),
+                        ironclaw_image: None,
+                        openclaw_image: None,
                     }),
                     ..Default::default()
                 }),
@@ -4395,6 +4411,8 @@ mod tests {
                     max_instances_per_manager: Some(max),
                     agent_hosting: Some(AgentHostingConfig {
                         new_agent_with_non_tee_infra: Some(non_tee),
+                        ironclaw_image: None,
+                        openclaw_image: None,
                     }),
                     ..Default::default()
                 }),
@@ -4420,6 +4438,8 @@ mod tests {
                     max_instances_by_manager_url: Some(per_url),
                     agent_hosting: Some(AgentHostingConfig {
                         new_agent_with_non_tee_infra: Some(true),
+                        ironclaw_image: None,
+                        openclaw_image: None,
                     }),
                     ..Default::default()
                 }),
@@ -6348,19 +6368,19 @@ mod tests {
     #[test]
     fn test_image_mapping_for_service_types() {
         // Verify that image mapping works correctly for all service types
-        // ironclaw uses IRONCLAW_DIND_IMAGE env var, defaults to docker.io/nearaidev/ironclaw-dind:latest
-        let ironclaw_image = get_image_for_service_type("ironclaw");
+        // ironclaw defaults to docker.io/nearaidev/ironclaw-dind:latest when not configured
+        let ironclaw_image = get_image_for_service_type("ironclaw", None);
         assert!(
             ironclaw_image.contains("docker.io/nearaidev/ironclaw-dind:"),
             "Expected docker.io/nearaidev/ironclaw-dind image, got {}",
             ironclaw_image
         );
         assert_eq!(
-            get_image_for_service_type("openclaw"),
+            get_image_for_service_type("openclaw", None),
             "docker.io/nearaidev/openclaw-nearai-worker:latest"
         );
         assert_eq!(
-            get_image_for_service_type("unknown"),
+            get_image_for_service_type("unknown", None),
             "docker.io/nearaidev/openclaw-nearai-worker:latest"
         );
     }
@@ -6711,19 +6731,19 @@ mod tests {
     #[test]
     fn test_image_format_selection_by_manager_type() {
         // Test get_image_for_service_type returns correct formats
-        // ironclaw uses IRONCLAW_DIND_IMAGE env var, defaults to docker.io/nearaidev/ironclaw-dind:latest
-        let ironclaw_image = get_image_for_service_type("ironclaw");
+        // ironclaw defaults to docker.io/nearaidev/ironclaw-dind:latest when not configured
+        let ironclaw_image = get_image_for_service_type("ironclaw", None);
         assert!(
             ironclaw_image.contains("docker.io/nearaidev/ironclaw-dind:"),
             "Expected docker.io/nearaidev/ironclaw-dind image, got {}",
             ironclaw_image
         );
         assert_eq!(
-            get_image_for_service_type("openclaw"),
+            get_image_for_service_type("openclaw", None),
             "docker.io/nearaidev/openclaw-nearai-worker:latest"
         );
         assert_eq!(
-            get_image_for_service_type("unknown"),
+            get_image_for_service_type("unknown", None),
             "docker.io/nearaidev/openclaw-nearai-worker:latest"
         );
     }
@@ -6869,5 +6889,163 @@ mod tests {
             extract_version_from_image("docker.io/repo/image:2.0.0-alpha"),
             Some("2.0.0-alpha".to_string())
         );
+    }
+
+    // ============================================================================
+    // Comprehensive tests for AgentHostingConfig image resolution
+    // ============================================================================
+
+    #[test]
+    fn test_image_resolution_ironclaw_with_config() {
+        // When config provides ironclaw_image, use it
+        let config = AgentHostingConfig {
+            new_agent_with_non_tee_infra: None,
+            ironclaw_image: Some("custom.registry.io/ironclaw:0.5.0".to_string()),
+            openclaw_image: None,
+        };
+
+        let image = get_image_for_service_type("ironclaw", Some(&config));
+        assert_eq!(image, "custom.registry.io/ironclaw:0.5.0");
+    }
+
+    #[test]
+    fn test_image_resolution_ironclaw_without_config() {
+        // When config is None, fall back to hardcoded default
+        let image = get_image_for_service_type("ironclaw", None);
+        assert_eq!(image, "docker.io/nearaidev/ironclaw-dind:latest");
+    }
+
+    #[test]
+    fn test_image_resolution_ironclaw_config_none_fields() {
+        // When config fields are None, fall back to hardcoded defaults
+        let config = AgentHostingConfig {
+            new_agent_with_non_tee_infra: None,
+            ironclaw_image: None,
+            openclaw_image: None,
+        };
+
+        let image = get_image_for_service_type("ironclaw", Some(&config));
+        assert_eq!(image, "docker.io/nearaidev/ironclaw-dind:latest");
+    }
+
+    #[test]
+    fn test_image_resolution_openclaw_with_config() {
+        // When config provides openclaw_image, use it
+        let config = AgentHostingConfig {
+            new_agent_with_non_tee_infra: None,
+            ironclaw_image: None,
+            openclaw_image: Some("my.registry.com/openclaw:v2.1".to_string()),
+        };
+
+        let image = get_image_for_service_type("openclaw", Some(&config));
+        assert_eq!(image, "my.registry.com/openclaw:v2.1");
+    }
+
+    #[test]
+    fn test_image_resolution_openclaw_without_config() {
+        // When config is None, fall back to hardcoded default
+        let image = get_image_for_service_type("openclaw", None);
+        assert_eq!(image, "docker.io/nearaidev/openclaw-nearai-worker:latest");
+    }
+
+    #[test]
+    fn test_image_resolution_openclaw_config_none_fields() {
+        // When config fields are None, fall back to hardcoded defaults
+        let config = AgentHostingConfig {
+            new_agent_with_non_tee_infra: None,
+            ironclaw_image: None,
+            openclaw_image: None,
+        };
+
+        let image = get_image_for_service_type("openclaw", Some(&config));
+        assert_eq!(image, "docker.io/nearaidev/openclaw-nearai-worker:latest");
+    }
+
+    #[test]
+    fn test_image_resolution_unknown_type_defaults_to_openclaw() {
+        // Unknown service types default to openclaw image
+        let image = get_image_for_service_type("unknown-type", None);
+        assert_eq!(image, "docker.io/nearaidev/openclaw-nearai-worker:latest");
+    }
+
+    #[test]
+    fn test_image_resolution_unknown_type_with_openclaw_override() {
+        // Unknown types respect openclaw_image override
+        let config = AgentHostingConfig {
+            new_agent_with_non_tee_infra: None,
+            ironclaw_image: None,
+            openclaw_image: Some("override.io/openclaw:custom".to_string()),
+        };
+
+        let image = get_image_for_service_type("unknown-type", Some(&config));
+        assert_eq!(image, "override.io/openclaw:custom");
+    }
+
+    #[test]
+    fn test_image_resolution_both_images_configured() {
+        // When both images are configured, each service type uses its own
+        let config = AgentHostingConfig {
+            new_agent_with_non_tee_infra: None,
+            ironclaw_image: Some("registry.io/ironclaw:1.0".to_string()),
+            openclaw_image: Some("registry.io/openclaw:2.0".to_string()),
+        };
+
+        let ironclaw_image = get_image_for_service_type("ironclaw", Some(&config));
+        let openclaw_image = get_image_for_service_type("openclaw", Some(&config));
+
+        assert_eq!(ironclaw_image, "registry.io/ironclaw:1.0");
+        assert_eq!(openclaw_image, "registry.io/openclaw:2.0");
+        assert_ne!(ironclaw_image, openclaw_image);
+    }
+
+    #[test]
+    fn test_image_resolution_partial_config_ironclaw_only() {
+        // Config can set just ironclaw_image; openclaw uses default
+        let config = AgentHostingConfig {
+            new_agent_with_non_tee_infra: None,
+            ironclaw_image: Some("custom.io/ironclaw:beta".to_string()),
+            openclaw_image: None,
+        };
+
+        let ironclaw = get_image_for_service_type("ironclaw", Some(&config));
+        let openclaw = get_image_for_service_type("openclaw", Some(&config));
+
+        assert_eq!(ironclaw, "custom.io/ironclaw:beta");
+        assert_eq!(
+            openclaw,
+            "docker.io/nearaidev/openclaw-nearai-worker:latest"
+        );
+    }
+
+    #[test]
+    fn test_image_resolution_partial_config_openclaw_only() {
+        // Config can set just openclaw_image; ironclaw uses default
+        let config = AgentHostingConfig {
+            new_agent_with_non_tee_infra: None,
+            ironclaw_image: None,
+            openclaw_image: Some("custom.io/openclaw:rc1".to_string()),
+        };
+
+        let ironclaw = get_image_for_service_type("ironclaw", Some(&config));
+        let openclaw = get_image_for_service_type("openclaw", Some(&config));
+
+        assert_eq!(ironclaw, "docker.io/nearaidev/ironclaw-dind:latest");
+        assert_eq!(openclaw, "custom.io/openclaw:rc1");
+    }
+
+    #[test]
+    fn test_image_resolution_config_coexists_with_tee_flag() {
+        // Image config is independent of the non_tee_infra flag
+        let config = AgentHostingConfig {
+            new_agent_with_non_tee_infra: Some(true), // Flag doesn't affect image resolution
+            ironclaw_image: Some("flag-independent.io/ironclaw:v1".to_string()),
+            openclaw_image: Some("flag-independent.io/openclaw:v1".to_string()),
+        };
+
+        let ironclaw = get_image_for_service_type("ironclaw", Some(&config));
+        let openclaw = get_image_for_service_type("openclaw", Some(&config));
+
+        assert_eq!(ironclaw, "flag-independent.io/ironclaw:v1");
+        assert_eq!(openclaw, "flag-independent.io/openclaw:v1");
     }
 }
