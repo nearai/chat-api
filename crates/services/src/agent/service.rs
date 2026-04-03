@@ -852,8 +852,14 @@ impl AgentServiceImpl {
             .service_type
             .as_deref()
             .unwrap_or(DEFAULT_SERVICE_TYPE);
-        // Service type is used as-is for API calls
+        // Canonical type for chat-api / DB (ironclaw, openclaw)
         let service_type_for_api = service_type.to_string();
+        // Crabshack (non-TEE) compose-api expects image-aligned names (e.g. ironclaw → ironclaw-dind).
+        let agent_api_service_type = if manager.get_is_non_tee() {
+            service_type_for_crabshack(&service_type_for_api, configs.agent_hosting.as_ref())
+        } else {
+            service_type_for_api.clone()
+        };
 
         // Determine image to use based on manager type
         let image_to_use = if let Some(img) = params.image {
@@ -876,7 +882,7 @@ impl AgentServiceImpl {
             "nearai_api_key": nearai_api_key,
             "nearai_api_url": nearai_api_url,
             "ssh_pubkey": params.ssh_pubkey,
-            "service_type": service_type_for_api,
+            "service_type": agent_api_service_type,
             "user_id": user_id,
         });
 
@@ -1109,8 +1115,12 @@ impl AgentServiceImpl {
             .as_deref()
             .unwrap_or(DEFAULT_SERVICE_TYPE);
 
-        // Service type is used as-is for API calls
         let service_type_for_api = service_type.to_string();
+        let agent_api_service_type = if manager.get_is_non_tee() {
+            service_type_for_crabshack(&service_type_for_api, configs.agent_hosting.as_ref())
+        } else {
+            service_type_for_api.clone()
+        };
 
         // Build request body with base fields
         // Note: In non-TEE mode, image is required; in TEE mode it's optional
@@ -1134,7 +1144,7 @@ impl AgentServiceImpl {
             "nearai_api_key": nearai_api_key,
             "nearai_api_url": nearai_api_url,
             "ssh_pubkey": params.ssh_pubkey,
-            "service_type": service_type_for_api,
+            "service_type": agent_api_service_type,
             "user_id": user_id,
         });
 
