@@ -356,6 +356,15 @@ impl Default for SystemConfigs {
     }
 }
 
+/// Merge optional string overrides: absent (`None`) keeps `base`; empty string clears an override.
+fn merge_opt_override(base: Option<String>, partial: Option<String>) -> Option<String> {
+    match partial {
+        None => base,
+        Some(s) if s.trim().is_empty() => None,
+        Some(s) => Some(s),
+    }
+}
+
 fn merge_agent_hosting_config(
     base: AgentHostingConfig,
     partial: AgentHostingConfig,
@@ -365,22 +374,22 @@ fn merge_agent_hosting_config(
             .new_agent_with_non_tee_infra
             .or(base.new_agent_with_non_tee_infra),
         crabshack: AgentHostingCrabshackConfig {
-            ironclaw_image: partial
-                .crabshack
-                .ironclaw_image
-                .or(base.crabshack.ironclaw_image),
-            openclaw_image: partial
-                .crabshack
-                .openclaw_image
-                .or(base.crabshack.openclaw_image),
-            ironclaw_service_type: partial
-                .crabshack
-                .ironclaw_service_type
-                .or(base.crabshack.ironclaw_service_type),
-            openclaw_service_type: partial
-                .crabshack
-                .openclaw_service_type
-                .or(base.crabshack.openclaw_service_type),
+            ironclaw_image: merge_opt_override(
+                base.crabshack.ironclaw_image,
+                partial.crabshack.ironclaw_image,
+            ),
+            openclaw_image: merge_opt_override(
+                base.crabshack.openclaw_image,
+                partial.crabshack.openclaw_image,
+            ),
+            ironclaw_service_type: merge_opt_override(
+                base.crabshack.ironclaw_service_type,
+                partial.crabshack.ironclaw_service_type,
+            ),
+            openclaw_service_type: merge_opt_override(
+                base.crabshack.openclaw_service_type,
+                partial.crabshack.openclaw_service_type,
+            ),
         },
     }
 }
@@ -607,5 +616,27 @@ mod tests {
             ah.crabshack.openclaw_service_type.as_deref(),
             Some("oc-type-base")
         );
+    }
+
+    #[test]
+    fn into_updated_clears_crabshack_override_on_empty_string() {
+        let base = SystemConfigs {
+            agent_hosting: Some(AgentHostingConfig {
+                new_agent_with_non_tee_infra: Some(false),
+                crabshack: AgentHostingCrabshackConfig {
+                    ironclaw_image: Some("custom:iron".to_string()),
+                    openclaw_image: None,
+                    ironclaw_service_type: None,
+                    openclaw_service_type: Some("oc-custom".to_string()),
+                },
+            }),
+            ..Default::default()
+        };
+        let partial_json = r#"{"agent_hosting":{"crabshack":{"ironclaw_image":"","openclaw_service_type":"   "}}}"#;
+        let partial: PartialSystemConfigs = serde_json::from_str(partial_json).unwrap();
+        let merged = base.into_updated(partial);
+        let ah = merged.agent_hosting.expect("agent_hosting");
+        assert_eq!(ah.crabshack.ironclaw_image, None);
+        assert_eq!(ah.crabshack.openclaw_service_type, None);
     }
 }
