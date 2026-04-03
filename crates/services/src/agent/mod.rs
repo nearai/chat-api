@@ -4,4 +4,4 @@ pub mod service;
 
 pub use ports::{is_valid_service_type, AgentRepository, AgentService, VALID_SERVICE_TYPES};
 pub use proxy::AgentProxyService;
-pub use service::AgentServiceImpl;
+pub use service::{service_type_for_crabshack, AgentServiceImpl};

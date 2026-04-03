@@ -1,4 +1,4 @@
-use crate::system_configs::ports::{SystemConfigs, SystemConfigsService};
+use crate::system_configs::ports::{AgentHostingConfig, SystemConfigs, SystemConfigsService};
 use crate::UserId;
 use anyhow::anyhow;
 use async_trait::async_trait;
@@ -94,33 +94,38 @@ fn compare_semantic_versions(a: &str, b: &str) -> std::cmp::Ordering {
     }
 }
 
-/// Map service type to worker image
-fn get_image_for_service_type(service_type: &str) -> String {
+/// Map service type to worker image.
+///
+/// Fallback chain:
+/// - ironclaw: `hosting.crabshack.ironclaw_image` → "docker.io/nearaidev/ironclaw-dind:latest"
+/// - openclaw: `hosting.crabshack.openclaw_image` → "docker.io/nearaidev/openclaw-nearai-worker:latest"
+fn get_image_for_service_type(service_type: &str, hosting: Option<&AgentHostingConfig>) -> String {
     match service_type {
-        "ironclaw" => "ironclaw-nearai-worker:local".to_string(),
-        "ironclaw-dind" => std::env::var("IRONCLAW_DIND_IMAGE")
-            .unwrap_or_else(|_| "docker.io/nearaidev/ironclaw-dind:latest".to_string()),
-        "openclaw" => "openclaw-nearai-worker:local".to_string(),
-        "openclaw-dind" => "docker.io/nearaidev/openclaw-dind:2026.2.22".to_string(),
-        _ => "openclaw-nearai-worker:local".to_string(), // default to openclaw
+        "ironclaw" => hosting
+            .and_then(|h| h.crabshack.ironclaw_image.clone())
+            .unwrap_or_else(|| "docker.io/nearaidev/ironclaw-dind:latest".to_string()),
+        _ => hosting
+            .and_then(|h| h.crabshack.openclaw_image.clone())
+            .unwrap_or_else(|| "docker.io/nearaidev/openclaw-nearai-worker:latest".to_string()),
     }
 }
 
-/// Normalize service type for compose-api calls.
-/// For non-TEE deployments, append `-dind` suffix for compose-api.
-/// For TEE deployments, use service type as-is.
-fn normalize_service_type_for_api(service_type: &str, non_tee: bool) -> String {
-    if non_tee {
-        // Non-TEE compose-api: append -dind suffix
-        match service_type {
-            "ironclaw" => "ironclaw-dind".to_string(),
-            "openclaw" => "openclaw-dind".to_string(),
-            // Already normalized (shouldn't happen with VALID_SERVICE_TYPES check)
-            s => s.to_string(),
-        }
-    } else {
-        // TEE compose-api: use as-is
-        service_type.to_string()
+/// Convert canonical service type to crabshack format for non-TEE.
+/// Crabshack uses inconsistent naming (configurable via AgentHostingConfig):
+/// - ironclaw → ironclaw-dind by default (can be overridden via crabshack.ironclaw_service_type)
+/// - openclaw → openclaw by default (can be overridden via crabshack.openclaw_service_type)
+pub fn service_type_for_crabshack(
+    canonical_type: &str,
+    hosting_config: Option<&crate::system_configs::ports::AgentHostingConfig>,
+) -> String {
+    match canonical_type {
+        "ironclaw" => hosting_config
+            .and_then(|cfg| cfg.crabshack.ironclaw_service_type.clone())
+            .unwrap_or_else(|| "ironclaw-dind".to_string()),
+        "openclaw" => hosting_config
+            .and_then(|cfg| cfg.crabshack.openclaw_service_type.clone())
+            .unwrap_or_else(|| "openclaw".to_string()),
+        other => other.to_string(), // unknown types pass through as-is
     }
 }
 
@@ -234,8 +239,11 @@ impl AgentServiceImpl {
 
         // Create HTTP client with timeout to prevent connection pool exhaustion from hung upstream services.
         // Default 30s for most calls; instance create uses per-request timeout (see call_agent_api_create).
+        // Direct connections only: agent manager URLs are explicit endpoints; skipping system proxy avoids
+        // misrouted loopback in tests and broken CONNECT for internal crabshack/compose hosts.
         let http_client = Client::builder()
             .timeout(std::time::Duration::from_secs(30))
+            .no_proxy()
             .build()
             .unwrap_or_else(|_| Client::new());
 
@@ -844,17 +852,19 @@ impl AgentServiceImpl {
             .service_type
             .as_deref()
             .unwrap_or(DEFAULT_SERVICE_TYPE);
-        // Normalize service_type for API call based on manager type
-        let service_type_for_api =
-            normalize_service_type_for_api(service_type, manager.get_is_non_tee());
+        // Service type is used as-is for API calls
+        let service_type_for_api = service_type.to_string();
 
         // Determine image to use based on manager type
         let image_to_use = if let Some(img) = params.image {
             Some(img)
         } else if manager.get_is_non_tee() {
-            // Non-TEE manager requires image; use normalized service_type to map to correct image
-            // e.g., user selects "ironclaw" → normalize to "ironclaw-dind" → map to ghcr.io/nearai/ironclaw-dind:0.21.0
-            Some(get_image_for_service_type(&service_type_for_api))
+            // Non-TEE manager requires image; map service_type to correct image
+            // e.g., user selects "ironclaw" → map to docker.io/nearaidev/ironclaw-dind:latest
+            Some(get_image_for_service_type(
+                &service_type_for_api,
+                configs.agent_hosting.as_ref(),
+            ))
         } else {
             // TEE manager: image is optional, let Agent API determine it
             None
@@ -1099,18 +1109,20 @@ impl AgentServiceImpl {
             .as_deref()
             .unwrap_or(DEFAULT_SERVICE_TYPE);
 
-        // Normalize service_type for API call based on ACTUAL manager type
-        let service_type_for_api =
-            normalize_service_type_for_api(service_type, manager.get_is_non_tee());
+        // Service type is used as-is for API calls
+        let service_type_for_api = service_type.to_string();
 
         // Build request body with base fields
         // Note: In non-TEE mode, image is required; in TEE mode it's optional
         let image_to_use = if let Some(img) = params.image {
             Some(img)
         } else if manager.get_is_non_tee() {
-            // Non-TEE manager requires image; use normalized service_type to map to correct image
-            // e.g., user selects "ironclaw" → normalize to "ironclaw-dind" → map to ghcr.io/nearai/ironclaw-dind:0.21.0
-            Some(get_image_for_service_type(&service_type_for_api))
+            // Non-TEE manager requires image; map service_type to correct image
+            // e.g., user selects "ironclaw" → map to docker.io/nearaidev/ironclaw-dind:latest
+            Some(get_image_for_service_type(
+                &service_type_for_api,
+                configs.agent_hosting.as_ref(),
+            ))
         } else {
             // TEE manager: image is optional, let Agent API determine it
             None
@@ -1973,22 +1985,10 @@ impl AgentService for AgentServiceImpl {
             }
         }
 
-        let mut service_type_for_api = params
+        let service_type_for_api = params
             .service_type
             .clone()
             .or_else(|| Some(DEFAULT_SERVICE_TYPE.to_string()));
-
-        // Normalize service type based on the selected manager (TEE vs non-TEE)
-        if let Some(st) = service_type_for_api.clone() {
-            let normalized = normalize_service_type_for_api(&st, manager.get_is_non_tee());
-            service_type_for_api = Some(normalized.to_string());
-            tracing::debug!(
-                "create_passkey_instance_streaming: normalized service_type from {} to {} for manager_type={}",
-                st,
-                normalized,
-                if manager.get_is_non_tee() { "non-TEE" } else { "TEE" }
-            );
-        }
 
         let mut rx = match self
             .call_agent_api_create_streaming(
@@ -3942,8 +3942,18 @@ impl AgentServiceImpl {
             .as_deref()
             .unwrap_or(DEFAULT_SERVICE_TYPE);
 
-        // Normalize service type to match crabshack format (append -dind for non-TEE)
-        let crabshack_service_type = normalize_service_type_for_api(target_service_type, true);
+        // Transform canonical service type to crabshack format (configurable via system_configs)
+        let system_configs = self
+            .system_configs_service
+            .get_configs()
+            .await
+            .ok()
+            .flatten();
+        let hosting_config = system_configs
+            .as_ref()
+            .and_then(|cfg| cfg.agent_hosting.as_ref());
+        let crabshack_service_type =
+            service_type_for_crabshack(target_service_type, hosting_config);
 
         tracing::debug!(
             "Non-TEE ({}): Filtering for service_type='{}' with status='allow-create'",
@@ -4362,7 +4372,9 @@ impl AgentServiceImpl {
 mod tests {
     use super::*;
     use crate::agent::ports::AgentService;
-    use crate::system_configs::ports::{PartialSystemConfigs, SystemConfigs, SystemConfigsService};
+    use crate::system_configs::ports::{
+        AgentHostingCrabshackConfig, PartialSystemConfigs, SystemConfigs, SystemConfigsService,
+    };
     use chrono::{Duration, Utc};
     use config::AgentManager;
 
@@ -4385,6 +4397,7 @@ mod tests {
                 configs: Some(SystemConfigs {
                     agent_hosting: Some(AgentHostingConfig {
                         new_agent_with_non_tee_infra: Some(true),
+                        crabshack: Default::default(),
                     }),
                     ..Default::default()
                 }),
@@ -4397,6 +4410,7 @@ mod tests {
                 configs: Some(SystemConfigs {
                     agent_hosting: Some(AgentHostingConfig {
                         new_agent_with_non_tee_infra: Some(non_tee_infra),
+                        crabshack: Default::default(),
                     }),
                     ..Default::default()
                 }),
@@ -4410,6 +4424,7 @@ mod tests {
                     max_instances_per_manager: Some(max),
                     agent_hosting: Some(AgentHostingConfig {
                         new_agent_with_non_tee_infra: Some(non_tee),
+                        crabshack: Default::default(),
                     }),
                     ..Default::default()
                 }),
@@ -4435,6 +4450,7 @@ mod tests {
                     max_instances_by_manager_url: Some(per_url),
                     agent_hosting: Some(AgentHostingConfig {
                         new_agent_with_non_tee_infra: Some(true),
+                        crabshack: Default::default(),
                     }),
                     ..Default::default()
                 }),
@@ -6067,7 +6083,7 @@ mod tests {
             let server = setup_mock_server().await;
 
             // TEE mode: mock TEE compose-api response
-            // Should receive normalized service type (ironclaw, not ironclaw-dind)
+            // Should receive service type as-is (ironclaw)
             Mock::given(method("POST"))
                 .and(path("/instances"))
                 .and(header("Content-Type", "application/json"))
@@ -6133,7 +6149,7 @@ mod tests {
             );
 
             // Verify TEE mode behavior:
-            // 1. Service type should be normalized (ironclaw-dind -> ironclaw)
+            // 1. Service type used as-is (ironclaw)
             // 2. No passkey login attempted
             // 3. Manager token used
             assert!(
@@ -6147,7 +6163,7 @@ mod tests {
             let server = setup_mock_server().await;
 
             // Non-TEE mode: Mock compose-api response
-            // Should accept ironclaw-dind as-is
+            // Should accept ironclaw as-is
             Mock::given(method("POST"))
                 .and(path("/instances"))
                 .and(header("Content-Type", "application/json"))
@@ -6193,7 +6209,7 @@ mod tests {
                     instance_token: Some("instance-token-nontee".to_string()),
                     dashboard_url: None,
                     agent_api_base_url: Some(server_uri_clone.clone()),
-                    service_type: Some("ironclaw-dind".to_string()),
+                    service_type: Some("ironclaw".to_string()),
                     status: "active".to_string(),
                     created_at: Utc::now(),
                     updated_at: Utc::now(),
@@ -6214,7 +6230,7 @@ mod tests {
             );
 
             // Verify non-TEE mode behavior:
-            // 1. Service type should be kept as-is (ironclaw-dind)
+            // 1. Service type used as-is (ironclaw)
             // 2. Passkey login can be attempted
             assert!(
                 service.managers[0].is_non_tee,
@@ -6222,31 +6238,286 @@ mod tests {
             );
         }
 
-        #[test]
-        fn test_e2e_mode_flow_summary() {
-            // Complete end-to-end flow verification:
+        // --- Non-TEE `check_upgrade_available` (crabshack allowlist + instance image) ---
 
-            // TEE Mode:
-            // Config: NON_TEE_INFRA not set or false
-            // Manager: TEE compose-api (e.g. api.agent.near.ai via AGENT_MANAGER_URLS_TEE)
-            // Auth: Manager token only, NO passkey login
-            // Service Type: Used as-is (ironclaw stays ironclaw)
-            let tee_mode = false;
-            assert_eq!(
-                normalize_service_type_for_api("ironclaw", tee_mode),
-                "ironclaw"
-            );
+        fn upgrade_check_instance(
+            instance_db_id: Uuid,
+            user_id: UserId,
+            name: &str,
+            crabshack_uri: &str,
+            service_type: Option<&str>,
+        ) -> AgentInstance {
+            AgentInstance {
+                id: instance_db_id,
+                user_id,
+                instance_id: format!("agent-api-{}", name),
+                name: name.to_string(),
+                public_ssh_key: None,
+                instance_url: None,
+                instance_token: None,
+                dashboard_url: None,
+                agent_api_base_url: Some(crabshack_uri.to_string()),
+                service_type: service_type.map(String::from),
+                status: "active".to_string(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            }
+        }
 
-            // Non-TEE Mode:
-            // Config: NON_TEE_INFRA=true
-            // Manager: non-TEE compose-api (AGENT_MANAGER_URLS)
-            // Auth: Passkey login available, falls back to manager token
-            // Service Type: Normalized with -dind suffix (ironclaw -> ironclaw-dind)
-            let non_tee_mode = true;
-            assert_eq!(
-                normalize_service_type_for_api("ironclaw", non_tee_mode),
-                "ironclaw-dind"
+        fn service_for_upgrade_check(
+            instance: AgentInstance,
+            crabshack_uri: &str,
+            token: &str,
+        ) -> AgentServiceImpl {
+            let instance_db_id = instance.id;
+            let mut repo = MockAgentRepository::new();
+            repo.expect_get_instance()
+                .with(eq(instance_db_id))
+                .returning(move |_| Ok(Some(instance.clone())));
+            repo.expect_get_user_passkey_credentials()
+                .returning(|_| Ok(None));
+
+            make_service(
+                vec![AgentManager {
+                    url: crabshack_uri.to_string(),
+                    token: token.to_string(),
+                    is_non_tee: true,
+                }],
+                Arc::new(repo),
+                Arc::new(MockSystemConfigsService::no_config()),
+            )
+        }
+
+        #[tokio::test]
+        async fn non_tee_check_upgrade_legacy_openclaw_dind_filter_and_semver() {
+            let server = setup_mock_server().await;
+            let uri = server.uri();
+            let token = "crab-token";
+            let instance_id = Uuid::new_v4();
+            let user_id = UserId(Uuid::new_v4());
+
+            Mock::given(method("GET"))
+                .and(path("/images"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                    {
+                        "ref": "docker.io/nearaidev/openclaw-dind:0.20.0",
+                        "service_type": "openclaw-dind",
+                        "status": "allow-create",
+                        "created_at": "2024-01-10T00:00:00Z"
+                    },
+                    {
+                        "ref": "docker.io/nearaidev/openclaw-dind:0.21.0",
+                        "service_type": "openclaw-dind",
+                        "status": "allow-create",
+                        "created_at": "2024-01-15T00:00:00Z"
+                    },
+                    {
+                        "ref": "docker.io/nearaidev/openclaw-dind:latest",
+                        "service_type": "openclaw-dind",
+                        "status": "deprecated",
+                        "created_at": "2024-01-01T00:00:00Z"
+                    }
+                ])))
+                .mount(&server)
+                .await;
+
+            Mock::given(method("GET"))
+                .and(path("/instances/test-instance"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "name": "test-instance",
+                    "image": "docker.io/nearaidev/openclaw-dind:0.20.0",
+                    "status": "running"
+                })))
+                .mount(&server)
+                .await;
+
+            let instance = upgrade_check_instance(
+                instance_id,
+                user_id,
+                "test-instance",
+                &uri,
+                Some("openclaw-dind"),
             );
+            let svc = service_for_upgrade_check(instance, &uri, token);
+            let out = AgentService::check_upgrade_available(&svc, instance_id, user_id)
+                .await
+                .expect("check_upgrade_available");
+
+            assert!(out.has_upgrade);
+            assert_eq!(
+                out.current_image.as_deref(),
+                Some("docker.io/nearaidev/openclaw-dind:0.20.0")
+            );
+            assert_eq!(out.latest_image, "docker.io/nearaidev/openclaw-dind:0.21.0");
+        }
+
+        #[tokio::test]
+        async fn non_tee_check_upgrade_prerelease_same_numeric_max_picks_later_allowlist_entry() {
+            let server = setup_mock_server().await;
+            let uri = server.uri();
+            let token = "crab-token";
+            let instance_id = Uuid::new_v4();
+            let user_id = UserId(Uuid::new_v4());
+
+            Mock::given(method("GET"))
+                .and(path("/images"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                    {
+                        "ref": "docker.io/nearaidev/openclaw-dind:0.20.0",
+                        "service_type": "openclaw-dind",
+                        "status": "allow-create",
+                        "created_at": "2024-01-10T00:00:00Z"
+                    },
+                    {
+                        "ref": "docker.io/nearaidev/openclaw-dind:0.21.0-rc1",
+                        "service_type": "openclaw-dind",
+                        "status": "allow-create",
+                        "created_at": "2024-01-15T00:00:00Z"
+                    },
+                    {
+                        "ref": "docker.io/nearaidev/openclaw-dind:0.21.0",
+                        "service_type": "openclaw-dind",
+                        "status": "allow-create",
+                        "created_at": "2024-01-16T00:00:00Z"
+                    }
+                ])))
+                .mount(&server)
+                .await;
+
+            Mock::given(method("GET"))
+                .and(path("/instances/test-instance"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "name": "test-instance",
+                    "image": "docker.io/nearaidev/openclaw-dind:0.20.0",
+                    "status": "running"
+                })))
+                .mount(&server)
+                .await;
+
+            let instance = upgrade_check_instance(
+                instance_id,
+                user_id,
+                "test-instance",
+                &uri,
+                Some("openclaw-dind"),
+            );
+            let svc = service_for_upgrade_check(instance, &uri, token);
+            let out = AgentService::check_upgrade_available(&svc, instance_id, user_id)
+                .await
+                .expect("check_upgrade_available");
+
+            assert!(out.has_upgrade);
+            // `compare_semantic_versions` ignores pre-release suffixes, so 0.21.0-rc1 and 0.21.0
+            // tie. `Iterator::max_by` uses `cmp::max_by`, which picks the second operand when equal,
+            // so the later allowlist entry (0.21.0) becomes latest.
+            assert_eq!(out.latest_image, "docker.io/nearaidev/openclaw-dind:0.21.0");
+        }
+
+        #[tokio::test]
+        async fn non_tee_check_upgrade_canonical_openclaw_images() {
+            let server = setup_mock_server().await;
+            let uri = server.uri();
+            let token = "crab-token";
+            let instance_id = Uuid::new_v4();
+            let user_id = UserId(Uuid::new_v4());
+
+            Mock::given(method("GET"))
+                .and(path("/images"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                    {
+                        "ref": "docker.io/nearaidev/openclaw:0.20.0",
+                        "service_type": "openclaw",
+                        "status": "allow-create",
+                        "created_at": "2024-01-10T00:00:00Z"
+                    },
+                    {
+                        "ref": "docker.io/nearaidev/openclaw:0.21.0",
+                        "service_type": "openclaw",
+                        "status": "allow-create",
+                        "created_at": "2024-01-15T00:00:00Z"
+                    },
+                    {
+                        "ref": "docker.io/nearaidev/openclaw:latest",
+                        "service_type": "openclaw",
+                        "status": "deprecated",
+                        "created_at": "2024-01-01T00:00:00Z"
+                    }
+                ])))
+                .mount(&server)
+                .await;
+
+            Mock::given(method("GET"))
+                .and(path("/instances/test-instance"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "name": "test-instance",
+                    "image": "docker.io/nearaidev/openclaw:0.20.0",
+                    "status": "running"
+                })))
+                .mount(&server)
+                .await;
+
+            let instance = upgrade_check_instance(
+                instance_id,
+                user_id,
+                "test-instance",
+                &uri,
+                Some("openclaw"),
+            );
+            let svc = service_for_upgrade_check(instance, &uri, token);
+            let out = AgentService::check_upgrade_available(&svc, instance_id, user_id)
+                .await
+                .expect("check_upgrade_available");
+
+            assert!(out.has_upgrade);
+            assert_eq!(
+                out.current_image.as_deref(),
+                Some("docker.io/nearaidev/openclaw:0.20.0")
+            );
+            assert_eq!(out.latest_image, "docker.io/nearaidev/openclaw:0.21.0");
+        }
+
+        #[tokio::test]
+        async fn non_tee_check_upgrade_instance_404_blocks_upgrade() {
+            let server = setup_mock_server().await;
+            let uri = server.uri();
+            let token = "crab-token";
+            let instance_id = Uuid::new_v4();
+            let user_id = UserId(Uuid::new_v4());
+
+            Mock::given(method("GET"))
+                .and(path("/images"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                    {
+                        "ref": "docker.io/nearaidev/openclaw-dind:0.21.0",
+                        "service_type": "openclaw-dind",
+                        "status": "allow-create",
+                        "created_at": "2024-01-15T00:00:00Z"
+                    }
+                ])))
+                .mount(&server)
+                .await;
+
+            Mock::given(method("GET"))
+                .and(path("/instances/not-synced-instance"))
+                .respond_with(ResponseTemplate::new(404))
+                .mount(&server)
+                .await;
+
+            let instance = upgrade_check_instance(
+                instance_id,
+                user_id,
+                "not-synced-instance",
+                &uri,
+                Some("openclaw-dind"),
+            );
+            let svc = service_for_upgrade_check(instance, &uri, token);
+            let out = AgentService::check_upgrade_available(&svc, instance_id, user_id)
+                .await
+                .expect("check_upgrade_available");
+
+            assert!(!out.has_upgrade);
+            assert!(out.current_image.is_none());
+            assert_eq!(out.latest_image, "docker.io/nearaidev/openclaw-dind:0.21.0");
         }
     }
 
@@ -6292,31 +6563,7 @@ mod tests {
 
     // --- TEE and Non-TEE Mode Tests ---
 
-    #[test]
-    fn test_service_type_normalization_tee_mode() {
-        // TEE mode: use service types as-is (no -dind suffix)
-        assert_eq!(
-            normalize_service_type_for_api("ironclaw", false),
-            "ironclaw"
-        );
-        assert_eq!(
-            normalize_service_type_for_api("openclaw", false),
-            "openclaw"
-        );
-    }
-
-    #[test]
-    fn test_service_type_normalization_non_tee_mode() {
-        // Non-TEE mode: append -dind suffix to service types
-        assert_eq!(
-            normalize_service_type_for_api("ironclaw", true),
-            "ironclaw-dind"
-        );
-        assert_eq!(
-            normalize_service_type_for_api("openclaw", true),
-            "openclaw-dind"
-        );
-    }
+    // Service type normalization tests removed: normalize_service_type_for_api is now a no-op
 
     #[test]
     fn test_agent_service_creation_tee_mode() {
@@ -6369,77 +6616,27 @@ mod tests {
     #[test]
     fn test_image_mapping_for_service_types() {
         // Verify that image mapping works correctly for all service types
-        assert_eq!(
-            get_image_for_service_type("ironclaw"),
-            "ironclaw-nearai-worker:local"
-        );
-        // ironclaw-dind uses IRONCLAW_DIND_IMAGE env var, defaults to :latest
-        let ironclaw_dind_image = get_image_for_service_type("ironclaw-dind");
+        // ironclaw defaults to docker.io/nearaidev/ironclaw-dind:latest when not configured
+        let ironclaw_image = get_image_for_service_type("ironclaw", None);
         assert!(
-            ironclaw_dind_image.contains("docker.io/nearaidev/ironclaw-dind:"),
+            ironclaw_image.contains("docker.io/nearaidev/ironclaw-dind:"),
             "Expected docker.io/nearaidev/ironclaw-dind image, got {}",
-            ironclaw_dind_image
+            ironclaw_image
         );
         assert_eq!(
-            get_image_for_service_type("openclaw"),
-            "openclaw-nearai-worker:local"
+            get_image_for_service_type("openclaw", None),
+            "docker.io/nearaidev/openclaw-nearai-worker:latest"
         );
         assert_eq!(
-            get_image_for_service_type("unknown"),
-            "openclaw-nearai-worker:local"
+            get_image_for_service_type("unknown", None),
+            "docker.io/nearaidev/openclaw-nearai-worker:latest"
         );
-    }
-
-    #[test]
-    fn test_normalize_service_type_edge_cases() {
-        // Edge cases for service type normalization
-        assert_eq!(normalize_service_type_for_api("", false), "");
-        assert_eq!(
-            normalize_service_type_for_api("ironclaw-dind-extra", false),
-            "ironclaw-dind-extra"
-        );
-        assert_eq!(normalize_service_type_for_api("dind", false), "dind");
     }
 
     // --- Mode Flow Verification Tests ---
 
-    #[test]
-    fn test_tee_mode_configuration_summary() {
-        // TEE Mode Flow:
-        // 1. Uses TEE compose-api (AGENT_API_BASE_URL or AGENT_MANAGER_URLS_TEE)
-        // 2. NO passkey login (resolve_bearer_token returns manager token directly)
-        // 3. Service types used as-is: "ironclaw" stays "ironclaw", "openclaw" stays "openclaw"
-        // 4. Manager token used for all API calls
-
-        // Verify service type normalization for TEE
-        assert_eq!(
-            normalize_service_type_for_api("ironclaw", false),
-            "ironclaw"
-        );
-        assert_eq!(
-            normalize_service_type_for_api("openclaw", false),
-            "openclaw"
-        );
-    }
-
-    #[test]
-    fn test_non_tee_mode_configuration_summary() {
-        // Non-TEE Mode Flow:
-        // 1. Uses non-TEE compose-api (AGENT_MANAGER_URLS)
-        // 2. Passkey login enabled (resolve_bearer_token attempts passkey login)
-        // 3. Service types normalized with -dind suffix: "ironclaw" -> "ironclaw-dind", "openclaw" -> "openclaw-dind"
-        // 4. Session token from passkey or manager token used for API calls
-
-        // Verify service type normalization for non-TEE
-        assert_eq!(
-            normalize_service_type_for_api("ironclaw", true),
-            "ironclaw-dind"
-        );
-        assert_eq!(
-            normalize_service_type_for_api("openclaw", true),
-            "openclaw-dind"
-        );
-    }
+    // test_tee_mode_configuration_summary and test_non_tee_mode_configuration_summary removed:
+    // were entirely about the removed normalize_service_type_for_api function
 
     // ============================================================================
     // Comprehensive tests for manager filtering and image format selection
@@ -6720,52 +6917,25 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_service_type_normalization_by_manager_type() {
-        // Test that service type normalization is correct for both manager types
-
-        // TEE mode: use service types as-is (no suffix)
-        assert_eq!(
-            normalize_service_type_for_api("openclaw", false),
-            "openclaw"
-        );
-        assert_eq!(
-            normalize_service_type_for_api("ironclaw", false),
-            "ironclaw"
-        );
-
-        // Non-TEE mode: append -dind suffix to service types
-        assert_eq!(
-            normalize_service_type_for_api("openclaw", true),
-            "openclaw-dind"
-        );
-        assert_eq!(
-            normalize_service_type_for_api("ironclaw", true),
-            "ironclaw-dind"
-        );
-    }
+    // test_service_type_normalization_by_manager_type removed: entirely about the removed normalize_service_type_for_api function
 
     #[test]
     fn test_image_format_selection_by_manager_type() {
         // Test get_image_for_service_type returns correct formats
-        assert_eq!(
-            get_image_for_service_type("ironclaw"),
-            "ironclaw-nearai-worker:local"
-        );
-        // ironclaw-dind uses IRONCLAW_DIND_IMAGE env var, defaults to :latest
-        let ironclaw_dind_image = get_image_for_service_type("ironclaw-dind");
+        // ironclaw defaults to docker.io/nearaidev/ironclaw-dind:latest when not configured
+        let ironclaw_image = get_image_for_service_type("ironclaw", None);
         assert!(
-            ironclaw_dind_image.contains("docker.io/nearaidev/ironclaw-dind:"),
+            ironclaw_image.contains("docker.io/nearaidev/ironclaw-dind:"),
             "Expected docker.io/nearaidev/ironclaw-dind image, got {}",
-            ironclaw_dind_image
+            ironclaw_image
         );
         assert_eq!(
-            get_image_for_service_type("openclaw"),
-            "openclaw-nearai-worker:local"
+            get_image_for_service_type("openclaw", None),
+            "docker.io/nearaidev/openclaw-nearai-worker:latest"
         );
         assert_eq!(
-            get_image_for_service_type("unknown"),
-            "openclaw-nearai-worker:local"
+            get_image_for_service_type("unknown", None),
+            "docker.io/nearaidev/openclaw-nearai-worker:latest"
         );
     }
 
@@ -6910,5 +7080,177 @@ mod tests {
             extract_version_from_image("docker.io/repo/image:2.0.0-alpha"),
             Some("2.0.0-alpha".to_string())
         );
+    }
+
+    // ============================================================================
+    // Comprehensive tests for AgentHostingConfig image resolution
+    // ============================================================================
+
+    #[test]
+    fn test_image_resolution_ironclaw_with_config() {
+        // When config provides ironclaw_image, use it
+        let config = AgentHostingConfig {
+            new_agent_with_non_tee_infra: None,
+            crabshack: AgentHostingCrabshackConfig {
+                ironclaw_image: Some("custom.registry.io/ironclaw:0.5.0".to_string()),
+                ..Default::default()
+            },
+        };
+
+        let image = get_image_for_service_type("ironclaw", Some(&config));
+        assert_eq!(image, "custom.registry.io/ironclaw:0.5.0");
+    }
+
+    #[test]
+    fn test_image_resolution_ironclaw_without_config() {
+        // When config is None, fall back to hardcoded default
+        let image = get_image_for_service_type("ironclaw", None);
+        assert_eq!(image, "docker.io/nearaidev/ironclaw-dind:latest");
+    }
+
+    #[test]
+    fn test_image_resolution_ironclaw_config_none_fields() {
+        // When config fields are None, fall back to hardcoded defaults
+        let config = AgentHostingConfig {
+            new_agent_with_non_tee_infra: None,
+            crabshack: AgentHostingCrabshackConfig::default(),
+        };
+
+        let image = get_image_for_service_type("ironclaw", Some(&config));
+        assert_eq!(image, "docker.io/nearaidev/ironclaw-dind:latest");
+    }
+
+    #[test]
+    fn test_image_resolution_openclaw_with_config() {
+        // When config provides openclaw_image, use it
+        let config = AgentHostingConfig {
+            new_agent_with_non_tee_infra: None,
+            crabshack: AgentHostingCrabshackConfig {
+                openclaw_image: Some("my.registry.com/openclaw:v2.1".to_string()),
+                ..Default::default()
+            },
+        };
+
+        let image = get_image_for_service_type("openclaw", Some(&config));
+        assert_eq!(image, "my.registry.com/openclaw:v2.1");
+    }
+
+    #[test]
+    fn test_image_resolution_openclaw_without_config() {
+        // When config is None, fall back to hardcoded default
+        let image = get_image_for_service_type("openclaw", None);
+        assert_eq!(image, "docker.io/nearaidev/openclaw-nearai-worker:latest");
+    }
+
+    #[test]
+    fn test_image_resolution_openclaw_config_none_fields() {
+        // When config fields are None, fall back to hardcoded defaults
+        let config = AgentHostingConfig {
+            new_agent_with_non_tee_infra: None,
+            crabshack: AgentHostingCrabshackConfig::default(),
+        };
+
+        let image = get_image_for_service_type("openclaw", Some(&config));
+        assert_eq!(image, "docker.io/nearaidev/openclaw-nearai-worker:latest");
+    }
+
+    #[test]
+    fn test_image_resolution_unknown_type_defaults_to_openclaw() {
+        // Unknown service types default to openclaw image
+        let image = get_image_for_service_type("unknown-type", None);
+        assert_eq!(image, "docker.io/nearaidev/openclaw-nearai-worker:latest");
+    }
+
+    #[test]
+    fn test_image_resolution_unknown_type_with_openclaw_override() {
+        // Unknown types respect openclaw_image override
+        let config = AgentHostingConfig {
+            new_agent_with_non_tee_infra: None,
+            crabshack: AgentHostingCrabshackConfig {
+                openclaw_image: Some("override.io/openclaw:custom".to_string()),
+                ..Default::default()
+            },
+        };
+
+        let image = get_image_for_service_type("unknown-type", Some(&config));
+        assert_eq!(image, "override.io/openclaw:custom");
+    }
+
+    #[test]
+    fn test_image_resolution_both_images_configured() {
+        // When both images are configured, each service type uses its own
+        let config = AgentHostingConfig {
+            new_agent_with_non_tee_infra: None,
+            crabshack: AgentHostingCrabshackConfig {
+                ironclaw_image: Some("registry.io/ironclaw:1.0".to_string()),
+                openclaw_image: Some("registry.io/openclaw:2.0".to_string()),
+                ..Default::default()
+            },
+        };
+
+        let ironclaw_image = get_image_for_service_type("ironclaw", Some(&config));
+        let openclaw_image = get_image_for_service_type("openclaw", Some(&config));
+
+        assert_eq!(ironclaw_image, "registry.io/ironclaw:1.0");
+        assert_eq!(openclaw_image, "registry.io/openclaw:2.0");
+        assert_ne!(ironclaw_image, openclaw_image);
+    }
+
+    #[test]
+    fn test_image_resolution_partial_config_ironclaw_only() {
+        // Config can set just ironclaw_image; openclaw uses default
+        let config = AgentHostingConfig {
+            new_agent_with_non_tee_infra: None,
+            crabshack: AgentHostingCrabshackConfig {
+                ironclaw_image: Some("custom.io/ironclaw:beta".to_string()),
+                ..Default::default()
+            },
+        };
+
+        let ironclaw = get_image_for_service_type("ironclaw", Some(&config));
+        let openclaw = get_image_for_service_type("openclaw", Some(&config));
+
+        assert_eq!(ironclaw, "custom.io/ironclaw:beta");
+        assert_eq!(
+            openclaw,
+            "docker.io/nearaidev/openclaw-nearai-worker:latest"
+        );
+    }
+
+    #[test]
+    fn test_image_resolution_partial_config_openclaw_only() {
+        // Config can set just openclaw_image; ironclaw uses default
+        let config = AgentHostingConfig {
+            new_agent_with_non_tee_infra: None,
+            crabshack: AgentHostingCrabshackConfig {
+                openclaw_image: Some("custom.io/openclaw:rc1".to_string()),
+                ..Default::default()
+            },
+        };
+
+        let ironclaw = get_image_for_service_type("ironclaw", Some(&config));
+        let openclaw = get_image_for_service_type("openclaw", Some(&config));
+
+        assert_eq!(ironclaw, "docker.io/nearaidev/ironclaw-dind:latest");
+        assert_eq!(openclaw, "custom.io/openclaw:rc1");
+    }
+
+    #[test]
+    fn test_image_resolution_config_coexists_with_tee_flag() {
+        // Image config is independent of the non_tee_infra flag
+        let config = AgentHostingConfig {
+            new_agent_with_non_tee_infra: Some(true), // Flag doesn't affect image resolution
+            crabshack: AgentHostingCrabshackConfig {
+                ironclaw_image: Some("flag-independent.io/ironclaw:v1".to_string()),
+                openclaw_image: Some("flag-independent.io/openclaw:v1".to_string()),
+                ..Default::default()
+            },
+        };
+
+        let ironclaw = get_image_for_service_type("ironclaw", Some(&config));
+        let openclaw = get_image_for_service_type("openclaw", Some(&config));
+
+        assert_eq!(ironclaw, "flag-independent.io/ironclaw:v1");
+        assert_eq!(openclaw, "flag-independent.io/openclaw:v1");
     }
 }

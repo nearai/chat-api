@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use chrono::Duration;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{de::Deserializer, Deserialize, Serialize, Serializer};
 use std::collections::HashMap;
 use std::fmt;
 
@@ -188,14 +188,102 @@ pub struct InstanceDefaultsConfig {
     pub storage_size: Option<String>,
 }
 
+/// Crabshack-related overrides under agent hosting (images, crabshack service type names).
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AgentHostingCrabshackConfig {
+    /// Docker image for ironclaw instances. If not set, defaults to
+    /// "docker.io/nearaidev/ironclaw-dind:latest"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ironclaw_image: Option<String>,
+
+    /// Docker image for openclaw instances. If not set, falls back to
+    /// "docker.io/nearaidev/openclaw-nearai-worker:latest"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openclaw_image: Option<String>,
+
+    /// Service type string sent to crabshack for ironclaw canonical type. If not set, defaults to
+    /// "ironclaw-dind" (crabshack still uses -dind suffix for ironclaw; overridable without redeployment).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "ironclaw_crabshack_type"
+    )]
+    pub ironclaw_service_type: Option<String>,
+
+    /// Service type string sent to crabshack for openclaw canonical type. If not set, defaults to
+    /// "openclaw" (overridable without redeployment).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "openclaw_crabshack_type"
+    )]
+    pub openclaw_service_type: Option<String>,
+}
+
+impl AgentHostingCrabshackConfig {
+    fn is_empty(&self) -> bool {
+        self.ironclaw_image.is_none()
+            && self.openclaw_image.is_none()
+            && self.ironclaw_service_type.is_none()
+            && self.openclaw_service_type.is_none()
+    }
+}
+
 /// Agent hosting infrastructure configuration
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct AgentHostingConfig {
     /// Use non-TEE infrastructure (true = non-TEE, false = TEE/default)
     /// When true, only non-TEE managers are used for instance creation
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new_agent_with_non_tee_infra: Option<bool>,
+
+    #[serde(default, skip_serializing_if = "AgentHostingCrabshackConfig::is_empty")]
+    pub crabshack: AgentHostingCrabshackConfig,
+}
+
+impl<'de> Deserialize<'de> for AgentHostingConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct AgentHostingConfigDe {
+            #[serde(default)]
+            new_agent_with_non_tee_infra: Option<bool>,
+            #[serde(default)]
+            crabshack: Option<AgentHostingCrabshackConfig>,
+            #[serde(default)]
+            ironclaw_image: Option<String>,
+            #[serde(default)]
+            openclaw_image: Option<String>,
+            #[serde(default, alias = "ironclaw_crabshack_type")]
+            ironclaw_service_type: Option<String>,
+            #[serde(default, alias = "openclaw_crabshack_type")]
+            openclaw_service_type: Option<String>,
+        }
+
+        let h = AgentHostingConfigDe::deserialize(deserializer)?;
+        let mut crabshack = h.crabshack.unwrap_or_default();
+        if crabshack.ironclaw_image.is_none() {
+            crabshack.ironclaw_image = h.ironclaw_image;
+        }
+        if crabshack.openclaw_image.is_none() {
+            crabshack.openclaw_image = h.openclaw_image;
+        }
+        if crabshack.ironclaw_service_type.is_none() {
+            crabshack.ironclaw_service_type = h.ironclaw_service_type;
+        }
+        if crabshack.openclaw_service_type.is_none() {
+            crabshack.openclaw_service_type = h.openclaw_service_type;
+        }
+
+        Ok(AgentHostingConfig {
+            new_agent_with_non_tee_infra: h.new_agent_with_non_tee_infra,
+            crabshack,
+        })
+    }
 }
 
 /// Application-wide configuration stored in `system_configs` table
@@ -262,13 +350,51 @@ impl Default for SystemConfigs {
             }),
             agent_hosting: Some(AgentHostingConfig {
                 new_agent_with_non_tee_infra: Some(false),
+                crabshack: AgentHostingCrabshackConfig::default(),
             }),
         }
     }
 }
 
+fn merge_agent_hosting_config(
+    base: AgentHostingConfig,
+    partial: AgentHostingConfig,
+) -> AgentHostingConfig {
+    AgentHostingConfig {
+        new_agent_with_non_tee_infra: partial
+            .new_agent_with_non_tee_infra
+            .or(base.new_agent_with_non_tee_infra),
+        crabshack: AgentHostingCrabshackConfig {
+            ironclaw_image: partial
+                .crabshack
+                .ironclaw_image
+                .or(base.crabshack.ironclaw_image),
+            openclaw_image: partial
+                .crabshack
+                .openclaw_image
+                .or(base.crabshack.openclaw_image),
+            ironclaw_service_type: partial
+                .crabshack
+                .ironclaw_service_type
+                .or(base.crabshack.ironclaw_service_type),
+            openclaw_service_type: partial
+                .crabshack
+                .openclaw_service_type
+                .or(base.crabshack.openclaw_service_type),
+        },
+    }
+}
+
 impl SystemConfigs {
     pub fn into_updated(self, partial: PartialSystemConfigs) -> Self {
+        let agent_hosting = match (partial.agent_hosting, self.agent_hosting) {
+            (Some(partial_ah), Some(base_ah)) => {
+                Some(merge_agent_hosting_config(base_ah, partial_ah))
+            }
+            (Some(partial_ah), None) => Some(partial_ah),
+            (None, base_ah) => base_ah,
+        };
+
         Self {
             default_model: partial.default_model.or(self.default_model),
             rate_limit: partial.rate_limit.unwrap_or(self.rate_limit),
@@ -282,7 +408,7 @@ impl SystemConfigs {
                 .or(self.max_instances_by_manager_url),
             auto_route: partial.auto_route.or(self.auto_route),
             instance_defaults: partial.instance_defaults.or(self.instance_defaults),
-            agent_hosting: partial.agent_hosting.or(self.agent_hosting),
+            agent_hosting,
         }
     }
 
@@ -406,5 +532,80 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(c.max_instances_for_manager("https://mgr.example.com"), None);
+    }
+
+    #[test]
+    fn agent_hosting_deserializes_nested_crabshack() {
+        let json =
+            r#"{"new_agent_with_non_tee_infra":true,"crabshack":{"ironclaw_image":"img:1"}}"#;
+        let h: AgentHostingConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(h.new_agent_with_non_tee_infra, Some(true));
+        assert_eq!(h.crabshack.ironclaw_image.as_deref(), Some("img:1"));
+    }
+
+    #[test]
+    fn agent_hosting_deserializes_nested_ironclaw_service_type() {
+        let json = r#"{"crabshack":{"ironclaw_service_type":"ic-new"}}"#;
+        let h: AgentHostingConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(h.crabshack.ironclaw_service_type.as_deref(), Some("ic-new"));
+    }
+
+    #[test]
+    fn agent_hosting_deserializes_nested_legacy_ironclaw_crabshack_type_key() {
+        let json = r#"{"crabshack":{"ironclaw_crabshack_type":"ic-legacy"}}"#;
+        let h: AgentHostingConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            h.crabshack.ironclaw_service_type.as_deref(),
+            Some("ic-legacy")
+        );
+    }
+
+    #[test]
+    fn agent_hosting_deserializes_legacy_flat_crabshack_fields() {
+        let json = r#"{"openclaw_image":"legacy:tag","ironclaw_crabshack_type":"ic-custom"}"#;
+        let h: AgentHostingConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(h.crabshack.openclaw_image.as_deref(), Some("legacy:tag"));
+        assert_eq!(
+            h.crabshack.ironclaw_service_type.as_deref(),
+            Some("ic-custom")
+        );
+    }
+
+    #[test]
+    fn nested_crabshack_takes_precedence_over_legacy_flat_fields() {
+        let json = r#"{"crabshack":{"ironclaw_image":"nested:1"},"ironclaw_image":"flat:2"}"#;
+        let h: AgentHostingConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(h.crabshack.ironclaw_image.as_deref(), Some("nested:1"));
+    }
+
+    #[test]
+    fn into_updated_merges_agent_hosting_nested_fields() {
+        let base = SystemConfigs {
+            agent_hosting: Some(AgentHostingConfig {
+                new_agent_with_non_tee_infra: Some(true),
+                crabshack: AgentHostingCrabshackConfig {
+                    ironclaw_image: Some("iron:base".to_string()),
+                    openclaw_image: Some("open:base".to_string()),
+                    ironclaw_service_type: Some("ic-type-base".to_string()),
+                    openclaw_service_type: Some("oc-type-base".to_string()),
+                },
+            }),
+            ..Default::default()
+        };
+        let partial_json = r#"{"agent_hosting":{"crabshack":{"ironclaw_image":"iron:patch"}}}"#;
+        let partial: PartialSystemConfigs = serde_json::from_str(partial_json).unwrap();
+        let merged = base.into_updated(partial);
+        let ah = merged.agent_hosting.expect("agent_hosting");
+        assert_eq!(ah.new_agent_with_non_tee_infra, Some(true));
+        assert_eq!(ah.crabshack.ironclaw_image.as_deref(), Some("iron:patch"));
+        assert_eq!(ah.crabshack.openclaw_image.as_deref(), Some("open:base"));
+        assert_eq!(
+            ah.crabshack.ironclaw_service_type.as_deref(),
+            Some("ic-type-base")
+        );
+        assert_eq!(
+            ah.crabshack.openclaw_service_type.as_deref(),
+            Some("oc-type-base")
+        );
     }
 }
