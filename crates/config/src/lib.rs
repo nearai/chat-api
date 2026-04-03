@@ -543,7 +543,7 @@ impl Default for TaskConfig {
             port: std::env::var("TASKS_PORT")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(8082),
+                .unwrap_or(3001),
         }
     }
 }
