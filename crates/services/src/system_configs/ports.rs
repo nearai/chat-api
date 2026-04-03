@@ -206,6 +206,16 @@ pub struct AgentHostingConfig {
     /// "docker.io/nearaidev/openclaw-nearai-worker:latest"
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openclaw_image: Option<String>,
+
+    /// Crabshack service type for ironclaw canonical type. If not set, defaults to "ironclaw-dind"
+    /// (crabshack still uses -dind suffix for ironclaw, but this can be overridden without redeployment)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ironclaw_crabshack_type: Option<String>,
+
+    /// Crabshack service type for openclaw canonical type. If not set, defaults to "openclaw"
+    /// (crabshack uses canonical naming for openclaw, but this can be overridden without redeployment)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openclaw_crabshack_type: Option<String>,
 }
 
 /// Application-wide configuration stored in `system_configs` table
@@ -274,6 +284,8 @@ impl Default for SystemConfigs {
                 new_agent_with_non_tee_infra: Some(false),
                 ironclaw_image: None,
                 openclaw_image: None,
+                ironclaw_crabshack_type: None,
+                openclaw_crabshack_type: None,
             }),
         }
     }

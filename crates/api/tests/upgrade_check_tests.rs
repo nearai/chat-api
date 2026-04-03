@@ -617,34 +617,59 @@ async fn test_semantic_version_parsing_edge_cases() {
 /// Test service type transformation for crabshack queries
 #[tokio::test]
 async fn test_service_type_for_crabshack_transformation() {
-    // Crabshack has inconsistent naming:
-    // - ironclaw → ironclaw-dind (crabshack still uses -dind suffix)
-    // - openclaw → openclaw (crabshack moved to canonical name)
-    fn service_type_for_crabshack(canonical_type: &str) -> String {
+    use services::system_configs::ports::AgentHostingConfig;
+
+    // Crabshack has inconsistent naming (configurable via system_configs):
+    // - ironclaw → ironclaw-dind (default, can be overridden via ironclaw_crabshack_type)
+    // - openclaw → openclaw (default, can be overridden via openclaw_crabshack_type)
+    fn service_type_for_crabshack(
+        canonical_type: &str,
+        hosting_config: Option<&AgentHostingConfig>,
+    ) -> String {
         match canonical_type {
-            "ironclaw" => "ironclaw-dind".to_string(),
-            other => other.to_string(), // openclaw and others pass through as-is
+            "ironclaw" => hosting_config
+                .and_then(|cfg| cfg.ironclaw_crabshack_type.clone())
+                .unwrap_or_else(|| "ironclaw-dind".to_string()),
+            "openclaw" => hosting_config
+                .and_then(|cfg| cfg.openclaw_crabshack_type.clone())
+                .unwrap_or_else(|| "openclaw".to_string()),
+            other => other.to_string(),
         }
     }
 
+    // Test with no config (using defaults)
     let test_cases = vec![
-        ("openclaw", "openclaw"),      // crabshack uses canonical "openclaw" now
-        ("ironclaw", "ironclaw-dind"), // crabshack still uses "ironclaw-dind"
-        ("openclaw-dind", "openclaw-dind"), // legacy format stays unchanged
-        ("ironclaw-dind", "ironclaw-dind"), // already correct for crabshack
-        ("unknown-type", "unknown-type"), // unknown types pass through
+        ("openclaw", "openclaw"),           // default: canonical "openclaw"
+        ("ironclaw", "ironclaw-dind"),      // default: "ironclaw-dind"
+        ("openclaw-dind", "openclaw-dind"), // unknown types pass through
+        ("ironclaw-dind", "ironclaw-dind"), // unknown types pass through
+        ("unknown-type", "unknown-type"),   // unknown types pass through
     ];
 
     for (input, expected) in test_cases {
-        let result = service_type_for_crabshack(input);
+        let result = service_type_for_crabshack(input, None);
         assert_eq!(
             result, expected,
-            "Crabshack transformation test case: {} should become {}",
+            "Crabshack transformation test case (no config): {} should become {}",
             input, expected
         );
     }
 
-    // Verify the specific mappings
-    assert_eq!(service_type_for_crabshack("openclaw"), "openclaw");
-    assert_eq!(service_type_for_crabshack("ironclaw"), "ironclaw-dind");
+    // Test with custom config overrides
+    let custom_config = AgentHostingConfig {
+        new_agent_with_non_tee_infra: None,
+        ironclaw_image: None,
+        openclaw_image: None,
+        ironclaw_crabshack_type: Some("ironclaw-custom".to_string()),
+        openclaw_crabshack_type: Some("openclaw-v2".to_string()),
+    };
+
+    assert_eq!(
+        service_type_for_crabshack("ironclaw", Some(&custom_config)),
+        "ironclaw-custom"
+    );
+    assert_eq!(
+        service_type_for_crabshack("openclaw", Some(&custom_config)),
+        "openclaw-v2"
+    );
 }
