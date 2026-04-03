@@ -157,12 +157,7 @@ async fn main() -> anyhow::Result<()> {
     let config = config::Config::from_env();
     let tasks = config.tasks.clone();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    api::init_tracing_from_config(&config.logging);
 
     if !tasks.enabled {
         return Err(anyhow!(
