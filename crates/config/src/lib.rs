@@ -862,6 +862,7 @@ mod tests {
         std::env::remove_var("TASKS_SQS_QUEUE_ARN");
         std::env::remove_var("TASKS_SCHEDULER_ROLE_ARN");
         std::env::remove_var("TASKS_SCHEDULER_GROUP");
+        std::env::remove_var("TASKS_PORT");
         std::env::remove_var("TASKS_CLEANUP_CANCELED_INSTANCES_DAILY_CRON");
         std::env::remove_var("TASKS_CLEANUP_CANCELED_INSTANCES_GRACE_DAYS");
         std::env::remove_var("TASKS_WORKER_WAIT_SECONDS");
@@ -873,6 +874,7 @@ mod tests {
         assert!(!cfg.enabled);
         assert!(cfg.aws_region.is_none());
         assert_eq!(cfg.scheduler_group, "default");
+        assert_eq!(cfg.port, 3001);
         assert_eq!(cfg.worker_wait_seconds, 20);
         assert_eq!(cfg.worker_visibility_timeout, 60);
         assert_eq!(cfg.worker_max_messages, 10);

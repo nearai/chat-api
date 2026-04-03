@@ -330,7 +330,7 @@ async fn process_message<E: TaskExecutor + 'static>(
         }
     };
 
-    tracing::info!(
+    tracing::debug!(
         "task message received task_id={} payload={:?}",
         task_message.task_id,
         task_message.payload
