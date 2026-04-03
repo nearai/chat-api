@@ -35,8 +35,17 @@ fn add_set_cookie_header(
     cookie: &Option<String>,
 ) -> http::response::Builder {
     if let Some(ref cookie) = cookie {
-        if let Ok(v) = cookie.parse::<http::HeaderValue>() {
-            builder = builder.header(http::header::SET_COOKIE, v);
+        match cookie.parse::<http::HeaderValue>() {
+            Ok(v) => {
+                builder = builder.header(http::header::SET_COOKIE, v);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    cookie_length = cookie.len(),
+                    error = %error,
+                    "Failed to parse Set-Cookie header value; dropping invalid cookie header"
+                );
+            }
         }
     }
     builder
@@ -197,20 +206,23 @@ pub async fn create_instance(
         .unwrap_or(false);
 
     // Refresh gateway cookie for non-TEE users (or users with existing non-TEE instances).
-    // setup_gateway_session_for_user handles all eligibility checks internally and returns
-    // Ok(None) safely for TEE-only users, so this call is always unconditional.
-    let gateway_cookie = app_state
-        .agent_service
-        .setup_gateway_session_for_user(user.user_id)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!(
-                "Failed to set up gateway session during instance creation: user_id={}, error={}",
-                user.user_id,
-                e
-            );
-            None
-        });
+    // Only refresh when non-TEE infrastructure is enabled to avoid redundant config/database work.
+    let gateway_cookie = if non_tee_infra {
+        app_state
+            .agent_service
+            .setup_gateway_session_for_user(user.user_id)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    "Failed to set up gateway session during instance creation: user_id={}, error={}",
+                    user.user_id,
+                    e
+                );
+                None
+            })
+    } else {
+        None
+    };
 
     if wants_stream {
         // SSE streaming response
