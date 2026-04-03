@@ -44,6 +44,12 @@ impl TaskExecutor for DefaultTaskExecutor {
             return Err(anyhow!("grace_days must be >= 0"));
         }
 
+        tracing::info!(
+            "cleanup task started grace_days={} dry_run={}",
+            payload.grace_days,
+            payload.dry_run
+        );
+
         let cutoff = Utc::now() - Duration::days(payload.grace_days);
         let mut offset: i64 = 0;
         let batch_size: i64 = 200;
@@ -77,8 +83,18 @@ impl TaskExecutor for DefaultTaskExecutor {
                 .context("failed to query canceled users for cleanup")?;
 
             if rows.is_empty() {
+                tracing::info!(
+                    "cleanup task: no more canceled users found after offset={}",
+                    offset
+                );
                 break;
             }
+
+            tracing::info!(
+                "cleanup task: batch found {} canceled users offset={}",
+                rows.len(),
+                offset
+            );
 
             for row in &rows {
                 let user_id: UserId = row.get("user_id");

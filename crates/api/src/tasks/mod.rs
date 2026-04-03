@@ -330,6 +330,12 @@ async fn process_message<E: TaskExecutor + 'static>(
         }
     };
 
+    tracing::info!(
+        "task message received task_id={} payload={:?}",
+        task_message.task_id,
+        task_message.payload
+    );
+
     // Extend visibility timeout for delete tasks — the external agent-manager delete call
     // can take several seconds under load, so we give it up to 5 minutes before
     // SQS would redeliver the message to another worker.
@@ -346,15 +352,25 @@ async fn process_message<E: TaskExecutor + 'static>(
                 .send()
                 .await
                 .context("failed to extend visibility timeout for cleanup task")?;
+            tracing::info!(
+                "extended visibility timeout for task_id={}",
+                task_message.task_id
+            );
         }
     }
 
     dispatch_task(executor.as_ref(), &task_message.payload)
         .await
-        .context("task handler execution failed")?;
+        .context(format!(
+            "task handler execution failed task_id={}",
+            task_message.task_id
+        ))?;
+
+    tracing::info!("task completed task_id={}", task_message.task_id);
 
     if let Some(receipt_handle) = receipt_handle.as_deref() {
         delete_message(&client, &queue_url, receipt_handle).await?;
+        tracing::info!("SQS message deleted for task_id={}", task_message.task_id);
     }
 
     Ok(())
