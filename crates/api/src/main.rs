@@ -1,6 +1,5 @@
 use api::middleware::RateLimitState;
 use api::{create_router_with_cors, ApiDoc, AppState};
-use config::LoggingConfig;
 use opentelemetry::global;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{
@@ -23,7 +22,6 @@ use services::{
     vpc::{initialize_vpc_credentials, VpcAuthConfig},
 };
 use std::sync::Arc;
-use tracing_subscriber::EnvFilter;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
@@ -39,7 +37,7 @@ async fn main() -> anyhow::Result<()> {
     let config = config::Config::from_env();
 
     // Initialize tracing based on configuration
-    init_tracing(&config.logging);
+    api::init_tracing_from_config(&config.logging);
 
     if config.tasks.enabled {
         if config.tasks.is_scheduler_configured() {
@@ -365,53 +363,4 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
-}
-
-fn init_tracing(logging_config: &LoggingConfig) {
-    let mut filter = logging_config.level.clone();
-    for (module, level) in &logging_config.modules {
-        filter.push_str(&format!(",{module}={level}"));
-    }
-
-    let env_filter = EnvFilter::try_new(&filter).unwrap_or_else(|err| {
-        eprintln!(
-            "Invalid log filter '{}': {}. Falling back to 'info'.",
-            filter, err
-        );
-        EnvFilter::new("info")
-    });
-
-    match logging_config.format.as_str() {
-        "json" => {
-            tracing_subscriber::fmt()
-                .json()
-                .with_env_filter(env_filter)
-                .with_current_span(false)
-                .with_span_list(false)
-                .init();
-        }
-        "compact" => {
-            tracing_subscriber::fmt()
-                .compact()
-                .with_env_filter(env_filter)
-                .with_target(false)
-                .with_thread_ids(false)
-                .with_thread_names(false)
-                .init();
-        }
-        "pretty" => {
-            tracing_subscriber::fmt()
-                .pretty()
-                .with_env_filter(env_filter)
-                .init();
-        }
-        _ => {
-            tracing_subscriber::fmt()
-                .json()
-                .with_env_filter(env_filter)
-                .with_current_span(false)
-                .with_span_list(false)
-                .init();
-        }
-    }
 }
