@@ -239,8 +239,11 @@ impl AgentServiceImpl {
 
         // Create HTTP client with timeout to prevent connection pool exhaustion from hung upstream services.
         // Default 30s for most calls; instance create uses per-request timeout (see call_agent_api_create).
+        // Direct connections only: agent manager URLs are explicit endpoints; skipping system proxy avoids
+        // misrouted loopback in tests and broken CONNECT for internal crabshack/compose hosts.
         let http_client = Client::builder()
             .timeout(std::time::Duration::from_secs(30))
+            .no_proxy()
             .build()
             .unwrap_or_else(|_| Client::new());
 
@@ -6235,7 +6238,287 @@ mod tests {
             );
         }
 
-        // test_e2e_mode_flow_summary removed: was entirely about the removed normalize_service_type_for_api function
+        // --- Non-TEE `check_upgrade_available` (crabshack allowlist + instance image) ---
+
+        fn upgrade_check_instance(
+            instance_db_id: Uuid,
+            user_id: UserId,
+            name: &str,
+            crabshack_uri: &str,
+            service_type: Option<&str>,
+        ) -> AgentInstance {
+            AgentInstance {
+                id: instance_db_id,
+                user_id,
+                instance_id: format!("agent-api-{}", name),
+                name: name.to_string(),
+                public_ssh_key: None,
+                instance_url: None,
+                instance_token: None,
+                dashboard_url: None,
+                agent_api_base_url: Some(crabshack_uri.to_string()),
+                service_type: service_type.map(String::from),
+                status: "active".to_string(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            }
+        }
+
+        fn service_for_upgrade_check(
+            instance: AgentInstance,
+            crabshack_uri: &str,
+            token: &str,
+        ) -> AgentServiceImpl {
+            let instance_db_id = instance.id;
+            let mut repo = MockAgentRepository::new();
+            repo.expect_get_instance()
+                .with(eq(instance_db_id))
+                .returning(move |_| Ok(Some(instance.clone())));
+            repo.expect_get_user_passkey_credentials()
+                .returning(|_| Ok(None));
+
+            make_service(
+                vec![AgentManager {
+                    url: crabshack_uri.to_string(),
+                    token: token.to_string(),
+                    is_non_tee: true,
+                }],
+                Arc::new(repo),
+                Arc::new(MockSystemConfigsService::no_config()),
+            )
+        }
+
+        #[tokio::test]
+        async fn non_tee_check_upgrade_legacy_openclaw_dind_filter_and_semver() {
+            let server = setup_mock_server().await;
+            let uri = server.uri();
+            let token = "crab-token";
+            let instance_id = Uuid::new_v4();
+            let user_id = UserId(Uuid::new_v4());
+
+            Mock::given(method("GET"))
+                .and(path("/images"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                    {
+                        "ref": "docker.io/nearaidev/openclaw-dind:0.20.0",
+                        "service_type": "openclaw-dind",
+                        "status": "allow-create",
+                        "created_at": "2024-01-10T00:00:00Z"
+                    },
+                    {
+                        "ref": "docker.io/nearaidev/openclaw-dind:0.21.0",
+                        "service_type": "openclaw-dind",
+                        "status": "allow-create",
+                        "created_at": "2024-01-15T00:00:00Z"
+                    },
+                    {
+                        "ref": "docker.io/nearaidev/openclaw-dind:latest",
+                        "service_type": "openclaw-dind",
+                        "status": "deprecated",
+                        "created_at": "2024-01-01T00:00:00Z"
+                    }
+                ])))
+                .mount(&server)
+                .await;
+
+            Mock::given(method("GET"))
+                .and(path("/instances/test-instance"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "name": "test-instance",
+                    "image": "docker.io/nearaidev/openclaw-dind:0.20.0",
+                    "status": "running"
+                })))
+                .mount(&server)
+                .await;
+
+            let instance = upgrade_check_instance(
+                instance_id,
+                user_id,
+                "test-instance",
+                &uri,
+                Some("openclaw-dind"),
+            );
+            let svc = service_for_upgrade_check(instance, &uri, token);
+            let out = AgentService::check_upgrade_available(&svc, instance_id, user_id)
+                .await
+                .expect("check_upgrade_available");
+
+            assert!(out.has_upgrade);
+            assert_eq!(
+                out.current_image.as_deref(),
+                Some("docker.io/nearaidev/openclaw-dind:0.20.0")
+            );
+            assert_eq!(out.latest_image, "docker.io/nearaidev/openclaw-dind:0.21.0");
+        }
+
+        #[tokio::test]
+        async fn non_tee_check_upgrade_prerelease_same_numeric_max_picks_later_allowlist_entry() {
+            let server = setup_mock_server().await;
+            let uri = server.uri();
+            let token = "crab-token";
+            let instance_id = Uuid::new_v4();
+            let user_id = UserId(Uuid::new_v4());
+
+            Mock::given(method("GET"))
+                .and(path("/images"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                    {
+                        "ref": "docker.io/nearaidev/openclaw-dind:0.20.0",
+                        "service_type": "openclaw-dind",
+                        "status": "allow-create",
+                        "created_at": "2024-01-10T00:00:00Z"
+                    },
+                    {
+                        "ref": "docker.io/nearaidev/openclaw-dind:0.21.0-rc1",
+                        "service_type": "openclaw-dind",
+                        "status": "allow-create",
+                        "created_at": "2024-01-15T00:00:00Z"
+                    },
+                    {
+                        "ref": "docker.io/nearaidev/openclaw-dind:0.21.0",
+                        "service_type": "openclaw-dind",
+                        "status": "allow-create",
+                        "created_at": "2024-01-16T00:00:00Z"
+                    }
+                ])))
+                .mount(&server)
+                .await;
+
+            Mock::given(method("GET"))
+                .and(path("/instances/test-instance"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "name": "test-instance",
+                    "image": "docker.io/nearaidev/openclaw-dind:0.20.0",
+                    "status": "running"
+                })))
+                .mount(&server)
+                .await;
+
+            let instance = upgrade_check_instance(
+                instance_id,
+                user_id,
+                "test-instance",
+                &uri,
+                Some("openclaw-dind"),
+            );
+            let svc = service_for_upgrade_check(instance, &uri, token);
+            let out = AgentService::check_upgrade_available(&svc, instance_id, user_id)
+                .await
+                .expect("check_upgrade_available");
+
+            assert!(out.has_upgrade);
+            // `compare_semantic_versions` ignores pre-release suffixes, so 0.21.0-rc1 and 0.21.0
+            // tie. `Iterator::max_by` uses `cmp::max_by`, which picks the second operand when equal,
+            // so the later allowlist entry (0.21.0) becomes latest.
+            assert_eq!(out.latest_image, "docker.io/nearaidev/openclaw-dind:0.21.0");
+        }
+
+        #[tokio::test]
+        async fn non_tee_check_upgrade_canonical_openclaw_images() {
+            let server = setup_mock_server().await;
+            let uri = server.uri();
+            let token = "crab-token";
+            let instance_id = Uuid::new_v4();
+            let user_id = UserId(Uuid::new_v4());
+
+            Mock::given(method("GET"))
+                .and(path("/images"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                    {
+                        "ref": "docker.io/nearaidev/openclaw:0.20.0",
+                        "service_type": "openclaw",
+                        "status": "allow-create",
+                        "created_at": "2024-01-10T00:00:00Z"
+                    },
+                    {
+                        "ref": "docker.io/nearaidev/openclaw:0.21.0",
+                        "service_type": "openclaw",
+                        "status": "allow-create",
+                        "created_at": "2024-01-15T00:00:00Z"
+                    },
+                    {
+                        "ref": "docker.io/nearaidev/openclaw:latest",
+                        "service_type": "openclaw",
+                        "status": "deprecated",
+                        "created_at": "2024-01-01T00:00:00Z"
+                    }
+                ])))
+                .mount(&server)
+                .await;
+
+            Mock::given(method("GET"))
+                .and(path("/instances/test-instance"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "name": "test-instance",
+                    "image": "docker.io/nearaidev/openclaw:0.20.0",
+                    "status": "running"
+                })))
+                .mount(&server)
+                .await;
+
+            let instance = upgrade_check_instance(
+                instance_id,
+                user_id,
+                "test-instance",
+                &uri,
+                Some("openclaw"),
+            );
+            let svc = service_for_upgrade_check(instance, &uri, token);
+            let out = AgentService::check_upgrade_available(&svc, instance_id, user_id)
+                .await
+                .expect("check_upgrade_available");
+
+            assert!(out.has_upgrade);
+            assert_eq!(
+                out.current_image.as_deref(),
+                Some("docker.io/nearaidev/openclaw:0.20.0")
+            );
+            assert_eq!(out.latest_image, "docker.io/nearaidev/openclaw:0.21.0");
+        }
+
+        #[tokio::test]
+        async fn non_tee_check_upgrade_instance_404_blocks_upgrade() {
+            let server = setup_mock_server().await;
+            let uri = server.uri();
+            let token = "crab-token";
+            let instance_id = Uuid::new_v4();
+            let user_id = UserId(Uuid::new_v4());
+
+            Mock::given(method("GET"))
+                .and(path("/images"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                    {
+                        "ref": "docker.io/nearaidev/openclaw-dind:0.21.0",
+                        "service_type": "openclaw-dind",
+                        "status": "allow-create",
+                        "created_at": "2024-01-15T00:00:00Z"
+                    }
+                ])))
+                .mount(&server)
+                .await;
+
+            Mock::given(method("GET"))
+                .and(path("/instances/not-synced-instance"))
+                .respond_with(ResponseTemplate::new(404))
+                .mount(&server)
+                .await;
+
+            let instance = upgrade_check_instance(
+                instance_id,
+                user_id,
+                "not-synced-instance",
+                &uri,
+                Some("openclaw-dind"),
+            );
+            let svc = service_for_upgrade_check(instance, &uri, token);
+            let out = AgentService::check_upgrade_available(&svc, instance_id, user_id)
+                .await
+                .expect("check_upgrade_available");
+
+            assert!(!out.has_upgrade);
+            assert!(out.current_image.is_none());
+            assert_eq!(out.latest_image, "docker.io/nearaidev/openclaw-dind:0.21.0");
+        }
     }
 
     #[test]
