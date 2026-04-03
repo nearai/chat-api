@@ -498,6 +498,7 @@ pub struct TaskConfig {
     pub worker_visibility_timeout: i32,
     pub worker_max_messages: i32,
     pub worker_max_concurrency: usize,
+    pub port: u16,
 }
 
 impl Default for TaskConfig {
@@ -539,6 +540,10 @@ impl Default for TaskConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(10),
+            port: std::env::var("TASKS_PORT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(8082),
         }
     }
 }

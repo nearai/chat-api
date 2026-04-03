@@ -4,10 +4,25 @@ use aws_smithy_http_client::{
     tls::{self, rustls_provider::CryptoMode},
     Builder as AwsHttpClientBuilder,
 };
+use axum::{routing::get, Json, Router};
 use chrono::{Duration, Utc};
+use serde::Serialize;
 use services::tasks::{CleanupCanceledInstancesTaskPayload, NoopTaskPayload, TaskExecutor};
 use services::{agent::ports::AgentService, UserId};
 use std::sync::Arc;
+
+#[derive(Serialize)]
+struct HealthResponse {
+    status: &'static str,
+    version: &'static str,
+}
+
+async fn health_check() -> Json<HealthResponse> {
+    Json(HealthResponse {
+        status: "ok",
+        version: env!("CARGO_PKG_VERSION"),
+    })
+}
 
 struct DefaultTaskExecutor {
     db_pool: database::DbPool,
@@ -211,6 +226,25 @@ async fn main() -> anyhow::Result<()> {
         agent_service,
     });
 
+    let health_port = tasks.port;
+    let addr = format!("{}:{health_port}", config.server.host);
+
+    // Bind before spawning so port conflict causes a hard startup failure.
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .with_context(|| format!("Failed to bind health server on {addr}"))?;
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+    tokio::spawn(async move {
+        let app = Router::new().route("/health", get(health_check));
+        tracing::info!("health server listening on http://{}", addr);
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async { let _ = shutdown_rx.await; })
+            .await
+            .ok();
+    });
+
     let worker = api::tasks::AwsSqsTaskWorker::new(
         sqs_client,
         queue_url,
@@ -221,8 +255,10 @@ async fn main() -> anyhow::Result<()> {
         executor,
     );
 
-    worker
+    let result = worker
         .run_forever()
         .await
-        .context("task worker loop exited unexpectedly")
+        .context("task worker loop exited unexpectedly");
+    let _ = shutdown_tx.send(());
+    result
 }
