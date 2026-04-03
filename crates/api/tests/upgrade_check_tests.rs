@@ -614,28 +614,12 @@ async fn test_semantic_version_parsing_edge_cases() {
     );
 }
 
-/// Test service type transformation for crabshack queries
+/// Test service type transformation for crabshack queries (uses production
+/// [`services::agent::service_type_for_crabshack`]).
 #[tokio::test]
 async fn test_service_type_for_crabshack_transformation() {
+    use services::agent::service_type_for_crabshack;
     use services::system_configs::ports::{AgentHostingConfig, AgentHostingCrabshackConfig};
-
-    // Crabshack has inconsistent naming (configurable via system_configs):
-    // - ironclaw → ironclaw-dind (default, can be overridden via crabshack.ironclaw_crabshack_type)
-    // - openclaw → openclaw (default, can be overridden via crabshack.openclaw_crabshack_type)
-    fn service_type_for_crabshack(
-        canonical_type: &str,
-        hosting_config: Option<&AgentHostingConfig>,
-    ) -> String {
-        match canonical_type {
-            "ironclaw" => hosting_config
-                .and_then(|cfg| cfg.crabshack.ironclaw_crabshack_type.clone())
-                .unwrap_or_else(|| "ironclaw-dind".to_string()),
-            "openclaw" => hosting_config
-                .and_then(|cfg| cfg.crabshack.openclaw_crabshack_type.clone())
-                .unwrap_or_else(|| "openclaw".to_string()),
-            other => other.to_string(),
-        }
-    }
 
     // Test with no config (using defaults)
     let test_cases = vec![
@@ -659,8 +643,8 @@ async fn test_service_type_for_crabshack_transformation() {
     let custom_config = AgentHostingConfig {
         new_agent_with_non_tee_infra: None,
         crabshack: AgentHostingCrabshackConfig {
-            ironclaw_crabshack_type: Some("ironclaw-custom".to_string()),
-            openclaw_crabshack_type: Some("openclaw-v2".to_string()),
+            ironclaw_service_type: Some("ironclaw-custom".to_string()),
+            openclaw_service_type: Some("openclaw-v2".to_string()),
             ..Default::default()
         },
     };

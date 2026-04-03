@@ -112,18 +112,18 @@ fn get_image_for_service_type(service_type: &str, hosting: Option<&AgentHostingC
 
 /// Convert canonical service type to crabshack format for non-TEE.
 /// Crabshack uses inconsistent naming (configurable via AgentHostingConfig):
-/// - ironclaw → ironclaw-dind by default (can be overridden via crabshack.ironclaw_crabshack_type)
-/// - openclaw → openclaw by default (can be overridden via crabshack.openclaw_crabshack_type)
-fn service_type_for_crabshack(
+/// - ironclaw → ironclaw-dind by default (can be overridden via crabshack.ironclaw_service_type)
+/// - openclaw → openclaw by default (can be overridden via crabshack.openclaw_service_type)
+pub fn service_type_for_crabshack(
     canonical_type: &str,
     hosting_config: Option<&crate::system_configs::ports::AgentHostingConfig>,
 ) -> String {
     match canonical_type {
         "ironclaw" => hosting_config
-            .and_then(|cfg| cfg.crabshack.ironclaw_crabshack_type.clone())
+            .and_then(|cfg| cfg.crabshack.ironclaw_service_type.clone())
             .unwrap_or_else(|| "ironclaw-dind".to_string()),
         "openclaw" => hosting_config
-            .and_then(|cfg| cfg.crabshack.openclaw_crabshack_type.clone())
+            .and_then(|cfg| cfg.crabshack.openclaw_service_type.clone())
             .unwrap_or_else(|| "openclaw".to_string()),
         other => other.to_string(), // unknown types pass through as-is
     }
