@@ -129,6 +129,20 @@ pub fn service_type_for_crabshack(
     }
 }
 
+/// `service_type` for POST `/instances`: canonical `ironclaw` / `openclaw` on TEE managers;
+/// Crabshack compose name from [`service_type_for_crabshack`] on non-TEE (e.g. `ironclaw` → `ironclaw-dind`).
+fn compose_api_service_type_on_create(
+    manager_is_non_tee: bool,
+    canonical_service_type: &str,
+    hosting: Option<&AgentHostingConfig>,
+) -> String {
+    if manager_is_non_tee {
+        service_type_for_crabshack(canonical_service_type, hosting)
+    } else {
+        canonical_service_type.to_string()
+    }
+}
+
 /// Parameters for Agent API instance creation.
 struct AgentApiCreateParams {
     image: Option<String>,
@@ -852,14 +866,13 @@ impl AgentServiceImpl {
             .service_type
             .as_deref()
             .unwrap_or(DEFAULT_SERVICE_TYPE);
-        // Canonical type for chat-api / DB (ironclaw, openclaw)
-        let service_type_for_api = service_type.to_string();
-        // Crabshack (non-TEE) compose-api expects image-aligned names (e.g. ironclaw → ironclaw-dind).
-        let agent_api_service_type = if manager.get_is_non_tee() {
-            service_type_for_crabshack(&service_type_for_api, configs.agent_hosting.as_ref())
-        } else {
-            service_type_for_api.clone()
-        };
+        // Canonical type for DB and `get_image_for_*` match keys (`ironclaw`, `openclaw`).
+        let canonical_service_type = service_type.to_string();
+        let compose_api_service_type = compose_api_service_type_on_create(
+            manager.get_is_non_tee(),
+            &canonical_service_type,
+            configs.agent_hosting.as_ref(),
+        );
 
         // Determine image to use based on manager type
         let image_to_use = if let Some(img) = params.image {
@@ -868,7 +881,7 @@ impl AgentServiceImpl {
             // Non-TEE manager requires image; map service_type to correct image
             // e.g., user selects "ironclaw" → map to docker.io/nearaidev/ironclaw-dind:latest
             Some(get_image_for_service_type(
-                &service_type_for_api,
+                &canonical_service_type,
                 configs.agent_hosting.as_ref(),
             ))
         } else {
@@ -882,7 +895,7 @@ impl AgentServiceImpl {
             "nearai_api_key": nearai_api_key,
             "nearai_api_url": nearai_api_url,
             "ssh_pubkey": params.ssh_pubkey,
-            "service_type": agent_api_service_type,
+            "service_type": compose_api_service_type,
             "user_id": user_id,
         });
 
@@ -1115,12 +1128,12 @@ impl AgentServiceImpl {
             .as_deref()
             .unwrap_or(DEFAULT_SERVICE_TYPE);
 
-        let service_type_for_api = service_type.to_string();
-        let agent_api_service_type = if manager.get_is_non_tee() {
-            service_type_for_crabshack(&service_type_for_api, configs.agent_hosting.as_ref())
-        } else {
-            service_type_for_api.clone()
-        };
+        let canonical_service_type = service_type.to_string();
+        let compose_api_service_type = compose_api_service_type_on_create(
+            manager.get_is_non_tee(),
+            &canonical_service_type,
+            configs.agent_hosting.as_ref(),
+        );
 
         // Build request body with base fields
         // Note: In non-TEE mode, image is required; in TEE mode it's optional
@@ -1130,7 +1143,7 @@ impl AgentServiceImpl {
             // Non-TEE manager requires image; map service_type to correct image
             // e.g., user selects "ironclaw" → map to docker.io/nearaidev/ironclaw-dind:latest
             Some(get_image_for_service_type(
-                &service_type_for_api,
+                &canonical_service_type,
                 configs.agent_hosting.as_ref(),
             ))
         } else {
@@ -1144,7 +1157,7 @@ impl AgentServiceImpl {
             "nearai_api_key": nearai_api_key,
             "nearai_api_url": nearai_api_url,
             "ssh_pubkey": params.ssh_pubkey,
-            "service_type": agent_api_service_type,
+            "service_type": compose_api_service_type,
             "user_id": user_id,
         });
 
@@ -4383,10 +4396,55 @@ mod tests {
     use super::*;
     use crate::agent::ports::AgentService;
     use crate::system_configs::ports::{
-        AgentHostingCrabshackConfig, PartialSystemConfigs, SystemConfigs, SystemConfigsService,
+        AgentHostingConfig, AgentHostingCrabshackConfig, PartialSystemConfigs, SystemConfigs,
+        SystemConfigsService,
     };
     use chrono::{Duration, Utc};
     use config::AgentManager;
+
+    #[test]
+    fn compose_api_service_type_on_create_tee_passes_canonical() {
+        assert_eq!(
+            compose_api_service_type_on_create(false, "ironclaw", None),
+            "ironclaw"
+        );
+        assert_eq!(
+            compose_api_service_type_on_create(false, "openclaw", None),
+            "openclaw"
+        );
+    }
+
+    #[test]
+    fn compose_api_service_type_on_create_non_tee_maps_ironclaw_and_openclaw() {
+        assert_eq!(
+            compose_api_service_type_on_create(true, "ironclaw", None),
+            "ironclaw-dind"
+        );
+        assert_eq!(
+            compose_api_service_type_on_create(true, "openclaw", None),
+            "openclaw"
+        );
+    }
+
+    #[test]
+    fn compose_api_service_type_on_create_non_tee_respects_hosting_overrides() {
+        let hosting = AgentHostingConfig {
+            new_agent_with_non_tee_infra: None,
+            crabshack: AgentHostingCrabshackConfig {
+                ironclaw_service_type: Some("iron-claw-custom".to_string()),
+                openclaw_service_type: Some("oc-custom".to_string()),
+                ..Default::default()
+            },
+        };
+        assert_eq!(
+            compose_api_service_type_on_create(true, "ironclaw", Some(&hosting)),
+            "iron-claw-custom"
+        );
+        assert_eq!(
+            compose_api_service_type_on_create(true, "openclaw", Some(&hosting)),
+            "oc-custom"
+        );
+    }
 
     // --- Mock SystemConfigsService ---
 

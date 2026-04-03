@@ -357,6 +357,9 @@ impl Default for SystemConfigs {
 }
 
 /// Merge optional string overrides: absent (`None`) keeps `base`; empty string clears an override.
+///
+/// Note: `partial.filter(|s| !s.trim().is_empty()).or(base)` is incorrect here — `Some("")` must
+/// clear to `None`, not revert to `base`.
 fn merge_opt_override(base: Option<String>, partial: Option<String>) -> Option<String> {
     match partial {
         None => base,
