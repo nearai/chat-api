@@ -156,7 +156,7 @@ impl StripeClient {
                 &[("expand[]", "line_items")],
             )
             .await?;
-        Ok(map_checkout_session(response))
+        map_checkout_session(response)
     }
 
     pub async fn retrieve_subscription(
@@ -236,7 +236,7 @@ impl StripeClient {
         let response: StripeCheckoutSessionResponse = self
             .post_form("/v1/checkout/sessions", &owned_form, Some(idempotency_key))
             .await?;
-        Ok(map_checkout_session(response))
+        map_checkout_session(response)
     }
 
     async fn get_json<T: serde::de::DeserializeOwned>(
@@ -343,24 +343,42 @@ fn log_response_shape(body: &str) {
     );
 }
 
-fn map_checkout_session(response: StripeCheckoutSessionResponse) -> StripeCheckoutSession {
-    StripeCheckoutSession {
+fn map_checkout_session(
+    response: StripeCheckoutSessionResponse,
+) -> Result<StripeCheckoutSession, StripeClientError> {
+    let line_items = response
+        .line_items
+        .map(|line_items| -> Result<StripeCheckoutLineItems, StripeClientError> {
+            let data = line_items
+                .data
+                .into_iter()
+                .map(|item| {
+                    let price_id =
+                        item.price
+                            .map(|p| p.id)
+                            .ok_or(StripeClientError::InvalidResponse(
+                                "missing checkout session line item price",
+                            ))?;
+                    let quantity = item.quantity.ok_or(StripeClientError::InvalidResponse(
+                        "missing checkout session line item quantity",
+                    ))?;
+
+                    Ok(StripeCheckoutLineItem { price_id, quantity })
+                })
+                .collect::<Result<Vec<_>, StripeClientError>>()?;
+
+            Ok(StripeCheckoutLineItems {
+                has_more: line_items.has_more,
+                data,
+            })
+        })
+        .transpose()?;
+
+    Ok(StripeCheckoutSession {
         id: response.id,
         url: response.url,
-        line_items: response
-            .line_items
-            .map(|line_items| StripeCheckoutLineItems {
-                has_more: line_items.has_more,
-                data: line_items
-                    .data
-                    .into_iter()
-                    .map(|item| StripeCheckoutLineItem {
-                        price_id: item.price.map(|p| p.id).unwrap_or_default(),
-                        quantity: item.quantity.unwrap_or(0),
-                    })
-                    .collect(),
-            }),
-    }
+        line_items,
+    })
 }
 
 fn map_subscription(
@@ -409,4 +427,56 @@ fn map_subscription(
         cancel_at_period_end: response.cancel_at_period_end,
         first_item_id,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{
+        StripeCheckoutSessionResponse, StripeLineItemResponse, StripeLineItemsResponse,
+    };
+
+    #[test]
+    fn map_checkout_session_rejects_missing_line_item_price() {
+        let response = StripeCheckoutSessionResponse {
+            id: "cs_test".to_string(),
+            url: Some("https://example.com".to_string()),
+            line_items: Some(StripeLineItemsResponse {
+                has_more: false,
+                data: vec![StripeLineItemResponse {
+                    price: None,
+                    quantity: Some(1),
+                }],
+            }),
+        };
+
+        let err = map_checkout_session(response).unwrap_err();
+        assert!(matches!(
+            err,
+            StripeClientError::InvalidResponse("missing checkout session line item price")
+        ));
+    }
+
+    #[test]
+    fn map_checkout_session_rejects_missing_line_item_quantity() {
+        let response = StripeCheckoutSessionResponse {
+            id: "cs_test".to_string(),
+            url: Some("https://example.com".to_string()),
+            line_items: Some(StripeLineItemsResponse {
+                has_more: false,
+                data: vec![StripeLineItemResponse {
+                    price: Some(crate::types::StripePriceRef {
+                        id: "price_test".to_string(),
+                    }),
+                    quantity: None,
+                }],
+            }),
+        };
+
+        let err = map_checkout_session(response).unwrap_err();
+        assert!(matches!(
+            err,
+            StripeClientError::InvalidResponse("missing checkout session line item quantity")
+        ));
+    }
 }
