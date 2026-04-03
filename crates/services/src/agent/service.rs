@@ -97,33 +97,33 @@ fn compare_semantic_versions(a: &str, b: &str) -> std::cmp::Ordering {
 /// Map service type to worker image.
 ///
 /// Fallback chain:
-/// - ironclaw: `hosting.ironclaw_image` → "docker.io/nearaidev/ironclaw-dind:latest"
-/// - openclaw: `hosting.openclaw_image` → "docker.io/nearaidev/openclaw-nearai-worker:latest"
+/// - ironclaw: `hosting.crabshack.ironclaw_image` → "docker.io/nearaidev/ironclaw-dind:latest"
+/// - openclaw: `hosting.crabshack.openclaw_image` → "docker.io/nearaidev/openclaw-nearai-worker:latest"
 fn get_image_for_service_type(service_type: &str, hosting: Option<&AgentHostingConfig>) -> String {
     match service_type {
         "ironclaw" => hosting
-            .and_then(|h| h.ironclaw_image.clone())
+            .and_then(|h| h.crabshack.ironclaw_image.clone())
             .unwrap_or_else(|| "docker.io/nearaidev/ironclaw-dind:latest".to_string()),
         _ => hosting
-            .and_then(|h| h.openclaw_image.clone())
+            .and_then(|h| h.crabshack.openclaw_image.clone())
             .unwrap_or_else(|| "docker.io/nearaidev/openclaw-nearai-worker:latest".to_string()),
     }
 }
 
 /// Convert canonical service type to crabshack format for non-TEE.
 /// Crabshack uses inconsistent naming (configurable via AgentHostingConfig):
-/// - ironclaw → ironclaw-dind by default (can be overridden via ironclaw_crabshack_type)
-/// - openclaw → openclaw by default (can be overridden via openclaw_crabshack_type)
+/// - ironclaw → ironclaw-dind by default (can be overridden via crabshack.ironclaw_crabshack_type)
+/// - openclaw → openclaw by default (can be overridden via crabshack.openclaw_crabshack_type)
 fn service_type_for_crabshack(
     canonical_type: &str,
     hosting_config: Option<&crate::system_configs::ports::AgentHostingConfig>,
 ) -> String {
     match canonical_type {
         "ironclaw" => hosting_config
-            .and_then(|cfg| cfg.ironclaw_crabshack_type.clone())
+            .and_then(|cfg| cfg.crabshack.ironclaw_crabshack_type.clone())
             .unwrap_or_else(|| "ironclaw-dind".to_string()),
         "openclaw" => hosting_config
-            .and_then(|cfg| cfg.openclaw_crabshack_type.clone())
+            .and_then(|cfg| cfg.crabshack.openclaw_crabshack_type.clone())
             .unwrap_or_else(|| "openclaw".to_string()),
         other => other.to_string(), // unknown types pass through as-is
     }
@@ -4369,7 +4369,9 @@ impl AgentServiceImpl {
 mod tests {
     use super::*;
     use crate::agent::ports::AgentService;
-    use crate::system_configs::ports::{PartialSystemConfigs, SystemConfigs, SystemConfigsService};
+    use crate::system_configs::ports::{
+        AgentHostingCrabshackConfig, PartialSystemConfigs, SystemConfigs, SystemConfigsService,
+    };
     use chrono::{Duration, Utc};
     use config::AgentManager;
 
@@ -4392,10 +4394,7 @@ mod tests {
                 configs: Some(SystemConfigs {
                     agent_hosting: Some(AgentHostingConfig {
                         new_agent_with_non_tee_infra: Some(true),
-                        ironclaw_image: None,
-                        openclaw_image: None,
-                        ironclaw_crabshack_type: None,
-                        openclaw_crabshack_type: None,
+                        crabshack: Default::default(),
                     }),
                     ..Default::default()
                 }),
@@ -4408,10 +4407,7 @@ mod tests {
                 configs: Some(SystemConfigs {
                     agent_hosting: Some(AgentHostingConfig {
                         new_agent_with_non_tee_infra: Some(non_tee_infra),
-                        ironclaw_image: None,
-                        openclaw_image: None,
-                        ironclaw_crabshack_type: None,
-                        openclaw_crabshack_type: None,
+                        crabshack: Default::default(),
                     }),
                     ..Default::default()
                 }),
@@ -4425,10 +4421,7 @@ mod tests {
                     max_instances_per_manager: Some(max),
                     agent_hosting: Some(AgentHostingConfig {
                         new_agent_with_non_tee_infra: Some(non_tee),
-                        ironclaw_image: None,
-                        openclaw_image: None,
-                        ironclaw_crabshack_type: None,
-                        openclaw_crabshack_type: None,
+                        crabshack: Default::default(),
                     }),
                     ..Default::default()
                 }),
@@ -4454,10 +4447,7 @@ mod tests {
                     max_instances_by_manager_url: Some(per_url),
                     agent_hosting: Some(AgentHostingConfig {
                         new_agent_with_non_tee_infra: Some(true),
-                        ironclaw_image: None,
-                        openclaw_image: None,
-                        ironclaw_crabshack_type: None,
-                        openclaw_crabshack_type: None,
+                        crabshack: Default::default(),
                     }),
                     ..Default::default()
                 }),
@@ -6818,10 +6808,10 @@ mod tests {
         // When config provides ironclaw_image, use it
         let config = AgentHostingConfig {
             new_agent_with_non_tee_infra: None,
-            ironclaw_image: Some("custom.registry.io/ironclaw:0.5.0".to_string()),
-            openclaw_image: None,
-            ironclaw_crabshack_type: None,
-            openclaw_crabshack_type: None,
+            crabshack: AgentHostingCrabshackConfig {
+                ironclaw_image: Some("custom.registry.io/ironclaw:0.5.0".to_string()),
+                ..Default::default()
+            },
         };
 
         let image = get_image_for_service_type("ironclaw", Some(&config));
@@ -6840,10 +6830,7 @@ mod tests {
         // When config fields are None, fall back to hardcoded defaults
         let config = AgentHostingConfig {
             new_agent_with_non_tee_infra: None,
-            ironclaw_image: None,
-            openclaw_image: None,
-            ironclaw_crabshack_type: None,
-            openclaw_crabshack_type: None,
+            crabshack: AgentHostingCrabshackConfig::default(),
         };
 
         let image = get_image_for_service_type("ironclaw", Some(&config));
@@ -6855,10 +6842,10 @@ mod tests {
         // When config provides openclaw_image, use it
         let config = AgentHostingConfig {
             new_agent_with_non_tee_infra: None,
-            ironclaw_image: None,
-            openclaw_image: Some("my.registry.com/openclaw:v2.1".to_string()),
-            ironclaw_crabshack_type: None,
-            openclaw_crabshack_type: None,
+            crabshack: AgentHostingCrabshackConfig {
+                openclaw_image: Some("my.registry.com/openclaw:v2.1".to_string()),
+                ..Default::default()
+            },
         };
 
         let image = get_image_for_service_type("openclaw", Some(&config));
@@ -6877,10 +6864,7 @@ mod tests {
         // When config fields are None, fall back to hardcoded defaults
         let config = AgentHostingConfig {
             new_agent_with_non_tee_infra: None,
-            ironclaw_image: None,
-            openclaw_image: None,
-            ironclaw_crabshack_type: None,
-            openclaw_crabshack_type: None,
+            crabshack: AgentHostingCrabshackConfig::default(),
         };
 
         let image = get_image_for_service_type("openclaw", Some(&config));
@@ -6899,10 +6883,10 @@ mod tests {
         // Unknown types respect openclaw_image override
         let config = AgentHostingConfig {
             new_agent_with_non_tee_infra: None,
-            ironclaw_image: None,
-            openclaw_image: Some("override.io/openclaw:custom".to_string()),
-            ironclaw_crabshack_type: None,
-            openclaw_crabshack_type: None,
+            crabshack: AgentHostingCrabshackConfig {
+                openclaw_image: Some("override.io/openclaw:custom".to_string()),
+                ..Default::default()
+            },
         };
 
         let image = get_image_for_service_type("unknown-type", Some(&config));
@@ -6914,10 +6898,11 @@ mod tests {
         // When both images are configured, each service type uses its own
         let config = AgentHostingConfig {
             new_agent_with_non_tee_infra: None,
-            ironclaw_image: Some("registry.io/ironclaw:1.0".to_string()),
-            openclaw_image: Some("registry.io/openclaw:2.0".to_string()),
-            ironclaw_crabshack_type: None,
-            openclaw_crabshack_type: None,
+            crabshack: AgentHostingCrabshackConfig {
+                ironclaw_image: Some("registry.io/ironclaw:1.0".to_string()),
+                openclaw_image: Some("registry.io/openclaw:2.0".to_string()),
+                ..Default::default()
+            },
         };
 
         let ironclaw_image = get_image_for_service_type("ironclaw", Some(&config));
@@ -6933,10 +6918,10 @@ mod tests {
         // Config can set just ironclaw_image; openclaw uses default
         let config = AgentHostingConfig {
             new_agent_with_non_tee_infra: None,
-            ironclaw_image: Some("custom.io/ironclaw:beta".to_string()),
-            openclaw_image: None,
-            ironclaw_crabshack_type: None,
-            openclaw_crabshack_type: None,
+            crabshack: AgentHostingCrabshackConfig {
+                ironclaw_image: Some("custom.io/ironclaw:beta".to_string()),
+                ..Default::default()
+            },
         };
 
         let ironclaw = get_image_for_service_type("ironclaw", Some(&config));
@@ -6954,10 +6939,10 @@ mod tests {
         // Config can set just openclaw_image; ironclaw uses default
         let config = AgentHostingConfig {
             new_agent_with_non_tee_infra: None,
-            ironclaw_image: None,
-            openclaw_image: Some("custom.io/openclaw:rc1".to_string()),
-            ironclaw_crabshack_type: None,
-            openclaw_crabshack_type: None,
+            crabshack: AgentHostingCrabshackConfig {
+                openclaw_image: Some("custom.io/openclaw:rc1".to_string()),
+                ..Default::default()
+            },
         };
 
         let ironclaw = get_image_for_service_type("ironclaw", Some(&config));
@@ -6972,10 +6957,11 @@ mod tests {
         // Image config is independent of the non_tee_infra flag
         let config = AgentHostingConfig {
             new_agent_with_non_tee_infra: Some(true), // Flag doesn't affect image resolution
-            ironclaw_image: Some("flag-independent.io/ironclaw:v1".to_string()),
-            openclaw_image: Some("flag-independent.io/openclaw:v1".to_string()),
-            ironclaw_crabshack_type: None,
-            openclaw_crabshack_type: None,
+            crabshack: AgentHostingCrabshackConfig {
+                ironclaw_image: Some("flag-independent.io/ironclaw:v1".to_string()),
+                openclaw_image: Some("flag-independent.io/openclaw:v1".to_string()),
+                ..Default::default()
+            },
         };
 
         let ironclaw = get_image_for_service_type("ironclaw", Some(&config));
