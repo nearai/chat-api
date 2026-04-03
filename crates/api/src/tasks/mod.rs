@@ -361,10 +361,12 @@ async fn process_message<E: TaskExecutor + 'static>(
 
     dispatch_task(executor.as_ref(), &task_message.payload)
         .await
-        .context(format!(
-            "task handler execution failed task_id={}",
-            task_message.task_id
-        ))?;
+        .with_context(|| {
+            format!(
+                "task handler execution failed task_id={}",
+                task_message.task_id
+            )
+        })?;
 
     tracing::info!("task completed task_id={}", task_message.task_id);
 
