@@ -1,9 +1,5 @@
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
-use aws_smithy_http_client::{
-    tls::{self, rustls_provider::CryptoMode},
-    Builder as AwsHttpClientBuilder,
-};
 use axum::{routing::get, Json, Router};
 use chrono::{Duration, Utc};
 use serde::Serialize;
@@ -226,15 +222,7 @@ async fn main() -> anyhow::Result<()> {
         config.agent.non_tee_agent_url_pattern.clone(),
     ));
 
-    let http_client = AwsHttpClientBuilder::new()
-        .tls_provider(tls::Provider::Rustls(CryptoMode::AwsLc))
-        .build_https();
-
-    let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-        .http_client(http_client)
-        .region(aws_sdk_sqs::config::Region::new(region))
-        .load()
-        .await;
+    let aws_config = api::tasks::load_aws_sdk_config(region).await;
 
     let sqs_client = aws_sdk_sqs::Client::new(&aws_config);
     let executor = Arc::new(DefaultTaskExecutor {

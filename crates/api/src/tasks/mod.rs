@@ -1,9 +1,13 @@
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use aws_sdk_scheduler::{
-    error::SdkError,
+    error::{DisplayErrorContext, SdkError},
     operation::create_schedule::CreateScheduleError,
     types::{ActionAfterCompletion, FlexibleTimeWindow, FlexibleTimeWindowMode, Target},
+};
+use aws_smithy_http_client::{
+    tls::{self, rustls_provider::CryptoMode},
+    Builder as AwsHttpClientBuilder,
 };
 use services::tasks::{
     daily_cleanup_canceled_instances_request, dispatch_task, ScheduleSpec, ScheduledTaskRequest,
@@ -16,6 +20,7 @@ use tokio::{
 };
 
 const SQS_RECEIVE_RETRY_DELAY: Duration = Duration::from_secs(5);
+const SQS_IDLE_HEARTBEAT_INTERVAL_POLLS: u64 = 3;
 
 struct ScheduleRequestParts {
     target: Target,
@@ -35,6 +40,26 @@ fn is_conflict_error(err: &SdkError<CreateScheduleError>) -> bool {
         SdkError::ServiceError(service_error)
             if matches!(service_error.err(), CreateScheduleError::ConflictException(_))
     )
+}
+
+fn format_aws_sdk_error<E, R>(err: &SdkError<E, R>) -> String
+where
+    E: std::error::Error + Send + Sync + 'static,
+    R: std::fmt::Debug + Send + Sync + 'static,
+{
+    DisplayErrorContext(err).to_string()
+}
+
+pub async fn load_aws_sdk_config(region: String) -> aws_config::SdkConfig {
+    let http_client = AwsHttpClientBuilder::new()
+        .tls_provider(tls::Provider::Rustls(CryptoMode::AwsLc))
+        .build_https();
+
+    aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .http_client(http_client)
+        .region(aws_config::Region::new(region))
+        .load()
+        .await
 }
 
 #[derive(Clone)]
@@ -118,7 +143,7 @@ impl AwsTaskScheduler {
             Err(err) => Err(anyhow!(
                 "failed to create schedule for task_id={}: {}",
                 request.task_id,
-                err
+                format_aws_sdk_error(&err)
             )),
         }
     }
@@ -153,7 +178,14 @@ impl TaskScheduler for AwsTaskScheduler {
         request.validate()?;
 
         match self.try_create_schedule(&request).await? {
-            CreateScheduleOutcome::Created => Ok(()),
+            CreateScheduleOutcome::Created => {
+                tracing::info!(
+                    "created schedule task_id={} group={}",
+                    request.task_id,
+                    self.scheduler_group
+                );
+                Ok(())
+            }
             CreateScheduleOutcome::Conflict(parts) => {
                 let mut update = self
                     .client
@@ -170,11 +202,16 @@ impl TaskScheduler for AwsTaskScheduler {
 
                 update.send().await.map_err(|e| {
                     anyhow!(
-                        "failed to update existing schedule for task_id={}: {:?}",
+                        "failed to update existing schedule for task_id={}: {}",
                         request.task_id,
-                        e
+                        format_aws_sdk_error(&e)
                     )
                 })?;
+                tracing::info!(
+                    "updated schedule task_id={} group={}",
+                    request.task_id,
+                    self.scheduler_group
+                );
                 Ok(())
             }
         }
@@ -187,7 +224,13 @@ impl TaskScheduler for AwsTaskScheduler {
             .group_name(&self.scheduler_group)
             .send()
             .await
-            .map_err(|e| anyhow!("failed to delete schedule task_id={}: {}", task_id, e))?;
+            .map_err(|e| {
+                anyhow!(
+                    "failed to delete schedule task_id={}: {}",
+                    task_id,
+                    format_aws_sdk_error(&e)
+                )
+            })?;
         Ok(())
     }
 }
@@ -230,6 +273,18 @@ impl<E: TaskExecutor + 'static> AwsSqsTaskWorker<E> {
             .max_messages
             .clamp(1, 10)
             .min(max_concurrency.min(10) as i32);
+        let wait_seconds = self.wait_seconds.clamp(1, 20);
+        let visibility_timeout = self.visibility_timeout.max(1);
+        let mut consecutive_empty_polls = 0u64;
+
+        tracing::info!(
+            "starting SQS polling queue_url={} wait_seconds={} max_messages={} visibility_timeout={} max_concurrency={}",
+            self.queue_url,
+            wait_seconds,
+            max_number_of_messages,
+            visibility_timeout,
+            max_concurrency
+        );
 
         loop {
             let response = match self
@@ -237,24 +292,49 @@ impl<E: TaskExecutor + 'static> AwsSqsTaskWorker<E> {
                 .receive_message()
                 .queue_url(&self.queue_url)
                 .max_number_of_messages(max_number_of_messages)
-                .wait_time_seconds(self.wait_seconds.clamp(1, 20))
-                .visibility_timeout(self.visibility_timeout.max(1))
+                .wait_time_seconds(wait_seconds)
+                .visibility_timeout(visibility_timeout)
                 .send()
                 .await
             {
                 Ok(response) => response,
                 Err(err) => {
+                    consecutive_empty_polls = 0;
                     tracing::warn!(
-                        "failed to receive SQS messages; retrying in {}s: {}",
+                        "failed to receive SQS messages queue_url={} retrying_in={}s err={}",
+                        self.queue_url,
                         SQS_RECEIVE_RETRY_DELAY.as_secs(),
-                        err
+                        format_aws_sdk_error(&err)
                     );
                     sleep(SQS_RECEIVE_RETRY_DELAY).await;
                     continue;
                 }
             };
 
-            for message in response.messages() {
+            let messages = response.messages();
+            if messages.is_empty() {
+                consecutive_empty_polls += 1;
+
+                if consecutive_empty_polls == 1
+                    || consecutive_empty_polls.is_multiple_of(SQS_IDLE_HEARTBEAT_INTERVAL_POLLS)
+                {
+                    tracing::debug!(
+                        "SQS poll returned no messages queue_url={} empty_polls={} wait_seconds={}",
+                        self.queue_url,
+                        consecutive_empty_polls,
+                        wait_seconds
+                    );
+                }
+            } else {
+                consecutive_empty_polls = 0;
+                tracing::info!(
+                    "received {} SQS message(s) queue_url={}",
+                    messages.len(),
+                    self.queue_url
+                );
+            }
+
+            for message in messages {
                 let permit = semaphore.clone().acquire_owned().await?;
                 let client = self.client.clone();
                 let queue_url = self.queue_url.clone();
@@ -283,7 +363,12 @@ async fn delete_message(
         .receipt_handle(receipt_handle)
         .send()
         .await
-        .context("failed to delete SQS message")?;
+        .map_err(|err| {
+            anyhow!(
+                "failed to delete SQS message: {}",
+                format_aws_sdk_error(&err)
+            )
+        })?;
 
     Ok(())
 }
@@ -351,7 +436,12 @@ async fn process_message<E: TaskExecutor + 'static>(
                 .visibility_timeout(300) // 5 minutes
                 .send()
                 .await
-                .context("failed to extend visibility timeout for cleanup task")?;
+                .map_err(|err| {
+                    anyhow!(
+                        "failed to extend visibility timeout for cleanup task: {}",
+                        format_aws_sdk_error(&err)
+                    )
+                })?;
             tracing::info!(
                 "extended visibility timeout for task_id={}",
                 task_message.task_id
@@ -406,10 +496,7 @@ pub async fn ensure_daily_cleanup_task(task_config: &config::TaskConfig) -> anyh
         .clone()
         .ok_or_else(|| anyhow!("TASKS_SCHEDULER_ROLE_ARN is required"))?;
 
-    let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-        .region(aws_sdk_scheduler::config::Region::new(region))
-        .load()
-        .await;
+    let aws_config = load_aws_sdk_config(region).await;
 
     let scheduler = AwsTaskScheduler::new(
         aws_sdk_scheduler::Client::new(&aws_config),
