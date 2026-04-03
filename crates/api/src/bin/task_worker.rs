@@ -4,10 +4,25 @@ use aws_smithy_http_client::{
     tls::{self, rustls_provider::CryptoMode},
     Builder as AwsHttpClientBuilder,
 };
+use axum::{routing::get, Json, Router};
 use chrono::{Duration, Utc};
+use serde::Serialize;
 use services::tasks::{CleanupCanceledInstancesTaskPayload, NoopTaskPayload, TaskExecutor};
 use services::{agent::ports::AgentService, UserId};
 use std::sync::Arc;
+
+#[derive(Serialize)]
+struct HealthResponse {
+    status: &'static str,
+    version: &'static str,
+}
+
+async fn health_check() -> Json<HealthResponse> {
+    Json(HealthResponse {
+        status: "ok",
+        version: env!("CARGO_PKG_VERSION"),
+    })
+}
 
 struct DefaultTaskExecutor {
     db_pool: database::DbPool,
@@ -28,6 +43,12 @@ impl TaskExecutor for DefaultTaskExecutor {
         if payload.grace_days < 0 {
             return Err(anyhow!("grace_days must be >= 0"));
         }
+
+        tracing::info!(
+            "cleanup task started grace_days={} dry_run={}",
+            payload.grace_days,
+            payload.dry_run
+        );
 
         let cutoff = Utc::now() - Duration::days(payload.grace_days);
         let mut offset: i64 = 0;
@@ -62,8 +83,18 @@ impl TaskExecutor for DefaultTaskExecutor {
                 .context("failed to query canceled users for cleanup")?;
 
             if rows.is_empty() {
+                tracing::info!(
+                    "cleanup task: no more canceled users found after offset={}",
+                    offset
+                );
                 break;
             }
+
+            tracing::info!(
+                "cleanup task: batch found {} canceled users offset={}",
+                rows.len(),
+                offset
+            );
 
             for row in &rows {
                 let user_id: UserId = row.get("user_id");
@@ -157,12 +188,7 @@ async fn main() -> anyhow::Result<()> {
     let config = config::Config::from_env();
     let tasks = config.tasks.clone();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    api::init_tracing_from_config(&config.logging);
 
     if !tasks.enabled {
         return Err(anyhow!(
@@ -216,6 +242,27 @@ async fn main() -> anyhow::Result<()> {
         agent_service,
     });
 
+    let health_port = tasks.port;
+    let addr = format!("{}:{health_port}", config.server.host);
+
+    // Bind before spawning so port conflict causes a hard startup failure.
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .with_context(|| format!("Failed to bind health server on {addr}"))?;
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+    tokio::spawn(async move {
+        let app = Router::new().route("/health", get(health_check));
+        tracing::info!("health server listening on http://{}", addr);
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .ok();
+    });
+
     let worker = api::tasks::AwsSqsTaskWorker::new(
         sqs_client,
         queue_url,
@@ -226,8 +273,10 @@ async fn main() -> anyhow::Result<()> {
         executor,
     );
 
-    worker
+    let result = worker
         .run_forever()
         .await
-        .context("task worker loop exited unexpectedly")
+        .context("task worker loop exited unexpectedly");
+    let _ = shutdown_tx.send(());
+    result
 }
