@@ -513,7 +513,7 @@ impl Default for TaskConfig {
             sqs_queue_arn: std::env::var("TASKS_SQS_QUEUE_ARN").ok(),
             scheduler_role_arn: std::env::var("TASKS_SCHEDULER_ROLE_ARN").ok(),
             scheduler_group: std::env::var("TASKS_SCHEDULER_GROUP")
-                .unwrap_or_else(|_| "chat-api".to_string()),
+                .unwrap_or_else(|_| "default".to_string()),
             cleanup_canceled_instances_daily_cron: std::env::var(
                 "TASKS_CLEANUP_CANCELED_INSTANCES_DAILY_CRON",
             )
@@ -872,7 +872,7 @@ mod tests {
         let cfg = TaskConfig::default();
         assert!(!cfg.enabled);
         assert!(cfg.aws_region.is_none());
-        assert_eq!(cfg.scheduler_group, "chat-api");
+        assert_eq!(cfg.scheduler_group, "default");
         assert_eq!(cfg.worker_wait_seconds, 20);
         assert_eq!(cfg.worker_visibility_timeout, 60);
         assert_eq!(cfg.worker_max_messages, 10);

@@ -40,28 +40,37 @@ pub fn init_tracing_from_config(logging_config: &LoggingConfig) {
 
     match logging_config.format.as_str() {
         "compact" => {
-            tracing_subscriber::fmt()
+            if let Err(e) = tracing_subscriber::fmt()
                 .compact()
                 .with_env_filter(env_filter)
                 .with_target(false)
                 .with_thread_ids(false)
                 .with_thread_names(false)
-                .init();
+                .try_init()
+            {
+                eprintln!("tracing already initialized: {e}");
+            }
         }
         "pretty" => {
-            tracing_subscriber::fmt()
+            if let Err(e) = tracing_subscriber::fmt()
                 .pretty()
                 .with_env_filter(env_filter)
-                .init();
+                .try_init()
+            {
+                eprintln!("tracing already initialized: {e}");
+            }
         }
         _ => {
             // Default to JSON for "json" or any unknown format
-            tracing_subscriber::fmt()
+            if let Err(e) = tracing_subscriber::fmt()
                 .json()
                 .with_env_filter(env_filter)
                 .with_current_span(false)
                 .with_span_list(false)
-                .init();
+                .try_init()
+            {
+                eprintln!("tracing already initialized: {e}");
+            }
         }
     }
 }
