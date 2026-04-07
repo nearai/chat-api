@@ -65,6 +65,8 @@ pub struct Subscription {
     pub pending_downgrade_expected_period_end: Option<DateTime<Utc>>,
     /// Last downgrade intent status.
     pub pending_downgrade_status: Option<DowngradeIntentStatus>,
+    /// Timestamp when the downgrade intent was last changed.
+    pub pending_downgrade_updated_at: Option<DateTime<Utc>>,
 }
 
 /// API response model with plan name resolved from price_id
@@ -181,6 +183,8 @@ pub enum SubscriptionError {
     TestClockNotAllowedForExistingCustomer,
     /// No pending downgrade to cancel (same plan requested but no pending downgrade exists)
     NoPendingDowngrade,
+    /// No subscription row found for the requested subscription_id.
+    SubscriptionNotFound,
 }
 
 impl fmt::Display for SubscriptionError {
@@ -240,6 +244,9 @@ impl fmt::Display for SubscriptionError {
             }
             Self::NoPendingDowngrade => {
                 write!(f, "No pending downgrade to cancel")
+            }
+            Self::SubscriptionNotFound => {
+                write!(f, "Subscription not found")
             }
         }
     }
@@ -334,6 +341,22 @@ pub trait SubscriptionRepository: Send + Sync {
         txn: &tokio_postgres::Transaction<'_>,
         subscription_id: &str,
     ) -> anyhow::Result<Option<String>>;
+
+    /// Fetch a subscription row with a row lock (FOR UPDATE).
+    /// Returns None if the subscription does not exist.
+    async fn get_subscription_for_update(
+        &self,
+        txn: &tokio_postgres::Transaction<'_>,
+        subscription_id: &str,
+    ) -> anyhow::Result<Option<Subscription>>;
+
+    /// Replace exactly one existing subscription row selected by subscription_id.
+    /// Returns None if the row does not exist.
+    async fn replace_subscription(
+        &self,
+        txn: &tokio_postgres::Transaction<'_>,
+        subscription: Subscription,
+    ) -> anyhow::Result<Option<Subscription>>;
 
     /// Unconditionally clear all pending-downgrade fields for a subscription.
     /// Used when an upgrade or explicit cancellation makes the pending intent obsolete.
@@ -556,6 +579,13 @@ pub trait SubscriptionService: Send + Sync {
         limit: i64,
         offset: i64,
     ) -> Result<(Vec<Subscription>, i64), SubscriptionError>;
+
+    /// Admin only: Fully replace exactly one existing subscription row by subscription_id.
+    async fn admin_replace_subscription(
+        &self,
+        admin_user_id: UserId,
+        subscription: Subscription,
+    ) -> Result<Subscription, SubscriptionError>;
 
     /// Create checkout session for purchasing credits. Returns checkout URL.
     async fn create_credit_purchase_checkout(
