@@ -1,8 +1,8 @@
 use super::ports::{
     BillingPeriod, ChangePlanOutcome, CreditsRepository, CreditsSummary, DowngradeIntentStatus,
     PaymentWebhookRepository, StripeCustomerRepository, Subscription, SubscriptionError,
-    SubscriptionPlan, SubscriptionRepository, SubscriptionService, SubscriptionWithPlan,
-    DEFAULT_MONTHLY_TOKEN_LIMIT,
+    SubscriptionPlan, SubscriptionReplacement, SubscriptionRepository, SubscriptionService,
+    SubscriptionWithPlan, DEFAULT_MONTHLY_TOKEN_LIMIT,
 };
 use crate::agent::ports::AgentRepository;
 use crate::agent::ports::AgentService;
@@ -2527,9 +2527,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
     async fn admin_replace_subscription(
         &self,
         admin_user_id: UserId,
-        subscription: Subscription,
+        subscription_id: String,
+        replacement: SubscriptionReplacement,
     ) -> Result<Subscription, SubscriptionError> {
-        let subscription_id = subscription.subscription_id.clone();
         tracing::info!(
             "Admin replacing subscription row: admin_user_id={}, subscription_id={}",
             admin_user_id,
@@ -2555,7 +2555,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
 
         let after = self
             .subscription_repo
-            .replace_subscription(&txn, subscription)
+            .replace_subscription(&txn, &subscription_id, replacement)
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
             .ok_or(SubscriptionError::SubscriptionNotFound)?;

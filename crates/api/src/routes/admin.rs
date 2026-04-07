@@ -848,14 +848,7 @@ pub async fn admin_replace_subscription(
     Path(subscription_id): Path<String>,
     Json(request): Json<AdminReplaceSubscriptionRequest>,
 ) -> Result<Json<services::subscription::ports::Subscription>, ApiError> {
-    tracing::info!(
-        "Admin replacing subscription row: admin_user_id={}, subscription_id={}",
-        admin.user_id,
-        subscription_id
-    );
-
-    let subscription = services::subscription::ports::Subscription {
-        subscription_id,
+    let replacement = services::subscription::ports::SubscriptionReplacement {
         user_id: request.user_id,
         provider: request.provider,
         customer_id: request.customer_id,
@@ -864,7 +857,6 @@ pub async fn admin_replace_subscription(
         current_period_end: request.current_period_end,
         cancel_at_period_end: request.cancel_at_period_end,
         created_at: request.created_at,
-        updated_at: chrono::Utc::now(),
         pending_downgrade_target_price_id: request.pending_downgrade_target_price_id,
         pending_downgrade_from_price_id: request.pending_downgrade_from_price_id,
         pending_downgrade_expected_period_end: request.pending_downgrade_expected_period_end,
@@ -874,7 +866,7 @@ pub async fn admin_replace_subscription(
 
     let subscription = app_state
         .subscription_service
-        .admin_replace_subscription(admin.user_id, subscription)
+        .admin_replace_subscription(admin.user_id, subscription_id, replacement)
         .await
         .map_err(|e| {
             tracing::error!(

@@ -1,6 +1,8 @@
 use crate::pool::DbPool;
 use async_trait::async_trait;
-use services::subscription::ports::{DowngradeIntentStatus, Subscription, SubscriptionRepository};
+use services::subscription::ports::{
+    DowngradeIntentStatus, Subscription, SubscriptionReplacement, SubscriptionRepository,
+};
 use services::UserId;
 
 fn row_to_subscription(row: &tokio_postgres::Row) -> Subscription {
@@ -374,9 +376,10 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
     async fn replace_subscription(
         &self,
         txn: &tokio_postgres::Transaction<'_>,
-        subscription: Subscription,
+        subscription_id: &str,
+        replacement: SubscriptionReplacement,
     ) -> anyhow::Result<Option<Subscription>> {
-        let pending_downgrade_status = subscription
+        let pending_downgrade_status = replacement
             .pending_downgrade_status
             .map(DowngradeIntentStatus::as_str);
 
@@ -404,20 +407,20 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
                            pending_downgrade_expected_period_end, pending_downgrade_status,
                            pending_downgrade_updated_at",
                 &[
-                    &subscription.subscription_id,
-                    &subscription.user_id,
-                    &subscription.provider,
-                    &subscription.customer_id,
-                    &subscription.price_id,
-                    &subscription.status,
-                    &subscription.current_period_end,
-                    &subscription.cancel_at_period_end,
-                    &subscription.created_at,
-                    &subscription.pending_downgrade_target_price_id,
-                    &subscription.pending_downgrade_from_price_id,
-                    &subscription.pending_downgrade_expected_period_end,
+                    &subscription_id,
+                    &replacement.user_id,
+                    &replacement.provider,
+                    &replacement.customer_id,
+                    &replacement.price_id,
+                    &replacement.status,
+                    &replacement.current_period_end,
+                    &replacement.cancel_at_period_end,
+                    &replacement.created_at,
+                    &replacement.pending_downgrade_target_price_id,
+                    &replacement.pending_downgrade_from_price_id,
+                    &replacement.pending_downgrade_expected_period_end,
                     &pending_downgrade_status,
-                    &subscription.pending_downgrade_updated_at,
+                    &replacement.pending_downgrade_updated_at,
                 ],
             )
             .await?;

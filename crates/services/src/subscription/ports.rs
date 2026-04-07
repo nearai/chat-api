@@ -69,6 +69,24 @@ pub struct Subscription {
     pub pending_downgrade_updated_at: Option<DateTime<Utc>>,
 }
 
+/// Admin repair payload for replacing one existing subscription row.
+#[derive(Debug, Clone)]
+pub struct SubscriptionReplacement {
+    pub user_id: UserId,
+    pub provider: String,
+    pub customer_id: String,
+    pub price_id: String,
+    pub status: String,
+    pub current_period_end: DateTime<Utc>,
+    pub cancel_at_period_end: bool,
+    pub created_at: DateTime<Utc>,
+    pub pending_downgrade_target_price_id: Option<String>,
+    pub pending_downgrade_from_price_id: Option<String>,
+    pub pending_downgrade_expected_period_end: Option<DateTime<Utc>>,
+    pub pending_downgrade_status: Option<DowngradeIntentStatus>,
+    pub pending_downgrade_updated_at: Option<DateTime<Utc>>,
+}
+
 /// API response model with plan name resolved from price_id
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -355,7 +373,8 @@ pub trait SubscriptionRepository: Send + Sync {
     async fn replace_subscription(
         &self,
         txn: &tokio_postgres::Transaction<'_>,
-        subscription: Subscription,
+        subscription_id: &str,
+        replacement: SubscriptionReplacement,
     ) -> anyhow::Result<Option<Subscription>>;
 
     /// Unconditionally clear all pending-downgrade fields for a subscription.
@@ -584,7 +603,8 @@ pub trait SubscriptionService: Send + Sync {
     async fn admin_replace_subscription(
         &self,
         admin_user_id: UserId,
-        subscription: Subscription,
+        subscription_id: String,
+        replacement: SubscriptionReplacement,
     ) -> Result<Subscription, SubscriptionError>;
 
     /// Create checkout session for purchasing credits. Returns checkout URL.
