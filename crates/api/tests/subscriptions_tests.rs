@@ -1,7 +1,7 @@
 mod common;
 
 use api::routes::api::SUBSCRIPTION_REQUIRED_ERROR_MESSAGE;
-use chrono::{Duration, TimeZone, Utc};
+use chrono::{Duration, TimeZone, Timelike, Utc};
 use common::{
     cleanup_user_agent_instances, cleanup_user_subscriptions, clear_subscription_plans,
     create_test_server, create_test_server_and_db, insert_test_agent_instances,
@@ -2238,7 +2238,9 @@ async fn test_admin_replace_subscription_success_updates_only_target_row() {
     let other_updated_before: chrono::DateTime<Utc> = other_row.get("updated_at");
 
     let replacement_period_end = Utc::now() + Duration::days(30);
-    let pending_updated_at = Utc::now() - Duration::hours(3);
+    let pending_updated_at = (Utc::now() - Duration::hours(3))
+        .with_nanosecond(((Utc::now() - Duration::hours(3)).timestamp_subsec_micros()) * 1_000)
+        .expect("valid microsecond timestamp");
     let admin_token = mock_login(&server, "replace_sub_success@admin.org").await;
 
     let response = server
