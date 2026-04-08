@@ -1,12 +1,11 @@
 WITH recalculated AS (
     SELECT
         ab.instance_id,
-        COALESCE(
-            SUM(u.quantity) FILTER (WHERE u.metric_key = 'llm.tokens'),
-            0
-        )::BIGINT AS total_tokens
+        COALESCE(SUM(u.quantity), 0)::BIGINT AS total_tokens
     FROM agent_balance ab
-    LEFT JOIN user_usage_event u ON u.instance_id = ab.instance_id
+    LEFT JOIN user_usage_event u
+        ON u.instance_id = ab.instance_id
+       AND u.metric_key = 'llm.tokens'
     GROUP BY ab.instance_id
 )
 UPDATE agent_balance AS ab
