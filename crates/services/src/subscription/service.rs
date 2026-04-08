@@ -1,8 +1,8 @@
 use super::ports::{
     BillingPeriod, ChangePlanOutcome, CreditsRepository, CreditsSummary, DowngradeIntentStatus,
     PaymentWebhookRepository, StripeCustomerRepository, Subscription, SubscriptionError,
-    SubscriptionPlan, SubscriptionRepository, SubscriptionService, SubscriptionWithPlan,
-    DEFAULT_MONTHLY_TOKEN_LIMIT,
+    SubscriptionPlan, SubscriptionReplacement, SubscriptionRepository, SubscriptionService,
+    SubscriptionWithPlan, DEFAULT_MONTHLY_TOKEN_LIMIT,
 };
 use crate::agent::ports::AgentRepository;
 use crate::agent::ports::AgentService;
@@ -438,6 +438,7 @@ impl SubscriptionServiceImpl {
             pending_downgrade_from_price_id: None,
             pending_downgrade_expected_period_end: None,
             pending_downgrade_status: None,
+            pending_downgrade_updated_at: None,
         })
     }
 
@@ -2436,6 +2437,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
             pending_downgrade_from_price_id: None,
             pending_downgrade_expected_period_end: None,
             pending_downgrade_status: None,
+            pending_downgrade_updated_at: None,
         };
 
         // Upsert subscription in transaction
@@ -2518,6 +2520,70 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .list_subscriptions(user_id, limit, offset)
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))
+    }
+
+    /// Admin-only raw subscription row override. This endpoint intentionally bypasses business
+    /// validation and relies on admin auth plus full before/after audit logging.
+    async fn admin_replace_subscription(
+        &self,
+        admin_user_id: UserId,
+        subscription_id: String,
+        replacement: SubscriptionReplacement,
+    ) -> Result<Subscription, SubscriptionError> {
+        tracing::info!(
+            "Admin replacing subscription row: admin_user_id={}, subscription_id={}",
+            admin_user_id,
+            subscription_id
+        );
+
+        let mut client = self
+            .db_pool
+            .get()
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+        let txn = client
+            .transaction()
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        let before = self
+            .subscription_repo
+            .get_subscription_for_update(&txn, &subscription_id)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
+            .ok_or(SubscriptionError::SubscriptionNotFound)?;
+
+        let after = self
+            .subscription_repo
+            .replace_subscription(&txn, &subscription_id, replacement)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
+            .ok_or(SubscriptionError::SubscriptionNotFound)?;
+
+        txn.commit()
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        let before_json = serde_json::to_string(&before)
+            .map_err(|e| SubscriptionError::InternalError(e.to_string()))?;
+        let after_json = serde_json::to_string(&after)
+            .map_err(|e| SubscriptionError::InternalError(e.to_string()))?;
+
+        self.invalidate_credit_limit_cache(before.user_id).await;
+        if after.user_id != before.user_id {
+            self.invalidate_credit_limit_cache(after.user_id).await;
+        }
+
+        // Intentionally log full before/after row snapshots for this privileged repair endpoint.
+        tracing::warn!(
+            admin_user_id = %admin_user_id,
+            subscription_id = %subscription_id,
+            before = %before_json,
+            after = %after_json,
+            "Admin overrode subscription row"
+        );
+
+        Ok(after)
     }
 
     async fn create_credit_purchase_checkout(
@@ -2787,6 +2853,7 @@ mod tests {
             pending_downgrade_from_price_id: None,
             pending_downgrade_expected_period_end: None,
             pending_downgrade_status: None,
+            pending_downgrade_updated_at: None,
         }
     }
 

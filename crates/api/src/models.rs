@@ -1232,6 +1232,42 @@ fn default_limit() -> i64 {
     20
 }
 
+/// Request to fully replace one existing subscription row (admin repair only)
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct AdminReplaceSubscriptionRequest {
+    /// User ID owning the subscription row
+    pub user_id: UserId,
+    /// Payment provider (e.g. "stripe")
+    pub provider: String,
+    /// Raw customer identifier stored in the subscriptions table
+    pub customer_id: String,
+    /// Raw provider price identifier
+    pub price_id: String,
+    /// Raw subscription status string
+    pub status: String,
+    /// Subscription period end date/time
+    pub current_period_end: chrono::DateTime<chrono::Utc>,
+    /// Whether cancellation is scheduled for period end
+    pub cancel_at_period_end: bool,
+    /// Original row creation timestamp to preserve
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Target price_id for a deferred downgrade intent
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_downgrade_target_price_id: Option<String>,
+    /// Original price_id when the downgrade intent was created
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_downgrade_from_price_id: Option<String>,
+    /// Expected period end when the downgrade will be evaluated
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_downgrade_expected_period_end: Option<chrono::DateTime<chrono::Utc>>,
+    /// Last downgrade intent status
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_downgrade_status: Option<services::subscription::ports::DowngradeIntentStatus>,
+    /// Timestamp when the downgrade intent was last changed
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_downgrade_updated_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 /// Request to set a user's subscription (admin only)
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct AdminSetSubscriptionRequest {
