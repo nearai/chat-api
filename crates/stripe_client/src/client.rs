@@ -348,30 +348,32 @@ fn map_checkout_session(
 ) -> Result<StripeCheckoutSession, StripeClientError> {
     let line_items = response
         .line_items
-        .map(|line_items| -> Result<StripeCheckoutLineItems, StripeClientError> {
-            let data = line_items
-                .data
-                .into_iter()
-                .map(|item| {
-                    let price_id =
-                        item.price
-                            .map(|p| p.id)
-                            .ok_or(StripeClientError::InvalidResponse(
-                                "missing checkout session line item price",
-                            ))?;
-                    let quantity = item.quantity.ok_or(StripeClientError::InvalidResponse(
-                        "missing checkout session line item quantity",
-                    ))?;
+        .map(
+            |line_items| -> Result<StripeCheckoutLineItems, StripeClientError> {
+                let data = line_items
+                    .data
+                    .into_iter()
+                    .map(|item| {
+                        let price_id =
+                            item.price
+                                .map(|p| p.id)
+                                .ok_or(StripeClientError::InvalidResponse(
+                                    "missing checkout session line item price",
+                                ))?;
+                        let quantity = item.quantity.ok_or(StripeClientError::InvalidResponse(
+                            "missing checkout session line item quantity",
+                        ))?;
 
-                    Ok(StripeCheckoutLineItem { price_id, quantity })
+                        Ok(StripeCheckoutLineItem { price_id, quantity })
+                    })
+                    .collect::<Result<Vec<_>, StripeClientError>>()?;
+
+                Ok(StripeCheckoutLineItems {
+                    has_more: line_items.has_more,
+                    data,
                 })
-                .collect::<Result<Vec<_>, StripeClientError>>()?;
-
-            Ok(StripeCheckoutLineItems {
-                has_more: line_items.has_more,
-                data,
-            })
-        })
+            },
+        )
         .transpose()?;
 
     Ok(StripeCheckoutSession {
