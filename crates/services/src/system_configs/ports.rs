@@ -202,6 +202,17 @@ pub struct AgentHostingCrabshackConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openclaw_image: Option<String>,
 
+    /// When `true`, non-TEE deploys for canonical `ironclaw` use the latest versioned image ref
+    /// from the agent manager (crabshack) `/images` allowlist—same source as upgrade checks—and
+    /// ignore `ironclaw_image`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ironclaw_deploy_latest_version_tag: Option<bool>,
+
+    /// When `true`, non-TEE deploys for canonical `openclaw` use the latest versioned image ref
+    /// from the agent manager `/images` allowlist, and ignore `openclaw_image`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openclaw_deploy_latest_version_tag: Option<bool>,
+
     /// Service type string sent to crabshack for ironclaw canonical type. If not set, defaults to
     /// "ironclaw-dind" (crabshack still uses -dind suffix for ironclaw; overridable without redeployment).
     #[serde(
@@ -225,6 +236,8 @@ impl AgentHostingCrabshackConfig {
     fn is_empty(&self) -> bool {
         self.ironclaw_image.is_none()
             && self.openclaw_image.is_none()
+            && self.ironclaw_deploy_latest_version_tag.is_none()
+            && self.openclaw_deploy_latest_version_tag.is_none()
             && self.ironclaw_service_type.is_none()
             && self.openclaw_service_type.is_none()
     }
@@ -258,6 +271,10 @@ impl<'de> Deserialize<'de> for AgentHostingConfig {
             ironclaw_image: Option<String>,
             #[serde(default)]
             openclaw_image: Option<String>,
+            #[serde(default)]
+            ironclaw_deploy_latest_version_tag: Option<bool>,
+            #[serde(default)]
+            openclaw_deploy_latest_version_tag: Option<bool>,
             #[serde(default, alias = "ironclaw_crabshack_type")]
             ironclaw_service_type: Option<String>,
             #[serde(default, alias = "openclaw_crabshack_type")]
@@ -271,6 +288,12 @@ impl<'de> Deserialize<'de> for AgentHostingConfig {
         }
         if crabshack.openclaw_image.is_none() {
             crabshack.openclaw_image = h.openclaw_image;
+        }
+        if crabshack.ironclaw_deploy_latest_version_tag.is_none() {
+            crabshack.ironclaw_deploy_latest_version_tag = h.ironclaw_deploy_latest_version_tag;
+        }
+        if crabshack.openclaw_deploy_latest_version_tag.is_none() {
+            crabshack.openclaw_deploy_latest_version_tag = h.openclaw_deploy_latest_version_tag;
         }
         if crabshack.ironclaw_service_type.is_none() {
             crabshack.ironclaw_service_type = h.ironclaw_service_type;
@@ -385,6 +408,14 @@ fn merge_agent_hosting_config(
                 base.crabshack.openclaw_image,
                 partial.crabshack.openclaw_image,
             ),
+            ironclaw_deploy_latest_version_tag: partial
+                .crabshack
+                .ironclaw_deploy_latest_version_tag
+                .or(base.crabshack.ironclaw_deploy_latest_version_tag),
+            openclaw_deploy_latest_version_tag: partial
+                .crabshack
+                .openclaw_deploy_latest_version_tag
+                .or(base.crabshack.openclaw_deploy_latest_version_tag),
             ironclaw_service_type: merge_opt_override(
                 base.crabshack.ironclaw_service_type,
                 partial.crabshack.ironclaw_service_type,
@@ -584,6 +615,21 @@ mod tests {
     }
 
     #[test]
+    fn agent_hosting_deserializes_deploy_latest_version_tag_flags() {
+        let json = r#"{"crabshack":{"ironclaw_deploy_latest_version_tag":true,"openclaw_deploy_latest_version_tag":false}}"#;
+        let h: AgentHostingConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(h.crabshack.ironclaw_deploy_latest_version_tag, Some(true));
+        assert_eq!(h.crabshack.openclaw_deploy_latest_version_tag, Some(false));
+    }
+
+    #[test]
+    fn agent_hosting_flat_deploy_latest_flags_merge_into_crabshack() {
+        let json = r#"{"ironclaw_deploy_latest_version_tag":true}"#;
+        let h: AgentHostingConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(h.crabshack.ironclaw_deploy_latest_version_tag, Some(true));
+    }
+
+    #[test]
     fn nested_crabshack_takes_precedence_over_legacy_flat_fields() {
         let json = r#"{"crabshack":{"ironclaw_image":"nested:1"},"ironclaw_image":"flat:2"}"#;
         let h: AgentHostingConfig = serde_json::from_str(json).unwrap();
@@ -600,6 +646,7 @@ mod tests {
                     openclaw_image: Some("open:base".to_string()),
                     ironclaw_service_type: Some("ic-type-base".to_string()),
                     openclaw_service_type: Some("oc-type-base".to_string()),
+                    ..Default::default()
                 },
             }),
             ..Default::default()
@@ -631,6 +678,7 @@ mod tests {
                     openclaw_image: None,
                     ironclaw_service_type: None,
                     openclaw_service_type: Some("oc-custom".to_string()),
+                    ..Default::default()
                 },
             }),
             ..Default::default()
