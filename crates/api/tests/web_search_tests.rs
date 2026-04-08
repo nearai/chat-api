@@ -2,6 +2,7 @@ mod common;
 
 use common::{create_test_server_and_db, mock_login, TestServerConfig};
 use serde_json::json;
+use services::agent::ports::AgentRepository;
 use services::user::ports::UserRepository;
 use services::UserId;
 use tokio::time::{sleep, Duration};
@@ -547,7 +548,7 @@ async fn web_search_records_usage_for_successful_agent_request() {
 
     let balance_row = client
         .query_one(
-            "SELECT total_spent, total_requests
+            "SELECT total_spent, total_requests, total_tokens
              FROM agent_balance
              WHERE instance_id = $1",
             &[&instance_id],
@@ -557,9 +558,34 @@ async fn web_search_records_usage_for_successful_agent_request() {
 
     let total_spent: i64 = balance_row.get(0);
     let total_requests: i64 = balance_row.get(1);
+    let total_tokens: i64 = balance_row.get(2);
 
     assert_eq!(total_spent, 456);
     assert_eq!(total_requests, 1);
+    assert_eq!(total_tokens, 0);
+
+    let agent_repo = db.agent_repository();
+    let (usage_entries, usage_total) = agent_repo
+        .get_instance_usage(instance_id, None, None, 10, 0)
+        .await
+        .expect("usage entries");
+
+    assert_eq!(usage_total, 1);
+    let item = &usage_entries[0];
+    assert_eq!(item.request_type, "mcp.web_search");
+    assert_eq!(item.model_id, "");
+    assert_eq!(item.input_tokens, 0);
+    assert_eq!(item.output_tokens, 0);
+    assert_eq!(item.total_tokens, 0);
+    assert_eq!(item.total_cost, 456);
+
+    let balance = agent_repo
+        .get_instance_balance(instance_id)
+        .await
+        .expect("balance lookup")
+        .expect("instance balance");
+    assert_eq!(balance.total_requests, 1);
+    assert_eq!(balance.total_tokens, 0);
 }
 
 #[tokio::test]
