@@ -12,15 +12,13 @@ use uuid::Uuid;
 use super::ports::{
     is_valid_service_type, AgentApiInstanceEnrichment, AgentApiKey, AgentApiKeyAuthError,
     AgentApiKeyCreationError, AgentInstance, AgentRepository, AgentService, CreateInstanceParams,
-    InstanceBalance, UpgradeAvailability, UsageLogEntry, VALID_SERVICE_TYPES,
+    InstanceBalance, UpgradeAvailability, UsageLogEntry, DEFAULT_AGENT_SERVICE_TYPE,
+    VALID_SERVICE_TYPES,
 };
 
 /// Maximum size for the Agent API SSE stream buffer (100 KB).
 /// Prevents DoS from a malicious Agent API sending extremely long lines.
 const MAX_BUFFER_SIZE: usize = 100 * 1024;
-
-/// Default service type for agent instances when not specified.
-const DEFAULT_SERVICE_TYPE: &str = "openclaw";
 
 /// How many instances to load when deciding if gateway session setup should run for legacy non-TEE users
 /// (global TEE flag but instances on a non-TEE manager). Cap keeps login-path DB work bounded.
@@ -99,6 +97,9 @@ fn compare_semantic_versions(a: &str, b: &str) -> std::cmp::Ordering {
 /// Fallback chain:
 /// - ironclaw: `hosting.crabshack.ironclaw_image` → "docker.io/nearaidev/ironclaw-dind:latest"
 /// - openclaw: `hosting.crabshack.openclaw_image` → "docker.io/nearaidev/openclaw-nearai-worker:latest"
+///
+/// Does not apply crabshack `deploy_latest_version_tag` flags; use
+/// `AgentServiceImpl::resolve_non_tee_worker_image_ref` for non-TEE deploys.
 fn get_image_for_service_type(service_type: &str, hosting: Option<&AgentHostingConfig>) -> String {
     match service_type {
         "ironclaw" => hosting
@@ -289,6 +290,42 @@ impl AgentServiceImpl {
             .ok()
             .flatten()
             .unwrap_or_default()
+    }
+
+    /// Docker image for non-TEE worker deploy when the caller did not supply `image`.
+    /// Honors crabshack `*_deploy_latest_version_tag` flags (latest versioned ref from the manager
+    /// `/images` allowlist, same as upgrade checks), ignoring pinned `*_image`.
+    async fn resolve_non_tee_worker_image_ref(
+        &self,
+        manager: &AgentManager,
+        canonical_service_type: &str,
+        hosting: Option<&AgentHostingConfig>,
+    ) -> anyhow::Result<String> {
+        let crab = hosting.map(|h| &h.crabshack);
+        let use_latest = match canonical_service_type {
+            "ironclaw" => crab.and_then(|c| c.ironclaw_deploy_latest_version_tag) == Some(true),
+            "openclaw" => crab.and_then(|c| c.openclaw_deploy_latest_version_tag) == Some(true),
+            _ => false,
+        };
+
+        if !use_latest {
+            return Ok(get_image_for_service_type(canonical_service_type, hosting));
+        }
+
+        match self
+            .get_latest_image_non_tee(manager, canonical_service_type, "deploy")
+            .await
+        {
+            Ok((ref_, _)) => Ok(ref_),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    service_type = %canonical_service_type,
+                    "Latest allowlist image unavailable; falling back to default image ref (no custom pins)"
+                );
+                Ok(get_image_for_service_type(canonical_service_type, None))
+            }
+        }
     }
 
     /// `true` when admin config says new agents use non-TEE infra (passkey / non-TEE managers).
@@ -865,7 +902,7 @@ impl AgentServiceImpl {
         let service_type = params
             .service_type
             .as_deref()
-            .unwrap_or(DEFAULT_SERVICE_TYPE);
+            .unwrap_or(DEFAULT_AGENT_SERVICE_TYPE);
         // Canonical type for DB and `get_image_for_*` match keys (`ironclaw`, `openclaw`).
         let canonical_service_type = service_type.to_string();
         let compose_api_service_type = compose_api_service_type_on_create(
@@ -878,12 +915,15 @@ impl AgentServiceImpl {
         let image_to_use = if let Some(img) = params.image {
             Some(img)
         } else if manager.get_is_non_tee() {
-            // Non-TEE manager requires image; map service_type to correct image
-            // e.g., user selects "ironclaw" → map to docker.io/nearaidev/ironclaw-dind:latest
-            Some(get_image_for_service_type(
-                &canonical_service_type,
-                configs.agent_hosting.as_ref(),
-            ))
+            // Non-TEE manager requires image; optional latest versioned ref from manager allowlist.
+            Some(
+                self.resolve_non_tee_worker_image_ref(
+                    manager,
+                    &canonical_service_type,
+                    configs.agent_hosting.as_ref(),
+                )
+                .await?,
+            )
         } else {
             // TEE manager: image is optional, let Agent API determine it
             None
@@ -1126,7 +1166,7 @@ impl AgentServiceImpl {
         let service_type = params
             .service_type
             .as_deref()
-            .unwrap_or(DEFAULT_SERVICE_TYPE);
+            .unwrap_or(DEFAULT_AGENT_SERVICE_TYPE);
 
         let canonical_service_type = service_type.to_string();
         let compose_api_service_type = compose_api_service_type_on_create(
@@ -1140,12 +1180,14 @@ impl AgentServiceImpl {
         let image_to_use = if let Some(img) = params.image {
             Some(img)
         } else if manager.get_is_non_tee() {
-            // Non-TEE manager requires image; map service_type to correct image
-            // e.g., user selects "ironclaw" → map to docker.io/nearaidev/ironclaw-dind:latest
-            Some(get_image_for_service_type(
-                &canonical_service_type,
-                configs.agent_hosting.as_ref(),
-            ))
+            Some(
+                self.resolve_non_tee_worker_image_ref(
+                    manager,
+                    &canonical_service_type,
+                    configs.agent_hosting.as_ref(),
+                )
+                .await?,
+            )
         } else {
             // TEE manager: image is optional, let Agent API determine it
             None
@@ -1575,7 +1617,7 @@ impl AgentService for AgentServiceImpl {
         let service_type_for_api = params
             .service_type
             .clone()
-            .or_else(|| Some(DEFAULT_SERVICE_TYPE.to_string()));
+            .or_else(|| Some(DEFAULT_AGENT_SERVICE_TYPE.to_string()));
 
         // Call Agent API with our API key and the chat-api URL (agents reach us at nearai_api_url)
         let response = self
@@ -1739,7 +1781,7 @@ impl AgentService for AgentServiceImpl {
         let service_type_for_api = params
             .service_type
             .clone()
-            .or_else(|| Some(DEFAULT_SERVICE_TYPE.to_string()));
+            .or_else(|| Some(DEFAULT_AGENT_SERVICE_TYPE.to_string()));
 
         // Get streaming receiver from Agent API
         let mut agent_api_rx = self
@@ -2011,7 +2053,7 @@ impl AgentService for AgentServiceImpl {
         let service_type_for_api = params
             .service_type
             .clone()
-            .or_else(|| Some(DEFAULT_SERVICE_TYPE.to_string()));
+            .or_else(|| Some(DEFAULT_AGENT_SERVICE_TYPE.to_string()));
 
         let mut rx = match self
             .call_agent_api_create_streaming(
@@ -3811,10 +3853,7 @@ impl AgentServiceImpl {
         tracing::debug!("TEE: /version response body: {:?}", version);
 
         // Map service_type to image key in the version response
-        let service_type = instance
-            .service_type
-            .as_deref()
-            .unwrap_or(DEFAULT_SERVICE_TYPE);
+        let service_type = instance.service_type_str();
         let image_key = match service_type {
             "ironclaw" => "ironclaw",
             _ => "worker",
@@ -3907,12 +3946,13 @@ impl AgentServiceImpl {
         })
     }
 
-    /// Fetch and filter allowed images from crabshack for a non-TEE instance
+    /// Fetch and filter allowed images from crabshack for a non-TEE manager.
+    /// `target_service_type` is the canonical or stored service type (e.g. `openclaw`, `ironclaw`, or legacy compose names).
     /// Returns filtered list of images matching service type and allow-create status
     async fn fetch_allowed_images_non_tee(
         &self,
         manager: &AgentManager,
-        instance: &AgentInstance,
+        target_service_type: &str,
         context: &str,
     ) -> anyhow::Result<Vec<CrabshackImageEntry>> {
         let bearer_token = &manager.token;
@@ -3960,12 +4000,6 @@ impl AgentServiceImpl {
             image_entries.len()
         );
 
-        // Determine which service type we're looking for
-        let target_service_type = instance
-            .service_type
-            .as_deref()
-            .unwrap_or(DEFAULT_SERVICE_TYPE);
-
         // Transform canonical service type to crabshack format (configurable via system_configs)
         let system_configs = self
             .system_configs_service
@@ -4003,16 +4037,16 @@ impl AgentServiceImpl {
         Ok(available_images)
     }
 
-    /// Fetch the latest versioned image from crabshack allowlist for a non-TEE instance
+    /// Fetch the latest versioned image from crabshack allowlist for a non-TEE manager.
     /// Returns the image ref and semantic version (only considers images with numeric versions)
     async fn get_latest_image_non_tee(
         &self,
         manager: &AgentManager,
-        instance: &AgentInstance,
-        context: &str, // For logging: "check" or "upgrade"
+        target_service_type: &str,
+        context: &str, // For logging: "check", "upgrade", or "deploy"
     ) -> anyhow::Result<(String, String)> {
         let available_images = self
-            .fetch_allowed_images_non_tee(manager, instance, context)
+            .fetch_allowed_images_non_tee(manager, target_service_type, context)
             .await?;
 
         // Extract versions from image refs and log them
@@ -4127,7 +4161,7 @@ impl AgentServiceImpl {
         if instance_not_found {
             // Try to fetch allowlist to provide the latest_image info, but don't fail if we can't
             let latest_image = match self
-                .get_latest_image_non_tee(manager, instance, "check")
+                .get_latest_image_non_tee(manager, instance.service_type_str(), "check")
                 .await
             {
                 Ok((img, _)) => img,
@@ -4160,7 +4194,7 @@ impl AgentServiceImpl {
             );
 
             let (latest_image, latest_version) = self
-                .get_latest_image_non_tee(manager, instance, "check")
+                .get_latest_image_non_tee(manager, instance.service_type_str(), "check")
                 .await?;
 
             let has_upgrade =
@@ -4187,7 +4221,7 @@ impl AgentServiceImpl {
             );
 
             let allowed_entries = self
-                .fetch_allowed_images_non_tee(manager, instance, "check")
+                .fetch_allowed_images_non_tee(manager, instance.service_type_str(), "check")
                 .await?;
 
             let matching_entry = allowed_entries.iter().find(|e| e.ref_ == current_image_ref);
@@ -4307,10 +4341,7 @@ impl AgentServiceImpl {
             .map_err(|e| anyhow!("Failed to parse compose-api version response: {}", e))?;
 
         // Map service_type to image key in the version response
-        let service_type = instance
-            .service_type
-            .as_deref()
-            .unwrap_or(DEFAULT_SERVICE_TYPE);
+        let service_type = instance.service_type_str();
         let image_key = match service_type {
             "ironclaw" => "ironclaw",
             _ => "worker",
@@ -4399,14 +4430,14 @@ impl AgentServiceImpl {
             // VERSIONED TAG: Get latest semver version
             tracing::debug!("Non-TEE upgrade: Upgrading versioned image");
             let (latest_image, _version) = self
-                .get_latest_image_non_tee(manager, instance, "upgrade")
+                .get_latest_image_non_tee(manager, instance.service_type_str(), "upgrade")
                 .await?;
             latest_image
         } else {
             // NON-VERSIONED TAG: Validate current ref exists in allowlist and use same tag
             tracing::debug!("Non-TEE upgrade: Upgrading non-versioned image");
             let allowed_entries = self
-                .fetch_allowed_images_non_tee(manager, instance, "upgrade")
+                .fetch_allowed_images_non_tee(manager, instance.service_type_str(), "upgrade")
                 .await?;
 
             let allowlist_entry = allowed_entries.iter().find(|e| e.ref_ == current_image);

@@ -42,7 +42,7 @@ impl AgentRepository for PostgresAgentRepository {
 
         let client = self.pool.get().await?;
 
-        // Default to 'openclaw' if service_type not provided (matches DEFAULT_SERVICE_TYPE in service layer)
+        // Default to 'openclaw' if service_type not provided (matches `DEFAULT_AGENT_SERVICE_TYPE` in services)
         let service_type = params.service_type.as_deref().unwrap_or("openclaw");
         let encrypted_token = encrypt_token(params.instance_token)
             .map_err(|e| anyhow::anyhow!("Failed to encrypt instance token: {e}"))?;
