@@ -866,13 +866,14 @@ pub async fn admin_replace_subscription(
 
     let subscription = app_state
         .subscription_service
-        .admin_replace_subscription(admin.user_id, subscription_id, replacement)
+        .admin_replace_subscription(admin.user_id, subscription_id.clone(), replacement)
         .await
         .map_err(|e| {
             tracing::error!(
-                "Failed to replace subscription row: admin_user_id={}, error={}",
-                admin.user_id,
-                e
+                admin_user_id = %admin.user_id,
+                subscription_id = %subscription_id,
+                error = %e,
+                "Failed to replace subscription row"
             );
             match e {
                 services::subscription::ports::SubscriptionError::SubscriptionNotFound => {

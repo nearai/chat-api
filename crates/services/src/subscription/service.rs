@@ -2560,14 +2560,14 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
             .ok_or(SubscriptionError::SubscriptionNotFound)?;
 
+        txn.commit()
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
         let before_json = serde_json::to_string(&before)
             .map_err(|e| SubscriptionError::InternalError(e.to_string()))?;
         let after_json = serde_json::to_string(&after)
             .map_err(|e| SubscriptionError::InternalError(e.to_string()))?;
-
-        txn.commit()
-            .await
-            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
         self.invalidate_credit_limit_cache(before.user_id).await;
         if after.user_id != before.user_id {
@@ -2576,11 +2576,11 @@ impl SubscriptionService for SubscriptionServiceImpl {
 
         // Intentionally log full before/after row snapshots for this privileged repair endpoint.
         tracing::warn!(
-            "Admin overrode subscription row: admin_user_id={}, subscription_id={}, before={}, after={}",
-            admin_user_id,
-            subscription_id,
-            before_json,
-            after_json
+            admin_user_id = %admin_user_id,
+            subscription_id = %subscription_id,
+            before = %before_json,
+            after = %after_json,
+            "Admin overrode subscription row"
         );
 
         Ok(after)
