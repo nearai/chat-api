@@ -1,7 +1,7 @@
 mod common;
 
 use api::routes::api::SUBSCRIPTION_REQUIRED_ERROR_MESSAGE;
-use chrono::{Duration, TimeZone, Utc};
+use chrono::{Duration, TimeZone, Timelike, Utc};
 use common::{
     cleanup_user_agent_instances, cleanup_user_subscriptions, clear_subscription_plans,
     create_test_server, create_test_server_and_db, insert_test_agent_instances,
@@ -2064,6 +2064,388 @@ async fn test_admin_set_subscription_success() {
         body.get("subscription_id").is_some(),
         "Response should include subscription_id"
     );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_admin_replace_subscription_requires_admin() {
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    let user_email = "replace_sub_requires_admin@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+    insert_test_subscription(&server, &db, user_email, false).await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .expect("get user")
+        .expect("user should exist");
+
+    let client = db.pool().get().await.expect("get pool client");
+    let row = client
+        .query_one(
+            "SELECT subscription_id, provider, customer_id, price_id, status, current_period_end, cancel_at_period_end, created_at,
+                    pending_downgrade_target_price_id, pending_downgrade_from_price_id,
+                    pending_downgrade_expected_period_end, pending_downgrade_status, pending_downgrade_updated_at
+             FROM subscriptions WHERE user_id = $1 LIMIT 1",
+            &[&user.id],
+        )
+        .await
+        .expect("load subscription row");
+
+    let subscription_id: String = row.get("subscription_id");
+    let current_period_end: chrono::DateTime<Utc> = row.get("current_period_end");
+    let created_at: chrono::DateTime<Utc> = row.get("created_at");
+
+    let user_token = mock_login(&server, user_email).await;
+    let response = server
+        .put(&format!("/v1/admin/subscriptions/{subscription_id}"))
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .json(&json!({
+            "user_id": user.id,
+            "provider": row.get::<_, String>("provider"),
+            "customer_id": row.get::<_, String>("customer_id"),
+            "price_id": row.get::<_, String>("price_id"),
+            "status": row.get::<_, String>("status"),
+            "current_period_end": current_period_end,
+            "cancel_at_period_end": row.get::<_, bool>("cancel_at_period_end"),
+            "created_at": created_at,
+            "pending_downgrade_target_price_id": row.get::<_, Option<String>>("pending_downgrade_target_price_id"),
+            "pending_downgrade_from_price_id": row.get::<_, Option<String>>("pending_downgrade_from_price_id"),
+            "pending_downgrade_expected_period_end": row.get::<_, Option<chrono::DateTime<Utc>>>("pending_downgrade_expected_period_end"),
+            "pending_downgrade_status": row.get::<_, Option<String>>("pending_downgrade_status"),
+            "pending_downgrade_updated_at": row.get::<_, Option<chrono::DateTime<Utc>>>("pending_downgrade_updated_at")
+        }))
+        .await;
+
+    assert_eq!(response.status_code(), 403);
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_admin_replace_subscription_requires_auth() {
+    let (server, _db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    let response = server
+        .put("/v1/admin/subscriptions/sub_missing")
+        .json(&json!({
+            "user_id": services::UserId::nil(),
+            "provider": "stripe",
+            "customer_id": "cus_test",
+            "price_id": "price_test_basic",
+            "status": "active",
+            "current_period_end": Utc::now(),
+            "cancel_at_period_end": false,
+            "created_at": Utc::now(),
+            "pending_downgrade_target_price_id": null,
+            "pending_downgrade_from_price_id": null,
+            "pending_downgrade_expected_period_end": null,
+            "pending_downgrade_status": null,
+            "pending_downgrade_updated_at": null
+        }))
+        .await;
+
+    assert_eq!(response.status_code(), 401);
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_admin_replace_subscription_not_found() {
+    let (server, _db) = create_test_server_and_db(TestServerConfig::default()).await;
+    let admin_token = mock_login(&server, "replace_sub_not_found@admin.org").await;
+
+    let response = server
+        .put("/v1/admin/subscriptions/sub_missing")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .json(&json!({
+            "user_id": services::UserId::nil(),
+            "provider": "stripe",
+            "customer_id": "cus_test",
+            "price_id": "price_test_basic",
+            "status": "active",
+            "current_period_end": Utc::now(),
+            "cancel_at_period_end": false,
+            "created_at": Utc::now(),
+            "pending_downgrade_target_price_id": null,
+            "pending_downgrade_from_price_id": null,
+            "pending_downgrade_expected_period_end": null,
+            "pending_downgrade_status": null,
+            "pending_downgrade_updated_at": null
+        }))
+        .await;
+
+    assert_eq!(response.status_code(), 404);
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_admin_replace_subscription_success_updates_only_target_row() {
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    let target_email = "replace_sub_target@example.com";
+    let other_email = "replace_sub_other@example.com";
+    cleanup_user_subscriptions(&db, target_email).await;
+    cleanup_user_subscriptions(&db, other_email).await;
+    insert_test_subscription(&server, &db, target_email, false).await;
+    insert_test_subscription(&server, &db, other_email, false).await;
+
+    let target_user = db
+        .user_repository()
+        .get_user_by_email(target_email)
+        .await
+        .expect("get target user")
+        .expect("target user should exist");
+    let other_user = db
+        .user_repository()
+        .get_user_by_email(other_email)
+        .await
+        .expect("get other user")
+        .expect("other user should exist");
+
+    let client = db.pool().get().await.expect("get pool client");
+    let target_row = client
+        .query_one(
+            "SELECT subscription_id, provider, customer_id, price_id, status, current_period_end, cancel_at_period_end, created_at, updated_at,
+                    pending_downgrade_target_price_id, pending_downgrade_from_price_id,
+                    pending_downgrade_expected_period_end, pending_downgrade_status, pending_downgrade_updated_at
+             FROM subscriptions WHERE user_id = $1 LIMIT 1",
+            &[&target_user.id],
+        )
+        .await
+        .expect("load target row");
+    let other_row = client
+        .query_one(
+            "SELECT subscription_id, price_id, status, cancel_at_period_end, updated_at
+             FROM subscriptions WHERE user_id = $1 LIMIT 1",
+            &[&other_user.id],
+        )
+        .await
+        .expect("load other row");
+
+    let subscription_id: String = target_row.get("subscription_id");
+    let previous_updated_at: chrono::DateTime<Utc> = target_row.get("updated_at");
+    let other_subscription_id: String = other_row.get("subscription_id");
+    let other_price_id_before: String = other_row.get("price_id");
+    let other_status_before: String = other_row.get("status");
+    let other_cancel_before: bool = other_row.get("cancel_at_period_end");
+    let other_updated_before: chrono::DateTime<Utc> = other_row.get("updated_at");
+
+    let replacement_period_end = Utc::now() + Duration::days(30);
+    let pending_updated_at = (Utc::now() - Duration::hours(3))
+        .with_nanosecond(((Utc::now() - Duration::hours(3)).timestamp_subsec_micros()) * 1_000)
+        .expect("valid microsecond timestamp");
+    let admin_token = mock_login(&server, "replace_sub_success@admin.org").await;
+
+    let response = server
+        .put(&format!("/v1/admin/subscriptions/{subscription_id}"))
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .json(&json!({
+            "user_id": target_user.id,
+            "provider": "stripe",
+            "customer_id": "cus_manual_override",
+            "price_id": "price_manual_override",
+            "status": "past_due",
+            "current_period_end": replacement_period_end,
+            "cancel_at_period_end": true,
+            "created_at": target_row.get::<_, chrono::DateTime<Utc>>("created_at"),
+            "pending_downgrade_target_price_id": "price_manual_target",
+            "pending_downgrade_from_price_id": "price_manual_from",
+            "pending_downgrade_expected_period_end": replacement_period_end,
+            "pending_downgrade_status": "pending",
+            "pending_downgrade_updated_at": pending_updated_at
+        }))
+        .await;
+
+    assert_eq!(response.status_code(), 200);
+    let body: serde_json::Value = response.json();
+    assert_eq!(
+        body["subscription_id"].as_str(),
+        Some(subscription_id.as_str())
+    );
+    assert_eq!(body["customer_id"].as_str(), Some("cus_manual_override"));
+    assert_eq!(body["price_id"].as_str(), Some("price_manual_override"));
+    assert_eq!(body["status"].as_str(), Some("past_due"));
+    assert_eq!(body["cancel_at_period_end"].as_bool(), Some(true));
+    assert_eq!(body["pending_downgrade_status"].as_str(), Some("pending"));
+    let response_pending_updated_at = body["pending_downgrade_updated_at"]
+        .as_str()
+        .expect("response should include pending_downgrade_updated_at")
+        .parse::<chrono::DateTime<Utc>>()
+        .expect("pending_downgrade_updated_at should be valid RFC3339");
+    assert_eq!(response_pending_updated_at, pending_updated_at);
+
+    let updated_target_row = client
+        .query_one(
+            "SELECT subscription_id, customer_id, price_id, status, current_period_end, cancel_at_period_end, updated_at,
+                    pending_downgrade_target_price_id, pending_downgrade_from_price_id,
+                    pending_downgrade_expected_period_end, pending_downgrade_status, pending_downgrade_updated_at
+             FROM subscriptions WHERE subscription_id = $1",
+            &[&subscription_id],
+        )
+        .await
+        .expect("reload target row");
+
+    assert_eq!(
+        updated_target_row.get::<_, String>("customer_id"),
+        "cus_manual_override"
+    );
+    assert_eq!(
+        updated_target_row.get::<_, String>("price_id"),
+        "price_manual_override"
+    );
+    assert_eq!(updated_target_row.get::<_, String>("status"), "past_due");
+    assert!(updated_target_row.get::<_, bool>("cancel_at_period_end"));
+    assert_eq!(
+        updated_target_row.get::<_, Option<String>>("pending_downgrade_target_price_id"),
+        Some("price_manual_target".to_string())
+    );
+    assert_eq!(
+        updated_target_row.get::<_, Option<String>>("pending_downgrade_from_price_id"),
+        Some("price_manual_from".to_string())
+    );
+    assert_eq!(
+        updated_target_row.get::<_, Option<String>>("pending_downgrade_status"),
+        Some("pending".to_string())
+    );
+    assert_eq!(
+        updated_target_row.get::<_, Option<chrono::DateTime<Utc>>>("pending_downgrade_updated_at"),
+        Some(pending_updated_at)
+    );
+    assert!(
+        updated_target_row.get::<_, chrono::DateTime<Utc>>("updated_at") >= previous_updated_at,
+        "updated_at should be set by DB trigger"
+    );
+
+    let updated_other_row = client
+        .query_one(
+            "SELECT subscription_id, price_id, status, cancel_at_period_end, updated_at
+             FROM subscriptions WHERE subscription_id = $1",
+            &[&other_subscription_id],
+        )
+        .await
+        .expect("reload other row");
+
+    assert_eq!(
+        updated_other_row.get::<_, String>("price_id"),
+        other_price_id_before
+    );
+    assert_eq!(
+        updated_other_row.get::<_, String>("status"),
+        other_status_before
+    );
+    assert_eq!(
+        updated_other_row.get::<_, bool>("cancel_at_period_end"),
+        other_cancel_before
+    );
+    assert_eq!(
+        updated_other_row.get::<_, chrono::DateTime<Utc>>("updated_at"),
+        other_updated_before
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_admin_replace_subscription_can_move_row_to_another_user() {
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    let source_email = "replace_sub_move_source@example.com";
+    let target_email = "replace_sub_move_target@example.com";
+    cleanup_user_subscriptions(&db, source_email).await;
+    cleanup_user_subscriptions(&db, target_email).await;
+    insert_test_subscription(&server, &db, source_email, false).await;
+    let _ = mock_login(&server, target_email).await;
+
+    let source_user = db
+        .user_repository()
+        .get_user_by_email(source_email)
+        .await
+        .expect("get source user")
+        .expect("source user should exist");
+    let target_user = db
+        .user_repository()
+        .get_user_by_email(target_email)
+        .await
+        .expect("get target user")
+        .expect("target user should exist");
+
+    let client = db.pool().get().await.expect("get pool client");
+    let row = client
+        .query_one(
+            "SELECT subscription_id, provider, customer_id, price_id, status, current_period_end, cancel_at_period_end, created_at
+             FROM subscriptions WHERE user_id = $1 LIMIT 1",
+            &[&source_user.id],
+        )
+        .await
+        .expect("load source row");
+    let subscription_id: String = row.get("subscription_id");
+
+    let admin_token = mock_login(&server, "replace_sub_move@admin.org").await;
+    let response = server
+        .put(&format!("/v1/admin/subscriptions/{subscription_id}"))
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .json(&json!({
+            "user_id": target_user.id,
+            "provider": row.get::<_, String>("provider"),
+            "customer_id": row.get::<_, String>("customer_id"),
+            "price_id": row.get::<_, String>("price_id"),
+            "status": row.get::<_, String>("status"),
+            "current_period_end": row.get::<_, chrono::DateTime<Utc>>("current_period_end"),
+            "cancel_at_period_end": row.get::<_, bool>("cancel_at_period_end"),
+            "created_at": row.get::<_, chrono::DateTime<Utc>>("created_at"),
+            "pending_downgrade_target_price_id": null,
+            "pending_downgrade_from_price_id": null,
+            "pending_downgrade_expected_period_end": null,
+            "pending_downgrade_status": null,
+            "pending_downgrade_updated_at": null
+        }))
+        .await;
+
+    assert_eq!(response.status_code(), 200);
+
+    let moved_row = client
+        .query_one(
+            "SELECT user_id FROM subscriptions WHERE subscription_id = $1",
+            &[&subscription_id],
+        )
+        .await
+        .expect("reload moved row");
+    assert_eq!(
+        moved_row.get::<_, services::UserId>("user_id"),
+        target_user.id
+    );
+
+    let source_count: i64 = client
+        .query_one(
+            "SELECT COUNT(*) FROM subscriptions WHERE user_id = $1",
+            &[&source_user.id],
+        )
+        .await
+        .expect("count source rows")
+        .get(0);
+    let target_count: i64 = client
+        .query_one(
+            "SELECT COUNT(*) FROM subscriptions WHERE user_id = $1",
+            &[&target_user.id],
+        )
+        .await
+        .expect("count target rows")
+        .get(0);
+
+    assert_eq!(source_count, 0);
+    assert_eq!(target_count, 1);
 }
 
 #[tokio::test]
