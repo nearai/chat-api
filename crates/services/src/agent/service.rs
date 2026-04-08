@@ -3759,6 +3759,7 @@ struct CrabshackImageEntry {
     service_type: String,
     status: String,
     created_at: String,
+    image_digest: Option<String>,
 }
 
 impl AgentServiceImpl {
@@ -3906,14 +3907,14 @@ impl AgentServiceImpl {
         })
     }
 
-    /// Fetch the latest image from crabshack allowlist for a non-TEE instance
-    /// Returns the image ref and semantic version
-    async fn get_latest_image_non_tee(
+    /// Fetch and filter allowed images from crabshack for a non-TEE instance
+    /// Returns filtered list of images matching service type and allow-create status
+    async fn fetch_allowed_images_non_tee(
         &self,
         manager: &AgentManager,
         instance: &AgentInstance,
-        context: &str, // For logging: "check" or "upgrade"
-    ) -> anyhow::Result<(String, String)> {
+        context: &str,
+    ) -> anyhow::Result<Vec<CrabshackImageEntry>> {
         let bearer_token = &manager.token;
 
         // Fetch available images from crabshack allowlist
@@ -3999,6 +4000,21 @@ impl AgentServiceImpl {
             available_images.len()
         );
 
+        Ok(available_images)
+    }
+
+    /// Fetch the latest versioned image from crabshack allowlist for a non-TEE instance
+    /// Returns the image ref and semantic version (only considers images with numeric versions)
+    async fn get_latest_image_non_tee(
+        &self,
+        manager: &AgentManager,
+        instance: &AgentInstance,
+        context: &str, // For logging: "check" or "upgrade"
+    ) -> anyhow::Result<(String, String)> {
+        let available_images = self
+            .fetch_allowed_images_non_tee(manager, instance, context)
+            .await?;
+
         // Extract versions from image refs and log them
         let images_with_versions: Vec<(String, Option<String>)> = available_images
             .iter()
@@ -4027,12 +4043,7 @@ impl AgentServiceImpl {
             .iter()
             .filter_map(|(ref_, version)| version.as_ref().map(|v| (ref_.clone(), v.clone())))
             .max_by(|a, b| compare_semantic_versions(&a.1, &b.1))
-            .ok_or_else(|| {
-                anyhow!(
-                    "No images with numeric versions available in allowlist for service_type='{}'",
-                    crabshack_service_type
-                )
-            })?;
+            .ok_or_else(|| anyhow!("No images with numeric versions available in allowlist"))?;
 
         tracing::debug!(
             "Non-TEE ({}): Latest image: ref={}, version={}",
@@ -4092,31 +4103,37 @@ impl AgentServiceImpl {
             ));
         }
 
-        let current_image = if !instance_not_found {
-            #[derive(serde::Deserialize)]
-            struct NonTeeInstanceResponse {
-                image: String,
-            }
+        #[derive(serde::Deserialize)]
+        struct NonTeeInstanceResponse {
+            image: String,
+            #[serde(default)]
+            image_digest: Option<String>,
+        }
 
+        let current_image = if !instance_not_found {
             let instance_status: NonTeeInstanceResponse = instance_resp
                 .json()
                 .await
                 .map_err(|e| anyhow!("Failed to parse non-TEE instance response: {}", e))?;
 
             tracing::debug!("Non-TEE: Current instance image: {}", instance_status.image);
-            Some(instance_status.image)
+            Some((instance_status.image, instance_status.image_digest))
         } else {
             None
         };
 
-        // Fetch the latest image from crabshack allowlist
-        let (latest_image, latest_version) = self
-            .get_latest_image_non_tee(manager, instance, "check")
-            .await?;
-
         // If instance not found (404), block upgrade until instance is synced
         // This handles cases where instance is not yet fully provisioned or synced
         if instance_not_found {
+            // Try to fetch allowlist to provide the latest_image info, but don't fail if we can't
+            let latest_image = match self
+                .get_latest_image_non_tee(manager, instance, "check")
+                .await
+            {
+                Ok((img, _)) => img,
+                Err(_) => "unknown".to_string(),
+            };
+
             tracing::info!(
                 "Non-TEE upgrade check blocked: instance_id={}, instance not synced. latest_image={}",
                 instance_id,
@@ -4129,47 +4146,116 @@ impl AgentServiceImpl {
             });
         }
 
-        // Determine upgrade availability by comparing semantic versions
-        let current_version = extract_version_from_image(current_image.as_ref().unwrap());
-        if let Some(ref v) = current_version {
+        let (current_image_ref, current_digest) = current_image.unwrap();
+
+        // Determine upgrade availability based on image tag type
+        let current_version = extract_version_from_image(&current_image_ref);
+
+        if let Some(curr_v) = current_version {
+            // VERSIONED TAG: Use semantic version comparison
             tracing::debug!(
-                "Non-TEE: Current image version extracted: ref={}, version={}",
-                current_image.as_ref().unwrap(),
-                v
+                "Non-TEE: Current image has numeric version: ref={}, version={}",
+                current_image_ref,
+                curr_v
             );
+
+            let (latest_image, latest_version) = self
+                .get_latest_image_non_tee(manager, instance, "check")
+                .await?;
+
+            let has_upgrade =
+                compare_semantic_versions(&curr_v, &latest_version) == std::cmp::Ordering::Less;
+
+            tracing::info!(
+                "Non-TEE upgrade check (versioned): instance_id={}, current_version={}, latest_version={}, has_upgrade={}",
+                instance_id,
+                curr_v,
+                latest_version,
+                has_upgrade
+            );
+
+            Ok(UpgradeAvailability {
+                has_upgrade,
+                current_image: Some(current_image_ref),
+                latest_image,
+            })
         } else {
+            // NON-VERSIONED TAG: Find exact ref in allowlist and compare digests
             tracing::debug!(
                 "Non-TEE: Current image has non-numeric tag: ref={}",
-                current_image.as_ref().unwrap()
+                current_image_ref
             );
+
+            let allowed_entries = self
+                .fetch_allowed_images_non_tee(manager, instance, "check")
+                .await?;
+
+            let matching_entry = allowed_entries.iter().find(|e| e.ref_ == current_image_ref);
+
+            let (has_upgrade, latest_image) = match matching_entry {
+                Some(entry) => {
+                    // Compare digests: if both exist and differ, upgrade is available
+                    let has_upgrade = match (&current_digest, &entry.image_digest) {
+                        (Some(curr_dig), Some(allow_dig)) => {
+                            // Both digests present: compare them
+                            let differs = curr_dig != allow_dig;
+                            tracing::debug!(
+                                "Non-TEE: Digest comparison: current={}, allowlist={}, differs={}",
+                                curr_dig,
+                                allow_dig,
+                                differs
+                            );
+                            differs
+                        }
+                        (Some(_), None) => {
+                            // Current has digest but allowlist doesn't - can't compare, assume no upgrade
+                            tracing::debug!(
+                                "Non-TEE: Current digest present but allowlist digest missing: current={:?}, allowlist=None",
+                                current_digest
+                            );
+                            false
+                        }
+                        (None, Some(_)) => {
+                            // Current missing digest but allowlist has one - can't compare, assume no upgrade
+                            tracing::debug!(
+                                "Non-TEE: Current digest missing but allowlist digest present: current=None, allowlist={:?}",
+                                entry.image_digest
+                            );
+                            false
+                        }
+                        (None, None) => {
+                            // Both missing digests - can't compare, assume no upgrade
+                            tracing::debug!("Non-TEE: Both current and allowlist digests missing");
+                            false
+                        }
+                    };
+                    (has_upgrade, entry.ref_.clone())
+                }
+                None => {
+                    // Image ref not in allowlist anymore - no upgrade info available
+                    tracing::warn!(
+                        "Non-TEE: Current image ref not found in allowlist: ref={}",
+                        current_image_ref
+                    );
+                    (false, current_image_ref.clone())
+                }
+            };
+
+            tracing::info!(
+                "Non-TEE upgrade check (non-versioned): instance_id={}, current_ref={}, current_digest={:?}, allowlist_digest={:?}, has_upgrade={}",
+                instance_id,
+                current_image_ref,
+                current_digest,
+                matching_entry.map(|e| &e.image_digest),
+                has_upgrade
+            );
+
+            Ok(UpgradeAvailability {
+                has_upgrade,
+                current_image: Some(current_image_ref),
+                latest_image,
+            })
         }
-
-        let has_upgrade = match current_version {
-            Some(curr_v) => {
-                compare_semantic_versions(&curr_v, &latest_version) == std::cmp::Ordering::Less
-            }
-            None => {
-                // If current image has non-numeric tag (like "dev", "latest"), assume upgrade available
-                tracing::warn!(
-                    "Non-TEE: Current image has non-numeric tag, assuming upgrade available"
-                );
-                true
-            }
-        };
-
-        tracing::info!(
-            "Non-TEE upgrade check completed: instance_id={}, current_image={}, latest_image={}, has_upgrade={}",
-            instance_id,
-            current_image.as_ref().unwrap(),
-            latest_image,
-            has_upgrade
-        );
-
-        Ok(UpgradeAvailability {
-            has_upgrade,
-            current_image,
-            latest_image,
-        })
     }
 }
 
@@ -4263,12 +4349,88 @@ impl AgentServiceImpl {
             instance.name
         );
 
-        // Fetch the latest image from crabshack allowlist
-        let (image, _version) = self
-            .get_latest_image_non_tee(manager, instance, "upgrade")
-            .await?;
+        // Fetch current instance to determine its image tag type
+        let bearer_token = &manager.token;
+        let encoded_name = urlencoding::encode(&instance.name);
+        let instance_url = format!("{}/instances/{}", manager.url, encoded_name);
+        tracing::debug!(
+            "Non-TEE upgrade: Fetching current instance from: {}",
+            instance_url
+        );
 
-        // Restart with the latest image (5-minute timeout; crabshack yields SSE stream)
+        let instance_resp = self
+            .http_client
+            .get(&instance_url)
+            .bearer_auth(bearer_token)
+            .send()
+            .await
+            .map_err(|e| anyhow!("Failed to fetch non-TEE instance for upgrade: {}", e))?;
+
+        if !instance_resp.status().is_success() {
+            return Err(anyhow!(
+                "Failed to fetch non-TEE instance status during upgrade: status={}",
+                instance_resp.status()
+            ));
+        }
+
+        #[derive(serde::Deserialize)]
+        struct NonTeeInstanceResponse {
+            image: String,
+            #[serde(default)]
+            image_digest: Option<String>,
+        }
+
+        let current_instance: NonTeeInstanceResponse = instance_resp.json().await.map_err(|e| {
+            anyhow!(
+                "Failed to parse non-TEE instance response during upgrade: {}",
+                e
+            )
+        })?;
+
+        let current_image = current_instance.image;
+        tracing::debug!(
+            "Non-TEE upgrade: Current instance image: {}, digest: {:?}",
+            current_image,
+            current_instance.image_digest
+        );
+
+        // Determine image to upgrade to based on tag type
+        let image = if extract_version_from_image(&current_image).is_some() {
+            // VERSIONED TAG: Get latest semver version
+            tracing::debug!("Non-TEE upgrade: Upgrading versioned image");
+            let (latest_image, _version) = self
+                .get_latest_image_non_tee(manager, instance, "upgrade")
+                .await?;
+            latest_image
+        } else {
+            // NON-VERSIONED TAG: Validate current ref exists in allowlist and use same tag
+            tracing::debug!("Non-TEE upgrade: Upgrading non-versioned image");
+            let allowed_entries = self
+                .fetch_allowed_images_non_tee(manager, instance, "upgrade")
+                .await?;
+
+            let allowlist_entry = allowed_entries.iter().find(|e| e.ref_ == current_image);
+            if allowlist_entry.is_none() {
+                return Err(anyhow!(
+                    "Current image ref {} not found in allowlist during upgrade",
+                    current_image
+                ));
+            }
+
+            tracing::debug!(
+                "Non-TEE upgrade: Non-versioned tag found in allowlist: ref={}, current_digest={:?}, allowlist_digest={:?}",
+                current_image,
+                current_instance.image_digest,
+                allowlist_entry.map(|e| &e.image_digest)
+            );
+
+            // Use the same image ref - manager will pull the latest digest of this tag
+            current_image.clone()
+        };
+
+        tracing::debug!("Non-TEE upgrade: Target image to restart with: {}", image);
+
+        // Restart with the target image (5-minute timeout; crabshack yields SSE stream)
         self.call_restart_streaming(manager, instance, &image, instance_id, user_id)
             .await
     }
@@ -6586,6 +6748,398 @@ mod tests {
             assert!(!out.has_upgrade);
             assert!(out.current_image.is_none());
             assert_eq!(out.latest_image, "docker.io/nearaidev/openclaw-dind:0.21.0");
+        }
+
+        #[tokio::test]
+        async fn non_tee_check_upgrade_non_versioned_tag_digest_changed() {
+            // Test non-versioned tags (e.g., :staging, :dev) with digest comparison
+            let server = setup_mock_server().await;
+            let uri = server.uri();
+            let token = "crab-token";
+            let instance_id = Uuid::new_v4();
+            let user_id = UserId(Uuid::new_v4());
+
+            Mock::given(method("GET"))
+                .and(path("/images"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                    {
+                        "ref": "docker.io/nearaidev/openclaw-dind:staging",
+                        "service_type": "openclaw-dind",
+                        "status": "allow-create",
+                        "created_at": "2024-01-15T10:00:00Z",
+                        "image_digest": "sha256:new-digest-abc123"
+                    }
+                ])))
+                .mount(&server)
+                .await;
+
+            Mock::given(method("GET"))
+                .and(path("/instances/test-instance"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "image": "docker.io/nearaidev/openclaw-dind:staging",
+                    "image_digest": "sha256:old-digest-xyz789"
+                })))
+                .mount(&server)
+                .await;
+
+            let instance = upgrade_check_instance(
+                instance_id,
+                user_id,
+                "test-instance",
+                &uri,
+                Some("openclaw-dind"),
+            );
+            let svc = service_for_upgrade_check(instance, &uri, token);
+            let out = AgentService::check_upgrade_available(&svc, instance_id, user_id)
+                .await
+                .expect("check_upgrade_available");
+
+            assert!(
+                out.has_upgrade,
+                "Digest changed, upgrade should be available"
+            );
+            assert_eq!(
+                out.current_image.as_deref(),
+                Some("docker.io/nearaidev/openclaw-dind:staging")
+            );
+            assert_eq!(
+                out.latest_image,
+                "docker.io/nearaidev/openclaw-dind:staging"
+            );
+        }
+
+        #[tokio::test]
+        async fn non_tee_check_upgrade_non_versioned_tag_digest_unchanged() {
+            // Test non-versioned tags with same digest (no upgrade)
+            let server = setup_mock_server().await;
+            let uri = server.uri();
+            let token = "crab-token";
+            let instance_id = Uuid::new_v4();
+            let user_id = UserId(Uuid::new_v4());
+
+            Mock::given(method("GET"))
+                .and(path("/images"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                    {
+                        "ref": "docker.io/nearaidev/openclaw-dind:dev",
+                        "service_type": "openclaw-dind",
+                        "status": "allow-create",
+                        "created_at": "2024-01-15T10:00:00Z",
+                        "image_digest": "sha256:same-digest-abc123"
+                    }
+                ])))
+                .mount(&server)
+                .await;
+
+            Mock::given(method("GET"))
+                .and(path("/instances/test-instance"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "image": "docker.io/nearaidev/openclaw-dind:dev",
+                    "image_digest": "sha256:same-digest-abc123"
+                })))
+                .mount(&server)
+                .await;
+
+            let instance = upgrade_check_instance(
+                instance_id,
+                user_id,
+                "test-instance",
+                &uri,
+                Some("openclaw-dind"),
+            );
+            let svc = service_for_upgrade_check(instance, &uri, token);
+            let out = AgentService::check_upgrade_available(&svc, instance_id, user_id)
+                .await
+                .expect("check_upgrade_available");
+
+            assert!(
+                !out.has_upgrade,
+                "Digest unchanged, upgrade should NOT be available"
+            );
+            assert_eq!(
+                out.current_image.as_deref(),
+                Some("docker.io/nearaidev/openclaw-dind:dev")
+            );
+            assert_eq!(out.latest_image, "docker.io/nearaidev/openclaw-dind:dev");
+        }
+
+        #[tokio::test]
+        async fn non_tee_check_upgrade_non_versioned_tag_not_in_allowlist() {
+            // Test non-versioned tag that's not in allowlist (no upgrade)
+            let server = setup_mock_server().await;
+            let uri = server.uri();
+            let token = "crab-token";
+            let instance_id = Uuid::new_v4();
+            let user_id = UserId(Uuid::new_v4());
+
+            Mock::given(method("GET"))
+                .and(path("/images"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                    {
+                        "ref": "docker.io/nearaidev/openclaw-dind:staging",
+                        "service_type": "openclaw-dind",
+                        "status": "allow-create",
+                        "created_at": "2024-01-15T10:00:00Z",
+                        "image_digest": "sha256:digest-staging"
+                    }
+                ])))
+                .mount(&server)
+                .await;
+
+            Mock::given(method("GET"))
+                .and(path("/instances/test-instance"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "image": "docker.io/nearaidev/openclaw-dind:dev",
+                    "image_digest": "sha256:digest-dev"
+                })))
+                .mount(&server)
+                .await;
+
+            let instance = upgrade_check_instance(
+                instance_id,
+                user_id,
+                "test-instance",
+                &uri,
+                Some("openclaw-dind"),
+            );
+            let svc = service_for_upgrade_check(instance, &uri, token);
+            let out = AgentService::check_upgrade_available(&svc, instance_id, user_id)
+                .await
+                .expect("check_upgrade_available");
+
+            assert!(
+                !out.has_upgrade,
+                "Image ref not in allowlist, upgrade should NOT be available"
+            );
+            assert_eq!(
+                out.current_image.as_deref(),
+                Some("docker.io/nearaidev/openclaw-dind:dev")
+            );
+            assert_eq!(out.latest_image, "docker.io/nearaidev/openclaw-dind:dev");
+        }
+
+        #[tokio::test]
+        async fn non_tee_upgrade_versioned_tag_gets_latest() {
+            // Test upgrade_instance_stream with versioned tag (should get latest semver)
+            let server = setup_mock_server().await;
+            let uri = server.uri();
+            let token = "crab-token";
+            let instance_id = Uuid::new_v4();
+            let user_id = UserId(Uuid::new_v4());
+
+            Mock::given(method("GET"))
+                .and(path("/instances/test-instance"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "image": "docker.io/nearaidev/openclaw-dind:0.20.0"
+                })))
+                .mount(&server)
+                .await;
+
+            Mock::given(method("GET"))
+                .and(path("/images"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                    {
+                        "ref": "docker.io/nearaidev/openclaw-dind:0.20.0",
+                        "service_type": "openclaw-dind",
+                        "status": "allow-create",
+                        "created_at": "2024-01-14T00:00:00Z"
+                    },
+                    {
+                        "ref": "docker.io/nearaidev/openclaw-dind:0.21.0",
+                        "service_type": "openclaw-dind",
+                        "status": "allow-create",
+                        "created_at": "2024-01-15T00:00:00Z"
+                    }
+                ])))
+                .mount(&server)
+                .await;
+
+            Mock::given(method("POST"))
+                .and(path("/instances/test-instance/restart"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .append_header("content-type", "text/event-stream")
+                        .set_body_string(
+                            "data: {\"status\":\"upgrading\"}\n\ndata: {\"stage\":\"ready\"}\n\n",
+                        ),
+                )
+                .mount(&server)
+                .await;
+
+            let instance = upgrade_check_instance(
+                instance_id,
+                user_id,
+                "test-instance",
+                &uri,
+                Some("openclaw-dind"),
+            );
+            let svc = service_for_upgrade_check(instance, &uri, token);
+            let result = AgentService::upgrade_instance_stream(&svc, instance_id, user_id).await;
+
+            assert!(result.is_ok(), "Upgrade should succeed with versioned tag");
+        }
+
+        #[tokio::test]
+        async fn non_tee_upgrade_non_versioned_tag_keeps_same_ref() {
+            // Test upgrade_instance_stream with non-versioned tag (should keep same ref)
+            let server = setup_mock_server().await;
+            let uri = server.uri();
+            let token = "crab-token";
+            let instance_id = Uuid::new_v4();
+            let user_id = UserId(Uuid::new_v4());
+
+            Mock::given(method("GET"))
+                .and(path("/instances/test-instance"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "image": "docker.io/nearaidev/openclaw-dind:staging"
+                })))
+                .mount(&server)
+                .await;
+
+            Mock::given(method("GET"))
+                .and(path("/images"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                    {
+                        "ref": "docker.io/nearaidev/openclaw-dind:staging",
+                        "service_type": "openclaw-dind",
+                        "status": "allow-create",
+                        "created_at": "2024-01-15T00:00:00Z",
+                        "image_digest": "sha256:new-digest"
+                    }
+                ])))
+                .mount(&server)
+                .await;
+
+            Mock::given(method("POST"))
+                .and(path("/instances/test-instance/restart"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .append_header("content-type", "text/event-stream")
+                        .set_body_string(
+                            "data: {\"status\":\"upgrading\"}\n\ndata: {\"stage\":\"ready\"}\n\n",
+                        ),
+                )
+                .mount(&server)
+                .await;
+
+            let instance = upgrade_check_instance(
+                instance_id,
+                user_id,
+                "test-instance",
+                &uri,
+                Some("openclaw-dind"),
+            );
+            let svc = service_for_upgrade_check(instance, &uri, token);
+            let result = AgentService::upgrade_instance_stream(&svc, instance_id, user_id).await;
+
+            assert!(
+                result.is_ok(),
+                "Upgrade should succeed with non-versioned tag"
+            );
+        }
+
+        #[tokio::test]
+        async fn non_tee_check_upgrade_non_versioned_tag_missing_allowlist_digest() {
+            // When allowlist doesn't have digest (None), we can't compare - no upgrade
+            let server = setup_mock_server().await;
+            let uri = server.uri();
+            let token = "crab-token";
+            let instance_id = Uuid::new_v4();
+            let user_id = UserId(Uuid::new_v4());
+
+            Mock::given(method("GET"))
+                .and(path("/images"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                    {
+                        "ref": "docker.io/nearaidev/openclaw-dind:staging",
+                        "service_type": "openclaw-dind",
+                        "status": "allow-create",
+                        "created_at": "2024-01-15T10:00:00Z"
+                        // Note: no image_digest field
+                    }
+                ])))
+                .mount(&server)
+                .await;
+
+            Mock::given(method("GET"))
+                .and(path("/instances/test-instance"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "image": "docker.io/nearaidev/openclaw-dind:staging",
+                    "image_digest": "sha256:some-digest"
+                })))
+                .mount(&server)
+                .await;
+
+            let instance = upgrade_check_instance(
+                instance_id,
+                user_id,
+                "test-instance",
+                &uri,
+                Some("openclaw-dind"),
+            );
+            let svc = service_for_upgrade_check(instance, &uri, token);
+            let out = AgentService::check_upgrade_available(&svc, instance_id, user_id)
+                .await
+                .expect("check_upgrade_available");
+
+            assert!(
+                !out.has_upgrade,
+                "No upgrade when allowlist digest is missing (can't compare)"
+            );
+            assert_eq!(
+                out.current_image.as_deref(),
+                Some("docker.io/nearaidev/openclaw-dind:staging")
+            );
+        }
+
+        #[tokio::test]
+        async fn non_tee_upgrade_non_versioned_tag_not_in_allowlist_fails() {
+            // Test upgrade_instance_stream fails when non-versioned tag not in allowlist
+            let server = setup_mock_server().await;
+            let uri = server.uri();
+            let token = "crab-token";
+            let instance_id = Uuid::new_v4();
+            let user_id = UserId(Uuid::new_v4());
+
+            Mock::given(method("GET"))
+                .and(path("/instances/test-instance"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "image": "docker.io/nearaidev/openclaw-dind:dev"
+                })))
+                .mount(&server)
+                .await;
+
+            Mock::given(method("GET"))
+                .and(path("/images"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                    {
+                        "ref": "docker.io/nearaidev/openclaw-dind:staging",
+                        "service_type": "openclaw-dind",
+                        "status": "allow-create",
+                        "created_at": "2024-01-15T00:00:00Z"
+                    }
+                ])))
+                .mount(&server)
+                .await;
+
+            let instance = upgrade_check_instance(
+                instance_id,
+                user_id,
+                "test-instance",
+                &uri,
+                Some("openclaw-dind"),
+            );
+            let svc = service_for_upgrade_check(instance, &uri, token);
+            let result = AgentService::upgrade_instance_stream(&svc, instance_id, user_id).await;
+
+            assert!(
+                result.is_err(),
+                "Upgrade should fail when non-versioned tag not in allowlist"
+            );
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("not found in allowlist"));
         }
     }
 
