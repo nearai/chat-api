@@ -434,8 +434,11 @@ pub async fn insert_test_subscription_with_provider_and_price(
         .execute(
             "INSERT INTO subscriptions (
                 subscription_id, user_id, provider, customer_id, price_id, status,
-                current_period_end, cancel_at_period_end
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                current_period_end, cancel_at_period_end,
+                pending_downgrade_target_price_id, pending_downgrade_from_price_id,
+                pending_downgrade_expected_period_end, pending_downgrade_status,
+                pending_downgrade_updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, NULL, NULL, NULL)
             ON CONFLICT (subscription_id) DO UPDATE SET
                 price_id = EXCLUDED.price_id,
                 cancel_at_period_end = EXCLUDED.cancel_at_period_end,

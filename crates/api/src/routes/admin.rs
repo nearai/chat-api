@@ -819,6 +819,73 @@ pub async fn admin_cancel_user_subscriptions(
     })))
 }
 
+/// Admin endpoint: Fully replace one existing subscription row (privileged repair only)
+///
+/// This endpoint exists only for manual admin data repair. It intentionally performs no
+/// subscription business validation beyond admin authentication and direct database constraints.
+/// It updates exactly one existing `subscriptions` row selected by `subscription_id`, does not
+/// create/delete rows, and relies on a full before/after audit log for accountability.
+#[utoipa::path(
+    put,
+    path = "/v1/admin/subscriptions/{subscription_id}",
+    tag = "Admin",
+    params(
+        ("subscription_id" = String, Path, description = "Subscription row ID")
+    ),
+    request_body = AdminReplaceSubscriptionRequest,
+    responses(
+        (status = 200, description = "Subscription row replaced successfully", body = services::subscription::ports::Subscription),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "Subscription row not found", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(("session_token" = []))
+)]
+pub async fn admin_replace_subscription(
+    State(app_state): State<AppState>,
+    Extension(admin): Extension<AuthenticatedUser>,
+    Path(subscription_id): Path<String>,
+    Json(request): Json<AdminReplaceSubscriptionRequest>,
+) -> Result<Json<services::subscription::ports::Subscription>, ApiError> {
+    let replacement = services::subscription::ports::SubscriptionReplacement {
+        user_id: request.user_id,
+        provider: request.provider,
+        customer_id: request.customer_id,
+        price_id: request.price_id,
+        status: request.status,
+        current_period_end: request.current_period_end,
+        cancel_at_period_end: request.cancel_at_period_end,
+        created_at: request.created_at,
+        pending_downgrade_target_price_id: request.pending_downgrade_target_price_id,
+        pending_downgrade_from_price_id: request.pending_downgrade_from_price_id,
+        pending_downgrade_expected_period_end: request.pending_downgrade_expected_period_end,
+        pending_downgrade_status: request.pending_downgrade_status,
+        pending_downgrade_updated_at: request.pending_downgrade_updated_at,
+    };
+
+    let subscription = app_state
+        .subscription_service
+        .admin_replace_subscription(admin.user_id, subscription_id.clone(), replacement)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                admin_user_id = %admin.user_id,
+                subscription_id = %subscription_id,
+                error = %e,
+                "Failed to replace subscription row"
+            );
+            match e {
+                services::subscription::ports::SubscriptionError::SubscriptionNotFound => {
+                    ApiError::not_found("Subscription not found")
+                }
+                _ => ApiError::internal_server_error("Failed to replace subscription row"),
+            }
+        })?;
+
+    Ok(Json(subscription))
+}
+
 /// List subscriptions (admin)
 ///
 /// Returns paginated raw subscription rows for internal operations and debugging.
@@ -2696,6 +2763,10 @@ pub fn create_admin_router() -> Router<AppState> {
             post(admin_set_user_subscription).delete(admin_cancel_user_subscriptions),
         )
         .route("/subscriptions", get(admin_list_subscriptions))
+        .route(
+            "/subscriptions/{subscription_id}",
+            axum::routing::put(admin_replace_subscription),
+        )
         .route("/models", get(list_models).patch(batch_upsert_models))
         .route("/models/{model_id}", delete(delete_model))
         .route("/vpc/revoke", post(revoke_vpc_credentials))
