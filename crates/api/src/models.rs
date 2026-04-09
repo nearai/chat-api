@@ -1131,6 +1131,8 @@ pub struct UsageResponse {
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub total_tokens: i64,
+    pub metric_key: String,
+    pub quantity: i64,
     pub input_cost: String,  // nano-dollars formatted as string
     pub output_cost: String, // nano-dollars formatted as string
     pub total_cost: String,  // nano-dollars formatted as string
@@ -1147,6 +1149,8 @@ impl From<services::agent::ports::UsageLogEntry> for UsageResponse {
             input_tokens: usage.input_tokens,
             output_tokens: usage.output_tokens,
             total_tokens: usage.total_tokens,
+            metric_key: usage.metric_key,
+            quantity: usage.quantity,
             input_cost: format_nano_dollars(usage.input_cost),
             output_cost: format_nano_dollars(usage.output_cost),
             total_cost: format_nano_dollars(usage.total_cost),
