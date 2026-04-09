@@ -6,6 +6,7 @@ use services::agent::ports::{
     AgentApiKey, AgentInstance, AgentRepository, CreateInstanceParams, InstanceBalance,
     UsageLogEntry,
 };
+use services::user_usage::METRIC_KEY_LLM_TOKENS;
 use services::UserId;
 use uuid::Uuid;
 
@@ -772,6 +773,8 @@ impl AgentRepository for PostgresAgentRepository {
                     "SELECT u.id, u.user_id, u.instance_id, u.api_key_id, k.name,
                             COALESCE((u.details->>'input_tokens')::BIGINT, 0),
                             COALESCE((u.details->>'output_tokens')::BIGINT, 0),
+                            CASE WHEN u.metric_key = $6 THEN u.quantity ELSE 0 END,
+                            u.metric_key,
                             u.quantity,
                             COALESCE((u.details->>'input_cost')::BIGINT, 0),
                             COALESCE((u.details->>'output_cost')::BIGINT, 0),
@@ -784,7 +787,14 @@ impl AgentRepository for PostgresAgentRepository {
                      WHERE u.instance_id = $1 AND u.created_at >= $2 AND u.created_at <= $3
                      ORDER BY u.created_at DESC
                      LIMIT $4 OFFSET $5",
-                    &[&instance_id, &start, &end, &limit, &offset],
+                    &[
+                        &instance_id,
+                        &start,
+                        &end,
+                        &limit,
+                        &offset,
+                        &METRIC_KEY_LLM_TOKENS,
+                    ],
                 )
                 .await?
         } else if let Some(start) = start_date {
@@ -793,6 +803,8 @@ impl AgentRepository for PostgresAgentRepository {
                     "SELECT u.id, u.user_id, u.instance_id, u.api_key_id, k.name,
                             COALESCE((u.details->>'input_tokens')::BIGINT, 0),
                             COALESCE((u.details->>'output_tokens')::BIGINT, 0),
+                            CASE WHEN u.metric_key = $5 THEN u.quantity ELSE 0 END,
+                            u.metric_key,
                             u.quantity,
                             COALESCE((u.details->>'input_cost')::BIGINT, 0),
                             COALESCE((u.details->>'output_cost')::BIGINT, 0),
@@ -805,7 +817,13 @@ impl AgentRepository for PostgresAgentRepository {
                      WHERE u.instance_id = $1 AND u.created_at >= $2
                      ORDER BY u.created_at DESC
                      LIMIT $3 OFFSET $4",
-                    &[&instance_id, &start, &limit, &offset],
+                    &[
+                        &instance_id,
+                        &start,
+                        &limit,
+                        &offset,
+                        &METRIC_KEY_LLM_TOKENS,
+                    ],
                 )
                 .await?
         } else if let Some(end) = end_date {
@@ -814,6 +832,8 @@ impl AgentRepository for PostgresAgentRepository {
                     "SELECT u.id, u.user_id, u.instance_id, u.api_key_id, k.name,
                             COALESCE((u.details->>'input_tokens')::BIGINT, 0),
                             COALESCE((u.details->>'output_tokens')::BIGINT, 0),
+                            CASE WHEN u.metric_key = $5 THEN u.quantity ELSE 0 END,
+                            u.metric_key,
                             u.quantity,
                             COALESCE((u.details->>'input_cost')::BIGINT, 0),
                             COALESCE((u.details->>'output_cost')::BIGINT, 0),
@@ -826,7 +846,7 @@ impl AgentRepository for PostgresAgentRepository {
                      WHERE u.instance_id = $1 AND u.created_at <= $2
                      ORDER BY u.created_at DESC
                      LIMIT $3 OFFSET $4",
-                    &[&instance_id, &end, &limit, &offset],
+                    &[&instance_id, &end, &limit, &offset, &METRIC_KEY_LLM_TOKENS],
                 )
                 .await?
         } else {
@@ -835,6 +855,8 @@ impl AgentRepository for PostgresAgentRepository {
                     "SELECT u.id, u.user_id, u.instance_id, u.api_key_id, k.name,
                             COALESCE((u.details->>'input_tokens')::BIGINT, 0),
                             COALESCE((u.details->>'output_tokens')::BIGINT, 0),
+                            CASE WHEN u.metric_key = $4 THEN u.quantity ELSE 0 END,
+                            u.metric_key,
                             u.quantity,
                             COALESCE((u.details->>'input_cost')::BIGINT, 0),
                             COALESCE((u.details->>'output_cost')::BIGINT, 0),
@@ -847,7 +869,7 @@ impl AgentRepository for PostgresAgentRepository {
                      WHERE u.instance_id = $1
                      ORDER BY u.created_at DESC
                      LIMIT $2 OFFSET $3",
-                    &[&instance_id, &limit, &offset],
+                    &[&instance_id, &limit, &offset, &METRIC_KEY_LLM_TOKENS],
                 )
                 .await?
         };
@@ -863,12 +885,14 @@ impl AgentRepository for PostgresAgentRepository {
                 input_tokens: r.get(5),
                 output_tokens: r.get(6),
                 total_tokens: r.get(7),
-                input_cost: r.get(8),
-                output_cost: r.get(9),
-                total_cost: r.get(10),
-                model_id: r.get::<_, Option<String>>(11).unwrap_or_default(),
-                request_type: r.get(12),
-                created_at: r.get(13),
+                metric_key: r.get(8),
+                quantity: r.get(9),
+                input_cost: r.get(10),
+                output_cost: r.get(11),
+                total_cost: r.get(12),
+                model_id: r.get::<_, Option<String>>(13).unwrap_or_default(),
+                request_type: r.get(14),
+                created_at: r.get(15),
             })
             .collect();
 
