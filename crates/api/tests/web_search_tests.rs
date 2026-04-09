@@ -2,7 +2,6 @@ mod common;
 
 use common::{create_test_server_and_db, mock_login, TestServerConfig};
 use serde_json::json;
-use services::agent::ports::AgentRepository;
 use services::user::ports::UserRepository;
 use services::UserId;
 use tokio::time::{sleep, Duration};
@@ -564,28 +563,41 @@ async fn web_search_records_usage_for_successful_agent_request() {
     assert_eq!(total_requests, 1);
     assert_eq!(total_tokens, 0);
 
-    let agent_repo = db.agent_repository();
-    let (usage_entries, usage_total) = agent_repo
-        .get_instance_usage(instance_id, None, None, 10, 0)
-        .await
-        .expect("usage entries");
+    let user_token = mock_login(&server, &success_agent_email).await;
+    let usage_response = server
+        .get(&format!("/v1/agents/instances/{instance_id}/usage"))
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .await;
 
-    assert_eq!(usage_total, 1);
-    let item = &usage_entries[0];
-    assert_eq!(item.request_type, "mcp.web_search");
-    assert_eq!(item.model_id, "");
-    assert_eq!(item.input_tokens, 0);
-    assert_eq!(item.output_tokens, 0);
-    assert_eq!(item.total_tokens, 0);
-    assert_eq!(item.total_cost, 456);
+    assert_eq!(usage_response.status_code(), 200);
+    let usage_body: serde_json::Value = usage_response.json();
+    assert_eq!(usage_body["total"], 1);
 
-    let balance = agent_repo
-        .get_instance_balance(instance_id)
-        .await
-        .expect("balance lookup")
-        .expect("instance balance");
-    assert_eq!(balance.total_requests, 1);
-    assert_eq!(balance.total_tokens, 0);
+    let item = &usage_body["items"][0];
+    assert_eq!(item["request_type"], "mcp.web_search");
+    assert_eq!(item["model_id"], "");
+    assert_eq!(item["metric_key"], "service.web_search");
+    assert_eq!(item["quantity"], 1);
+    assert_eq!(item["input_tokens"], 0);
+    assert_eq!(item["output_tokens"], 0);
+    assert_eq!(item["total_tokens"], 0);
+    assert_eq!(item["total_cost"], "0.000000456");
+
+    let balance_response = server
+        .get(&format!("/v1/agents/instances/{instance_id}/balance"))
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(balance_response.status_code(), 200);
+    let balance_body: serde_json::Value = balance_response.json();
+    assert_eq!(balance_body["total_requests"], 1);
+    assert_eq!(balance_body["total_tokens"], 0);
 }
 
 #[tokio::test]
