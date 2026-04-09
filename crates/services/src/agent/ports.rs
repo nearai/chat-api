@@ -138,6 +138,8 @@ pub struct UsageLogEntry {
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub total_tokens: i64,
+    pub metric_key: String,
+    pub quantity: i64,
     pub input_cost: i64,  // nano-dollars
     pub output_cost: i64, // nano-dollars
     pub total_cost: i64,  // nano-dollars

@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use services::user_usage::{
     InstanceUsageSummary, RecordUsageParams, UsageRankBy, UserUsageRepository, UserUsageSummary,
+    METRIC_KEY_LLM_TOKENS,
 };
 use services::UserId;
 use uuid::Uuid;
@@ -75,7 +76,11 @@ impl UserUsageRepository for PostgresUserUsageRepository {
         let instance_id = params
             .instance_id
             .ok_or_else(|| anyhow::anyhow!("instance_id required for balance update"))?;
-        let total_tokens = params.quantity;
+        let total_tokens = if params.metric_key == METRIC_KEY_LLM_TOKENS {
+            params.quantity
+        } else {
+            0
+        };
         let total_cost = params.cost_nano_usd.unwrap_or(0);
 
         let mut client = self.pool.get().await?;
