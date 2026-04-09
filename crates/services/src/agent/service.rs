@@ -58,37 +58,100 @@ fn extract_version_from_image(image_ref: &str) -> Option<String> {
     }
 }
 
-/// Parse semantic version string (e.g., "0.23.0" -> (0, 23, 0))
-fn parse_semantic_version(v: &str) -> (u32, u32, u32) {
-    let parts: Vec<&str> = v.split('.').collect();
-
-    // Extract numeric prefix from each part (handles versions like 1.2.3-rc1)
-    let parse_part = |s: &str| {
-        s.chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect::<String>()
-            .parse::<u32>()
-            .ok()
-    };
-
-    let major = parts.first().and_then(|s| parse_part(s)).unwrap_or(0);
-    let minor = parts.get(1).and_then(|s| parse_part(s)).unwrap_or(0);
-    let patch = parts.get(2).and_then(|s| parse_part(s)).unwrap_or(0);
-    (major, minor, patch)
+/// Check if a version string is stable (no pre-release suffix).
+/// Strips build metadata (+...) before checking for hyphen.
+/// Examples: "1.0.0" → true, "1.0.0-rc.1" → false
+fn is_stable_version(v: &str) -> bool {
+    let core = v.split('+').next().unwrap_or(v); // strip build metadata
+    !core.contains('-')
 }
 
-/// Compare two semantic versions
-fn compare_semantic_versions(a: &str, b: &str) -> std::cmp::Ordering {
-    let (major_a, minor_a, patch_a) = parse_semantic_version(a);
-    let (major_b, minor_b, patch_b) = parse_semantic_version(b);
+/// Parse semantic version string with pre-release support.
+/// Returns (major, minor, patch, prerelease_str)
+/// prerelease_str is "" for stable versions.
+/// Examples:
+/// - "1.0.0" → (1, 0, 0, "")
+/// - "1.0.0-rc.1" → (1, 0, 0, "rc.1")
+/// - "1.0.0-alpha+build123" → (1, 0, 0, "alpha")
+fn parse_semantic_version(v: &str) -> (u32, u32, u32, &str) {
+    // Strip build metadata first (everything after +)
+    let v_no_build = v.split('+').next().unwrap_or(v);
 
-    use std::cmp::Ordering;
-    match major_a.cmp(&major_b) {
-        Ordering::Equal => match minor_a.cmp(&minor_b) {
-            Ordering::Equal => patch_a.cmp(&patch_b),
-            other => other,
-        },
-        other => other,
+    // Split on first hyphen to separate core from pre-release
+    let (core, pre) = match v_no_build.split_once('-') {
+        Some((c, p)) => (c, p),
+        None => (v_no_build, ""),
+    };
+
+    // Parse core version parts
+    let parts: Vec<&str> = core.split('.').collect();
+    let parse_u32 = |s: &str| s.parse::<u32>().unwrap_or(0);
+
+    let major = parts.first().map(|s| parse_u32(s)).unwrap_or(0);
+    let minor = parts.get(1).map(|s| parse_u32(s)).unwrap_or(0);
+    let patch = parts.get(2).map(|s| parse_u32(s)).unwrap_or(0);
+
+    (major, minor, patch, pre)
+}
+
+/// Compare two semantic versions according to semver spec §11.
+/// Handles pre-release versions correctly:
+/// - Stable (1.0.0) > pre-release with same core (1.0.0-rc.1)
+/// - Pre-release identifiers compared left-to-right: numeric < alphanumeric
+///
+/// Examples:
+/// - "1.0.0-alpha" < "1.0.0-alpha.1" < "1.0.0-alpha.beta" < "1.0.0-beta" < "1.0.0"
+fn compare_semantic_versions(a: &str, b: &str) -> std::cmp::Ordering {
+    let (maj_a, min_a, pat_a, pre_a) = parse_semantic_version(a);
+    let (maj_b, min_b, pat_b, pre_b) = parse_semantic_version(b);
+
+    use std::cmp::Ordering::*;
+
+    // Compare numeric core first
+    let core_cmp = maj_a
+        .cmp(&maj_b)
+        .then(min_a.cmp(&min_b))
+        .then(pat_a.cmp(&pat_b));
+
+    if core_cmp != Equal {
+        return core_cmp;
+    }
+
+    // Same core: stable > pre-release (semver §11.4)
+    match (pre_a.is_empty(), pre_b.is_empty()) {
+        (true, false) => return Greater,
+        (false, true) => return Less,
+        (true, true) => return Equal,
+        (false, false) => {} // both have pre-release, compare them
+    }
+
+    // Compare pre-release identifier sequences
+    // Split on '.', e.g. "alpha.1" → ["alpha", "1"], "beta" → ["beta"]
+    let mut ids_a = pre_a.split('.');
+    let mut ids_b = pre_b.split('.');
+
+    loop {
+        match (ids_a.next(), ids_b.next()) {
+            (None, None) => return Equal,
+            (None, Some(_)) => return Less, // a is shorter, lower precedence
+            (Some(_), None) => return Greater, // b is shorter
+            (Some(id_a), Some(id_b)) => {
+                // Numeric identifiers are compared numerically
+                // Alphanumeric are compared lexically (ASCII sort order)
+                // Numeric identifiers always have lower precedence than alphanumeric
+                let ord = match (id_a.parse::<u64>(), id_b.parse::<u64>()) {
+                    (Ok(n_a), Ok(n_b)) => n_a.cmp(&n_b),
+                    (Err(_), Err(_)) => id_a.cmp(id_b),
+                    (Ok(_), Err(_)) => Less, // numeric < alphanumeric
+                    (Err(_), Ok(_)) => Greater,
+                };
+
+                if ord != Equal {
+                    return ord;
+                }
+                // ids are equal, continue to next
+            }
+        }
     }
 }
 
@@ -4028,6 +4091,19 @@ impl AgentServiceImpl {
             .cloned()
             .collect();
 
+        // Warn about incomplete entries (missing image_digest) which cannot be used for
+        // non-versioned tag comparison during upgrades
+        for img in &available_images {
+            if img.image_digest.is_none() {
+                tracing::warn!(
+                    "Non-TEE ({}): Allowlist entry missing image_digest (incomplete): ref={}. \
+                     This entry cannot be used for non-versioned tag upgrades.",
+                    context,
+                    img.ref_
+                );
+            }
+        }
+
         tracing::debug!(
             "Non-TEE ({}): Available images after filtering: {} images",
             context,
@@ -4072,10 +4148,26 @@ impl AgentServiceImpl {
             })
             .collect();
 
+        // Check if pre-release versions are allowed (defaults to false = stable-only)
+        let configs = self.get_system_configs().await;
+        let allow_prerelease = configs
+            .agent_hosting
+            .as_ref()
+            .and_then(|h| h.crabshack.allow_prerelease_upgrades)
+            .unwrap_or(false);
+
+        if !allow_prerelease {
+            tracing::debug!(
+                "Non-TEE ({}): Filtering to stable versions only (allow_prerelease_upgrades=false)",
+                context
+            );
+        }
+
         // Find the newest image by comparing semantic versions
         let latest_image_entry = images_with_versions
             .iter()
             .filter_map(|(ref_, version)| version.as_ref().map(|v| (ref_.clone(), v.clone())))
+            .filter(|(_, v)| allow_prerelease || is_stable_version(v))
             .max_by(|a, b| compare_semantic_versions(&a.1, &b.1))
             .ok_or_else(|| anyhow!("No images with numeric versions available in allowlist"))?;
 
@@ -4242,9 +4334,11 @@ impl AgentServiceImpl {
                             differs
                         }
                         (Some(_), None) => {
-                            // Current has digest but allowlist doesn't - can't compare, assume no upgrade
-                            tracing::debug!(
-                                "Non-TEE: Current digest present but allowlist digest missing: current={:?}, allowlist=None",
+                            // Current has digest but allowlist entry is missing it - data quality issue
+                            // For non-versioned tags, crabshack should always populate image_digest
+                            tracing::warn!(
+                                "Non-TEE: Allowlist entry missing image_digest (incomplete data): ref={}, current_digest={:?}",
+                                current_image_ref,
                                 current_digest
                             );
                             false
@@ -4280,7 +4374,7 @@ impl AgentServiceImpl {
                 instance_id,
                 current_image_ref,
                 current_digest,
-                matching_entry.map(|e| &e.image_digest),
+                matching_entry.and_then(|e| e.image_digest.as_ref()),
                 has_upgrade
             );
 
@@ -4452,7 +4546,7 @@ impl AgentServiceImpl {
                 "Non-TEE upgrade: Non-versioned tag found in allowlist: ref={}, current_digest={:?}, allowlist_digest={:?}",
                 current_image,
                 current_instance.image_digest,
-                allowlist_entry.map(|e| &e.image_digest)
+                allowlist_entry.and_then(|e| e.image_digest.as_ref())
             );
 
             // Use the same image ref - manager will pull the latest digest of this tag
@@ -7905,5 +7999,223 @@ mod tests {
 
         assert_eq!(ironclaw, "flag-independent.io/ironclaw:v1");
         assert_eq!(openclaw, "flag-independent.io/openclaw:v1");
+    }
+
+    // ========== SEMANTIC VERSION TESTS ==========
+
+    #[test]
+    fn test_is_stable_version_stable() {
+        assert!(is_stable_version("1.0.0"));
+        assert!(is_stable_version("0.21.0"));
+        assert!(is_stable_version("2.3.4"));
+        assert!(is_stable_version("0.0.0"));
+    }
+
+    #[test]
+    fn test_is_stable_version_prerelease() {
+        assert!(!is_stable_version("1.0.0-rc.1"));
+        assert!(!is_stable_version("1.0.0-alpha"));
+        assert!(!is_stable_version("1.0.0-beta.2"));
+        assert!(!is_stable_version("2.0.0-rc"));
+    }
+
+    #[test]
+    fn test_is_stable_version_with_build_metadata() {
+        // Build metadata is ignored for stability check
+        assert!(is_stable_version("1.0.0+build123"));
+        assert!(!is_stable_version("1.0.0-rc.1+build"));
+    }
+
+    #[test]
+    fn test_parse_semantic_version_stable() {
+        let (maj, min, pat, pre) = parse_semantic_version("1.2.3");
+        assert_eq!((maj, min, pat, pre), (1, 2, 3, ""));
+
+        let (maj, min, pat, pre) = parse_semantic_version("0.21.0");
+        assert_eq!((maj, min, pat, pre), (0, 21, 0, ""));
+    }
+
+    #[test]
+    fn test_parse_semantic_version_prerelease() {
+        let (maj, min, pat, pre) = parse_semantic_version("1.0.0-rc.1");
+        assert_eq!((maj, min, pat, pre), (1, 0, 0, "rc.1"));
+
+        let (maj, min, pat, pre) = parse_semantic_version("1.0.0-alpha");
+        assert_eq!((maj, min, pat, pre), (1, 0, 0, "alpha"));
+
+        let (maj, min, pat, pre) = parse_semantic_version("2.0.0-beta.2");
+        assert_eq!((maj, min, pat, pre), (2, 0, 0, "beta.2"));
+    }
+
+    #[test]
+    fn test_parse_semantic_version_with_build_metadata() {
+        let (maj, min, pat, pre) = parse_semantic_version("1.0.0+build123");
+        assert_eq!((maj, min, pat, pre), (1, 0, 0, ""));
+
+        let (maj, min, pat, pre) = parse_semantic_version("1.0.0-rc.1+build");
+        assert_eq!((maj, min, pat, pre), (1, 0, 0, "rc.1"));
+    }
+
+    #[test]
+    fn test_compare_semantic_versions_core_version() {
+        // Core version comparison (no pre-release)
+        assert_eq!(
+            compare_semantic_versions("1.0.0", "1.0.0"),
+            std::cmp::Ordering::Equal
+        );
+        assert_eq!(
+            compare_semantic_versions("1.0.0", "1.0.1"),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_semantic_versions("1.0.1", "1.0.0"),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(
+            compare_semantic_versions("1.0.0", "1.1.0"),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_semantic_versions("1.1.0", "2.0.0"),
+            std::cmp::Ordering::Less
+        );
+    }
+
+    #[test]
+    fn test_compare_semantic_versions_stable_vs_prerelease() {
+        // Stable version > pre-release with same core
+        assert_eq!(
+            compare_semantic_versions("1.0.0", "1.0.0-rc.1"),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(
+            compare_semantic_versions("1.0.0-rc.1", "1.0.0"),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_semantic_versions("2.0.0", "2.0.0-alpha"),
+            std::cmp::Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn test_compare_semantic_versions_prerelease_ordering() {
+        use std::cmp::Ordering;
+
+        // Full semver pre-release ordering from spec:
+        // 1.0.0-alpha < 1.0.0-alpha.1 < 1.0.0-alpha.beta < 1.0.0-beta < 1.0.0-beta.2 < 1.0.0-beta.11 < 1.0.0-rc.1 < 1.0.0
+
+        // alpha < alpha.1
+        assert_eq!(
+            compare_semantic_versions("1.0.0-alpha", "1.0.0-alpha.1"),
+            Ordering::Less
+        );
+
+        // alpha.1 < alpha.beta
+        assert_eq!(
+            compare_semantic_versions("1.0.0-alpha.1", "1.0.0-alpha.beta"),
+            Ordering::Less
+        );
+
+        // alpha.beta < beta
+        assert_eq!(
+            compare_semantic_versions("1.0.0-alpha.beta", "1.0.0-beta"),
+            Ordering::Less
+        );
+
+        // beta < beta.2
+        assert_eq!(
+            compare_semantic_versions("1.0.0-beta", "1.0.0-beta.2"),
+            Ordering::Less
+        );
+
+        // beta.2 < beta.11 (numeric comparison, not lexical)
+        assert_eq!(
+            compare_semantic_versions("1.0.0-beta.2", "1.0.0-beta.11"),
+            Ordering::Less
+        );
+
+        // beta.11 < rc.1
+        assert_eq!(
+            compare_semantic_versions("1.0.0-beta.11", "1.0.0-rc.1"),
+            Ordering::Less
+        );
+
+        // rc.1 < stable
+        assert_eq!(
+            compare_semantic_versions("1.0.0-rc.1", "1.0.0"),
+            Ordering::Less
+        );
+
+        // Full chain test
+        let versions = [
+            "1.0.0-alpha",
+            "1.0.0-alpha.1",
+            "1.0.0-alpha.beta",
+            "1.0.0-beta",
+            "1.0.0-beta.2",
+            "1.0.0-beta.11",
+            "1.0.0-rc.1",
+            "1.0.0",
+        ];
+
+        for i in 0..versions.len() - 1 {
+            assert_eq!(
+                compare_semantic_versions(versions[i], versions[i + 1]),
+                Ordering::Less,
+                "{} should be < {}",
+                versions[i],
+                versions[i + 1]
+            );
+        }
+    }
+
+    #[test]
+    fn test_compare_semantic_versions_numeric_vs_alphanumeric() {
+        use std::cmp::Ordering;
+
+        // Numeric identifiers have lower precedence than alphanumeric
+        assert_eq!(
+            compare_semantic_versions("1.0.0-1", "1.0.0-alpha"),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_semantic_versions("1.0.0-alpha", "1.0.0-1"),
+            Ordering::Greater
+        );
+
+        // In multi-part pre-release
+        assert_eq!(
+            compare_semantic_versions("1.0.0-1.alpha", "1.0.0-1.1"),
+            Ordering::Greater // alpha > numeric
+        );
+    }
+
+    #[test]
+    fn test_compare_semantic_versions_with_build_metadata() {
+        // Build metadata doesn't affect version precedence
+        assert_eq!(
+            compare_semantic_versions("1.0.0+build1", "1.0.0+build2"),
+            std::cmp::Ordering::Equal
+        );
+        assert_eq!(
+            compare_semantic_versions("1.0.0-rc.1+build1", "1.0.0-rc.1+build2"),
+            std::cmp::Ordering::Equal
+        );
+    }
+
+    #[test]
+    fn test_compare_semantic_versions_legacy_prerelease_case() {
+        // The old test case that relied on tie-breaking: both parse to same core
+        // but now stable (1.0.0) correctly wins over pre-release (1.0.0-rc1)
+        // regardless of order
+        assert_eq!(
+            compare_semantic_versions("1.0.0-rc1", "1.0.0"),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_semantic_versions("1.0.0", "1.0.0-rc1"),
+            std::cmp::Ordering::Greater
+        );
     }
 }

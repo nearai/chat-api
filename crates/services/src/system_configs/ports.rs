@@ -230,6 +230,12 @@ pub struct AgentHostingCrabshackConfig {
         alias = "openclaw_crabshack_type"
     )]
     pub openclaw_service_type: Option<String>,
+
+    /// If `true`, pre-release versions (e.g., 1.0.0-rc.1) are included in upgrade and deploy
+    /// image selection. If `false` (default), only stable versions are considered. Intended for
+    /// staging/test environments; production should leave this `false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_prerelease_upgrades: Option<bool>,
 }
 
 impl AgentHostingCrabshackConfig {
@@ -240,6 +246,7 @@ impl AgentHostingCrabshackConfig {
             && self.openclaw_deploy_latest_version_tag.is_none()
             && self.ironclaw_service_type.is_none()
             && self.openclaw_service_type.is_none()
+            && self.allow_prerelease_upgrades.is_none()
     }
 }
 
@@ -424,6 +431,10 @@ fn merge_agent_hosting_config(
                 base.crabshack.openclaw_service_type,
                 partial.crabshack.openclaw_service_type,
             ),
+            allow_prerelease_upgrades: partial
+                .crabshack
+                .allow_prerelease_upgrades
+                .or(base.crabshack.allow_prerelease_upgrades),
         },
     }
 }
