@@ -36,14 +36,15 @@ const GATEWAY_SESSION_INSTANCE_SCAN_LIMIT: i64 = 50;
 /// - `docker.io/repo/image` → `docker.io/repo/image` (no tag to strip)
 /// - `docker.io/repo/image@sha256:abcdef…` → unchanged (digest `:` must not be treated as a tag)
 ///
-/// Correctly handles registry ports by checking if colon is after the last slash.
+/// Correctly handles registry ports by comparing the last `:` with the last `/`.
 fn strip_image_tag(image: &str) -> &str {
     // Digest-qualified refs (`repo@sha256:…`): the colon separates algorithm from hash, not image:tag.
     if image.contains('@') {
         return image;
     }
     if let Some(tag_pos) = image.rfind(':') {
-        // Check if there's a / after the last :, which would indicate a port (not a tag)
+        // Compare last ':' with last '/': colon after last slash → tag separator; colon before last
+        // slash → registry host/port (e.g. `localhost:5000/repo`), keep full string.
         if let Some(slash_pos) = image.rfind('/') {
             if tag_pos > slash_pos {
                 // Colon after last slash = tag separator, strip it
@@ -4135,24 +4136,29 @@ impl AgentServiceImpl {
             .await
             .map_err(|e| anyhow!("Failed to read non-TEE images response body: {}", e))?;
 
-        tracing::debug!(
-            "Non-TEE ({}): Raw /images response: {}",
-            context,
-            response_body
-        );
+        let response_body_len = response_body.len();
 
         let image_entries: Vec<CrabshackImageEntry> = serde_json::from_str(&response_body)
             .map_err(|e| anyhow!("Failed to parse non-TEE images response: {}", e))?;
 
+        let sample_refs = image_entries
+            .iter()
+            .take(5)
+            .map(|img| img.ref_.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+
         tracing::debug!(
-            "Non-TEE ({}): Parsed {} total images from allowlist",
+            "Non-TEE ({}): Parsed {} allowlist images (response_bytes={}, sample_refs=[{}])",
             context,
-            image_entries.len()
+            image_entries.len(),
+            response_body_len,
+            sample_refs
         );
 
-        // Log detailed breakdown of all images for debugging
+        // Per-entry lines are verbose for large allowlists; use trace for full breakdown.
         for img in &image_entries {
-            tracing::debug!(
+            tracing::trace!(
                 "Non-TEE ({}): Allowlist image: ref={}, service_type={}, status={}, has_digest={}, created_at={}",
                 context,
                 img.ref_,
