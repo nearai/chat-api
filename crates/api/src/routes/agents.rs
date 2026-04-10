@@ -1456,6 +1456,8 @@ pub async fn check_upgrade_available(
                 has_upgrade: upgrade_info.has_upgrade,
                 current_image: upgrade_info.current_image,
                 latest_image: upgrade_info.latest_image,
+                current_digest: upgrade_info.current_digest,
+                latest_digest: upgrade_info.latest_digest,
             })
             .map_err(|_| ApiError::internal_server_error("Failed to serialize response"))?,
         ))
@@ -1467,6 +1469,8 @@ pub struct UpgradeAvailabilityResponse {
     pub has_upgrade: bool,
     pub current_image: Option<String>,
     pub latest_image: String,
+    pub current_digest: Option<String>,
+    pub latest_digest: Option<String>,
 }
 
 /// Response for agent key verification

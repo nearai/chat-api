@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use services::agent::ports::{
     AgentApiKey, AgentInstance, AgentRepository, CreateInstanceParams, InstanceBalance,
-    UsageLogEntry,
+    UsageLogEntry, DEFAULT_AGENT_SERVICE_TYPE,
 };
 use services::user_usage::METRIC_KEY_LLM_TOKENS;
 use services::UserId;
@@ -43,8 +43,11 @@ impl AgentRepository for PostgresAgentRepository {
 
         let client = self.pool.get().await?;
 
-        // Default to 'openclaw' if service_type not provided (matches DEFAULT_SERVICE_TYPE in service layer)
-        let service_type = params.service_type.as_deref().unwrap_or("openclaw");
+        // Default to the shared service-layer constant when service_type is omitted.
+        let service_type = params
+            .service_type
+            .as_deref()
+            .unwrap_or(DEFAULT_AGENT_SERVICE_TYPE);
         let encrypted_token = encrypt_token(params.instance_token)
             .map_err(|e| anyhow::anyhow!("Failed to encrypt instance token: {e}"))?;
 

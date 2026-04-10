@@ -36,6 +36,9 @@ pub fn is_valid_service_type(service_type: &str) -> bool {
     VALID_SERVICE_TYPES.contains(&service_type)
 }
 
+/// Default [`AgentInstance::service_type`] when unset in storage or API payloads.
+pub const DEFAULT_AGENT_SERVICE_TYPE: &str = "openclaw";
+
 /// Enrichment data from the agent compose-api (TEE or non-TEE) for instance responses
 #[derive(Debug, Clone, Default)]
 pub struct AgentApiInstanceEnrichment {
@@ -49,6 +52,8 @@ pub struct UpgradeAvailability {
     pub has_upgrade: bool,
     pub current_image: Option<String>,
     pub latest_image: String,
+    pub current_digest: Option<String>,
+    pub latest_digest: Option<String>,
 }
 
 /// Agent instance metadata
@@ -70,6 +75,16 @@ pub struct AgentInstance {
     pub status: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl AgentInstance {
+    /// Stored service type or [`DEFAULT_AGENT_SERVICE_TYPE`].
+    #[inline]
+    pub fn service_type_str(&self) -> &str {
+        self.service_type
+            .as_deref()
+            .unwrap_or(DEFAULT_AGENT_SERVICE_TYPE)
+    }
 }
 
 /// API key metadata (without plaintext key)
