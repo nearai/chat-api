@@ -52,6 +52,8 @@ pub struct UpgradeAvailability {
     pub has_upgrade: bool,
     pub current_image: Option<String>,
     pub latest_image: String,
+    pub current_digest: Option<String>,
+    pub latest_digest: Option<String>,
 }
 
 /// Agent instance metadata

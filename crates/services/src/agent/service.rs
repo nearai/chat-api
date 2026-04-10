@@ -27,6 +27,36 @@ const GATEWAY_SESSION_INSTANCE_SCAN_LIMIT: i64 = 50;
 // Resource sizing defaults (instance_default_cpus, instance_default_mem_limit, instance_default_storage_size)
 // are struct fields accessible via self.instance_default_cpus, etc.
 
+/// Strip tag from Docker/OCI image reference, returning just the repository.
+///
+/// Examples:
+/// - `docker.io/repo/image:staging` → `docker.io/repo/image`
+/// - `docker.io/repo/image:0.21.0` → `docker.io/repo/image`
+/// - `localhost:5000/image:tag` → `localhost:5000/image` (preserves registry port)
+/// - `docker.io/repo/image` → `docker.io/repo/image` (no tag to strip)
+///
+/// Correctly handles registry ports by checking if colon is after the last slash.
+fn strip_image_tag(image: &str) -> &str {
+    if let Some(tag_pos) = image.rfind(':') {
+        // Check if there's a / after the last :, which would indicate a port (not a tag)
+        if let Some(slash_pos) = image.rfind('/') {
+            if tag_pos > slash_pos {
+                // Colon after last slash = tag separator, strip it
+                &image[..tag_pos]
+            } else {
+                // Colon is part of registry (e.g., localhost:5000), keep full image
+                image
+            }
+        } else {
+            // No slash, colon is a tag separator
+            &image[..tag_pos]
+        }
+    } else {
+        // No colon, no tag to strip
+        image
+    }
+}
+
 /// Extract version tag from Docker/OCI image ref
 ///
 /// Properly parses image references like:
@@ -379,14 +409,14 @@ impl AgentServiceImpl {
             .get_latest_image_non_tee(manager, canonical_service_type, "deploy")
             .await
         {
-            Ok((ref_, _)) => Ok(ref_),
+            Ok((ref_, _, _)) => Ok(ref_),
             Err(e) => {
                 tracing::warn!(
                     error = %e,
                     service_type = %canonical_service_type,
-                    "Latest allowlist image unavailable; falling back to default image ref (no custom pins)"
+                    "Latest allowlist image unavailable; falling back to configured image ref"
                 );
-                Ok(get_image_for_service_type(canonical_service_type, None))
+                Ok(get_image_for_service_type(canonical_service_type, hosting))
             }
         }
     }
@@ -3864,6 +3894,7 @@ struct CrabshackImageEntry {
     service_type: String,
     status: String,
     created_at: String,
+    #[serde(rename = "digest")]
     image_digest: Option<String>,
 }
 
@@ -3969,6 +4000,8 @@ impl AgentServiceImpl {
                 has_upgrade: false,
                 current_image: None,
                 latest_image,
+                current_digest: None,
+                latest_digest: None,
             });
         }
 
@@ -3984,9 +4017,18 @@ impl AgentServiceImpl {
             image: String,
         }
 
-        let instance_status: InstanceResponse = instance_resp
-            .json()
+        let response_body = instance_resp
+            .text()
             .await
+            .map_err(|e| anyhow!("Failed to read instance response body: {}", e))?;
+
+        tracing::debug!(
+            "TEE: Raw /instances/{} response: {}",
+            encoded_name,
+            response_body
+        );
+
+        let instance_status: InstanceResponse = serde_json::from_str(&response_body)
             .map_err(|e| anyhow!("Failed to parse instance response: {}", e))?;
 
         let current_image = instance_status.image;
@@ -4006,18 +4048,20 @@ impl AgentServiceImpl {
             has_upgrade,
             current_image: Some(current_image),
             latest_image,
+            current_digest: None,
+            latest_digest: None,
         })
     }
 
     /// Fetch and filter allowed images from crabshack for a non-TEE manager.
     /// `target_service_type` is the canonical or stored service type (e.g. `openclaw`, `ironclaw`, or legacy compose names).
-    /// Returns filtered list of images matching service type and allow-create status
+    /// Returns filtered list of images and the hosting config (to avoid redundant system_configs reads).
     async fn fetch_allowed_images_non_tee(
         &self,
         manager: &AgentManager,
         target_service_type: &str,
         context: &str,
-    ) -> anyhow::Result<Vec<CrabshackImageEntry>> {
+    ) -> anyhow::Result<(Vec<CrabshackImageEntry>, Option<AgentHostingConfig>)> {
         let bearer_token = &manager.token;
 
         // Fetch available images from crabshack allowlist
@@ -4054,6 +4098,12 @@ impl AgentServiceImpl {
             .await
             .map_err(|e| anyhow!("Failed to read non-TEE images response body: {}", e))?;
 
+        tracing::debug!(
+            "Non-TEE ({}): Raw /images response: {}",
+            context,
+            response_body
+        );
+
         let image_entries: Vec<CrabshackImageEntry> = serde_json::from_str(&response_body)
             .map_err(|e| anyhow!("Failed to parse non-TEE images response: {}", e))?;
 
@@ -4062,6 +4112,19 @@ impl AgentServiceImpl {
             context,
             image_entries.len()
         );
+
+        // Log detailed breakdown of all images for debugging
+        for img in &image_entries {
+            tracing::debug!(
+                "Non-TEE ({}): Allowlist image: ref={}, service_type={}, status={}, has_digest={}, created_at={}",
+                context,
+                img.ref_,
+                img.service_type,
+                img.status,
+                img.image_digest.is_some(),
+                img.created_at
+            );
+        }
 
         // Transform canonical service type to crabshack format (configurable via system_configs)
         let system_configs = self
@@ -4091,12 +4154,13 @@ impl AgentServiceImpl {
             .cloned()
             .collect();
 
-        // Warn about incomplete entries (missing image_digest) which cannot be used for
-        // non-versioned tag comparison during upgrades
+        // Warn about incomplete entries (missing image_digest) for non-versioned tags.
+        // Image digest is only required for non-versioned tag comparison during upgrades.
         for img in &available_images {
-            if img.image_digest.is_none() {
+            // Only warn if this is a non-versioned tag and digest is missing
+            if extract_version_from_image(&img.ref_).is_none() && img.image_digest.is_none() {
                 tracing::warn!(
-                    "Non-TEE ({}): Allowlist entry missing image_digest (incomplete): ref={}. \
+                    "Non-TEE ({}): Allowlist entry with non-versioned tag missing image_digest (incomplete): ref={}. \
                      This entry cannot be used for non-versioned tag upgrades.",
                     context,
                     img.ref_
@@ -4110,23 +4174,23 @@ impl AgentServiceImpl {
             available_images.len()
         );
 
-        Ok(available_images)
+        Ok((available_images, hosting_config.cloned()))
     }
 
     /// Fetch the latest versioned image from crabshack allowlist for a non-TEE manager.
-    /// Returns the image ref and semantic version (only considers images with numeric versions)
+    /// Returns the image ref, semantic version, and optional digest (only considers images with numeric versions)
     async fn get_latest_image_non_tee(
         &self,
         manager: &AgentManager,
         target_service_type: &str,
         context: &str, // For logging: "check", "upgrade", or "deploy"
-    ) -> anyhow::Result<(String, String)> {
-        let available_images = self
+    ) -> anyhow::Result<(String, String, Option<String>)> {
+        let (available_images, hosting_config) = self
             .fetch_allowed_images_non_tee(manager, target_service_type, context)
             .await?;
 
         // Extract versions from image refs and log them
-        let images_with_versions: Vec<(String, Option<String>)> = available_images
+        let images_with_versions: Vec<(String, Option<String>, Option<String>)> = available_images
             .iter()
             .map(|img| {
                 let version = extract_version_from_image(&img.ref_);
@@ -4144,14 +4208,13 @@ impl AgentServiceImpl {
                         img.ref_
                     );
                 }
-                (img.ref_.clone(), version)
+                (img.ref_.clone(), version, img.image_digest.clone())
             })
             .collect();
 
         // Check if pre-release versions are allowed (defaults to false = stable-only)
-        let configs = self.get_system_configs().await;
-        let allow_prerelease = configs
-            .agent_hosting
+        // Use the hosting_config we already fetched in fetch_allowed_images_non_tee to avoid redundant DB read
+        let allow_prerelease = hosting_config
             .as_ref()
             .and_then(|h| h.crabshack.allow_prerelease_upgrades)
             .unwrap_or(false);
@@ -4166,19 +4229,28 @@ impl AgentServiceImpl {
         // Find the newest image by comparing semantic versions
         let latest_image_entry = images_with_versions
             .iter()
-            .filter_map(|(ref_, version)| version.as_ref().map(|v| (ref_.clone(), v.clone())))
-            .filter(|(_, v)| allow_prerelease || is_stable_version(v))
+            .filter_map(|(ref_, version, digest)| {
+                version
+                    .as_ref()
+                    .map(|v| (ref_.clone(), v.clone(), digest.clone()))
+            })
+            .filter(|(_, v, _)| allow_prerelease || is_stable_version(v))
             .max_by(|a, b| compare_semantic_versions(&a.1, &b.1))
             .ok_or_else(|| anyhow!("No images with numeric versions available in allowlist"))?;
 
         tracing::debug!(
-            "Non-TEE ({}): Latest image: ref={}, version={}",
+            "Non-TEE ({}): Latest image: ref={}, version={}, digest={:?}",
             context,
             latest_image_entry.0,
-            latest_image_entry.1
+            latest_image_entry.1,
+            latest_image_entry.2
         );
 
-        Ok((latest_image_entry.0, latest_image_entry.1))
+        Ok((
+            latest_image_entry.0,
+            latest_image_entry.1,
+            latest_image_entry.2,
+        ))
     }
 
     /// Check upgrade availability for non-TEE infrastructure (crabshack)
@@ -4237,9 +4309,18 @@ impl AgentServiceImpl {
         }
 
         let current_image = if !instance_not_found {
-            let instance_status: NonTeeInstanceResponse = instance_resp
-                .json()
+            let response_body = instance_resp
+                .text()
                 .await
+                .map_err(|e| anyhow!("Failed to read non-TEE instance response body: {}", e))?;
+
+            tracing::debug!(
+                "Non-TEE: Raw /instances/{} response: {}",
+                encoded_name,
+                response_body
+            );
+
+            let instance_status: NonTeeInstanceResponse = serde_json::from_str(&response_body)
                 .map_err(|e| anyhow!("Failed to parse non-TEE instance response: {}", e))?;
 
             tracing::debug!("Non-TEE: Current instance image: {}", instance_status.image);
@@ -4252,12 +4333,12 @@ impl AgentServiceImpl {
         // This handles cases where instance is not yet fully provisioned or synced
         if instance_not_found {
             // Try to fetch allowlist to provide the latest_image info, but don't fail if we can't
-            let latest_image = match self
+            let (latest_image, latest_digest) = match self
                 .get_latest_image_non_tee(manager, instance.service_type_str(), "check")
                 .await
             {
-                Ok((img, _)) => img,
-                Err(_) => "unknown".to_string(),
+                Ok((img, _, digest)) => (img, digest),
+                Err(_) => ("unknown".to_string(), None),
             };
 
             tracing::info!(
@@ -4269,6 +4350,8 @@ impl AgentServiceImpl {
                 has_upgrade: false,
                 current_image: None,
                 latest_image,
+                current_digest: None,
+                latest_digest,
             });
         }
 
@@ -4285,7 +4368,7 @@ impl AgentServiceImpl {
                 curr_v
             );
 
-            let (latest_image, latest_version) = self
+            let (latest_image, latest_version, latest_digest) = self
                 .get_latest_image_non_tee(manager, instance.service_type_str(), "check")
                 .await?;
 
@@ -4304,6 +4387,8 @@ impl AgentServiceImpl {
                 has_upgrade,
                 current_image: Some(current_image_ref),
                 latest_image,
+                current_digest,
+                latest_digest,
             })
         } else {
             // NON-VERSIONED TAG: Find exact ref in allowlist and compare digests
@@ -4312,7 +4397,7 @@ impl AgentServiceImpl {
                 current_image_ref
             );
 
-            let allowed_entries = self
+            let (allowed_entries, _hosting_config) = self
                 .fetch_allowed_images_non_tee(manager, instance.service_type_str(), "check")
                 .await?;
 
@@ -4369,12 +4454,16 @@ impl AgentServiceImpl {
                 }
             };
 
+            let latest_digest = matching_entry
+                .and_then(|e| e.image_digest.as_ref())
+                .cloned();
+
             tracing::info!(
                 "Non-TEE upgrade check (non-versioned): instance_id={}, current_ref={}, current_digest={:?}, allowlist_digest={:?}, has_upgrade={}",
                 instance_id,
                 current_image_ref,
                 current_digest,
-                matching_entry.and_then(|e| e.image_digest.as_ref()),
+                latest_digest,
                 has_upgrade
             );
 
@@ -4382,6 +4471,8 @@ impl AgentServiceImpl {
                 has_upgrade,
                 current_image: Some(current_image_ref),
                 latest_image,
+                current_digest,
+                latest_digest,
             })
         }
     }
@@ -4505,12 +4596,26 @@ impl AgentServiceImpl {
             image_digest: Option<String>,
         }
 
-        let current_instance: NonTeeInstanceResponse = instance_resp.json().await.map_err(|e| {
+        let response_body = instance_resp.text().await.map_err(|e| {
             anyhow!(
-                "Failed to parse non-TEE instance response during upgrade: {}",
+                "Failed to read non-TEE instance response body during upgrade: {}",
                 e
             )
         })?;
+
+        tracing::debug!(
+            "Non-TEE upgrade: Raw /instances/{} response: {}",
+            encoded_name,
+            response_body
+        );
+
+        let current_instance: NonTeeInstanceResponse = serde_json::from_str(&response_body)
+            .map_err(|e| {
+                anyhow!(
+                    "Failed to parse non-TEE instance response during upgrade: {}",
+                    e
+                )
+            })?;
 
         let current_image = current_instance.image;
         tracing::debug!(
@@ -4519,18 +4624,18 @@ impl AgentServiceImpl {
             current_instance.image_digest
         );
 
-        // Determine image to upgrade to based on tag type
-        let image = if extract_version_from_image(&current_image).is_some() {
+        // Determine image and digest to upgrade to based on tag type
+        let (image, image_digest) = if extract_version_from_image(&current_image).is_some() {
             // VERSIONED TAG: Get latest semver version
             tracing::debug!("Non-TEE upgrade: Upgrading versioned image");
-            let (latest_image, _version) = self
+            let (latest_image, _version, latest_digest) = self
                 .get_latest_image_non_tee(manager, instance.service_type_str(), "upgrade")
                 .await?;
-            latest_image
+            (latest_image, latest_digest)
         } else {
             // NON-VERSIONED TAG: Validate current ref exists in allowlist and use same tag
             tracing::debug!("Non-TEE upgrade: Upgrading non-versioned image");
-            let allowed_entries = self
+            let (allowed_entries, _hosting_config) = self
                 .fetch_allowed_images_non_tee(manager, instance.service_type_str(), "upgrade")
                 .await?;
 
@@ -4542,25 +4647,41 @@ impl AgentServiceImpl {
                 ));
             }
 
+            let entry = allowlist_entry.unwrap();
+            let target_digest = entry.image_digest.clone();
+
             tracing::debug!(
-                "Non-TEE upgrade: Non-versioned tag found in allowlist: ref={}, current_digest={:?}, allowlist_digest={:?}",
+                "Non-TEE upgrade: Non-versioned tag found in allowlist: ref={}, current_digest={:?}, target_digest={:?}",
                 current_image,
                 current_instance.image_digest,
-                allowlist_entry.and_then(|e| e.image_digest.as_ref())
+                target_digest
             );
 
-            // Use the same image ref - manager will pull the latest digest of this tag
-            current_image.clone()
+            // Use the same image ref with explicit target digest to avoid ambiguity
+            (current_image.clone(), target_digest)
         };
 
-        tracing::debug!("Non-TEE upgrade: Target image to restart with: {}", image);
+        // Combine image and digest using OCI format (image@digest) for non-TEE
+        let target_image_ref = if let Some(digest) = image_digest {
+            // Strip tag and use repo@digest format (OCI image reference with pinned digest)
+            let image_repo = strip_image_tag(&image);
+            format!("{}@{}", image_repo, digest)
+        } else {
+            image.clone()
+        };
 
-        // Restart with the target image (5-minute timeout; crabshack yields SSE stream)
-        self.call_restart_streaming(manager, instance, &image, instance_id, user_id)
+        tracing::debug!(
+            "Non-TEE upgrade: Target image ref to restart with: {}",
+            target_image_ref
+        );
+
+        // Restart with the target image ref (5-minute timeout; crabshack yields SSE stream)
+        self.call_restart_streaming(manager, instance, &target_image_ref, instance_id, user_id)
             .await
     }
 
-    /// Call /instances/{name}/restart with image and stream the response
+    /// Call /instances/{name}/restart with image ref and stream the response.
+    /// For non-TEE, image should be in OCI format: repo@digest (tag stripped, digest pinned)
     async fn call_restart_streaming(
         &self,
         manager: &AgentManager,
@@ -6892,7 +7013,7 @@ mod tests {
                         "service_type": "openclaw-dind",
                         "status": "allow-create",
                         "created_at": "2024-01-15T10:00:00Z",
-                        "image_digest": "sha256:new-digest-abc123"
+                        "digest": "sha256:new-digest-abc123"
                     }
                 ])))
                 .mount(&server)
@@ -7005,7 +7126,7 @@ mod tests {
                         "service_type": "openclaw-dind",
                         "status": "allow-create",
                         "created_at": "2024-01-15T10:00:00Z",
-                        "image_digest": "sha256:digest-staging"
+                        "digest": "sha256:digest-staging"
                     }
                 ])))
                 .mount(&server)
@@ -7129,7 +7250,7 @@ mod tests {
                         "service_type": "openclaw-dind",
                         "status": "allow-create",
                         "created_at": "2024-01-15T00:00:00Z",
-                        "image_digest": "sha256:new-digest"
+                        "digest": "sha256:new-digest"
                     }
                 ])))
                 .mount(&server)
@@ -7827,6 +7948,73 @@ mod tests {
             extract_version_from_image("docker.io/repo/image:2.0.0-alpha"),
             Some("2.0.0-alpha".to_string())
         );
+    }
+
+    // ============================================================================
+    // Tests for strip_image_tag function (OCI image reference stripping)
+    // ============================================================================
+
+    #[test]
+    fn test_strip_image_tag_with_semantic_version() {
+        // Versioned tags should be stripped
+        assert_eq!(
+            strip_image_tag("docker.io/nearaidev/ironclaw-dind:0.21.0"),
+            "docker.io/nearaidev/ironclaw-dind"
+        );
+        assert_eq!(
+            strip_image_tag("docker.io/nearaidev/openclaw:1.0.0"),
+            "docker.io/nearaidev/openclaw"
+        );
+    }
+
+    #[test]
+    fn test_strip_image_tag_with_non_versioned_tags() {
+        // Non-versioned tags (:staging, :dev, :latest) should be stripped
+        assert_eq!(
+            strip_image_tag("docker.io/nearaidev/ironclaw-dind:staging"),
+            "docker.io/nearaidev/ironclaw-dind"
+        );
+        assert_eq!(
+            strip_image_tag("docker.io/nearaidev/ironclaw-dind:dev"),
+            "docker.io/nearaidev/ironclaw-dind"
+        );
+        assert_eq!(
+            strip_image_tag("docker.io/nearaidev/ironclaw-dind:latest"),
+            "docker.io/nearaidev/ironclaw-dind"
+        );
+    }
+
+    #[test]
+    fn test_strip_image_tag_with_registry_port() {
+        // Registry port should be preserved, tag should be stripped
+        assert_eq!(
+            strip_image_tag("localhost:5000/image:tag"),
+            "localhost:5000/image"
+        );
+        assert_eq!(
+            strip_image_tag("registry.example.com:443/repo/image:v1.0"),
+            "registry.example.com:443/repo/image"
+        );
+    }
+
+    #[test]
+    fn test_strip_image_tag_without_tag() {
+        // Images without tags should pass through unchanged
+        assert_eq!(
+            strip_image_tag("docker.io/nearaidev/ironclaw-dind"),
+            "docker.io/nearaidev/ironclaw-dind"
+        );
+        assert_eq!(
+            strip_image_tag("localhost:5000/image"),
+            "localhost:5000/image"
+        );
+    }
+
+    #[test]
+    fn test_strip_image_tag_short_names() {
+        // Short image names (without /) should strip tags correctly
+        assert_eq!(strip_image_tag("image:tag"), "image");
+        assert_eq!(strip_image_tag("image"), "image");
     }
 
     // ============================================================================
