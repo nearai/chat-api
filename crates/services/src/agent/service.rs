@@ -27,42 +27,6 @@ const GATEWAY_SESSION_INSTANCE_SCAN_LIMIT: i64 = 50;
 // Resource sizing defaults (instance_default_cpus, instance_default_mem_limit, instance_default_storage_size)
 // are struct fields accessible via self.instance_default_cpus, etc.
 
-/// Strip tag from Docker/OCI image reference, returning just the repository.
-///
-/// Examples:
-/// - `docker.io/repo/image:staging` → `docker.io/repo/image`
-/// - `docker.io/repo/image:0.21.0` → `docker.io/repo/image`
-/// - `localhost:5000/image:tag` → `localhost:5000/image` (preserves registry port)
-/// - `docker.io/repo/image` → `docker.io/repo/image` (no tag to strip)
-/// - `docker.io/repo/image@sha256:abcdef…` → unchanged (digest `:` must not be treated as a tag)
-///
-/// Correctly handles registry ports by comparing the last `:` with the last `/`.
-fn strip_image_tag(image: &str) -> &str {
-    // Digest-qualified refs (`repo@sha256:…`): the colon separates algorithm from hash, not image:tag.
-    if image.contains('@') {
-        return image;
-    }
-    if let Some(tag_pos) = image.rfind(':') {
-        // Compare last ':' with last '/': colon after last slash → tag separator; colon before last
-        // slash → registry host/port (e.g. `localhost:5000/repo`), keep full string.
-        if let Some(slash_pos) = image.rfind('/') {
-            if tag_pos > slash_pos {
-                // Colon after last slash = tag separator, strip it
-                &image[..tag_pos]
-            } else {
-                // Colon is part of registry (e.g., localhost:5000), keep full image
-                image
-            }
-        } else {
-            // No slash, colon is a tag separator
-            &image[..tag_pos]
-        }
-    } else {
-        // No colon, no tag to strip
-        image
-    }
-}
-
 /// Extract version tag from Docker/OCI image ref
 ///
 /// Properly parses image references like:
@@ -4692,11 +4656,14 @@ impl AgentServiceImpl {
             (current_image.clone(), target_digest)
         };
 
-        // Combine image and digest using OCI format (image@digest) for non-TEE
+        // Combine image and digest using OCI format (name[:tag]@digest) for non-TEE.
+        // Keep the original tag when present so manager /instances responses preserve mutable tag context
+        // (e.g., :staging) while still pinning by digest.
         let target_image_ref = if let Some(digest) = image_digest {
-            // Strip tag and use repo@digest format (OCI image reference with pinned digest)
-            let image_repo = strip_image_tag(&image);
-            format!("{}@{}", image_repo, digest)
+            // Defensive: if image already contains a digest, replace it instead of appending
+            // a second one (which would produce an invalid ref like `name@old@new`).
+            let image_base = image.split('@').next().unwrap_or(&image);
+            format!("{}@{}", image_base, digest)
         } else {
             image.clone()
         };
@@ -4712,7 +4679,7 @@ impl AgentServiceImpl {
     }
 
     /// Call /instances/{name}/restart with image ref and stream the response.
-    /// For non-TEE, image should be in OCI format: repo@digest (tag stripped, digest pinned)
+    /// For non-TEE, image should be in OCI format: name[:tag]@digest when digest is known.
     async fn call_restart_streaming(
         &self,
         manager: &AgentManager,
@@ -5486,7 +5453,9 @@ mod tests {
     mod wiremock_tests {
         use super::*;
         use mockall::predicate::eq;
-        use wiremock::matchers::{bearer_token, header, method, path, path_regex};
+        use wiremock::matchers::{
+            bearer_token, body_partial_json, header, method, path, path_regex,
+        };
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         async fn setup_mock_server() -> MockServer {
@@ -7380,7 +7349,8 @@ mod tests {
                         "ref": "docker.io/nearaidev/openclaw-dind:0.21.0",
                         "service_type": "openclaw-dind",
                         "status": "allow-create",
-                        "created_at": "2024-01-15T00:00:00Z"
+                        "created_at": "2024-01-15T00:00:00Z",
+                        "digest": "sha256:latest-digest"
                     }
                 ])))
                 .mount(&server)
@@ -7388,6 +7358,9 @@ mod tests {
 
             Mock::given(method("POST"))
                 .and(path("/instances/test-instance/restart"))
+                .and(body_partial_json(serde_json::json!({
+                    "image": "docker.io/nearaidev/openclaw-dind:0.21.0@sha256:latest-digest"
+                })))
                 .respond_with(
                     ResponseTemplate::new(200)
                         .append_header("content-type", "text/event-stream")
@@ -7444,6 +7417,9 @@ mod tests {
 
             Mock::given(method("POST"))
                 .and(path("/instances/test-instance/restart"))
+                .and(body_partial_json(serde_json::json!({
+                    "image": "docker.io/nearaidev/openclaw-dind:staging@sha256:new-digest"
+                })))
                 .respond_with(
                     ResponseTemplate::new(200)
                         .append_header("content-type", "text/event-stream")
@@ -8134,80 +8110,6 @@ mod tests {
             extract_version_from_image("docker.io/repo/image:2.0.0-alpha"),
             Some("2.0.0-alpha".to_string())
         );
-    }
-
-    // ============================================================================
-    // Tests for strip_image_tag function (OCI image reference stripping)
-    // ============================================================================
-
-    #[test]
-    fn test_strip_image_tag_with_semantic_version() {
-        // Versioned tags should be stripped
-        assert_eq!(
-            strip_image_tag("docker.io/nearaidev/ironclaw-dind:0.21.0"),
-            "docker.io/nearaidev/ironclaw-dind"
-        );
-        assert_eq!(
-            strip_image_tag("docker.io/nearaidev/openclaw:1.0.0"),
-            "docker.io/nearaidev/openclaw"
-        );
-    }
-
-    #[test]
-    fn test_strip_image_tag_digest_qualified_reference_unchanged() {
-        let digest_ref =
-            "docker.io/nearaidev/openclaw-dind@sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
-        assert_eq!(strip_image_tag(digest_ref), digest_ref);
-    }
-
-    #[test]
-    fn test_strip_image_tag_with_non_versioned_tags() {
-        // Non-versioned tags (:staging, :dev, :latest) should be stripped
-        assert_eq!(
-            strip_image_tag("docker.io/nearaidev/ironclaw-dind:staging"),
-            "docker.io/nearaidev/ironclaw-dind"
-        );
-        assert_eq!(
-            strip_image_tag("docker.io/nearaidev/ironclaw-dind:dev"),
-            "docker.io/nearaidev/ironclaw-dind"
-        );
-        assert_eq!(
-            strip_image_tag("docker.io/nearaidev/ironclaw-dind:latest"),
-            "docker.io/nearaidev/ironclaw-dind"
-        );
-    }
-
-    #[test]
-    fn test_strip_image_tag_with_registry_port() {
-        // Registry port should be preserved, tag should be stripped
-        assert_eq!(
-            strip_image_tag("localhost:5000/image:tag"),
-            "localhost:5000/image"
-        );
-        assert_eq!(
-            strip_image_tag("registry.example.com:443/repo/image:v1.0"),
-            "registry.example.com:443/repo/image"
-        );
-    }
-
-    #[test]
-    fn test_strip_image_tag_without_tag() {
-        // Images without tags should pass through unchanged
-        assert_eq!(
-            strip_image_tag("docker.io/nearaidev/ironclaw-dind"),
-            "docker.io/nearaidev/ironclaw-dind"
-        );
-        assert_eq!(
-            strip_image_tag("localhost:5000/image"),
-            "localhost:5000/image"
-        );
-    }
-
-    #[test]
-    fn test_strip_image_tag_short_names() {
-        // Short image names (without /) should strip tags correctly
-        assert_eq!(strip_image_tag("image:tag"), "image");
-        assert_eq!(strip_image_tag("image"), "image");
     }
 
     // ============================================================================
