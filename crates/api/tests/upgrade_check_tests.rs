@@ -325,6 +325,13 @@ async fn test_upgrade_completion_only_on_success() {
 // - `non_tee_check_upgrade_prerelease_same_numeric_max_picks_later_allowlist_entry` — rc vs release tie
 // - `non_tee_check_upgrade_canonical_openclaw_images` — DB `openclaw` + crabshack `openclaw` images
 // - `non_tee_check_upgrade_instance_404_blocks_upgrade` — unsynced instance / no upgrade
+// - `non_tee_stable_only_filter_picks_highest_stable_not_prerelease` — mixed stable + pre-release allowlist,
+//   default `allow_prerelease_upgrades=false` picks highest stable
+// - `non_tee_allow_prerelease_includes_prerelease_in_latest` — same allowlist with flag true picks pre-release
+//
+// `allow_prerelease_upgrades` behavior (stable-only vs including pre-releases when picking the newest
+// versioned tag from crabshack) is intentionally exercised there with real `/images` mocks and
+// `AgentService::check_upgrade_available`, not via shallow struct-default assertions in this crate.
 
 /// Test semantic version parsing with various formats
 ///
@@ -471,42 +478,4 @@ async fn test_service_type_for_crabshack_transformation() {
         service_type_for_crabshack("openclaw", Some(&custom_config)),
         "openclaw-v2"
     );
-}
-
-/// Test that stable-only filtering works correctly in upgrade/deploy.
-/// When allow_prerelease_upgrades=false (default), only stable versions are considered.
-/// When allow_prerelease_upgrades=true, pre-release versions are included.
-#[tokio::test]
-async fn test_upgrade_stable_only_filtering_default() {
-    use services::system_configs::ports::{AgentHostingConfig, AgentHostingCrabshackConfig};
-
-    // Default config: allow_prerelease_upgrades is None/false
-    let config = AgentHostingConfig {
-        new_agent_with_non_tee_infra: None,
-        crabshack: AgentHostingCrabshackConfig {
-            ..Default::default()
-        },
-    };
-
-    // Verify that the config's allow_prerelease_upgrades defaults to false
-    let allow_prerelease = config.crabshack.allow_prerelease_upgrades.unwrap_or(false);
-    assert!(!allow_prerelease, "Default should be stable-only (false)");
-}
-
-/// Test that allow_prerelease_upgrades config flag can be set to true.
-#[tokio::test]
-async fn test_upgrade_allow_prerelease_flag() {
-    use services::system_configs::ports::{AgentHostingConfig, AgentHostingCrabshackConfig};
-
-    // Config with allow_prerelease_upgrades=true (staging mode)
-    let config = AgentHostingConfig {
-        new_agent_with_non_tee_infra: None,
-        crabshack: AgentHostingCrabshackConfig {
-            allow_prerelease_upgrades: Some(true),
-            ..Default::default()
-        },
-    };
-
-    let allow_prerelease = config.crabshack.allow_prerelease_upgrades.unwrap_or(false);
-    assert!(allow_prerelease, "Flag should be true when explicitly set");
 }

@@ -34,9 +34,14 @@ const GATEWAY_SESSION_INSTANCE_SCAN_LIMIT: i64 = 50;
 /// - `docker.io/repo/image:0.21.0` → `docker.io/repo/image`
 /// - `localhost:5000/image:tag` → `localhost:5000/image` (preserves registry port)
 /// - `docker.io/repo/image` → `docker.io/repo/image` (no tag to strip)
+/// - `docker.io/repo/image@sha256:abcdef…` → unchanged (digest `:` must not be treated as a tag)
 ///
 /// Correctly handles registry ports by checking if colon is after the last slash.
 fn strip_image_tag(image: &str) -> &str {
+    // Digest-qualified refs (`repo@sha256:…`): the colon separates algorithm from hash, not image:tag.
+    if image.contains('@') {
+        return image;
+    }
     if let Some(tag_pos) = image.rfind(':') {
         // Check if there's a / after the last :, which would indicate a port (not a tag)
         if let Some(slash_pos) = image.rfind('/') {
@@ -97,13 +102,17 @@ fn is_stable_version(v: &str) -> bool {
 }
 
 /// Parse semantic version string with pre-release support.
-/// Returns (major, minor, patch, prerelease_str)
-/// prerelease_str is "" for stable versions.
+/// Requires a strict `major.minor.patch` numeric core (exactly three dot-separated components).
+///
+/// Returns `None` for malformed cores (e.g. `1.2.x`), extra segments (`1.0.0.1`), or empty
+/// pre-release identifiers. `prerelease_str` is `""` for stable versions.
+///
 /// Examples:
-/// - "1.0.0" → (1, 0, 0, "")
-/// - "1.0.0-rc.1" → (1, 0, 0, "rc.1")
-/// - "1.0.0-alpha+build123" → (1, 0, 0, "alpha")
-fn parse_semantic_version(v: &str) -> (u32, u32, u32, &str) {
+/// - `"1.0.0"` → `Some((1, 0, 0, ""))`
+/// - `"1.0.0-rc.1"` → `Some((1, 0, 0, "rc.1"))`
+/// - `"1.0.0-alpha+build123"` → `Some((1, 0, 0, "alpha"))`
+/// - `"1.2.x"` → `None`
+fn parse_semantic_version(v: &str) -> Option<(u32, u32, u32, &str)> {
     // Strip build metadata first (everything after +)
     let v_no_build = v.split('+').next().unwrap_or(v);
 
@@ -113,31 +122,31 @@ fn parse_semantic_version(v: &str) -> (u32, u32, u32, &str) {
         None => (v_no_build, ""),
     };
 
-    // Parse core version parts
-    let parts: Vec<&str> = core.split('.').collect();
-    let parse_u32 = |s: &str| s.parse::<u32>().unwrap_or(0);
+    if !pre.is_empty() && pre.split('.').any(|identifier| identifier.is_empty()) {
+        return None;
+    }
 
-    let major = parts.first().map(|s| parse_u32(s)).unwrap_or(0);
-    let minor = parts.get(1).map(|s| parse_u32(s)).unwrap_or(0);
-    let patch = parts.get(2).map(|s| parse_u32(s)).unwrap_or(0);
+    let mut parts = core.split('.');
+    let major = parts.next()?.parse::<u32>().ok()?;
+    let minor = parts.next()?.parse::<u32>().ok()?;
+    let patch = parts.next()?.parse::<u32>().ok()?;
+    // Reject cores with more than three segments (e.g. `1.0.0.1`).
+    if parts.next().is_some() {
+        return None;
+    }
 
-    (major, minor, patch, pre)
+    Some((major, minor, patch, pre))
 }
 
-/// Compare two semantic versions according to semver spec §11.
-/// Handles pre-release versions correctly:
-/// - Stable (1.0.0) > pre-release with same core (1.0.0-rc.1)
-/// - Pre-release identifiers compared left-to-right: numeric < alphanumeric
-///
-/// Examples:
-/// - "1.0.0-alpha" < "1.0.0-alpha.1" < "1.0.0-alpha.beta" < "1.0.0-beta" < "1.0.0"
-fn compare_semantic_versions(a: &str, b: &str) -> std::cmp::Ordering {
-    let (maj_a, min_a, pat_a, pre_a) = parse_semantic_version(a);
-    let (maj_b, min_b, pat_b, pre_b) = parse_semantic_version(b);
-
+/// Compare two parsed semver tuples per [semver spec §11](https://semver.org/#spec-item-11).
+/// Used by [`compare_semantic_versions`] after strings are parsed; keeps ordering logic in one place.
+fn compare_semver_parsed(
+    (maj_a, min_a, pat_a, pre_a): (u32, u32, u32, &str),
+    (maj_b, min_b, pat_b, pre_b): (u32, u32, u32, &str),
+) -> std::cmp::Ordering {
     use std::cmp::Ordering::*;
 
-    // Compare numeric core first
+    // Compare numeric core first (major, then minor, then patch).
     let core_cmp = maj_a
         .cmp(&maj_b)
         .then(min_a.cmp(&min_b))
@@ -147,16 +156,16 @@ fn compare_semantic_versions(a: &str, b: &str) -> std::cmp::Ordering {
         return core_cmp;
     }
 
-    // Same core: stable > pre-release (semver §11.4)
+    // Same core: stable > pre-release (semver §11.4).
     match (pre_a.is_empty(), pre_b.is_empty()) {
         (true, false) => return Greater,
         (false, true) => return Less,
         (true, true) => return Equal,
-        (false, false) => {} // both have pre-release, compare them
+        (false, false) => {} // both have pre-release, compare identifier sequences below
     }
 
-    // Compare pre-release identifier sequences
-    // Split on '.', e.g. "alpha.1" → ["alpha", "1"], "beta" → ["beta"]
+    // Compare pre-release identifier sequences.
+    // Split on '.', e.g. "alpha.1" → ["alpha", "1"], "beta" → ["beta"].
     let mut ids_a = pre_a.split('.');
     let mut ids_b = pre_b.split('.');
 
@@ -166,9 +175,9 @@ fn compare_semantic_versions(a: &str, b: &str) -> std::cmp::Ordering {
             (None, Some(_)) => return Less, // a is shorter, lower precedence
             (Some(_), None) => return Greater, // b is shorter
             (Some(id_a), Some(id_b)) => {
-                // Numeric identifiers are compared numerically
-                // Alphanumeric are compared lexically (ASCII sort order)
-                // Numeric identifiers always have lower precedence than alphanumeric
+                // Numeric identifiers are compared numerically.
+                // Alphanumeric identifiers are compared lexically (ASCII sort order).
+                // Numeric identifiers always have lower precedence than alphanumeric (spec §11.4).
                 let ord = match (id_a.parse::<u64>(), id_b.parse::<u64>()) {
                     (Ok(n_a), Ok(n_b)) => n_a.cmp(&n_b),
                     (Err(_), Err(_)) => id_a.cmp(id_b),
@@ -179,9 +188,30 @@ fn compare_semantic_versions(a: &str, b: &str) -> std::cmp::Ordering {
                 if ord != Equal {
                     return ord;
                 }
-                // ids are equal, continue to next
+                // identifiers equal, continue to next pair
             }
         }
+    }
+}
+
+/// Compare two semantic versions according to semver spec §11.
+/// Handles pre-release versions correctly:
+/// - Stable (1.0.0) > pre-release with same core (1.0.0-rc.1)
+/// - Pre-release identifiers compared left-to-right: numeric < alphanumeric
+///
+/// Invalid version strings sort **before** valid ones (lower precedence).
+///
+/// Examples:
+/// - "1.0.0-alpha" < "1.0.0-alpha.1" < "1.0.0-alpha.beta" < "1.0.0-beta" < "1.0.0-beta.2"
+///   < "1.0.0-beta.11" < "1.0.0-rc.1" < "1.0.0"
+fn compare_semantic_versions(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering::*;
+
+    match (parse_semantic_version(a), parse_semantic_version(b)) {
+        (None, None) => Equal,
+        (None, Some(_)) => Less, // malformed / non-strict semver sorts before valid
+        (Some(_), None) => Greater,
+        (Some(pa), Some(pb)) => compare_semver_parsed(pa, pb),
     }
 }
 
@@ -4030,17 +4060,16 @@ impl AgentServiceImpl {
             .await
             .map_err(|e| anyhow!("Failed to read instance response body: {}", e))?;
 
-        tracing::debug!(
-            "TEE: Raw /instances/{} response: {}",
-            encoded_name,
-            response_body
-        );
-
         let instance_status: InstanceResponse = serde_json::from_str(&response_body)
             .map_err(|e| anyhow!("Failed to parse instance response: {}", e))?;
 
         let current_image = instance_status.image;
-        tracing::debug!("TEE: Current instance image: {}", current_image);
+        // Log parsed fields only — full `/instances` JSON may include tokens, URLs, or keys.
+        tracing::debug!(
+            "TEE: Parsed /instances/{} response: image={}",
+            encoded_name,
+            current_image
+        );
 
         let has_upgrade = current_image != latest_image;
 
@@ -4242,6 +4271,8 @@ impl AgentServiceImpl {
                     .as_ref()
                     .map(|v| (ref_.clone(), v.clone(), digest.clone()))
             })
+            // Tags can look numeric (`1.2.x`) but fail strict semver — exclude them from "latest" selection.
+            .filter(|(_, v, _)| parse_semantic_version(v).is_some())
             .filter(|(_, v, _)| allow_prerelease || is_stable_version(v))
             .max_by(|a, b| compare_semantic_versions(&a.1, &b.1))
             .ok_or_else(|| {
@@ -4321,16 +4352,16 @@ impl AgentServiceImpl {
                 .await
                 .map_err(|e| anyhow!("Failed to read non-TEE instance response body: {}", e))?;
 
-            tracing::debug!(
-                "Non-TEE: Raw /instances/{} response: {}",
-                encoded_name,
-                response_body
-            );
-
             let instance_status: NonTeeInstanceResponse = serde_json::from_str(&response_body)
                 .map_err(|e| anyhow!("Failed to parse non-TEE instance response: {}", e))?;
 
-            tracing::debug!("Non-TEE: Current instance image: {}", instance_status.image);
+            // Log image + digest only — raw body can carry sensitive crabshack instance metadata.
+            tracing::debug!(
+                "Non-TEE: Parsed /instances/{} response: image={}, digest={:?}",
+                encoded_name,
+                instance_status.image,
+                instance_status.image_digest
+            );
             Some((instance_status.image, instance_status.image_digest))
         } else {
             None
@@ -4604,12 +4635,7 @@ impl AgentServiceImpl {
             )
         })?;
 
-        tracing::debug!(
-            "Non-TEE upgrade: Raw /instances/{} response: {}",
-            encoded_name,
-            response_body
-        );
-
+        // Avoid logging the raw response body during upgrade — same sensitivity as the check path above.
         let current_instance: NonTeeInstanceResponse = serde_json::from_str(&response_body)
             .map_err(|e| {
                 anyhow!(
@@ -4907,6 +4933,22 @@ mod tests {
         }
 
         /// Per-URL limits with non-TEE infra enabled
+        fn with_allow_prerelease_upgrades(allow_prerelease: bool) -> Self {
+            use crate::system_configs::ports::{AgentHostingConfig, AgentHostingCrabshackConfig};
+            Self {
+                configs: Some(SystemConfigs {
+                    agent_hosting: Some(AgentHostingConfig {
+                        new_agent_with_non_tee_infra: None,
+                        crabshack: AgentHostingCrabshackConfig {
+                            allow_prerelease_upgrades: Some(allow_prerelease),
+                            ..Default::default()
+                        },
+                    }),
+                    ..Default::default()
+                }),
+            }
+        }
+
         fn with_per_url_limits_and_non_tee() -> Self {
             use crate::system_configs::ports::AgentHostingConfig;
             use std::collections::HashMap;
@@ -6744,6 +6786,20 @@ mod tests {
             crabshack_uri: &str,
             token: &str,
         ) -> AgentServiceImpl {
+            service_for_upgrade_check_with_configs(
+                instance,
+                crabshack_uri,
+                token,
+                Arc::new(MockSystemConfigsService::no_config()),
+            )
+        }
+
+        fn service_for_upgrade_check_with_configs(
+            instance: AgentInstance,
+            crabshack_uri: &str,
+            token: &str,
+            configs: Arc<dyn SystemConfigsService>,
+        ) -> AgentServiceImpl {
             let instance_db_id = instance.id;
             let mut repo = MockAgentRepository::new();
             repo.expect_get_instance()
@@ -6759,7 +6815,7 @@ mod tests {
                     is_non_tee: true,
                 }],
                 Arc::new(repo),
-                Arc::new(MockSystemConfigsService::no_config()),
+                configs,
             )
         }
 
@@ -6882,10 +6938,135 @@ mod tests {
                 .expect("check_upgrade_available");
 
             assert!(out.has_upgrade);
-            // `compare_semantic_versions` ignores pre-release suffixes, so 0.21.0-rc1 and 0.21.0
-            // tie. `Iterator::max_by` uses `cmp::max_by`, which picks the second operand when equal,
-            // so the later allowlist entry (0.21.0) becomes latest.
+            // Default `allow_prerelease_upgrades=false` drops `0.21.0-rc1` from the candidate set, so
+            // `max_by(compare_semantic_versions)` runs only on stables (`0.20.0`, `0.21.0`) and picks `0.21.0`.
             assert_eq!(out.latest_image, "docker.io/nearaidev/openclaw-dind:0.21.0");
+        }
+
+        /// With `allow_prerelease_upgrades=false` (default), latest semver from allowlist ignores pre-releases.
+        #[tokio::test]
+        async fn non_tee_stable_only_filter_picks_highest_stable_not_prerelease() {
+            let server = setup_mock_server().await;
+            let uri = server.uri();
+            let token = "crab-token";
+            let instance_id = Uuid::new_v4();
+            let user_id = UserId(Uuid::new_v4());
+
+            Mock::given(method("GET"))
+                .and(path("/images"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                    {
+                        "ref": "docker.io/nearaidev/openclaw-dind:0.20.0",
+                        "service_type": "openclaw-dind",
+                        "status": "allow-create",
+                        "created_at": "2024-01-10T00:00:00Z"
+                    },
+                    {
+                        "ref": "docker.io/nearaidev/openclaw-dind:0.21.0",
+                        "service_type": "openclaw-dind",
+                        "status": "allow-create",
+                        "created_at": "2024-01-15T00:00:00Z"
+                    },
+                    {
+                        "ref": "docker.io/nearaidev/openclaw-dind:0.22.0-rc1",
+                        "service_type": "openclaw-dind",
+                        "status": "allow-create",
+                        "created_at": "2024-01-16T00:00:00Z"
+                    }
+                ])))
+                .mount(&server)
+                .await;
+
+            Mock::given(method("GET"))
+                .and(path("/instances/test-instance"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "image": "docker.io/nearaidev/openclaw-dind:0.20.0",
+                })))
+                .mount(&server)
+                .await;
+
+            let instance = upgrade_check_instance(
+                instance_id,
+                user_id,
+                "test-instance",
+                &uri,
+                Some("openclaw-dind"),
+            );
+            let svc = service_for_upgrade_check(instance, &uri, token);
+            let out = AgentService::check_upgrade_available(&svc, instance_id, user_id)
+                .await
+                .expect("check_upgrade_available");
+
+            assert!(out.has_upgrade);
+            assert_eq!(out.latest_image, "docker.io/nearaidev/openclaw-dind:0.21.0");
+        }
+
+        /// With `allow_prerelease_upgrades=true`, pre-releases compete for “latest” alongside stables.
+        #[tokio::test]
+        async fn non_tee_allow_prerelease_includes_prerelease_in_latest() {
+            let server = setup_mock_server().await;
+            let uri = server.uri();
+            let token = "crab-token";
+            let instance_id = Uuid::new_v4();
+            let user_id = UserId(Uuid::new_v4());
+
+            Mock::given(method("GET"))
+                .and(path("/images"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                    {
+                        "ref": "docker.io/nearaidev/openclaw-dind:0.20.0",
+                        "service_type": "openclaw-dind",
+                        "status": "allow-create",
+                        "created_at": "2024-01-10T00:00:00Z"
+                    },
+                    {
+                        "ref": "docker.io/nearaidev/openclaw-dind:0.21.0",
+                        "service_type": "openclaw-dind",
+                        "status": "allow-create",
+                        "created_at": "2024-01-15T00:00:00Z"
+                    },
+                    {
+                        "ref": "docker.io/nearaidev/openclaw-dind:0.22.0-rc1",
+                        "service_type": "openclaw-dind",
+                        "status": "allow-create",
+                        "created_at": "2024-01-16T00:00:00Z"
+                    }
+                ])))
+                .mount(&server)
+                .await;
+
+            Mock::given(method("GET"))
+                .and(path("/instances/test-instance"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "image": "docker.io/nearaidev/openclaw-dind:0.20.0",
+                })))
+                .mount(&server)
+                .await;
+
+            let instance = upgrade_check_instance(
+                instance_id,
+                user_id,
+                "test-instance",
+                &uri,
+                Some("openclaw-dind"),
+            );
+            let svc = service_for_upgrade_check_with_configs(
+                instance,
+                &uri,
+                token,
+                Arc::new(MockSystemConfigsService::with_allow_prerelease_upgrades(
+                    true,
+                )),
+            );
+            let out = AgentService::check_upgrade_available(&svc, instance_id, user_id)
+                .await
+                .expect("check_upgrade_available");
+
+            assert!(out.has_upgrade);
+            assert_eq!(
+                out.latest_image,
+                "docker.io/nearaidev/openclaw-dind:0.22.0-rc1"
+            );
         }
 
         #[tokio::test]
@@ -7967,6 +8148,13 @@ mod tests {
     }
 
     #[test]
+    fn test_strip_image_tag_digest_qualified_reference_unchanged() {
+        let digest_ref =
+            "docker.io/nearaidev/openclaw-dind@sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        assert_eq!(strip_image_tag(digest_ref), digest_ref);
+    }
+
+    #[test]
     fn test_strip_image_tag_with_non_versioned_tags() {
         // Non-versioned tags (:staging, :dev, :latest) should be stripped
         assert_eq!(
@@ -8215,32 +8403,55 @@ mod tests {
 
     #[test]
     fn test_parse_semantic_version_stable() {
-        let (maj, min, pat, pre) = parse_semantic_version("1.2.3");
+        let (maj, min, pat, pre) = parse_semantic_version("1.2.3").expect("parse");
         assert_eq!((maj, min, pat, pre), (1, 2, 3, ""));
 
-        let (maj, min, pat, pre) = parse_semantic_version("0.21.0");
+        let (maj, min, pat, pre) = parse_semantic_version("0.21.0").expect("parse");
         assert_eq!((maj, min, pat, pre), (0, 21, 0, ""));
     }
 
     #[test]
     fn test_parse_semantic_version_prerelease() {
-        let (maj, min, pat, pre) = parse_semantic_version("1.0.0-rc.1");
+        let (maj, min, pat, pre) = parse_semantic_version("1.0.0-rc.1").expect("parse");
         assert_eq!((maj, min, pat, pre), (1, 0, 0, "rc.1"));
 
-        let (maj, min, pat, pre) = parse_semantic_version("1.0.0-alpha");
+        let (maj, min, pat, pre) = parse_semantic_version("1.0.0-alpha").expect("parse");
         assert_eq!((maj, min, pat, pre), (1, 0, 0, "alpha"));
 
-        let (maj, min, pat, pre) = parse_semantic_version("2.0.0-beta.2");
+        let (maj, min, pat, pre) = parse_semantic_version("2.0.0-beta.2").expect("parse");
         assert_eq!((maj, min, pat, pre), (2, 0, 0, "beta.2"));
     }
 
     #[test]
     fn test_parse_semantic_version_with_build_metadata() {
-        let (maj, min, pat, pre) = parse_semantic_version("1.0.0+build123");
+        let (maj, min, pat, pre) = parse_semantic_version("1.0.0+build123").expect("parse");
         assert_eq!((maj, min, pat, pre), (1, 0, 0, ""));
 
-        let (maj, min, pat, pre) = parse_semantic_version("1.0.0-rc.1+build");
+        let (maj, min, pat, pre) = parse_semantic_version("1.0.0-rc.1+build").expect("parse");
         assert_eq!((maj, min, pat, pre), (1, 0, 0, "rc.1"));
+    }
+
+    #[test]
+    fn test_parse_semantic_version_rejects_malformed_core() {
+        assert!(parse_semantic_version("1.2.x").is_none());
+        assert!(parse_semantic_version("1.0").is_none());
+        assert!(parse_semantic_version("1.0.0.1").is_none());
+        assert!(parse_semantic_version("").is_none());
+    }
+
+    #[test]
+    fn test_parse_semantic_version_rejects_empty_prerelease_identifier() {
+        assert!(parse_semantic_version("1.0.0-a..b").is_none());
+    }
+
+    #[test]
+    fn test_compare_semantic_versions_invalid_sorts_before_valid() {
+        use std::cmp::Ordering;
+        assert_eq!(compare_semantic_versions("1.2.x", "1.0.0"), Ordering::Less);
+        assert_eq!(
+            compare_semantic_versions("1.0.0", "1.2.x"),
+            Ordering::Greater
+        );
     }
 
     #[test]
