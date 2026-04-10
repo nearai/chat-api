@@ -3898,6 +3898,14 @@ struct CrabshackImageEntry {
     image_digest: Option<String>,
 }
 
+/// Response structure from crabshack `/instances/{name}` for non-TEE upgrade flows.
+#[derive(serde::Deserialize, Debug)]
+struct NonTeeInstanceResponse {
+    image: String,
+    #[serde(default)]
+    image_digest: Option<String>,
+}
+
 impl AgentServiceImpl {
     /// Check upgrade availability for TEE infrastructure (compose-api)
     async fn check_upgrade_available_tee(
@@ -4236,7 +4244,13 @@ impl AgentServiceImpl {
             })
             .filter(|(_, v, _)| allow_prerelease || is_stable_version(v))
             .max_by(|a, b| compare_semantic_versions(&a.1, &b.1))
-            .ok_or_else(|| anyhow!("No images with numeric versions available in allowlist"))?;
+            .ok_or_else(|| {
+                anyhow!(
+                    "No images with numeric versions available in allowlist: context='{}', service_type='{}'",
+                    context,
+                    target_service_type
+                )
+            })?;
 
         tracing::debug!(
             "Non-TEE ({}): Latest image: ref={}, version={}, digest={:?}",
@@ -4301,13 +4315,6 @@ impl AgentServiceImpl {
             ));
         }
 
-        #[derive(serde::Deserialize)]
-        struct NonTeeInstanceResponse {
-            image: String,
-            #[serde(default)]
-            image_digest: Option<String>,
-        }
-
         let current_image = if !instance_not_found {
             let response_body = instance_resp
                 .text()
@@ -4355,7 +4362,8 @@ impl AgentServiceImpl {
             });
         }
 
-        let (current_image_ref, current_digest) = current_image.unwrap();
+        let (current_image_ref, current_digest) =
+            current_image.ok_or_else(|| anyhow!("Missing current image after non-found guard"))?;
 
         // Determine upgrade availability based on image tag type
         let current_version = extract_version_from_image(&current_image_ref);
@@ -4589,13 +4597,6 @@ impl AgentServiceImpl {
             ));
         }
 
-        #[derive(serde::Deserialize)]
-        struct NonTeeInstanceResponse {
-            image: String,
-            #[serde(default)]
-            image_digest: Option<String>,
-        }
-
         let response_body = instance_resp.text().await.map_err(|e| {
             anyhow!(
                 "Failed to read non-TEE instance response body during upgrade: {}",
@@ -4640,14 +4641,12 @@ impl AgentServiceImpl {
                 .await?;
 
             let allowlist_entry = allowed_entries.iter().find(|e| e.ref_ == current_image);
-            if allowlist_entry.is_none() {
-                return Err(anyhow!(
+            let entry = allowlist_entry.ok_or_else(|| {
+                anyhow!(
                     "Current image ref {} not found in allowlist during upgrade",
                     current_image
-                ));
-            }
-
-            let entry = allowlist_entry.unwrap();
+                )
+            })?;
             let target_digest = entry.image_digest.clone();
 
             tracing::debug!(
@@ -7071,7 +7070,7 @@ mod tests {
                         "service_type": "openclaw-dind",
                         "status": "allow-create",
                         "created_at": "2024-01-15T10:00:00Z",
-                        "image_digest": "sha256:same-digest-abc123"
+                        "digest": "sha256:same-digest-abc123"
                     }
                 ])))
                 .mount(&server)
@@ -7301,7 +7300,7 @@ mod tests {
                         "service_type": "openclaw-dind",
                         "status": "allow-create",
                         "created_at": "2024-01-15T10:00:00Z"
-                        // Note: no image_digest field
+                        // Note: no digest field (CrabshackImageEntry uses JSON key "digest")
                     }
                 ])))
                 .mount(&server)
