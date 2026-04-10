@@ -4656,11 +4656,14 @@ impl AgentServiceImpl {
             (current_image.clone(), target_digest)
         };
 
-        // Combine image and digest using OCI format (image:tag@digest) for non-TEE.
+        // Combine image and digest using OCI format (name[:tag]@digest) for non-TEE.
         // Keep the original tag when present so manager /instances responses preserve mutable tag context
         // (e.g., :staging) while still pinning by digest.
         let target_image_ref = if let Some(digest) = image_digest {
-            format!("{}@{}", image, digest)
+            // Defensive: if image already contains a digest, replace it instead of appending
+            // a second one (which would produce an invalid ref like `name@old@new`).
+            let image_base = image.split('@').next().unwrap_or(&image);
+            format!("{}@{}", image_base, digest)
         } else {
             image.clone()
         };
@@ -4676,7 +4679,7 @@ impl AgentServiceImpl {
     }
 
     /// Call /instances/{name}/restart with image ref and stream the response.
-    /// For non-TEE, image should be in OCI format: image:tag@digest when digest is known.
+    /// For non-TEE, image should be in OCI format: name[:tag]@digest when digest is known.
     async fn call_restart_streaming(
         &self,
         manager: &AgentManager,
@@ -5450,7 +5453,9 @@ mod tests {
     mod wiremock_tests {
         use super::*;
         use mockall::predicate::eq;
-        use wiremock::matchers::{bearer_token, header, method, path, path_regex};
+        use wiremock::matchers::{
+            bearer_token, body_partial_json, header, method, path, path_regex,
+        };
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         async fn setup_mock_server() -> MockServer {
@@ -7344,7 +7349,8 @@ mod tests {
                         "ref": "docker.io/nearaidev/openclaw-dind:0.21.0",
                         "service_type": "openclaw-dind",
                         "status": "allow-create",
-                        "created_at": "2024-01-15T00:00:00Z"
+                        "created_at": "2024-01-15T00:00:00Z",
+                        "digest": "sha256:latest-digest"
                     }
                 ])))
                 .mount(&server)
@@ -7352,6 +7358,9 @@ mod tests {
 
             Mock::given(method("POST"))
                 .and(path("/instances/test-instance/restart"))
+                .and(body_partial_json(serde_json::json!({
+                    "image": "docker.io/nearaidev/openclaw-dind:0.21.0@sha256:latest-digest"
+                })))
                 .respond_with(
                     ResponseTemplate::new(200)
                         .append_header("content-type", "text/event-stream")
@@ -7408,6 +7417,9 @@ mod tests {
 
             Mock::given(method("POST"))
                 .and(path("/instances/test-instance/restart"))
+                .and(body_partial_json(serde_json::json!({
+                    "image": "docker.io/nearaidev/openclaw-dind:staging@sha256:new-digest"
+                })))
                 .respond_with(
                     ResponseTemplate::new(200)
                         .append_header("content-type", "text/event-stream")
