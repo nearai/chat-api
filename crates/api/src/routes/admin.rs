@@ -14,6 +14,7 @@ use axum::{
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use services::agent::ports::AgentInstance;
 use services::analytics::{ActivityLogEntry, AnalyticsSummary, TopActiveUsersResponse};
 use services::bi_metrics::{
     DeploymentFilter, DeploymentRecord, DeploymentSummary, DeploymentsSortBy, DeploymentsSortOrder,
@@ -1843,6 +1844,179 @@ pub async fn admin_delete_instance(
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn admin_get_instance_for_lifecycle(
+    app_state: &AppState,
+    instance_uuid: Uuid,
+) -> Result<AgentInstance, ApiError> {
+    app_state
+        .agent_repository
+        .get_instance(instance_uuid)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to fetch instance: instance_id={}, error={}",
+                instance_uuid,
+                e
+            );
+            ApiError::internal_server_error("Failed to fetch instance")
+        })?
+        .ok_or_else(|| ApiError::not_found("Instance not found"))
+}
+
+fn empty_ok_response() -> Result<Response, ApiError> {
+    Response::builder()
+        .status(StatusCode::OK)
+        .body(axum::body::Body::empty())
+        .map_err(|_| ApiError::internal_server_error("Failed to construct response"))
+}
+
+/// Admin: start an agent instance by id (no ownership check; uses the instance owner's id for the agent API).
+#[utoipa::path(
+    post,
+    path = "/v1/admin/agents/instances/{id}/start",
+    tag = "Admin",
+    params(
+        ("id" = String, Path, description = "Instance ID (chat-api row UUID)")
+    ),
+    responses(
+        (status = 200, description = "Instance started"),
+        (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - admin only", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "Instance not found", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(("session_token" = []))
+)]
+pub async fn admin_start_instance(
+    State(app_state): State<AppState>,
+    Extension(_user): Extension<AuthenticatedUser>,
+    Path(instance_id): Path<String>,
+) -> Result<Response, ApiError> {
+    let instance_uuid = Uuid::parse_str(&instance_id)
+        .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
+
+    let instance = admin_get_instance_for_lifecycle(&app_state, instance_uuid).await?;
+    tracing::info!(
+        "Admin: Starting instance: instance_id={}, owner_user_id={}",
+        instance_uuid,
+        instance.user_id
+    );
+
+    app_state
+        .agent_service
+        .start_instance(instance_uuid, instance.user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Admin: Failed to start instance: instance_id={}, error={}",
+                instance_uuid,
+                e
+            );
+            ApiError::internal_server_error("Failed to start instance")
+        })?;
+
+    empty_ok_response()
+}
+
+/// Admin: stop an agent instance by id (no ownership check).
+#[utoipa::path(
+    post,
+    path = "/v1/admin/agents/instances/{id}/stop",
+    tag = "Admin",
+    params(
+        ("id" = String, Path, description = "Instance ID (chat-api row UUID)")
+    ),
+    responses(
+        (status = 200, description = "Instance stopped"),
+        (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - admin only", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "Instance not found", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(("session_token" = []))
+)]
+pub async fn admin_stop_instance(
+    State(app_state): State<AppState>,
+    Extension(_user): Extension<AuthenticatedUser>,
+    Path(instance_id): Path<String>,
+) -> Result<Response, ApiError> {
+    let instance_uuid = Uuid::parse_str(&instance_id)
+        .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
+
+    let instance = admin_get_instance_for_lifecycle(&app_state, instance_uuid).await?;
+    tracing::info!(
+        "Admin: Stopping instance: instance_id={}, owner_user_id={}",
+        instance_uuid,
+        instance.user_id
+    );
+
+    app_state
+        .agent_service
+        .stop_instance(instance_uuid, instance.user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Admin: Failed to stop instance: instance_id={}, error={}",
+                instance_uuid,
+                e
+            );
+            ApiError::internal_server_error("Failed to stop instance")
+        })?;
+
+    empty_ok_response()
+}
+
+/// Admin: restart an agent instance by id (no ownership check).
+#[utoipa::path(
+    post,
+    path = "/v1/admin/agents/instances/{id}/restart",
+    tag = "Admin",
+    params(
+        ("id" = String, Path, description = "Instance ID (chat-api row UUID)")
+    ),
+    responses(
+        (status = 200, description = "Instance restarted"),
+        (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - admin only", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "Instance not found", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(("session_token" = []))
+)]
+pub async fn admin_restart_instance(
+    State(app_state): State<AppState>,
+    Extension(_user): Extension<AuthenticatedUser>,
+    Path(instance_id): Path<String>,
+) -> Result<Response, ApiError> {
+    let instance_uuid = Uuid::parse_str(&instance_id)
+        .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
+
+    let instance = admin_get_instance_for_lifecycle(&app_state, instance_uuid).await?;
+    tracing::info!(
+        "Admin: Restarting instance: instance_id={}, owner_user_id={}",
+        instance_uuid,
+        instance.user_id
+    );
+
+    app_state
+        .agent_service
+        .restart_instance(instance_uuid, instance.user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Admin: Failed to restart instance: instance_id={}, error={}",
+                instance_uuid,
+                e
+            );
+            ApiError::internal_server_error("Failed to restart instance")
+        })?;
+
+    empty_ok_response()
+}
+
 /// Request body for admin creating API key on behalf of a user
 #[derive(serde::Deserialize, utoipa::ToSchema)]
 pub struct AdminCreateApiKeyRequest {
@@ -2789,6 +2963,9 @@ pub fn create_admin_router() -> Router<AppState> {
                     get(admin_list_all_instances).post(admin_create_instance),
                 )
                 .route("/instances/sync-status", post(admin_sync_agent_status))
+                .route("/instances/{id}/start", post(admin_start_instance))
+                .route("/instances/{id}/stop", post(admin_stop_instance))
+                .route("/instances/{id}/restart", post(admin_restart_instance))
                 .route("/instances/{id}", delete(admin_delete_instance))
                 .route("/instances/{id}/backup", post(admin_create_backup))
                 .route("/instances/{id}/backups", get(admin_list_backups))
