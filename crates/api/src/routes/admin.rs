@@ -1828,8 +1828,6 @@ pub async fn admin_delete_instance(
 ) -> Result<StatusCode, ApiError> {
     let instance_uuid = Uuid::parse_str(&instance_id)
         .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
-    // Align behavior with OpenAPI: return 404 when instance is missing.
-    let _instance = admin_get_instance_for_lifecycle(&app_state, instance_uuid).await?;
 
     tracing::info!(
         "Admin: Deleting instance: instance_id={}, admin_user_id={}",
@@ -1846,12 +1844,16 @@ pub async fn admin_delete_instance(
         )
         .await
         .map_err(|e| {
-            tracing::error!(
-                "Failed to delete instance: instance_id={}, error={}",
-                instance_uuid,
-                e
-            );
-            ApiError::internal_server_error("Failed to delete instance")
+            if e.to_string().contains("Instance not found") {
+                ApiError::not_found("Instance not found")
+            } else {
+                tracing::error!(
+                    "Failed to delete instance: instance_id={}, error={}",
+                    instance_uuid,
+                    e
+                );
+                ApiError::internal_server_error("Failed to delete instance")
+            }
         })?;
 
     Ok(StatusCode::NO_CONTENT)
@@ -1898,13 +1900,12 @@ fn resolve_admin_change_reason(
             let trimmed = s.trim();
             if trimmed.is_empty() {
                 Ok(fallback.to_string())
+            } else if trimmed.len() > ADMIN_CHANGE_REASON_MAX_LEN {
+                Err(ApiError::bad_request(format!(
+                    "change_reason must be <= {} characters",
+                    ADMIN_CHANGE_REASON_MAX_LEN
+                )))
             } else {
-                if trimmed.len() > ADMIN_CHANGE_REASON_MAX_LEN {
-                    return Err(ApiError::bad_request(format!(
-                        "change_reason must be <= {} characters",
-                        ADMIN_CHANGE_REASON_MAX_LEN
-                    )));
-                }
                 Ok(trimmed.to_string())
             }
         }
