@@ -657,6 +657,25 @@ pub async fn cleanup_user_usage(db: &database::Database, user_email: &str) {
         .expect("delete usage events");
 }
 
+/// Delete a user by email ( cascades to subscriptions, sessions, etc. via FK).
+pub async fn cleanup_user(db: &database::Database, user_email: &str) {
+    let user = match db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .expect("get user")
+    {
+        Some(u) => u,
+        None => return,
+    };
+
+    let client = db.pool().get().await.expect("get pool client");
+    client
+        .execute("DELETE FROM users WHERE id = $1", &[&user.id])
+        .await
+        .expect("delete user");
+}
+
 /// Clean up all subscriptions for a user (by email).
 /// Useful for test isolation to ensure no leftover data from previous test runs.
 pub async fn cleanup_user_subscriptions(db: &database::Database, user_email: &str) {

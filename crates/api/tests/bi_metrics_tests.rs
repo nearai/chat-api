@@ -1,6 +1,6 @@
 mod common;
 
-use common::{create_test_server_and_db, mock_login, TestServerConfig};
+use common::{cleanup_user, create_test_server_and_db, mock_login, TestServerConfig};
 use services::agent::ports::AgentRepository;
 use services::user::ports::UserRepository;
 use uuid::Uuid;
@@ -1267,6 +1267,7 @@ async fn test_bi_users_returns_only_active_subscriptions() {
     );
 
     // Cleanup
-    common::cleanup_user_subscriptions(&db, &active_email).await;
-    common::cleanup_user_subscriptions(&db, &canceled_email).await;
+    common::cleanup_user(&db, &active_email).await;
+    common::cleanup_user(&db, &canceled_email).await;
+    common::cleanup_user(&db, &none_email).await;
 }
