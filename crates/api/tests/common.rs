@@ -611,6 +611,52 @@ pub async fn cleanup_user_agent_instances(db: &database::Database, user_email: &
         .expect("delete agent instances");
 }
 
+/// Clean up all purchased credits for a user (by email).
+pub async fn cleanup_user_subscription_credits(db: &database::Database, user_email: &str) {
+    let user = match db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .expect("get user")
+    {
+        Some(u) => u,
+        None => return,
+    };
+
+    let client = db.pool().get().await.expect("get pool client");
+    // Clean up both the balance table and the transaction audit log
+    client
+        .execute("DELETE FROM user_credits WHERE user_id = $1", &[&user.id])
+        .await
+        .expect("delete user_credits");
+    client
+        .execute(
+            "DELETE FROM credit_transactions WHERE user_id = $1",
+            &[&user.id],
+        )
+        .await
+        .expect("delete credit_transactions");
+}
+
+/// Clean up all usage events for a user (by email).
+pub async fn cleanup_user_usage(db: &database::Database, user_email: &str) {
+    let user = match db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .expect("get user")
+    {
+        Some(u) => u,
+        None => return,
+    };
+
+    let client = db.pool().get().await.expect("get pool client");
+    client
+        .execute("DELETE FROM usage_events WHERE user_id = $1", &[&user.id])
+        .await
+        .expect("delete usage events");
+}
+
 /// Clean up all subscriptions for a user (by email).
 /// Useful for test isolation to ensure no leftover data from previous test runs.
 pub async fn cleanup_user_subscriptions(db: &database::Database, user_email: &str) {

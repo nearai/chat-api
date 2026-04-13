@@ -3,10 +3,10 @@ mod common;
 use api::routes::api::SUBSCRIPTION_REQUIRED_ERROR_MESSAGE;
 use chrono::{Duration, TimeZone, Timelike, Utc};
 use common::{
-    cleanup_user_agent_instances, cleanup_user_subscriptions, clear_subscription_plans,
-    create_test_server, create_test_server_and_db, insert_test_agent_instances,
-    insert_test_subscription, insert_test_subscription_with_price_id, mock_login,
-    set_subscription_plans, TestServerConfig,
+    cleanup_user_agent_instances, cleanup_user_subscription_credits, cleanup_user_subscriptions,
+    cleanup_user_usage, clear_subscription_plans, create_test_server, create_test_server_and_db,
+    insert_test_agent_instances, insert_test_subscription, insert_test_subscription_with_price_id,
+    mock_login, set_subscription_plans, TestServerConfig,
 };
 use hmac::Mac;
 use serde_json::json;
@@ -15,6 +15,7 @@ use services::subscription::ports::SubscriptionRepository;
 use services::system_configs::ports::RateLimitConfig;
 use services::user::ports::UserRepository;
 use services::user_usage::{UserUsageRepository, METRIC_KEY_LLM_TOKENS};
+use uuid::Uuid;
 
 /// Stripe secrets must be non-empty for subscription gating; otherwise requests reach upstream (401).
 fn ensure_stripe_env_for_gating() {
@@ -1684,13 +1685,20 @@ async fn test_proxy_allows_over_plan_with_purchased_credits() {
     )
     .await;
 
-    let user_email = "test_proxy_over_plan_with_credits@example.com";
-    insert_test_subscription(&server, &db, user_email, false).await;
-    let user_token = mock_login(&server, user_email).await;
+    let run_id = Uuid::new_v4();
+    let user_email = format!("test-proxy-over-plan-{run_id}@example.com");
+
+    // Clean up any leftover state from previous runs using the same email
+    cleanup_user_subscription_credits(&db, &user_email).await;
+    cleanup_user_usage(&db, &user_email).await;
+    cleanup_user_subscriptions(&db, &user_email).await;
+
+    insert_test_subscription(&server, &db, &user_email, false).await;
+    let user_token = mock_login(&server, &user_email).await;
 
     let user = db
         .user_repository()
-        .get_user_by_email(user_email)
+        .get_user_by_email(&user_email)
         .await
         .expect("get user")
         .expect("user exists");
@@ -1893,13 +1901,20 @@ async fn test_proxy_allows_within_plan() {
     )
     .await;
 
-    let user_email = "test_proxy_within_plan@example.com";
-    insert_test_subscription(&server, &db, user_email, false).await;
-    let user_token = mock_login(&server, user_email).await;
+    let run_id = Uuid::new_v4();
+    let user_email = format!("test-proxy-within-plan-{run_id}@example.com");
+
+    // Clean up any leftover state from previous runs using the same email
+    cleanup_user_subscription_credits(&db, &user_email).await;
+    cleanup_user_usage(&db, &user_email).await;
+    cleanup_user_subscriptions(&db, &user_email).await;
+
+    insert_test_subscription(&server, &db, &user_email, false).await;
+    let user_token = mock_login(&server, &user_email).await;
 
     let user = db
         .user_repository()
-        .get_user_by_email(user_email)
+        .get_user_by_email(&user_email)
         .await
         .expect("get user")
         .expect("user exists");
