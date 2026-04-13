@@ -2822,7 +2822,12 @@ impl AgentService for AgentServiceImpl {
     /// SECURITY: This method does NOT verify ownership. Callers MUST enforce
     /// authorization before calling (e.g. the user route checks `instance.user_id`,
     /// and the admin route requires admin privileges).
-    async fn delete_instance(&self, instance_id: Uuid) -> anyhow::Result<()> {
+    async fn delete_instance(
+        &self,
+        instance_id: Uuid,
+        actor_user_id: Option<UserId>,
+        reason: &str,
+    ) -> anyhow::Result<()> {
         tracing::info!("Deleting instance: instance_id={}", instance_id);
 
         // Get instance details
@@ -2866,7 +2871,9 @@ impl AgentService for AgentServiceImpl {
             }
         }
 
-        self.repository.delete_instance(instance_id).await?;
+        self.repository
+            .delete_instance(instance_id, actor_user_id, reason)
+            .await?;
 
         tracing::info!(
             "Instance deleted successfully: instance_id={}, name={}",
@@ -2877,11 +2884,17 @@ impl AgentService for AgentServiceImpl {
         Ok(())
     }
 
-    async fn restart_instance(&self, instance_id: Uuid, user_id: UserId) -> anyhow::Result<()> {
+    async fn restart_instance(
+        &self,
+        instance_id: Uuid,
+        owner_user_id: UserId,
+        actor_user_id: UserId,
+        reason: &str,
+    ) -> anyhow::Result<()> {
         tracing::info!(
             "Restarting instance: instance_id={}, user_id={}",
             instance_id,
-            user_id
+            owner_user_id
         );
 
         // Restart is valid for any non-deleted status (active, stopped, error, etc.). We do not
@@ -2896,7 +2909,7 @@ impl AgentService for AgentServiceImpl {
             .ok_or_else(|| anyhow!("Instance not found"))?;
 
         // Verify ownership
-        if instance.user_id != user_id {
+        if instance.user_id != owner_user_id {
             return Err(anyhow!("Access denied"));
         }
 
@@ -2924,7 +2937,7 @@ impl AgentService for AgentServiceImpl {
             .http_client
             .post(&restart_url)
             .bearer_auth(&bearer_token)
-            .json(&serde_json::json!({ "user_id": user_id }))
+            .json(&serde_json::json!({ "user_id": owner_user_id }))
             .send()
             .await
             .map_err(|e| anyhow!("Failed to call Agent API restart: {}", e))?;
@@ -2951,7 +2964,7 @@ impl AgentService for AgentServiceImpl {
 
         // Update DB status to active (end state after restart)
         self.repository
-            .update_instance_status(instance_id, "active")
+            .update_instance_status(instance_id, "active", Some(actor_user_id), reason)
             .await?;
 
         tracing::info!(
@@ -3042,11 +3055,17 @@ impl AgentService for AgentServiceImpl {
         }
     }
 
-    async fn stop_instance(&self, instance_id: Uuid, user_id: UserId) -> anyhow::Result<()> {
+    async fn stop_instance(
+        &self,
+        instance_id: Uuid,
+        owner_user_id: UserId,
+        actor_user_id: UserId,
+        reason: &str,
+    ) -> anyhow::Result<()> {
         tracing::info!(
             "Stopping instance: instance_id={}, user_id={}",
             instance_id,
-            user_id
+            owner_user_id
         );
 
         // Get instance details
@@ -3057,7 +3076,7 @@ impl AgentService for AgentServiceImpl {
             .ok_or_else(|| anyhow!("Instance not found"))?;
 
         // Verify ownership
-        if instance.user_id != user_id {
+        if instance.user_id != owner_user_id {
             return Err(anyhow!("Access denied"));
         }
 
@@ -3085,7 +3104,7 @@ impl AgentService for AgentServiceImpl {
             .http_client
             .post(&stop_url)
             .bearer_auth(&bearer_token)
-            .json(&serde_json::json!({ "user_id": user_id }))
+            .json(&serde_json::json!({ "user_id": owner_user_id }))
             .send()
             .await
             .map_err(|e| anyhow!("Failed to call Agent API stop: {}", e))?;
@@ -3112,7 +3131,7 @@ impl AgentService for AgentServiceImpl {
 
         // Update DB status (trigger records to agent_instance_status_history)
         self.repository
-            .update_instance_status(instance_id, "stopped")
+            .update_instance_status(instance_id, "stopped", Some(actor_user_id), reason)
             .await?;
 
         tracing::info!(
@@ -3124,11 +3143,17 @@ impl AgentService for AgentServiceImpl {
         Ok(())
     }
 
-    async fn start_instance(&self, instance_id: Uuid, user_id: UserId) -> anyhow::Result<()> {
+    async fn start_instance(
+        &self,
+        instance_id: Uuid,
+        owner_user_id: UserId,
+        actor_user_id: UserId,
+        reason: &str,
+    ) -> anyhow::Result<()> {
         tracing::info!(
             "Starting instance: instance_id={}, user_id={}",
             instance_id,
-            user_id
+            owner_user_id
         );
 
         // Get instance details
@@ -3139,7 +3164,7 @@ impl AgentService for AgentServiceImpl {
             .ok_or_else(|| anyhow!("Instance not found"))?;
 
         // Verify ownership
-        if instance.user_id != user_id {
+        if instance.user_id != owner_user_id {
             return Err(anyhow!("Access denied"));
         }
 
@@ -3167,7 +3192,7 @@ impl AgentService for AgentServiceImpl {
             .http_client
             .post(&start_url)
             .bearer_auth(&bearer_token)
-            .json(&serde_json::json!({ "user_id": user_id }))
+            .json(&serde_json::json!({ "user_id": owner_user_id }))
             .send()
             .await
             .map_err(|e| anyhow!("Failed to call Agent API start: {}", e))?;
@@ -3194,7 +3219,7 @@ impl AgentService for AgentServiceImpl {
 
         // Update DB status (trigger records to agent_instance_status_history)
         self.repository
-            .update_instance_status(instance_id, "active")
+            .update_instance_status(instance_id, "active", Some(actor_user_id), reason)
             .await?;
 
         tracing::info!(
@@ -3357,7 +3382,7 @@ impl AgentService for AgentServiceImpl {
 
             match self
                 .repository
-                .update_instance_status(inst.id, new_status)
+                .update_instance_status(inst.id, new_status, None, "sync_status_poll")
                 .await
             {
                 Ok(()) => result.updated += 1,
@@ -5938,9 +5963,8 @@ mod tests {
             repo.expect_get_user_passkey_credentials()
                 .returning(|_| Ok(None));
             repo.expect_update_instance_status()
-                .with(eq(inst_id), eq("active"))
                 .times(1)
-                .returning(|_, _| Ok(()));
+                .returning(|_, _, _, _| Ok(()));
 
             let svc = make_service(
                 vec![AgentManager {
@@ -5952,7 +5976,9 @@ mod tests {
                 Arc::new(MockSystemConfigsService::no_config()),
             );
 
-            let result = svc.start_instance(inst_id, user_id).await;
+            let result = svc
+                .start_instance(inst_id, user_id, user_id, "owner_start")
+                .await;
             assert!(
                 result.is_ok(),
                 "start_instance should succeed: {:?}",
@@ -5983,7 +6009,7 @@ mod tests {
                 .returning(|_| Ok(None));
             repo.expect_update_instance_status()
                 .times(0)
-                .returning(|_, _| Ok(()));
+                .returning(|_, _, _, _| Ok(()));
 
             let svc = make_service(
                 vec![AgentManager {
@@ -5995,7 +6021,9 @@ mod tests {
                 Arc::new(MockSystemConfigsService::no_config()),
             );
 
-            let result = svc.start_instance(inst_id, user_id).await;
+            let result = svc
+                .start_instance(inst_id, user_id, user_id, "owner_start")
+                .await;
             assert!(
                 result.is_err(),
                 "start_instance should fail when API returns 500"
@@ -6024,9 +6052,8 @@ mod tests {
             repo.expect_get_user_passkey_credentials()
                 .returning(|_| Ok(None));
             repo.expect_update_instance_status()
-                .with(eq(inst_id), eq("stopped"))
                 .times(1)
-                .returning(|_, _| Ok(()));
+                .returning(|_, _, _, _| Ok(()));
 
             let svc = make_service(
                 vec![AgentManager {
@@ -6038,7 +6065,9 @@ mod tests {
                 Arc::new(MockSystemConfigsService::no_config()),
             );
 
-            let result = svc.stop_instance(inst_id, user_id).await;
+            let result = svc
+                .stop_instance(inst_id, user_id, user_id, "owner_stop")
+                .await;
             assert!(result.is_ok(), "stop_instance should succeed: {:?}", result);
         }
 
@@ -6065,7 +6094,7 @@ mod tests {
                 .returning(|_| Ok(None));
             repo.expect_update_instance_status()
                 .times(0)
-                .returning(|_, _| Ok(()));
+                .returning(|_, _, _, _| Ok(()));
 
             let svc = make_service(
                 vec![AgentManager {
@@ -6077,7 +6106,9 @@ mod tests {
                 Arc::new(MockSystemConfigsService::no_config()),
             );
 
-            let result = svc.stop_instance(inst_id, user_id).await;
+            let result = svc
+                .stop_instance(inst_id, user_id, user_id, "owner_stop")
+                .await;
             assert!(
                 result.is_err(),
                 "stop_instance should fail when API returns 500"
@@ -6106,9 +6137,8 @@ mod tests {
             repo.expect_get_user_passkey_credentials()
                 .returning(|_| Ok(None));
             repo.expect_update_instance_status()
-                .with(eq(inst_id), eq("active"))
                 .times(1)
-                .returning(|_, _| Ok(()));
+                .returning(|_, _, _, _| Ok(()));
 
             let svc = make_service(
                 vec![AgentManager {
@@ -6120,7 +6150,9 @@ mod tests {
                 Arc::new(MockSystemConfigsService::no_config()),
             );
 
-            let result = svc.restart_instance(inst_id, user_id).await;
+            let result = svc
+                .restart_instance(inst_id, user_id, user_id, "owner_restart")
+                .await;
             assert!(
                 result.is_ok(),
                 "restart_instance should succeed: {:?}",
@@ -6151,7 +6183,7 @@ mod tests {
                 .returning(|_| Ok(None));
             repo.expect_update_instance_status()
                 .times(0)
-                .returning(|_, _| Ok(()));
+                .returning(|_, _, _, _| Ok(()));
 
             let svc = make_service(
                 vec![AgentManager {
@@ -6163,7 +6195,9 @@ mod tests {
                 Arc::new(MockSystemConfigsService::no_config()),
             );
 
-            let result = svc.restart_instance(inst_id, user_id).await;
+            let result = svc
+                .restart_instance(inst_id, user_id, user_id, "owner_restart")
+                .await;
             assert!(
                 result.is_err(),
                 "restart_instance should fail when API returns 500"
@@ -6197,9 +6231,8 @@ mod tests {
             repo.expect_list_all_instances()
                 .returning(move |_, _| Ok((vec![instance.clone()], 1)));
             repo.expect_update_instance_status()
-                .with(eq(inst_id), eq("active"))
                 .times(1)
-                .returning(|_, _| Ok(()));
+                .returning(|_, _, _, _| Ok(()));
 
             let svc = make_service(
                 vec![AgentManager {
@@ -6245,9 +6278,8 @@ mod tests {
             repo.expect_list_all_instances()
                 .returning(move |_, _| Ok((vec![instance.clone()], 1)));
             repo.expect_update_instance_status()
-                .with(eq(inst_id), eq("stopped"))
                 .times(1)
-                .returning(|_, _| Ok(()));
+                .returning(|_, _, _, _| Ok(()));
 
             let svc = make_service(
                 vec![AgentManager {
@@ -6292,7 +6324,7 @@ mod tests {
                 .returning(move |_, _| Ok((vec![instance.clone()], 1)));
             repo.expect_update_instance_status()
                 .times(0)
-                .returning(|_, _| Ok(()));
+                .returning(|_, _, _, _| Ok(()));
 
             let svc = make_service(
                 vec![AgentManager {
@@ -6326,7 +6358,7 @@ mod tests {
                 .returning(move |_, _| Ok((vec![instance.clone()], 1)));
             repo.expect_update_instance_status()
                 .times(0)
-                .returning(|_, _| Ok(()));
+                .returning(|_, _, _, _| Ok(()));
 
             let svc = make_service(
                 vec![AgentManager {
@@ -6369,7 +6401,7 @@ mod tests {
                 .returning(move |_, _| Ok((vec![instance.clone()], 1)));
             repo.expect_update_instance_status()
                 .times(0)
-                .returning(|_, _| Ok(()));
+                .returning(|_, _, _, _| Ok(()));
 
             let svc = make_service(
                 vec![AgentManager {
@@ -6406,7 +6438,7 @@ mod tests {
                 .returning(move |_, _| Ok((vec![instance.clone()], 1)));
             repo.expect_update_instance_status()
                 .times(0)
-                .returning(|_, _| Ok(()));
+                .returning(|_, _, _, _| Ok(()));
 
             let svc = make_service(
                 vec![AgentManager {
@@ -6454,7 +6486,7 @@ mod tests {
             repo.expect_list_all_instances()
                 .returning(move |_, _| Ok((vec![instance.clone()], 1)));
             repo.expect_update_instance_status()
-                .returning(|_, _| Err(anyhow!("DB connection lost")));
+                .returning(|_, _, _, _| Err(anyhow!("DB connection lost")));
 
             let svc = make_service(
                 vec![AgentManager {
@@ -6504,9 +6536,8 @@ mod tests {
             repo.expect_list_all_instances()
                 .returning(move |_, _| Ok((vec![inst_found_c.clone(), inst_missing_c.clone()], 2)));
             repo.expect_update_instance_status()
-                .with(eq(found_id), eq("active"))
                 .times(1)
-                .returning(|_, _| Ok(()));
+                .returning(|_, _, _, _| Ok(()));
 
             let svc = make_service(
                 vec![AgentManager {
@@ -6545,7 +6576,7 @@ mod tests {
                 .returning(move |_, _| Ok((vec![instance.clone()], 1)));
             repo.expect_update_instance_status()
                 .times(0)
-                .returning(|_, _| Ok(()));
+                .returning(|_, _, _, _| Ok(()));
 
             let svc = make_service(
                 vec![AgentManager {

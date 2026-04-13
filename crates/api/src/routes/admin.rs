@@ -1807,7 +1807,8 @@ pub async fn admin_create_instance(
     path = "/v1/admin/agents/instances/{id}",
     tag = "Admin",
     params(
-        ("id" = String, Path, description = "Instance ID")
+        ("id" = String, Path, description = "Instance ID"),
+        AdminChangeReasonQuery
     ),
     responses(
         (status = 204, description = "Instance deleted"),
@@ -1822,6 +1823,7 @@ pub async fn admin_delete_instance(
     State(app_state): State<AppState>,
     Extension(admin): Extension<AuthenticatedUser>,
     Path(instance_id): Path<String>,
+    Query(query): Query<AdminChangeReasonQuery>,
 ) -> Result<StatusCode, ApiError> {
     let instance_uuid = Uuid::parse_str(&instance_id)
         .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
@@ -1834,7 +1836,11 @@ pub async fn admin_delete_instance(
 
     app_state
         .agent_service
-        .delete_instance(instance_uuid)
+        .delete_instance(
+            instance_uuid,
+            Some(admin.user_id),
+            &resolve_admin_change_reason(query.change_reason, "admin_delete"),
+        )
         .await
         .map_err(|e| {
             tracing::error!(
@@ -1874,6 +1880,26 @@ fn empty_ok_response() -> Result<Response, ApiError> {
         .map_err(|_| ApiError::internal_server_error("Failed to construct response"))
 }
 
+#[derive(Debug, Deserialize, utoipa::IntoParams, utoipa::ToSchema)]
+pub struct AdminChangeReasonQuery {
+    /// Optional audit reason for admin lifecycle/delete actions.
+    pub change_reason: Option<String>,
+}
+
+fn resolve_admin_change_reason(input: Option<String>, fallback: &'static str) -> String {
+    match input {
+        Some(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                fallback.to_string()
+            } else {
+                trimmed.to_string()
+            }
+        }
+        None => fallback.to_string(),
+    }
+}
+
 enum LifecycleAction {
     Start,
     Stop,
@@ -1905,6 +1931,7 @@ async fn do_lifecycle_action(
     instance_id_str: &str,
     action: LifecycleAction,
     admin_user_id: UserId,
+    change_reason: &str,
 ) -> Result<(), ApiError> {
     let instance_uuid = Uuid::parse_str(instance_id_str)
         .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
@@ -1924,19 +1951,19 @@ async fn do_lifecycle_action(
         LifecycleAction::Start => {
             app_state
                 .agent_service
-                .start_instance(instance_uuid, user_id)
+                .start_instance(instance_uuid, user_id, admin_user_id, change_reason)
                 .await
         }
         LifecycleAction::Stop => {
             app_state
                 .agent_service
-                .stop_instance(instance_uuid, user_id)
+                .stop_instance(instance_uuid, user_id, admin_user_id, change_reason)
                 .await
         }
         LifecycleAction::Restart => {
             app_state
                 .agent_service
-                .restart_instance(instance_uuid, user_id)
+                .restart_instance(instance_uuid, user_id, admin_user_id, change_reason)
                 .await
         }
     };
@@ -1958,7 +1985,8 @@ async fn do_lifecycle_action(
     path = "/v1/admin/agents/instances/{id}/start",
     tag = "Admin",
     params(
-        ("id" = String, Path, description = "Instance ID (chat-api row UUID)")
+        ("id" = String, Path, description = "Instance ID (chat-api row UUID)"),
+        AdminChangeReasonQuery
     ),
     responses(
         (status = 200, description = "Instance started"),
@@ -1974,12 +2002,15 @@ pub async fn admin_start_instance(
     State(app_state): State<AppState>,
     Extension(admin): Extension<AuthenticatedUser>,
     Path(instance_id): Path<String>,
+    Query(query): Query<AdminChangeReasonQuery>,
 ) -> Result<Response, ApiError> {
+    let change_reason = resolve_admin_change_reason(query.change_reason, "admin_start");
     do_lifecycle_action(
         &app_state,
         &instance_id,
         LifecycleAction::Start,
         admin.user_id,
+        &change_reason,
     )
     .await?;
     empty_ok_response()
@@ -1991,7 +2022,8 @@ pub async fn admin_start_instance(
     path = "/v1/admin/agents/instances/{id}/stop",
     tag = "Admin",
     params(
-        ("id" = String, Path, description = "Instance ID (chat-api row UUID)")
+        ("id" = String, Path, description = "Instance ID (chat-api row UUID)"),
+        AdminChangeReasonQuery
     ),
     responses(
         (status = 200, description = "Instance stopped"),
@@ -2007,12 +2039,15 @@ pub async fn admin_stop_instance(
     State(app_state): State<AppState>,
     Extension(admin): Extension<AuthenticatedUser>,
     Path(instance_id): Path<String>,
+    Query(query): Query<AdminChangeReasonQuery>,
 ) -> Result<Response, ApiError> {
+    let change_reason = resolve_admin_change_reason(query.change_reason, "admin_stop");
     do_lifecycle_action(
         &app_state,
         &instance_id,
         LifecycleAction::Stop,
         admin.user_id,
+        &change_reason,
     )
     .await?;
     empty_ok_response()
@@ -2024,7 +2059,8 @@ pub async fn admin_stop_instance(
     path = "/v1/admin/agents/instances/{id}/restart",
     tag = "Admin",
     params(
-        ("id" = String, Path, description = "Instance ID (chat-api row UUID)")
+        ("id" = String, Path, description = "Instance ID (chat-api row UUID)"),
+        AdminChangeReasonQuery
     ),
     responses(
         (status = 200, description = "Instance restarted"),
@@ -2040,12 +2076,15 @@ pub async fn admin_restart_instance(
     State(app_state): State<AppState>,
     Extension(admin): Extension<AuthenticatedUser>,
     Path(instance_id): Path<String>,
+    Query(query): Query<AdminChangeReasonQuery>,
 ) -> Result<Response, ApiError> {
+    let change_reason = resolve_admin_change_reason(query.change_reason, "admin_restart");
     do_lifecycle_action(
         &app_state,
         &instance_id,
         LifecycleAction::Restart,
         admin.user_id,
+        &change_reason,
     )
     .await?;
     empty_ok_response()
