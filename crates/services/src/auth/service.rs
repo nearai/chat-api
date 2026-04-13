@@ -270,14 +270,19 @@ impl OAuthServiceImpl {
             {
                 Ok(user) => (user.id, true),
                 Err(create_err) => {
-                    if user_info.email_verified {
-                        if let Some(existing_user) = self
-                            .user_repository
-                            .get_user_by_email(&user_info.email)
-                            .await?
-                        {
+                    // Race: another request created this email concurrently.
+                    // Only merge if the OAuth email is verified — unverified emails
+                    // must not silently take over an existing account.
+                    if let Some(existing_user) = self
+                        .user_repository
+                        .get_user_by_email(&user_info.email)
+                        .await?
+                    {
+                        if user_info.email_verified {
                             (existing_user.id, false)
                         } else {
+                            // Email already taken by another account; refuse to merge.
+                            // The real account holder should use their original auth path.
                             return Err(create_err);
                         }
                     } else {
