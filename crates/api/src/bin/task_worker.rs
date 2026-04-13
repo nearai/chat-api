@@ -128,7 +128,15 @@ impl TaskExecutor for DefaultTaskExecutor {
                 }
 
                 for instance in cleanup_targets.drain(..) {
-                    if let Err(err) = self.agent_service.delete_instance(instance.id).await {
+                    if let Err(err) = self
+                        .agent_service
+                        .delete_instance(
+                            instance.id,
+                            None,
+                            "cleanup_task_cancelled_user_after_grace_period",
+                        )
+                        .await
+                    {
                         failed_instances += 1;
                         tracing::error!(
                             "cleanup task: delete failed instance_id={} user_id={} status={} err={}",

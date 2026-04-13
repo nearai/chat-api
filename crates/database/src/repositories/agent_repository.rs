@@ -30,6 +30,73 @@ impl PostgresAgentRepository {
     pub fn new(pool: DbPool) -> Self {
         Self { pool }
     }
+
+    async fn set_instance_status_with_audit(
+        &self,
+        instance_id: Uuid,
+        new_status: &str,
+        changed_by_user_id: Option<UserId>,
+        change_reason: &str,
+        allow_from_deleted: bool,
+    ) -> anyhow::Result<()> {
+        let mut client = self.pool.get().await?;
+        let tx = client.transaction().await?;
+
+        // `allow_from_deleted=true` is used by delete flow so repeated delete calls are idempotent:
+        // we re-set status to `deleted` and skip history insert when there is no transition.
+        let old_status: Option<String> = if allow_from_deleted {
+            tx.query_opt(
+                "SELECT status FROM agent_instances
+                 WHERE id = $1
+                 FOR UPDATE",
+                &[&instance_id],
+            )
+            .await?
+            .map(|row| row.get(0))
+        } else {
+            tx.query_opt(
+                "SELECT status FROM agent_instances
+                 WHERE id = $1 AND status != 'deleted'
+                 FOR UPDATE",
+                &[&instance_id],
+            )
+            .await?
+            .map(|row| row.get(0))
+        };
+
+        let Some(old_status) = old_status else {
+            anyhow::bail!(
+                "agent instance not found or already deleted: instance_id={}",
+                instance_id
+            );
+        };
+
+        tx.execute(
+            "UPDATE agent_instances SET status = $1, updated_at = NOW()
+             WHERE id = $2",
+            &[&new_status, &instance_id],
+        )
+        .await?;
+
+        if old_status != new_status {
+            tx.execute(
+                "INSERT INTO agent_instance_status_history
+                 (instance_id, old_status, new_status, changed_by_user_id, change_reason, changed_at)
+                 VALUES ($1, $2, $3, $4, $5, NOW())",
+                &[
+                    &instance_id,
+                    &old_status,
+                    &new_status,
+                    &changed_by_user_id,
+                    &change_reason,
+                ],
+            )
+            .await?;
+        }
+
+        tx.commit().await?;
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -434,41 +501,33 @@ impl AgentRepository for PostgresAgentRepository {
         &self,
         instance_id: Uuid,
         new_status: &str,
+        changed_by_user_id: Option<UserId>,
+        change_reason: &str,
     ) -> anyhow::Result<()> {
-        let client = self.pool.get().await?;
-
-        // Exclude soft-deleted instances to avoid resurrecting them. Trigger records change to
-        // agent_instance_status_history automatically.
-        let rows = client
-            .execute(
-                "UPDATE agent_instances SET status = $1, updated_at = NOW()
-                 WHERE id = $2 AND status != 'deleted'",
-                &[&new_status, &instance_id],
-            )
-            .await?;
-
-        if rows == 0 {
-            anyhow::bail!(
-                "agent instance not found or already deleted: instance_id={}",
-                instance_id
-            );
-        }
-
-        Ok(())
+        self.set_instance_status_with_audit(
+            instance_id,
+            new_status,
+            changed_by_user_id,
+            change_reason,
+            false,
+        )
+        .await
     }
 
-    async fn delete_instance(&self, instance_id: Uuid) -> anyhow::Result<()> {
-        let client = self.pool.get().await?;
-
-        // Soft-delete: set status to 'deleted' instead of permanently deleting
-        client
-            .execute(
-                "UPDATE agent_instances SET status = 'deleted', updated_at = NOW() WHERE id = $1",
-                &[&instance_id],
-            )
-            .await?;
-
-        Ok(())
+    async fn delete_instance(
+        &self,
+        instance_id: Uuid,
+        changed_by_user_id: Option<UserId>,
+        change_reason: &str,
+    ) -> anyhow::Result<()> {
+        self.set_instance_status_with_audit(
+            instance_id,
+            "deleted",
+            changed_by_user_id,
+            change_reason,
+            true,
+        )
+        .await
     }
 
     async fn create_api_key(

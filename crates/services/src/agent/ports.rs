@@ -129,6 +129,12 @@ pub enum AgentApiKeyCreationError {
     Internal(#[from] anyhow::Error),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum AgentServiceError {
+    #[error("Instance not found")]
+    InstanceNotFound,
+}
+
 /// Usage log entry for tracking API consumption
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageLogEntry {
@@ -267,14 +273,21 @@ pub trait AgentRepository: Send + Sync {
         public_ssh_key: Option<String>,
     ) -> anyhow::Result<AgentInstance>;
 
-    /// Update instance status in DB (triggers status_history audit via trigger).
+    /// Update instance status in DB and append explicit status history audit metadata.
     async fn update_instance_status(
         &self,
         instance_id: Uuid,
         new_status: &str,
+        changed_by_user_id: Option<UserId>,
+        change_reason: &str,
     ) -> anyhow::Result<()>;
 
-    async fn delete_instance(&self, instance_id: Uuid) -> anyhow::Result<()>;
+    async fn delete_instance(
+        &self,
+        instance_id: Uuid,
+        changed_by_user_id: Option<UserId>,
+        change_reason: &str,
+    ) -> anyhow::Result<()>;
 
     // API Key operations
     async fn create_api_key(
@@ -431,9 +444,20 @@ pub trait AgentService: Send + Sync {
         public_ssh_key: Option<String>,
     ) -> anyhow::Result<AgentInstance>;
 
-    async fn delete_instance(&self, instance_id: Uuid) -> anyhow::Result<()>;
+    async fn delete_instance(
+        &self,
+        instance_id: Uuid,
+        actor_user_id: Option<UserId>,
+        reason: &str,
+    ) -> anyhow::Result<()>;
 
-    async fn restart_instance(&self, instance_id: Uuid, user_id: UserId) -> anyhow::Result<()>;
+    async fn restart_instance(
+        &self,
+        instance_id: Uuid,
+        owner_user_id: UserId,
+        actor_user_id: UserId,
+        reason: &str,
+    ) -> anyhow::Result<()>;
 
     /// Upgrade instance with streaming SSE progress.
     /// Returns a receiver that yields SSE chunks from the agent compose-api restart stream.
@@ -452,9 +476,21 @@ pub trait AgentService: Send + Sync {
         user_id: UserId,
     ) -> anyhow::Result<UpgradeAvailability>;
 
-    async fn stop_instance(&self, instance_id: Uuid, user_id: UserId) -> anyhow::Result<()>;
+    async fn stop_instance(
+        &self,
+        instance_id: Uuid,
+        owner_user_id: UserId,
+        actor_user_id: UserId,
+        reason: &str,
+    ) -> anyhow::Result<()>;
 
-    async fn start_instance(&self, instance_id: Uuid, user_id: UserId) -> anyhow::Result<()>;
+    async fn start_instance(
+        &self,
+        instance_id: Uuid,
+        owner_user_id: UserId,
+        actor_user_id: UserId,
+        reason: &str,
+    ) -> anyhow::Result<()>;
 
     /// Sync instance status from all Agent API managers into the database.
     /// Fetches live status via GET /instances per manager, maps "running" -> "active", others -> "stopped".

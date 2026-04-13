@@ -192,7 +192,15 @@ impl SubscriptionServiceImpl {
         for instance in &active_instances {
             let mut last_err = None;
             for attempt in 0..=Self::STOP_INSTANCE_MAX_RETRIES {
-                match agent_service.stop_instance(instance.id, user_id).await {
+                match agent_service
+                    .stop_instance(
+                        instance.id,
+                        user_id,
+                        user_id,
+                        "subscription_cancel_auto_stop",
+                    )
+                    .await
+                {
                     Ok(()) => {
                         last_err = None;
                         break;

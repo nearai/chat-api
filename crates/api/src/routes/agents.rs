@@ -1031,7 +1031,7 @@ pub async fn delete_instance(
 
     app_state
         .agent_service
-        .delete_instance(instance_uuid)
+        .delete_instance(instance_uuid, Some(user.user_id), "owner_delete")
         .await
         .map_err(|e| {
             tracing::error!(
@@ -1116,7 +1116,7 @@ pub async fn start_instance(
 
     app_state
         .agent_service
-        .start_instance(instance_uuid, user.user_id)
+        .start_instance(instance_uuid, user.user_id, user.user_id, "owner_start")
         .await
         .map_err(|e| {
             tracing::error!(
@@ -1185,7 +1185,7 @@ pub async fn stop_instance(
 
     app_state
         .agent_service
-        .stop_instance(instance_uuid, user.user_id)
+        .stop_instance(instance_uuid, user.user_id, user.user_id, "owner_stop")
         .await
         .map_err(|e| {
             tracing::error!(
@@ -1273,7 +1273,7 @@ pub async fn restart_instance(
 
     app_state
         .agent_service
-        .restart_instance(instance_uuid, user.user_id)
+        .restart_instance(instance_uuid, user.user_id, user.user_id, "owner_restart")
         .await
         .map_err(|e| {
             tracing::error!(

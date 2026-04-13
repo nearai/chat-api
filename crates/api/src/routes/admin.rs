@@ -14,6 +14,7 @@ use axum::{
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use services::agent::ports::{AgentInstance, AgentServiceError};
 use services::analytics::{ActivityLogEntry, AnalyticsSummary, TopActiveUsersResponse};
 use services::bi_metrics::{
     DeploymentFilter, DeploymentRecord, DeploymentSummary, DeploymentsSortBy, DeploymentsSortOrder,
@@ -23,6 +24,7 @@ use services::bi_metrics::{
 
 /// Maximum rows for BI usage aggregation queries.
 const BI_USAGE_MAX_ROWS: i64 = 1000;
+const ADMIN_CHANGE_REASON_MAX_LEN: usize = 255;
 
 use services::model::ports::{UpdateModelParams, UpsertModelParams};
 use services::user_usage::UsageRankBy;
@@ -1806,7 +1808,8 @@ pub async fn admin_create_instance(
     path = "/v1/admin/agents/instances/{id}",
     tag = "Admin",
     params(
-        ("id" = String, Path, description = "Instance ID")
+        ("id" = String, Path, description = "Instance ID"),
+        AdminChangeReasonQuery
     ),
     responses(
         (status = 204, description = "Instance deleted"),
@@ -1819,28 +1822,289 @@ pub async fn admin_create_instance(
 )]
 pub async fn admin_delete_instance(
     State(app_state): State<AppState>,
-    Extension(_user): Extension<AuthenticatedUser>,
+    Extension(admin): Extension<AuthenticatedUser>,
     Path(instance_id): Path<String>,
+    Query(query): Query<AdminChangeReasonQuery>,
 ) -> Result<StatusCode, ApiError> {
     let instance_uuid = Uuid::parse_str(&instance_id)
         .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
 
-    tracing::info!("Admin: Deleting instance: instance_id={}", instance_uuid);
+    tracing::info!(
+        "Admin: Deleting instance: instance_id={}, admin_user_id={}",
+        instance_uuid,
+        admin.user_id
+    );
 
     app_state
         .agent_service
-        .delete_instance(instance_uuid)
+        .delete_instance(
+            instance_uuid,
+            Some(admin.user_id),
+            &resolve_admin_change_reason(query.change_reason, "admin_delete")?,
+        )
         .await
         .map_err(|e| {
-            tracing::error!(
-                "Failed to delete instance: instance_id={}, error={}",
-                instance_uuid,
-                e
-            );
-            ApiError::internal_server_error("Failed to delete instance")
+            if matches!(
+                e.downcast_ref::<AgentServiceError>(),
+                Some(AgentServiceError::InstanceNotFound)
+            ) {
+                ApiError::not_found("Instance not found")
+            } else {
+                tracing::error!(
+                    "Failed to delete instance: instance_id={}, error={}",
+                    instance_uuid,
+                    e
+                );
+                ApiError::internal_server_error("Failed to delete instance")
+            }
         })?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn admin_get_instance_for_lifecycle(
+    app_state: &AppState,
+    instance_uuid: Uuid,
+) -> Result<AgentInstance, ApiError> {
+    app_state
+        .agent_repository
+        .get_instance(instance_uuid)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to fetch instance: instance_id={}, error={}",
+                instance_uuid,
+                e
+            );
+            ApiError::internal_server_error("Failed to fetch instance")
+        })?
+        .ok_or_else(|| ApiError::not_found("Instance not found"))
+}
+
+fn empty_ok_response() -> Result<Response, ApiError> {
+    Response::builder()
+        .status(StatusCode::OK)
+        .body(axum::body::Body::empty())
+        .map_err(|_| ApiError::internal_server_error("Failed to construct response"))
+}
+
+#[derive(Debug, Deserialize, utoipa::IntoParams, utoipa::ToSchema)]
+pub struct AdminChangeReasonQuery {
+    /// Optional audit reason for admin lifecycle/delete actions.
+    pub change_reason: Option<String>,
+}
+
+fn resolve_admin_change_reason(
+    input: Option<String>,
+    fallback: &'static str,
+) -> Result<String, ApiError> {
+    match input {
+        Some(s) => {
+            let trimmed = s.trim();
+            let trimmed_char_count = trimmed.chars().count();
+            if trimmed.is_empty() {
+                Ok(fallback.to_string())
+            } else if trimmed_char_count > ADMIN_CHANGE_REASON_MAX_LEN {
+                Err(ApiError::bad_request(format!(
+                    "change_reason must be <= {} characters",
+                    ADMIN_CHANGE_REASON_MAX_LEN
+                )))
+            } else {
+                Ok(trimmed.to_string())
+            }
+        }
+        None => Ok(fallback.to_string()),
+    }
+}
+
+enum LifecycleAction {
+    Start,
+    Stop,
+    Restart,
+}
+
+impl std::fmt::Display for LifecycleAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Start => write!(f, "start"),
+            Self::Stop => write!(f, "stop"),
+            Self::Restart => write!(f, "restart"),
+        }
+    }
+}
+
+impl LifecycleAction {
+    fn gerund(&self) -> &'static str {
+        match self {
+            Self::Start => "Starting",
+            Self::Stop => "Stopping",
+            Self::Restart => "Restarting",
+        }
+    }
+}
+
+async fn do_lifecycle_action(
+    app_state: &AppState,
+    instance_id_str: &str,
+    action: LifecycleAction,
+    admin_user_id: UserId,
+    change_reason: &str,
+) -> Result<(), ApiError> {
+    let instance_uuid = Uuid::parse_str(instance_id_str)
+        .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
+
+    let instance = admin_get_instance_for_lifecycle(app_state, instance_uuid).await?;
+    let user_id = instance.user_id;
+
+    tracing::info!(
+        "Admin: {} instance: instance_id={}, owner_user_id={}, admin_user_id={}",
+        action.gerund(),
+        instance_uuid,
+        user_id,
+        admin_user_id
+    );
+
+    let result = match action {
+        LifecycleAction::Start => {
+            app_state
+                .agent_service
+                .start_instance(instance_uuid, user_id, admin_user_id, change_reason)
+                .await
+        }
+        LifecycleAction::Stop => {
+            app_state
+                .agent_service
+                .stop_instance(instance_uuid, user_id, admin_user_id, change_reason)
+                .await
+        }
+        LifecycleAction::Restart => {
+            app_state
+                .agent_service
+                .restart_instance(instance_uuid, user_id, admin_user_id, change_reason)
+                .await
+        }
+    };
+
+    result.map_err(|e| {
+        tracing::error!(
+            "Admin: Failed to {} instance: instance_id={}, error={}",
+            action,
+            instance_uuid,
+            e
+        );
+        ApiError::internal_server_error(format!("Failed to {} instance", action))
+    })
+}
+
+/// Admin: start an agent instance by id (no ownership check; uses the instance owner's id for the agent API).
+#[utoipa::path(
+    post,
+    path = "/v1/admin/agents/instances/{id}/start",
+    tag = "Admin",
+    params(
+        ("id" = String, Path, description = "Instance ID"),
+        AdminChangeReasonQuery
+    ),
+    responses(
+        (status = 200, description = "Instance started"),
+        (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - admin only", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "Instance not found", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(("session_token" = []))
+)]
+pub async fn admin_start_instance(
+    State(app_state): State<AppState>,
+    Extension(admin): Extension<AuthenticatedUser>,
+    Path(instance_id): Path<String>,
+    Query(query): Query<AdminChangeReasonQuery>,
+) -> Result<Response, ApiError> {
+    let change_reason = resolve_admin_change_reason(query.change_reason, "admin_start")?;
+    do_lifecycle_action(
+        &app_state,
+        &instance_id,
+        LifecycleAction::Start,
+        admin.user_id,
+        &change_reason,
+    )
+    .await?;
+    empty_ok_response()
+}
+
+/// Admin: stop an agent instance by id (no ownership check).
+#[utoipa::path(
+    post,
+    path = "/v1/admin/agents/instances/{id}/stop",
+    tag = "Admin",
+    params(
+        ("id" = String, Path, description = "Instance ID"),
+        AdminChangeReasonQuery
+    ),
+    responses(
+        (status = 200, description = "Instance stopped"),
+        (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - admin only", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "Instance not found", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(("session_token" = []))
+)]
+pub async fn admin_stop_instance(
+    State(app_state): State<AppState>,
+    Extension(admin): Extension<AuthenticatedUser>,
+    Path(instance_id): Path<String>,
+    Query(query): Query<AdminChangeReasonQuery>,
+) -> Result<Response, ApiError> {
+    let change_reason = resolve_admin_change_reason(query.change_reason, "admin_stop")?;
+    do_lifecycle_action(
+        &app_state,
+        &instance_id,
+        LifecycleAction::Stop,
+        admin.user_id,
+        &change_reason,
+    )
+    .await?;
+    empty_ok_response()
+}
+
+/// Admin: restart an agent instance by id (no ownership check).
+#[utoipa::path(
+    post,
+    path = "/v1/admin/agents/instances/{id}/restart",
+    tag = "Admin",
+    params(
+        ("id" = String, Path, description = "Instance ID"),
+        AdminChangeReasonQuery
+    ),
+    responses(
+        (status = 200, description = "Instance restarted"),
+        (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - admin only", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "Instance not found", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(("session_token" = []))
+)]
+pub async fn admin_restart_instance(
+    State(app_state): State<AppState>,
+    Extension(admin): Extension<AuthenticatedUser>,
+    Path(instance_id): Path<String>,
+    Query(query): Query<AdminChangeReasonQuery>,
+) -> Result<Response, ApiError> {
+    let change_reason = resolve_admin_change_reason(query.change_reason, "admin_restart")?;
+    do_lifecycle_action(
+        &app_state,
+        &instance_id,
+        LifecycleAction::Restart,
+        admin.user_id,
+        &change_reason,
+    )
+    .await?;
+    empty_ok_response()
 }
 
 /// Request body for admin creating API key on behalf of a user
@@ -2789,6 +3053,9 @@ pub fn create_admin_router() -> Router<AppState> {
                     get(admin_list_all_instances).post(admin_create_instance),
                 )
                 .route("/instances/sync-status", post(admin_sync_agent_status))
+                .route("/instances/{id}/start", post(admin_start_instance))
+                .route("/instances/{id}/stop", post(admin_stop_instance))
+                .route("/instances/{id}/restart", post(admin_restart_instance))
                 .route("/instances/{id}", delete(admin_delete_instance))
                 .route("/instances/{id}/backup", post(admin_create_backup))
                 .route("/instances/{id}/backups", get(admin_list_backups))
