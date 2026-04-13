@@ -1985,7 +1985,7 @@ async fn do_lifecycle_action(
     path = "/v1/admin/agents/instances/{id}/start",
     tag = "Admin",
     params(
-        ("id" = String, Path, description = "Instance ID (chat-api row UUID)"),
+        ("id" = String, Path, description = "Instance ID"),
         AdminChangeReasonQuery
     ),
     responses(
@@ -2022,7 +2022,7 @@ pub async fn admin_start_instance(
     path = "/v1/admin/agents/instances/{id}/stop",
     tag = "Admin",
     params(
-        ("id" = String, Path, description = "Instance ID (chat-api row UUID)"),
+        ("id" = String, Path, description = "Instance ID"),
         AdminChangeReasonQuery
     ),
     responses(
@@ -2059,7 +2059,7 @@ pub async fn admin_stop_instance(
     path = "/v1/admin/agents/instances/{id}/restart",
     tag = "Admin",
     params(
-        ("id" = String, Path, description = "Instance ID (chat-api row UUID)"),
+        ("id" = String, Path, description = "Instance ID"),
         AdminChangeReasonQuery
     ),
     responses(
