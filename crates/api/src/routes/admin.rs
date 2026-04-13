@@ -1870,6 +1870,82 @@ fn empty_ok_response() -> Result<Response, ApiError> {
         .map_err(|_| ApiError::internal_server_error("Failed to construct response"))
 }
 
+enum LifecycleAction {
+    Start,
+    Stop,
+    Restart,
+}
+
+impl std::fmt::Display for LifecycleAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Start => write!(f, "start"),
+            Self::Stop => write!(f, "stop"),
+            Self::Restart => write!(f, "restart"),
+        }
+    }
+}
+
+impl LifecycleAction {
+    fn gerund(&self) -> &'static str {
+        match self {
+            Self::Start => "Starting",
+            Self::Stop => "Stopping",
+            Self::Restart => "Restarting",
+        }
+    }
+}
+
+async fn do_lifecycle_action(
+    app_state: &AppState,
+    instance_id_str: &str,
+    action: LifecycleAction,
+) -> Result<(), ApiError> {
+    let instance_uuid = Uuid::parse_str(instance_id_str)
+        .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
+
+    let instance = admin_get_instance_for_lifecycle(app_state, instance_uuid).await?;
+    let user_id = instance.user_id;
+
+    tracing::info!(
+        "Admin: {} instance: instance_id={}, owner_user_id={}",
+        action.gerund(),
+        instance_uuid,
+        user_id
+    );
+
+    let result = match action {
+        LifecycleAction::Start => {
+            app_state
+                .agent_service
+                .start_instance(instance_uuid, user_id)
+                .await
+        }
+        LifecycleAction::Stop => {
+            app_state
+                .agent_service
+                .stop_instance(instance_uuid, user_id)
+                .await
+        }
+        LifecycleAction::Restart => {
+            app_state
+                .agent_service
+                .restart_instance(instance_uuid, user_id)
+                .await
+        }
+    };
+
+    result.map_err(|e| {
+        tracing::error!(
+            "Admin: Failed to {} instance: instance_id={}, error={}",
+            action,
+            instance_uuid,
+            e
+        );
+        ApiError::internal_server_error(format!("Failed to {} instance", action))
+    })
+}
+
 /// Admin: start an agent instance by id (no ownership check; uses the instance owner's id for the agent API).
 #[utoipa::path(
     post,
@@ -1893,29 +1969,7 @@ pub async fn admin_start_instance(
     Extension(_user): Extension<AuthenticatedUser>,
     Path(instance_id): Path<String>,
 ) -> Result<Response, ApiError> {
-    let instance_uuid = Uuid::parse_str(&instance_id)
-        .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
-
-    let instance = admin_get_instance_for_lifecycle(&app_state, instance_uuid).await?;
-    tracing::info!(
-        "Admin: Starting instance: instance_id={}, owner_user_id={}",
-        instance_uuid,
-        instance.user_id
-    );
-
-    app_state
-        .agent_service
-        .start_instance(instance_uuid, instance.user_id)
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                "Admin: Failed to start instance: instance_id={}, error={}",
-                instance_uuid,
-                e
-            );
-            ApiError::internal_server_error("Failed to start instance")
-        })?;
-
+    do_lifecycle_action(&app_state, &instance_id, LifecycleAction::Start).await?;
     empty_ok_response()
 }
 
@@ -1942,29 +1996,7 @@ pub async fn admin_stop_instance(
     Extension(_user): Extension<AuthenticatedUser>,
     Path(instance_id): Path<String>,
 ) -> Result<Response, ApiError> {
-    let instance_uuid = Uuid::parse_str(&instance_id)
-        .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
-
-    let instance = admin_get_instance_for_lifecycle(&app_state, instance_uuid).await?;
-    tracing::info!(
-        "Admin: Stopping instance: instance_id={}, owner_user_id={}",
-        instance_uuid,
-        instance.user_id
-    );
-
-    app_state
-        .agent_service
-        .stop_instance(instance_uuid, instance.user_id)
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                "Admin: Failed to stop instance: instance_id={}, error={}",
-                instance_uuid,
-                e
-            );
-            ApiError::internal_server_error("Failed to stop instance")
-        })?;
-
+    do_lifecycle_action(&app_state, &instance_id, LifecycleAction::Stop).await?;
     empty_ok_response()
 }
 
@@ -1991,29 +2023,7 @@ pub async fn admin_restart_instance(
     Extension(_user): Extension<AuthenticatedUser>,
     Path(instance_id): Path<String>,
 ) -> Result<Response, ApiError> {
-    let instance_uuid = Uuid::parse_str(&instance_id)
-        .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
-
-    let instance = admin_get_instance_for_lifecycle(&app_state, instance_uuid).await?;
-    tracing::info!(
-        "Admin: Restarting instance: instance_id={}, owner_user_id={}",
-        instance_uuid,
-        instance.user_id
-    );
-
-    app_state
-        .agent_service
-        .restart_instance(instance_uuid, instance.user_id)
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                "Admin: Failed to restart instance: instance_id={}, error={}",
-                instance_uuid,
-                e
-            );
-            ApiError::internal_server_error("Failed to restart instance")
-        })?;
-
+    do_lifecycle_action(&app_state, &instance_id, LifecycleAction::Restart).await?;
     empty_ok_response()
 }
 
