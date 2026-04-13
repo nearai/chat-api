@@ -3129,7 +3129,7 @@ impl AgentService for AgentServiceImpl {
             ));
         }
 
-        // Update DB status (trigger records to agent_instance_status_history)
+        // Update DB status; repository persists status-history/audit row explicitly.
         self.repository
             .update_instance_status(instance_id, "stopped", Some(actor_user_id), reason)
             .await?;
@@ -3217,7 +3217,7 @@ impl AgentService for AgentServiceImpl {
             ));
         }
 
-        // Update DB status (trigger records to agent_instance_status_history)
+        // Update DB status; repository persists status-history/audit row explicitly.
         self.repository
             .update_instance_status(instance_id, "active", Some(actor_user_id), reason)
             .await?;
@@ -5963,6 +5963,12 @@ mod tests {
             repo.expect_get_user_passkey_credentials()
                 .returning(|_| Ok(None));
             repo.expect_update_instance_status()
+                .withf(move |instance_id, new_status, actor, change_reason| {
+                    *instance_id == inst_id
+                        && new_status == "active"
+                        && *actor == Some(user_id)
+                        && change_reason == "owner_start"
+                })
                 .times(1)
                 .returning(|_, _, _, _| Ok(()));
 
@@ -6052,6 +6058,12 @@ mod tests {
             repo.expect_get_user_passkey_credentials()
                 .returning(|_| Ok(None));
             repo.expect_update_instance_status()
+                .withf(move |instance_id, new_status, actor, change_reason| {
+                    *instance_id == inst_id
+                        && new_status == "stopped"
+                        && *actor == Some(user_id)
+                        && change_reason == "owner_stop"
+                })
                 .times(1)
                 .returning(|_, _, _, _| Ok(()));
 
@@ -6137,6 +6149,12 @@ mod tests {
             repo.expect_get_user_passkey_credentials()
                 .returning(|_| Ok(None));
             repo.expect_update_instance_status()
+                .withf(move |instance_id, new_status, actor, change_reason| {
+                    *instance_id == inst_id
+                        && new_status == "active"
+                        && *actor == Some(user_id)
+                        && change_reason == "owner_restart"
+                })
                 .times(1)
                 .returning(|_, _, _, _| Ok(()));
 
@@ -6231,6 +6249,12 @@ mod tests {
             repo.expect_list_all_instances()
                 .returning(move |_, _| Ok((vec![instance.clone()], 1)));
             repo.expect_update_instance_status()
+                .withf(move |instance_id, new_status, actor, change_reason| {
+                    *instance_id == inst_id
+                        && new_status == "active"
+                        && actor.is_none()
+                        && change_reason == "sync_status_poll"
+                })
                 .times(1)
                 .returning(|_, _, _, _| Ok(()));
 
@@ -6278,6 +6302,12 @@ mod tests {
             repo.expect_list_all_instances()
                 .returning(move |_, _| Ok((vec![instance.clone()], 1)));
             repo.expect_update_instance_status()
+                .withf(move |instance_id, new_status, actor, change_reason| {
+                    *instance_id == inst_id
+                        && new_status == "stopped"
+                        && actor.is_none()
+                        && change_reason == "sync_status_poll"
+                })
                 .times(1)
                 .returning(|_, _, _, _| Ok(()));
 
@@ -6536,6 +6566,12 @@ mod tests {
             repo.expect_list_all_instances()
                 .returning(move |_, _| Ok((vec![inst_found_c.clone(), inst_missing_c.clone()], 2)));
             repo.expect_update_instance_status()
+                .withf(move |instance_id, new_status, actor, change_reason| {
+                    *instance_id == found_id
+                        && new_status == "active"
+                        && actor.is_none()
+                        && change_reason == "sync_status_poll"
+                })
                 .times(1)
                 .returning(|_, _, _, _| Ok(()));
 

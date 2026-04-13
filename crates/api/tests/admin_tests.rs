@@ -613,3 +613,59 @@ async fn test_admin_lifecycle_endpoints_missing_instance_returns_404() {
         );
     }
 }
+
+#[tokio::test]
+async fn test_admin_lifecycle_endpoints_require_admin_403() {
+    let server = create_test_server().await;
+    let non_admin_token = mock_login(&server, "admin_lifecycle_nonadmin@no-admin.org").await;
+    let instance_id = Uuid::new_v4();
+
+    for route in [
+        format!("/v1/admin/agents/instances/{instance_id}/start"),
+        format!("/v1/admin/agents/instances/{instance_id}/stop"),
+        format!("/v1/admin/agents/instances/{instance_id}/restart"),
+    ] {
+        let response = server
+            .post(&route)
+            .add_header(
+                http::HeaderName::from_static("authorization"),
+                http::HeaderValue::from_str(&format!("Bearer {non_admin_token}")).unwrap(),
+            )
+            .await;
+
+        assert_eq!(
+            response.status_code(),
+            403,
+            "Expected 403 for non-admin lifecycle route: {}",
+            route
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_admin_lifecycle_change_reason_too_long_returns_400() {
+    let server = create_test_server().await;
+    let admin_token = mock_login(&server, "admin_lifecycle_reason_len@admin.org").await;
+    let instance_id = Uuid::new_v4();
+    let too_long = "x".repeat(256);
+
+    let response = server
+        .post(&format!(
+            "/v1/admin/agents/instances/{}/start?change_reason={}",
+            instance_id, too_long
+        ))
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 400);
+    let body: serde_json::Value = response.json();
+    let message = body.get("message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        message.contains("change_reason must be <="),
+        "Expected change_reason length validation error, got: {}",
+        message
+    );
+}

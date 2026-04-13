@@ -42,6 +42,8 @@ impl PostgresAgentRepository {
         let mut client = self.pool.get().await?;
         let tx = client.transaction().await?;
 
+        // `allow_from_deleted=true` is used by delete flow so repeated delete calls are idempotent:
+        // we re-set status to `deleted` and skip history insert when there is no transition.
         let old_status: Option<String> = if allow_from_deleted {
             tx.query_opt(
                 "SELECT status FROM agent_instances

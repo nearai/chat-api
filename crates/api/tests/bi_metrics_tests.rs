@@ -1,6 +1,7 @@
 mod common;
 
 use common::{create_test_server_and_db, mock_login, TestServerConfig};
+use services::agent::ports::AgentRepository;
 use services::user::ports::UserRepository;
 use uuid::Uuid;
 
@@ -613,20 +614,13 @@ async fn test_bi_status_history_with_changes() {
 
     let (inst1_id, inst2_id) = seed_bi_test_data(&db, user.id.0).await;
 
-    // Trigger status changes via UPDATE (the trigger will record them)
-    let client = db.pool().get().await.expect("get pool client");
-    client
-        .execute(
-            "UPDATE agent_instances SET status = 'stopped' WHERE id = $1",
-            &[&inst1_id],
-        )
+    // Trigger status changes via repository API (explicitly writes status history).
+    db.agent_repository()
+        .update_instance_status(inst1_id, "stopped", Some(user.id), "bi_test_stop")
         .await
         .expect("update status to stopped");
-    client
-        .execute(
-            "UPDATE agent_instances SET status = 'active' WHERE id = $1",
-            &[&inst1_id],
-        )
+    db.agent_repository()
+        .update_instance_status(inst1_id, "active", Some(user.id), "bi_test_start")
         .await
         .expect("update status back to active");
 

@@ -24,6 +24,7 @@ use services::bi_metrics::{
 
 /// Maximum rows for BI usage aggregation queries.
 const BI_USAGE_MAX_ROWS: i64 = 1000;
+const ADMIN_CHANGE_REASON_MAX_LEN: usize = 255;
 
 use services::model::ports::{UpdateModelParams, UpsertModelParams};
 use services::user_usage::UsageRankBy;
@@ -1827,6 +1828,8 @@ pub async fn admin_delete_instance(
 ) -> Result<StatusCode, ApiError> {
     let instance_uuid = Uuid::parse_str(&instance_id)
         .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
+    // Align behavior with OpenAPI: return 404 when instance is missing.
+    let _instance = admin_get_instance_for_lifecycle(&app_state, instance_uuid).await?;
 
     tracing::info!(
         "Admin: Deleting instance: instance_id={}, admin_user_id={}",
@@ -1839,7 +1842,7 @@ pub async fn admin_delete_instance(
         .delete_instance(
             instance_uuid,
             Some(admin.user_id),
-            &resolve_admin_change_reason(query.change_reason, "admin_delete"),
+            &resolve_admin_change_reason(query.change_reason, "admin_delete")?,
         )
         .await
         .map_err(|e| {
@@ -1886,17 +1889,26 @@ pub struct AdminChangeReasonQuery {
     pub change_reason: Option<String>,
 }
 
-fn resolve_admin_change_reason(input: Option<String>, fallback: &'static str) -> String {
+fn resolve_admin_change_reason(
+    input: Option<String>,
+    fallback: &'static str,
+) -> Result<String, ApiError> {
     match input {
         Some(s) => {
             let trimmed = s.trim();
             if trimmed.is_empty() {
-                fallback.to_string()
+                Ok(fallback.to_string())
             } else {
-                trimmed.to_string()
+                if trimmed.len() > ADMIN_CHANGE_REASON_MAX_LEN {
+                    return Err(ApiError::bad_request(format!(
+                        "change_reason must be <= {} characters",
+                        ADMIN_CHANGE_REASON_MAX_LEN
+                    )));
+                }
+                Ok(trimmed.to_string())
             }
         }
-        None => fallback.to_string(),
+        None => Ok(fallback.to_string()),
     }
 }
 
@@ -2004,7 +2016,7 @@ pub async fn admin_start_instance(
     Path(instance_id): Path<String>,
     Query(query): Query<AdminChangeReasonQuery>,
 ) -> Result<Response, ApiError> {
-    let change_reason = resolve_admin_change_reason(query.change_reason, "admin_start");
+    let change_reason = resolve_admin_change_reason(query.change_reason, "admin_start")?;
     do_lifecycle_action(
         &app_state,
         &instance_id,
@@ -2041,7 +2053,7 @@ pub async fn admin_stop_instance(
     Path(instance_id): Path<String>,
     Query(query): Query<AdminChangeReasonQuery>,
 ) -> Result<Response, ApiError> {
-    let change_reason = resolve_admin_change_reason(query.change_reason, "admin_stop");
+    let change_reason = resolve_admin_change_reason(query.change_reason, "admin_stop")?;
     do_lifecycle_action(
         &app_state,
         &instance_id,
@@ -2078,7 +2090,7 @@ pub async fn admin_restart_instance(
     Path(instance_id): Path<String>,
     Query(query): Query<AdminChangeReasonQuery>,
 ) -> Result<Response, ApiError> {
-    let change_reason = resolve_admin_change_reason(query.change_reason, "admin_restart");
+    let change_reason = resolve_admin_change_reason(query.change_reason, "admin_restart")?;
     do_lifecycle_action(
         &app_state,
         &instance_id,
