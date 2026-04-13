@@ -14,7 +14,7 @@ use axum::{
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use services::agent::ports::AgentInstance;
+use services::agent::ports::{AgentInstance, AgentServiceError};
 use services::analytics::{ActivityLogEntry, AnalyticsSummary, TopActiveUsersResponse};
 use services::bi_metrics::{
     DeploymentFilter, DeploymentRecord, DeploymentSummary, DeploymentsSortBy, DeploymentsSortOrder,
@@ -1844,7 +1844,10 @@ pub async fn admin_delete_instance(
         )
         .await
         .map_err(|e| {
-            if e.to_string().contains("Instance not found") {
+            if matches!(
+                e.downcast_ref::<AgentServiceError>(),
+                Some(AgentServiceError::InstanceNotFound)
+            ) {
                 ApiError::not_found("Instance not found")
             } else {
                 tracing::error!(
@@ -1898,9 +1901,10 @@ fn resolve_admin_change_reason(
     match input {
         Some(s) => {
             let trimmed = s.trim();
+            let trimmed_char_count = trimmed.chars().count();
             if trimmed.is_empty() {
                 Ok(fallback.to_string())
-            } else if trimmed.len() > ADMIN_CHANGE_REASON_MAX_LEN {
+            } else if trimmed_char_count > ADMIN_CHANGE_REASON_MAX_LEN {
                 Err(ApiError::bad_request(format!(
                     "change_reason must be <= {} characters",
                     ADMIN_CHANGE_REASON_MAX_LEN

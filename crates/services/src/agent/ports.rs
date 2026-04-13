@@ -129,6 +129,12 @@ pub enum AgentApiKeyCreationError {
     Internal(#[from] anyhow::Error),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum AgentServiceError {
+    #[error("Instance not found")]
+    InstanceNotFound,
+}
+
 /// Usage log entry for tracking API consumption
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageLogEntry {

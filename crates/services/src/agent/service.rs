@@ -11,9 +11,9 @@ use uuid::Uuid;
 
 use super::ports::{
     is_valid_service_type, AgentApiInstanceEnrichment, AgentApiKey, AgentApiKeyAuthError,
-    AgentApiKeyCreationError, AgentInstance, AgentRepository, AgentService, CreateInstanceParams,
-    InstanceBalance, UpgradeAvailability, UsageLogEntry, DEFAULT_AGENT_SERVICE_TYPE,
-    VALID_SERVICE_TYPES,
+    AgentApiKeyCreationError, AgentInstance, AgentRepository, AgentService, AgentServiceError,
+    CreateInstanceParams, InstanceBalance, UpgradeAvailability, UsageLogEntry,
+    DEFAULT_AGENT_SERVICE_TYPE, VALID_SERVICE_TYPES,
 };
 
 /// Maximum size for the Agent API SSE stream buffer (100 KB).
@@ -2794,7 +2794,7 @@ impl AgentService for AgentServiceImpl {
             .repository
             .get_instance(instance_id)
             .await?
-            .ok_or_else(|| anyhow!("Instance not found"))?;
+            .ok_or(AgentServiceError::InstanceNotFound)?;
 
         if instance.user_id != user_id {
             return Err(anyhow!("Access denied"));
