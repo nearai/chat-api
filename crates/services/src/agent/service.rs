@@ -2835,7 +2835,7 @@ impl AgentService for AgentServiceImpl {
             .repository
             .get_instance(instance_id)
             .await?
-            .ok_or_else(|| anyhow!("Instance not found"))?;
+            .ok_or(AgentServiceError::InstanceNotFound)?;
 
         // Route to the correct manager that owns this instance
         let manager = self.resolve_manager(&instance)?;

@@ -615,6 +615,30 @@ async fn test_admin_lifecycle_endpoints_missing_instance_returns_404() {
 }
 
 #[tokio::test]
+async fn test_admin_delete_endpoint_missing_instance_returns_404() {
+    let server = create_test_server().await;
+    let admin_token = mock_login(&server, "admin_delete_missing_instance@admin.org").await;
+    let missing_instance_id = Uuid::new_v4();
+
+    let response = server
+        .delete(&format!(
+            "/v1/admin/agents/instances/{}",
+            missing_instance_id
+        ))
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        404,
+        "Expected 404 for missing instance on admin delete route"
+    );
+}
+
+#[tokio::test]
 async fn test_admin_lifecycle_endpoints_require_admin_403() {
     let server = create_test_server().await;
     let non_admin_token = mock_login(&server, "admin_lifecycle_nonadmin@no-admin.org").await;
