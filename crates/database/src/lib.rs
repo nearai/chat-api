@@ -9,11 +9,12 @@ pub use pool::DbPool;
 pub use repositories::{
     PostgresAgentRepository, PostgresAnalyticsRepository, PostgresAppConfigRepository,
     PostgresBiMetricsRepository, PostgresConversationRepository,
-    PostgresConversationShareRepository, PostgresCreditsRepository, PostgresFileRepository,
-    PostgresModelRepository, PostgresNearNonceRepository, PostgresOAuthRepository,
-    PostgresPaymentWebhookRepository, PostgresSessionRepository, PostgresStripeCustomerRepository,
-    PostgresSubscriptionRepository, PostgresSystemConfigsRepository, PostgresUserRepository,
-    PostgresUserSettingsRepository, PostgresUserUsageRepository,
+    PostgresConversationShareRepository, PostgresCreditsRepository,
+    PostgresEmailVerificationChallengeRepository, PostgresFileRepository, PostgresModelRepository,
+    PostgresNearNonceRepository, PostgresOAuthRepository, PostgresPaymentWebhookRepository,
+    PostgresSessionRepository, PostgresStripeCustomerRepository, PostgresSubscriptionRepository,
+    PostgresSystemConfigsRepository, PostgresUserRepository, PostgresUserSettingsRepository,
+    PostgresUserUsageRepository,
 };
 
 use crate::pool::create_pool_with_native_tls;
@@ -38,6 +39,7 @@ pub struct Database {
     app_config_repository: Arc<PostgresAppConfigRepository>,
     near_nonce_repository: Arc<PostgresNearNonceRepository>,
     analytics_repository: Arc<PostgresAnalyticsRepository>,
+    email_verification_challenge_repository: Arc<PostgresEmailVerificationChallengeRepository>,
     user_usage_repository: Arc<PostgresUserUsageRepository>,
     model_repository: Arc<PostgresModelRepository>,
     credits_repository: Arc<PostgresCreditsRepository>,
@@ -65,6 +67,9 @@ impl Database {
         let app_config_repository = Arc::new(PostgresAppConfigRepository::new(pool.clone()));
         let near_nonce_repository = Arc::new(PostgresNearNonceRepository::new(pool.clone()));
         let analytics_repository = Arc::new(PostgresAnalyticsRepository::new(pool.clone()));
+        let email_verification_challenge_repository = Arc::new(
+            PostgresEmailVerificationChallengeRepository::new(pool.clone()),
+        );
         let user_usage_repository = Arc::new(PostgresUserUsageRepository::new(pool.clone()));
         let model_repository = Arc::new(PostgresModelRepository::new(pool.clone()));
         let credits_repository = Arc::new(PostgresCreditsRepository::new(pool.clone()));
@@ -89,6 +94,7 @@ impl Database {
             app_config_repository,
             near_nonce_repository,
             analytics_repository,
+            email_verification_challenge_repository,
             user_usage_repository,
             model_repository,
             credits_repository,
@@ -269,6 +275,13 @@ impl Database {
     /// Get the analytics repository
     pub fn analytics_repository(&self) -> Arc<PostgresAnalyticsRepository> {
         self.analytics_repository.clone()
+    }
+
+    /// Get the email verification challenge repository
+    pub fn email_verification_challenge_repository(
+        &self,
+    ) -> Arc<PostgresEmailVerificationChallengeRepository> {
+        self.email_verification_challenge_repository.clone()
     }
 
     /// Get the user usage repository

@@ -1,4 +1,6 @@
-use crate::{error::ApiError, middleware::AuthenticatedUser, state::AppState};
+use crate::{
+    error::ApiError, middleware::AuthenticatedUser, state::AppState, validation::validate_email,
+};
 use axum::extract::Query;
 use axum::{
     extract::{Extension, State},
@@ -11,7 +13,7 @@ use near_api::signer::NEP413Payload;
 use serde::{Deserialize, Serialize};
 use services::analytics::{ActivityType, AuthMethod, RecordActivityRequest};
 use services::auth::near::SignedMessage;
-use services::auth::ports::OAuthProvider;
+use services::auth::ports::{OAuthProvider, VerifyEmailCodeError};
 use services::metrics::consts::{
     METRIC_USER_LOGIN, METRIC_USER_SIGNUP, TAG_AUTH_METHOD, TAG_IS_NEW_USER,
 };
@@ -35,6 +37,72 @@ fn try_add_gateway_cookie(headers: &mut HeaderMap, cookie: Option<String>, conte
             "No Set-Cookie header returned from gateway session setup in {}",
             context
         );
+    }
+}
+
+/// Request body for email OTP code request
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+pub struct EmailRequestCodeRequest {
+    pub email: String,
+}
+
+/// Request body for email OTP verification
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+pub struct EmailVerifyCodeRequest {
+    pub email: String,
+    pub code: String,
+}
+
+fn extract_client_ip(headers: &HeaderMap) -> String {
+    if let Some(value) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+        if let Some(ip) = value
+            .split(',')
+            .next()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            return ip.to_string();
+        }
+    }
+
+    if let Some(value) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
+        let ip = value.trim();
+        if !ip.is_empty() {
+            return ip.to_string();
+        }
+    }
+
+    if let Some(value) = headers.get("forwarded").and_then(|v| v.to_str().ok()) {
+        for part in value.split(';').flat_map(|segment| segment.split(',')) {
+            let part = part.trim();
+            if let Some(for_value) = part.strip_prefix("for=") {
+                let ip = for_value
+                    .trim_matches('"')
+                    .trim_matches('[')
+                    .trim_matches(']')
+                    .trim();
+                if !ip.is_empty() {
+                    return ip.to_string();
+                }
+            }
+        }
+    }
+
+    "127.0.0.1".to_string()
+}
+
+fn email_verify_error_to_api_error(error: VerifyEmailCodeError) -> ApiError {
+    match error {
+        VerifyEmailCodeError::Disabled => {
+            ApiError::service_unavailable("Email authentication is disabled")
+        }
+        VerifyEmailCodeError::InvalidOrExpired | VerifyEmailCodeError::RateLimited => {
+            ApiError::unauthorized("Invalid or expired verification code")
+        }
+        VerifyEmailCodeError::Internal(err) => {
+            tracing::error!("Email verification failed: {}", err);
+            ApiError::internal_server_error("Failed to verify email code")
+        }
     }
 }
 
@@ -159,6 +227,141 @@ pub struct NearAuthResponse {
     pub expires_at: String,
     /// Whether this is a new user
     pub is_new_user: bool,
+}
+
+/// Handler for requesting an email verification code
+#[utoipa::path(
+    post,
+    path = "/v1/auth/email/request-code",
+    tag = "Auth",
+    request_body = EmailRequestCodeRequest,
+    responses(
+        (status = 204, description = "Verification code requested"),
+        (status = 400, description = "Invalid email format", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    )
+)]
+pub async fn request_email_code(
+    State(app_state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<EmailRequestCodeRequest>,
+) -> Result<StatusCode, ApiError> {
+    validate_email(&request.email).map_err(ApiError::bad_request)?;
+
+    app_state
+        .email_auth_service
+        .request_code(
+            request.email.trim().to_string(),
+            extract_client_ip(&headers),
+        )
+        .await
+        .map_err(|err| {
+            tracing::error!("Failed to request email verification code: {}", err);
+            ApiError::internal_server_error("Failed to request verification code")
+        })?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Handler for verifying an email verification code
+#[utoipa::path(
+    post,
+    path = "/v1/auth/email/verify-code",
+    tag = "Auth",
+    request_body = EmailVerifyCodeRequest,
+    responses(
+        (status = 200, description = "Successfully authenticated", body = crate::models::EmailAuthResponse),
+        (status = 400, description = "Invalid request format", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Invalid or expired verification code", body = crate::error::ApiErrorResponse),
+        (status = 503, description = "Email authentication unavailable", body = crate::error::ApiErrorResponse)
+    )
+)]
+pub async fn verify_email_code(
+    State(app_state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<EmailVerifyCodeRequest>,
+) -> Result<(HeaderMap, Json<crate::models::EmailAuthResponse>), ApiError> {
+    validate_email(&request.email).map_err(ApiError::bad_request)?;
+
+    if request.code.len() != 6 || !request.code.chars().all(|c| c.is_ascii_digit()) {
+        return Err(ApiError::bad_request(
+            "Verification code must be a 6-digit number",
+        ));
+    }
+
+    let result = app_state
+        .email_auth_service
+        .verify_code(
+            request.email.trim().to_string(),
+            request.code,
+            extract_client_ip(&headers),
+        )
+        .await
+        .map_err(email_verify_error_to_api_error)?;
+
+    let auth_method = AuthMethod::Email;
+    let metric_name = if result.is_new_user {
+        METRIC_USER_SIGNUP
+    } else {
+        METRIC_USER_LOGIN
+    };
+    let tags = [
+        format!("{}:{}", TAG_AUTH_METHOD, auth_method.as_str()),
+        format!("{}:{}", TAG_IS_NEW_USER, result.is_new_user),
+    ];
+    let tags_str: Vec<&str> = tags.iter().map(|s| s.as_str()).collect();
+    app_state
+        .metrics_service
+        .record_count(metric_name, 1, &tags_str);
+
+    let activity_type = if result.is_new_user {
+        ActivityType::Signup
+    } else {
+        ActivityType::Login
+    };
+    if let Err(err) = app_state
+        .analytics_service
+        .record_activity(RecordActivityRequest {
+            user_id: result.session.user_id,
+            activity_type,
+            auth_method: Some(auth_method),
+            metadata: None,
+        })
+        .await
+    {
+        tracing::warn!("Failed to record analytics for email auth: {}", err);
+    }
+
+    let token = result
+        .session
+        .token
+        .ok_or_else(|| ApiError::internal_server_error("Failed to create session"))?;
+
+    let gateway_cookie = app_state
+        .agent_service
+        .setup_gateway_session_for_user(result.session.user_id)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                "Failed to set up gateway session for user in verify_email_code: user_id={}, error={}",
+                result.session.user_id,
+                e
+            );
+            None
+        });
+
+    let mut response_headers = HeaderMap::new();
+    try_add_gateway_cookie(&mut response_headers, gateway_cookie, "verify_email_code");
+
+    Ok((
+        response_headers,
+        Json(crate::models::EmailAuthResponse {
+            token,
+            session_id: result.session.session_id.to_string(),
+            expires_at: result.session.expires_at.to_rfc3339(),
+            is_new_user: result.is_new_user,
+        }),
+    ))
 }
 
 /// Handler for initiating Google OAuth flow
@@ -773,6 +976,8 @@ pub fn create_oauth_router() -> Router<AppState> {
         // OAuth initiation routes
         .route("/google", get(google_login))
         .route("/github", get(github_login))
+        .route("/email/request-code", post(request_email_code))
+        .route("/email/verify-code", post(verify_email_code))
         // NEAR wallet authentication
         .route("/near", post(near_auth))
         // Unified callback route for all providers

@@ -1099,20 +1099,24 @@ async fn test_bi_deployments_limit_minimum() {
 #[tokio::test]
 async fn test_bi_deployments_pagination() {
     let (server, db) = server_and_db().await;
-    let admin_token = mock_login(&server, "bi_admin_page@admin.org").await;
+    let run_id = Uuid::new_v4().to_string();
+    let admin_email = format!("bi-admin-page-{run_id}@admin.org");
+    let admin_token = mock_login(&server, &admin_email).await;
 
     let user = db
         .user_repository()
-        .get_user_by_email("bi_admin_page@admin.org")
+        .get_user_by_email(&admin_email)
         .await
         .unwrap()
         .unwrap();
 
     let (inst1_id, inst2_id) = seed_bi_test_data(&db, user.id.0).await;
 
-    // Fetch page 1 with limit=1
+    // Fetch page 1 with limit=1, scoped to this test's seeded user and deterministic sort.
     let response = server
-        .get("/v1/admin/bi/deployments?limit=1&offset=0")
+        .get(&format!(
+            "/v1/admin/bi/deployments?q={run_id}&sort_by=name&sort_order=asc&limit=1&offset=0"
+        ))
         .add_header(AUTH, auth_header(&admin_token))
         .await;
 
@@ -1121,11 +1125,16 @@ async fn test_bi_deployments_pagination() {
     let page1 = body.get("deployments").unwrap().as_array().unwrap();
     let total = body.get("total").unwrap().as_i64().unwrap();
     assert_eq!(page1.len(), 1, "Page 1 should return exactly 1 item");
-    assert!(total >= 2, "Total should be at least 2");
+    assert_eq!(
+        total, 2,
+        "Scoped pagination query should see exactly 2 items"
+    );
 
-    // Fetch page 2 with limit=1, offset=1
+    // Fetch page 2 with limit=1, offset=1.
     let response = server
-        .get("/v1/admin/bi/deployments?limit=1&offset=1")
+        .get(&format!(
+            "/v1/admin/bi/deployments?q={run_id}&sort_by=name&sort_order=asc&limit=1&offset=1"
+        ))
         .add_header(AUTH, auth_header(&admin_token))
         .await;
 
@@ -1134,7 +1143,7 @@ async fn test_bi_deployments_pagination() {
     let page2 = body.get("deployments").unwrap().as_array().unwrap();
     assert_eq!(page2.len(), 1, "Page 2 should return exactly 1 item");
 
-    // Pages should return different items
+    // Pages should return different items.
     let id1 = page1[0].get("id").unwrap().as_str().unwrap();
     let id2 = page2[0].get("id").unwrap().as_str().unwrap();
     assert_ne!(id1, id2, "Pagination should return different items");
@@ -1150,6 +1159,10 @@ async fn test_bi_deployments_pagination() {
 async fn test_bi_users_returns_only_active_subscriptions() {
     let (server, db) = server_and_db().await;
     let admin_token = mock_login(&server, "bi_users_admin@admin.org").await;
+    let run_id = Uuid::new_v4().to_string();
+    let active_email = format!("bi-user-active-{run_id}@test.org");
+    let none_email = format!("bi-user-none-{run_id}@test.org");
+    let canceled_email = format!("bi-user-canceled-{run_id}@test.org");
 
     // Configure subscription plans so we can filter by plan
     common::set_subscription_plans(
@@ -1161,33 +1174,35 @@ async fn test_bi_users_returns_only_active_subscriptions() {
     .await;
 
     // User 1: active subscription - should appear with subscription_status=active
-    let _ = mock_login(&server, "bi_user_active@test.org").await;
+    let _ = mock_login(&server, &active_email).await;
     common::insert_test_subscription_with_status(
         &server,
         &db,
-        "bi_user_active@test.org",
+        &active_email,
         "active",
         "price_bi_test_basic",
     )
     .await;
 
     // User 2: no subscription - should appear with subscription_status=none
-    let _ = mock_login(&server, "bi_user_none@test.org").await;
+    let _ = mock_login(&server, &none_email).await;
 
     // User 3: canceled subscription only - BI returns only active/trialing, so this user gets null
-    let _ = mock_login(&server, "bi_user_canceled@test.org").await;
+    let _ = mock_login(&server, &canceled_email).await;
     common::insert_test_subscription_with_status(
         &server,
         &db,
-        "bi_user_canceled@test.org",
+        &canceled_email,
         "canceled",
         "price_bi_test_basic",
     )
     .await;
 
-    // Filter by subscription_status=active: should include user 1, exclude user 2 and 3
+    // Filter by subscription_status=active within this test's seeded users only.
     let response = server
-        .get("/v1/admin/bi/users?filter_by=subscription_status&filter_value=active&limit=100")
+        .get(&format!(
+            "/v1/admin/bi/users?filter_by=subscription_status&filter_value=active&q={run_id}&limit=100"
+        ))
         .add_header(AUTH, auth_header(&admin_token))
         .await;
     assert_eq!(response.status_code(), 200);
@@ -1198,18 +1213,24 @@ async fn test_bi_users_returns_only_active_subscriptions() {
         .filter_map(|u| u.get("email").and_then(|e| e.as_str()))
         .collect();
     assert!(
-        active_emails.contains(&"bi_user_active@test.org"),
+        active_emails.contains(&active_email.as_str()),
         "User with active subscription should appear: {:?}",
         active_emails
     );
     assert!(
-        !active_emails.contains(&"bi_user_canceled@test.org"),
+        !active_emails.contains(&canceled_email.as_str()),
         "User with only canceled subscription should not appear"
     );
+    assert!(
+        !active_emails.contains(&none_email.as_str()),
+        "User with no subscription should not appear in active filter"
+    );
 
-    // Filter by subscription_status=none: should include user 2 and 3 (no active sub)
+    // Filter by subscription_status=none within this test's seeded users only.
     let response = server
-        .get("/v1/admin/bi/users?filter_by=subscription_status&filter_value=none&limit=100")
+        .get(&format!(
+            "/v1/admin/bi/users?filter_by=subscription_status&filter_value=none&q={run_id}&limit=100"
+        ))
         .add_header(AUTH, auth_header(&admin_token))
         .await;
     assert_eq!(response.status_code(), 200);
@@ -1220,14 +1241,18 @@ async fn test_bi_users_returns_only_active_subscriptions() {
         .filter_map(|u| u.get("email").and_then(|e| e.as_str()))
         .collect();
     assert!(
-        none_emails.contains(&"bi_user_none@test.org"),
+        none_emails.contains(&none_email.as_str()),
         "User with no subscription should appear: {:?}",
         none_emails
     );
     assert!(
-        none_emails.contains(&"bi_user_canceled@test.org"),
+        none_emails.contains(&canceled_email.as_str()),
         "User with only canceled subscription should appear as 'none' (no active sub): {:?}",
         none_emails
+    );
+    assert!(
+        !none_emails.contains(&active_email.as_str()),
+        "Active subscription user should not appear in none filter"
     );
 
     // Filter subscription_status=canceled should return 400 (invalid - only active, trialing, none)
@@ -1242,6 +1267,6 @@ async fn test_bi_users_returns_only_active_subscriptions() {
     );
 
     // Cleanup
-    common::cleanup_user_subscriptions(&db, "bi_user_active@test.org").await;
-    common::cleanup_user_subscriptions(&db, "bi_user_canceled@test.org").await;
+    common::cleanup_user_subscriptions(&db, &active_email).await;
+    common::cleanup_user_subscriptions(&db, &canceled_email).await;
 }

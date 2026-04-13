@@ -37,6 +37,10 @@ pub struct TestServerConfig {
     ///
     /// If not set, tests use a permissive default to avoid unrelated flakiness.
     pub rate_limit_config: Option<RateLimitConfig>,
+    /// Optional override for Resend API base URL in email auth tests.
+    pub email_resend_base_url: Option<String>,
+    /// Optional override to enable/disable email auth in tests.
+    pub email_auth_enabled: Option<bool>,
 }
 
 /// Restrictive rate limit config for rate limit tests.
@@ -81,7 +85,13 @@ pub async fn create_test_server_and_db(
         .await;
 
     // Load configuration
-    let config = config::Config::from_env();
+    let mut config = config::Config::from_env();
+    if let Some(base_url) = test_config.email_resend_base_url.clone() {
+        config.email_auth.resend_base_url = base_url;
+    }
+    if let Some(enabled) = test_config.email_auth_enabled {
+        config.email_auth.enabled = enabled;
+    }
 
     // Create database connection
     let db = database::Database::from_config(&config.database)
@@ -108,8 +118,10 @@ pub async fn create_test_server_and_db(
     let model_repo = db.model_repository();
     let system_configs_repo = db.system_configs_repository();
     let near_nonce_repo = db.near_nonce_repository();
+    let email_challenge_repo = db.email_verification_challenge_repository();
 
     // Create services
+    let http_client = reqwest::Client::new();
     let oauth_service = Arc::new(services::auth::OAuthServiceImpl::new(
         oauth_repo.clone(),
         session_repo.clone(),
@@ -121,6 +133,15 @@ pub async fn create_test_server_and_db(
         config.oauth.github_client_secret.clone(),
         config.oauth.redirect_uri.clone(),
         config.near.rpc_url.clone(),
+    ));
+
+    let email_auth_service = Arc::new(services::auth::EmailAuthServiceImpl::new(
+        email_challenge_repo
+            as Arc<dyn services::auth::ports::EmailVerificationChallengeRepository>,
+        session_repo.clone() as Arc<dyn services::auth::ports::SessionRepository>,
+        user_repo.clone(),
+        http_client.clone(),
+        config.email_auth.clone(),
     ));
 
     let user_service = Arc::new(services::user::UserServiceImpl::new(user_repo.clone()));
@@ -270,10 +291,9 @@ pub async fn create_test_server_and_db(
         ));
 
     // Create application state
-    let http_client = reqwest::Client::new();
-
     let app_state = AppState {
         oauth_service,
+        email_auth_service,
         user_service,
         user_settings_service,
         model_service,
