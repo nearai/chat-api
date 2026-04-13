@@ -1820,13 +1820,17 @@ pub async fn admin_create_instance(
 )]
 pub async fn admin_delete_instance(
     State(app_state): State<AppState>,
-    Extension(_user): Extension<AuthenticatedUser>,
+    Extension(admin): Extension<AuthenticatedUser>,
     Path(instance_id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let instance_uuid = Uuid::parse_str(&instance_id)
         .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
 
-    tracing::info!("Admin: Deleting instance: instance_id={}", instance_uuid);
+    tracing::info!(
+        "Admin: Deleting instance: instance_id={}, admin_user_id={}",
+        instance_uuid,
+        admin.user_id
+    );
 
     app_state
         .agent_service
