@@ -1900,6 +1900,7 @@ async fn do_lifecycle_action(
     app_state: &AppState,
     instance_id_str: &str,
     action: LifecycleAction,
+    admin_user_id: UserId,
 ) -> Result<(), ApiError> {
     let instance_uuid = Uuid::parse_str(instance_id_str)
         .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
@@ -1908,10 +1909,11 @@ async fn do_lifecycle_action(
     let user_id = instance.user_id;
 
     tracing::info!(
-        "Admin: {} instance: instance_id={}, owner_user_id={}",
+        "Admin: {} instance: instance_id={}, owner_user_id={}, admin_user_id={}",
         action.gerund(),
         instance_uuid,
-        user_id
+        user_id,
+        admin_user_id
     );
 
     let result = match action {
@@ -1966,10 +1968,16 @@ async fn do_lifecycle_action(
 )]
 pub async fn admin_start_instance(
     State(app_state): State<AppState>,
-    Extension(_user): Extension<AuthenticatedUser>,
+    Extension(admin): Extension<AuthenticatedUser>,
     Path(instance_id): Path<String>,
 ) -> Result<Response, ApiError> {
-    do_lifecycle_action(&app_state, &instance_id, LifecycleAction::Start).await?;
+    do_lifecycle_action(
+        &app_state,
+        &instance_id,
+        LifecycleAction::Start,
+        admin.user_id,
+    )
+    .await?;
     empty_ok_response()
 }
 
@@ -1993,10 +2001,16 @@ pub async fn admin_start_instance(
 )]
 pub async fn admin_stop_instance(
     State(app_state): State<AppState>,
-    Extension(_user): Extension<AuthenticatedUser>,
+    Extension(admin): Extension<AuthenticatedUser>,
     Path(instance_id): Path<String>,
 ) -> Result<Response, ApiError> {
-    do_lifecycle_action(&app_state, &instance_id, LifecycleAction::Stop).await?;
+    do_lifecycle_action(
+        &app_state,
+        &instance_id,
+        LifecycleAction::Stop,
+        admin.user_id,
+    )
+    .await?;
     empty_ok_response()
 }
 
@@ -2020,10 +2034,16 @@ pub async fn admin_stop_instance(
 )]
 pub async fn admin_restart_instance(
     State(app_state): State<AppState>,
-    Extension(_user): Extension<AuthenticatedUser>,
+    Extension(admin): Extension<AuthenticatedUser>,
     Path(instance_id): Path<String>,
 ) -> Result<Response, ApiError> {
-    do_lifecycle_action(&app_state, &instance_id, LifecycleAction::Restart).await?;
+    do_lifecycle_action(
+        &app_state,
+        &instance_id,
+        LifecycleAction::Restart,
+        admin.user_id,
+    )
+    .await?;
     empty_ok_response()
 }
 
