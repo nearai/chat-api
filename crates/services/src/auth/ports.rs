@@ -167,9 +167,14 @@ pub trait EmailVerificationChallengeRepository: Send + Sync {
         email: &str,
     ) -> anyhow::Result<Option<EmailVerificationChallenge>>;
 
-    async fn verify_challenge(
+    /// Atomically look up the latest active 'sent' challenge for an email and attempt
+    /// to verify it. Returns:
+    ///   - Ok(Some(true))  = code matched, challenge consumed
+    ///   - Ok(Some(false)) = code did not match (attempt counted)
+    ///   - Ok(None)       = no active 'sent' challenge found for this email
+    async fn verify_email_code(
         &self,
-        challenge_id: Uuid,
+        email: &str,
         code_mac: &str,
         max_attempts: i32,
     ) -> anyhow::Result<Option<bool>>;

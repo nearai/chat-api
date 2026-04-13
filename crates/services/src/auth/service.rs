@@ -479,16 +479,12 @@ impl EmailAuthServiceImpl {
         format!("{:06}", rng.random_range(0..1_000_000))
     }
 
-    fn compute_code_mac(
-        &self,
-        challenge_id: Uuid,
-        email: &str,
-        code: &str,
-    ) -> anyhow::Result<String> {
+    /// Compute HMAC-SHA256 over email and code only. The challenge_id is not included
+    /// to allow the verify step to be a single atomic DB call. The OTP's time TTL and
+    /// rate-limit constraints make challenge_id in the MAC unnecessary for security.
+    fn compute_code_mac(&self, email: &str, code: &str) -> anyhow::Result<String> {
         let mut mac = HmacSha256::new_from_slice(self.config.otp_hmac_secret.as_bytes())
             .context("Invalid email OTP HMAC secret")?;
-        mac.update(challenge_id.as_bytes());
-        mac.update(b"|");
         mac.update(email.as_bytes());
         mac.update(b"|");
         mac.update(code.as_bytes());
@@ -576,7 +572,7 @@ impl EmailAuthService for EmailAuthServiceImpl {
 
         let challenge_id = Uuid::new_v4();
         let code = self.generate_verification_code();
-        let code_mac = self.compute_code_mac(challenge_id, &email, &code)?;
+        let code_mac = self.compute_code_mac(&email, &code)?;
         let expires_at = now + chrono::Duration::minutes(self.config.otp_ttl_minutes);
 
         let challenge = self
@@ -637,20 +633,13 @@ impl EmailAuthService for EmailAuthServiceImpl {
             return Err(VerifyEmailCodeError::RateLimited);
         }
 
-        let challenge = self
-            .challenge_repository
-            .get_latest_active_sent_challenge(&email)
-            .await
-            .map_err(VerifyEmailCodeError::Internal)?
-            .ok_or(VerifyEmailCodeError::InvalidOrExpired)?;
-
         let code_mac = self
-            .compute_code_mac(challenge.id, &email, &code)
+            .compute_code_mac(&email, &code)
             .map_err(VerifyEmailCodeError::Internal)?;
 
         let matched = self
             .challenge_repository
-            .verify_challenge(challenge.id, &code_mac, self.config.otp_max_verify_attempts)
+            .verify_email_code(&email, &code_mac, self.config.otp_max_verify_attempts)
             .await
             .map_err(VerifyEmailCodeError::Internal)?
             .ok_or(VerifyEmailCodeError::InvalidOrExpired)?;

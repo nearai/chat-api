@@ -66,7 +66,7 @@ async fn verify_email_code(
         .await
 }
 
-fn compute_code_mac(challenge_id: Uuid, email: &str, code: &str) -> String {
+fn compute_code_mac(email: &str, code: &str) -> String {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
 
@@ -74,8 +74,6 @@ fn compute_code_mac(challenge_id: Uuid, email: &str, code: &str) -> String {
 
     let mut mac = HmacSha256::new_from_slice(b"test-email-auth-secret-test-email-auth-secret")
         .expect("valid hmac key");
-    mac.update(challenge_id.as_bytes());
-    mac.update(b"|");
     mac.update(email.as_bytes());
     mac.update(b"|");
     mac.update(code.as_bytes());
@@ -122,7 +120,7 @@ async fn latest_challenge_id(db: &database::Database, email: &str) -> Uuid {
 
 async fn set_latest_challenge_code(db: &database::Database, email: &str, code: &str) -> Uuid {
     let challenge_id = latest_challenge_id(db, email).await;
-    let code_mac = compute_code_mac(challenge_id, email, code);
+    let code_mac = compute_code_mac(email, code);
     let client = db.pool().get().await.expect("db client");
     client
         .execute(
@@ -278,8 +276,8 @@ async fn test_request_email_code_invalidates_previous_challenge() {
     assert_eq!(first_status, "invalidated");
     assert_eq!(second_status, "sent");
 
-    let first_mac = compute_code_mac(first_id, &email, "111111");
-    let second_mac = compute_code_mac(second_id, &email, "222222");
+    let first_mac = compute_code_mac(&email, "111111");
+    let second_mac = compute_code_mac(&email, "222222");
     client
         .execute(
             "UPDATE email_verification_challenges SET code_mac = $2 WHERE id = $1",
@@ -477,7 +475,7 @@ async fn test_failed_delivery_marks_challenge_failed_and_non_verifiable() {
     let status: String = row.get(1);
     assert_eq!(status, "failed");
 
-    let code_mac = compute_code_mac(challenge_id, &email, "123456");
+    let code_mac = compute_code_mac(&email, "123456");
     client
         .execute(
             "UPDATE email_verification_challenges SET code_mac = $2 WHERE id = $1",

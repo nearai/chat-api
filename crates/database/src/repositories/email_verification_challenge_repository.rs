@@ -207,30 +207,42 @@ impl EmailVerificationChallengeRepository for PostgresEmailVerificationChallenge
         Ok(row.map(challenge_from_row))
     }
 
-    async fn verify_challenge(
+    /// Atomically look up the latest 'sent' challenge for an email and attempt verification.
+    /// Uses FOR UPDATE SKIP LOCKED to avoid blocking concurrent requests on different challenges.
+    /// Returns Some(true) if the code matched (challenge consumed), Some(false) if the code
+    /// did not match (attempt counted, may be invalidated), None if no active challenge found.
+    async fn verify_email_code(
         &self,
-        challenge_id: Uuid,
+        email: &str,
         code_mac: &str,
         max_attempts: i32,
     ) -> anyhow::Result<Option<bool>> {
         let client = self.pool.get().await?;
         let row = client
             .query_opt(
-                "UPDATE email_verification_challenges
-                 SET attempt_count = CASE
-                        WHEN code_mac = $2 THEN attempt_count
-                        ELSE attempt_count + 1
-                     END,
-                     status = CASE
-                        WHEN code_mac = $2 THEN 'consumed'
-                        WHEN attempt_count + 1 >= $3 THEN 'invalidated'
+                "WITH active_challenge AS (
+                    SELECT id, code_mac, attempt_count
+                    FROM email_verification_challenges
+                    WHERE email = $1
+                      AND status = 'sent'
+                      AND expires_at > NOW()
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    FOR UPDATE SKIP LOCKED
+                )
+                UPDATE email_verification_challenges
+                SET
+                    attempt_count = CASE WHEN active_challenge.code_mac = $2 THEN active_challenge.attempt_count ELSE active_challenge.attempt_count + 1 END,
+                    status = CASE
+                        WHEN active_challenge.code_mac = $2 THEN 'consumed'
+                        WHEN active_challenge.attempt_count + 1 >= $3 THEN 'invalidated'
                         ELSE status
-                     END
-                 WHERE id = $1
-                   AND status = 'sent'
-                   AND expires_at > NOW()
-                 RETURNING code_mac = $2 AS matched",
-                &[&challenge_id, &code_mac, &max_attempts],
+                    END
+                FROM active_challenge
+                WHERE email_verification_challenges.id = active_challenge.id
+                  AND email_verification_challenges.status = 'sent'
+                RETURNING active_challenge.code_mac = $2 AS matched",
+                &[&email, &code_mac, &max_attempts],
             )
             .await?;
 
