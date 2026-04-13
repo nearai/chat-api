@@ -313,10 +313,16 @@ impl BiMetricsRepository for PostgresBiMetricsRepository {
 
         let rows = client
             .query(
-                "SELECT id, instance_id, old_status, new_status, changed_at
-                 FROM agent_instance_status_history
+                "SELECT h.id, h.instance_id, h.old_status, h.new_status,
+                        h.changed_by_user_id,
+                        COALESCE(NULLIF(u.name, ''), NULLIF(u.email, '')) AS changed_by_user_name,
+                        u.avatar_url AS changed_by_user_avatar_url,
+                        h.change_reason,
+                        h.changed_at
+                 FROM agent_instance_status_history h
+                 LEFT JOIN users u ON h.changed_by_user_id = u.id
                  WHERE instance_id = $1
-                 ORDER BY changed_at DESC
+                 ORDER BY h.changed_at DESC
                  LIMIT $2",
                 &[&instance_id, &capped_limit],
             )
@@ -329,7 +335,11 @@ impl BiMetricsRepository for PostgresBiMetricsRepository {
                 instance_id: r.get(1),
                 old_status: r.get(2),
                 new_status: r.get(3),
-                changed_at: r.get(4),
+                changed_by_user_id: r.get(4),
+                changed_by_user_name: r.get(5),
+                changed_by_user_avatar_url: r.get(6),
+                change_reason: r.get(7),
+                changed_at: r.get(8),
             })
             .collect();
 
