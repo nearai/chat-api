@@ -4944,6 +4944,15 @@ mod tests {
             }
         }
 
+        fn with_manager_limit(max: u64) -> Self {
+            Self {
+                configs: Some(SystemConfigs {
+                    max_instances_per_manager: Some(max),
+                    ..Default::default()
+                }),
+            }
+        }
+
         /// Per-URL limits with non-TEE infra enabled
         fn with_allow_prerelease_upgrades(allow_prerelease: bool) -> Self {
             use crate::system_configs::ports::{AgentHostingConfig, AgentHostingCrabshackConfig};
@@ -5494,9 +5503,7 @@ mod tests {
         let svc = make_service(
             managers,
             Arc::new(repo),
-            Arc::new(MockSystemConfigsService::with_manager_limit_and_non_tee(
-                10, true,
-            )),
+            Arc::new(MockSystemConfigsService::with_manager_limit(10)),
         );
 
         let mgr = svc.next_available_manager_for_class(false).await.unwrap();
@@ -5534,9 +5541,7 @@ mod tests {
         let svc = make_service(
             managers,
             Arc::new(repo),
-            Arc::new(MockSystemConfigsService::with_manager_limit_and_non_tee(
-                10, false,
-            )),
+            Arc::new(MockSystemConfigsService::with_manager_limit(10)),
         );
 
         let mgr = svc.next_available_manager_for_class(true).await.unwrap();
