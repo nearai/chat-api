@@ -257,8 +257,6 @@ pub struct AgentServiceImpl {
     http_client: Client,
     /// Agent manager endpoints (URL + token pairs)
     managers: Vec<AgentManager>,
-    /// Round-robin counter for distributing new instances across managers
-    round_robin_counter: AtomicUsize,
     /// Type-specific round-robin counters for capacity-aware manager selection.
     tee_manager_rr_counter: AtomicUsize,
     non_tee_manager_rr_counter: AtomicUsize,
@@ -376,7 +374,6 @@ impl AgentServiceImpl {
             repository,
             http_client,
             managers,
-            round_robin_counter: AtomicUsize::new(0),
             tee_manager_rr_counter: AtomicUsize::new(0),
             non_tee_manager_rr_counter: AtomicUsize::new(0),
             nearai_api_url,
@@ -390,7 +387,7 @@ impl AgentServiceImpl {
     /// Does NOT check capacity — use type-specific capacity-aware helpers for production paths.
     #[cfg(test)]
     fn next_manager(&self) -> &AgentManager {
-        let idx = self.round_robin_counter.fetch_add(1, Ordering::Relaxed);
+        let idx = self.tee_manager_rr_counter.fetch_add(1, Ordering::Relaxed);
         &self.managers[idx % self.managers.len()]
     }
 
