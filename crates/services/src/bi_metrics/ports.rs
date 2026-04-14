@@ -156,6 +156,14 @@ pub struct StatusChangeRecord {
     pub instance_id: Uuid,
     pub old_status: String,
     pub new_status: String,
+    /// User ID that initiated the change when known (null for system events).
+    pub changed_by_user_id: Option<UserId>,
+    /// User display name (or email fallback) for admin UI display.
+    pub changed_by_user_name: Option<String>,
+    /// User avatar URL for admin UI display when available.
+    pub changed_by_user_avatar_url: Option<String>,
+    /// Optional audit reason attached to the status change.
+    pub change_reason: Option<String>,
     pub changed_at: DateTime<Utc>,
 }
 

@@ -313,10 +313,19 @@ impl BiMetricsRepository for PostgresBiMetricsRepository {
 
         let rows = client
             .query(
-                "SELECT id, instance_id, old_status, new_status, changed_at
-                 FROM agent_instance_status_history
-                 WHERE instance_id = $1
-                 ORDER BY changed_at DESC
+                "SELECT h.id AS id,
+                        h.instance_id AS instance_id,
+                        h.old_status AS old_status,
+                        h.new_status AS new_status,
+                        h.changed_by_user_id AS changed_by_user_id,
+                        COALESCE(NULLIF(u.name, ''), NULLIF(u.email, '')) AS changed_by_user_name,
+                        u.avatar_url AS changed_by_user_avatar_url,
+                        h.change_reason AS change_reason,
+                        h.changed_at AS changed_at
+                 FROM agent_instance_status_history h
+                 LEFT JOIN users u ON h.changed_by_user_id = u.id
+                 WHERE h.instance_id = $1
+                 ORDER BY h.changed_at DESC
                  LIMIT $2",
                 &[&instance_id, &capped_limit],
             )
@@ -325,11 +334,15 @@ impl BiMetricsRepository for PostgresBiMetricsRepository {
         let records = rows
             .into_iter()
             .map(|r| StatusChangeRecord {
-                id: r.get(0),
-                instance_id: r.get(1),
-                old_status: r.get(2),
-                new_status: r.get(3),
-                changed_at: r.get(4),
+                id: r.get("id"),
+                instance_id: r.get("instance_id"),
+                old_status: r.get("old_status"),
+                new_status: r.get("new_status"),
+                changed_by_user_id: r.get("changed_by_user_id"),
+                changed_by_user_name: r.get("changed_by_user_name"),
+                changed_by_user_avatar_url: r.get("changed_by_user_avatar_url"),
+                change_reason: r.get("change_reason"),
+                changed_at: r.get("changed_at"),
             })
             .collect();
 
