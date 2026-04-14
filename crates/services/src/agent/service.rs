@@ -259,6 +259,9 @@ pub struct AgentServiceImpl {
     managers: Vec<AgentManager>,
     /// Round-robin counter for distributing new instances across managers
     round_robin_counter: AtomicUsize,
+    /// Type-specific round-robin counters for capacity-aware manager selection.
+    tee_manager_rr_counter: AtomicUsize,
+    non_tee_manager_rr_counter: AtomicUsize,
     /// Chat-API base URL passed to the Agent API as nearai_api_url when creating instances
     nearai_api_url: String,
     /// System configs for reading instance limits and defaults
@@ -313,6 +316,25 @@ enum AuthMethod<'a> {
     BearerToken(&'a str),
 }
 
+#[derive(Clone, Copy, Debug)]
+enum ManagerType {
+    Tee,
+    NonTee,
+}
+
+impl ManagerType {
+    fn is_non_tee(self) -> bool {
+        matches!(self, Self::NonTee)
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Tee => "tee",
+            Self::NonTee => "non-tee",
+        }
+    }
+}
+
 impl AgentServiceImpl {
     /// Generate a random credential (hex-encoded random bytes)
     fn generate_random_credential(len: usize) -> String {
@@ -355,6 +377,8 @@ impl AgentServiceImpl {
             http_client,
             managers,
             round_robin_counter: AtomicUsize::new(0),
+            tee_manager_rr_counter: AtomicUsize::new(0),
+            non_tee_manager_rr_counter: AtomicUsize::new(0),
             nearai_api_url,
             system_configs_service,
             channel_relay_url,
@@ -363,7 +387,7 @@ impl AgentServiceImpl {
     }
 
     /// Pick the next manager in round-robin order for new instance creation.
-    /// Does NOT check capacity — use `next_available_manager` for capacity-aware selection.
+    /// Does NOT check capacity — use type-specific capacity-aware helpers for production paths.
     #[cfg(test)]
     fn next_manager(&self) -> &AgentManager {
         let idx = self.round_robin_counter.fetch_add(1, Ordering::Relaxed);
@@ -436,17 +460,18 @@ impl AgentServiceImpl {
         })
     }
 
-    /// Pick the next manager with available capacity for a specific manager class,
+    /// Pick the next manager with available capacity for a specific manager type,
     /// starting from the round-robin position. Tries each candidate once.
     ///
     /// NOTE: This is a best-effort soft limit. Concurrent calls can both see a manager as
     /// under capacity and both create instances there, temporarily exceeding the limit.
     /// For a hard cap, DB-level enforcement (e.g. INSERT ... WHERE count < max) would be needed.
-    async fn next_available_manager_for_class(
+    async fn next_available_manager_for_type(
         &self,
-        is_non_tee: bool,
+        manager_type: ManagerType,
     ) -> anyhow::Result<AgentManager> {
         let configs = self.get_system_configs().await;
+        let is_non_tee = manager_type.is_non_tee();
 
         let available_managers: Vec<_> = self
             .managers
@@ -456,14 +481,19 @@ impl AgentServiceImpl {
 
         if available_managers.is_empty() {
             return Err(anyhow!(
-                "No suitable managers available: is_non_tee={}, configured_managers={}",
-                is_non_tee,
+                "No suitable managers available: manager_type={}, configured_managers={}",
+                manager_type.as_str(),
                 self.managers.len()
             ));
         }
 
         let n = available_managers.len();
-        let start = self.round_robin_counter.fetch_add(1, Ordering::Relaxed);
+        let start = match manager_type {
+            ManagerType::Tee => self.tee_manager_rr_counter.fetch_add(1, Ordering::Relaxed),
+            ManagerType::NonTee => self
+                .non_tee_manager_rr_counter
+                .fetch_add(1, Ordering::Relaxed),
+        };
 
         for i in 0..n {
             let mgr = available_managers[(start + i) % n];
@@ -471,10 +501,10 @@ impl AgentServiceImpl {
             let max = match max {
                 Some(limit) => limit,
                 None => {
-                    tracing::warn!(
-                        "Manager limit missing in config, treating as unlimited: manager_url={}, is_non_tee={}",
+                    tracing::info!(
+                        "Manager limit missing in config, treating as unlimited: manager_url={}, manager_type={}",
                         mgr.url,
-                        is_non_tee
+                        manager_type.as_str()
                     );
                     return Ok(mgr.clone());
                 }
@@ -484,19 +514,28 @@ impl AgentServiceImpl {
                 return Ok(mgr.clone());
             }
             tracing::info!(
-                "Manager at capacity: manager_url={}, count={}, max={}, is_non_tee={}",
+                "Manager at capacity: manager_url={}, count={}, max={}, manager_type={}",
                 mgr.url,
                 count,
                 max,
-                is_non_tee
+                manager_type.as_str()
             );
         }
 
         Err(anyhow!(
-            "All {} suitable agent manager(s) are at capacity (is_non_tee={})",
+            "All {} suitable agent manager(s) are at capacity (manager_type={})",
             n,
-            is_non_tee
+            manager_type.as_str()
         ))
+    }
+
+    async fn next_available_tee_manager(&self) -> anyhow::Result<AgentManager> {
+        self.next_available_manager_for_type(ManagerType::Tee).await
+    }
+
+    async fn next_available_non_tee_manager(&self) -> anyhow::Result<AgentManager> {
+        self.next_available_manager_for_type(ManagerType::NonTee)
+            .await
     }
 
     /// Resolve the manager for an existing instance.
@@ -1682,7 +1721,7 @@ impl AgentService for AgentServiceImpl {
         tracing::info!("Creating instance from Agent API: user_id={}", user_id);
 
         // Pick next manager with available capacity (round-robin, skipping full managers)
-        let manager = self.next_available_manager_for_class(false).await?;
+        let manager = self.next_available_tee_manager().await?;
 
         // Create an unbound API key on behalf of the user; the agent will use it to authenticate to the chat-api.
         let key_name = params
@@ -1846,7 +1885,7 @@ impl AgentService for AgentServiceImpl {
         }
 
         // Pick next manager with available capacity
-        let manager = self.next_available_manager_for_class(false).await?;
+        let manager = self.next_available_tee_manager().await?;
 
         // Create an unbound API key on behalf of the user
         let key_name = params
@@ -2051,7 +2090,7 @@ impl AgentService for AgentServiceImpl {
         );
 
         // Pick next manager with available capacity
-        let manager = self.next_available_manager_for_class(true).await?;
+        let manager = self.next_available_non_tee_manager().await?;
         let manager_url = manager.url.clone();
 
         tracing::info!(
@@ -4843,7 +4882,12 @@ mod tests {
         async fn next_available_manager(&self) -> anyhow::Result<AgentManager> {
             let configs = self.get_system_configs().await;
             let non_tee_infra = Self::is_non_tee_infra(&configs);
-            self.next_available_manager_for_class(non_tee_infra).await
+            let manager_type = if non_tee_infra {
+                ManagerType::NonTee
+            } else {
+                ManagerType::Tee
+            };
+            self.next_available_manager_for_type(manager_type).await
         }
     }
 
@@ -5473,7 +5517,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_next_available_manager_for_class_applies_limit_to_tee_pool() {
+    async fn test_next_available_manager_for_type_applies_limit_to_tee_pool() {
         let managers = vec![
             AgentManager {
                 url: "https://tee-full.example.com".to_string(),
@@ -5506,12 +5550,15 @@ mod tests {
             Arc::new(MockSystemConfigsService::with_manager_limit(10)),
         );
 
-        let mgr = svc.next_available_manager_for_class(false).await.unwrap();
+        let mgr = svc
+            .next_available_manager_for_type(ManagerType::Tee)
+            .await
+            .unwrap();
         assert_eq!(mgr.url, "https://tee-room.example.com");
     }
 
     #[tokio::test]
-    async fn test_next_available_manager_for_class_applies_limit_to_non_tee_pool() {
+    async fn test_next_available_manager_for_type_applies_limit_to_non_tee_pool() {
         let managers = vec![
             AgentManager {
                 url: "https://claws.example.com/api/crabshack/non-tee-full".to_string(),
@@ -5544,7 +5591,10 @@ mod tests {
             Arc::new(MockSystemConfigsService::with_manager_limit(10)),
         );
 
-        let mgr = svc.next_available_manager_for_class(true).await.unwrap();
+        let mgr = svc
+            .next_available_manager_for_type(ManagerType::NonTee)
+            .await
+            .unwrap();
         assert_eq!(
             mgr.url,
             "https://claws.example.com/api/crabshack/non-tee-room"
@@ -5552,7 +5602,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_next_available_manager_for_class_errors_on_empty_target_pool() {
+    async fn test_next_available_manager_for_type_errors_on_empty_target_pool() {
         let managers = vec![AgentManager {
             url: "https://tee.example.com".to_string(),
             token: "tee-token".to_string(),
@@ -5565,12 +5615,14 @@ mod tests {
             Arc::new(MockSystemConfigsService::no_config()),
         );
 
-        let result = svc.next_available_manager_for_class(true).await;
+        let result = svc
+            .next_available_manager_for_type(ManagerType::NonTee)
+            .await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("No suitable managers available: is_non_tee=true"));
+            .contains("No suitable managers available: manager_type=non-tee"));
     }
 
     #[test]
@@ -8178,7 +8230,7 @@ mod tests {
         let result = svc.next_available_manager().await;
         let error_msg = result.unwrap_err().to_string();
         assert!(error_msg.contains("No suitable managers"));
-        assert!(error_msg.contains("is_non_tee=true"));
+        assert!(error_msg.contains("manager_type=non-tee"));
     }
 
     #[tokio::test]
