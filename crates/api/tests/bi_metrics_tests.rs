@@ -1,6 +1,6 @@
 mod common;
 
-use common::{cleanup_user, create_test_server_and_db, mock_login, TestServerConfig};
+use common::{create_test_server_and_db, mock_login, TestServerConfig};
 use services::agent::ports::AgentRepository;
 use services::user::ports::UserRepository;
 use uuid::Uuid;
