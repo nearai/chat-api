@@ -499,13 +499,6 @@ impl AgentServiceImpl {
         ))
     }
 
-    /// Pick the next manager with available capacity using infra mode from system config.
-    async fn next_available_manager(&self) -> anyhow::Result<AgentManager> {
-        let configs = self.get_system_configs().await;
-        let non_tee_infra = Self::is_non_tee_infra(&configs);
-        self.next_available_manager_for_class(non_tee_infra).await
-    }
-
     /// Resolve the manager for an existing instance.
     /// Uses the stored agent_api_base_url from DB, falling back to the first manager.
     fn resolve_manager(&self, instance: &AgentInstance) -> anyhow::Result<&AgentManager> {
@@ -4844,6 +4837,15 @@ mod tests {
     };
     use chrono::{Duration, Utc};
     use config::AgentManager;
+
+    impl AgentServiceImpl {
+        /// Test-only wrapper that preserves legacy test call sites.
+        async fn next_available_manager(&self) -> anyhow::Result<AgentManager> {
+            let configs = self.get_system_configs().await;
+            let non_tee_infra = Self::is_non_tee_infra(&configs);
+            self.next_available_manager_for_class(non_tee_infra).await
+        }
+    }
 
     #[test]
     fn compose_api_service_type_on_create_tee_passes_canonical() {
