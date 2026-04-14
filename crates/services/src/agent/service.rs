@@ -436,31 +436,28 @@ impl AgentServiceImpl {
         })
     }
 
-    /// Pick the next manager with available capacity, starting from the round-robin position.
-    /// Tries each manager once. Returns Err if all managers are at capacity.
+    /// Pick the next manager with available capacity for a specific manager class,
+    /// starting from the round-robin position. Tries each candidate once.
     ///
     /// NOTE: This is a best-effort soft limit. Concurrent calls can both see a manager as
     /// under capacity and both create instances there, temporarily exceeding the limit.
     /// For a hard cap, DB-level enforcement (e.g. INSERT ... WHERE count < max) would be needed.
-    async fn next_available_manager(&self) -> anyhow::Result<AgentManager> {
+    async fn next_available_manager_for_class(
+        &self,
+        is_non_tee: bool,
+    ) -> anyhow::Result<AgentManager> {
         let configs = self.get_system_configs().await;
 
-        let non_tee_infra = Self::is_non_tee_infra(&configs);
-
-        // Filter managers based on agent_hosting.new_agent_with_non_tee_infra
         let available_managers: Vec<_> = self
             .managers
             .iter()
-            .filter(|mgr| {
-                // Infrastructure mode must match: non_tee_infra=true means only non-TEE, false means only TEE
-                non_tee_infra == mgr.get_is_non_tee()
-            })
+            .filter(|mgr| is_non_tee == mgr.get_is_non_tee())
             .collect();
 
         if available_managers.is_empty() {
             return Err(anyhow!(
-                "No suitable managers available: non_tee_infra={}, configured_managers={}",
-                non_tee_infra,
+                "No suitable managers available: is_non_tee={}, configured_managers={}",
+                is_non_tee,
                 self.managers.len()
             ));
         }
@@ -473,25 +470,40 @@ impl AgentServiceImpl {
             let max = configs.max_instances_for_manager(&mgr.url);
             let max = match max {
                 Some(limit) => limit,
-                None => return Ok(mgr.clone()),
+                None => {
+                    tracing::warn!(
+                        "Manager limit missing in config, treating as unlimited: manager_url={}, is_non_tee={}",
+                        mgr.url,
+                        is_non_tee
+                    );
+                    return Ok(mgr.clone());
+                }
             };
             let count = self.repository.count_instances_by_manager(&mgr.url).await?;
             if (count as u64) < max {
                 return Ok(mgr.clone());
             }
             tracing::info!(
-                "Manager at capacity: manager_url={}, count={}, max={}",
+                "Manager at capacity: manager_url={}, count={}, max={}, is_non_tee={}",
                 mgr.url,
                 count,
-                max
+                max,
+                is_non_tee
             );
         }
 
         Err(anyhow!(
-            "All {} suitable agent manager(s) are at capacity (non_tee_infra={})",
+            "All {} suitable agent manager(s) are at capacity (is_non_tee={})",
             n,
-            non_tee_infra
+            is_non_tee
         ))
+    }
+
+    /// Pick the next manager with available capacity using infra mode from system config.
+    async fn next_available_manager(&self) -> anyhow::Result<AgentManager> {
+        let configs = self.get_system_configs().await;
+        let non_tee_infra = Self::is_non_tee_infra(&configs);
+        self.next_available_manager_for_class(non_tee_infra).await
     }
 
     /// Resolve the manager for an existing instance.
@@ -1677,7 +1689,7 @@ impl AgentService for AgentServiceImpl {
         tracing::info!("Creating instance from Agent API: user_id={}", user_id);
 
         // Pick next manager with available capacity (round-robin, skipping full managers)
-        let manager = self.next_available_manager().await?;
+        let manager = self.next_available_manager_for_class(false).await?;
 
         // Create an unbound API key on behalf of the user; the agent will use it to authenticate to the chat-api.
         let key_name = params
@@ -1841,7 +1853,7 @@ impl AgentService for AgentServiceImpl {
         }
 
         // Pick next manager with available capacity
-        let manager = self.next_available_manager().await?;
+        let manager = self.next_available_manager_for_class(false).await?;
 
         // Create an unbound API key on behalf of the user
         let key_name = params
@@ -2046,7 +2058,7 @@ impl AgentService for AgentServiceImpl {
         );
 
         // Pick next manager with available capacity
-        let manager = self.next_available_manager().await?;
+        let manager = self.next_available_manager_for_class(true).await?;
         let manager_url = manager.url.clone();
 
         tracing::info!(
@@ -5449,6 +5461,111 @@ mod tests {
         assert_eq!(mgr.url, "https://claws.example.com/api/crabshack/mgr1");
     }
 
+    #[tokio::test]
+    async fn test_next_available_manager_for_class_applies_limit_to_tee_pool() {
+        let managers = vec![
+            AgentManager {
+                url: "https://tee-full.example.com".to_string(),
+                token: "tee-full-token".to_string(),
+                is_non_tee: false,
+            },
+            AgentManager {
+                url: "https://tee-room.example.com".to_string(),
+                token: "tee-room-token".to_string(),
+                is_non_tee: false,
+            },
+            AgentManager {
+                url: "https://claws.example.com/api/crabshack/non-tee".to_string(),
+                token: "non-tee-token".to_string(),
+                is_non_tee: true,
+            },
+        ];
+
+        let mut repo = MockAgentRepository::new();
+        repo.expect_count_instances_by_manager()
+            .withf(|url: &str| url == "https://tee-full.example.com")
+            .returning(|_| Ok(10));
+        repo.expect_count_instances_by_manager()
+            .withf(|url: &str| url == "https://tee-room.example.com")
+            .returning(|_| Ok(5));
+
+        let svc = make_service(
+            managers,
+            Arc::new(repo),
+            Arc::new(MockSystemConfigsService::with_manager_limit_and_non_tee(
+                10, true,
+            )),
+        );
+
+        let mgr = svc.next_available_manager_for_class(false).await.unwrap();
+        assert_eq!(mgr.url, "https://tee-room.example.com");
+    }
+
+    #[tokio::test]
+    async fn test_next_available_manager_for_class_applies_limit_to_non_tee_pool() {
+        let managers = vec![
+            AgentManager {
+                url: "https://claws.example.com/api/crabshack/non-tee-full".to_string(),
+                token: "non-tee-full-token".to_string(),
+                is_non_tee: true,
+            },
+            AgentManager {
+                url: "https://claws.example.com/api/crabshack/non-tee-room".to_string(),
+                token: "non-tee-room-token".to_string(),
+                is_non_tee: true,
+            },
+            AgentManager {
+                url: "https://tee.example.com".to_string(),
+                token: "tee-token".to_string(),
+                is_non_tee: false,
+            },
+        ];
+
+        let mut repo = MockAgentRepository::new();
+        repo.expect_count_instances_by_manager()
+            .withf(|url: &str| url == "https://claws.example.com/api/crabshack/non-tee-full")
+            .returning(|_| Ok(10));
+        repo.expect_count_instances_by_manager()
+            .withf(|url: &str| url == "https://claws.example.com/api/crabshack/non-tee-room")
+            .returning(|_| Ok(4));
+
+        let svc = make_service(
+            managers,
+            Arc::new(repo),
+            Arc::new(MockSystemConfigsService::with_manager_limit_and_non_tee(
+                10, false,
+            )),
+        );
+
+        let mgr = svc.next_available_manager_for_class(true).await.unwrap();
+        assert_eq!(
+            mgr.url,
+            "https://claws.example.com/api/crabshack/non-tee-room"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_next_available_manager_for_class_errors_on_empty_target_pool() {
+        let managers = vec![AgentManager {
+            url: "https://tee.example.com".to_string(),
+            token: "tee-token".to_string(),
+            is_non_tee: false,
+        }];
+
+        let svc = make_service(
+            managers,
+            Arc::new(mock_repo_with_manager_count(0)),
+            Arc::new(MockSystemConfigsService::no_config()),
+        );
+
+        let result = svc.next_available_manager_for_class(true).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("No suitable managers available: is_non_tee=true"));
+    }
+
     #[test]
     #[should_panic(expected = "At least one agent manager must be configured")]
     fn test_panics_on_empty_managers() {
@@ -8054,7 +8171,7 @@ mod tests {
         let result = svc.next_available_manager().await;
         let error_msg = result.unwrap_err().to_string();
         assert!(error_msg.contains("No suitable managers"));
-        assert!(error_msg.contains("non_tee_infra=true"));
+        assert!(error_msg.contains("is_non_tee=true"));
     }
 
     #[tokio::test]
