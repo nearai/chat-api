@@ -663,6 +663,39 @@ async fn test_bi_status_history_with_changes() {
         "stopped"
     );
 
+    let expected_user_id = user.id.0.to_string();
+    let expected_display_name = user
+        .name
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(user.email.as_str());
+    for (label, row) in [("latest", latest), ("earlier", earlier)] {
+        assert_eq!(
+            row.get("changed_by_user_id").and_then(|v| v.as_str()),
+            Some(expected_user_id.as_str()),
+            "{label}: changed_by_user_id should match acting user"
+        );
+        assert_eq!(
+            row.get("changed_by_user_name").and_then(|v| v.as_str()),
+            Some(expected_display_name),
+            "{label}: changed_by_user_name should round-trip from users join"
+        );
+        assert_eq!(
+            row.get("changed_by_user_avatar_url")
+                .and_then(|v| v.as_str()),
+            user.avatar_url.as_deref(),
+            "{label}: changed_by_user_avatar_url should match user row"
+        );
+    }
+    assert_eq!(
+        latest.get("change_reason").and_then(|v| v.as_str()),
+        Some("bi_test_start")
+    );
+    assert_eq!(
+        earlier.get("change_reason").and_then(|v| v.as_str()),
+        Some("bi_test_stop")
+    );
+
     cleanup(&db, inst1_id, inst2_id).await;
 }
 
