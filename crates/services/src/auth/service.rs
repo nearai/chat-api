@@ -491,16 +491,26 @@ impl EmailAuthServiceImpl {
         Ok(hex::encode(mac.finalize().into_bytes()))
     }
 
+    fn format_code_for_display(&self, code: &str) -> String {
+        if code.len() == 6 {
+            format!("{}-{}", &code[..3], &code[3..])
+        } else {
+            code.to_string()
+        }
+    }
+
     fn verification_email_text(&self, code: &str) -> String {
+        let display_code = self.format_code_for_display(code);
         format!(
-            "Your verification code is {code}. It expires in {} minutes. If you did not request this code, you can ignore this email.",
-            self.config.otp_ttl_minutes
+            "Enter this verification code to sign in to NEAR AI.\n\n{display_code}\n\nThis code expires in {} minutes.\n\nDon't share this code with anyone. NEAR AI employees will never ask for this code.\n\nIf you didn't request this code, you can ignore this email.",
+            self.config.otp_ttl_minutes,
         )
     }
 
     fn verification_email_html(&self, code: &str) -> String {
+        let display_code = self.format_code_for_display(code);
         format!(
-            "<!doctype html><html><body style=\"font-family:Arial,sans-serif;background:#f8fafc;padding:24px;\"><div style=\"max-width:480px;margin:0 auto;background:#ffffff;border-radius:12px;padding:32px;text-align:center;border:1px solid #e2e8f0;\"><h1 style=\"margin:0 0 16px;font-size:24px;color:#0f172a;\">NEAR AI verification code</h1><p style=\"margin:0 0 24px;color:#475569;font-size:14px;\">Use this code to sign in. It expires in {} minutes.</p><div style=\"font-size:32px;letter-spacing:8px;font-weight:700;color:#0f172a;margin:0 0 24px;\">{code}</div><p style=\"margin:0;color:#64748b;font-size:12px;\">If you did not request this code, you can ignore this email.</p></div></body></html>",
+            "<!doctype html><html><body style=\"margin:0;padding:0;background:#edf2fa;\"><table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"background:#edf2fa;\"><tr><td align=\"center\" style=\"padding:24px 12px;\"><table role=\"presentation\" width=\"620\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"width:620px;max-width:620px;background:#ffffff;border:1px solid #d8e1ee;border-radius:14px;overflow:hidden;\"><tr><td style=\"padding:18px 24px;background:#1f4ed8;font-family:Arial,'Helvetica Neue',Helvetica,sans-serif;\"><span style=\"display:inline-block;color:#ffffff;font-size:20px;font-weight:700;letter-spacing:0.4px;\">NEAR AI</span></td></tr><tr><td style=\"padding:24px 24px 22px;font-family:Arial,'Helvetica Neue',Helvetica,sans-serif;color:#1e293b;\"><p style=\"margin:0 0 16px;font-size:15px;line-height:1.6;\">Enter this verification code to sign in to NEAR AI.</p><table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"border:1px solid #c7d8f6;background:#f7fbff;border-radius:10px;\"><tr><td align=\"center\" style=\"padding:12px 12px 4px;font-family:Arial,'Helvetica Neue',Helvetica,sans-serif;font-size:11px;line-height:1.2;font-weight:700;letter-spacing:1px;color:#1f4ed8;text-transform:uppercase;\">Verification Code</td></tr><tr><td align=\"center\" style=\"padding:2px 12px 16px;font-family:Arial,'Helvetica Neue',Helvetica,sans-serif;font-size:36px;line-height:1;font-weight:700;letter-spacing:3px;color:#0f172a;\">{display_code}</td></tr></table><p style=\"margin:16px 0 0;font-size:13px;line-height:1.6;font-weight:700;color:#0f172a;\">Code expires in {} minutes.</p><table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"margin-top:14px;border:1px solid #f5d487;background:#fffbeb;border-radius:8px;\"><tr><td style=\"padding:12px 14px;font-family:Arial,'Helvetica Neue',Helvetica,sans-serif;font-size:13px;line-height:1.6;color:#8a4b0f;\">Don't share this code with anyone. NEAR AI employees will never ask for this code.</td></tr></table><p style=\"margin:16px 0 0;font-size:13px;line-height:1.6;color:#64748b;\">If you didn't request this code, you can ignore this email.</p></td></tr></table><table role=\"presentation\" width=\"620\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\" style=\"width:620px;max-width:620px;\"><tr><td align=\"center\" style=\"padding:10px 8px 0;font-family:Arial,'Helvetica Neue',Helvetica,sans-serif;font-size:11px;line-height:1.4;color:#94a3b8;\">This is an automated security message from NEAR AI.</td></tr></table></td></tr></table></body></html>",
             self.config.otp_ttl_minutes
         )
     }
