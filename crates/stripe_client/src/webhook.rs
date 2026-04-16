@@ -48,7 +48,10 @@ impl StripeWebhookVerifier {
             return Err(StripeWebhookError::SignatureMismatch);
         }
 
-        let timestamp_age = now.timestamp() - header.timestamp;
+        let timestamp_age = now
+            .timestamp()
+            .checked_sub(header.timestamp)
+            .ok_or(StripeWebhookError::TimestampOutsideTolerance)?;
         if self.tolerance_seconds > 0 && timestamp_age > self.tolerance_seconds {
             return Err(StripeWebhookError::TimestampOutsideTolerance);
         }
@@ -253,5 +256,20 @@ mod tests {
             .verify(payload, "t=1700000000,v1=not_hex", "whsec_test", now)
             .unwrap_err();
         assert!(matches!(err, StripeWebhookError::InvalidSignatureEncoding));
+    }
+
+    #[test]
+    fn rejects_timestamp_age_overflow() {
+        let verifier = StripeWebhookVerifier::default();
+        let payload = br#"{"id":"evt_1"}"#;
+        let ts = i64::MIN;
+        let sig = sign("whsec_test", ts, payload);
+        let header = format!("t={ts},v1={sig}");
+        let now = Utc.timestamp_opt(0, 0).unwrap();
+
+        let err = verifier
+            .verify(payload, &header, "whsec_test", now)
+            .unwrap_err();
+        assert!(matches!(err, StripeWebhookError::TimestampOutsideTolerance));
     }
 }
