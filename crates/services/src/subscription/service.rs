@@ -4,8 +4,7 @@ use super::ports::{
     StripeClientPort, StripeCreateCreditsCheckoutParams, StripeCreateSubscriptionCheckoutParams,
     StripeCustomerRepository, StripeSubscriptionSnapshot, StripeUpdateSubscriptionParams,
     Subscription, SubscriptionError, SubscriptionPlan, SubscriptionReplacement,
-    SubscriptionRepository, SubscriptionService,
-    SubscriptionWithPlan, DEFAULT_MONTHLY_TOKEN_LIMIT,
+    SubscriptionRepository, SubscriptionService, SubscriptionWithPlan, DEFAULT_MONTHLY_TOKEN_LIMIT,
 };
 use crate::agent::ports::AgentRepository;
 use crate::agent::ports::AgentService;
