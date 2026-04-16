@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use api::middleware::RateLimitState;
+use api::stripe_client_adapter::StripeClientAdapter;
 use api::{create_router_with_cors, AppState};
 use axum_test::TestServer;
 use chrono::Duration;
@@ -152,11 +153,14 @@ pub async fn create_test_server_and_db(
     ));
 
     // Initialize subscription service for testing
+    let stripe_client = Arc::new(StripeClientAdapter::new(config.stripe.secret_key.clone()));
     let subscription_service = Arc::new(services::subscription::SubscriptionServiceImpl::new(
         services::subscription::SubscriptionServiceConfig {
             db_pool: db.pool().clone(),
             stripe_customer_repo: db.stripe_customer_repository()
                 as Arc<dyn services::subscription::ports::StripeCustomerRepository>,
+            stripe_client: stripe_client.clone()
+                as Arc<dyn services::subscription::ports::StripeClientPort>,
             subscription_repo: db.subscription_repository()
                 as Arc<dyn services::subscription::ports::SubscriptionRepository>,
             webhook_repo: db.payment_webhook_repository()

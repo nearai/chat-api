@@ -44,6 +44,7 @@ utoipa-swagger-ui = { version = "9", features = ["axum"] }
 services = { path = "../services", features = ["utoipa"] }
 database = { path = "../database" }
 config = { path = "../config" }
+stripe_client = { path = "../stripe_client" }
 hex = "0.4.3"
 near-api = "0.8.0"
 

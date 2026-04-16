@@ -1,8 +1,10 @@
 use super::ports::{
-    BillingPeriod, ChangePlanOutcome, CreditsRepository, CreditsSummary, DowngradeIntentStatus,
-    PaymentWebhookRepository, StripeCustomerRepository, Subscription, SubscriptionError,
-    SubscriptionPlan, SubscriptionReplacement, SubscriptionRepository, SubscriptionService,
-    SubscriptionWithPlan, DEFAULT_MONTHLY_TOKEN_LIMIT,
+    BillingCycleAnchor, BillingPeriod, ChangePlanOutcome, CreditsRepository, CreditsSummary,
+    DowngradeIntentStatus, PaymentBehavior, PaymentWebhookRepository, ProrationBehavior,
+    StripeClientPort, StripeCreateCreditsCheckoutParams, StripeCreateSubscriptionCheckoutParams,
+    StripeCustomerRepository, StripeSubscriptionSnapshot, StripeUpdateSubscriptionParams,
+    Subscription, SubscriptionError, SubscriptionPlan, SubscriptionReplacement,
+    SubscriptionRepository, SubscriptionService, SubscriptionWithPlan, DEFAULT_MONTHLY_TOKEN_LIMIT,
 };
 use crate::agent::ports::AgentRepository;
 use crate::agent::ports::AgentService;
@@ -15,19 +17,13 @@ use chrono::{Datelike, Duration, NaiveTime, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use stripe::{
-    BillingPortalSession, CheckoutSession, CheckoutSessionMode, Client, CreateBillingPortalSession,
-    CreateCheckoutSession, CreateCheckoutSessionInvoiceCreation,
-    CreateCheckoutSessionInvoiceCreationInvoiceData, CreateCheckoutSessionLineItems,
-    CreateCheckoutSessionSubscriptionData, Customer, CustomerId, Metadata, RequestStrategy,
-    Subscription as StripeSubscription, UpdateSubscriptionItems, Webhook, WebhookError,
-};
 use tokio::sync::RwLock;
 
 /// Configuration for SubscriptionServiceImpl
 pub struct SubscriptionServiceConfig {
     pub db_pool: deadpool_postgres::Pool,
     pub stripe_customer_repo: Arc<dyn StripeCustomerRepository>,
+    pub stripe_client: Arc<dyn StripeClientPort>,
     pub subscription_repo: Arc<dyn SubscriptionRepository>,
     pub webhook_repo: Arc<dyn PaymentWebhookRepository>,
     pub credits_repo: Arc<dyn CreditsRepository>,
@@ -68,6 +64,7 @@ const TX_LOCK_TIMEOUT_MS: i64 = 1500;
 pub struct SubscriptionServiceImpl {
     db_pool: deadpool_postgres::Pool,
     stripe_customer_repo: Arc<dyn StripeCustomerRepository>,
+    stripe_client: Arc<dyn StripeClientPort>,
     subscription_repo: Arc<dyn SubscriptionRepository>,
     webhook_repo: Arc<dyn PaymentWebhookRepository>,
     credits_repo: Arc<dyn CreditsRepository>,
@@ -97,6 +94,7 @@ impl SubscriptionServiceImpl {
         Self {
             db_pool: config.db_pool,
             stripe_customer_repo: config.stripe_customer_repo,
+            stripe_client: config.stripe_client,
             subscription_repo: config.subscription_repo,
             webhook_repo: config.webhook_repo,
             credits_repo: config.credits_repo,
@@ -298,11 +296,6 @@ impl SubscriptionServiceImpl {
         Ok(plans)
     }
 
-    /// Get Stripe client
-    fn get_stripe_client(&self) -> Client {
-        Client::new(&self.stripe_secret_key)
-    }
-
     /// Get or create Stripe customer for user
     async fn get_or_create_stripe_customer(
         &self,
@@ -345,39 +338,29 @@ impl SubscriptionServiceImpl {
         let email_for_stripe = (!user.email.ends_with("@near")).then_some(user.email.as_str());
 
         // Create new Stripe customer with email and name for Stripe Dashboard/receipts
-        tracing::info!("Creating new Stripe customer for user_id={}", user_id);
-        let client = self.get_stripe_client();
-
-        let customer = Customer::create(
-            &client,
-            stripe::CreateCustomer {
-                email: email_for_stripe,
-                name: user.name.as_deref(),
-                metadata: Some(
-                    vec![("user_id".to_string(), user_id.0.to_string())]
-                        .into_iter()
-                        .collect(),
-                ),
-                test_clock: test_clock_id.as_deref(),
-                ..Default::default()
-            },
-        )
-        .await
-        .map_err(|e| SubscriptionError::StripeError(e.to_string()))?;
+        let customer_id = self
+            .stripe_client
+            .create_customer(
+                email_for_stripe,
+                user.name.as_deref(),
+                &user_id.0.to_string(),
+                test_clock_id.as_deref(),
+            )
+            .await?;
 
         // Store customer mapping
         self.stripe_customer_repo
-            .create_customer_mapping(user_id, customer.id.to_string())
+            .create_customer_mapping(user_id, customer_id.clone())
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
         tracing::info!(
             "Stripe customer created: user_id={}, customer_id={}",
             user_id,
-            customer.id
+            customer_id
         );
 
-        Ok(customer.id.to_string())
+        Ok(customer_id)
     }
 
     /// Supported payment providers
@@ -409,36 +392,18 @@ impl SubscriptionServiceImpl {
     /// Convert Stripe subscription to our Subscription model
     fn stripe_subscription_to_model(
         &self,
-        stripe_sub: &StripeSubscription,
+        stripe_sub: &StripeSubscriptionSnapshot,
         user_id: UserId,
         provider: &str,
     ) -> Result<Subscription, SubscriptionError> {
-        let price_id = stripe_sub
-            .items
-            .data
-            .first()
-            .and_then(|item| item.price.as_ref())
-            .map(|price| price.id.to_string())
-            .ok_or_else(|| {
-                SubscriptionError::StripeError("No price found in subscription".into())
-            })?;
-
-        // Extract customer_id from Expandable<Customer>
-        let customer_id = match &stripe_sub.customer {
-            stripe::Expandable::Id(id) => id.to_string(),
-            stripe::Expandable::Object(customer) => customer.id.to_string(),
-        };
-
-        let current_period_end = chrono::DateTime::from_timestamp(stripe_sub.current_period_end, 0)
-            .ok_or_else(|| SubscriptionError::StripeError("Invalid current_period_end".into()))?;
         Ok(Subscription {
-            subscription_id: stripe_sub.id.to_string(),
+            subscription_id: stripe_sub.id.clone(),
             user_id,
             provider: provider.to_string(),
-            customer_id,
-            price_id,
-            status: stripe_sub.status.to_string(),
-            current_period_end,
+            customer_id: stripe_sub.customer_id.clone(),
+            price_id: stripe_sub.price_id.clone(),
+            status: stripe_sub.status.clone(),
+            current_period_end: stripe_sub.current_period_end,
             cancel_at_period_end: stripe_sub.cancel_at_period_end,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
@@ -587,15 +552,10 @@ impl SubscriptionServiceImpl {
             return Ok(None);
         };
 
-        let stripe_client = self.get_stripe_client();
-        let stripe_sub_id: stripe::SubscriptionId = pending
-            .subscription_id
-            .parse()
-            .map_err(|_| SubscriptionError::StripeError("Invalid subscription ID".into()))?;
-
-        let stripe_sub = StripeSubscription::retrieve(&stripe_client, &stripe_sub_id, &[])
-            .await
-            .map_err(|e| SubscriptionError::StripeError(e.to_string()))?;
+        let stripe_sub = self
+            .stripe_client
+            .retrieve_subscription(&pending.subscription_id)
+            .await?;
 
         let mut current_model =
             self.stripe_subscription_to_model(&stripe_sub, pending.user_id, &pending.provider)?;
@@ -673,30 +633,20 @@ impl SubscriptionServiceImpl {
                 return Ok(Some(updated));
             }
 
-            let subscription_item_id = stripe_sub
-                .items
-                .data
-                .first()
-                .map(|item| item.id.to_string())
-                .ok_or_else(|| {
-                    SubscriptionError::StripeError("No subscription item found".into())
-                })?;
-            let update_item = UpdateSubscriptionItems {
-                id: Some(subscription_item_id),
-                price: Some(target_price_id),
-                ..Default::default()
-            };
-            let params = stripe::UpdateSubscription {
-                items: Some(vec![update_item]),
-                proration_behavior: Some(
-                    stripe::generated::billing::subscription::SubscriptionProrationBehavior::CreateProrations,
-                ),
-                ..Default::default()
-            };
-
-            let updated_sub = StripeSubscription::update(&stripe_client, &stripe_sub_id, params)
-                .await
-                .map_err(|e| SubscriptionError::StripeError(e.to_string()))?;
+            let updated_sub = self
+                .stripe_client
+                .update_subscription(
+                    &pending.subscription_id,
+                    StripeUpdateSubscriptionParams {
+                        cancel_at_period_end: None,
+                        item_id: Some(stripe_sub.first_item_id.clone()),
+                        price_id: Some(target_price_id),
+                        proration_behavior: Some(ProrationBehavior::CreateProrations),
+                        payment_behavior: None,
+                        billing_cycle_anchor: None,
+                    },
+                )
+                .await?;
 
             let mut updated_model = self.stripe_subscription_to_model(
                 &updated_sub,
@@ -1109,43 +1059,20 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .get_or_create_stripe_customer(user_id, test_clock_id)
             .await?;
 
-        // Create Stripe checkout session
-        let base_client = self.get_stripe_client();
-
         // Generate idempotency key with 1-hour time window
         let idempotency_key = generate_checkout_idempotency_key(&user_id, &price_id);
 
-        // Clone client and set request strategy with idempotency key
-        let client = base_client
-            .clone()
-            .with_strategy(RequestStrategy::Idempotent(idempotency_key.clone()));
-
-        let mut params = CreateCheckoutSession::new();
-        params.mode = Some(CheckoutSessionMode::Subscription);
-        params.customer = Some(
-            customer_id
-                .parse()
-                .map_err(|_| SubscriptionError::StripeError("Invalid customer ID".to_string()))?,
-        );
-        params.success_url = Some(&success_url);
-        params.cancel_url = Some(&cancel_url);
-        params.line_items = Some(vec![CreateCheckoutSessionLineItems {
-            price: Some(price_id.clone()),
-            quantity: Some(1),
-            ..Default::default()
-        }]);
-
-        // Set trial period when plan has trial_period_days
-        if let Some(days) = trial_period_days {
-            params.subscription_data = Some(CreateCheckoutSessionSubscriptionData {
-                trial_period_days: Some(days),
-                ..Default::default()
-            });
-        }
-
-        let session = CheckoutSession::create(&client, params)
-            .await
-            .map_err(|e| SubscriptionError::StripeError(e.to_string()))?;
+        let session = self
+            .stripe_client
+            .create_subscription_checkout_session(StripeCreateSubscriptionCheckoutParams {
+                customer_id,
+                price_id,
+                success_url,
+                cancel_url,
+                trial_period_days,
+                idempotency_key: idempotency_key.clone(),
+            })
+            .await?;
 
         let checkout_url = session
             .url
@@ -1172,22 +1099,20 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
             .ok_or(SubscriptionError::NoActiveSubscription)?;
 
-        // Cancel subscription via Stripe API (at period end)
-        let client = self.get_stripe_client();
-        let subscription_id: stripe::SubscriptionId = subscription
-            .subscription_id
-            .parse()
-            .map_err(|_| SubscriptionError::StripeError("Invalid subscription ID".into()))?;
-
-        // Update subscription to cancel at period end
-        let params = stripe::UpdateSubscription {
-            cancel_at_period_end: Some(true),
-            ..Default::default()
-        };
-
-        let updated_sub = StripeSubscription::update(&client, &subscription_id, params)
-            .await
-            .map_err(|e| SubscriptionError::StripeError(e.to_string()))?;
+        let updated_sub = self
+            .stripe_client
+            .update_subscription(
+                &subscription.subscription_id,
+                StripeUpdateSubscriptionParams {
+                    cancel_at_period_end: Some(true),
+                    item_id: None,
+                    price_id: None,
+                    proration_behavior: None,
+                    payment_behavior: None,
+                    billing_cycle_anchor: None,
+                },
+            )
+            .await?;
 
         // Update database (with transaction)
         let updated_model =
@@ -1245,21 +1170,20 @@ impl SubscriptionService for SubscriptionServiceImpl {
             return Err(SubscriptionError::SubscriptionNotScheduledForCancellation);
         }
 
-        // Resume subscription via Stripe API (clear cancel_at_period_end)
-        let client = self.get_stripe_client();
-        let subscription_id: stripe::SubscriptionId = subscription
-            .subscription_id
-            .parse()
-            .map_err(|_| SubscriptionError::StripeError("Invalid subscription ID".into()))?;
-
-        let params = stripe::UpdateSubscription {
-            cancel_at_period_end: Some(false),
-            ..Default::default()
-        };
-
-        let updated_sub = StripeSubscription::update(&client, &subscription_id, params)
-            .await
-            .map_err(|e| SubscriptionError::StripeError(e.to_string()))?;
+        let updated_sub = self
+            .stripe_client
+            .update_subscription(
+                &subscription.subscription_id,
+                StripeUpdateSubscriptionParams {
+                    cancel_at_period_end: Some(false),
+                    item_id: None,
+                    price_id: None,
+                    proration_behavior: None,
+                    payment_behavior: None,
+                    billing_cycle_anchor: None,
+                },
+            )
+            .await?;
 
         // Update database (with transaction)
         let updated_model =
@@ -1405,16 +1329,6 @@ impl SubscriptionService for SubscriptionServiceImpl {
             return Ok(ChangePlanOutcome::ScheduledForPeriodEnd);
         }
 
-        // Retrieve current Stripe subscription to get subscription item ID
-        let client = self.get_stripe_client();
-        let subscription_id: stripe::SubscriptionId = subscription
-            .subscription_id
-            .parse()
-            .map_err(|_| SubscriptionError::StripeError("Invalid subscription ID".into()))?;
-
-        // Clear any pending downgrade before applying the upgrade.
-        // The user's intent is now to upgrade, so the pending intent is obsolete regardless of
-        // whether the Stripe call succeeds.
         if subscription.pending_downgrade_status.is_some() {
             let mut client = self
                 .db_pool
@@ -1435,16 +1349,10 @@ impl SubscriptionService for SubscriptionServiceImpl {
             self.invalidate_credit_limit_cache(user_id).await;
         }
 
-        let stripe_sub = StripeSubscription::retrieve(&client, &subscription_id, &[])
-            .await
-            .map_err(|e| SubscriptionError::StripeError(e.to_string()))?;
-
-        let subscription_item_id = stripe_sub
-            .items
-            .data
-            .first()
-            .map(|item| item.id.to_string())
-            .ok_or_else(|| SubscriptionError::StripeError("No subscription item found".into()))?;
+        let stripe_sub = self
+            .stripe_client
+            .retrieve_subscription(&subscription.subscription_id)
+            .await?;
 
         // Update subscription to new price.
         // For upgrades: always_invoice immediately charges the prorated amount.
@@ -1452,28 +1360,19 @@ impl SubscriptionService for SubscriptionServiceImpl {
         // status rather than rejecting the update outright. The local DB is updated via webhook
         // (customer.subscription.updated), which syncs Stripe's subscription state as-is. Until
         // the webhook arrives, entitlement checks remain on the old plan.
-        let update_item = UpdateSubscriptionItems {
-            id: Some(subscription_item_id),
-            price: Some(price_id.clone()),
-            ..Default::default()
-        };
-        let params = stripe::UpdateSubscription {
-            items: Some(vec![update_item]),
-            proration_behavior: Some(
-                stripe::generated::billing::subscription::SubscriptionProrationBehavior::AlwaysInvoice,
-            ),
-            payment_behavior: Some(
-                stripe::generated::billing::subscription::SubscriptionPaymentBehavior::PendingIfIncomplete,
-            ),
-            billing_cycle_anchor: Some(
-                stripe::generated::billing::subscription::SubscriptionBillingCycleAnchor::Unchanged,
-            ),
-            ..Default::default()
-        };
-
-        StripeSubscription::update(&client, &subscription_id, params)
-            .await
-            .map_err(|e| SubscriptionError::StripeError(e.to_string()))?;
+        self.stripe_client
+            .update_subscription(
+                &subscription.subscription_id,
+                StripeUpdateSubscriptionParams {
+                    cancel_at_period_end: None,
+                    item_id: Some(stripe_sub.first_item_id.clone()),
+                    price_id: Some(price_id.clone()),
+                    proration_behavior: Some(ProrationBehavior::AlwaysInvoice),
+                    payment_behavior: Some(PaymentBehavior::PendingIfIncomplete),
+                    billing_cycle_anchor: Some(BillingCycleAnchor::Unchanged),
+                },
+            )
+            .await?;
 
         tracing::info!(
             "Plan changed immediately in Stripe: user_id={}, target_plan={}, subscription_id={}",
@@ -1565,35 +1464,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
     ) -> Result<(), SubscriptionError> {
         tracing::info!("Processing Stripe webhook");
 
-        // Convert payload to string for webhook verification
-        let payload_str = std::str::from_utf8(payload).map_err(|e| {
-            SubscriptionError::WebhookVerificationFailed(format!("Invalid UTF-8: {}", e))
-        })?;
-
-        // Verify webhook signature FIRST (CRITICAL - use library, never hand-write)
-        // This prevents unauthenticated requests from consuming server resources
-        // Note: construct_event does BOTH signature verification AND event parsing
-        // We only care about signature verification at this stage
-        if let Err(e) =
-            Webhook::construct_event(payload_str, signature, &self.stripe_webhook_secret)
-        {
-            match e {
-                // Security-critical errors - reject the webhook immediately
-                WebhookError::BadKey
-                | WebhookError::BadSignature
-                | WebhookError::BadTimestamp(_)
-                | WebhookError::BadHeader(_) => {
-                    tracing::error!("Webhook signature verification failed: error={}", e);
-                    return Err(SubscriptionError::WebhookVerificationFailed(e.to_string()));
-                }
-                // Parsing error - signature is OK, we can continue
-                WebhookError::BadParse(_) => {
-                    tracing::debug!("Webhook event parsing failed (signature OK): error={}", e);
-                }
-            }
-        } else {
-            tracing::debug!("Webhook signature verified and parsed successfully");
-        }
+        self.stripe_client
+            .verify_webhook_signature(payload, signature, &self.stripe_webhook_secret)
+            .await?;
 
         // Only parse JSON after signature verification succeeds
         let payload_json: serde_json::Value = serde_json::from_slice(payload).map_err(|e| {
@@ -1723,24 +1596,11 @@ impl SubscriptionService for SubscriptionServiceImpl {
                             } else if let (Some(user_uuid), Some(credit_price_id)) =
                                 (user_uuid, credit_price_id)
                             {
-                                let stripe_client = self.get_stripe_client();
-                                let session_id: stripe::CheckoutSessionId =
-                                    sid.parse().map_err(|_| {
-                                        SubscriptionError::StripeError(
-                                            "Invalid checkout session id".into(),
-                                        )
-                                    })?;
-
-                                let session = CheckoutSession::retrieve(
-                                    &stripe_client,
-                                    &session_id,
-                                    &["line_items"],
-                                )
-                                .await
-                                .map_err(|e| SubscriptionError::StripeError(e.to_string()))?;
+                                let session =
+                                    self.stripe_client.retrieve_checkout_session(sid).await?;
 
                                 if let Some(line_items) = session.line_items {
-                                    if line_items.has_more {
+                                    if session.line_items_has_more {
                                         tracing::warn!(
                                             "Checkout session line_items truncated (has_more=true): session_id={}",
                                             sid
@@ -1749,12 +1609,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
                                     } else {
                                         let mut credits_count: i64 = 0;
                                         let mut bad_price = false;
-                                        for item in &line_items.data {
-                                            let item_price_id = item
-                                                .price
-                                                .as_ref()
-                                                .map(|p| p.id.to_string())
-                                                .unwrap_or_default();
+                                        for item in &line_items {
+                                            let item_price_id = item.price_id.clone();
                                             if item_price_id != credit_price_id {
                                                 tracing::warn!(
                                                     "Unexpected price id in credit checkout: session_id={}, expected={}, got={}",
@@ -1765,9 +1621,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
                                                 bad_price = true;
                                                 break;
                                             }
-                                            let qty = item.quantity.unwrap_or(0);
-                                            credits_count = credits_count
-                                                .saturating_add(qty.min(i64::MAX as u64) as i64);
+                                            let qty = item.quantity;
+                                            credits_count = credits_count.saturating_add(qty);
                                         }
                                         if bad_price {
                                             None
@@ -1878,38 +1733,20 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 subscription_id
             );
 
-            // Fetch latest subscription state from Stripe API
-            // (only called for new webhooks after idempotency check)
-            let stripe_client = self.get_stripe_client();
-            let stripe_sub = StripeSubscription::retrieve(
-                &stripe_client,
-                &subscription_id.parse().map_err(|_| {
-                    SubscriptionError::InternalError(format!(
-                        "Invalid subscription_id: {}",
-                        subscription_id
-                    ))
-                })?,
-                &[],
-            )
-            .await
-            .map_err(|e| SubscriptionError::StripeError(e.to_string()))?;
+            let stripe_sub = self
+                .stripe_client
+                .retrieve_subscription(subscription_id)
+                .await?;
 
             // Extract user_id from customer metadata
-            let customer_id = match &stripe_sub.customer {
-                stripe::Expandable::Id(id) => id.clone(),
-                stripe::Expandable::Object(customer) => customer.id.clone(),
-            };
-            let customer = Customer::retrieve(&stripe_client, &customer_id, &[])
-                .await
-                .map_err(|e| SubscriptionError::StripeError(e.to_string()))?;
+            let customer = self
+                .stripe_client
+                .retrieve_customer(&stripe_sub.customer_id)
+                .await?;
 
-            let user_id_str = customer
-                .metadata
-                .as_ref()
-                .and_then(|m| m.get("user_id"))
-                .ok_or_else(|| {
-                    SubscriptionError::InternalError("No user_id in customer metadata".into())
-                })?;
+            let user_id_str = customer.metadata.get("user_id").ok_or_else(|| {
+                SubscriptionError::InternalError("No user_id in customer metadata".into())
+            })?;
 
             let user_id = UserId(uuid::Uuid::parse_str(user_id_str).map_err(|e| {
                 SubscriptionError::InternalError(format!("Invalid user_id: {}", e))
@@ -2054,19 +1891,10 @@ impl SubscriptionService for SubscriptionServiceImpl {
             customer_id
         );
 
-        // Parse customer ID
-        let customer_id_parsed: CustomerId = customer_id
-            .parse()
-            .map_err(|_| SubscriptionError::InternalError("Invalid customer ID format".into()))?;
-
-        // Create billing portal session
-        let client = self.get_stripe_client();
-        let mut params = CreateBillingPortalSession::new(customer_id_parsed);
-        params.return_url = Some(&return_url);
-
-        let session = BillingPortalSession::create(&client, params)
-            .await
-            .map_err(|e| SubscriptionError::StripeError(e.to_string()))?;
+        let session = self
+            .stripe_client
+            .create_billing_portal_session(&customer_id, &return_url)
+            .await?;
 
         tracing::info!(
             "Portal session created: user_id={}, session_id={}",
@@ -2654,44 +2482,21 @@ impl SubscriptionService for SubscriptionServiceImpl {
 
         let customer_id = self.get_or_create_stripe_customer(user_id, None).await?;
 
-        let base_client = self.get_stripe_client();
         let idempotency_key =
             generate_credit_checkout_idempotency_key(&user_id, credits, &success_url, &cancel_url);
-        let client = base_client
-            .clone()
-            .with_strategy(RequestStrategy::Idempotent(idempotency_key));
 
-        let mut params = CreateCheckoutSession::new();
-        params.mode = Some(CheckoutSessionMode::Payment);
-        params.customer = Some(
-            customer_id
-                .parse()
-                .map_err(|_| SubscriptionError::StripeError("Invalid customer ID".to_string()))?,
-        );
-        params.success_url = Some(&success_url);
-        params.cancel_url = Some(&cancel_url);
-        params.line_items = Some(vec![CreateCheckoutSessionLineItems {
-            price: Some(credit_price_id),
-            quantity: Some(credits),
-            ..Default::default()
-        }]);
-        let mut metadata: Metadata = HashMap::new();
-        metadata.insert("user_id".to_string(), user_id.to_string());
-        metadata.insert("credits".to_string(), credits.to_string());
-
-        // Enable invoice creation for one-time payments (invoices/receipts).
-        params.metadata = Some(metadata.clone());
-        params.invoice_creation = Some(CreateCheckoutSessionInvoiceCreation {
-            enabled: true,
-            invoice_data: Some(CreateCheckoutSessionInvoiceCreationInvoiceData {
-                metadata: Some(metadata),
-                ..Default::default()
-            }),
-        });
-
-        let session = CheckoutSession::create(&client, params)
-            .await
-            .map_err(|e| SubscriptionError::StripeError(e.to_string()))?;
+        let session = self
+            .stripe_client
+            .create_credits_checkout_session(StripeCreateCreditsCheckoutParams {
+                customer_id,
+                price_id: credit_price_id,
+                credits,
+                success_url,
+                cancel_url,
+                user_id: user_id.to_string(),
+                idempotency_key,
+            })
+            .await?;
 
         let checkout_url = session
             .url

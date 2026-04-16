@@ -1,0 +1,25 @@
+[package]
+name = "stripe_client"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+description.workspace = true
+
+[dependencies]
+anyhow = "1.0"
+bytes = "1.5"
+chrono = { version = "0.4", features = ["serde"] }
+hex = "0.4"
+hmac = "0.12"
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+subtle = "2.6"
+thiserror = "2.0"
+tracing = "0.1"
+urlencoding = "2.1"
+
+[dev-dependencies]
+serde_json = "1.0"
