@@ -132,6 +132,20 @@ async fn set_latest_challenge_code(db: &database::Database, email: &str, code: &
     challenge_id
 }
 
+async fn insert_failed_challenge(db: &database::Database, email: &str, ip: &str) {
+    let ip_addr = ip.parse::<std::net::IpAddr>().expect("valid ip");
+    let client = db.pool().get().await.expect("db client");
+    client
+        .execute(
+            "INSERT INTO email_verification_challenges
+                (id, email, code_mac, ip_address, status, expires_at)
+             VALUES ($1, $2, $3, $4, 'failed', NOW() + INTERVAL '10 minutes')",
+            &[&Uuid::new_v4(), &email, &"failed-mac", &ip_addr],
+        )
+        .await
+        .expect("insert failed challenge");
+}
+
 #[tokio::test]
 #[serial]
 async fn test_request_email_code_returns_204_and_persists_sent_challenge() {
@@ -228,6 +242,47 @@ async fn test_verify_email_code_logs_into_existing_user() {
         .expect("get user by email")
         .expect("user exists");
     assert_eq!(user.id, existing_user.id);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_email_auth_normalizes_email_case_across_request_and_verify() {
+    let resend = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/emails"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": "email_case" })))
+        .mount(&resend)
+        .await;
+
+    set_email_auth_env();
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        email_resend_base_url: Some(resend.uri()),
+        email_auth_enabled: Some(true),
+        ..Default::default()
+    })
+    .await;
+
+    let normalized_email = unique_email("email-auth-case");
+    let mixed_case_email = normalized_email.to_uppercase();
+    let ip = unique_ip();
+    cleanup_email_auth_state(&db, &normalized_email).await;
+
+    let request_response = request_email_code(&server, &mixed_case_email, &ip).await;
+    assert_eq!(request_response.status_code(), 204);
+
+    set_latest_challenge_code(&db, &normalized_email, "123456").await;
+
+    let verify_response = verify_email_code(&server, &normalized_email, "123456", &ip).await;
+    assert_eq!(verify_response.status_code(), 200);
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(&normalized_email)
+        .await
+        .expect("get normalized user")
+        .expect("normalized user should exist");
+    assert_eq!(user.email, normalized_email);
 }
 
 #[tokio::test]
@@ -528,6 +583,53 @@ async fn test_request_email_code_rate_limit_skips_creating_additional_challenge(
         .expect("count challenges");
     let challenge_count: i64 = row.get(0);
     assert_eq!(challenge_count, 1);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_failed_challenge_does_not_consume_request_rate_limit() {
+    let resend = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/emails"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "id": "email_after_failure" })),
+        )
+        .mount(&resend)
+        .await;
+
+    set_email_auth_env();
+    std::env::set_var("EMAIL_OTP_RATE_LIMIT_PER_HOUR", "1");
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        email_resend_base_url: Some(resend.uri()),
+        email_auth_enabled: Some(true),
+        ..Default::default()
+    })
+    .await;
+
+    let email = unique_email("email-auth-failed-rate-limit");
+    let ip = unique_ip();
+    cleanup_email_auth_state(&db, &email).await;
+    insert_failed_challenge(&db, &email, &ip).await;
+
+    let response = request_email_code(&server, &email, &ip).await;
+    assert_eq!(response.status_code(), 204);
+
+    let client = db.pool().get().await.expect("db client");
+    let row = client
+        .query_one(
+            "SELECT COUNT(*)::bigint,
+                    COUNT(*) FILTER (WHERE status = 'sent')::bigint
+             FROM email_verification_challenges
+             WHERE email = $1",
+            &[&email],
+        )
+        .await
+        .expect("count challenges after failed challenge");
+    let total_count: i64 = row.get(0);
+    let sent_count: i64 = row.get(1);
+    assert_eq!(total_count, 2);
+    assert_eq!(sent_count, 1);
 }
 
 #[tokio::test]

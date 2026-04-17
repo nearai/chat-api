@@ -1,4 +1,5 @@
 use crate::pool::DbPool;
+use anyhow::Context;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use services::auth::ports::{
@@ -19,28 +20,33 @@ impl PostgresEmailVerificationChallengeRepository {
     }
 }
 
-fn status_from_str(value: &str) -> EmailVerificationChallengeStatus {
+fn status_from_str(value: &str) -> anyhow::Result<EmailVerificationChallengeStatus> {
     match value {
-        "pending" => EmailVerificationChallengeStatus::Pending,
-        "sent" => EmailVerificationChallengeStatus::Sent,
-        "failed" => EmailVerificationChallengeStatus::Failed,
-        "consumed" => EmailVerificationChallengeStatus::Consumed,
-        "invalidated" => EmailVerificationChallengeStatus::Invalidated,
-        _ => EmailVerificationChallengeStatus::Failed,
+        "pending" => Ok(EmailVerificationChallengeStatus::Pending),
+        "sent" => Ok(EmailVerificationChallengeStatus::Sent),
+        "failed" => Ok(EmailVerificationChallengeStatus::Failed),
+        "consumed" => Ok(EmailVerificationChallengeStatus::Consumed),
+        "invalidated" => Ok(EmailVerificationChallengeStatus::Invalidated),
+        _ => Err(anyhow::anyhow!(
+            "unexpected email verification challenge status from DB: {}",
+            value
+        )),
     }
 }
 
-fn challenge_from_row(row: Row) -> EmailVerificationChallenge {
-    EmailVerificationChallenge {
+fn challenge_from_row(row: Row) -> anyhow::Result<EmailVerificationChallenge> {
+    let status = row.get::<_, String>("status");
+
+    Ok(EmailVerificationChallenge {
         id: row.get("id"),
         email: row.get("email"),
         code_mac: row.get("code_mac"),
-        status: status_from_str(row.get::<_, String>("status").as_str()),
+        status: status_from_str(status.as_str())?,
         attempt_count: row.get("attempt_count"),
         provider_message_id: row.get("provider_message_id"),
         created_at: row.get("created_at"),
         expires_at: row.get("expires_at"),
-    }
+    })
 }
 
 #[async_trait]
@@ -79,7 +85,7 @@ impl EmailVerificationChallengeRepository for PostgresEmailVerificationChallenge
 
         transaction.commit().await?;
 
-        Ok(challenge_from_row(row))
+        challenge_from_row(row)
     }
 
     async fn mark_challenge_sent(
@@ -88,7 +94,7 @@ impl EmailVerificationChallengeRepository for PostgresEmailVerificationChallenge
         provider_message_id: Option<&str>,
     ) -> anyhow::Result<()> {
         let client = self.pool.get().await?;
-        client
+        let updated_rows = client
             .execute(
                 "UPDATE email_verification_challenges
                  SET status = 'sent', provider_message_id = $2
@@ -96,12 +102,18 @@ impl EmailVerificationChallengeRepository for PostgresEmailVerificationChallenge
                 &[&challenge_id, &provider_message_id],
             )
             .await?;
+        if updated_rows == 0 {
+            tracing::warn!(
+                challenge_id = %challenge_id,
+                "mark_challenge_sent updated no rows; challenge likely changed state concurrently"
+            );
+        }
         Ok(())
     }
 
     async fn mark_challenge_failed(&self, challenge_id: Uuid) -> anyhow::Result<()> {
         let client = self.pool.get().await?;
-        client
+        let updated_rows = client
             .execute(
                 "UPDATE email_verification_challenges
                  SET status = 'failed'
@@ -109,6 +121,12 @@ impl EmailVerificationChallengeRepository for PostgresEmailVerificationChallenge
                 &[&challenge_id],
             )
             .await?;
+        if updated_rows == 0 {
+            tracing::warn!(
+                challenge_id = %challenge_id,
+                "mark_challenge_failed updated no rows; challenge likely changed state concurrently"
+            );
+        }
         Ok(())
     }
 
@@ -122,7 +140,9 @@ impl EmailVerificationChallengeRepository for PostgresEmailVerificationChallenge
             .query_one(
                 "SELECT COUNT(*)::bigint
                  FROM email_verification_challenges
-                 WHERE email = $1 AND created_at >= $2",
+                 WHERE email = $1
+                   AND created_at >= $2
+                   AND status <> 'failed'",
                 &[&email, &since],
             )
             .await?;
@@ -141,7 +161,9 @@ impl EmailVerificationChallengeRepository for PostgresEmailVerificationChallenge
             .query_one(
                 "SELECT COUNT(*)::bigint
                  FROM email_verification_challenges
-                 WHERE ip_address = $1 AND created_at >= $2",
+                 WHERE ip_address = $1
+                   AND created_at >= $2
+                   AND status <> 'failed'",
                 &[&parsed_ip, &since],
             )
             .await?;
@@ -204,7 +226,7 @@ impl EmailVerificationChallengeRepository for PostgresEmailVerificationChallenge
             )
             .await?;
 
-        Ok(row.map(challenge_from_row))
+        row.map(challenge_from_row).transpose()
     }
 
     /// Atomically look up the latest 'sent' challenge for an email and attempt verification.
@@ -244,7 +266,8 @@ impl EmailVerificationChallengeRepository for PostgresEmailVerificationChallenge
                 RETURNING active_challenge.code_mac = $2 AS matched",
                 &[&email, &code_mac, &max_attempts],
             )
-            .await?;
+            .await
+            .context("Failed to atomically verify email code")?;
 
         Ok(row.map(|r| r.get(0)))
     }

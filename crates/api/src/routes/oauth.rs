@@ -18,6 +18,7 @@ use services::metrics::consts::{
     METRIC_USER_LOGIN, METRIC_USER_SIGNUP, TAG_AUTH_METHOD, TAG_IS_NEW_USER,
 };
 use services::SessionId;
+use std::net::IpAddr;
 use utoipa::ToSchema;
 
 /// Helper to add a Set-Cookie header to a HeaderMap when available
@@ -53,42 +54,137 @@ pub struct EmailVerifyCodeRequest {
     pub code: String,
 }
 
-fn extract_client_ip(headers: &HeaderMap) -> String {
-    if let Some(value) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        if let Some(ip) = value
-            .split(',')
-            .next()
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-        {
-            return ip.to_string();
+fn normalize_email_input(email: &str) -> String {
+    email.trim().to_ascii_lowercase()
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ClientIpSource {
+    XForwardedFor,
+    XRealIp,
+    Forwarded,
+    LoopbackFallback,
+}
+
+impl ClientIpSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            ClientIpSource::XForwardedFor => "x_forwarded_for",
+            ClientIpSource::XRealIp => "x_real_ip",
+            ClientIpSource::Forwarded => "forwarded",
+            ClientIpSource::LoopbackFallback => "loopback_fallback",
+        }
+    }
+}
+
+fn header_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers.get(name).and_then(|v| v.to_str().ok())
+}
+
+fn parse_ip_candidate(candidate: &str) -> Option<IpAddr> {
+    let trimmed = candidate.trim().trim_matches('"');
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("unknown") {
+        return None;
+    }
+
+    if let Ok(ip) = trimmed.parse::<IpAddr>() {
+        return Some(ip);
+    }
+
+    if let Ok(socket_addr) = trimmed.parse::<std::net::SocketAddr>() {
+        return Some(socket_addr.ip());
+    }
+
+    if let Some(bracketed) = trimmed.strip_prefix('[') {
+        if let Some((host, _rest)) = bracketed.split_once(']') {
+            if let Ok(ip) = host.parse::<IpAddr>() {
+                return Some(ip);
+            }
         }
     }
 
-    if let Some(value) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
-        let ip = value.trim();
-        if !ip.is_empty() {
-            return ip.to_string();
+    if let Some((host, _port)) = trimmed.rsplit_once(':') {
+        if !host.contains(':') {
+            if let Ok(ip) = host.parse::<IpAddr>() {
+                return Some(ip);
+            }
         }
     }
 
-    if let Some(value) = headers.get("forwarded").and_then(|v| v.to_str().ok()) {
-        for part in value.split(';').flat_map(|segment| segment.split(',')) {
+    None
+}
+
+fn select_proxy_chain_ip(ips: &[IpAddr], trusted_proxy_count: usize) -> Option<IpAddr> {
+    if ips.is_empty() {
+        return None;
+    }
+
+    // ONLINE VALIDATION REQUIRED:
+    // This assumes our ingress/proxy chain appends trusted hops to X-Forwarded-For / Forwarded.
+    // The client IP is selected by walking left from the trusted proxy suffix. This should be
+    // verified against production ingress behavior and adjusted if the deployed proxy topology
+    // differs from the configured trusted_proxy_count.
+    let index = ips.len().saturating_sub(trusted_proxy_count);
+    ips.get(index).copied()
+}
+
+fn extract_x_forwarded_for_ip(headers: &HeaderMap, trusted_proxy_count: usize) -> Option<IpAddr> {
+    let ips: Vec<IpAddr> = header_value(headers, "x-forwarded-for")?
+        .split(',')
+        .filter_map(parse_ip_candidate)
+        .collect();
+    select_proxy_chain_ip(&ips, trusted_proxy_count)
+}
+
+fn extract_forwarded_ip(headers: &HeaderMap, trusted_proxy_count: usize) -> Option<IpAddr> {
+    let mut ips = Vec::new();
+
+    for entry in header_value(headers, "forwarded")?.split(',') {
+        for part in entry.split(';') {
             let part = part.trim();
             if let Some(for_value) = part.strip_prefix("for=") {
-                let ip = for_value
-                    .trim_matches('"')
-                    .trim_matches('[')
-                    .trim_matches(']')
-                    .trim();
-                if !ip.is_empty() {
-                    return ip.to_string();
+                if let Some(ip) = parse_ip_candidate(for_value) {
+                    ips.push(ip);
                 }
             }
         }
     }
 
-    "127.0.0.1".to_string()
+    select_proxy_chain_ip(&ips, trusted_proxy_count)
+}
+
+fn extract_client_ip(headers: &HeaderMap, trusted_proxy_count: usize) -> String {
+    let x_forwarded_for = header_value(headers, "x-forwarded-for");
+    let x_real_ip = header_value(headers, "x-real-ip");
+    let forwarded = header_value(headers, "forwarded");
+
+    let (resolved_ip, source) = extract_x_forwarded_for_ip(headers, trusted_proxy_count)
+        .map(|ip| (ip, ClientIpSource::XForwardedFor))
+        .or_else(|| {
+            x_real_ip
+                .and_then(parse_ip_candidate)
+                .map(|ip| (ip, ClientIpSource::XRealIp))
+        })
+        .or_else(|| {
+            extract_forwarded_ip(headers, trusted_proxy_count)
+                .map(|ip| (ip, ClientIpSource::Forwarded))
+        })
+        .unwrap_or((
+            IpAddr::from([127, 0, 0, 1]),
+            ClientIpSource::LoopbackFallback,
+        ));
+
+    tracing::info!(
+        resolved_client_ip = %resolved_ip,
+        client_ip_source = source.as_str(),
+        trusted_proxy_count,
+        x_forwarded_for = x_forwarded_for.unwrap_or(""),
+        x_real_ip = x_real_ip.unwrap_or(""),
+        forwarded = forwarded.unwrap_or(""),
+        "Resolved client IP for email auth request"
+    );
+
+    resolved_ip.to_string()
 }
 
 fn email_verify_error_to_api_error(error: VerifyEmailCodeError) -> ApiError {
@@ -246,13 +342,14 @@ pub async fn request_email_code(
     headers: HeaderMap,
     Json(request): Json<EmailRequestCodeRequest>,
 ) -> Result<StatusCode, ApiError> {
-    validate_email(&request.email).map_err(ApiError::bad_request)?;
+    let email = normalize_email_input(&request.email);
+    validate_email(&email).map_err(ApiError::bad_request)?;
 
     app_state
         .email_auth_service
         .request_code(
-            request.email.trim().to_string(),
-            extract_client_ip(&headers),
+            email,
+            extract_client_ip(&headers, app_state.email_auth_trusted_proxy_count),
         )
         .await
         .map_err(|err| {
@@ -281,7 +378,8 @@ pub async fn verify_email_code(
     headers: HeaderMap,
     Json(request): Json<EmailVerifyCodeRequest>,
 ) -> Result<(HeaderMap, Json<crate::models::EmailAuthResponse>), ApiError> {
-    validate_email(&request.email).map_err(ApiError::bad_request)?;
+    let email = normalize_email_input(&request.email);
+    validate_email(&email).map_err(ApiError::bad_request)?;
 
     if request.code.len() != 6 || !request.code.chars().all(|c| c.is_ascii_digit()) {
         return Err(ApiError::bad_request(
@@ -292,9 +390,9 @@ pub async fn verify_email_code(
     let result = app_state
         .email_auth_service
         .verify_code(
-            request.email.trim().to_string(),
+            email,
             request.code,
-            extract_client_ip(&headers),
+            extract_client_ip(&headers, app_state.email_auth_trusted_proxy_count),
         )
         .await
         .map_err(email_verify_error_to_api_error)?;

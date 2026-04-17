@@ -9,7 +9,7 @@ use oauth2::{
 };
 use rand::Rng;
 use serde::Deserialize;
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -31,6 +31,14 @@ enum HttpClientError {
     Reqwest(#[from] reqwest::Error),
     #[error("HTTP response build failed: {0}")]
     Http(#[from] oauth2::http::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+enum EmailAuthAvailabilityError {
+    #[error("Email authentication is disabled")]
+    Disabled,
+    #[error("Email authentication is not fully configured")]
+    Misconfigured,
 }
 
 #[derive(Debug, Deserialize)]
@@ -433,21 +441,28 @@ impl EmailAuthServiceImpl {
         }
     }
 
-    fn ensure_enabled(&self) -> anyhow::Result<()> {
+    fn ensure_enabled(&self) -> Result<(), EmailAuthAvailabilityError> {
         if !self.config.enabled {
-            return Err(anyhow::anyhow!("Email authentication is disabled"));
+            return Err(EmailAuthAvailabilityError::Disabled);
         }
 
         if self.config.resend_api_key.is_empty()
             || self.config.email_from.is_empty()
             || self.config.otp_hmac_secret.is_empty()
         {
-            return Err(anyhow::anyhow!(
-                "Email authentication is not fully configured"
-            ));
+            return Err(EmailAuthAvailabilityError::Misconfigured);
         }
 
         Ok(())
+    }
+
+    fn normalize_email(email: &str) -> String {
+        email.trim().to_ascii_lowercase()
+    }
+
+    fn email_log_hash(email: &str) -> String {
+        let digest = Sha256::digest(email.as_bytes());
+        hex::encode(&digest[..6])
     }
 
     async fn find_or_create_user_by_email_exact(
@@ -557,7 +572,10 @@ impl EmailAuthServiceImpl {
 #[async_trait]
 impl EmailAuthService for EmailAuthServiceImpl {
     async fn request_code(&self, email: String, client_ip: String) -> anyhow::Result<()> {
-        self.ensure_enabled()?;
+        self.ensure_enabled().map_err(anyhow::Error::from)?;
+
+        let email = Self::normalize_email(&email);
+        let email_hash = Self::email_log_hash(&email);
 
         let now = Utc::now();
         let since = now - chrono::Duration::hours(1);
@@ -568,6 +586,11 @@ impl EmailAuthService for EmailAuthServiceImpl {
             .await?
             >= self.config.otp_rate_limit_per_hour
         {
+            tracing::warn!(
+                email_hash = %email_hash,
+                client_ip = %client_ip,
+                "Email OTP request rate-limited by email threshold"
+            );
             return Ok(());
         }
 
@@ -577,6 +600,11 @@ impl EmailAuthService for EmailAuthServiceImpl {
             .await?
             >= self.config.otp_requests_per_ip_per_hour
         {
+            tracing::warn!(
+                email_hash = %email_hash,
+                client_ip = %client_ip,
+                "Email OTP request rate-limited by IP threshold"
+            );
             return Ok(());
         }
 
@@ -612,13 +640,15 @@ impl EmailAuthService for EmailAuthServiceImpl {
         code: String,
         client_ip: String,
     ) -> Result<EmailAuthSuccess, VerifyEmailCodeError> {
-        self.ensure_enabled().map_err(|err| {
-            if err.to_string() == "Email authentication is disabled" {
-                VerifyEmailCodeError::Disabled
-            } else {
-                VerifyEmailCodeError::Internal(err)
+        self.ensure_enabled().map_err(|err| match err {
+            EmailAuthAvailabilityError::Disabled => VerifyEmailCodeError::Disabled,
+            EmailAuthAvailabilityError::Misconfigured => {
+                VerifyEmailCodeError::Internal(anyhow::Error::new(err))
             }
         })?;
+
+        let email = Self::normalize_email(&email);
+        let email_hash = Self::email_log_hash(&email);
 
         let now = Utc::now();
         let since = now - chrono::Duration::hours(1);
@@ -630,6 +660,11 @@ impl EmailAuthService for EmailAuthServiceImpl {
             .map_err(VerifyEmailCodeError::Internal)?
             >= self.config.otp_verify_failures_per_hour
         {
+            tracing::warn!(
+                email_hash = %email_hash,
+                client_ip = %client_ip,
+                "Email OTP verify rate-limited by email failure threshold"
+            );
             return Err(VerifyEmailCodeError::RateLimited);
         }
 
@@ -640,6 +675,11 @@ impl EmailAuthService for EmailAuthServiceImpl {
             .map_err(VerifyEmailCodeError::Internal)?
             >= self.config.otp_verifies_per_ip_per_hour
         {
+            tracing::warn!(
+                email_hash = %email_hash,
+                client_ip = %client_ip,
+                "Email OTP verify rate-limited by IP failure threshold"
+            );
             return Err(VerifyEmailCodeError::RateLimited);
         }
 

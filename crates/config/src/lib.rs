@@ -88,6 +88,7 @@ pub struct EmailAuthConfig {
     pub resend_api_key: String,
     pub resend_base_url: String,
     pub email_from: String,
+    pub trusted_proxy_count: usize,
     pub otp_ttl_minutes: i64,
     pub otp_rate_limit_per_hour: u64,
     pub otp_max_verify_attempts: i32,
@@ -108,6 +109,11 @@ impl Default for EmailAuthConfig {
             resend_base_url: std::env::var("RESEND_BASE_URL")
                 .unwrap_or_else(|_| "https://api.resend.com".to_string()),
             email_from: std::env::var("EMAIL_FROM").unwrap_or_default(),
+            trusted_proxy_count: std::env::var("EMAIL_AUTH_TRUSTED_PROXY_COUNT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|count| *count > 0)
+                .unwrap_or(1),
             otp_ttl_minutes: std::env::var("EMAIL_OTP_TTL_MINUTES")
                 .ok()
                 .and_then(|v| v.parse().ok())

@@ -294,6 +294,7 @@ pub async fn create_test_server_and_db(
     let app_state = AppState {
         oauth_service,
         email_auth_service,
+        email_auth_trusted_proxy_count: config.email_auth.trusted_proxy_count,
         user_service,
         user_settings_service,
         model_service,
