@@ -1473,17 +1473,18 @@ impl AgentServiceImpl {
                         }
                     }
                     Some(Err(e)) => {
-                        // If stream ended after successfully processing all received data,
-                        // treat as normal stream closure (connection terminated after sending events)
-                        if chunk_count > 0 && buffer.is_empty() {
+                        // If all received data was successfully processed (buffer is empty),
+                        // the stream closed normally after completion
+                        if buffer.is_empty() {
                             break;
                         }
 
+                        // Unprocessed data remains - this is a real error
                         tracing::error!(
-                            "Agent API stream error: error={}, chunks_received={}, buffer_content={:?}",
+                            "Agent API stream error: error={}, chunks_received={}, buffer_len={}",
                             e,
                             chunk_count,
-                            buffer
+                            buffer.len()
                         );
                         let _ = tx.send(Err(anyhow!("Stream error: {}", e))).await;
                         break;
