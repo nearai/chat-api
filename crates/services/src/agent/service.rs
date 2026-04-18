@@ -1408,6 +1408,7 @@ impl AgentServiceImpl {
 
             let mut stream = response.bytes_stream();
             let mut buffer = String::new();
+            let mut chunk_count = 0;
             const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
             loop {
@@ -1426,6 +1427,7 @@ impl AgentServiceImpl {
 
                 match chunk_result {
                     Some(Ok(chunk)) => {
+                        chunk_count += 1;
                         let text = String::from_utf8_lossy(&chunk);
                         if buffer.len() + text.len() > MAX_BUFFER_SIZE {
                             tracing::error!(
@@ -1450,6 +1452,14 @@ impl AgentServiceImpl {
                             if let Some(data) = line.strip_prefix("data: ") {
                                 match serde_json::from_str::<serde_json::Value>(data) {
                                     Ok(event) => {
+                                        if let Some(event_type) =
+                                            event.get("event").and_then(|v| v.as_str())
+                                        {
+                                            tracing::info!(
+                                                "Agent API SSE event received: event_type={}",
+                                                event_type
+                                            );
+                                        }
                                         let _ = tx.send(Ok(event)).await;
                                     }
                                     Err(e) => {
@@ -1463,7 +1473,19 @@ impl AgentServiceImpl {
                         }
                     }
                     Some(Err(e)) => {
-                        tracing::error!("Error reading Agent API stream: {}", e);
+                        // If all received data was successfully processed (buffer is empty),
+                        // the stream closed normally after completion
+                        if buffer.is_empty() {
+                            break;
+                        }
+
+                        // Unprocessed data remains - this is a real error
+                        tracing::error!(
+                            "Agent API stream error: error={}, chunks_received={}, buffer_len={}",
+                            e,
+                            chunk_count,
+                            buffer.len()
+                        );
                         let _ = tx.send(Err(anyhow!("Stream error: {}", e))).await;
                         break;
                     }
