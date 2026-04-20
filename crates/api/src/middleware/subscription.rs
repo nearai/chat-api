@@ -27,6 +27,10 @@ struct SubscriptionErrorResponse {
 const SUBSCRIPTION_REQUIRED_ERROR_MESSAGE: &str =
     "Active subscription required. Please subscribe to continue.";
 
+/// Error message when email-only user is on a free-priced plan
+const EMAIL_ONLY_FREE_PLAN_ERROR_MESSAGE: &str =
+    "Email-only accounts require a paid subscription to access LLM APIs.";
+
 /// Error message when credit limit is exceeded
 const CREDIT_LIMIT_EXCEEDED_MESSAGE: &str = "Credit limit exceeded.";
 
@@ -77,6 +81,19 @@ pub async fn subscription_middleware(
                 StatusCode::FORBIDDEN,
                 Json(SubscriptionErrorResponse {
                     error: SUBSCRIPTION_REQUIRED_ERROR_MESSAGE.to_string(),
+                }),
+            )
+                .into_response())
+        }
+        Err(SubscriptionError::EmailOnlyFreePlanNotAllowed) => {
+            tracing::info!(
+                "Blocked proxy access for user_id={}: email-only account on free-priced plan",
+                user.user_id
+            );
+            Err((
+                StatusCode::FORBIDDEN,
+                Json(SubscriptionErrorResponse {
+                    error: EMAIL_ONLY_FREE_PLAN_ERROR_MESSAGE.to_string(),
                 }),
             )
                 .into_response())
