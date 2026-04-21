@@ -39,6 +39,8 @@ pub struct TestServerConfig {
     pub rate_limit_config: Option<RateLimitConfig>,
     /// Optional override for Resend API base URL in email auth tests.
     pub email_resend_base_url: Option<String>,
+    /// Optional override for Cloudflare Turnstile verify URL in email auth tests.
+    pub email_turnstile_verify_url: Option<String>,
     /// Optional override to enable/disable email auth in tests.
     pub email_auth_enabled: Option<bool>,
 }
@@ -120,6 +122,13 @@ pub async fn create_test_server_and_db(
     let near_nonce_repo = db.near_nonce_repository();
     let email_challenge_repo = db.email_verification_challenge_repository();
 
+    let email_turnstile_verify_url = test_config.email_turnstile_verify_url.clone().or_else(|| {
+        test_config
+            .email_resend_base_url
+            .as_ref()
+            .map(|base| format!("{}/turnstile/siteverify", base.trim_end_matches('/')))
+    });
+
     // Create services
     let http_client = reqwest::Client::new();
     let oauth_service = Arc::new(services::auth::OAuthServiceImpl::new(
@@ -135,14 +144,29 @@ pub async fn create_test_server_and_db(
         config.near.rpc_url.clone(),
     ));
 
-    let email_auth_service = Arc::new(services::auth::EmailAuthServiceImpl::new(
-        email_challenge_repo
-            as Arc<dyn services::auth::ports::EmailVerificationChallengeRepository>,
-        session_repo.clone() as Arc<dyn services::auth::ports::SessionRepository>,
-        user_repo.clone(),
-        http_client.clone(),
-        config.email_auth.clone(),
-    ));
+    let email_auth_service: Arc<dyn services::auth::ports::EmailAuthService> =
+        if let Some(turnstile_verify_url) = email_turnstile_verify_url {
+            Arc::new(
+                services::auth::EmailAuthServiceImpl::new_with_turnstile_verify_url(
+                    email_challenge_repo
+                        as Arc<dyn services::auth::ports::EmailVerificationChallengeRepository>,
+                    session_repo.clone() as Arc<dyn services::auth::ports::SessionRepository>,
+                    user_repo.clone(),
+                    http_client.clone(),
+                    config.email_auth.clone(),
+                    turnstile_verify_url,
+                ),
+            )
+        } else {
+            Arc::new(services::auth::EmailAuthServiceImpl::new(
+                email_challenge_repo
+                    as Arc<dyn services::auth::ports::EmailVerificationChallengeRepository>,
+                session_repo.clone() as Arc<dyn services::auth::ports::SessionRepository>,
+                user_repo.clone(),
+                http_client.clone(),
+                config.email_auth.clone(),
+            ))
+        };
 
     let user_service = Arc::new(services::user::UserServiceImpl::new(user_repo.clone()));
 

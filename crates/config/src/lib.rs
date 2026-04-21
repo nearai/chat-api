@@ -87,6 +87,7 @@ pub struct EmailAuthConfig {
     pub enabled: bool,
     pub resend_api_key: String,
     pub resend_base_url: String,
+    pub turnstile_secret_key: String,
     pub email_from: String,
     pub trusted_proxy_count: usize,
     pub otp_ttl_minutes: i64,
@@ -108,6 +109,8 @@ impl Default for EmailAuthConfig {
             resend_api_key: std::env::var("RESEND_API_KEY").unwrap_or_default(),
             resend_base_url: std::env::var("RESEND_BASE_URL")
                 .unwrap_or_else(|_| "https://api.resend.com".to_string()),
+            turnstile_secret_key: std::env::var("EMAIL_OTP_TURNSTILE_SECRET_KEY")
+                .unwrap_or_default(),
             email_from: std::env::var("EMAIL_FROM").unwrap_or_default(),
             trusted_proxy_count: std::env::var("EMAIL_AUTH_TRUSTED_PROXY_COUNT")
                 .ok()

@@ -15,14 +15,15 @@ use uuid::Uuid;
 
 use super::ports::{
     EmailAuthService, EmailAuthSuccess, EmailVerificationChallengeRepository, OAuthRepository,
-    OAuthService, OAuthState, OAuthTokens, OAuthUserInfo, SessionRepository, UserSession,
-    VerifyEmailCodeError,
+    OAuthService, OAuthState, OAuthTokens, OAuthUserInfo, RequestEmailCodeError, SessionRepository,
+    UserSession, VerifyEmailCodeError,
 };
 use super::{NearAuthService, NearNonceRepository};
 use crate::types::{SessionId, UserId};
 use crate::user::ports::{OAuthProvider, UserRepository};
 
 type HmacSha256 = Hmac<Sha256>;
+const TURNSTILE_SITEVERIFY_URL: &str = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
 
 /// Custom error type for HTTP client
 #[derive(Debug, thiserror::Error)]
@@ -44,6 +45,13 @@ enum EmailAuthAvailabilityError {
 #[derive(Debug, Deserialize)]
 struct ResendSendEmailResponse {
     id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TurnstileVerifyResponse {
+    success: bool,
+    #[serde(rename = "error-codes")]
+    error_codes: Option<Vec<String>>,
 }
 
 /// Custom HTTP client for OAuth2 using reqwest
@@ -422,6 +430,7 @@ pub struct EmailAuthServiceImpl {
     user_repository: Arc<dyn UserRepository>,
     http_client: reqwest::Client,
     config: config::EmailAuthConfig,
+    turnstile_verify_url: String,
 }
 
 impl EmailAuthServiceImpl {
@@ -432,12 +441,31 @@ impl EmailAuthServiceImpl {
         http_client: reqwest::Client,
         config: config::EmailAuthConfig,
     ) -> Self {
+        Self::new_with_turnstile_verify_url(
+            challenge_repository,
+            session_repository,
+            user_repository,
+            http_client,
+            config,
+            TURNSTILE_SITEVERIFY_URL.to_string(),
+        )
+    }
+
+    pub fn new_with_turnstile_verify_url(
+        challenge_repository: Arc<dyn EmailVerificationChallengeRepository>,
+        session_repository: Arc<dyn SessionRepository>,
+        user_repository: Arc<dyn UserRepository>,
+        http_client: reqwest::Client,
+        config: config::EmailAuthConfig,
+        turnstile_verify_url: String,
+    ) -> Self {
         Self {
             challenge_repository,
             session_repository,
             user_repository,
             http_client,
             config,
+            turnstile_verify_url,
         }
     }
 
@@ -448,6 +476,7 @@ impl EmailAuthServiceImpl {
 
         if self.config.resend_api_key.is_empty()
             || self.config.email_from.is_empty()
+            || self.config.turnstile_secret_key.is_empty()
             || self.config.otp_hmac_secret.is_empty()
         {
             return Err(EmailAuthAvailabilityError::Misconfigured);
@@ -567,15 +596,71 @@ impl EmailAuthServiceImpl {
 
         Ok(Some(body.id))
     }
+
+    async fn verify_turnstile_token(
+        &self,
+        token: &str,
+        client_ip: &str,
+        email_hash: &str,
+    ) -> Result<(), RequestEmailCodeError> {
+        let response = self
+            .http_client
+            .post(&self.turnstile_verify_url)
+            .form(&[
+                ("secret", self.config.turnstile_secret_key.as_str()),
+                ("response", token),
+                ("remoteip", client_ip),
+            ])
+            .send()
+            .await
+            .map_err(|err| RequestEmailCodeError::Internal(err.into()))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(RequestEmailCodeError::Internal(anyhow::anyhow!(
+                "Turnstile verify failed with status {}",
+                status
+            )));
+        }
+
+        let body: TurnstileVerifyResponse = response
+            .json()
+            .await
+            .context("Failed to parse Turnstile verify response")
+            .map_err(RequestEmailCodeError::Internal)?;
+
+        if !body.success {
+            tracing::warn!(
+                email_hash = %email_hash,
+                client_ip = %client_ip,
+                error_codes = ?body.error_codes,
+                "Turnstile verification rejected request"
+            );
+            return Err(RequestEmailCodeError::HumanVerificationFailed);
+        }
+
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl EmailAuthService for EmailAuthServiceImpl {
-    async fn request_code(&self, email: String, client_ip: String) -> anyhow::Result<()> {
-        self.ensure_enabled().map_err(anyhow::Error::from)?;
+    async fn request_code(
+        &self,
+        email: String,
+        client_ip: String,
+        turnstile_token: String,
+    ) -> Result<(), RequestEmailCodeError> {
+        self.ensure_enabled().map_err(|err| match err {
+            EmailAuthAvailabilityError::Disabled => RequestEmailCodeError::Disabled,
+            EmailAuthAvailabilityError::Misconfigured => RequestEmailCodeError::Misconfigured,
+        })?;
 
         let email = Self::normalize_email(&email);
         let email_hash = Self::email_log_hash(&email);
+
+        self.verify_turnstile_token(&turnstile_token, &client_ip, &email_hash)
+            .await?;
 
         let now = Utc::now();
         let since = now - chrono::Duration::hours(1);
@@ -629,7 +714,7 @@ impl EmailAuthService for EmailAuthServiceImpl {
                 self.challenge_repository
                     .mark_challenge_failed(challenge.id)
                     .await?;
-                Err(send_err)
+                Err(RequestEmailCodeError::Internal(send_err))
             }
         }
     }

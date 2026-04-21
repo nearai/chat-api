@@ -98,6 +98,18 @@ pub enum VerifyEmailCodeError {
     Internal(#[from] anyhow::Error),
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum RequestEmailCodeError {
+    #[error("Email authentication is disabled")]
+    Disabled,
+    #[error("Email authentication is not fully configured")]
+    Misconfigured,
+    #[error("Human verification failed")]
+    HumanVerificationFailed,
+    #[error("Internal error: {0}")]
+    Internal(#[from] anyhow::Error),
+}
+
 /// Repository trait for authentication session management
 #[async_trait]
 pub trait SessionRepository: Send + Sync {
@@ -208,7 +220,12 @@ pub trait OAuthRepository: Send + Sync {
 /// Service trait for email OTP authentication operations
 #[async_trait]
 pub trait EmailAuthService: Send + Sync {
-    async fn request_code(&self, email: String, client_ip: String) -> anyhow::Result<()>;
+    async fn request_code(
+        &self,
+        email: String,
+        client_ip: String,
+        turnstile_token: String,
+    ) -> Result<(), RequestEmailCodeError>;
 
     async fn verify_code(
         &self,

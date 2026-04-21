@@ -8,9 +8,12 @@ use uuid::Uuid;
 use wiremock::matchers::{body_partial_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+const TEST_TURNSTILE_TOKEN: &str = "test-turnstile-token";
+
 fn set_email_auth_env() {
     std::env::set_var("RESEND_API_KEY", "test-resend-key");
     std::env::set_var("EMAIL_FROM", "auth@example.com");
+    std::env::set_var("EMAIL_OTP_TURNSTILE_SECRET_KEY", "test-turnstile-secret");
     std::env::set_var(
         "EMAIL_OTP_HMAC_SECRET",
         "test-email-auth-secret-test-email-auth-secret",
@@ -37,14 +40,45 @@ async fn request_email_code(
     email: &str,
     ip: &str,
 ) -> axum_test::TestResponse {
+    request_email_code_with_token(server, email, ip, TEST_TURNSTILE_TOKEN).await
+}
+
+async fn request_email_code_with_token(
+    server: &axum_test::TestServer,
+    email: &str,
+    ip: &str,
+    turnstile_token: &str,
+) -> axum_test::TestResponse {
     server
         .post("/v1/auth/email/request-code")
         .add_header(
             http::HeaderName::from_static("x-real-ip"),
             http::HeaderValue::from_str(ip).expect("valid ip header"),
         )
-        .json(&json!({ "email": email }))
+        .json(&json!({
+            "email": email,
+            "turnstile_token": turnstile_token,
+        }))
         .await
+}
+
+async fn mount_turnstile_success(resend: &MockServer) {
+    Mock::given(method("POST"))
+        .and(path("/turnstile/siteverify"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "success": true })))
+        .mount(resend)
+        .await;
+}
+
+async fn mount_turnstile_failure(resend: &MockServer) {
+    Mock::given(method("POST"))
+        .and(path("/turnstile/siteverify"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "success": false,
+            "error-codes": ["invalid-input-response"]
+        })))
+        .mount(resend)
+        .await;
 }
 
 async fn verify_email_code(
@@ -160,6 +194,7 @@ async fn test_request_email_code_returns_204_and_persists_sent_challenge() {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": "email_123" })))
         .mount(&resend)
         .await;
+    mount_turnstile_success(&resend).await;
 
     set_email_auth_env();
 
@@ -195,6 +230,59 @@ async fn test_request_email_code_returns_204_and_persists_sent_challenge() {
 
 #[tokio::test]
 #[serial]
+async fn test_request_email_code_requires_turnstile_token() {
+    set_email_auth_env();
+
+    let (server, _db) = create_test_server_and_db(TestServerConfig {
+        email_auth_enabled: Some(true),
+        ..Default::default()
+    })
+    .await;
+
+    let response = server
+        .post("/v1/auth/email/request-code")
+        .json(&json!({ "email": unique_email("email-auth-missing-turnstile") }))
+        .await;
+
+    assert_eq!(response.status_code(), 400);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_request_email_code_rejects_when_turnstile_verification_fails() {
+    let resend = MockServer::start().await;
+    mount_turnstile_failure(&resend).await;
+
+    set_email_auth_env();
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        email_resend_base_url: Some(resend.uri()),
+        email_auth_enabled: Some(true),
+        ..Default::default()
+    })
+    .await;
+
+    let email = unique_email("email-auth-turnstile-failed");
+    let ip = unique_ip();
+    cleanup_email_auth_state(&db, &email).await;
+
+    let response = request_email_code_with_token(&server, &email, &ip, "invalid-token").await;
+    assert_eq!(response.status_code(), 401);
+
+    let client = db.pool().get().await.expect("db client");
+    let row = client
+        .query_one(
+            "SELECT COUNT(*)::bigint FROM email_verification_challenges WHERE email = $1",
+            &[&email],
+        )
+        .await
+        .expect("count challenges");
+    let challenge_count: i64 = row.get(0);
+    assert_eq!(challenge_count, 0);
+}
+
+#[tokio::test]
+#[serial]
 async fn test_verify_email_code_logs_into_existing_user() {
     let resend = MockServer::start().await;
     Mock::given(method("POST"))
@@ -202,6 +290,7 @@ async fn test_verify_email_code_logs_into_existing_user() {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": "email_456" })))
         .mount(&resend)
         .await;
+    mount_turnstile_success(&resend).await;
 
     set_email_auth_env();
 
@@ -253,6 +342,7 @@ async fn test_email_auth_normalizes_email_case_across_request_and_verify() {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": "email_case" })))
         .mount(&resend)
         .await;
+    mount_turnstile_success(&resend).await;
 
     set_email_auth_env();
 
@@ -294,6 +384,7 @@ async fn test_request_email_code_invalidates_previous_challenge() {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": "email_resend" })))
         .mount(&resend)
         .await;
+    mount_turnstile_success(&resend).await;
 
     set_email_auth_env();
 
@@ -364,6 +455,7 @@ async fn test_verify_email_code_cannot_be_replayed() {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": "email_replay" })))
         .mount(&resend)
         .await;
+    mount_turnstile_success(&resend).await;
 
     set_email_auth_env();
 
@@ -410,6 +502,7 @@ async fn test_wrong_code_attempts_eventually_invalidate_challenge() {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": "email_attempts" })))
         .mount(&resend)
         .await;
+    mount_turnstile_success(&resend).await;
 
     set_email_auth_env();
     std::env::set_var("EMAIL_OTP_MAX_VERIFY_ATTEMPTS", "2");
@@ -461,6 +554,7 @@ async fn test_expired_challenge_cannot_be_verified() {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": "email_expired" })))
         .mount(&resend)
         .await;
+    mount_turnstile_success(&resend).await;
 
     set_email_auth_env();
 
@@ -501,6 +595,7 @@ async fn test_failed_delivery_marks_challenge_failed_and_non_verifiable() {
         .respond_with(ResponseTemplate::new(500))
         .mount(&resend)
         .await;
+    mount_turnstile_success(&resend).await;
 
     set_email_auth_env();
 
@@ -552,6 +647,7 @@ async fn test_request_email_code_rate_limit_skips_creating_additional_challenge(
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": "email_limit" })))
         .mount(&resend)
         .await;
+    mount_turnstile_success(&resend).await;
 
     set_email_auth_env();
     std::env::set_var("EMAIL_OTP_RATE_LIMIT_PER_HOUR", "1");
@@ -596,6 +692,7 @@ async fn test_failed_challenge_does_not_consume_request_rate_limit() {
         )
         .mount(&resend)
         .await;
+    mount_turnstile_success(&resend).await;
 
     set_email_auth_env();
     std::env::set_var("EMAIL_OTP_RATE_LIMIT_PER_HOUR", "1");
@@ -643,6 +740,7 @@ async fn test_verify_email_code_rate_limit_blocks_after_failed_attempt() {
         )
         .mount(&resend)
         .await;
+    mount_turnstile_success(&resend).await;
 
     set_email_auth_env();
     std::env::set_var("EMAIL_OTP_VERIFY_FAILURES_PER_HOUR", "1");
@@ -693,6 +791,7 @@ async fn test_concurrent_verify_only_allows_one_success() {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": "email_concurrent" })))
         .mount(&resend)
         .await;
+    mount_turnstile_success(&resend).await;
 
     set_email_auth_env();
 

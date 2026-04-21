@@ -13,7 +13,7 @@ use near_api::signer::NEP413Payload;
 use serde::{Deserialize, Serialize};
 use services::analytics::{ActivityType, AuthMethod, RecordActivityRequest};
 use services::auth::near::SignedMessage;
-use services::auth::ports::{OAuthProvider, VerifyEmailCodeError};
+use services::auth::ports::{OAuthProvider, RequestEmailCodeError, VerifyEmailCodeError};
 use services::metrics::consts::{
     METRIC_USER_LOGIN, METRIC_USER_SIGNUP, TAG_AUTH_METHOD, TAG_IS_NEW_USER,
 };
@@ -45,6 +45,7 @@ fn try_add_gateway_cookie(headers: &mut HeaderMap, cookie: Option<String>, conte
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
 pub struct EmailRequestCodeRequest {
     pub email: String,
+    pub turnstile_token: String,
 }
 
 /// Request body for email OTP verification
@@ -202,6 +203,24 @@ fn email_verify_error_to_api_error(error: VerifyEmailCodeError) -> ApiError {
     }
 }
 
+fn request_email_code_error_to_api_error(error: RequestEmailCodeError) -> ApiError {
+    match error {
+        RequestEmailCodeError::Disabled => {
+            ApiError::service_unavailable("Email authentication is disabled")
+        }
+        RequestEmailCodeError::Misconfigured => {
+            ApiError::service_unavailable("Email authentication is not fully configured")
+        }
+        RequestEmailCodeError::HumanVerificationFailed => {
+            ApiError::unauthorized("Human verification failed")
+        }
+        RequestEmailCodeError::Internal(err) => {
+            tracing::error!("Email code request failed: {}", err);
+            ApiError::internal_server_error("Failed to request verification code")
+        }
+    }
+}
+
 /// Query parameters for OAuth callback
 #[derive(Debug, Deserialize)]
 pub struct OAuthCallbackQuery {
@@ -334,6 +353,8 @@ pub struct NearAuthResponse {
     responses(
         (status = 204, description = "Verification code requested"),
         (status = 400, description = "Invalid email format", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Human verification failed", body = crate::error::ApiErrorResponse),
+        (status = 503, description = "Email authentication unavailable", body = crate::error::ApiErrorResponse),
         (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
     )
 )]
@@ -344,18 +365,20 @@ pub async fn request_email_code(
 ) -> Result<StatusCode, ApiError> {
     let email = normalize_email_input(&request.email);
     validate_email(&email).map_err(ApiError::bad_request)?;
+    let turnstile_token = request.turnstile_token.trim();
+    if turnstile_token.is_empty() {
+        return Err(ApiError::bad_request("turnstile_token is required"));
+    }
 
     app_state
         .email_auth_service
         .request_code(
             email,
             extract_client_ip(&headers, app_state.email_auth_trusted_proxy_count),
+            turnstile_token.to_string(),
         )
         .await
-        .map_err(|err| {
-            tracing::error!("Failed to request email verification code: {}", err);
-            ApiError::internal_server_error("Failed to request verification code")
-        })?;
+        .map_err(request_email_code_error_to_api_error)?;
 
     Ok(StatusCode::NO_CONTENT)
 }
