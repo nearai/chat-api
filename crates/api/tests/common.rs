@@ -37,6 +37,12 @@ pub struct TestServerConfig {
     ///
     /// If not set, tests use a permissive default to avoid unrelated flakiness.
     pub rate_limit_config: Option<RateLimitConfig>,
+    /// Optional override for Resend API base URL in email auth tests.
+    pub email_resend_base_url: Option<String>,
+    /// Optional override for Cloudflare Turnstile verify URL in email auth tests.
+    pub email_turnstile_verify_url: Option<String>,
+    /// Optional override to enable/disable email auth in tests.
+    pub email_auth_enabled: Option<bool>,
 }
 
 /// Restrictive rate limit config for rate limit tests.
@@ -81,7 +87,13 @@ pub async fn create_test_server_and_db(
         .await;
 
     // Load configuration
-    let config = config::Config::from_env();
+    let mut config = config::Config::from_env();
+    if let Some(base_url) = test_config.email_resend_base_url.clone() {
+        config.email_auth.resend_base_url = base_url;
+    }
+    if let Some(enabled) = test_config.email_auth_enabled {
+        config.email_auth.enabled = enabled;
+    }
 
     // Create database connection
     let db = database::Database::from_config(&config.database)
@@ -108,8 +120,17 @@ pub async fn create_test_server_and_db(
     let model_repo = db.model_repository();
     let system_configs_repo = db.system_configs_repository();
     let near_nonce_repo = db.near_nonce_repository();
+    let email_challenge_repo = db.email_verification_challenge_repository();
+
+    let email_turnstile_verify_url = test_config.email_turnstile_verify_url.clone().or_else(|| {
+        test_config
+            .email_resend_base_url
+            .as_ref()
+            .map(|base| format!("{}/turnstile/siteverify", base.trim_end_matches('/')))
+    });
 
     // Create services
+    let http_client = reqwest::Client::new();
     let oauth_service = Arc::new(services::auth::OAuthServiceImpl::new(
         oauth_repo.clone(),
         session_repo.clone(),
@@ -122,6 +143,30 @@ pub async fn create_test_server_and_db(
         config.oauth.redirect_uri.clone(),
         config.near.rpc_url.clone(),
     ));
+
+    let email_auth_service: Arc<dyn services::auth::ports::EmailAuthService> =
+        if let Some(turnstile_verify_url) = email_turnstile_verify_url {
+            Arc::new(
+                services::auth::EmailAuthServiceImpl::new_with_turnstile_verify_url(
+                    email_challenge_repo
+                        as Arc<dyn services::auth::ports::EmailVerificationChallengeRepository>,
+                    session_repo.clone() as Arc<dyn services::auth::ports::SessionRepository>,
+                    user_repo.clone(),
+                    http_client.clone(),
+                    config.email_auth.clone(),
+                    turnstile_verify_url,
+                ),
+            )
+        } else {
+            Arc::new(services::auth::EmailAuthServiceImpl::new(
+                email_challenge_repo
+                    as Arc<dyn services::auth::ports::EmailVerificationChallengeRepository>,
+                session_repo.clone() as Arc<dyn services::auth::ports::SessionRepository>,
+                user_repo.clone(),
+                http_client.clone(),
+                config.email_auth.clone(),
+            ))
+        };
 
     let user_service = Arc::new(services::user::UserServiceImpl::new(user_repo.clone()));
 
@@ -270,10 +315,10 @@ pub async fn create_test_server_and_db(
         ));
 
     // Create application state
-    let http_client = reqwest::Client::new();
-
     let app_state = AppState {
         oauth_service,
+        email_auth_service,
+        email_auth_trusted_proxy_count: config.email_auth.trusted_proxy_count,
         user_service,
         user_settings_service,
         model_service,
@@ -591,6 +636,70 @@ pub async fn cleanup_user_agent_instances(db: &database::Database, user_email: &
         .expect("delete agent instances");
 }
 
+/// Clean up all purchased credits for a user (by email).
+pub async fn cleanup_user_subscription_credits(db: &database::Database, user_email: &str) {
+    let user = match db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .expect("get user")
+    {
+        Some(u) => u,
+        None => return,
+    };
+
+    let client = db.pool().get().await.expect("get pool client");
+    // Clean up both the balance table and the transaction audit log
+    client
+        .execute("DELETE FROM user_credits WHERE user_id = $1", &[&user.id])
+        .await
+        .expect("delete user_credits");
+    client
+        .execute(
+            "DELETE FROM credit_transactions WHERE user_id = $1",
+            &[&user.id],
+        )
+        .await
+        .expect("delete credit_transactions");
+}
+
+/// Clean up all usage events for a user (by email).
+pub async fn cleanup_user_usage(db: &database::Database, user_email: &str) {
+    let user = match db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .expect("get user")
+    {
+        Some(u) => u,
+        None => return,
+    };
+
+    let client = db.pool().get().await.expect("get pool client");
+    client
+        .execute("DELETE FROM usage_events WHERE user_id = $1", &[&user.id])
+        .await
+        .expect("delete usage events");
+}
+
+/// Delete a user by email ( cascades to subscriptions, sessions, etc. via FK).
+pub async fn cleanup_user(db: &database::Database, user_email: &str) {
+    let user = match db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .expect("get user")
+    {
+        Some(u) => u,
+        None => return,
+    };
+
+    let client = db.pool().get().await.expect("get pool client");
+    client
+        .execute("DELETE FROM users WHERE id = $1", &[&user.id])
+        .await
+        .expect("delete user");
+}
 /// Clean up all subscriptions for a user (by email).
 /// Useful for test isolation to ensure no leftover data from previous test runs.
 pub async fn cleanup_user_subscriptions(db: &database::Database, user_email: &str) {

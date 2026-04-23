@@ -83,6 +83,70 @@ impl Default for OAuthConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct EmailAuthConfig {
+    pub enabled: bool,
+    pub resend_api_key: String,
+    pub resend_base_url: String,
+    pub turnstile_secret_key: String,
+    pub email_from: String,
+    pub trusted_proxy_count: usize,
+    pub otp_ttl_minutes: i64,
+    pub otp_rate_limit_per_hour: u64,
+    pub otp_max_verify_attempts: i32,
+    pub otp_verify_failures_per_hour: u64,
+    pub otp_requests_per_ip_per_hour: u64,
+    pub otp_verifies_per_ip_per_hour: u64,
+    pub otp_hmac_secret: String,
+}
+
+impl Default for EmailAuthConfig {
+    fn default() -> Self {
+        Self {
+            enabled: std::env::var("EMAIL_AUTH_ENABLED")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(false),
+            resend_api_key: std::env::var("RESEND_API_KEY").unwrap_or_default(),
+            resend_base_url: std::env::var("RESEND_BASE_URL")
+                .unwrap_or_else(|_| "https://api.resend.com".to_string()),
+            turnstile_secret_key: std::env::var("EMAIL_OTP_TURNSTILE_SECRET_KEY")
+                .unwrap_or_default(),
+            email_from: std::env::var("EMAIL_FROM").unwrap_or_default(),
+            trusted_proxy_count: std::env::var("EMAIL_AUTH_TRUSTED_PROXY_COUNT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|count| *count > 0)
+                .unwrap_or(1),
+            otp_ttl_minutes: std::env::var("EMAIL_OTP_TTL_MINUTES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(10),
+            otp_rate_limit_per_hour: std::env::var("EMAIL_OTP_RATE_LIMIT_PER_HOUR")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(10),
+            otp_max_verify_attempts: std::env::var("EMAIL_OTP_MAX_VERIFY_ATTEMPTS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(5),
+            otp_verify_failures_per_hour: std::env::var("EMAIL_OTP_VERIFY_FAILURES_PER_HOUR")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(20),
+            otp_requests_per_ip_per_hour: std::env::var("EMAIL_OTP_REQUESTS_PER_IP_PER_HOUR")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(30),
+            otp_verifies_per_ip_per_hour: std::env::var("EMAIL_OTP_VERIFIES_PER_IP_PER_HOUR")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(60),
+            otp_hmac_secret: std::env::var("EMAIL_OTP_HMAC_SECRET").unwrap_or_default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
@@ -608,6 +672,7 @@ impl Default for LoggingConfig {
 pub struct Config {
     pub database: DatabaseConfig,
     pub oauth: OAuthConfig,
+    pub email_auth: EmailAuthConfig,
     pub server: ServerConfig,
     pub openai: OpenAIConfig,
     /// NEAR-related configuration
@@ -630,6 +695,7 @@ impl Config {
         Self {
             database: DatabaseConfig::default(),
             oauth: OAuthConfig::default(),
+            email_auth: EmailAuthConfig::default(),
             server: ServerConfig::default(),
             openai: OpenAIConfig::default(),
             near: NearConfig::default(),

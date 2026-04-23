@@ -43,6 +43,8 @@ pub type SystemConfigsCache = Arc<RwLock<Option<SystemConfigsCacheEntry>>>;
 #[derive(Clone)]
 pub struct AppState {
     pub oauth_service: Arc<dyn services::auth::ports::OAuthService>,
+    pub email_auth_service: Arc<dyn services::auth::ports::EmailAuthService>,
+    pub email_auth_trusted_proxy_count: usize,
     pub user_service: Arc<dyn services::user::ports::UserService>,
     pub user_settings_service: Arc<dyn services::user::ports::UserSettingsService>,
     pub model_service: Arc<dyn services::model::ports::ModelService>,

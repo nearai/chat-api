@@ -25,18 +25,17 @@ async fn test_create_passkey_instance_requires_auth() {
     );
 }
 
-/// Test that passkey instance endpoint validates auth_secret and backup_passphrase
+/// Test that passkey instance creation does not require client-supplied passkey credentials.
 #[tokio::test]
 #[serial]
-async fn test_create_passkey_instance_validates_credentials() {
+async fn test_create_passkey_instance_accepts_backend_generated_credentials() {
     let server = create_test_server_and_db(Default::default()).await.0;
 
     let user_email = "test_user@example.com";
     let user_token = mock_login(&server, user_email).await;
 
-    // Try with empty auth_secret
-    // Credentials are now generated on the backend, so no need to validate them from the request
-    // Just test that the endpoint accepts a valid request without credentials
+    // Credentials are generated on the backend, so a request without explicit
+    // auth_secret / backup_passphrase should still pass request validation.
     let response = server
         .post("/v1/agents/instances")
         .add_header(
@@ -48,11 +47,10 @@ async fn test_create_passkey_instance_validates_credentials() {
         }))
         .await;
 
-    // Should require streaming header
-    // Without SSE header it should fail with 400 (streaming required)
-    assert!(
-        response.status_code() == 400 || response.status_code() == 402,
-        "Should reject request without streaming header or due to payment requirements"
+    let status = response.status_code();
+    assert_ne!(
+        status, 400,
+        "Request without explicit passkey credentials should not fail request validation"
     );
 }
 

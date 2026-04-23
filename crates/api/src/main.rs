@@ -10,7 +10,7 @@ use opentelemetry_sdk::{
 use services::{
     agent::proxy::AgentProxy,
     analytics::AnalyticsServiceImpl,
-    auth::OAuthServiceImpl,
+    auth::{EmailAuthServiceImpl, OAuthServiceImpl},
     conversation::service::ConversationServiceImpl,
     conversation::share_service::ConversationShareServiceImpl,
     file::service::FileServiceImpl,
@@ -88,6 +88,7 @@ async fn main() -> anyhow::Result<()> {
     let analytics_repo = db.analytics_repository();
     let system_configs_repo = db.system_configs_repository();
     let model_repo = db.model_repository();
+    let email_challenge_repo = db.email_verification_challenge_repository();
 
     // Create services
     tracing::info!("Initializing services...");
@@ -102,6 +103,17 @@ async fn main() -> anyhow::Result<()> {
         config.oauth.github_client_secret.clone(),
         config.oauth.redirect_uri.clone(),
         config.near.rpc_url.clone(),
+    ));
+
+    let http_client = reqwest::Client::new();
+
+    let email_auth_service = Arc::new(EmailAuthServiceImpl::new(
+        email_challenge_repo
+            as Arc<dyn services::auth::ports::EmailVerificationChallengeRepository>,
+        session_repo.clone() as Arc<dyn services::auth::ports::SessionRepository>,
+        user_repo.clone(),
+        http_client.clone(),
+        config.email_auth.clone(),
     ));
 
     let user_service = Arc::new(UserServiceImpl::new(user_repo.clone()));
@@ -312,10 +324,10 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Create application state
-    let http_client = reqwest::Client::new();
-
     let app_state = AppState {
         oauth_service,
+        email_auth_service,
+        email_auth_trusted_proxy_count: config.email_auth.trusted_proxy_count,
         user_service,
         user_settings_service,
         model_service,

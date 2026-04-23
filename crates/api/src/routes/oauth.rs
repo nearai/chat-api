@@ -1,4 +1,6 @@
-use crate::{error::ApiError, middleware::AuthenticatedUser, state::AppState};
+use crate::{
+    error::ApiError, middleware::AuthenticatedUser, state::AppState, validation::validate_email,
+};
 use axum::extract::Query;
 use axum::{
     extract::{Extension, State},
@@ -11,11 +13,12 @@ use near_api::signer::NEP413Payload;
 use serde::{Deserialize, Serialize};
 use services::analytics::{ActivityType, AuthMethod, RecordActivityRequest};
 use services::auth::near::SignedMessage;
-use services::auth::ports::OAuthProvider;
+use services::auth::ports::{OAuthProvider, RequestEmailCodeError, VerifyEmailCodeError};
 use services::metrics::consts::{
     METRIC_USER_LOGIN, METRIC_USER_SIGNUP, TAG_AUTH_METHOD, TAG_IS_NEW_USER,
 };
 use services::SessionId;
+use std::net::IpAddr;
 use utoipa::ToSchema;
 
 /// Helper to add a Set-Cookie header to a HeaderMap when available
@@ -35,6 +38,189 @@ fn try_add_gateway_cookie(headers: &mut HeaderMap, cookie: Option<String>, conte
             "No Set-Cookie header returned from gateway session setup in {}",
             context
         );
+    }
+}
+
+/// Request body for email OTP code request
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+pub struct EmailRequestCodeRequest {
+    pub email: String,
+    pub turnstile_token: String,
+}
+
+/// Request body for email OTP verification
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+pub struct EmailVerifyCodeRequest {
+    pub email: String,
+    pub code: String,
+}
+
+fn normalize_email_input(email: &str) -> String {
+    email.trim().to_ascii_lowercase()
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ClientIpSource {
+    XForwardedFor,
+    XRealIp,
+    Forwarded,
+    LoopbackFallback,
+}
+
+impl ClientIpSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            ClientIpSource::XForwardedFor => "x_forwarded_for",
+            ClientIpSource::XRealIp => "x_real_ip",
+            ClientIpSource::Forwarded => "forwarded",
+            ClientIpSource::LoopbackFallback => "loopback_fallback",
+        }
+    }
+}
+
+fn header_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers.get(name).and_then(|v| v.to_str().ok())
+}
+
+fn parse_ip_candidate(candidate: &str) -> Option<IpAddr> {
+    let trimmed = candidate.trim().trim_matches('"');
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("unknown") {
+        return None;
+    }
+
+    if let Ok(ip) = trimmed.parse::<IpAddr>() {
+        return Some(ip);
+    }
+
+    if let Ok(socket_addr) = trimmed.parse::<std::net::SocketAddr>() {
+        return Some(socket_addr.ip());
+    }
+
+    if let Some(bracketed) = trimmed.strip_prefix('[') {
+        if let Some((host, _rest)) = bracketed.split_once(']') {
+            if let Ok(ip) = host.parse::<IpAddr>() {
+                return Some(ip);
+            }
+        }
+    }
+
+    if let Some((host, _port)) = trimmed.rsplit_once(':') {
+        if !host.contains(':') {
+            if let Ok(ip) = host.parse::<IpAddr>() {
+                return Some(ip);
+            }
+        }
+    }
+
+    None
+}
+
+fn select_proxy_chain_ip(ips: &[IpAddr], trusted_proxy_count: usize) -> Option<IpAddr> {
+    if ips.is_empty() {
+        return None;
+    }
+
+    // ONLINE VALIDATION REQUIRED:
+    // This assumes our ingress/proxy chain appends trusted hops to X-Forwarded-For / Forwarded.
+    // The client IP is selected by walking left from the trusted proxy suffix. This should be
+    // verified against production ingress behavior and adjusted if the deployed proxy topology
+    // differs from the configured trusted_proxy_count.
+    let index = ips.len().saturating_sub(trusted_proxy_count + 1);
+    ips.get(index).copied()
+}
+
+fn extract_x_forwarded_for_ip(headers: &HeaderMap, trusted_proxy_count: usize) -> Option<IpAddr> {
+    let ips: Vec<IpAddr> = header_value(headers, "x-forwarded-for")?
+        .split(',')
+        .filter_map(parse_ip_candidate)
+        .collect();
+    select_proxy_chain_ip(&ips, trusted_proxy_count)
+}
+
+fn extract_forwarded_ip(headers: &HeaderMap, trusted_proxy_count: usize) -> Option<IpAddr> {
+    let mut ips = Vec::new();
+
+    for entry in header_value(headers, "forwarded")?.split(',') {
+        for part in entry.split(';') {
+            let part = part.trim();
+            if let Some(for_value) = part.strip_prefix("for=") {
+                if let Some(ip) = parse_ip_candidate(for_value) {
+                    ips.push(ip);
+                }
+            }
+        }
+    }
+
+    select_proxy_chain_ip(&ips, trusted_proxy_count)
+}
+
+fn extract_client_ip(headers: &HeaderMap, trusted_proxy_count: usize) -> String {
+    let x_forwarded_for = header_value(headers, "x-forwarded-for");
+    let x_real_ip = header_value(headers, "x-real-ip");
+    let forwarded = header_value(headers, "forwarded");
+
+    let (resolved_ip, source) = extract_x_forwarded_for_ip(headers, trusted_proxy_count)
+        .map(|ip| (ip, ClientIpSource::XForwardedFor))
+        .or_else(|| {
+            x_real_ip
+                .and_then(parse_ip_candidate)
+                .map(|ip| (ip, ClientIpSource::XRealIp))
+        })
+        .or_else(|| {
+            extract_forwarded_ip(headers, trusted_proxy_count)
+                .map(|ip| (ip, ClientIpSource::Forwarded))
+        })
+        .unwrap_or((
+            IpAddr::from([127, 0, 0, 1]),
+            ClientIpSource::LoopbackFallback,
+        ));
+
+    tracing::info!(
+        resolved_client_ip = %resolved_ip,
+        client_ip_source = source.as_str(),
+        trusted_proxy_count,
+        x_forwarded_for = x_forwarded_for.unwrap_or(""),
+        x_real_ip = x_real_ip.unwrap_or(""),
+        forwarded = forwarded.unwrap_or(""),
+        "Resolved client IP for email auth request"
+    );
+
+    resolved_ip.to_string()
+}
+
+fn email_verify_error_to_api_error(error: VerifyEmailCodeError) -> ApiError {
+    match error {
+        VerifyEmailCodeError::Disabled => {
+            ApiError::service_unavailable("Email authentication is disabled")
+        }
+        VerifyEmailCodeError::Misconfigured => {
+            ApiError::service_unavailable("Email authentication is not fully configured")
+        }
+        VerifyEmailCodeError::InvalidOrExpired | VerifyEmailCodeError::RateLimited => {
+            ApiError::unauthorized("Invalid or expired verification code")
+        }
+        VerifyEmailCodeError::Internal(err) => {
+            tracing::error!("Email verification failed: {}", err);
+            ApiError::internal_server_error("Failed to verify email code")
+        }
+    }
+}
+
+fn request_email_code_error_to_api_error(error: RequestEmailCodeError) -> ApiError {
+    match error {
+        RequestEmailCodeError::Disabled => {
+            ApiError::service_unavailable("Email authentication is disabled")
+        }
+        RequestEmailCodeError::Misconfigured => {
+            ApiError::service_unavailable("Email authentication is not fully configured")
+        }
+        RequestEmailCodeError::HumanVerificationFailed => {
+            ApiError::unprocessable_entity("Human verification failed")
+        }
+        RequestEmailCodeError::Internal(err) => {
+            tracing::error!("Email code request failed: {}", err);
+            ApiError::internal_server_error("Failed to request verification code")
+        }
     }
 }
 
@@ -159,6 +345,147 @@ pub struct NearAuthResponse {
     pub expires_at: String,
     /// Whether this is a new user
     pub is_new_user: bool,
+}
+
+/// Handler for requesting an email verification code
+#[utoipa::path(
+    post,
+    path = "/v1/auth/email/request-code",
+    tag = "Auth",
+    request_body = EmailRequestCodeRequest,
+    responses(
+        (status = 204, description = "Verification code requested"),
+        (status = 400, description = "Invalid email format", body = crate::error::ApiErrorResponse),
+        (status = 422, description = "Human verification failed", body = crate::error::ApiErrorResponse),
+        (status = 503, description = "Email authentication unavailable", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    )
+)]
+pub async fn request_email_code(
+    State(app_state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<EmailRequestCodeRequest>,
+) -> Result<StatusCode, ApiError> {
+    let email = normalize_email_input(&request.email);
+    validate_email(&email).map_err(ApiError::bad_request)?;
+    let turnstile_token = request.turnstile_token.trim();
+    if turnstile_token.is_empty() {
+        return Err(ApiError::bad_request("turnstile_token is required"));
+    }
+
+    app_state
+        .email_auth_service
+        .request_code(
+            email,
+            extract_client_ip(&headers, app_state.email_auth_trusted_proxy_count),
+            turnstile_token.to_string(),
+        )
+        .await
+        .map_err(request_email_code_error_to_api_error)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Handler for verifying an email verification code
+#[utoipa::path(
+    post,
+    path = "/v1/auth/email/verify-code",
+    tag = "Auth",
+    request_body = EmailVerifyCodeRequest,
+    responses(
+        (status = 200, description = "Successfully authenticated", body = crate::models::EmailAuthResponse),
+        (status = 400, description = "Invalid request format", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Invalid or expired verification code", body = crate::error::ApiErrorResponse),
+        (status = 503, description = "Email authentication unavailable", body = crate::error::ApiErrorResponse)
+    )
+)]
+pub async fn verify_email_code(
+    State(app_state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<EmailVerifyCodeRequest>,
+) -> Result<(HeaderMap, Json<crate::models::EmailAuthResponse>), ApiError> {
+    let email = normalize_email_input(&request.email);
+    validate_email(&email).map_err(ApiError::bad_request)?;
+
+    if request.code.len() != 6 || !request.code.chars().all(|c| c.is_ascii_digit()) {
+        return Err(ApiError::bad_request(
+            "Verification code must be a 6-digit number",
+        ));
+    }
+
+    let result = app_state
+        .email_auth_service
+        .verify_code(
+            email,
+            request.code,
+            extract_client_ip(&headers, app_state.email_auth_trusted_proxy_count),
+        )
+        .await
+        .map_err(email_verify_error_to_api_error)?;
+
+    let auth_method = AuthMethod::Email;
+    let metric_name = if result.is_new_user {
+        METRIC_USER_SIGNUP
+    } else {
+        METRIC_USER_LOGIN
+    };
+    let tags = [
+        format!("{}:{}", TAG_AUTH_METHOD, auth_method.as_str()),
+        format!("{}:{}", TAG_IS_NEW_USER, result.is_new_user),
+    ];
+    let tags_str: Vec<&str> = tags.iter().map(|s| s.as_str()).collect();
+    app_state
+        .metrics_service
+        .record_count(metric_name, 1, &tags_str);
+
+    let activity_type = if result.is_new_user {
+        ActivityType::Signup
+    } else {
+        ActivityType::Login
+    };
+    if let Err(err) = app_state
+        .analytics_service
+        .record_activity(RecordActivityRequest {
+            user_id: result.session.user_id,
+            activity_type,
+            auth_method: Some(auth_method),
+            metadata: None,
+        })
+        .await
+    {
+        tracing::warn!("Failed to record analytics for email auth: {}", err);
+    }
+
+    let token = result
+        .session
+        .token
+        .ok_or_else(|| ApiError::internal_server_error("Failed to create session"))?;
+
+    let gateway_cookie = app_state
+        .agent_service
+        .setup_gateway_session_for_user(result.session.user_id)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                "Failed to set up gateway session for user in verify_email_code: user_id={}, error={}",
+                result.session.user_id,
+                e
+            );
+            None
+        });
+
+    let mut response_headers = HeaderMap::new();
+    try_add_gateway_cookie(&mut response_headers, gateway_cookie, "verify_email_code");
+
+    Ok((
+        response_headers,
+        Json(crate::models::EmailAuthResponse {
+            token,
+            session_id: result.session.session_id.to_string(),
+            expires_at: result.session.expires_at.to_rfc3339(),
+            is_new_user: result.is_new_user,
+        }),
+    ))
 }
 
 /// Handler for initiating Google OAuth flow
@@ -773,6 +1100,8 @@ pub fn create_oauth_router() -> Router<AppState> {
         // OAuth initiation routes
         .route("/google", get(google_login))
         .route("/github", get(github_login))
+        .route("/email/request-code", post(request_email_code))
+        .route("/email/verify-code", post(verify_email_code))
         // NEAR wallet authentication
         .route("/near", post(near_auth))
         // Unified callback route for all providers
@@ -783,4 +1112,46 @@ pub fn create_oauth_router() -> Router<AppState> {
     let router = router.route("/mock-login", axum::routing::post(mock_login));
 
     router
+}
+
+#[cfg(test)]
+mod tests {
+    use super::select_proxy_chain_ip;
+    use std::net::IpAddr;
+
+    #[test]
+    fn select_proxy_chain_ip_uses_ip_before_trusted_suffix() {
+        let cases = [
+            (
+                vec![
+                    "198.51.100.10".parse::<IpAddr>().unwrap(),
+                    "203.0.113.20".parse::<IpAddr>().unwrap(),
+                ],
+                1,
+                Some("198.51.100.10".parse::<IpAddr>().unwrap()),
+            ),
+            (
+                vec![
+                    "198.51.100.10".parse::<IpAddr>().unwrap(),
+                    "203.0.113.20".parse::<IpAddr>().unwrap(),
+                    "203.0.113.21".parse::<IpAddr>().unwrap(),
+                ],
+                2,
+                Some("198.51.100.10".parse::<IpAddr>().unwrap()),
+            ),
+            (
+                vec![
+                    "198.51.100.10".parse::<IpAddr>().unwrap(),
+                    "203.0.113.20".parse::<IpAddr>().unwrap(),
+                ],
+                5,
+                Some("198.51.100.10".parse::<IpAddr>().unwrap()),
+            ),
+            (Vec::new(), 1, None),
+        ];
+
+        for (ips, trusted_proxy_count, expected) in cases {
+            assert_eq!(select_proxy_chain_ip(&ips, trusted_proxy_count), expected);
+        }
+    }
 }
