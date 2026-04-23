@@ -244,7 +244,7 @@ async fn test_request_email_code_requires_turnstile_token() {
         .json(&json!({ "email": unique_email("email-auth-missing-turnstile") }))
         .await;
 
-    assert_eq!(response.status_code(), 400);
+    assert_eq!(response.status_code(), 422);
 }
 
 #[tokio::test]
