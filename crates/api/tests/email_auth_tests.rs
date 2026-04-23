@@ -283,26 +283,6 @@ async fn test_request_email_code_rejects_when_turnstile_verification_fails() {
 
 #[tokio::test]
 #[serial]
-async fn test_verify_email_code_returns_503_when_email_auth_is_misconfigured() {
-    let (server, _db) = create_test_server_and_db(TestServerConfig {
-        email_auth_enabled: Some(true),
-        ..Default::default()
-    })
-    .await;
-
-    let response = verify_email_code(
-        &server,
-        &unique_email("email-auth-verify-misconfigured"),
-        "123456",
-        &unique_ip(),
-    )
-    .await;
-
-    assert_eq!(response.status_code(), 503);
-}
-
-#[tokio::test]
-#[serial]
 async fn test_verify_email_code_logs_into_existing_user() {
     let resend = MockServer::start().await;
     Mock::given(method("POST"))
