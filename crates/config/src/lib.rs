@@ -483,6 +483,8 @@ impl Default for InfrastructureConfig {
 
 pub const TASKS_CLEANUP_CANCELED_INSTANCES_DAILY_CRON_DEFAULT: &str = "cron(0 0 * * ? *)";
 pub const TASKS_CLEANUP_CANCELED_INSTANCES_GRACE_DAYS_DEFAULT: i64 = 15;
+pub const TASKS_CLEANUP_CANCELED_INSTANCES_DAILY_TASK_ID_DEFAULT: &str =
+    "cleanup.canceled-instances.daily";
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct TaskConfig {
@@ -492,6 +494,7 @@ pub struct TaskConfig {
     pub sqs_queue_arn: Option<String>,
     pub scheduler_role_arn: Option<String>,
     pub scheduler_group: String,
+    pub cleanup_canceled_instances_daily_task_id: String,
     pub cleanup_canceled_instances_daily_cron: String,
     pub cleanup_canceled_instances_grace_days: i64,
     pub worker_wait_seconds: i32,
@@ -514,6 +517,11 @@ impl Default for TaskConfig {
             scheduler_role_arn: std::env::var("TASKS_SCHEDULER_ROLE_ARN").ok(),
             scheduler_group: std::env::var("TASKS_SCHEDULER_GROUP")
                 .unwrap_or_else(|_| "default".to_string()),
+            cleanup_canceled_instances_daily_task_id: std::env::var(
+                "TASKS_CLEANUP_CANCELED_INSTANCES_DAILY_TASK_ID",
+            )
+            .map(|v| v.trim().to_string())
+            .unwrap_or_else(|_| TASKS_CLEANUP_CANCELED_INSTANCES_DAILY_TASK_ID_DEFAULT.to_string()),
             cleanup_canceled_instances_daily_cron: std::env::var(
                 "TASKS_CLEANUP_CANCELED_INSTANCES_DAILY_CRON",
             )
@@ -862,6 +870,7 @@ mod tests {
         std::env::remove_var("TASKS_SQS_QUEUE_ARN");
         std::env::remove_var("TASKS_SCHEDULER_ROLE_ARN");
         std::env::remove_var("TASKS_SCHEDULER_GROUP");
+        std::env::remove_var("TASKS_CLEANUP_CANCELED_INSTANCES_DAILY_TASK_ID");
         std::env::remove_var("TASKS_PORT");
         std::env::remove_var("TASKS_CLEANUP_CANCELED_INSTANCES_DAILY_CRON");
         std::env::remove_var("TASKS_CLEANUP_CANCELED_INSTANCES_GRACE_DAYS");
@@ -874,6 +883,10 @@ mod tests {
         assert!(!cfg.enabled);
         assert!(cfg.aws_region.is_none());
         assert_eq!(cfg.scheduler_group, "default");
+        assert_eq!(
+            cfg.cleanup_canceled_instances_daily_task_id,
+            TASKS_CLEANUP_CANCELED_INSTANCES_DAILY_TASK_ID_DEFAULT
+        );
         assert_eq!(cfg.port, 3001);
         assert_eq!(cfg.worker_wait_seconds, 20);
         assert_eq!(cfg.worker_visibility_timeout, 60);
@@ -1115,6 +1128,10 @@ mod tests {
         );
         std::env::set_var("TASKS_SCHEDULER_GROUP", "group-a");
         std::env::set_var(
+            "TASKS_CLEANUP_CANCELED_INSTANCES_DAILY_TASK_ID",
+            "  cleanup.canceled-instances.daily.prod  ",
+        );
+        std::env::set_var(
             "TASKS_CLEANUP_CANCELED_INSTANCES_DAILY_CRON",
             "cron(0 12 * * ? *)",
         );
@@ -1128,6 +1145,10 @@ mod tests {
         assert!(cfg.enabled);
         assert_eq!(cfg.aws_region.as_deref(), Some("us-west-2"));
         assert_eq!(cfg.scheduler_group, "group-a");
+        assert_eq!(
+            cfg.cleanup_canceled_instances_daily_task_id,
+            "cleanup.canceled-instances.daily.prod"
+        );
         assert_eq!(
             cfg.cleanup_canceled_instances_daily_cron,
             "cron(0 12 * * ? *)"
@@ -1146,6 +1167,7 @@ mod tests {
         std::env::remove_var("TASKS_SQS_QUEUE_ARN");
         std::env::remove_var("TASKS_SCHEDULER_ROLE_ARN");
         std::env::remove_var("TASKS_SCHEDULER_GROUP");
+        std::env::remove_var("TASKS_CLEANUP_CANCELED_INSTANCES_DAILY_TASK_ID");
         std::env::remove_var("TASKS_CLEANUP_CANCELED_INSTANCES_DAILY_CRON");
         std::env::remove_var("TASKS_CLEANUP_CANCELED_INSTANCES_GRACE_DAYS");
         std::env::remove_var("TASKS_WORKER_WAIT_SECONDS");
