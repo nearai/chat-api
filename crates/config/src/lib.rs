@@ -520,6 +520,7 @@ impl Default for TaskConfig {
             cleanup_canceled_instances_daily_task_id: std::env::var(
                 "TASKS_CLEANUP_CANCELED_INSTANCES_DAILY_TASK_ID",
             )
+            .map(|v| v.trim().to_string())
             .unwrap_or_else(|_| TASKS_CLEANUP_CANCELED_INSTANCES_DAILY_TASK_ID_DEFAULT.to_string()),
             cleanup_canceled_instances_daily_cron: std::env::var(
                 "TASKS_CLEANUP_CANCELED_INSTANCES_DAILY_CRON",
@@ -1128,7 +1129,7 @@ mod tests {
         std::env::set_var("TASKS_SCHEDULER_GROUP", "group-a");
         std::env::set_var(
             "TASKS_CLEANUP_CANCELED_INSTANCES_DAILY_TASK_ID",
-            "cleanup.canceled-instances.daily.prod",
+            "  cleanup.canceled-instances.daily.prod  ",
         );
         std::env::set_var(
             "TASKS_CLEANUP_CANCELED_INSTANCES_DAILY_CRON",
