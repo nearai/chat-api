@@ -125,7 +125,7 @@ fn select_proxy_chain_ip(ips: &[IpAddr], trusted_proxy_count: usize) -> Option<I
     // The client IP is selected by walking left from the trusted proxy suffix. This should be
     // verified against production ingress behavior and adjusted if the deployed proxy topology
     // differs from the configured trusted_proxy_count.
-    let index = ips.len().saturating_sub(trusted_proxy_count);
+    let index = ips.len().saturating_sub(trusted_proxy_count + 1);
     ips.get(index).copied()
 }
 
@@ -193,6 +193,9 @@ fn email_verify_error_to_api_error(error: VerifyEmailCodeError) -> ApiError {
         VerifyEmailCodeError::Disabled => {
             ApiError::service_unavailable("Email authentication is disabled")
         }
+        VerifyEmailCodeError::Misconfigured => {
+            ApiError::service_unavailable("Email authentication is not fully configured")
+        }
         VerifyEmailCodeError::InvalidOrExpired | VerifyEmailCodeError::RateLimited => {
             ApiError::unauthorized("Invalid or expired verification code")
         }
@@ -212,7 +215,7 @@ fn request_email_code_error_to_api_error(error: RequestEmailCodeError) -> ApiErr
             ApiError::service_unavailable("Email authentication is not fully configured")
         }
         RequestEmailCodeError::HumanVerificationFailed => {
-            ApiError::unauthorized("Human verification failed")
+            ApiError::unprocessable_entity("Human verification failed")
         }
         RequestEmailCodeError::Internal(err) => {
             tracing::error!("Email code request failed: {}", err);
@@ -1109,4 +1112,46 @@ pub fn create_oauth_router() -> Router<AppState> {
     let router = router.route("/mock-login", axum::routing::post(mock_login));
 
     router
+}
+
+#[cfg(test)]
+mod tests {
+    use super::select_proxy_chain_ip;
+    use std::net::IpAddr;
+
+    #[test]
+    fn select_proxy_chain_ip_uses_ip_before_trusted_suffix() {
+        let cases = [
+            (
+                vec![
+                    "198.51.100.10".parse::<IpAddr>().unwrap(),
+                    "203.0.113.20".parse::<IpAddr>().unwrap(),
+                ],
+                1,
+                Some("198.51.100.10".parse::<IpAddr>().unwrap()),
+            ),
+            (
+                vec![
+                    "198.51.100.10".parse::<IpAddr>().unwrap(),
+                    "203.0.113.20".parse::<IpAddr>().unwrap(),
+                    "203.0.113.21".parse::<IpAddr>().unwrap(),
+                ],
+                2,
+                Some("198.51.100.10".parse::<IpAddr>().unwrap()),
+            ),
+            (
+                vec![
+                    "198.51.100.10".parse::<IpAddr>().unwrap(),
+                    "203.0.113.20".parse::<IpAddr>().unwrap(),
+                ],
+                5,
+                Some("198.51.100.10".parse::<IpAddr>().unwrap()),
+            ),
+            (Vec::new(), 1, None),
+        ];
+
+        for (ips, trusted_proxy_count, expected) in cases {
+            assert_eq!(select_proxy_chain_ip(&ips, trusted_proxy_count), expected);
+        }
+    }
 }

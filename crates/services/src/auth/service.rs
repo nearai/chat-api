@@ -727,9 +727,7 @@ impl EmailAuthService for EmailAuthServiceImpl {
     ) -> Result<EmailAuthSuccess, VerifyEmailCodeError> {
         self.ensure_enabled().map_err(|err| match err {
             EmailAuthAvailabilityError::Disabled => VerifyEmailCodeError::Disabled,
-            EmailAuthAvailabilityError::Misconfigured => {
-                VerifyEmailCodeError::Internal(anyhow::Error::new(err))
-            }
+            EmailAuthAvailabilityError::Misconfigured => VerifyEmailCodeError::Misconfigured,
         })?;
 
         let email = Self::normalize_email(&email);

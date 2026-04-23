@@ -267,7 +267,7 @@ async fn test_request_email_code_rejects_when_turnstile_verification_fails() {
     cleanup_email_auth_state(&db, &email).await;
 
     let response = request_email_code_with_token(&server, &email, &ip, "invalid-token").await;
-    assert_eq!(response.status_code(), 401);
+    assert_eq!(response.status_code(), 422);
 
     let client = db.pool().get().await.expect("db client");
     let row = client
@@ -279,6 +279,26 @@ async fn test_request_email_code_rejects_when_turnstile_verification_fails() {
         .expect("count challenges");
     let challenge_count: i64 = row.get(0);
     assert_eq!(challenge_count, 0);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_verify_email_code_returns_503_when_email_auth_is_misconfigured() {
+    let (server, _db) = create_test_server_and_db(TestServerConfig {
+        email_auth_enabled: Some(true),
+        ..Default::default()
+    })
+    .await;
+
+    let response = verify_email_code(
+        &server,
+        &unique_email("email-auth-verify-misconfigured"),
+        "123456",
+        &unique_ip(),
+    )
+    .await;
+
+    assert_eq!(response.status_code(), 503);
 }
 
 #[tokio::test]

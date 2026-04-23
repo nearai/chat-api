@@ -90,6 +90,8 @@ pub struct EmailAuthSuccess {
 pub enum VerifyEmailCodeError {
     #[error("Email authentication is disabled")]
     Disabled,
+    #[error("Email authentication is not fully configured")]
+    Misconfigured,
     #[error("Invalid or expired verification code")]
     InvalidOrExpired,
     #[error("Too many verification attempts")]

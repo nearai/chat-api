@@ -12,6 +12,7 @@ use common::{
 };
 use futures::future::join_all;
 use serde_json::json;
+use serial_test::serial;
 use services::system_configs::ports::{RateLimitConfig, WindowLimit};
 use services::user::ports::UserRepository;
 use services::user_usage::{UserUsageRepository, METRIC_KEY_LLM_TOKENS};
@@ -342,8 +343,10 @@ async fn test_chat_completions_cost_limit_blocks_request_when_usage_exceeds_limi
 
 /// Test NEAR balance check skipped when no NEAR-linked account for /v1/chat/completions
 #[tokio::test]
+#[serial(subscription_tests)]
 async fn test_chat_completions_near_balance_skipped_when_no_near_linked_account() {
     let server = create_test_server().await;
+    clear_subscription_plans(&server).await;
 
     // Use mock_login helper which does NOT set oauth_provider, so no NEAR linked account
     let token = mock_login(&server, "chat-completions-no-near@example.com").await;
@@ -704,8 +707,10 @@ async fn test_image_generations_cost_limit_blocks_request_when_usage_exceeds_lim
 
 /// Test NEAR balance check skipped when no NEAR-linked account for /v1/images/generations
 #[tokio::test]
+#[serial(subscription_tests)]
 async fn test_image_generations_near_balance_skipped_when_no_near_linked_account() {
     let server = create_test_server().await;
+    clear_subscription_plans(&server).await;
 
     // Use mock_login helper which does NOT set oauth_provider, so no NEAR linked account
     let token = mock_login(&server, "image-generations-no-near@example.com").await;
@@ -928,8 +933,10 @@ async fn test_image_edits_cost_limit_blocks_request_when_usage_exceeds_limit() {
 
 /// Test NEAR balance check skipped when no NEAR-linked account for /v1/images/edits
 #[tokio::test]
+#[serial(subscription_tests)]
 async fn test_image_edits_near_balance_skipped_when_no_near_linked_account() {
     let server = create_test_server().await;
+    clear_subscription_plans(&server).await;
 
     // Use mock_login helper which does NOT set oauth_provider, so no NEAR linked account
     let token = mock_login(&server, "image-edits-no-near@example.com").await;
