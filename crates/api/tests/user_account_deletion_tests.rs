@@ -4,8 +4,6 @@ use common::{create_test_server_and_db, mock_login, TestServerConfig};
 use http::{HeaderName, HeaderValue};
 use services::user::ports::UserRepository;
 use uuid::Uuid;
-use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn auth_header(token: &str) -> (HeaderName, HeaderValue) {
     (
@@ -88,13 +86,8 @@ async fn delete_account_blocks_non_stopped_instance() {
 }
 
 #[tokio::test]
-async fn delete_account_removes_pii_and_preserves_audit_rows() {
-    let mock_cloud_api = MockServer::start().await;
-    let (server, db) = create_test_server_and_db(TestServerConfig {
-        proxy_base_url: Some(mock_cloud_api.uri()),
-        ..TestServerConfig::default()
-    })
-    .await;
+async fn delete_account_request_creates_pending_state_and_blocks_access() {
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
     let email = format!("delete_account_success_{}@test.org", Uuid::new_v4());
     let token = mock_login(&server, &email).await;
     let user = db
@@ -109,15 +102,6 @@ async fn delete_account_removes_pii_and_preserves_audit_rows() {
     let instance_id = format!("inst_delete_success_{}", Uuid::new_v4());
     let subscription_id = format!("sub_delete_success_{}", Uuid::new_v4());
     let conversation_id = format!("conv_delete_success_{}", Uuid::new_v4());
-
-    Mock::given(method("DELETE"))
-        .and(path(format!("/conversations/{conversation_id}")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "id": conversation_id,
-            "deleted": true
-        })))
-        .mount(&mock_cloud_api)
-        .await;
 
     client
         .execute(
@@ -172,14 +156,38 @@ async fn delete_account_removes_pii_and_preserves_audit_rows() {
 
     let (name, value) = auth_header(&token);
     let response = server.delete("/v1/users/me").add_header(name, value).await;
-    assert_eq!(response.status_code(), 204);
+    assert_eq!(response.status_code(), 202);
+
+    let body: serde_json::Value = response.json();
+    assert_eq!(body.get("status").and_then(|v| v.as_str()), Some("pending"));
+
+    let deletion = db
+        .user_repository()
+        .get_account_deletion_by_user_id(user.id)
+        .await
+        .expect("get deletion")
+        .expect("deletion exists");
+    assert_eq!(deletion.status.as_str(), "pending");
 
     assert!(db
         .user_repository()
         .get_user(user.id)
         .await
-        .expect("get deleted user")
-        .is_none());
+        .expect("get pending deletion user")
+        .is_some());
+
+    let (name, value) = auth_header(&token);
+    let profile_response = server.get("/v1/users/me").add_header(name, value).await;
+    assert_eq!(profile_response.status_code(), 403);
+
+    db.user_repository()
+        .delete_user_account(user.id, &[conversation_id.clone()])
+        .await
+        .expect("finalize delete account");
+    db.user_repository()
+        .mark_account_deletion_completed(deletion.id)
+        .await
+        .expect("mark completed");
 
     let subscription_count: i64 = client
         .query_one(
@@ -243,14 +251,9 @@ async fn delete_account_removes_pii_and_preserves_audit_rows() {
 }
 
 #[tokio::test]
-async fn delete_account_blocks_when_cloud_conversation_delete_fails() {
-    let mock_cloud_api = MockServer::start().await;
-    let (server, db) = create_test_server_and_db(TestServerConfig {
-        proxy_base_url: Some(mock_cloud_api.uri()),
-        ..TestServerConfig::default()
-    })
-    .await;
-    let email = format!("delete_account_cloud_failure_{}@test.org", Uuid::new_v4());
+async fn pending_delete_account_request_can_be_retried() {
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+    let email = format!("delete_account_retry_{}@test.org", Uuid::new_v4());
     let token = mock_login(&server, &email).await;
     let user = db
         .user_repository()
@@ -258,43 +261,33 @@ async fn delete_account_blocks_when_cloud_conversation_delete_fails() {
         .await
         .expect("get user")
         .expect("user exists");
-    let conversation_id = format!("conv_delete_failure_{}", Uuid::new_v4());
-
-    Mock::given(method("DELETE"))
-        .and(path(format!("/conversations/{conversation_id}")))
-        .respond_with(ResponseTemplate::new(500).set_body_json(serde_json::json!({
-            "error": "upstream failure"
-        })))
-        .mount(&mock_cloud_api)
-        .await;
-
-    let client = db.pool().get().await.expect("db client");
-    client
-        .execute(
-            "INSERT INTO conversations (id, user_id) VALUES ($1, $2)",
-            &[&conversation_id, &user.id],
-        )
-        .await
-        .expect("insert conversation");
 
     let (name, value) = auth_header(&token);
     let response = server.delete("/v1/users/me").add_header(name, value).await;
-    assert_eq!(response.status_code(), 502);
+    assert_eq!(response.status_code(), 202);
+
+    let (name, value) = auth_header(&token);
+    let retry_response = server.delete("/v1/users/me").add_header(name, value).await;
+    assert_eq!(retry_response.status_code(), 202);
 
     assert!(db
         .user_repository()
         .get_user(user.id)
         .await
-        .expect("get user after cloud failure")
+        .expect("get user after pending delete retry")
         .is_some());
 
-    let conversation_count: i64 = client
+    let deletion_count: i64 = db
+        .pool()
+        .get()
+        .await
+        .expect("db client")
         .query_one(
-            "SELECT COUNT(*) FROM conversations WHERE user_id = $1",
+            "SELECT COUNT(*) FROM user_account_deletions WHERE user_id = $1",
             &[&user.id],
         )
         .await
-        .expect("count conversations after cloud failure")
+        .expect("count deletion requests")
         .get(0);
-    assert_eq!(conversation_count, 1);
+    assert_eq!(deletion_count, 1);
 }

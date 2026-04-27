@@ -2,11 +2,13 @@ use crate::pool::DbPool;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use services::user::ports::{
-    AccountDeletionError, BanType, LinkedOAuthAccount, OAuthProvider, User, UserRepository,
+    AccountDeletion, AccountDeletionError, AccountDeletionStatus, BanType, LinkedOAuthAccount,
+    OAuthProvider, User, UserRepository,
 };
 use services::UserId;
 use std::collections::HashSet;
 use tokio_postgres::GenericClient;
+use uuid::Uuid;
 
 pub struct PostgresUserRepository {
     pool: DbPool,
@@ -79,6 +81,24 @@ impl PostgresUserRepository {
         }
 
         Ok(())
+    }
+
+    fn account_deletion_from_row(row: tokio_postgres::Row) -> anyhow::Result<AccountDeletion> {
+        let status: String = row.get("status");
+        Ok(AccountDeletion {
+            id: row.get("id"),
+            user_id: row.get("user_id"),
+            status: AccountDeletionStatus::parse_db_value(&status)?,
+            requested_at: row.get("requested_at"),
+            started_at: row.get("started_at"),
+            completed_at: row.get("completed_at"),
+            attempt_count: row.get("attempt_count"),
+            lease_until: row.get("lease_until"),
+            last_error: row.get("last_error"),
+            progress: row.get("progress"),
+            created_at: row.get("created_at"),
+            updated_at: row.get("updated_at"),
+        })
     }
 }
 
@@ -361,6 +381,152 @@ impl UserRepository for PostgresUserRepository {
         }
 
         tx.commit().await.map_err(anyhow::Error::from)?;
+        Ok(())
+    }
+
+    async fn create_account_deletion_request(
+        &self,
+        user_id: UserId,
+    ) -> Result<AccountDeletion, AccountDeletionError> {
+        let mut client = self.pool.get().await.map_err(anyhow::Error::from)?;
+        let tx = client.transaction().await.map_err(anyhow::Error::from)?;
+
+        Self::validate_account_deletion_preconditions_with_client(&*tx, user_id, true).await?;
+
+        let row = tx
+            .query_one(
+                "INSERT INTO user_account_deletions (user_id, status)
+                 VALUES ($1, 'pending')
+                 ON CONFLICT (user_id) DO UPDATE
+                    SET updated_at = NOW()
+                 RETURNING id, user_id, status, requested_at, started_at, completed_at,
+                           attempt_count, lease_until, last_error, progress, created_at, updated_at",
+                &[&user_id],
+            )
+            .await
+            .map_err(anyhow::Error::from)?;
+
+        tx.commit().await.map_err(anyhow::Error::from)?;
+        Self::account_deletion_from_row(row).map_err(AccountDeletionError::Internal)
+    }
+
+    async fn get_account_deletion_by_user_id(
+        &self,
+        user_id: UserId,
+    ) -> anyhow::Result<Option<AccountDeletion>> {
+        let client = self.pool.get().await?;
+        let row = client
+            .query_opt(
+                "SELECT id, user_id, status, requested_at, started_at, completed_at,
+                        attempt_count, lease_until, last_error, progress, created_at, updated_at
+                 FROM user_account_deletions
+                 WHERE user_id = $1",
+                &[&user_id],
+            )
+            .await?;
+
+        row.map(Self::account_deletion_from_row).transpose()
+    }
+
+    async fn get_account_deletion(
+        &self,
+        deletion_id: Uuid,
+    ) -> anyhow::Result<Option<AccountDeletion>> {
+        let client = self.pool.get().await?;
+        let row = client
+            .query_opt(
+                "SELECT id, user_id, status, requested_at, started_at, completed_at,
+                        attempt_count, lease_until, last_error, progress, created_at, updated_at
+                 FROM user_account_deletions
+                 WHERE id = $1",
+                &[&deletion_id],
+            )
+            .await?;
+
+        row.map(Self::account_deletion_from_row).transpose()
+    }
+
+    async fn claim_account_deletion(
+        &self,
+        deletion_id: Uuid,
+        lease_seconds: i64,
+    ) -> anyhow::Result<Option<AccountDeletion>> {
+        let client = self.pool.get().await?;
+        let row = client
+            .query_opt(
+                "UPDATE user_account_deletions
+                 SET status = 'processing',
+                     started_at = COALESCE(started_at, NOW()),
+                     attempt_count = attempt_count + 1,
+                     lease_until = NOW() + ($2::bigint * INTERVAL '1 second'),
+                     last_error = NULL,
+                     updated_at = NOW()
+                 WHERE id = $1
+                   AND status IN ('pending', 'retrying', 'processing')
+                   AND (lease_until IS NULL OR lease_until < NOW() OR status IN ('pending', 'retrying'))
+                 RETURNING id, user_id, status, requested_at, started_at, completed_at,
+                           attempt_count, lease_until, last_error, progress, created_at, updated_at",
+                &[&deletion_id, &lease_seconds],
+            )
+            .await?;
+
+        row.map(Self::account_deletion_from_row).transpose()
+    }
+
+    async fn update_account_deletion_progress(
+        &self,
+        deletion_id: Uuid,
+        progress: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let client = self.pool.get().await?;
+        client
+            .execute(
+                "UPDATE user_account_deletions
+                 SET progress = $2, updated_at = NOW()
+                 WHERE id = $1",
+                &[&deletion_id, &progress],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn mark_account_deletion_retrying(
+        &self,
+        deletion_id: Uuid,
+        last_error: String,
+        progress: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let client = self.pool.get().await?;
+        client
+            .execute(
+                "UPDATE user_account_deletions
+                 SET status = 'retrying',
+                     lease_until = NULL,
+                     last_error = $2,
+                     progress = $3,
+                     updated_at = NOW()
+                 WHERE id = $1
+                   AND status <> 'completed'",
+                &[&deletion_id, &last_error, &progress],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn mark_account_deletion_completed(&self, deletion_id: Uuid) -> anyhow::Result<()> {
+        let client = self.pool.get().await?;
+        client
+            .execute(
+                "UPDATE user_account_deletions
+                 SET status = 'completed',
+                     lease_until = NULL,
+                     completed_at = COALESCE(completed_at, NOW()),
+                     last_error = NULL,
+                     updated_at = NOW()
+                 WHERE id = $1",
+                &[&deletion_id],
+            )
+            .await?;
         Ok(())
     }
 

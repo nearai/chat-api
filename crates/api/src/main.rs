@@ -324,6 +324,20 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Create application state
+    let account_deletion_task_publisher = match (
+        config.tasks.aws_region.clone(),
+        config.tasks.account_deletion_sqs_queue_url.clone(),
+    ) {
+        (Some(region), Some(queue_url)) => {
+            let aws_config = api::tasks::load_aws_sdk_config(region).await;
+            Some(Arc::new(api::tasks::AwsSqsTaskPublisher::new(
+                aws_sdk_sqs::Client::new(&aws_config),
+                queue_url,
+            )) as Arc<dyn api::tasks::TaskPublisher>)
+        }
+        _ => None,
+    };
+
     let app_state = AppState {
         oauth_service,
         email_auth_service,
@@ -363,6 +377,7 @@ async fn main() -> anyhow::Result<()> {
         system_configs_cache: Arc::new(tokio::sync::RwLock::new(None)),
         rate_limit_state,
         bi_metrics_service,
+        account_deletion_task_publisher,
     };
 
     // Create router with CORS support
