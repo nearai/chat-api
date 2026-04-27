@@ -1,11 +1,13 @@
 use crate::{error::ApiError, middleware::AuthenticatedUser, models::*, state::AppState};
 use axum::{
     extract::{Extension, Query, State},
+    http::StatusCode,
     routing::{get, patch, post},
     Json, Router,
 };
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
+use services::user::ports::AccountDeletionError;
 /// Get current user
 ///
 /// Returns the profile of the currently authenticated user, including their linked OAuth accounts.
@@ -39,6 +41,106 @@ pub async fn get_current_user(
         })?;
 
     Ok(Json(profile.into()))
+}
+
+/// Delete current user account
+///
+/// Deletes the authenticated user's direct PII/account rows after verifying they have no active
+/// subscriptions and no running/provisioning/error instances.
+#[utoipa::path(
+    delete,
+    path = "/v1/users/me",
+    tag = "Users",
+    responses(
+        (status = 204, description = "User account deleted"),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "User not found", body = crate::error::ApiErrorResponse),
+        (status = 409, description = "Account cannot be deleted until subscriptions are inactive and instances are stopped", body = crate::error::ApiErrorResponse),
+        (status = 502, description = "Failed to delete upstream chat history", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn delete_current_user(
+    State(app_state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+) -> Result<StatusCode, ApiError> {
+    tracing::warn!("Deleting current user account: user_id={}", user.user_id);
+
+    app_state
+        .user_service
+        .validate_account_deletion_preconditions(user.user_id)
+        .await
+        .map_err(account_deletion_error_to_api_error)?;
+
+    let conversation_ids = app_state
+        .user_service
+        .list_owned_conversation_ids(user.user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to list conversations for account deletion: user_id={}, error={:#}",
+                user.user_id,
+                e
+            );
+            ApiError::internal_server_error("Failed to prepare account deletion")
+        })?;
+
+    let mut cloud_deleted_conversation_ids = Vec::with_capacity(conversation_ids.len());
+    for conversation_id in conversation_ids {
+        app_state
+            .conversation_service
+            .delete_conversation_from_provider(&conversation_id)
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    "Failed to delete conversation from Cloud API during account deletion: user_id={}, conversation_id={}, error={}",
+                    user.user_id,
+                    conversation_id,
+                    e
+                );
+                ApiError::bad_gateway("Failed to delete chat history")
+                    .with_details(format!("Cloud API conversation cleanup failed for {conversation_id}"))
+            })?;
+        cloud_deleted_conversation_ids.push(conversation_id);
+    }
+
+    app_state
+        .user_service
+        .delete_account(user.user_id, &cloud_deleted_conversation_ids)
+        .await
+        .map_err(account_deletion_error_to_api_error)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn account_deletion_error_to_api_error(e: AccountDeletionError) -> ApiError {
+    match e {
+        AccountDeletionError::UserNotFound => ApiError::not_found("User not found"),
+        AccountDeletionError::ActiveSubscriptions { count } => ApiError::conflict(format!(
+            "Cannot delete account while {count} active subscription(s) exist"
+        )),
+        AccountDeletionError::InstancesNotStopped { count, statuses } => ApiError::conflict(
+            format!("Cannot delete account while {count} instance(s) are not stopped"),
+        )
+        .with_details(format!(
+            "Blocking instance statuses: {}",
+            statuses.join(", ")
+        )),
+        AccountDeletionError::ConversationCleanupIncomplete { conversation_ids } => {
+            ApiError::conflict("Cannot delete account until chat history is cleaned up")
+                .with_details(format!(
+                    "Missing Cloud API cleanup for conversation(s): {}",
+                    conversation_ids.join(", ")
+                ))
+        }
+        AccountDeletionError::Internal(err) => {
+            tracing::error!("Failed to delete account: {:#}", err);
+            ApiError::internal_server_error("Failed to delete account")
+        }
+    }
 }
 
 /// Query parameters for usage time range.
@@ -248,7 +350,7 @@ pub async fn update_user_settings_partially(
 /// Create user router with all routes (requires authentication)
 pub fn create_user_router() -> Router<AppState> {
     Router::new()
-        .route("/me", get(get_current_user))
+        .route("/me", get(get_current_user).delete(delete_current_user))
         .route("/me/usage", get(get_my_usage))
         .route("/me/settings", get(get_user_settings))
         .route("/me/settings", post(update_user_settings))

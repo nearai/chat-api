@@ -22,6 +22,7 @@ use utoipa::OpenApi;
         crate::routes::oauth::logout,
         // User endpoints
         crate::routes::users::get_current_user,
+        crate::routes::users::delete_current_user,
         crate::routes::users::get_my_usage,
         // Conversation endpoints
         crate::routes::api::create_conversation,
