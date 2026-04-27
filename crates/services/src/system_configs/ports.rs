@@ -259,6 +259,11 @@ pub struct AgentHostingConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new_agent_with_non_tee_infra: Option<bool>,
 
+    /// Per-manager infrastructure mode keyed by manager URL.
+    /// `tee=true` means classic/TEE manager; `tee=false` means crabshack/non-TEE manager.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manager_tee_by_url: Option<HashMap<String, bool>>,
+
     #[serde(default, skip_serializing_if = "AgentHostingCrabshackConfig::is_empty")]
     pub crabshack: AgentHostingCrabshackConfig,
 }
@@ -272,6 +277,8 @@ impl<'de> Deserialize<'de> for AgentHostingConfig {
         struct AgentHostingConfigDe {
             #[serde(default)]
             new_agent_with_non_tee_infra: Option<bool>,
+            #[serde(default)]
+            manager_tee_by_url: Option<HashMap<String, bool>>,
             #[serde(default)]
             crabshack: Option<AgentHostingCrabshackConfig>,
             #[serde(default)]
@@ -311,6 +318,7 @@ impl<'de> Deserialize<'de> for AgentHostingConfig {
 
         Ok(AgentHostingConfig {
             new_agent_with_non_tee_infra: h.new_agent_with_non_tee_infra,
+            manager_tee_by_url: h.manager_tee_by_url,
             crabshack,
         })
     }
@@ -380,6 +388,7 @@ impl Default for SystemConfigs {
             }),
             agent_hosting: Some(AgentHostingConfig {
                 new_agent_with_non_tee_infra: Some(false),
+                manager_tee_by_url: None,
                 crabshack: AgentHostingCrabshackConfig::default(),
             }),
         }
@@ -406,6 +415,7 @@ fn merge_agent_hosting_config(
         new_agent_with_non_tee_infra: partial
             .new_agent_with_non_tee_infra
             .or(base.new_agent_with_non_tee_infra),
+        manager_tee_by_url: partial.manager_tee_by_url.or(base.manager_tee_by_url),
         crabshack: AgentHostingCrabshackConfig {
             ironclaw_image: merge_opt_override(
                 base.crabshack.ironclaw_image,

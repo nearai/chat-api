@@ -266,9 +266,6 @@ pub struct AgentServiceImpl {
     system_configs_service: Arc<dyn SystemConfigsService>,
     /// Channel-relay URL for provisioning relay config to IronClaw instances
     channel_relay_url: Option<String>,
-    /// URL pattern to identify non-TEE manager endpoints (e.g., "claws")
-    /// Used to determine instance type when routing to managers
-    non_tee_agent_url_pattern: String,
 }
 
 /// Static helper: Fetch instance details from Agent API GET /instances/{name}.
@@ -334,6 +331,16 @@ impl ManagerType {
 }
 
 impl AgentServiceImpl {
+    fn manager_is_non_tee_with_configs(configs: &SystemConfigs, manager: &AgentManager) -> bool {
+        let from_system_configs = configs
+            .agent_hosting
+            .as_ref()
+            .and_then(|h| h.manager_tee_by_url.as_ref())
+            .and_then(|m| m.get(&manager.url))
+            .map(|tee| !*tee);
+        from_system_configs.unwrap_or_else(|| manager.get_is_non_tee())
+    }
+
     /// Generate a random credential (hex-encoded random bytes)
     fn generate_random_credential(len: usize) -> String {
         use rand::Rng;
@@ -348,7 +355,6 @@ impl AgentServiceImpl {
         nearai_api_url: String,
         system_configs_service: Arc<dyn SystemConfigsService>,
         channel_relay_url: Option<String>,
-        non_tee_agent_url_pattern: String,
     ) -> Self {
         // Validate required configuration
         if managers.is_empty() {
@@ -379,7 +385,6 @@ impl AgentServiceImpl {
             nearai_api_url,
             system_configs_service,
             channel_relay_url,
-            non_tee_agent_url_pattern,
         }
     }
 
@@ -473,7 +478,7 @@ impl AgentServiceImpl {
         let available_managers: Vec<_> = self
             .managers
             .iter()
-            .filter(|mgr| is_non_tee == mgr.get_is_non_tee())
+            .filter(|mgr| is_non_tee == Self::manager_is_non_tee_with_configs(&configs, mgr))
             .collect();
 
         if available_managers.is_empty() {
@@ -580,64 +585,8 @@ impl AgentServiceImpl {
             return Err(anyhow!("No agent managers configured"));
         }
 
-        // Use first available manager as fallback, but try to match manager type if stored URL exists
-        // This ensures instances created as TEE don't accidentally get routed to non-TEE managers
-        let fallback_manager = if let Some(ref stored_url) = instance.agent_api_base_url {
-            // Determine expected manager type based on URL pattern:
-            // - Non-TEE: URLs containing the configured non_tee_agent_url_pattern (e.g., "claws")
-            // - TEE: all other URLs (TEE compose-api / manager hostnames)
-            let expected_is_non_tee = stored_url.contains(&self.non_tee_agent_url_pattern);
-
-            // Find a manager of the matching type
-            if let Some(matching_mgr) = self.managers.iter().find(|m| {
-                if expected_is_non_tee {
-                    m.get_is_non_tee()
-                } else {
-                    !m.get_is_non_tee()
-                }
-            }) {
-                tracing::info!(
-                    "resolve_manager: Stored URL {} not found, using fallback {} (expected manager type: non_tee={})",
-                    stored_url,
-                    matching_mgr.url,
-                    expected_is_non_tee
-                );
-                matching_mgr
-            } else {
-                // No matching type available - fail rather than silently use wrong type
-                // This prevents instances from being incorrectly routed to managers of a different authentication type
-                let expected_type = if expected_is_non_tee {
-                    "non-TEE"
-                } else {
-                    "TEE"
-                };
-                let available_types = self
-                    .managers
-                    .iter()
-                    .map(|m| if m.get_is_non_tee() { "non-TEE" } else { "TEE" })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                tracing::error!(
-                    "resolve_manager: Instance was created on {} manager but no {} manager is available. Available types: [{}], instance_id={}",
-                    expected_type,
-                    expected_type,
-                    available_types,
-                    instance.id
-                );
-                return Err(anyhow!(
-                    "Instance was created on {} manager but no {} manager is available",
-                    expected_type,
-                    expected_type
-                ));
-            }
-        } else {
-            // No stored URL, just use first manager
-            tracing::info!(
-                "resolve_manager: No stored URL, using first available manager: {}",
-                self.managers[0].url
-            );
-            &self.managers[0]
-        };
+        // No URL-based type inference fallback: use first configured manager.
+        let fallback_manager = &self.managers[0];
 
         tracing::info!(
             "resolve_manager: Using fallback manager: {} for instance_id={}",
@@ -5133,8 +5082,7 @@ mod tests {
             managers,
             "https://nearai.test/v1".to_string(),
             configs,
-            None,                // channel_relay_url
-            "claws".to_string(), // non_tee_agent_url_pattern
+            None, // channel_relay_url
         )
     }
 
@@ -6899,7 +6847,6 @@ mod tests {
                 "https://nearai.example.com/v1".to_string(),
                 Arc::new(MockSystemConfigsService::no_config()),
                 None,
-                "claws".to_string(), // non_tee_agent_url_pattern
             );
 
             // Verify TEE mode behavior:
@@ -6980,7 +6927,6 @@ mod tests {
                 "https://nearai.example.com/v1".to_string(),
                 Arc::new(MockSystemConfigsService::no_config()),
                 None,
-                "claws".to_string(), // non_tee_agent_url_pattern
             );
 
             // Verify non-TEE mode behavior:
@@ -7874,7 +7820,6 @@ mod tests {
             "https://nearai.example.com/v1".to_string(),
             configs,
             None,
-            "claws".to_string(), // non_tee_agent_url_pattern
         );
 
         // Verify TEE mode configuration: manager is TEE
@@ -7898,7 +7843,6 @@ mod tests {
             "https://nearai.example.com/v1".to_string(),
             configs,
             None,
-            "claws".to_string(), // non_tee_agent_url_pattern
         );
 
         // Verify non-TEE mode configuration: manager is non-TEE
