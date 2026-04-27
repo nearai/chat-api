@@ -629,6 +629,13 @@ pub async fn cleanup_user_agent_instances(db: &database::Database, user_email: &
         .ok();
     client
         .execute(
+            "DELETE FROM agent_instance_status_history WHERE instance_id IN (SELECT id FROM agent_instances WHERE user_id = $1)",
+            &[&user.id],
+        )
+        .await
+        .ok();
+    client
+        .execute(
             "DELETE FROM agent_instances WHERE user_id = $1",
             &[&user.id],
         )

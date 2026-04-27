@@ -282,6 +282,12 @@ pub trait ConversationService: Send + Sync {
         conversation_id: &str,
         user_id: UserId,
     ) -> Result<serde_json::Value, ConversationError>;
+
+    /// Delete a conversation from the upstream Cloud API without changing local DB state.
+    async fn delete_conversation_from_provider(
+        &self,
+        conversation_id: &str,
+    ) -> Result<serde_json::Value, ConversationError>;
 }
 
 #[derive(Debug, Clone)]

@@ -939,7 +939,25 @@ mod tests {
             unimplemented!("update_user not needed for tests");
         }
 
-        async fn delete_user(&self, _user_id: UserId) -> anyhow::Result<()> {
+        async fn delete_user_account(
+            &self,
+            _user_id: UserId,
+            _cloud_deleted_conversation_ids: &[String],
+        ) -> Result<(), crate::user::ports::AccountDeletionError> {
+            Ok(())
+        }
+
+        async fn list_owned_conversation_ids(
+            &self,
+            _user_id: UserId,
+        ) -> anyhow::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+
+        async fn validate_account_deletion_preconditions(
+            &self,
+            _user_id: UserId,
+        ) -> Result<(), crate::user::ports::AccountDeletionError> {
             Ok(())
         }
 
@@ -1010,7 +1028,25 @@ mod tests {
             unimplemented!("UserService not needed for tests");
         }
 
-        async fn delete_account(&self, _user_id: UserId) -> anyhow::Result<()> {
+        async fn delete_account(
+            &self,
+            _user_id: UserId,
+            _cloud_deleted_conversation_ids: &[String],
+        ) -> Result<(), crate::user::ports::AccountDeletionError> {
+            Ok(())
+        }
+
+        async fn list_owned_conversation_ids(
+            &self,
+            _user_id: UserId,
+        ) -> anyhow::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+
+        async fn validate_account_deletion_preconditions(
+            &self,
+            _user_id: UserId,
+        ) -> Result<(), crate::user::ports::AccountDeletionError> {
             Ok(())
         }
 

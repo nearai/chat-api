@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use thiserror::Error;
 
 use crate::types::UserId;
 
@@ -61,6 +62,21 @@ pub struct UserProfile {
     pub linked_accounts: Vec<LinkedOAuthAccount>,
 }
 
+/// Errors returned when deleting a user account.
+#[derive(Debug, Error)]
+pub enum AccountDeletionError {
+    #[error("User not found")]
+    UserNotFound,
+    #[error("Cannot delete account while active subscriptions exist")]
+    ActiveSubscriptions { count: i64 },
+    #[error("Cannot delete account while instances are not stopped")]
+    InstancesNotStopped { count: i64, statuses: Vec<String> },
+    #[error("Cannot delete account because conversation cleanup is incomplete")]
+    ConversationCleanupIncomplete { conversation_ids: Vec<String> },
+    #[error(transparent)]
+    Internal(#[from] anyhow::Error),
+}
+
 /// Repository trait for user-related data operations
 #[async_trait]
 pub trait UserRepository: Send + Sync {
@@ -86,8 +102,21 @@ pub trait UserRepository: Send + Sync {
         avatar_url: Option<String>,
     ) -> anyhow::Result<User>;
 
-    /// Delete a user
-    async fn delete_user(&self, user_id: UserId) -> anyhow::Result<()>;
+    /// Delete a user account and direct PII rows while preserving audit and billing data.
+    async fn delete_user_account(
+        &self,
+        user_id: UserId,
+        cloud_deleted_conversation_ids: &[String],
+    ) -> Result<(), AccountDeletionError>;
+
+    /// List locally tracked conversations owned by a user.
+    async fn list_owned_conversation_ids(&self, user_id: UserId) -> anyhow::Result<Vec<String>>;
+
+    /// Validate current account deletion preconditions without deleting any data.
+    async fn validate_account_deletion_preconditions(
+        &self,
+        user_id: UserId,
+    ) -> Result<(), AccountDeletionError>;
 
     /// Get linked OAuth accounts for a user
     async fn get_linked_accounts(&self, user_id: UserId)
@@ -139,7 +168,20 @@ pub trait UserService: Send + Sync {
     ) -> anyhow::Result<User>;
 
     /// Delete user account
-    async fn delete_account(&self, user_id: UserId) -> anyhow::Result<()>;
+    async fn delete_account(
+        &self,
+        user_id: UserId,
+        cloud_deleted_conversation_ids: &[String],
+    ) -> Result<(), AccountDeletionError>;
+
+    /// List locally tracked conversations owned by a user.
+    async fn list_owned_conversation_ids(&self, user_id: UserId) -> anyhow::Result<Vec<String>>;
+
+    /// Validate current account deletion preconditions without deleting any data.
+    async fn validate_account_deletion_preconditions(
+        &self,
+        user_id: UserId,
+    ) -> Result<(), AccountDeletionError>;
 
     /// List users with pagination
     async fn list_users(&self, limit: i64, offset: i64) -> anyhow::Result<(Vec<User>, u64)>;

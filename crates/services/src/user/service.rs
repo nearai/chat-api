@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use std::sync::Arc;
 
-use super::ports::{BanType, User, UserProfile, UserRepository, UserService};
+use super::ports::{AccountDeletionError, BanType, User, UserProfile, UserRepository, UserService};
 use crate::types::UserId;
 
 pub struct UserServiceImpl {
@@ -89,14 +89,35 @@ impl UserService for UserServiceImpl {
         Ok(user)
     }
 
-    async fn delete_account(&self, user_id: UserId) -> anyhow::Result<()> {
+    async fn delete_account(
+        &self,
+        user_id: UserId,
+        cloud_deleted_conversation_ids: &[String],
+    ) -> Result<(), AccountDeletionError> {
         tracing::warn!("Deleting user account: user_id={}", user_id);
 
-        self.user_repository.delete_user(user_id).await?;
+        self.user_repository
+            .delete_user_account(user_id, cloud_deleted_conversation_ids)
+            .await?;
 
         tracing::info!("User account deleted successfully: user_id={}", user_id);
 
         Ok(())
+    }
+
+    async fn list_owned_conversation_ids(&self, user_id: UserId) -> anyhow::Result<Vec<String>> {
+        self.user_repository
+            .list_owned_conversation_ids(user_id)
+            .await
+    }
+
+    async fn validate_account_deletion_preconditions(
+        &self,
+        user_id: UserId,
+    ) -> Result<(), AccountDeletionError> {
+        self.user_repository
+            .validate_account_deletion_preconditions(user_id)
+            .await
     }
 
     async fn list_users(&self, limit: i64, offset: i64) -> anyhow::Result<(Vec<User>, u64)> {
