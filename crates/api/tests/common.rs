@@ -194,7 +194,6 @@ pub async fn create_test_server_and_db(
         system_configs_service.clone()
             as Arc<dyn services::system_configs::ports::SystemConfigsService>,
         config.agent.channel_relay_url.clone(),
-        config.agent.non_tee_agent_url_pattern.clone(),
     ));
 
     // Initialize subscription service for testing
