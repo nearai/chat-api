@@ -3,10 +3,10 @@ mod common;
 use api::routes::api::SUBSCRIPTION_REQUIRED_ERROR_MESSAGE;
 use chrono::{Duration, TimeZone, Timelike, Utc};
 use common::{
-    cleanup_user_agent_instances, cleanup_user_subscriptions, clear_subscription_plans,
-    create_test_server, create_test_server_and_db, insert_test_agent_instances,
-    insert_test_subscription, insert_test_subscription_with_price_id, mock_login,
-    set_subscription_plans, TestServerConfig,
+    cleanup_user_agent_instances, cleanup_user_subscription_credits, cleanup_user_subscriptions,
+    cleanup_user_usage, clear_subscription_plans, create_test_server, create_test_server_and_db,
+    insert_test_agent_instances, insert_test_subscription, insert_test_subscription_with_price_id,
+    mock_login, set_subscription_plans, TestServerConfig,
 };
 use hmac::Mac;
 use serde_json::json;
@@ -15,6 +15,7 @@ use services::subscription::ports::SubscriptionRepository;
 use services::system_configs::ports::RateLimitConfig;
 use services::user::ports::UserRepository;
 use services::user_usage::{UserUsageRepository, METRIC_KEY_LLM_TOKENS};
+use uuid::Uuid;
 
 /// Stripe secrets must be non-empty for subscription gating; otherwise requests reach upstream (401).
 fn ensure_stripe_env_for_gating() {
@@ -39,6 +40,9 @@ fn permissive_rate_limit_config() -> RateLimitConfig {
         cost_window_limits: vec![],
     }
 }
+
+const EMAIL_ONLY_FREE_PLAN_ERROR_MESSAGE: &str =
+    "Email-only accounts require a paid subscription to access LLM APIs.";
 
 #[tokio::test]
 #[serial(subscription_tests)]
@@ -1387,6 +1391,122 @@ async fn test_proxy_returns_403_without_subscription_when_plans_configured() {
 
 #[tokio::test]
 #[serial(subscription_tests)]
+async fn test_proxy_blocks_email_only_user_on_free_priced_plan() {
+    ensure_stripe_env_for_gating();
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        rate_limit_config: Some(permissive_rate_limit_config()),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "free": {
+                "providers": {"stripe": {"price_id": "price_test_free"}},
+                "price": 0,
+                "monthly_credits": {"max": 1000000}
+            },
+            "basic": {
+                "providers": {"stripe": {"price_id": "price_test_basic"}},
+                "price": 999,
+                "agent_instances": {"max": 1},
+                "monthly_credits": {"max": 1000000}
+            }
+        }),
+    )
+    .await;
+
+    let user_email = "test_email_only_free_plan_block@example.com";
+    insert_test_subscription_with_price_id(&server, &db, user_email, false, "price_test_free")
+        .await;
+    let user_token = mock_login(&server, user_email).await;
+
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}]
+        }))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        403,
+        "Email-only user on free-priced plan should be blocked from LLM APIs"
+    );
+
+    let body_res: serde_json::Value = response.json();
+    assert_eq!(
+        body_res.get("error").and_then(|v| v.as_str()),
+        Some(EMAIL_ONLY_FREE_PLAN_ERROR_MESSAGE)
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_proxy_allows_email_only_user_on_paid_plan() {
+    ensure_stripe_env_for_gating();
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        rate_limit_config: Some(permissive_rate_limit_config()),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "free": {
+                "providers": {"stripe": {"price_id": "price_test_free"}},
+                "price": 0,
+                "monthly_credits": {"max": 1000000}
+            },
+            "basic": {
+                "providers": {"stripe": {"price_id": "price_test_basic"}},
+                "price": 999,
+                "agent_instances": {"max": 1},
+                "monthly_credits": {"max": 1000000}
+            }
+        }),
+    )
+    .await;
+
+    let user_email = "test_email_only_paid_plan_allowed@example.com";
+    insert_test_subscription_with_price_id(&server, &db, user_email, false, "price_test_basic")
+        .await;
+    let user_token = mock_login(&server, user_email).await;
+
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}]
+        }))
+        .await;
+
+    assert_ne!(
+        response.status_code(),
+        403,
+        "Email-only user on paid plan should not be blocked by free-plan rule"
+    );
+
+    let body_res: serde_json::Value = response.json();
+    assert_ne!(
+        body_res.get("error").and_then(|v| v.as_str()),
+        Some(EMAIL_ONLY_FREE_PLAN_ERROR_MESSAGE),
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
 async fn test_proxy_allows_with_subscription() {
     let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
 
@@ -1684,13 +1804,20 @@ async fn test_proxy_allows_over_plan_with_purchased_credits() {
     )
     .await;
 
-    let user_email = "test_proxy_over_plan_with_credits@example.com";
-    insert_test_subscription(&server, &db, user_email, false).await;
-    let user_token = mock_login(&server, user_email).await;
+    let run_id = Uuid::new_v4();
+    let user_email = format!("test-proxy-over-plan-{run_id}@example.com");
+
+    // Clean up any leftover state from previous runs using the same email
+    cleanup_user_subscription_credits(&db, &user_email).await;
+    cleanup_user_usage(&db, &user_email).await;
+    cleanup_user_subscriptions(&db, &user_email).await;
+
+    insert_test_subscription(&server, &db, &user_email, false).await;
+    let user_token = mock_login(&server, &user_email).await;
 
     let user = db
         .user_repository()
-        .get_user_by_email(user_email)
+        .get_user_by_email(&user_email)
         .await
         .expect("get user")
         .expect("user exists");
@@ -1893,13 +2020,20 @@ async fn test_proxy_allows_within_plan() {
     )
     .await;
 
-    let user_email = "test_proxy_within_plan@example.com";
-    insert_test_subscription(&server, &db, user_email, false).await;
-    let user_token = mock_login(&server, user_email).await;
+    let run_id = Uuid::new_v4();
+    let user_email = format!("test-proxy-within-plan-{run_id}@example.com");
+
+    // Clean up any leftover state from previous runs using the same email
+    cleanup_user_subscription_credits(&db, &user_email).await;
+    cleanup_user_usage(&db, &user_email).await;
+    cleanup_user_subscriptions(&db, &user_email).await;
+
+    insert_test_subscription(&server, &db, &user_email, false).await;
+    let user_token = mock_login(&server, &user_email).await;
 
     let user = db
         .user_repository()
-        .get_user_by_email(user_email)
+        .get_user_by_email(&user_email)
         .await
         .expect("get user")
         .expect("user exists");

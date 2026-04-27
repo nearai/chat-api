@@ -389,6 +389,48 @@ impl SubscriptionServiceImpl {
             .unwrap_or_default())
     }
 
+    /// Returns true only when:
+    /// 1) user has no linked OAuth accounts (email-only account), and
+    /// 2) effective plan price is explicitly free (price == 0)
+    async fn is_email_only_user_on_free_priced_plan(
+        &self,
+        user_id: UserId,
+    ) -> Result<bool, SubscriptionError> {
+        let linked_accounts = self
+            .user_repository
+            .get_linked_accounts(user_id)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        if !linked_accounts.is_empty() {
+            return Ok(false);
+        }
+
+        let subscription_plans = self.get_subscription_plans().await?;
+        let active_subscription = self
+            .subscription_repo
+            .get_active_subscription(user_id)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        let is_free_priced = match active_subscription {
+            Some(sub) => {
+                resolve_plan_name_from_config(
+                    sub.provider.as_str(),
+                    &sub.price_id,
+                    &subscription_plans,
+                )
+                .as_deref()
+                .and_then(|plan_name| subscription_plans.get(plan_name))
+                .and_then(|plan| plan.price)
+                    == Some(0)
+            }
+            None => subscription_plans.get("free").and_then(|plan| plan.price) == Some(0),
+        };
+
+        Ok(is_free_priced)
+    }
+
     /// Convert Stripe subscription to our Subscription model
     fn stripe_subscription_to_model(
         &self,
@@ -1960,6 +2002,14 @@ impl SubscriptionService for SubscriptionServiceImpl {
             }
             Err(e) => return Err(e),
             Ok(_) => {}
+        }
+
+        if self.is_email_only_user_on_free_priced_plan(user_id).await? {
+            tracing::info!(
+                "Blocking proxy access for email-only user_id={} on free-priced plan",
+                user_id
+            );
+            return Err(SubscriptionError::EmailOnlyFreePlanNotAllowed);
         }
 
         // 1. Get plan credits (monthly_credits) from the config. Cache 10 mins.

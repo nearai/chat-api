@@ -3,8 +3,8 @@ mod common;
 use api::routes::api::USER_BANNED_ERROR_MESSAGE;
 use axum_test::TestServer;
 use common::{
-    create_test_server_and_db, insert_test_subscription, insert_test_subscription_with_price_id,
-    mock_login, set_subscription_plans,
+    clear_subscription_plans, create_test_server_and_db, insert_test_subscription,
+    insert_test_subscription_with_price_id, mock_login, set_subscription_plans,
 };
 use serde_json::json;
 use serial_test::serial;
@@ -97,8 +97,10 @@ async fn wait_for_near_balance_ban(
 /// When user has no NEAR-linked account, NEAR balance check should be skipped
 /// and /v1/responses should not return 403 due to balance.
 #[tokio::test]
+#[serial(subscription_tests)]
 async fn test_near_balance_skipped_when_no_near_linked_account() {
     let (server, db) = create_test_server_and_db(Default::default()).await;
+    clear_subscription_plans(&server).await;
     cleanup_user_completely(&db, "no-near@example.com").await;
 
     // Use mock_login helper which does NOT set oauth_provider, so no NEAR linked account

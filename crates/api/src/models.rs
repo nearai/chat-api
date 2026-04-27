@@ -35,6 +35,15 @@ pub struct UserProfileResponse {
     pub linked_accounts: Vec<LinkedAccountResponse>,
 }
 
+/// Response for successful email authentication
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct EmailAuthResponse {
+    pub token: String,
+    pub session_id: String,
+    pub expires_at: String,
+    pub is_new_user: bool,
+}
+
 /// Response for successful authentication
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct AuthResponse {

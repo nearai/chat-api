@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use uuid::Uuid;
 
 use crate::types::{SessionId, UserId};
 
@@ -30,6 +31,7 @@ pub struct OAuthUserInfo {
     pub provider: OAuthProvider,
     pub provider_user_id: String,
     pub email: String,
+    pub email_verified: bool,
     pub name: Option<String>,
     pub avatar_url: Option<String>,
 }
@@ -43,6 +45,71 @@ pub struct UserSession {
     pub expires_at: DateTime<Utc>,
     /// The actual session token (only populated on creation, not on retrieval)
     pub token: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmailVerificationChallengeStatus {
+    Pending,
+    Sent,
+    Failed,
+    Consumed,
+    Invalidated,
+}
+
+impl EmailVerificationChallengeStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Sent => "sent",
+            Self::Failed => "failed",
+            Self::Consumed => "consumed",
+            Self::Invalidated => "invalidated",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EmailVerificationChallenge {
+    pub id: Uuid,
+    pub email: String,
+    pub code_mac: String,
+    pub status: EmailVerificationChallengeStatus,
+    pub attempt_count: i32,
+    pub provider_message_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EmailAuthSuccess {
+    pub session: UserSession,
+    pub is_new_user: bool,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum VerifyEmailCodeError {
+    #[error("Email authentication is disabled")]
+    Disabled,
+    #[error("Email authentication is not fully configured")]
+    Misconfigured,
+    #[error("Invalid or expired verification code")]
+    InvalidOrExpired,
+    #[error("Too many verification attempts")]
+    RateLimited,
+    #[error("Internal error: {0}")]
+    Internal(#[from] anyhow::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RequestEmailCodeError {
+    #[error("Email authentication is disabled")]
+    Disabled,
+    #[error("Email authentication is not fully configured")]
+    Misconfigured,
+    #[error("Human verification failed")]
+    HumanVerificationFailed,
+    #[error("Internal error: {0}")]
+    Internal(#[from] anyhow::Error),
 }
 
 /// Repository trait for authentication session management
@@ -63,6 +130,72 @@ pub trait SessionRepository: Send + Sync {
 
     /// Delete a session
     async fn delete_session(&self, session_id: SessionId) -> anyhow::Result<()>;
+}
+
+/// Repository trait for email verification challenge management
+#[async_trait]
+pub trait EmailVerificationChallengeRepository: Send + Sync {
+    async fn create_pending_challenge(
+        &self,
+        challenge_id: Uuid,
+        email: &str,
+        code_mac: &str,
+        ip_address: &str,
+        expires_at: DateTime<Utc>,
+    ) -> anyhow::Result<EmailVerificationChallenge>;
+
+    async fn mark_challenge_sent(
+        &self,
+        challenge_id: Uuid,
+        provider_message_id: Option<&str>,
+    ) -> anyhow::Result<()>;
+
+    async fn mark_challenge_failed(&self, challenge_id: Uuid) -> anyhow::Result<()>;
+
+    async fn count_recent_challenges_for_email(
+        &self,
+        email: &str,
+        since: DateTime<Utc>,
+    ) -> anyhow::Result<u64>;
+
+    async fn count_recent_challenges_for_ip(
+        &self,
+        ip_address: &str,
+        since: DateTime<Utc>,
+    ) -> anyhow::Result<u64>;
+
+    /// Counts verification failures for an email in the time window by summing `attempt_count`.
+    /// Used by verify-rate-limit checks before attempting code verification.
+    async fn count_recent_failed_verifications_for_email(
+        &self,
+        email: &str,
+        since: DateTime<Utc>,
+    ) -> anyhow::Result<u64>;
+
+    /// Counts verification failures for an IP in the time window by summing `attempt_count`.
+    /// Used by verify-rate-limit checks before attempting code verification.
+    async fn count_recent_failed_verifications_for_ip(
+        &self,
+        ip_address: &str,
+        since: DateTime<Utc>,
+    ) -> anyhow::Result<u64>;
+
+    async fn get_latest_active_sent_challenge(
+        &self,
+        email: &str,
+    ) -> anyhow::Result<Option<EmailVerificationChallenge>>;
+
+    /// Atomically look up the latest active 'sent' challenge for an email and attempt
+    /// to verify it. Returns:
+    ///   - Ok(Some(true))  = code matched, challenge consumed
+    ///   - Ok(Some(false)) = code did not match (attempt counted)
+    ///   - Ok(None)       = no active 'sent' challenge found for this email
+    async fn verify_email_code(
+        &self,
+        email: &str,
+        code_mac: &str,
+        max_attempts: i32,
+    ) -> anyhow::Result<Option<bool>>;
 }
 
 /// Repository trait for OAuth state and token management
@@ -88,6 +221,24 @@ pub trait OAuthRepository: Send + Sync {
         user_id: UserId,
         provider: OAuthProvider,
     ) -> anyhow::Result<Option<OAuthTokens>>;
+}
+
+/// Service trait for email OTP authentication operations
+#[async_trait]
+pub trait EmailAuthService: Send + Sync {
+    async fn request_code(
+        &self,
+        email: String,
+        client_ip: String,
+        turnstile_token: String,
+    ) -> Result<(), RequestEmailCodeError>;
+
+    async fn verify_code(
+        &self,
+        email: String,
+        code: String,
+        client_ip: String,
+    ) -> Result<EmailAuthSuccess, VerifyEmailCodeError>;
 }
 
 /// Service trait for OAuth authentication operations
