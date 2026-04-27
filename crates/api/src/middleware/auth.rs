@@ -1,5 +1,6 @@
 use axum::{
     extract::{Request, State},
+    http::Method,
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -199,6 +200,39 @@ async fn authenticate_session_by_token(
     })
 }
 
+async fn ensure_account_not_deleting(
+    state: &AuthState,
+    user_id: UserId,
+    allow_delete_retry: bool,
+) -> Result<(), ApiError> {
+    if allow_delete_retry {
+        return Ok(());
+    }
+
+    let is_deleting = state
+        .user_service
+        .is_account_deletion_requested(user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to check account deletion status for user_id={}: {}",
+                user_id,
+                e
+            );
+            ApiError::internal_server_error("Failed to authenticate session")
+        })?;
+
+    if is_deleting {
+        tracing::warn!(
+            "Account deletion in progress, denying access user_id={}",
+            user_id
+        );
+        return Err(ApiError::forbidden("Account deletion in progress"));
+    }
+
+    Ok(())
+}
+
 /// Extracts the domain portion from an email address.
 ///
 /// # Arguments
@@ -246,6 +280,10 @@ pub async fn auth_middleware(
     let user = authenticate_token_string(token, &state)
         .await
         .map_err(|e| e.into_response())?;
+    let allow_delete_retry = method == Method::DELETE && (path == "/v1/users/me" || path == "/me");
+    ensure_account_not_deleting(&state, user.user_id, allow_delete_retry)
+        .await
+        .map_err(|e| e.into_response())?;
 
     tracing::info!(
         "Authentication successful for user_id={}, session_id={} on {} {}",
@@ -277,13 +315,23 @@ pub async fn optional_auth_middleware(
     let user: Option<AuthenticatedUser> = match extract_token_from_request(&request) {
         Ok(token) => match authenticate_token_string(token, &state).await {
             Ok(user) => {
-                tracing::info!(
-                    "Optional auth: authenticated user_id={} on {} {}",
-                    user.user_id,
-                    method,
-                    path
-                );
-                Some(user)
+                if let Err(err) = ensure_account_not_deleting(&state, user.user_id, false).await {
+                    tracing::debug!(
+                        "Optional auth: account deletion check failed on {} {}: {:?}",
+                        method,
+                        path,
+                        err
+                    );
+                    None
+                } else {
+                    tracing::info!(
+                        "Optional auth: authenticated user_id={} on {} {}",
+                        user.user_id,
+                        method,
+                        path
+                    );
+                    Some(user)
+                }
             }
             Err(e) => {
                 tracing::debug!(
@@ -327,6 +375,9 @@ pub async fn admin_auth_middleware(
             tracing::error!("Authentication failed in admin middleware: {:?}", err);
             err.into_response()
         })?;
+    ensure_account_not_deleting(&state, authenticated_user.user_id, false)
+        .await
+        .map_err(|e| e.into_response())?;
 
     tracing::info!(
         "User authenticated, checking admin access for user_id={}",
@@ -455,12 +506,18 @@ pub async fn dual_auth_middleware(
             user_id: api_key_info.user_id,
             session_id: SessionId(uuid::Uuid::from_bytes(uuid_bytes)),
         };
+        ensure_account_not_deleting(&state.auth_state, authenticated_user.user_id, false)
+            .await
+            .map_err(|e| e.into_response())?;
 
         request.extensions_mut().insert(authenticated_api_key);
         request.extensions_mut().insert(authenticated_user);
     } else {
         // Session auth
         let user = authenticate_token_string(token, &state.auth_state)
+            .await
+            .map_err(|e| e.into_response())?;
+        ensure_account_not_deleting(&state.auth_state, user.user_id, false)
             .await
             .map_err(|e| e.into_response())?;
         request.extensions_mut().insert(user);

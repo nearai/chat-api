@@ -354,6 +354,7 @@ pub async fn create_test_server_and_db(
         system_configs_cache: Arc::new(tokio::sync::RwLock::new(None)),
         rate_limit_state,
         bi_metrics_service,
+        account_deletion_task_publisher: Some(Arc::new(api::tasks::NoopTaskPublisher)),
     };
 
     // Create router

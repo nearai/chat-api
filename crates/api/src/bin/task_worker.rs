@@ -3,7 +3,13 @@ use async_trait::async_trait;
 use axum::{routing::get, Json, Router};
 use chrono::{Duration, Utc};
 use serde::Serialize;
-use services::tasks::{CleanupCanceledInstancesTaskPayload, NoopTaskPayload, TaskExecutor};
+use services::conversation::ports::ConversationService;
+use services::response::service::OpenAIProxy;
+use services::tasks::{
+    AccountDeletionTaskPayload, CleanupCanceledInstancesTaskPayload, NoopTaskPayload, TaskExecutor,
+};
+use services::user::ports::{AccountDeletionError, AccountDeletionStatus, UserRepository};
+use services::vpc::{initialize_vpc_credentials, VpcAuthConfig};
 use services::{agent::ports::AgentService, UserId};
 use std::sync::Arc;
 
@@ -23,6 +29,26 @@ async fn health_check() -> Json<HealthResponse> {
 struct DefaultTaskExecutor {
     db_pool: database::DbPool,
     agent_service: Arc<dyn AgentService>,
+    user_repository: Arc<dyn UserRepository>,
+    conversation_service: Arc<dyn ConversationService>,
+}
+
+fn progress_deleted_conversation_ids(progress: &serde_json::Value) -> Vec<String> {
+    progress
+        .get("cloud_deleted_conversation_ids")
+        .and_then(|v| v.as_array())
+        .map(|ids| {
+            ids.iter()
+                .filter_map(|id| id.as_str().map(ToOwned::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn build_account_deletion_progress(ids: &[String]) -> serde_json::Value {
+    serde_json::json!({
+        "cloud_deleted_conversation_ids": ids,
+    })
 }
 
 #[async_trait]
@@ -180,6 +206,134 @@ impl TaskExecutor for DefaultTaskExecutor {
 
         Ok(())
     }
+
+    async fn execute_account_deletion(
+        &self,
+        payload: &AccountDeletionTaskPayload,
+    ) -> anyhow::Result<()> {
+        let Some(existing) = self
+            .user_repository
+            .get_account_deletion(payload.deletion_id)
+            .await
+            .context("failed to load account deletion request")?
+        else {
+            tracing::info!(
+                "account deletion task has no matching request, dropping deletion_id={}",
+                payload.deletion_id
+            );
+            return Ok(());
+        };
+
+        if existing.status == AccountDeletionStatus::Completed {
+            tracing::info!(
+                "account deletion already completed deletion_id={} user_id={}",
+                existing.id,
+                existing.user_id
+            );
+            return Ok(());
+        }
+
+        if existing.status == AccountDeletionStatus::FailedNeedsReview {
+            tracing::warn!(
+                "account deletion requires manual review, dropping task deletion_id={} user_id={}",
+                existing.id,
+                existing.user_id
+            );
+            return Ok(());
+        }
+
+        let Some(request) = self
+            .user_repository
+            .claim_account_deletion(payload.deletion_id, 300)
+            .await
+            .context("failed to claim account deletion request")?
+        else {
+            tracing::info!(
+                "account deletion request is currently leased by another worker deletion_id={}",
+                payload.deletion_id
+            );
+            return Ok(());
+        };
+
+        tracing::warn!(
+            "account deletion worker started deletion_id={} user_id={} attempt={}",
+            request.id,
+            request.user_id,
+            request.attempt_count
+        );
+
+        let mut cloud_deleted_conversation_ids =
+            progress_deleted_conversation_ids(&request.progress);
+        let mut cloud_deleted_set = cloud_deleted_conversation_ids
+            .iter()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+
+        let conversation_ids = self
+            .user_repository
+            .list_owned_conversation_ids(request.user_id)
+            .await
+            .context("failed to list account conversations")?;
+
+        for conversation_id in conversation_ids {
+            if cloud_deleted_set.contains(&conversation_id) {
+                continue;
+            }
+
+            if let Err(err) = self
+                .conversation_service
+                .delete_conversation_from_provider(&conversation_id)
+                .await
+            {
+                let progress = build_account_deletion_progress(&cloud_deleted_conversation_ids);
+                let last_error =
+                    format!("failed to delete cloud conversation {conversation_id}: {err}");
+                self.user_repository
+                    .mark_account_deletion_retrying(request.id, last_error.clone(), progress)
+                    .await
+                    .context("failed to mark account deletion retrying")?;
+                anyhow::bail!(last_error);
+            }
+
+            cloud_deleted_set.insert(conversation_id.clone());
+            cloud_deleted_conversation_ids.push(conversation_id);
+            self.user_repository
+                .update_account_deletion_progress(
+                    request.id,
+                    build_account_deletion_progress(&cloud_deleted_conversation_ids),
+                )
+                .await
+                .context("failed to update account deletion progress")?;
+        }
+
+        match self
+            .user_repository
+            .delete_user_account(request.user_id, &cloud_deleted_conversation_ids)
+            .await
+        {
+            Ok(()) | Err(AccountDeletionError::UserNotFound) => {
+                self.user_repository
+                    .mark_account_deletion_completed(request.id)
+                    .await
+                    .context("failed to mark account deletion completed")?;
+                tracing::warn!(
+                    "account deletion worker completed deletion_id={} user_id={}",
+                    request.id,
+                    request.user_id
+                );
+                Ok(())
+            }
+            Err(err) => {
+                let progress = build_account_deletion_progress(&cloud_deleted_conversation_ids);
+                let last_error = err.to_string();
+                self.user_repository
+                    .mark_account_deletion_retrying(request.id, last_error.clone(), progress)
+                    .await
+                    .context("failed to mark account deletion retrying after finalization error")?;
+                Err(anyhow!(last_error))
+            }
+        }
+    }
 }
 
 #[tokio::main]
@@ -206,9 +360,9 @@ async fn main() -> anyhow::Result<()> {
         .ok_or_else(|| anyhow!("AWS_REGION is required"))?;
 
     let queue_url = tasks
-        .sqs_queue_url
-        .clone()
-        .ok_or_else(|| anyhow!("TASKS_SQS_QUEUE_URL is required"))?;
+        .worker_sqs_queue_url()
+        .cloned()
+        .ok_or_else(|| anyhow!("SQS queue URL is required for selected TASKS_WORKER_QUEUE"))?;
 
     let db = database::Database::from_config(&config.database)
         .await
@@ -230,12 +384,54 @@ async fn main() -> anyhow::Result<()> {
         config.agent.non_tee_agent_url_pattern.clone(),
     ));
 
+    let vpc_auth_config = if config.vpc_auth.is_configured() {
+        let base_url = config.openai.base_url.as_ref().ok_or_else(|| {
+            anyhow!("OPENAI_BASE_URL is required when VPC authentication is configured")
+        })?;
+        let shared_secret = config
+            .vpc_auth
+            .read_shared_secret()
+            .ok_or_else(|| anyhow!("Failed to read VPC shared secret"))?;
+        Some(VpcAuthConfig {
+            client_id: config.vpc_auth.client_id.clone(),
+            shared_secret,
+            base_url: base_url.clone(),
+        })
+    } else {
+        None
+    };
+
+    let static_api_key = if vpc_auth_config.is_none() {
+        Some(config.openai.api_key.clone())
+    } else {
+        None
+    };
+    let vpc_credentials_service = initialize_vpc_credentials(
+        vpc_auth_config,
+        db.app_config_repository() as Arc<dyn services::vpc::VpcCredentialsRepository>,
+        static_api_key,
+    )
+    .await?;
+
+    let mut proxy_service = OpenAIProxy::new(vpc_credentials_service);
+    if let Some(base_url) = config.openai.base_url.clone() {
+        proxy_service = proxy_service.with_base_url(base_url);
+    }
+    let conversation_service = Arc::new(
+        services::conversation::service::ConversationServiceImpl::new(
+            db.conversation_repository(),
+            Arc::new(proxy_service),
+        ),
+    );
+
     let aws_config = api::tasks::load_aws_sdk_config(region).await;
 
     let sqs_client = aws_sdk_sqs::Client::new(&aws_config);
     let executor = Arc::new(DefaultTaskExecutor {
         db_pool: db.pool().clone(),
         agent_service,
+        user_repository: db.user_repository(),
+        conversation_service,
     });
 
     let health_port = tasks.port;

@@ -2,7 +2,9 @@ use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use std::sync::Arc;
 
-use super::ports::{AccountDeletionError, BanType, User, UserProfile, UserRepository, UserService};
+use super::ports::{
+    AccountDeletion, AccountDeletionError, BanType, User, UserProfile, UserRepository, UserService,
+};
 use crate::types::UserId;
 
 pub struct UserServiceImpl {
@@ -103,6 +105,27 @@ impl UserService for UserServiceImpl {
         tracing::info!("User account deleted successfully: user_id={}", user_id);
 
         Ok(())
+    }
+
+    async fn create_account_deletion_request(
+        &self,
+        user_id: UserId,
+    ) -> Result<AccountDeletion, AccountDeletionError> {
+        tracing::warn!(
+            "Creating user account deletion request: user_id={}",
+            user_id
+        );
+        self.user_repository
+            .create_account_deletion_request(user_id)
+            .await
+    }
+
+    async fn is_account_deletion_requested(&self, user_id: UserId) -> anyhow::Result<bool> {
+        Ok(self
+            .user_repository
+            .get_account_deletion_by_user_id(user_id)
+            .await?
+            .is_some())
     }
 
     async fn list_owned_conversation_ids(&self, user_id: UserId) -> anyhow::Result<Vec<String>> {

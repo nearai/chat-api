@@ -133,6 +133,7 @@ use utoipa::OpenApi;
         crate::models::AdminUserListResponse,
         crate::models::LinkedAccountResponse,
         crate::models::UserProfileResponse,
+        crate::models::UserAccountDeletionResponse,
         crate::models::AuthResponse,
         crate::error::ApiErrorResponse,
         // Auth request models

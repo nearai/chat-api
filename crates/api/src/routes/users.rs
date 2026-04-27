@@ -7,6 +7,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
+use services::tasks::{AccountDeletionTaskPayload, TaskId, TaskMessage, TaskPayload};
 use services::user::ports::AccountDeletionError;
 /// Get current user
 ///
@@ -45,18 +46,17 @@ pub async fn get_current_user(
 
 /// Delete current user account
 ///
-/// Deletes the authenticated user's direct PII/account rows after verifying they have no active
-/// subscriptions and no running/provisioning/error instances.
+/// Requests asynchronous account deletion after verifying the user has no active subscriptions
+/// and no running/provisioning/error instances.
 #[utoipa::path(
     delete,
     path = "/v1/users/me",
     tag = "Users",
     responses(
-        (status = 204, description = "User account deleted"),
+        (status = 202, description = "User account deletion requested", body = UserAccountDeletionResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 404, description = "User not found", body = crate::error::ApiErrorResponse),
         (status = 409, description = "Account cannot be deleted until subscriptions are inactive and instances are stopped", body = crate::error::ApiErrorResponse),
-        (status = 502, description = "Failed to delete upstream chat history", body = crate::error::ApiErrorResponse),
         (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
     ),
     security(
@@ -66,8 +66,11 @@ pub async fn get_current_user(
 pub async fn delete_current_user(
     State(app_state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-) -> Result<StatusCode, ApiError> {
-    tracing::warn!("Deleting current user account: user_id={}", user.user_id);
+) -> Result<(StatusCode, Json<UserAccountDeletionResponse>), ApiError> {
+    tracing::warn!(
+        "Requesting current user account deletion: user_id={}",
+        user.user_id
+    );
 
     app_state
         .user_service
@@ -75,45 +78,41 @@ pub async fn delete_current_user(
         .await
         .map_err(account_deletion_error_to_api_error)?;
 
-    let conversation_ids = app_state
-        .user_service
-        .list_owned_conversation_ids(user.user_id)
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                "Failed to list conversations for account deletion: user_id={}, error={:#}",
-                user.user_id,
-                e
-            );
-            ApiError::internal_server_error("Failed to prepare account deletion")
+    let task_publisher = app_state
+        .account_deletion_task_publisher
+        .as_ref()
+        .ok_or_else(|| {
+            ApiError::internal_server_error("Account deletion queue is not configured")
         })?;
 
-    let mut cloud_deleted_conversation_ids = Vec::with_capacity(conversation_ids.len());
-    for conversation_id in conversation_ids {
-        app_state
-            .conversation_service
-            .delete_conversation_from_provider(&conversation_id)
-            .await
-            .map_err(|e| {
-                tracing::error!(
-                    "Failed to delete conversation from Cloud API during account deletion: user_id={}, conversation_id={}, error={}",
-                    user.user_id,
-                    conversation_id,
-                    e
-                );
-                ApiError::bad_gateway("Failed to delete chat history")
-                    .with_details(format!("Cloud API conversation cleanup failed for {conversation_id}"))
-            })?;
-        cloud_deleted_conversation_ids.push(conversation_id);
-    }
-
-    app_state
+    let deletion = app_state
         .user_service
-        .delete_account(user.user_id, &cloud_deleted_conversation_ids)
+        .create_account_deletion_request(user.user_id)
         .await
         .map_err(account_deletion_error_to_api_error)?;
 
-    Ok(StatusCode::NO_CONTENT)
+    let task_id = TaskId::new(format!("account-deletion-{}", deletion.id)).map_err(|e| {
+        tracing::error!("Failed to create account deletion task id: {}", e);
+        ApiError::internal_server_error("Failed to enqueue account deletion")
+    })?;
+    let message = TaskMessage {
+        task_id,
+        payload: TaskPayload::AccountDeletion(AccountDeletionTaskPayload {
+            deletion_id: deletion.id,
+        }),
+    };
+
+    task_publisher.publish(message).await.map_err(|e| {
+        tracing::error!(
+            "Failed to enqueue account deletion task: user_id={}, deletion_id={}, error={:#}",
+            user.user_id,
+            deletion.id,
+            e
+        );
+        ApiError::internal_server_error("Failed to enqueue account deletion")
+    })?;
+
+    Ok((StatusCode::ACCEPTED, Json(deletion.into())))
 }
 
 fn account_deletion_error_to_api_error(e: AccountDeletionError) -> ApiError {
