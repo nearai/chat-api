@@ -171,6 +171,8 @@ impl EmailVerificationChallengeRepository for PostgresEmailVerificationChallenge
         Ok(count as u64)
     }
 
+    // Count verification failures in the window by summing accumulated attempt counts.
+    // This value is used for email-scoped verify rate limiting.
     async fn count_recent_failed_verifications_for_email(
         &self,
         email: &str,
@@ -189,6 +191,8 @@ impl EmailVerificationChallengeRepository for PostgresEmailVerificationChallenge
         Ok(count as u64)
     }
 
+    // Count verification failures in the window by summing accumulated attempt counts.
+    // This value is used for IP-scoped verify rate limiting.
     async fn count_recent_failed_verifications_for_ip(
         &self,
         ip_address: &str,

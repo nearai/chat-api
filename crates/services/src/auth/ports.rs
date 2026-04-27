@@ -164,12 +164,16 @@ pub trait EmailVerificationChallengeRepository: Send + Sync {
         since: DateTime<Utc>,
     ) -> anyhow::Result<u64>;
 
+    /// Counts verification failures for an email in the time window by summing `attempt_count`.
+    /// Used by verify-rate-limit checks before attempting code verification.
     async fn count_recent_failed_verifications_for_email(
         &self,
         email: &str,
         since: DateTime<Utc>,
     ) -> anyhow::Result<u64>;
 
+    /// Counts verification failures for an IP in the time window by summing `attempt_count`.
+    /// Used by verify-rate-limit checks before attempting code verification.
     async fn count_recent_failed_verifications_for_ip(
         &self,
         ip_address: &str,
