@@ -3,8 +3,8 @@ use crate::{
 };
 use axum::extract::Query;
 use axum::{
-    extract::{Extension, State},
-    http::{header::LOCATION, HeaderMap, StatusCode},
+    extract::{ConnectInfo, Extension, FromRequestParts, State},
+    http::{header::LOCATION, request::Parts, HeaderMap, StatusCode},
     response::Redirect,
     routing::{get, post},
     Json, Router,
@@ -18,8 +18,28 @@ use services::metrics::consts::{
     METRIC_USER_LOGIN, METRIC_USER_SIGNUP, TAG_AUTH_METHOD, TAG_IS_NEW_USER,
 };
 use services::SessionId;
-use std::net::IpAddr;
+use std::convert::Infallible;
+use std::net::{IpAddr, SocketAddr};
 use utoipa::ToSchema;
+
+pub struct OptionalConnectInfo<T>(Option<T>);
+
+impl<S, T> FromRequestParts<S> for OptionalConnectInfo<T>
+where
+    S: Send + Sync,
+    T: Clone + Send + Sync + 'static,
+{
+    type Rejection = Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        Ok(Self(
+            parts
+                .extensions
+                .get::<ConnectInfo<T>>()
+                .map(|ConnectInfo(addr)| addr.clone()),
+        ))
+    }
+}
 
 /// Helper to add a Set-Cookie header to a HeaderMap when available
 fn try_add_gateway_cookie(headers: &mut HeaderMap, cookie: Option<String>, context: &str) {
@@ -64,6 +84,7 @@ enum ClientIpSource {
     XForwardedFor,
     XRealIp,
     Forwarded,
+    PeerAddress,
     LoopbackFallback,
 }
 
@@ -73,6 +94,7 @@ impl ClientIpSource {
             ClientIpSource::XForwardedFor => "x_forwarded_for",
             ClientIpSource::XRealIp => "x_real_ip",
             ClientIpSource::Forwarded => "forwarded",
+            ClientIpSource::PeerAddress => "peer_address",
             ClientIpSource::LoopbackFallback => "loopback_fallback",
         }
     }
@@ -154,22 +176,33 @@ fn extract_forwarded_ip(headers: &HeaderMap, trusted_proxy_count: usize) -> Opti
     select_proxy_chain_ip(&ips, trusted_proxy_count)
 }
 
-fn extract_client_ip(headers: &HeaderMap, trusted_proxy_count: usize) -> String {
+fn extract_client_ip(
+    headers: &HeaderMap,
+    trusted_proxy_count: usize,
+    peer_addr: Option<SocketAddr>,
+) -> String {
     let x_forwarded_for = header_value(headers, "x-forwarded-for");
     let x_real_ip = header_value(headers, "x-real-ip");
     let forwarded = header_value(headers, "forwarded");
 
-    let (resolved_ip, source) = extract_x_forwarded_for_ip(headers, trusted_proxy_count)
-        .map(|ip| (ip, ClientIpSource::XForwardedFor))
-        .or_else(|| {
-            x_real_ip
-                .and_then(parse_ip_candidate)
-                .map(|ip| (ip, ClientIpSource::XRealIp))
-        })
-        .or_else(|| {
-            extract_forwarded_ip(headers, trusted_proxy_count)
-                .map(|ip| (ip, ClientIpSource::Forwarded))
-        })
+    let forwarded_ip = if trusted_proxy_count > 0 {
+        extract_x_forwarded_for_ip(headers, trusted_proxy_count)
+            .map(|ip| (ip, ClientIpSource::XForwardedFor))
+            .or_else(|| {
+                x_real_ip
+                    .and_then(parse_ip_candidate)
+                    .map(|ip| (ip, ClientIpSource::XRealIp))
+            })
+            .or_else(|| {
+                extract_forwarded_ip(headers, trusted_proxy_count)
+                    .map(|ip| (ip, ClientIpSource::Forwarded))
+            })
+    } else {
+        None
+    };
+
+    let (resolved_ip, source) = forwarded_ip
+        .or_else(|| peer_addr.map(|addr| (addr.ip(), ClientIpSource::PeerAddress)))
         .unwrap_or((
             IpAddr::from([127, 0, 0, 1]),
             ClientIpSource::LoopbackFallback,
@@ -179,6 +212,7 @@ fn extract_client_ip(headers: &HeaderMap, trusted_proxy_count: usize) -> String 
         resolved_client_ip = %resolved_ip,
         client_ip_source = source.as_str(),
         trusted_proxy_count,
+        peer_addr = %peer_addr.map(|addr| addr.to_string()).unwrap_or_default(),
         x_forwarded_for = x_forwarded_for.unwrap_or(""),
         x_real_ip = x_real_ip.unwrap_or(""),
         forwarded = forwarded.unwrap_or(""),
@@ -364,6 +398,7 @@ pub struct NearAuthResponse {
 pub async fn request_email_code(
     State(app_state): State<AppState>,
     headers: HeaderMap,
+    OptionalConnectInfo(peer_addr): OptionalConnectInfo<SocketAddr>,
     Json(request): Json<EmailRequestCodeRequest>,
 ) -> Result<StatusCode, ApiError> {
     let email = normalize_email_input(&request.email);
@@ -377,7 +412,11 @@ pub async fn request_email_code(
         .email_auth_service
         .request_code(
             email,
-            extract_client_ip(&headers, app_state.email_auth_trusted_proxy_count),
+            extract_client_ip(
+                &headers,
+                app_state.email_auth_trusted_proxy_count,
+                peer_addr,
+            ),
             turnstile_token.to_string(),
         )
         .await
@@ -402,6 +441,7 @@ pub async fn request_email_code(
 pub async fn verify_email_code(
     State(app_state): State<AppState>,
     headers: HeaderMap,
+    OptionalConnectInfo(peer_addr): OptionalConnectInfo<SocketAddr>,
     Json(request): Json<EmailVerifyCodeRequest>,
 ) -> Result<(HeaderMap, Json<crate::models::EmailAuthResponse>), ApiError> {
     let email = normalize_email_input(&request.email);
@@ -418,7 +458,11 @@ pub async fn verify_email_code(
         .verify_code(
             email,
             request.code,
-            extract_client_ip(&headers, app_state.email_auth_trusted_proxy_count),
+            extract_client_ip(
+                &headers,
+                app_state.email_auth_trusted_proxy_count,
+                peer_addr,
+            ),
         )
         .await
         .map_err(email_verify_error_to_api_error)?;
@@ -1116,8 +1160,9 @@ pub fn create_oauth_router() -> Router<AppState> {
 
 #[cfg(test)]
 mod tests {
-    use super::select_proxy_chain_ip;
-    use std::net::IpAddr;
+    use super::{extract_client_ip, select_proxy_chain_ip};
+    use axum::http::{HeaderMap, HeaderValue};
+    use std::net::{IpAddr, SocketAddr};
 
     #[test]
     fn select_proxy_chain_ip_uses_ip_before_trusted_suffix() {
@@ -1153,5 +1198,28 @@ mod tests {
         for (ips, trusted_proxy_count, expected) in cases {
             assert_eq!(select_proxy_chain_ip(&ips, trusted_proxy_count), expected);
         }
+    }
+
+    #[test]
+    fn extract_client_ip_uses_peer_address_when_no_proxies_are_trusted() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("198.51.100.10, 203.0.113.20"),
+        );
+        headers.insert("x-real-ip", HeaderValue::from_static("198.51.100.11"));
+        let peer_addr = "203.0.113.99:443".parse::<SocketAddr>().unwrap();
+
+        assert_eq!(
+            extract_client_ip(&headers, 0, Some(peer_addr)),
+            "203.0.113.99"
+        );
+    }
+
+    #[test]
+    fn extract_client_ip_logs_and_falls_back_to_loopback_without_peer_address() {
+        let headers = HeaderMap::new();
+
+        assert_eq!(extract_client_ip(&headers, 0, None), "127.0.0.1");
     }
 }

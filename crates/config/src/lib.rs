@@ -115,8 +115,7 @@ impl Default for EmailAuthConfig {
             trusted_proxy_count: std::env::var("EMAIL_AUTH_TRUSTED_PROXY_COUNT")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .filter(|count| *count > 0)
-                .unwrap_or(1),
+                .unwrap_or(0),
             otp_ttl_minutes: std::env::var("EMAIL_OTP_TTL_MINUTES")
                 .ok()
                 .and_then(|v| v.parse().ok())

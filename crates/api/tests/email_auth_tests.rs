@@ -24,6 +24,7 @@ fn set_email_auth_env() {
     std::env::set_var("EMAIL_OTP_VERIFY_FAILURES_PER_HOUR", "20");
     std::env::set_var("EMAIL_OTP_REQUESTS_PER_IP_PER_HOUR", "30");
     std::env::set_var("EMAIL_OTP_VERIFIES_PER_IP_PER_HOUR", "60");
+    std::env::set_var("EMAIL_AUTH_TRUSTED_PROXY_COUNT", "1");
 }
 
 fn unique_email(prefix: &str) -> String {

@@ -376,7 +376,11 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("🚀 Server listening on http://{}", addr);
     tracing::info!("📚 Swagger UI available at http://{}/docs", addr);
 
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }
