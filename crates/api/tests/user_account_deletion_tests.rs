@@ -181,7 +181,7 @@ async fn delete_account_request_creates_pending_state_and_blocks_access() {
     assert_eq!(profile_response.status_code(), 403);
 
     db.user_repository()
-        .delete_user_account(user.id, &[conversation_id.clone()])
+        .delete_user_account(user.id, std::slice::from_ref(&conversation_id))
         .await
         .expect("finalize delete account");
     db.user_repository()
