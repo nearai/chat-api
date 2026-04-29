@@ -191,6 +191,7 @@ pub trait UserRepository: Send + Sync {
         &self,
         deletion_id: Uuid,
         progress: serde_json::Value,
+        lease_seconds: i64,
     ) -> anyhow::Result<()>;
 
     async fn mark_account_deletion_retrying(
@@ -201,6 +202,13 @@ pub trait UserRepository: Send + Sync {
     ) -> anyhow::Result<()>;
 
     async fn mark_account_deletion_completed(&self, deletion_id: Uuid) -> anyhow::Result<()>;
+
+    async fn mark_account_deletion_failed_needs_review(
+        &self,
+        deletion_id: Uuid,
+        last_error: String,
+        progress: serde_json::Value,
+    ) -> anyhow::Result<()>;
 
     /// List locally tracked conversations owned by a user.
     async fn list_owned_conversation_ids(&self, user_id: UserId) -> anyhow::Result<Vec<String>>;

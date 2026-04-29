@@ -125,7 +125,8 @@ impl UserService for UserServiceImpl {
             .user_repository
             .get_account_deletion_by_user_id(user_id)
             .await?
-            .is_some())
+            .map(|deletion| deletion.status != crate::user::ports::AccountDeletionStatus::Completed)
+            .unwrap_or(false))
     }
 
     async fn list_owned_conversation_ids(&self, user_id: UserId) -> anyhow::Result<Vec<String>> {

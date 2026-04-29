@@ -129,11 +129,11 @@ fn account_deletion_error_to_api_error(e: AccountDeletionError) -> ApiError {
             statuses.join(", ")
         )),
         AccountDeletionError::ConversationCleanupIncomplete { conversation_ids } => {
-            ApiError::conflict("Cannot delete account until chat history is cleaned up")
-                .with_details(format!(
-                    "Missing Cloud API cleanup for conversation(s): {}",
-                    conversation_ids.join(", ")
-                ))
+            tracing::error!(
+                "Unexpected ConversationCleanupIncomplete during delete request validation/create path: {}",
+                conversation_ids.join(", ")
+            );
+            ApiError::internal_server_error("Failed to delete account")
         }
         AccountDeletionError::Internal(err) => {
             tracing::error!("Failed to delete account: {:#}", err);

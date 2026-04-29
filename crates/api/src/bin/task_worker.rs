@@ -33,6 +33,9 @@ struct DefaultTaskExecutor {
     conversation_service: Arc<dyn ConversationService>,
 }
 
+const ACCOUNT_DELETION_LEASE_SECONDS: i64 = 300;
+const MAX_ACCOUNT_DELETION_ATTEMPTS: i32 = 5;
+
 fn progress_deleted_conversation_ids(progress: &serde_json::Value) -> Vec<String> {
     progress
         .get("cloud_deleted_conversation_ids")
@@ -244,7 +247,7 @@ impl TaskExecutor for DefaultTaskExecutor {
 
         let Some(request) = self
             .user_repository
-            .claim_account_deletion(payload.deletion_id, 300)
+            .claim_account_deletion(payload.deletion_id, ACCOUNT_DELETION_LEASE_SECONDS)
             .await
             .context("failed to claim account deletion request")?
         else {
@@ -261,6 +264,28 @@ impl TaskExecutor for DefaultTaskExecutor {
             request.user_id,
             request.attempt_count
         );
+
+        if request.attempt_count > MAX_ACCOUNT_DELETION_ATTEMPTS {
+            let last_error = format!(
+                "max deletion retry attempts exceeded (attempt_count={}, max={})",
+                request.attempt_count, MAX_ACCOUNT_DELETION_ATTEMPTS
+            );
+            self.user_repository
+                .mark_account_deletion_failed_needs_review(
+                    request.id,
+                    last_error.clone(),
+                    request.progress.clone(),
+                )
+                .await
+                .context("failed to mark account deletion as failed_needs_review")?;
+            tracing::warn!(
+                "account deletion moved to failed_needs_review deletion_id={} user_id={} reason={}",
+                request.id,
+                request.user_id,
+                last_error
+            );
+            return Ok(());
+        }
 
         let mut cloud_deleted_conversation_ids =
             progress_deleted_conversation_ids(&request.progress);
@@ -301,6 +326,7 @@ impl TaskExecutor for DefaultTaskExecutor {
                 .update_account_deletion_progress(
                     request.id,
                     build_account_deletion_progress(&cloud_deleted_conversation_ids),
+                    ACCOUNT_DELETION_LEASE_SECONDS,
                 )
                 .await
                 .context("failed to update account deletion progress")?;

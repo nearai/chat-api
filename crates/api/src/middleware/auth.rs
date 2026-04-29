@@ -280,7 +280,9 @@ pub async fn auth_middleware(
     let user = authenticate_token_string(token, &state)
         .await
         .map_err(|e| e.into_response())?;
-    let allow_delete_retry = method == Method::DELETE && (path == "/v1/users/me" || path == "/me");
+    let normalized_path = path.trim_end_matches('/');
+    let allow_delete_retry =
+        method == Method::DELETE && (normalized_path == "/v1/users/me" || normalized_path == "/me");
     ensure_account_not_deleting(&state, user.user_id, allow_delete_retry)
         .await
         .map_err(|e| e.into_response())?;

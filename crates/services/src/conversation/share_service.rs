@@ -981,6 +981,7 @@ mod tests {
             &self,
             _deletion_id: uuid::Uuid,
             _progress: serde_json::Value,
+            _lease_seconds: i64,
         ) -> anyhow::Result<()> {
             Ok(())
         }
@@ -997,6 +998,15 @@ mod tests {
         async fn mark_account_deletion_completed(
             &self,
             _deletion_id: uuid::Uuid,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn mark_account_deletion_failed_needs_review(
+            &self,
+            _deletion_id: uuid::Uuid,
+            _last_error: String,
+            _progress: serde_json::Value,
         ) -> anyhow::Result<()> {
             Ok(())
         }
