@@ -1,5 +1,7 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use thiserror::Error;
+use uuid::Uuid;
 
 use crate::types::UserId;
 
@@ -61,6 +63,76 @@ pub struct UserProfile {
     pub linked_accounts: Vec<LinkedOAuthAccount>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountDeletionStatus {
+    Pending,
+    Processing,
+    Retrying,
+    Completed,
+    FailedNeedsReview,
+}
+
+impl AccountDeletionStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Processing => "processing",
+            Self::Retrying => "retrying",
+            Self::Completed => "completed",
+            Self::FailedNeedsReview => "failed_needs_review",
+        }
+    }
+
+    pub fn parse_db_value(value: &str) -> anyhow::Result<Self> {
+        match value {
+            "pending" => Ok(Self::Pending),
+            "processing" => Ok(Self::Processing),
+            "retrying" => Ok(Self::Retrying),
+            "completed" => Ok(Self::Completed),
+            "failed_needs_review" => Ok(Self::FailedNeedsReview),
+            _ => anyhow::bail!("unknown account deletion status: {value}"),
+        }
+    }
+}
+
+impl std::fmt::Display for AccountDeletionStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AccountDeletion {
+    pub id: Uuid,
+    pub user_id: UserId,
+    pub status: AccountDeletionStatus,
+    pub requested_at: DateTime<Utc>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub attempt_count: i32,
+    pub lease_until: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+    pub progress: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Errors returned when deleting a user account.
+#[derive(Debug, Error)]
+pub enum AccountDeletionError {
+    #[error("User not found")]
+    UserNotFound,
+    #[error("Cannot delete account while active subscriptions exist")]
+    ActiveSubscriptions { count: i64 },
+    #[error("Cannot delete account while instances are not stopped")]
+    InstancesNotStopped { count: i64, statuses: Vec<String> },
+    #[error("Cannot delete account because conversation cleanup is incomplete")]
+    ConversationCleanupIncomplete { conversation_ids: Vec<String> },
+    #[error(transparent)]
+    Internal(#[from] anyhow::Error),
+}
+
 /// Repository trait for user-related data operations
 #[async_trait]
 pub trait UserRepository: Send + Sync {
@@ -86,8 +158,66 @@ pub trait UserRepository: Send + Sync {
         avatar_url: Option<String>,
     ) -> anyhow::Result<User>;
 
-    /// Delete a user
-    async fn delete_user(&self, user_id: UserId) -> anyhow::Result<()>;
+    /// Delete a user account and direct PII rows while preserving audit and billing data.
+    async fn delete_user_account(
+        &self,
+        user_id: UserId,
+        cloud_deleted_conversation_ids: &[String],
+    ) -> Result<(), AccountDeletionError>;
+
+    /// Create or return an existing deletion request after validating preconditions.
+    async fn create_account_deletion_request(
+        &self,
+        user_id: UserId,
+    ) -> Result<AccountDeletion, AccountDeletionError>;
+
+    async fn get_account_deletion_by_user_id(
+        &self,
+        user_id: UserId,
+    ) -> anyhow::Result<Option<AccountDeletion>>;
+
+    async fn get_account_deletion(
+        &self,
+        deletion_id: Uuid,
+    ) -> anyhow::Result<Option<AccountDeletion>>;
+
+    async fn claim_account_deletion(
+        &self,
+        deletion_id: Uuid,
+        lease_seconds: i64,
+    ) -> anyhow::Result<Option<AccountDeletion>>;
+
+    async fn update_account_deletion_progress(
+        &self,
+        deletion_id: Uuid,
+        progress: serde_json::Value,
+        lease_seconds: i64,
+    ) -> anyhow::Result<()>;
+
+    async fn mark_account_deletion_retrying(
+        &self,
+        deletion_id: Uuid,
+        last_error: String,
+        progress: serde_json::Value,
+    ) -> anyhow::Result<()>;
+
+    async fn mark_account_deletion_completed(&self, deletion_id: Uuid) -> anyhow::Result<()>;
+
+    async fn mark_account_deletion_failed_needs_review(
+        &self,
+        deletion_id: Uuid,
+        last_error: String,
+        progress: serde_json::Value,
+    ) -> anyhow::Result<()>;
+
+    /// List locally tracked conversations owned by a user.
+    async fn list_owned_conversation_ids(&self, user_id: UserId) -> anyhow::Result<Vec<String>>;
+
+    /// Validate current account deletion preconditions without deleting any data.
+    async fn validate_account_deletion_preconditions(
+        &self,
+        user_id: UserId,
+    ) -> Result<(), AccountDeletionError>;
 
     /// Get linked OAuth accounts for a user
     async fn get_linked_accounts(&self, user_id: UserId)
@@ -139,7 +269,27 @@ pub trait UserService: Send + Sync {
     ) -> anyhow::Result<User>;
 
     /// Delete user account
-    async fn delete_account(&self, user_id: UserId) -> anyhow::Result<()>;
+    async fn delete_account(
+        &self,
+        user_id: UserId,
+        cloud_deleted_conversation_ids: &[String],
+    ) -> Result<(), AccountDeletionError>;
+
+    async fn create_account_deletion_request(
+        &self,
+        user_id: UserId,
+    ) -> Result<AccountDeletion, AccountDeletionError>;
+
+    async fn is_account_deletion_requested(&self, user_id: UserId) -> anyhow::Result<bool>;
+
+    /// List locally tracked conversations owned by a user.
+    async fn list_owned_conversation_ids(&self, user_id: UserId) -> anyhow::Result<Vec<String>>;
+
+    /// Validate current account deletion preconditions without deleting any data.
+    async fn validate_account_deletion_preconditions(
+        &self,
+        user_id: UserId,
+    ) -> Result<(), AccountDeletionError>;
 
     /// List users with pagination
     async fn list_users(&self, limit: i64, offset: i64) -> anyhow::Result<(Vec<User>, u64)>;

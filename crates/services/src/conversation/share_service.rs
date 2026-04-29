@@ -939,7 +939,89 @@ mod tests {
             unimplemented!("update_user not needed for tests");
         }
 
-        async fn delete_user(&self, _user_id: UserId) -> anyhow::Result<()> {
+        async fn delete_user_account(
+            &self,
+            _user_id: UserId,
+            _cloud_deleted_conversation_ids: &[String],
+        ) -> Result<(), crate::user::ports::AccountDeletionError> {
+            Ok(())
+        }
+
+        async fn create_account_deletion_request(
+            &self,
+            _user_id: UserId,
+        ) -> Result<crate::user::ports::AccountDeletion, crate::user::ports::AccountDeletionError>
+        {
+            unimplemented!("create_account_deletion_request not needed for tests");
+        }
+
+        async fn get_account_deletion_by_user_id(
+            &self,
+            _user_id: UserId,
+        ) -> anyhow::Result<Option<crate::user::ports::AccountDeletion>> {
+            Ok(None)
+        }
+
+        async fn get_account_deletion(
+            &self,
+            _deletion_id: uuid::Uuid,
+        ) -> anyhow::Result<Option<crate::user::ports::AccountDeletion>> {
+            Ok(None)
+        }
+
+        async fn claim_account_deletion(
+            &self,
+            _deletion_id: uuid::Uuid,
+            _lease_seconds: i64,
+        ) -> anyhow::Result<Option<crate::user::ports::AccountDeletion>> {
+            Ok(None)
+        }
+
+        async fn update_account_deletion_progress(
+            &self,
+            _deletion_id: uuid::Uuid,
+            _progress: serde_json::Value,
+            _lease_seconds: i64,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn mark_account_deletion_retrying(
+            &self,
+            _deletion_id: uuid::Uuid,
+            _last_error: String,
+            _progress: serde_json::Value,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn mark_account_deletion_completed(
+            &self,
+            _deletion_id: uuid::Uuid,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn mark_account_deletion_failed_needs_review(
+            &self,
+            _deletion_id: uuid::Uuid,
+            _last_error: String,
+            _progress: serde_json::Value,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn list_owned_conversation_ids(
+            &self,
+            _user_id: UserId,
+        ) -> anyhow::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+
+        async fn validate_account_deletion_preconditions(
+            &self,
+            _user_id: UserId,
+        ) -> Result<(), crate::user::ports::AccountDeletionError> {
             Ok(())
         }
 
@@ -1010,7 +1092,37 @@ mod tests {
             unimplemented!("UserService not needed for tests");
         }
 
-        async fn delete_account(&self, _user_id: UserId) -> anyhow::Result<()> {
+        async fn delete_account(
+            &self,
+            _user_id: UserId,
+            _cloud_deleted_conversation_ids: &[String],
+        ) -> Result<(), crate::user::ports::AccountDeletionError> {
+            Ok(())
+        }
+
+        async fn create_account_deletion_request(
+            &self,
+            _user_id: UserId,
+        ) -> Result<crate::user::ports::AccountDeletion, crate::user::ports::AccountDeletionError>
+        {
+            unimplemented!("create_account_deletion_request not needed for tests");
+        }
+
+        async fn is_account_deletion_requested(&self, _user_id: UserId) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+
+        async fn list_owned_conversation_ids(
+            &self,
+            _user_id: UserId,
+        ) -> anyhow::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+
+        async fn validate_account_deletion_preconditions(
+            &self,
+            _user_id: UserId,
+        ) -> Result<(), crate::user::ports::AccountDeletionError> {
             Ok(())
         }
 

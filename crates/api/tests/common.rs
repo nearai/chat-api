@@ -354,6 +354,7 @@ pub async fn create_test_server_and_db(
         system_configs_cache: Arc::new(tokio::sync::RwLock::new(None)),
         rate_limit_state,
         bi_metrics_service,
+        account_deletion_task_publisher: Some(Arc::new(api::tasks::NoopTaskPublisher)),
     };
 
     // Create router
@@ -623,6 +624,13 @@ pub async fn cleanup_user_agent_instances(db: &database::Database, user_email: &
     client
         .execute(
             "DELETE FROM agent_api_keys WHERE instance_id IN (SELECT id FROM agent_instances WHERE user_id = $1)",
+            &[&user.id],
+        )
+        .await
+        .ok();
+    client
+        .execute(
+            "DELETE FROM agent_instance_status_history WHERE instance_id IN (SELECT id FROM agent_instances WHERE user_id = $1)",
             &[&user.id],
         )
         .await

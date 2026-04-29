@@ -161,6 +161,13 @@ impl ConversationService for ConversationServiceImpl {
 
         Ok(deleted)
     }
+
+    async fn delete_conversation_from_provider(
+        &self,
+        conversation_id: &str,
+    ) -> Result<serde_json::Value, ConversationError> {
+        self.delete_conversation_from_openai(conversation_id).await
+    }
 }
 
 impl ConversationServiceImpl {
