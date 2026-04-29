@@ -477,14 +477,17 @@ impl UserRepository for PostgresUserRepository {
         &self,
         deletion_id: Uuid,
         progress: serde_json::Value,
+        lease_seconds: i64,
     ) -> anyhow::Result<()> {
         let client = self.pool.get().await?;
         client
             .execute(
                 "UPDATE user_account_deletions
-                 SET progress = $2, updated_at = NOW()
+                 SET progress = $2,
+                     lease_until = NOW() + ($3::bigint * INTERVAL '1 second'),
+                     updated_at = NOW()
                  WHERE id = $1",
-                &[&deletion_id, &progress],
+                &[&deletion_id, &progress, &lease_seconds],
             )
             .await?;
         Ok(())
@@ -525,6 +528,29 @@ impl UserRepository for PostgresUserRepository {
                      updated_at = NOW()
                  WHERE id = $1",
                 &[&deletion_id],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn mark_account_deletion_failed_needs_review(
+        &self,
+        deletion_id: Uuid,
+        last_error: String,
+        progress: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let client = self.pool.get().await?;
+        client
+            .execute(
+                "UPDATE user_account_deletions
+                 SET status = 'failed_needs_review',
+                     lease_until = NULL,
+                     last_error = $2,
+                     progress = $3,
+                     updated_at = NOW()
+                 WHERE id = $1
+                   AND status <> 'completed'",
+                &[&deletion_id, &last_error, &progress],
             )
             .await?;
         Ok(())
