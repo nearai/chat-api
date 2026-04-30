@@ -2,8 +2,8 @@ mod common;
 
 use chrono::Duration;
 use common::{
-    create_test_server_and_db, create_test_server_with_config, mock_login,
-    restrictive_rate_limit_config, TestServerConfig,
+    create_test_server_and_db, create_test_server_with_config, insert_test_subscription,
+    mock_login, restrictive_rate_limit_config, TestServerConfig,
 };
 use futures::future::join_all;
 use serde_json::json;
@@ -21,10 +21,20 @@ async fn create_rate_limited_test_server() -> axum_test::TestServer {
     .await
 }
 
+async fn create_rate_limited_test_server_and_db() -> (axum_test::TestServer, database::Database) {
+    create_test_server_and_db(TestServerConfig {
+        rate_limit_config: Some(restrictive_rate_limit_config()),
+        ..Default::default()
+    })
+    .await
+}
+
 #[tokio::test]
 async fn test_rate_limit_first_request_succeeds() {
-    let server = create_rate_limited_test_server().await;
-    let token = mock_login(&server, "rate-limit-test-1@example.com").await;
+    let (server, db) = create_rate_limited_test_server_and_db().await;
+    let email = "rate-limit-test-1@example.com";
+    let token = mock_login(&server, email).await;
+    insert_test_subscription(&server, &db, email, false).await;
 
     let response = server
         .post("/v1/responses")
@@ -48,8 +58,10 @@ async fn test_rate_limit_first_request_succeeds() {
 
 #[tokio::test]
 async fn test_rate_limit_blocks_rapid_requests() {
-    let server = create_rate_limited_test_server().await;
-    let token = mock_login(&server, "rate-limit-test-2@example.com").await;
+    let (server, db) = create_rate_limited_test_server_and_db().await;
+    let email = "rate-limit-test-2@example.com";
+    let token = mock_login(&server, email).await;
+    insert_test_subscription(&server, &db, email, false).await;
 
     let request_body = json!({
         "model": "test-model",
@@ -97,9 +109,13 @@ async fn test_rate_limit_blocks_rapid_requests() {
 
 #[tokio::test]
 async fn test_rate_limit_per_user_isolation() {
-    let server = create_rate_limited_test_server().await;
-    let token1 = mock_login(&server, "rate-limit-user-a@example.com").await;
-    let token2 = mock_login(&server, "rate-limit-user-b@example.com").await;
+    let (server, db) = create_rate_limited_test_server_and_db().await;
+    let email1 = "rate-limit-user-a@example.com";
+    let email2 = "rate-limit-user-b@example.com";
+    let token1 = mock_login(&server, email1).await;
+    let token2 = mock_login(&server, email2).await;
+    insert_test_subscription(&server, &db, email1, false).await;
+    insert_test_subscription(&server, &db, email2, false).await;
 
     let request_body = json!({
         "model": "test-model",
@@ -159,8 +175,11 @@ async fn test_non_rate_limited_endpoints_unaffected() {
 
 #[tokio::test]
 async fn test_concurrent_requests_rate_limited() {
-    let server = Arc::new(create_rate_limited_test_server().await);
-    let token = Arc::new(mock_login(&server, "rate-limit-concurrent@example.com").await);
+    let (server, db) = create_rate_limited_test_server_and_db().await;
+    let email = "rate-limit-concurrent@example.com";
+    let token = Arc::new(mock_login(&server, email).await);
+    insert_test_subscription(&server, &db, email, false).await;
+    let server = Arc::new(server);
 
     let request_body = json!({
         "model": "test-model",
@@ -225,6 +244,7 @@ async fn test_token_limit_blocks_request_when_usage_exceeds_limit() {
 
     let email = "token-limit@example.com";
     let token = mock_login(&server, email).await;
+    insert_test_subscription(&server, &db, email, false).await;
 
     let user = db
         .user_repository()

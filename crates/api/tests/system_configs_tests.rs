@@ -1,6 +1,9 @@
 mod common;
 
-use common::{create_test_server, mock_login};
+use common::{
+    create_test_server, create_test_server_and_db, insert_test_subscription, mock_login,
+    TestServerConfig,
+};
 use serde_json::json;
 use serial_test::serial;
 
@@ -585,7 +588,7 @@ async fn test_empty_window_limits_allowed() {
 #[tokio::test]
 #[serial(write_system_configs)]
 async fn test_rate_limit_config_hot_reload() {
-    let server = create_test_server().await;
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
 
     let admin_email = "test_admin_hot_reload@admin.org";
     let admin_token = mock_login(&server, admin_email).await;
@@ -632,6 +635,7 @@ async fn test_rate_limit_config_hot_reload() {
     // Step 2: Make first request (should succeed)
     let test_user_email = "test_user_hot_reload@example.com";
     let user_token = mock_login(&server, test_user_email).await;
+    insert_test_subscription(&server, &db, test_user_email, false).await;
 
     let request_body = json!({
         "model": "test-model",
