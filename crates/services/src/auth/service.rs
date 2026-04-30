@@ -676,7 +676,7 @@ impl EmailAuthService for EmailAuthServiceImpl {
                 client_ip = %client_ip,
                 "Email OTP request rate-limited by email threshold"
             );
-            return Ok(());
+            return Err(RequestEmailCodeError::RateLimited);
         }
 
         if self
@@ -690,7 +690,7 @@ impl EmailAuthService for EmailAuthServiceImpl {
                 client_ip = %client_ip,
                 "Email OTP request rate-limited by IP threshold"
             );
-            return Ok(());
+            return Err(RequestEmailCodeError::RateLimited);
         }
 
         let challenge_id = Uuid::new_v4();

@@ -108,6 +108,8 @@ pub enum RequestEmailCodeError {
     Misconfigured,
     #[error("Human verification failed")]
     HumanVerificationFailed,
+    #[error("Too many verification code requests")]
+    RateLimited,
     #[error("Internal error: {0}")]
     Internal(#[from] anyhow::Error),
 }
