@@ -1,6 +1,9 @@
 mod common;
 
-use common::{create_test_server, mock_login};
+use common::{
+    create_test_server, create_test_server_and_db, insert_test_subscription, mock_login,
+    TestServerConfig,
+};
 use serde_json::json;
 use serial_test::serial;
 
@@ -312,11 +315,12 @@ async fn test_delete_model_requires_admin() {
 #[tokio::test]
 #[serial(model_visibility_tests)]
 async fn test_responses_block_non_public_model() {
-    let server = create_test_server().await;
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
 
     // Use an admin account to configure model settings and allowlist
     let admin_email = "visibility-non-public-admin@admin.org";
     let admin_token = mock_login(&server, admin_email).await;
+    insert_test_subscription(&server, &db, admin_email, false).await;
 
     let response = server
         .patch("/v1/admin/configs")
@@ -405,11 +409,12 @@ async fn test_responses_block_non_public_model() {
 #[tokio::test]
 #[serial(model_visibility_tests)]
 async fn test_responses_allow_public_model() {
-    let server = create_test_server().await;
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
 
     // Use an admin account to configure model settings and allowlist
     let admin_email = "visibility-public-admin@admin.org";
     let admin_token = mock_login(&server, admin_email).await;
+    insert_test_subscription(&server, &db, admin_email, false).await;
 
     let response = server
         .patch("/v1/admin/configs")
@@ -494,7 +499,7 @@ async fn test_responses_allow_public_model() {
 #[tokio::test]
 #[serial(model_visibility_tests)]
 async fn test_responses_injects_system_prompt_when_instructions_missing() {
-    let server = create_test_server().await;
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
 
     // Use an admin account to configure model settings and allowlist
     let admin_email = "system-prompt-no-instructions-admin@admin.org";
@@ -555,6 +560,7 @@ async fn test_responses_injects_system_prompt_when_instructions_missing() {
     // Now send a responses request WITHOUT instructions
     let user_email = "system-prompt-no-instructions-user@example.com";
     let user_token = mock_login(&server, user_email).await;
+    insert_test_subscription(&server, &db, user_email, false).await;
 
     let body = json!({
         "model": "test-system-prompt-model-1",
@@ -589,7 +595,7 @@ async fn test_responses_injects_system_prompt_when_instructions_missing() {
 #[tokio::test]
 #[serial(model_visibility_tests)]
 async fn test_responses_prepends_system_prompt_when_instructions_present() {
-    let server = create_test_server().await;
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
 
     // Use an admin account to configure model settings and allowlist
     let admin_email = "system-prompt-with-instructions-admin@admin.org";
@@ -650,6 +656,7 @@ async fn test_responses_prepends_system_prompt_when_instructions_present() {
     // Now send a responses request WITH client instructions
     let user_email = "system-prompt-with-instructions-user@example.com";
     let user_token = mock_login(&server, user_email).await;
+    insert_test_subscription(&server, &db, user_email, false).await;
 
     let body = json!({
         "model": "test-system-prompt-model-2",
@@ -683,9 +690,11 @@ async fn test_responses_prepends_system_prompt_when_instructions_present() {
 /// Requests without a `model` field should be allowed (no 403 from visibility logic).
 #[tokio::test]
 async fn test_responses_allow_without_model_field() {
-    let server = create_test_server().await;
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
 
-    let token = mock_login(&server, "visibility-no-model@example.com").await;
+    let email = "visibility-no-model@example.com";
+    let token = mock_login(&server, email).await;
+    insert_test_subscription(&server, &db, email, false).await;
 
     // No `model` field in body
     let body = json!({
