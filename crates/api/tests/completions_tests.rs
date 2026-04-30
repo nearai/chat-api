@@ -9,7 +9,7 @@ use chrono::Duration;
 use common::{
     clear_subscription_plans, create_test_server, create_test_server_and_db,
     create_test_server_with_config, insert_test_subscription, mock_login,
-    restrictive_rate_limit_config, TestServerConfig,
+    restrictive_rate_limit_config, set_subscription_plans, TestServerConfig,
 };
 use futures::future::join_all;
 use serde_json::json;
@@ -973,6 +973,15 @@ async fn test_image_edits_near_balance_skipped_when_no_near_linked_account() {
 #[tokio::test]
 async fn test_chat_completions_block_non_public_model() {
     let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": { "stripe": { "price_id": "price_test_basic" } }
+            }
+        }),
+    )
+    .await;
 
     // Use an admin account to configure model settings
     let admin_email = "chat-completions-visibility-non-public-admin@admin.org";
@@ -1278,6 +1287,15 @@ async fn test_chat_completions_auto_model_forwards_with_substituted_model() {
         ..Default::default()
     })
     .await;
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": { "stripe": { "price_id": "price_test_basic" } }
+            }
+        }),
+    )
+    .await;
     let email = "chat-completions-auto-forward@example.com";
     let token = mock_login(&server, email).await;
     insert_test_subscription(&server, &db, email, false).await;
@@ -1361,6 +1379,15 @@ async fn test_chat_completions_auto_model_preserves_client_params() {
         proxy_base_url: Some(mock_upstream.uri()),
         ..Default::default()
     })
+    .await;
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": { "stripe": { "price_id": "price_test_basic" } }
+            }
+        }),
+    )
     .await;
     let email = "chat-completions-auto-preserve@example.com";
     let token = mock_login(&server, email).await;
