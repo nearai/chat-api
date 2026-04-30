@@ -389,10 +389,11 @@ impl SubscriptionServiceImpl {
             .unwrap_or_default())
     }
 
-    /// Returns true only when:
-    /// 1) user has no linked OAuth accounts (email-only account), and
-    /// 2) effective plan price is explicitly free (price == 0)
-    async fn is_email_only_user_on_free_priced_plan(
+    /// Returns true only when the user has no linked OAuth accounts (email-only account)
+    /// and has no active/trialing subscription. Email-only users with any active
+    /// subscription, including a free-priced plan, may access LLM APIs subject to
+    /// the normal quota and credit checks.
+    async fn is_email_only_user_without_active_subscription(
         &self,
         user_id: UserId,
     ) -> Result<bool, SubscriptionError> {
@@ -406,29 +407,13 @@ impl SubscriptionServiceImpl {
             return Ok(false);
         }
 
-        let subscription_plans = self.get_subscription_plans().await?;
         let active_subscription = self
             .subscription_repo
             .get_active_subscription(user_id)
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
-        let is_free_priced = match active_subscription {
-            Some(sub) => {
-                resolve_plan_name_from_config(
-                    sub.provider.as_str(),
-                    &sub.price_id,
-                    &subscription_plans,
-                )
-                .as_deref()
-                .and_then(|plan_name| subscription_plans.get(plan_name))
-                .and_then(|plan| plan.price)
-                    == Some(0)
-            }
-            None => subscription_plans.get("free").and_then(|plan| plan.price) == Some(0),
-        };
-
-        Ok(is_free_priced)
+        Ok(active_subscription.is_none())
     }
 
     /// Convert Stripe subscription to our Subscription model
@@ -2004,12 +1989,15 @@ impl SubscriptionService for SubscriptionServiceImpl {
             Ok(_) => {}
         }
 
-        if self.is_email_only_user_on_free_priced_plan(user_id).await? {
+        if self
+            .is_email_only_user_without_active_subscription(user_id)
+            .await?
+        {
             tracing::info!(
-                "Blocking proxy access for email-only user_id={} on free-priced plan",
+                "Blocking proxy access for email-only user_id={}: no active subscription",
                 user_id
             );
-            return Err(SubscriptionError::EmailOnlyFreePlanNotAllowed);
+            return Err(SubscriptionError::NoActiveSubscription);
         }
 
         // 1. Get plan credits (monthly_credits) from the config. Cache 10 mins.

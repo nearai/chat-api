@@ -41,9 +41,6 @@ fn permissive_rate_limit_config() -> RateLimitConfig {
     }
 }
 
-const EMAIL_ONLY_FREE_PLAN_ERROR_MESSAGE: &str =
-    "Email-only accounts require a paid subscription to access LLM APIs.";
-
 #[tokio::test]
 #[serial(subscription_tests)]
 async fn test_list_subscriptions_requires_auth() {
@@ -1391,7 +1388,7 @@ async fn test_proxy_returns_403_without_subscription_when_plans_configured() {
 
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn test_proxy_blocks_email_only_user_on_free_priced_plan() {
+async fn test_proxy_allows_email_only_user_on_free_priced_plan() {
     ensure_stripe_env_for_gating();
     let (server, db) = create_test_server_and_db(TestServerConfig {
         rate_limit_config: Some(permissive_rate_limit_config()),
@@ -1417,9 +1414,59 @@ async fn test_proxy_blocks_email_only_user_on_free_priced_plan() {
     )
     .await;
 
-    let user_email = "test_email_only_free_plan_block@example.com";
+    let user_email = "test_email_only_free_plan_allowed@example.com";
     insert_test_subscription_with_price_id(&server, &db, user_email, false, "price_test_free")
         .await;
+    let user_token = mock_login(&server, user_email).await;
+
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}]
+        }))
+        .await;
+
+    assert_ne!(
+        response.status_code(),
+        403,
+        "Email-only user with an active free-priced subscription should not be blocked from LLM APIs"
+    );
+
+    let body_res: serde_json::Value = response.json();
+    assert_ne!(
+        body_res.get("error").and_then(|v| v.as_str()),
+        Some(SUBSCRIPTION_REQUIRED_ERROR_MESSAGE),
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_proxy_blocks_email_only_user_without_active_subscription() {
+    ensure_stripe_env_for_gating();
+    let (server, _db) = create_test_server_and_db(TestServerConfig {
+        rate_limit_config: Some(permissive_rate_limit_config()),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "free": {
+                "providers": {"stripe": {"price_id": "price_test_free"}},
+                "price": 0,
+                "monthly_credits": {"max": 1000000}
+            }
+        }),
+    )
+    .await;
+
+    let user_email = "test_email_only_no_subscription_block@example.com";
     let user_token = mock_login(&server, user_email).await;
 
     let response = server
@@ -1437,13 +1484,13 @@ async fn test_proxy_blocks_email_only_user_on_free_priced_plan() {
     assert_eq!(
         response.status_code(),
         403,
-        "Email-only user on free-priced plan should be blocked from LLM APIs"
+        "Email-only user without an active subscription should be blocked from LLM APIs"
     );
 
     let body_res: serde_json::Value = response.json();
     assert_eq!(
         body_res.get("error").and_then(|v| v.as_str()),
-        Some(EMAIL_ONLY_FREE_PLAN_ERROR_MESSAGE)
+        Some(SUBSCRIPTION_REQUIRED_ERROR_MESSAGE)
     );
 }
 
@@ -1501,7 +1548,7 @@ async fn test_proxy_allows_email_only_user_on_paid_plan() {
     let body_res: serde_json::Value = response.json();
     assert_ne!(
         body_res.get("error").and_then(|v| v.as_str()),
-        Some(EMAIL_ONLY_FREE_PLAN_ERROR_MESSAGE),
+        Some(SUBSCRIPTION_REQUIRED_ERROR_MESSAGE),
     );
 }
 
