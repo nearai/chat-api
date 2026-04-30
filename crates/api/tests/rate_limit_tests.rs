@@ -328,21 +328,11 @@ async fn test_cost_limit_blocks_request_when_usage_exceeds_limit() {
     })
     .await;
 
-    // Clear subscription plans via DB to avoid subscription gating interference
-    {
-        let client = db.pool().get().await.expect("DB pool");
-        let rows = client
-            .execute(
-                "UPDATE system_configs SET value = value - 'subscription_plans' WHERE key = 'config'",
-                &[],
-            )
-            .await
-            .expect("UPDATE system_configs for rate limit test");
-        assert!(rows > 0, "system_configs row for key='config' should exist");
-    }
+    configure_basic_subscription_plan(&db).await;
 
     let email = "cost-limit@example.com";
     let token = mock_login(&server, email).await;
+    insert_test_subscription(&server, &db, email, false).await;
 
     let user = db
         .user_repository()
