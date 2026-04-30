@@ -251,6 +251,9 @@ fn request_email_code_error_to_api_error(error: RequestEmailCodeError) -> ApiErr
         RequestEmailCodeError::HumanVerificationFailed => {
             ApiError::unprocessable_entity("Human verification failed")
         }
+        RequestEmailCodeError::RateLimited => ApiError::too_many_requests(
+            "Too many verification code requests. Please try again later.",
+        ),
         RequestEmailCodeError::Internal(err) => {
             tracing::error!("Email code request failed: {}", err);
             ApiError::internal_server_error("Failed to request verification code")
@@ -390,6 +393,7 @@ pub struct NearAuthResponse {
     responses(
         (status = 204, description = "Verification code requested"),
         (status = 400, description = "Invalid email format", body = crate::error::ApiErrorResponse),
+        (status = 429, description = "Too many verification code requests", body = crate::error::ApiErrorResponse),
         (status = 422, description = "Human verification failed", body = crate::error::ApiErrorResponse),
         (status = 503, description = "Email authentication unavailable", body = crate::error::ApiErrorResponse),
         (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
