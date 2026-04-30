@@ -71,11 +71,6 @@ impl ApiError {
         Self::new(StatusCode::CONFLICT, "conflict", message)
     }
 
-    /// 429 Too Many Requests
-    pub fn too_many_requests(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::TOO_MANY_REQUESTS, "too_many_requests", message)
-    }
-
     /// 422 Unprocessable Entity
     pub fn unprocessable_entity(message: impl Into<String>) -> Self {
         Self::new(
@@ -83,6 +78,11 @@ impl ApiError {
             "unprocessable_entity",
             message,
         )
+    }
+
+    /// 429 Too Many Requests
+    pub fn too_many_requests(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::TOO_MANY_REQUESTS, "too_many_requests", message)
     }
 
     /// 500 Internal Server Error

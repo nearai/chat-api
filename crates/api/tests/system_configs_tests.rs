@@ -597,7 +597,10 @@ async fn test_rate_limit_config_hot_reload() {
     // Include subscription_plans so subscription passes before rate limiting is exercised
     let initial_config = json!({
         "subscription_plans": {
-            "free": { "providers": {}, "monthly_credits": { "max": 1000000 } }
+            "basic": {
+                "providers": { "stripe": { "price_id": "price_test_basic" } },
+                "monthly_credits": { "max": 1000000 }
+            }
         },
         "rate_limit": {
             "max_concurrent": 1,

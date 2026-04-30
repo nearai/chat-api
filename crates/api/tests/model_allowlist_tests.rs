@@ -1,5 +1,6 @@
 mod common;
 
+use api::routes::api::SUBSCRIPTION_REQUIRED_ERROR_MESSAGE;
 use bytes::Bytes;
 use common::{
     cleanup_user_subscriptions, create_test_server, create_test_server_and_db,
@@ -106,7 +107,7 @@ async fn test_no_subscription_free_plan_allowed_models_blocks_even_listed_model(
     let body: serde_json::Value = response.json();
     assert_eq!(
         body.get("error").and_then(|value| value.as_str()),
-        Some("Active subscription required. Please subscribe to continue.")
+        Some(SUBSCRIPTION_REQUIRED_ERROR_MESSAGE)
     );
 }
 
@@ -166,7 +167,7 @@ async fn test_no_subscription_free_plan_allowed_models_blocks_unlisted_model() {
     let body: serde_json::Value = response.json();
     assert_eq!(
         body.get("error").and_then(|value| value.as_str()),
-        Some("Active subscription required. Please subscribe to continue.")
+        Some(SUBSCRIPTION_REQUIRED_ERROR_MESSAGE)
     );
 }
 
@@ -762,7 +763,7 @@ async fn test_model_allowlist_resolves_non_stripe_provider_subscription() {
 
 #[tokio::test]
 #[serial(model_allowlist_tests)]
-async fn test_model_allowlist_allows_unmatched_active_plan_for_both_endpoints() {
+async fn test_model_allowlist_internal_resolution_error_returns_json_500_for_both_endpoints() {
     ensure_stripe_env_for_gating();
     let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
 
@@ -795,15 +796,16 @@ async fn test_model_allowlist_allows_unmatched_active_plan_for_both_endpoints() 
         }))
         .await;
 
-    assert_ne!(
-        chat_response.status_code(),
-        403,
-        "Chat completions should allow users with an active subscription even when the plan is not in current config"
-    );
-    assert_ne!(
+    assert_eq!(
         chat_response.status_code(),
         500,
-        "Unmatched active subscription plans should not surface as internal errors"
+        "Chat completions should surface plan resolution failures as internal errors"
+    );
+    let chat_body: serde_json::Value = chat_response.json();
+    assert_eq!(
+        chat_body,
+        json!({ "error": "Failed to validate model access" }),
+        "Chat completions should return the shared JSON error body"
     );
 
     let responses_response = server
@@ -818,15 +820,16 @@ async fn test_model_allowlist_allows_unmatched_active_plan_for_both_endpoints() 
         }))
         .await;
 
-    assert_ne!(
-        responses_response.status_code(),
-        403,
-        "Responses should allow users with an active subscription even when the plan is not in current config"
-    );
-    assert_ne!(
+    assert_eq!(
         responses_response.status_code(),
         500,
-        "Unmatched active subscription plans should not surface as internal errors"
+        "Responses should surface plan resolution failures as internal errors"
+    );
+    let responses_body: serde_json::Value = responses_response.json();
+    assert_eq!(
+        responses_body,
+        json!({ "error": "Failed to validate model access" }),
+        "Responses should return the shared JSON error body"
     );
 }
 

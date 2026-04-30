@@ -672,7 +672,7 @@ async fn test_request_email_code_rate_limit_skips_creating_additional_challenge(
     let body: serde_json::Value = second.json();
     assert_eq!(
         body.get("message").and_then(|v| v.as_str()),
-        Some("Too many verification code requests. Please try again later.")
+        Some("Too many verification code requests. Please try again later")
     );
 
     let client = db.pool().get().await.expect("db client");
@@ -722,7 +722,7 @@ async fn test_request_email_code_ip_rate_limit_returns_429() {
     let body: serde_json::Value = second.json();
     assert_eq!(
         body.get("message").and_then(|v| v.as_str()),
-        Some("Too many verification code requests. Please try again later.")
+        Some("Too many verification code requests. Please try again later")
     );
 
     let client = db.pool().get().await.expect("db client");
@@ -822,7 +822,12 @@ async fn test_verify_email_code_rate_limit_blocks_after_failed_attempt() {
     assert_eq!(wrong_response.status_code(), 401);
 
     let blocked_response = verify_email_code(&server, &email, "123456", &ip).await;
-    assert_eq!(blocked_response.status_code(), 401);
+    assert_eq!(blocked_response.status_code(), 429);
+    let body: serde_json::Value = blocked_response.json();
+    assert_eq!(
+        body.get("message").and_then(|v| v.as_str()),
+        Some("Too many verification attempts. Please try again later")
+    );
 
     let client = db.pool().get().await.expect("db client");
     let row = client

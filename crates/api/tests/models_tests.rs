@@ -1,8 +1,8 @@
 mod common;
 
 use common::{
-    create_test_server, create_test_server_and_db, insert_test_subscription, mock_login,
-    TestServerConfig,
+    create_test_server, create_test_server_and_db, insert_test_subscription,
+    insert_test_subscription_with_price_id, mock_login, TestServerConfig,
 };
 use serde_json::json;
 use serial_test::serial;
@@ -320,7 +320,7 @@ async fn test_responses_block_non_public_model() {
     // Use an admin account to configure model settings and allowlist
     let admin_email = "visibility-non-public-admin@admin.org";
     let admin_token = mock_login(&server, admin_email).await;
-    insert_test_subscription(&server, &db, admin_email, false).await;
+    insert_test_subscription_with_price_id(&server, &db, admin_email, false, "price_free").await;
 
     let response = server
         .patch("/v1/admin/configs")
@@ -414,7 +414,7 @@ async fn test_responses_allow_public_model() {
     // Use an admin account to configure model settings and allowlist
     let admin_email = "visibility-public-admin@admin.org";
     let admin_token = mock_login(&server, admin_email).await;
-    insert_test_subscription(&server, &db, admin_email, false).await;
+    insert_test_subscription_with_price_id(&server, &db, admin_email, false, "price_free").await;
 
     let response = server
         .patch("/v1/admin/configs")
@@ -560,7 +560,7 @@ async fn test_responses_injects_system_prompt_when_instructions_missing() {
     // Now send a responses request WITHOUT instructions
     let user_email = "system-prompt-no-instructions-user@example.com";
     let user_token = mock_login(&server, user_email).await;
-    insert_test_subscription(&server, &db, user_email, false).await;
+    insert_test_subscription_with_price_id(&server, &db, user_email, false, "price_free").await;
 
     let body = json!({
         "model": "test-system-prompt-model-1",
@@ -656,7 +656,7 @@ async fn test_responses_prepends_system_prompt_when_instructions_present() {
     // Now send a responses request WITH client instructions
     let user_email = "system-prompt-with-instructions-user@example.com";
     let user_token = mock_login(&server, user_email).await;
-    insert_test_subscription(&server, &db, user_email, false).await;
+    insert_test_subscription_with_price_id(&server, &db, user_email, false, "price_free").await;
 
     let body = json!({
         "model": "test-system-prompt-model-2",

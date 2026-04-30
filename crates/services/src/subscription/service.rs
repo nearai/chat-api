@@ -2179,15 +2179,22 @@ impl SubscriptionService for SubscriptionServiceImpl {
             Some(ref sub) => {
                 // User has an active subscription - use plan's allowlist
                 if let Some(plans) = subscription_plans {
-                    let Some(plan_name) =
-                        resolve_plan_name_from_config(sub.provider.as_str(), &sub.price_id, plans)
-                    else {
-                        tracing::warn!(
-                            "Model access allowed for user_id={}: active subscription plan is not present in current config",
-                            user_id
+                    let plan_name = resolve_plan_name_from_config(
+                        sub.provider.as_str(),
+                        &sub.price_id,
+                        plans,
+                    )
+                    .ok_or_else(|| {
+                        tracing::error!(
+                            "Failed to resolve plan name for model access: user_id={}, provider={}, price_id={} does not match any configured plan",
+                            user_id,
+                            sub.provider,
+                            sub.price_id
                         );
-                        return Ok(());
-                    };
+                        SubscriptionError::InternalError(
+                            "Failed to resolve subscription plan configuration".to_string(),
+                        )
+                    })?;
                     plans
                         .get(&plan_name)
                         .and_then(|config| config.allowed_models.as_ref())

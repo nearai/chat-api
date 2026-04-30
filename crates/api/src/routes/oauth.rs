@@ -230,8 +230,11 @@ fn email_verify_error_to_api_error(error: VerifyEmailCodeError) -> ApiError {
         VerifyEmailCodeError::Misconfigured => {
             ApiError::service_unavailable("Email authentication is not fully configured")
         }
-        VerifyEmailCodeError::InvalidOrExpired | VerifyEmailCodeError::RateLimited => {
+        VerifyEmailCodeError::InvalidOrExpired => {
             ApiError::unauthorized("Invalid or expired verification code")
+        }
+        VerifyEmailCodeError::RateLimited => {
+            ApiError::too_many_requests("Too many verification attempts. Please try again later")
         }
         VerifyEmailCodeError::Internal(err) => {
             tracing::error!("Email verification failed: {}", err);
@@ -252,7 +255,7 @@ fn request_email_code_error_to_api_error(error: RequestEmailCodeError) -> ApiErr
             ApiError::unprocessable_entity("Human verification failed")
         }
         RequestEmailCodeError::RateLimited => ApiError::too_many_requests(
-            "Too many verification code requests. Please try again later.",
+            "Too many verification code requests. Please try again later",
         ),
         RequestEmailCodeError::Internal(err) => {
             tracing::error!("Email code request failed: {}", err);
@@ -393,8 +396,8 @@ pub struct NearAuthResponse {
     responses(
         (status = 204, description = "Verification code requested"),
         (status = 400, description = "Invalid email format", body = crate::error::ApiErrorResponse),
-        (status = 429, description = "Too many verification code requests", body = crate::error::ApiErrorResponse),
         (status = 422, description = "Human verification failed", body = crate::error::ApiErrorResponse),
+        (status = 429, description = "Too many verification code requests", body = crate::error::ApiErrorResponse),
         (status = 503, description = "Email authentication unavailable", body = crate::error::ApiErrorResponse),
         (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
     )
@@ -439,6 +442,7 @@ pub async fn request_email_code(
         (status = 200, description = "Successfully authenticated", body = crate::models::EmailAuthResponse),
         (status = 400, description = "Invalid request format", body = crate::error::ApiErrorResponse),
         (status = 401, description = "Invalid or expired verification code", body = crate::error::ApiErrorResponse),
+        (status = 429, description = "Too many verification attempts", body = crate::error::ApiErrorResponse),
         (status = 503, description = "Email authentication unavailable", body = crate::error::ApiErrorResponse)
     )
 )]

@@ -3,7 +3,7 @@ mod common;
 use chrono::Duration;
 use common::{
     create_test_server_and_db, create_test_server_with_config, insert_test_subscription,
-    mock_login, restrictive_rate_limit_config, TestServerConfig,
+    mock_login, restrictive_rate_limit_config, set_subscription_plans, TestServerConfig,
 };
 use futures::future::join_all;
 use serde_json::json;
@@ -22,11 +22,22 @@ async fn create_rate_limited_test_server() -> axum_test::TestServer {
 }
 
 async fn create_rate_limited_test_server_and_db() -> (axum_test::TestServer, database::Database) {
-    create_test_server_and_db(TestServerConfig {
+    let (server, db) = create_test_server_and_db(TestServerConfig {
         rate_limit_config: Some(restrictive_rate_limit_config()),
         ..Default::default()
     })
-    .await
+    .await;
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": { "stripe": { "price_id": "price_test_basic" } },
+                "monthly_credits": { "max": 1000000 }
+            }
+        }),
+    )
+    .await;
+    (server, db)
 }
 
 #[tokio::test]
@@ -240,6 +251,16 @@ async fn test_token_limit_blocks_request_when_usage_exceeds_limit() {
         }),
         ..Default::default()
     })
+    .await;
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": { "stripe": { "price_id": "price_test_basic" } },
+                "monthly_credits": { "max": 1000000 }
+            }
+        }),
+    )
     .await;
 
     let email = "token-limit@example.com";
