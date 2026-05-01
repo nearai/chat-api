@@ -668,7 +668,12 @@ async fn test_request_email_code_rate_limit_skips_creating_additional_challenge(
     assert_eq!(first.status_code(), 204);
 
     let second = request_email_code(&server, &email, &ip).await;
-    assert_eq!(second.status_code(), 204);
+    assert_eq!(second.status_code(), 429);
+    let body: serde_json::Value = second.json();
+    assert_eq!(
+        body.get("message").and_then(|v| v.as_str()),
+        Some("Too many verification code requests. Please try again later")
+    );
 
     let client = db.pool().get().await.expect("db client");
     let row = client
@@ -680,6 +685,56 @@ async fn test_request_email_code_rate_limit_skips_creating_additional_challenge(
         .expect("count challenges");
     let challenge_count: i64 = row.get(0);
     assert_eq!(challenge_count, 1);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_request_email_code_ip_rate_limit_returns_429() {
+    let resend = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/emails"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": "email_ip_limit" })))
+        .mount(&resend)
+        .await;
+    mount_turnstile_success(&resend).await;
+
+    set_email_auth_env();
+    std::env::set_var("EMAIL_OTP_REQUESTS_PER_IP_PER_HOUR", "1");
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        email_resend_base_url: Some(resend.uri()),
+        email_auth_enabled: Some(true),
+        ..Default::default()
+    })
+    .await;
+
+    let first_email = unique_email("email-auth-ip-request-limit-first");
+    let second_email = unique_email("email-auth-ip-request-limit-second");
+    let ip = unique_ip();
+    cleanup_email_auth_state(&db, &first_email).await;
+    cleanup_email_auth_state(&db, &second_email).await;
+
+    let first = request_email_code(&server, &first_email, &ip).await;
+    assert_eq!(first.status_code(), 204);
+
+    let second = request_email_code(&server, &second_email, &ip).await;
+    assert_eq!(second.status_code(), 429);
+    let body: serde_json::Value = second.json();
+    assert_eq!(
+        body.get("message").and_then(|v| v.as_str()),
+        Some("Too many verification code requests. Please try again later")
+    );
+
+    let client = db.pool().get().await.expect("db client");
+    let row = client
+        .query_one(
+            "SELECT COUNT(*)::bigint FROM email_verification_challenges WHERE email = $1",
+            &[&second_email],
+        )
+        .await
+        .expect("count challenges for rate-limited email");
+    let challenge_count: i64 = row.get(0);
+    assert_eq!(challenge_count, 0);
 }
 
 #[tokio::test]
@@ -767,7 +822,12 @@ async fn test_verify_email_code_rate_limit_blocks_after_failed_attempt() {
     assert_eq!(wrong_response.status_code(), 401);
 
     let blocked_response = verify_email_code(&server, &email, "123456", &ip).await;
-    assert_eq!(blocked_response.status_code(), 401);
+    assert_eq!(blocked_response.status_code(), 429);
+    let body: serde_json::Value = blocked_response.json();
+    assert_eq!(
+        body.get("message").and_then(|v| v.as_str()),
+        Some("Too many verification attempts. Please try again later")
+    );
 
     let client = db.pool().get().await.expect("db client");
     let row = client

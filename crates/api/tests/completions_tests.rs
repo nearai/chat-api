@@ -8,7 +8,8 @@ use axum_test::TestServer;
 use chrono::Duration;
 use common::{
     clear_subscription_plans, create_test_server, create_test_server_and_db,
-    create_test_server_with_config, mock_login, restrictive_rate_limit_config, TestServerConfig,
+    create_test_server_with_config, insert_test_subscription, mock_login,
+    restrictive_rate_limit_config, set_subscription_plans, TestServerConfig,
 };
 use futures::future::join_all;
 use serde_json::json;
@@ -179,8 +180,15 @@ async fn test_chat_completions_rate_limit_per_user_isolation() {
 /// Test concurrent requests rate limiting for /v1/chat/completions
 #[tokio::test]
 async fn test_chat_completions_concurrent_requests_rate_limited() {
-    let server = Arc::new(create_rate_limited_test_server().await);
-    let token = Arc::new(mock_login(&server, "chat-completions-concurrent@example.com").await);
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        rate_limit_config: Some(restrictive_rate_limit_config()),
+        ..Default::default()
+    })
+    .await;
+    let email = "chat-completions-concurrent@example.com";
+    let token = Arc::new(mock_login(&server, email).await);
+    insert_test_subscription(&server, &db, email, false).await;
+    let server = Arc::new(server);
 
     let request_body = json!({
         "model": "gpt-4o",
@@ -303,6 +311,7 @@ async fn test_chat_completions_cost_limit_blocks_request_when_usage_exceeds_limi
 
     let email = "chat-completions-cost-limit@example.com";
     let token = mock_login(&server, email).await;
+    insert_test_subscription(&server, &db, email, false).await;
 
     let user = db
         .user_repository()
@@ -963,11 +972,21 @@ async fn test_image_edits_near_balance_skipped_when_no_near_linked_account() {
 /// Requests with a model whose settings are non-public should be blocked with 403 for /v1/chat/completions.
 #[tokio::test]
 async fn test_chat_completions_block_non_public_model() {
-    let server = create_test_server().await;
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": { "stripe": { "price_id": "price_test_basic" } }
+            }
+        }),
+    )
+    .await;
 
     // Use an admin account to configure model settings
     let admin_email = "chat-completions-visibility-non-public-admin@admin.org";
     let admin_token = mock_login(&server, admin_email).await;
+    insert_test_subscription(&server, &db, admin_email, false).await;
 
     // Explicitly create a non-public model via admin API
     let batch_body = json!({
@@ -1030,11 +1049,12 @@ async fn test_chat_completions_block_non_public_model() {
 /// Requests with a model whose settings are public should be allowed (not blocked by 403) for /v1/chat/completions.
 #[tokio::test]
 async fn test_chat_completions_allow_public_model() {
-    let server = create_test_server().await;
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
 
     // Use an admin account to configure model settings
     let admin_email = "chat-completions-visibility-public-admin@admin.org";
     let admin_token = mock_login(&server, admin_email).await;
+    insert_test_subscription(&server, &db, admin_email, false).await;
 
     // Mark the model as public via admin API
     let batch_body = json!({
@@ -1093,7 +1113,7 @@ async fn test_chat_completions_allow_public_model() {
 /// the proxy should inject a system message with the model system_prompt.
 #[tokio::test]
 async fn test_chat_completions_injects_system_prompt_when_system_message_missing() {
-    let server = create_test_server().await;
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
 
     // Use an admin account to configure model settings (public + system_prompt)
     let admin_email = "chat-completions-system-prompt-no-system-admin@admin.org";
@@ -1129,6 +1149,7 @@ async fn test_chat_completions_injects_system_prompt_when_system_message_missing
     // Now send a chat completions request WITHOUT system message
     let user_email = "chat-completions-system-prompt-no-system-user@example.com";
     let user_token = mock_login(&server, user_email).await;
+    insert_test_subscription(&server, &db, user_email, false).await;
 
     let body = json!({
         "model": "test-chat-completions-system-prompt-model-1",
@@ -1162,7 +1183,7 @@ async fn test_chat_completions_injects_system_prompt_when_system_message_missing
 /// the proxy should prepend the model system_prompt to the existing system message content.
 #[tokio::test]
 async fn test_chat_completions_prepends_system_prompt_when_system_message_present() {
-    let server = create_test_server().await;
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
 
     // Use an admin account to configure model settings (public + system_prompt)
     let admin_email = "chat-completions-system-prompt-with-system-admin@admin.org";
@@ -1198,6 +1219,7 @@ async fn test_chat_completions_prepends_system_prompt_when_system_message_presen
     // Now send a chat completions request WITH client system message
     let user_email = "chat-completions-system-prompt-with-system-user@example.com";
     let user_token = mock_login(&server, user_email).await;
+    insert_test_subscription(&server, &db, user_email, false).await;
 
     let body = json!({
         "model": "test-chat-completions-system-prompt-model-2",
@@ -1260,12 +1282,23 @@ async fn test_chat_completions_auto_model_forwards_with_substituted_model() {
         .await;
 
     // Create test server pointing at mock upstream
-    let server = create_test_server_with_config(TestServerConfig {
+    let (server, db) = create_test_server_and_db(TestServerConfig {
         proxy_base_url: Some(mock_upstream.uri()),
         ..Default::default()
     })
     .await;
-    let token = mock_login(&server, "chat-completions-auto-forward@example.com").await;
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": { "stripe": { "price_id": "price_test_basic" } }
+            }
+        }),
+    )
+    .await;
+    let email = "chat-completions-auto-forward@example.com";
+    let token = mock_login(&server, email).await;
+    insert_test_subscription(&server, &db, email, false).await;
 
     let response = server
         .post("/v1/chat/completions")
@@ -1342,12 +1375,23 @@ async fn test_chat_completions_auto_model_preserves_client_params() {
         .mount(&mock_upstream)
         .await;
 
-    let server = create_test_server_with_config(TestServerConfig {
+    let (server, db) = create_test_server_and_db(TestServerConfig {
         proxy_base_url: Some(mock_upstream.uri()),
         ..Default::default()
     })
     .await;
-    let token = mock_login(&server, "chat-completions-auto-preserve@example.com").await;
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": { "stripe": { "price_id": "price_test_basic" } }
+            }
+        }),
+    )
+    .await;
+    let email = "chat-completions-auto-preserve@example.com";
+    let token = mock_login(&server, email).await;
+    insert_test_subscription(&server, &db, email, false).await;
 
     // Client provides custom temperature and max_tokens, but not top_p
     let response = server
@@ -1395,9 +1439,11 @@ async fn test_chat_completions_auto_model_preserves_client_params() {
 /// Requests without a `model` field should be allowed (no 403 from visibility logic) for /v1/chat/completions.
 #[tokio::test]
 async fn test_chat_completions_allow_without_model_field() {
-    let server = create_test_server().await;
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
 
-    let token = mock_login(&server, "chat-completions-visibility-no-model@example.com").await;
+    let email = "chat-completions-visibility-no-model@example.com";
+    let token = mock_login(&server, email).await;
+    insert_test_subscription(&server, &db, email, false).await;
 
     // No `model` field in body
     let body = json!({

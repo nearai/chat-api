@@ -80,6 +80,11 @@ impl ApiError {
         )
     }
 
+    /// 429 Too Many Requests
+    pub fn too_many_requests(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::TOO_MANY_REQUESTS, "too_many_requests", message)
+    }
+
     /// 500 Internal Server Error
     pub fn internal_server_error(message: impl Into<String>) -> Self {
         Self::new(

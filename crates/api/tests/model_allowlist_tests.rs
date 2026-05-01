@@ -1,5 +1,6 @@
 mod common;
 
+use api::routes::api::SUBSCRIPTION_REQUIRED_ERROR_MESSAGE;
 use bytes::Bytes;
 use common::{
     cleanup_user_subscriptions, create_test_server, create_test_server_and_db,
@@ -43,12 +44,12 @@ not-a-real-png\r\n\
 }
 
 // ============================================================================
-// Test: Users without subscription (using free plan allowed_models)
+// Test: Email-only users without subscription are blocked before model allowlist
 // ============================================================================
 
 #[tokio::test]
 #[serial(model_allowlist_tests)]
-async fn test_no_subscription_free_plan_allowed_models_allows_listed_model() {
+async fn test_no_subscription_free_plan_allowed_models_blocks_even_listed_model() {
     ensure_stripe_env_for_gating();
     let server = create_test_server().await;
 
@@ -83,7 +84,8 @@ async fn test_no_subscription_free_plan_allowed_models_allows_listed_model() {
     let user_email = "no_subscription_allowed@example.com";
     let user_token = mock_login(&server, user_email).await;
 
-    // Try to use a model that's in the free plan allowlist
+    // Try to use a model that's in the free plan allowlist. Email-only users without
+    // an active subscription are blocked before model allowlist evaluation.
     let response = server
         .post("/v1/chat/completions")
         .add_header(
@@ -96,11 +98,16 @@ async fn test_no_subscription_free_plan_allowed_models_allows_listed_model() {
         }))
         .await;
 
-    // Should NOT be 403 (will likely be 401/502 due to no upstream, but not 403)
-    assert_ne!(
+    assert_eq!(
         response.status_code(),
         403,
-        "User should be allowed to use model in free plan allowed_models"
+        "Email-only user without active subscription should be blocked before free plan allowlist"
+    );
+
+    let body: serde_json::Value = response.json();
+    assert_eq!(
+        body.get("error").and_then(|value| value.as_str()),
+        Some(SUBSCRIPTION_REQUIRED_ERROR_MESSAGE)
     );
 }
 
@@ -137,7 +144,8 @@ async fn test_no_subscription_free_plan_allowed_models_blocks_unlisted_model() {
     let user_email = "no_subscription_blocked@example.com";
     let user_token = mock_login(&server, user_email).await;
 
-    // Try to use a model NOT in the free plan allowlist
+    // Try to use a model NOT in the free plan allowlist. Email-only users without
+    // an active subscription are blocked before model allowlist evaluation.
     let response = server
         .post("/v1/chat/completions")
         .add_header(
@@ -150,21 +158,16 @@ async fn test_no_subscription_free_plan_allowed_models_blocks_unlisted_model() {
         }))
         .await;
 
-    // Should be 403 Forbidden
     assert_eq!(
         response.status_code(),
         403,
-        "User without subscription should be blocked from using model not in free plan allowed_models"
+        "Email-only user without active subscription should be blocked before free plan allowlist"
     );
 
     let body: serde_json::Value = response.json();
-    let error = body
-        .get("error")
-        .and_then(|value| value.as_str())
-        .expect("Error response should contain string error field");
-    assert!(
-        error.contains("gpt-4o") && error.contains("not available"),
-        "Error message should mention the model and that it's not available"
+    assert_eq!(
+        body.get("error").and_then(|value| value.as_str()),
+        Some(SUBSCRIPTION_REQUIRED_ERROR_MESSAGE)
     );
 }
 

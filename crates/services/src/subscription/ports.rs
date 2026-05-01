@@ -174,8 +174,6 @@ pub enum SubscriptionError {
     NotConfigured,
     /// No active subscription found for user
     NoActiveSubscription,
-    /// Email-only users on free-priced plans cannot access LLM APIs
-    EmailOnlyFreePlanNotAllowed,
     /// Credit limit exceeded (used >= limit)
     CreditLimitExceeded { used: i64, limit: u64 },
     /// Cannot switch to plan: current instance count exceeds target plan's limit
@@ -218,9 +216,6 @@ impl fmt::Display for SubscriptionError {
             Self::InvalidProvider(provider) => write!(f, "Invalid provider: {}", provider),
             Self::NotConfigured => write!(f, "Stripe is not configured"),
             Self::NoActiveSubscription => write!(f, "No active subscription found"),
-            Self::EmailOnlyFreePlanNotAllowed => {
-                write!(f, "Email-only users on free plans cannot access LLM APIs")
-            }
             Self::CreditLimitExceeded { used, limit } => {
                 write!(
                     f,
