@@ -9,7 +9,8 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use services::subscription::ports::{
-    ChangePlanOutcome, SubscriptionError, SubscriptionPlan, SubscriptionWithPlan,
+    ChangePlanOutcome, CreateSubscriptionOutcome, SubscriptionError, SubscriptionPlan,
+    SubscriptionWithPlan,
 };
 use utoipa::ToSchema;
 
@@ -34,12 +35,8 @@ fn default_provider() -> String {
     "stripe".to_string()
 }
 
-/// Response containing checkout URL
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct CreateSubscriptionResponse {
-    /// Stripe checkout URL for completing subscription
-    pub checkout_url: String,
-}
+/// Subscription checkout: Stripe redirect URL or House-of-Stake contract call parameters.
+pub type CreateSubscriptionResponse = CreateSubscriptionOutcome;
 
 /// Response for subscription cancellation
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -151,7 +148,7 @@ pub async fn create_subscription(
         return Err(ApiError::bad_request("Test clock feature is not enabled"));
     }
 
-    let checkout_url = app_state
+    let outcome = app_state
         .subscription_service
         .create_subscription(
             user.user_id,
@@ -208,13 +205,19 @@ pub async fn create_subscription(
                 );
                 ApiError::internal_server_error("Failed to create subscription")
             }
+            SubscriptionError::HouseOfStakeNotConfigured => {
+                ApiError::service_unavailable("House-of-Stake billing is not configured")
+            }
+            SubscriptionError::HouseOfStakeRequiresNearWallet => ApiError::forbidden(
+                "House-of-Stake subscription requires signing in with a NEAR wallet",
+            ),
             unexpected => {
                 tracing::error!(error = ?unexpected, "Unexpected subscription error in create");
                 ApiError::internal_server_error("Failed to create subscription")
             }
         })?;
 
-    Ok(Json(CreateSubscriptionResponse { checkout_url }))
+    Ok(Json(outcome))
 }
 
 /// Cancel user's active subscription

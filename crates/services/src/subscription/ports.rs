@@ -204,6 +204,10 @@ pub enum SubscriptionError {
     NoPendingDowngrade,
     /// No subscription row found for the requested subscription_id.
     SubscriptionNotFound,
+    /// House-of-Stake contract id is not configured
+    HouseOfStakeNotConfigured,
+    /// House-of-Stake requires the user to authenticate with a NEAR wallet
+    HouseOfStakeRequiresNearWallet,
 }
 
 impl fmt::Display for SubscriptionError {
@@ -266,6 +270,15 @@ impl fmt::Display for SubscriptionError {
             }
             Self::SubscriptionNotFound => {
                 write!(f, "Subscription not found")
+            }
+            Self::HouseOfStakeNotConfigured => {
+                write!(f, "House-of-Stake billing is not configured")
+            }
+            Self::HouseOfStakeRequiresNearWallet => {
+                write!(
+                    f,
+                    "House-of-Stake subscription requires signing in with a NEAR wallet"
+                )
             }
         }
     }
@@ -667,6 +680,22 @@ pub struct SubscriptionPlan {
     pub allowed_models: Option<Vec<String>>,
 }
 
+/// Result of [`SubscriptionService::create_subscription`]: Stripe redirect or on-chain lock intent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CreateSubscriptionOutcome {
+    /// Complete checkout on Stripe (`checkout_url`).
+    StripeCheckout { checkout_url: String },
+    /// Submit `method_name` with `args` to `contract_id` from the user's NEAR wallet (attached deposit per contract rules).
+    HouseOfStakeLock {
+        contract_id: String,
+        method_name: String,
+        args: serde_json::Value,
+        network_id: String,
+    },
+}
+
 /// Service trait for subscription management
 #[async_trait]
 pub trait SubscriptionService: Send + Sync {
@@ -674,8 +703,8 @@ pub trait SubscriptionService: Send + Sync {
     async fn get_available_plans(&self) -> Result<Vec<SubscriptionPlan>, SubscriptionError>;
 
     /// Create a subscription checkout session for a user
-    /// Returns the checkout URL
-    /// provider: payment provider name (e.g. "stripe")
+    /// Returns either a Stripe checkout URL or House-of-Stake contract call parameters.
+    /// provider: payment provider name (e.g. "stripe", "house-of-stake")
     /// test_clock_id: optional test clock ID to bind customer to (requires STRIPE_TEST_CLOCK_ENABLED)
     async fn create_subscription(
         &self,
@@ -685,7 +714,7 @@ pub trait SubscriptionService: Send + Sync {
         success_url: String,
         cancel_url: String,
         test_clock_id: Option<String>,
-    ) -> Result<String, SubscriptionError>;
+    ) -> Result<CreateSubscriptionOutcome, SubscriptionError>;
 
     /// Cancel a user's active subscription (at period end)
     async fn cancel_subscription(&self, user_id: UserId) -> Result<(), SubscriptionError>;

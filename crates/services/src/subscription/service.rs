@@ -1,7 +1,8 @@
 use super::ports::{
-    BillingCycleAnchor, BillingPeriod, ChangePlanOutcome, CreditsRepository, CreditsSummary,
-    DowngradeIntentStatus, PaymentBehavior, PaymentWebhookRepository, ProrationBehavior,
-    StripeClientPort, StripeCreateCreditsCheckoutParams, StripeCreateSubscriptionCheckoutParams,
+    BillingCycleAnchor, BillingPeriod, ChangePlanOutcome, CreateSubscriptionOutcome,
+    CreditsRepository, CreditsSummary, DowngradeIntentStatus, PaymentBehavior,
+    PaymentWebhookRepository, ProrationBehavior, StripeClientPort,
+    StripeCreateCreditsCheckoutParams, StripeCreateSubscriptionCheckoutParams,
     StripeCustomerRepository, StripeSubscriptionSnapshot, StripeUpdateSubscriptionParams,
     Subscription, SubscriptionError, SubscriptionPlan, SubscriptionReplacement,
     SubscriptionRepository, SubscriptionService, SubscriptionWithPlan, DEFAULT_MONTHLY_TOKEN_LIMIT,
@@ -9,6 +10,7 @@ use super::ports::{
 use crate::agent::ports::AgentRepository;
 use crate::agent::ports::AgentService;
 use crate::system_configs::ports::{SubscriptionPlanConfig, SystemConfigs, SystemConfigsService};
+use crate::user::ports::OAuthProvider;
 use crate::user::ports::UserRepository;
 use crate::user_usage::ports::UserUsageRepository;
 use crate::UserId;
@@ -34,6 +36,10 @@ pub struct SubscriptionServiceConfig {
     pub agent_service: Arc<dyn AgentService>,
     pub stripe_secret_key: String,
     pub stripe_webhook_secret: String,
+    /// When set, enables `provider = house-of-stake` subscription intents (staking contract account id).
+    pub house_of_stake_contract_id: Option<String>,
+    /// Display / wallet hint (e.g. `mainnet`, `testnet`).
+    pub near_network_id: String,
 }
 
 /// Cached credit limit for a user. Invalid after TTL_CACHE_SECS (10 mins) or when plan/credits change.
@@ -75,6 +81,8 @@ pub struct SubscriptionServiceImpl {
     agent_service: Arc<dyn AgentService>,
     stripe_secret_key: String,
     stripe_webhook_secret: String,
+    house_of_stake_contract_id: Option<String>,
+    near_network_id: String,
     credit_limit_cache: Arc<RwLock<HashMap<UserId, CachedCreditLimit>>>,
     system_configs_cache: Arc<RwLock<Option<CachedSystemConfigs>>>,
 }
@@ -105,6 +113,8 @@ impl SubscriptionServiceImpl {
             agent_service: config.agent_service,
             stripe_secret_key: config.stripe_secret_key,
             stripe_webhook_secret: config.stripe_webhook_secret,
+            house_of_stake_contract_id: config.house_of_stake_contract_id,
+            near_network_id: config.near_network_id,
             credit_limit_cache: Arc::new(RwLock::new(HashMap::new())),
             system_configs_cache: Arc::new(RwLock::new(None)),
         }
@@ -236,14 +246,25 @@ impl SubscriptionServiceImpl {
             provider
         );
 
+        let provider_lc = provider.to_lowercase();
+
         // Treat missing/empty Stripe secrets as "not configured" when provider is stripe
-        if provider.to_lowercase() == "stripe" && !self.is_stripe_configured() {
+        if provider_lc == "stripe" && !self.is_stripe_configured() {
             tracing::debug!(
                 "Stripe secrets are not set (secret_key_empty={}, webhook_secret_empty={}), Stripe not configured",
                 self.stripe_secret_key.is_empty(),
                 self.stripe_webhook_secret.is_empty(),
             );
             return Err(SubscriptionError::NotConfigured);
+        }
+
+        if provider_lc == "house-of-stake" {
+            let Some(cid) = self.house_of_stake_contract_id.as_deref() else {
+                return Err(SubscriptionError::HouseOfStakeNotConfigured);
+            };
+            if cid.trim().is_empty() {
+                return Err(SubscriptionError::HouseOfStakeNotConfigured);
+            }
         }
 
         let configs = self
@@ -364,7 +385,7 @@ impl SubscriptionServiceImpl {
     }
 
     /// Supported payment providers
-    const SUPPORTED_PROVIDERS: &[&str] = &["stripe"];
+    const SUPPORTED_PROVIDERS: &[&str] = &["stripe", "house-of-stake"];
 
     /// Validate that the provider is supported
     fn validate_provider(provider: &str) -> Result<(), SubscriptionError> {
@@ -378,6 +399,24 @@ impl SubscriptionServiceImpl {
                 Self::SUPPORTED_PROVIDERS.join(", ")
             )))
         }
+    }
+
+    /// NEAR account id from linked oauth_accounts (required for house-of-stake).
+    async fn house_of_stake_near_account_id(
+        &self,
+        user_id: UserId,
+    ) -> Result<String, SubscriptionError> {
+        let accounts = self
+            .user_repository
+            .get_linked_accounts(user_id)
+            .await
+            .map_err(|e| SubscriptionError::InternalError(e.to_string()))?;
+        for a in accounts {
+            if a.provider == OAuthProvider::Near {
+                return Ok(a.provider_user_id);
+            }
+        }
+        Err(SubscriptionError::HouseOfStakeRequiresNearWallet)
     }
 
     async fn get_subscription_plans(
@@ -1016,7 +1055,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
         success_url: String,
         cancel_url: String,
         test_clock_id: Option<String>,
-    ) -> Result<String, SubscriptionError> {
+    ) -> Result<CreateSubscriptionOutcome, SubscriptionError> {
         tracing::info!(
             "Creating subscription checkout for user_id={}, provider={}, plan={}",
             user_id,
@@ -1024,13 +1063,10 @@ impl SubscriptionService for SubscriptionServiceImpl {
             plan
         );
 
-        // Validate provider (only stripe supported for now)
         Self::validate_provider(&provider)?;
 
-        // Get plans for provider from system configs
         let provider_plans = self.get_plans_for_provider(&provider).await?;
 
-        // Check if user already has active subscription
         if self
             .subscription_repo
             .get_active_subscription(user_id)
@@ -1041,14 +1077,11 @@ impl SubscriptionService for SubscriptionServiceImpl {
             return Err(SubscriptionError::ActiveSubscriptionExists);
         }
 
-        // Validate plan and get price_id
         let price_id = provider_plans
             .get(&plan)
             .ok_or_else(|| SubscriptionError::InvalidPlan(plan.clone()))?
             .clone();
 
-        // Validate instance count: user may have leftover instances from a prior higher-tier plan.
-        // Fail before checkout to avoid subscribing to a lower-tier plan they cannot use.
         let configs = self
             .system_configs_service
             .get_configs()
@@ -1075,18 +1108,34 @@ impl SubscriptionService for SubscriptionServiceImpl {
             });
         }
 
-        // Fetch trial_period_days from subscription plan config (reuse plan_config from instance check)
+        if provider.to_lowercase() == "house-of-stake" {
+            self.house_of_stake_near_account_id(user_id).await?;
+            let contract_id = self
+                .house_of_stake_contract_id
+                .as_deref()
+                .ok_or(SubscriptionError::HouseOfStakeNotConfigured)?
+                .trim()
+                .to_string();
+            if contract_id.is_empty() {
+                return Err(SubscriptionError::HouseOfStakeNotConfigured);
+            }
+            return Ok(CreateSubscriptionOutcome::HouseOfStakeLock {
+                contract_id,
+                method_name: "lock_for_subscription".to_string(),
+                args: serde_json::json!({ "price_id": price_id }),
+                network_id: self.near_network_id.clone(),
+            });
+        }
+
         let trial_period_days = plan_config
+            .as_ref()
             .and_then(|p| p.trial_period_days)
-            // Stripe supports a maximum trial period of 730 days
             .filter(|&n| n > 0 && n <= 730);
 
-        // Get or create Stripe customer
         let customer_id = self
             .get_or_create_stripe_customer(user_id, test_clock_id)
             .await?;
 
-        // Generate idempotency key with 1-hour time window
         let idempotency_key = generate_checkout_idempotency_key(&user_id, &price_id);
 
         let session = self
@@ -1112,7 +1161,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
             &idempotency_key.chars().take(16).collect::<String>()
         );
 
-        Ok(checkout_url)
+        Ok(CreateSubscriptionOutcome::StripeCheckout { checkout_url })
     }
 
     async fn cancel_subscription(&self, user_id: UserId) -> Result<(), SubscriptionError> {
