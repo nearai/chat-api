@@ -690,7 +690,7 @@ pub async fn cleanup_user_usage(db: &database::Database, user_email: &str) {
         .expect("delete usage events");
 }
 
-/// Delete a user by email ( cascades to subscriptions, sessions, etc. via FK).
+/// Delete a user by email after removing account-owned rows that use restrictive FKs.
 pub async fn cleanup_user(db: &database::Database, user_email: &str) {
     let user = match db
         .user_repository()
@@ -703,6 +703,10 @@ pub async fn cleanup_user(db: &database::Database, user_email: &str) {
     };
 
     let client = db.pool().get().await.expect("get pool client");
+    client
+        .execute("DELETE FROM sessions WHERE user_id = $1", &[&user.id])
+        .await
+        .expect("delete user sessions");
     client
         .execute("DELETE FROM users WHERE id = $1", &[&user.id])
         .await
