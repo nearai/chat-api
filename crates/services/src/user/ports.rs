@@ -129,6 +129,8 @@ pub enum AccountDeletionError {
     InstancesNotStopped { count: i64, statuses: Vec<String> },
     #[error("Cannot delete account because conversation cleanup is incomplete")]
     ConversationCleanupIncomplete { conversation_ids: Vec<String> },
+    #[error("Account deletion is already {status}")]
+    AlreadyInTerminalState { status: AccountDeletionStatus },
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
 }

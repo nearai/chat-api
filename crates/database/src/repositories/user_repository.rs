@@ -406,8 +406,20 @@ impl UserRepository for PostgresUserRepository {
             .await
             .map_err(anyhow::Error::from)?;
 
+        let deletion =
+            Self::account_deletion_from_row(row).map_err(AccountDeletionError::Internal)?;
+
+        if matches!(
+            deletion.status,
+            AccountDeletionStatus::FailedNeedsReview | AccountDeletionStatus::Completed
+        ) {
+            return Err(AccountDeletionError::AlreadyInTerminalState {
+                status: deletion.status,
+            });
+        }
+
         tx.commit().await.map_err(anyhow::Error::from)?;
-        Self::account_deletion_from_row(row).map_err(AccountDeletionError::Internal)
+        Ok(deletion)
     }
 
     async fn get_account_deletion_by_user_id(
