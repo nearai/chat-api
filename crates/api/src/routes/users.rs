@@ -72,12 +72,6 @@ pub async fn delete_current_user(
         user.user_id
     );
 
-    app_state
-        .user_service
-        .validate_account_deletion_preconditions(user.user_id)
-        .await
-        .map_err(account_deletion_error_to_api_error)?;
-
     let task_publisher = app_state
         .account_deletion_task_publisher
         .as_ref()
@@ -134,6 +128,9 @@ fn account_deletion_error_to_api_error(e: AccountDeletionError) -> ApiError {
                 conversation_ids.join(", ")
             );
             ApiError::internal_server_error("Failed to delete account")
+        }
+        AccountDeletionError::AlreadyInTerminalState { status } => {
+            ApiError::conflict(format!("Account deletion is already {status}"))
         }
         AccountDeletionError::Internal(err) => {
             tracing::error!("Failed to delete account: {:#}", err);
