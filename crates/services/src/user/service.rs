@@ -4,7 +4,8 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use super::ports::{
-    AccountDeletion, AccountDeletionError, BanType, User, UserProfile, UserRepository, UserService,
+    AccountDeletion, AccountDeletionError, AccountDeletionStatus, BanType, User, UserProfile,
+    UserRepository, UserService,
 };
 use crate::types::UserId;
 
@@ -144,6 +145,17 @@ impl UserService for UserServiceImpl {
 
     async fn list_owned_file_ids(&self, user_id: UserId) -> anyhow::Result<Vec<String>> {
         self.user_repository.list_owned_file_ids(user_id).await
+    }
+
+    async fn list_account_deletions(
+        &self,
+        status: Option<AccountDeletionStatus>,
+        limit: i64,
+        offset: i64,
+    ) -> anyhow::Result<Vec<AccountDeletion>> {
+        self.user_repository
+            .list_account_deletions(status, limit, offset)
+            .await
     }
 
     async fn validate_account_deletion_preconditions(

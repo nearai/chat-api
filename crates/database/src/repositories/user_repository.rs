@@ -616,6 +616,42 @@ impl UserRepository for PostgresUserRepository {
         Ok(rows.into_iter().map(|row| row.get("id")).collect())
     }
 
+    async fn list_account_deletions(
+        &self,
+        status: Option<AccountDeletionStatus>,
+        limit: i64,
+        offset: i64,
+    ) -> anyhow::Result<Vec<AccountDeletion>> {
+        let client = self.pool.get().await?;
+        let rows = if let Some(ref s) = status {
+            client
+                .query(
+                    "SELECT id, user_id, status, requested_at, started_at, completed_at,
+                            attempt_count, lease_until, last_error, progress, created_at, updated_at
+                     FROM user_account_deletions
+                     WHERE status = $1
+                     ORDER BY created_at DESC
+                     LIMIT $2 OFFSET $3",
+                    &[&s.as_str(), &limit, &offset],
+                )
+                .await?
+        } else {
+            client
+                .query(
+                    "SELECT id, user_id, status, requested_at, started_at, completed_at,
+                            attempt_count, lease_until, last_error, progress, created_at, updated_at
+                     FROM user_account_deletions
+                     ORDER BY created_at DESC
+                     LIMIT $1 OFFSET $2",
+                    &[&limit, &offset],
+                )
+                .await?
+        };
+        rows.into_iter()
+            .map(Self::account_deletion_from_row)
+            .collect()
+    }
+
     async fn validate_account_deletion_preconditions(
         &self,
         user_id: UserId,

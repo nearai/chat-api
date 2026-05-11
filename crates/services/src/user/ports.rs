@@ -102,7 +102,7 @@ impl std::fmt::Display for AccountDeletionStatus {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct AccountDeletion {
     pub id: Uuid,
     pub user_id: UserId,
@@ -221,6 +221,14 @@ pub trait UserRepository: Send + Sync {
     /// List file IDs owned by a user (for provider cleanup before account deletion).
     async fn list_owned_file_ids(&self, user_id: UserId) -> anyhow::Result<Vec<String>>;
 
+    /// List account deletion requests (admin use).
+    async fn list_account_deletions(
+        &self,
+        status: Option<AccountDeletionStatus>,
+        limit: i64,
+        offset: i64,
+    ) -> anyhow::Result<Vec<AccountDeletion>>;
+
     /// Validate current account deletion preconditions without deleting any data.
     async fn validate_account_deletion_preconditions(
         &self,
@@ -298,6 +306,14 @@ pub trait UserService: Send + Sync {
 
     /// List file IDs owned by a user (for provider cleanup before account deletion).
     async fn list_owned_file_ids(&self, user_id: UserId) -> anyhow::Result<Vec<String>>;
+
+    /// List account deletion requests (admin use).
+    async fn list_account_deletions(
+        &self,
+        status: Option<AccountDeletionStatus>,
+        limit: i64,
+        offset: i64,
+    ) -> anyhow::Result<Vec<AccountDeletion>>;
 
     /// Validate current account deletion preconditions without deleting any data.
     async fn validate_account_deletion_preconditions(

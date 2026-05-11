@@ -1029,6 +1029,15 @@ mod tests {
             Ok(Vec::new())
         }
 
+        async fn list_account_deletions(
+            &self,
+            _status: Option<crate::user::ports::AccountDeletionStatus>,
+            _limit: i64,
+            _offset: i64,
+        ) -> anyhow::Result<Vec<crate::user::ports::AccountDeletion>> {
+            Ok(Vec::new())
+        }
+
         async fn validate_account_deletion_preconditions(
             &self,
             _user_id: UserId,
@@ -1138,6 +1147,15 @@ mod tests {
         }
 
         async fn list_owned_file_ids(&self, _user_id: UserId) -> anyhow::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+
+        async fn list_account_deletions(
+            &self,
+            _status: Option<crate::user::ports::AccountDeletionStatus>,
+            _limit: i64,
+            _offset: i64,
+        ) -> anyhow::Result<Vec<crate::user::ports::AccountDeletion>> {
             Ok(Vec::new())
         }
 
