@@ -9,7 +9,8 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use services::subscription::ports::{
-    ChangePlanOutcome, CreateSubscriptionOutcome, SubscriptionError, SubscriptionPlan,
+    CancelSubscriptionOutcome, ChangePlanOutcome, CreateSubscriptionOutcome,
+    NearWalletIntentPayload, ResumeSubscriptionOutcome, SubscriptionError, SubscriptionPlan,
     SubscriptionWithPlan,
 };
 use utoipa::ToSchema;
@@ -43,6 +44,9 @@ pub type CreateSubscriptionResponse = CreateSubscriptionOutcome;
 pub struct CancelSubscriptionResponse {
     /// Success message
     pub message: String,
+    /// Present when the subscription is billed via NEAR staking (`house-of-stake`): sign these calls in the wallet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub near_wallet_intent: Option<NearWalletIntentPayload>,
 }
 
 /// Response for subscription resume
@@ -50,6 +54,8 @@ pub struct CancelSubscriptionResponse {
 pub struct ResumeSubscriptionResponse {
     /// Success message
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub near_wallet_intent: Option<NearWalletIntentPayload>,
 }
 
 /// Request to change subscription plan
@@ -92,6 +98,13 @@ fn default_false() -> bool {
 pub struct ListPlansResponse {
     /// List of available subscription plans
     pub plans: Vec<SubscriptionPlan>,
+}
+
+/// Query `provider`: omit or `stripe` for Stripe-backed plans; `house-of-stake` for staking-contract SKUs.
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct ListPlansParams {
+    #[serde(default)]
+    pub provider: Option<String>,
 }
 
 /// Request to create a customer portal session
@@ -241,13 +254,20 @@ pub async fn cancel_subscription(
 ) -> Result<Json<CancelSubscriptionResponse>, ApiError> {
     tracing::info!("Canceling subscription for user_id={}", user.user_id);
 
-    app_state
+    let outcome = app_state
         .subscription_service
         .cancel_subscription(user.user_id)
         .await
         .map_err(|e| match e {
             SubscriptionError::NoActiveSubscription => {
                 ApiError::not_found("No active subscription found")
+            }
+            SubscriptionError::HouseOfStakeNotConfigured => {
+                ApiError::service_unavailable("House-of-Stake billing is not configured")
+            }
+            SubscriptionError::NearRpcError(msg) => {
+                tracing::error!(error = ?msg, "NEAR RPC error canceling subscription");
+                ApiError::service_unavailable("Failed to reach NEAR RPC for subscription sync")
             }
             SubscriptionError::DatabaseError(msg) => {
                 tracing::error!(error = ?msg, "Database error canceling subscription");
@@ -263,8 +283,20 @@ pub async fn cancel_subscription(
             }
         })?;
 
+    let (message, near_wallet_intent) = match outcome {
+        CancelSubscriptionOutcome::Completed => (
+            "Subscription will be canceled at period end".to_string(),
+            None,
+        ),
+        CancelSubscriptionOutcome::NearWalletIntent(p) => (
+            "Complete cancellation in your NEAR wallet".to_string(),
+            Some(p),
+        ),
+    };
+
     Ok(Json(CancelSubscriptionResponse {
-        message: "Subscription will be canceled at period end".to_string(),
+        message,
+        near_wallet_intent,
     }))
 }
 
@@ -290,7 +322,7 @@ pub async fn resume_subscription(
 ) -> Result<Json<ResumeSubscriptionResponse>, ApiError> {
     tracing::info!("Resuming subscription for user_id={}", user.user_id);
 
-    app_state
+    let outcome = app_state
         .subscription_service
         .resume_subscription(user.user_id)
         .await
@@ -300,6 +332,13 @@ pub async fn resume_subscription(
             }
             SubscriptionError::SubscriptionNotScheduledForCancellation => {
                 ApiError::bad_request("Subscription is not scheduled for cancellation")
+            }
+            SubscriptionError::HouseOfStakeNotConfigured => {
+                ApiError::service_unavailable("House-of-Stake billing is not configured")
+            }
+            SubscriptionError::NearRpcError(msg) => {
+                tracing::error!(error = ?msg, "NEAR RPC error resuming subscription");
+                ApiError::service_unavailable("Failed to reach NEAR RPC for subscription sync")
             }
             SubscriptionError::DatabaseError(msg) => {
                 tracing::error!(error = ?msg, "Database error resuming subscription");
@@ -315,8 +354,17 @@ pub async fn resume_subscription(
             }
         })?;
 
+    let (message, near_wallet_intent) = match outcome {
+        ResumeSubscriptionOutcome::Completed => ("Subscription resumed successfully".to_string(), None),
+        ResumeSubscriptionOutcome::NearWalletIntent(p) => (
+            "Complete resume in your NEAR wallet".to_string(),
+            Some(p),
+        ),
+    };
+
     Ok(Json(ResumeSubscriptionResponse {
-        message: "Subscription resumed successfully".to_string(),
+        message,
+        near_wallet_intent,
     }))
 }
 
@@ -383,6 +431,13 @@ pub async fn change_plan(
             SubscriptionError::NoPendingDowngrade => {
                 ApiError::bad_request("No pending downgrade to cancel")
             }
+            SubscriptionError::HouseOfStakeNotConfigured => {
+                ApiError::service_unavailable("House-of-Stake billing is not configured")
+            }
+            SubscriptionError::NearRpcError(msg) => {
+                tracing::error!(error = ?msg, "NEAR RPC error changing plan");
+                ApiError::service_unavailable("Failed to reach NEAR RPC for staking catalog")
+            }
             _ => {
                 tracing::error!(error = ?e, "Failed to change plan");
                 ApiError::internal_server_error("Failed to change plan")
@@ -390,13 +445,16 @@ pub async fn change_plan(
         })?;
 
     Ok(Json(ChangePlanResponse {
-        message: match outcome {
+        message: match &outcome {
             ChangePlanOutcome::ChangedImmediately => "Plan changed successfully".to_string(),
             ChangePlanOutcome::ScheduledForPeriodEnd => {
                 "Downgrade scheduled and will be checked near period end".to_string()
             }
             ChangePlanOutcome::NoOp => "User is already on the target plan".to_string(),
             ChangePlanOutcome::DowngradeCancelled => "Pending downgrade cancelled".to_string(),
+            ChangePlanOutcome::NearWalletIntent(_) => {
+                "Complete plan change in your NEAR wallet".to_string()
+            }
         },
         result: outcome,
     }))
@@ -415,16 +473,27 @@ pub async fn change_plan(
 )]
 pub async fn list_plans(
     State(app_state): State<AppState>,
+    Query(params): Query<ListPlansParams>,
 ) -> Result<Json<ListPlansResponse>, ApiError> {
-    tracing::debug!("Listing available subscription plans");
+    tracing::debug!("Listing available subscription plans provider={:?}", params.provider);
+
+    let provider_filter = params
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
 
     let plans = app_state
         .subscription_service
-        .get_available_plans()
+        .get_available_plans(provider_filter)
         .await
         .map_err(|e| match e {
             SubscriptionError::NotConfigured => {
                 ApiError::service_unavailable("Stripe is not configured")
+            }
+            SubscriptionError::InvalidProvider(msg) => ApiError::bad_request(msg),
+            SubscriptionError::HouseOfStakeNotConfigured => {
+                ApiError::service_unavailable("House-of-Stake billing is not configured")
             }
             _ => {
                 tracing::error!(error = ?e, "Failed to list plans");
@@ -471,6 +540,10 @@ pub async fn list_subscriptions(
         .map_err(|e| match e {
             SubscriptionError::NotConfigured => {
                 ApiError::service_unavailable("Stripe is not configured")
+            }
+            SubscriptionError::NearRpcError(msg) => {
+                tracing::error!(error = ?msg, "NEAR RPC error listing subscriptions");
+                ApiError::service_unavailable("Failed to sync subscription from NEAR RPC")
             }
             SubscriptionError::DatabaseError(msg) => {
                 tracing::error!(error = ?msg, "Database error listing subscriptions");
@@ -532,6 +605,33 @@ pub async fn create_portal_session(
     Ok(Json(CreatePortalSessionResponse { url }))
 }
 
+/// POST /v1/subscriptions/near/sync — refresh local `house-of-stake` row from chain (authenticated).
+pub async fn sync_near_staking_subscription(
+    State(app_state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    app_state
+        .subscription_service
+        .sync_near_staking_subscription(user.user_id)
+        .await
+        .map_err(|e| match e {
+            SubscriptionError::NearRpcError(msg) => {
+                tracing::error!(error = ?msg, "NEAR RPC sync failed");
+                ApiError::service_unavailable("Failed to sync subscription from NEAR RPC")
+            }
+            SubscriptionError::DatabaseError(msg) => {
+                tracing::error!(error = ?msg, "Database error syncing NEAR subscription");
+                ApiError::internal_server_error("Failed to sync subscription")
+            }
+            _ => {
+                tracing::error!(error = ?e, "Failed to sync NEAR subscription");
+                ApiError::internal_server_error("Failed to sync subscription")
+            }
+        })?;
+
+    Ok(Json(serde_json::json!({ "synced": true })))
+}
+
 /// Handle Stripe webhook events (public endpoint - no auth required)
 pub async fn handle_stripe_webhook(
     State(app_state): State<AppState>,
@@ -578,6 +678,10 @@ pub fn create_subscriptions_router() -> Router<AppState> {
         .route("/v1/subscriptions/resume", post(resume_subscription))
         .route("/v1/subscriptions/change", post(change_plan))
         .route("/v1/subscriptions/portal", post(create_portal_session))
+        .route(
+            "/v1/subscriptions/near/sync",
+            post(sync_near_staking_subscription),
+        )
 }
 
 /// Create public subscription router (for webhooks and plans - no auth)

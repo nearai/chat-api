@@ -354,23 +354,29 @@ impl Default for StripeConfig {
 pub struct NearConfig {
     /// NEAR JSON-RPC endpoint used for on-chain queries (e.g. balance checks)
     pub rpc_url: Url,
-    /// Optional `stake.dao` / House-of-Stake staking contract account id (e.g. `stake.dao.near`).
-    /// Required for `house-of-stake` subscription checkout intents.
-    #[serde(default)]
-    pub house_of_stake_contract_id: Option<String>,
+    /// Optional `stake.dao` staking contract account id (e.g. `stake.dao.near`).
+    /// Required for `house-of-stake` subscription intents and RPC sync.
+    #[serde(default, alias = "house_of_stake_contract_id")]
+    pub near_staking_contract_id: Option<String>,
 }
 
 impl Default for NearConfig {
     fn default() -> Self {
         let raw =
             std::env::var("NEAR_RPC_URL").unwrap_or("https://free.rpc.fastnear.com".to_string());
-        let house_of_stake_contract_id = std::env::var("HOUSE_OF_STAKE_CONTRACT_ID")
+        let near_staking_contract_id = std::env::var("NEAR_STAKING_CONTRACT_ID")
             .ok()
+            .filter(|s| !s.trim().is_empty())
             .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
+            .or_else(|| {
+                std::env::var("HOUSE_OF_STAKE_CONTRACT_ID")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty())
+                    .map(|s| s.trim().to_string())
+            });
         Self {
             rpc_url: Url::parse(&raw).expect("NEAR_RPC_URL must be a valid URL"),
-            house_of_stake_contract_id,
+            near_staking_contract_id,
         }
     }
 }

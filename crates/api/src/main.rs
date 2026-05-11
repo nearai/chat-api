@@ -242,7 +242,8 @@ async fn main() -> anyhow::Result<()> {
             stripe_secret_key: config.stripe.secret_key.clone(),
             stripe_webhook_secret: config.stripe.webhook_secret.clone(),
             agent_service: agent_service.clone() as Arc<dyn services::agent::ports::AgentService>,
-            house_of_stake_contract_id: config.near.house_of_stake_contract_id.clone(),
+            near_rpc_url: config.near.rpc_url.to_string(),
+            near_staking_contract_id: config.near.near_staking_contract_id.clone(),
             near_network_id: std::env::var("NEAR_NETWORK_ID")
                 .unwrap_or_else(|_| "mainnet".to_string()),
         },

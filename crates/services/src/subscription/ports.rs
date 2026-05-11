@@ -121,7 +121,7 @@ pub struct BillingPeriod {
 
 /// Result of a plan-change request.
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChangePlanOutcome {
     /// Stripe subscription was updated immediately.
@@ -132,6 +132,51 @@ pub enum ChangePlanOutcome {
     NoOp,
     /// A pending downgrade was cancelled (same plan requested with active pending downgrade).
     DowngradeCancelled,
+    /// Complete the change by signing NEAR transactions (`near_wallet_intent`).
+    NearWalletIntent(NearWalletIntentPayload),
+}
+
+/// Bundle returned when Stripe-equivalent operations are executed on-chain via the user's wallet.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct NearWalletIntentPayload {
+    pub contract_id: String,
+    pub network_id: String,
+    pub actions: Vec<NearWalletAction>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct NearWalletAction {
+    pub method_name: String,
+    pub args: serde_json::Value,
+    pub deposit: NearDepositKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum NearDepositKind {
+    /// Attach exactly 1 yoctoNEAR (`assert_one_yocto` paths).
+    YoctoOne,
+    /// Attach stake according to catalog rules (`lock_for_subscription`, `upgrade_subscription`, etc.).
+    AttachNear,
+}
+
+/// Stripe cancellation completed, or NEAR wallet intents for `cancel_subscription`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub enum CancelSubscriptionOutcome {
+    Completed,
+    NearWalletIntent(NearWalletIntentPayload),
+}
+
+/// Stripe resume completed, or NEAR wallet intents for `resume_subscription`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub enum ResumeSubscriptionOutcome {
+    Completed,
+    NearWalletIntent(NearWalletIntentPayload),
 }
 
 /// Stripe customer mapping data
@@ -208,6 +253,8 @@ pub enum SubscriptionError {
     HouseOfStakeNotConfigured,
     /// House-of-Stake requires the user to authenticate with a NEAR wallet
     HouseOfStakeRequiresNearWallet,
+    /// NEAR JSON-RPC view call failed
+    NearRpcError(String),
 }
 
 impl fmt::Display for SubscriptionError {
@@ -280,6 +327,7 @@ impl fmt::Display for SubscriptionError {
                     "House-of-Stake subscription requires signing in with a NEAR wallet"
                 )
             }
+            Self::NearRpcError(msg) => write!(f, "NEAR RPC error: {}", msg),
         }
     }
 }
@@ -687,20 +735,22 @@ pub struct SubscriptionPlan {
 pub enum CreateSubscriptionOutcome {
     /// Complete checkout on Stripe (`checkout_url`).
     StripeCheckout { checkout_url: String },
-    /// Submit `method_name` with `args` to `contract_id` from the user's NEAR wallet (attached deposit per contract rules).
-    HouseOfStakeLock {
+    /// Sign one or more NEAR calls against the staking contract (`NEAR_STAKING_CONTRACT_ID`).
+    NearWalletIntent {
         contract_id: String,
-        method_name: String,
-        args: serde_json::Value,
         network_id: String,
+        actions: Vec<NearWalletAction>,
     },
 }
 
 /// Service trait for subscription management
 #[async_trait]
 pub trait SubscriptionService: Send + Sync {
-    /// Get available subscription plans
-    async fn get_available_plans(&self) -> Result<Vec<SubscriptionPlan>, SubscriptionError>;
+    /// Get available subscription plans (`provider`: `None` or `"stripe"` → Stripe catalog; `"house-of-stake"` → HoS catalog).
+    async fn get_available_plans(
+        &self,
+        provider: Option<&str>,
+    ) -> Result<Vec<SubscriptionPlan>, SubscriptionError>;
 
     /// Create a subscription checkout session for a user
     /// Returns either a Stripe checkout URL or House-of-Stake contract call parameters.
@@ -716,11 +766,20 @@ pub trait SubscriptionService: Send + Sync {
         test_clock_id: Option<String>,
     ) -> Result<CreateSubscriptionOutcome, SubscriptionError>;
 
-    /// Cancel a user's active subscription (at period end)
-    async fn cancel_subscription(&self, user_id: UserId) -> Result<(), SubscriptionError>;
+    /// Cancel a user's active subscription (at period end), or return NEAR wallet intents for HoS.
+    async fn cancel_subscription(
+        &self,
+        user_id: UserId,
+    ) -> Result<CancelSubscriptionOutcome, SubscriptionError>;
 
-    /// Resume a subscription that was scheduled to cancel at period end
-    async fn resume_subscription(&self, user_id: UserId) -> Result<(), SubscriptionError>;
+    /// Resume a subscription that was scheduled to cancel at period end, or return NEAR wallet intents for HoS.
+    async fn resume_subscription(
+        &self,
+        user_id: UserId,
+    ) -> Result<ResumeSubscriptionOutcome, SubscriptionError>;
+
+    /// Re-fetch staking subscription from RPC and upsert/delete the local `house-of-stake` row.
+    async fn sync_near_staking_subscription(&self, user_id: UserId) -> Result<(), SubscriptionError>;
 
     /// Change the user's subscription to a different plan.
     /// Upgrades are applied immediately; downgrades are scheduled for period-end checks.
