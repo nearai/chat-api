@@ -372,6 +372,21 @@ impl UserRepository for PostgresUserRepository {
         .await
         .map_err(anyhow::Error::from)?;
 
+        let user_email: Option<String> = tx
+            .query_opt("SELECT email FROM users WHERE id = $1", &[&user_id])
+            .await
+            .map_err(anyhow::Error::from)?
+            .map(|row| row.get("email"));
+
+        if let Some(ref email) = user_email {
+            tx.execute(
+                "DELETE FROM email_verification_challenges WHERE email = $1",
+                &[&email],
+            )
+            .await
+            .map_err(anyhow::Error::from)?;
+        }
+
         let deleted = tx
             .execute("DELETE FROM users WHERE id = $1", &[&user_id])
             .await
@@ -420,6 +435,17 @@ impl UserRepository for PostgresUserRepository {
 
         tx.commit().await.map_err(anyhow::Error::from)?;
         Ok(deletion)
+    }
+
+    async fn delete_account_deletion_request(&self, deletion_id: Uuid) -> anyhow::Result<()> {
+        let client = self.pool.get().await?;
+        client
+            .execute(
+                "DELETE FROM user_account_deletions WHERE id = $1",
+                &[&deletion_id],
+            )
+            .await?;
+        Ok(())
     }
 
     async fn get_account_deletion_by_user_id(
@@ -573,6 +599,17 @@ impl UserRepository for PostgresUserRepository {
         let rows = client
             .query(
                 "SELECT id FROM conversations WHERE user_id = $1 ORDER BY id",
+                &[&user_id],
+            )
+            .await?;
+        Ok(rows.into_iter().map(|row| row.get("id")).collect())
+    }
+
+    async fn list_owned_file_ids(&self, user_id: UserId) -> anyhow::Result<Vec<String>> {
+        let client = self.pool.get().await?;
+        let rows = client
+            .query(
+                "SELECT id FROM files WHERE user_id = $1 ORDER BY id",
                 &[&user_id],
             )
             .await?;

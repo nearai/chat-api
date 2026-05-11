@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use std::sync::Arc;
+use uuid::Uuid;
 
 use super::ports::{
     AccountDeletion, AccountDeletionError, BanType, User, UserProfile, UserRepository, UserService,
@@ -120,6 +121,12 @@ impl UserService for UserServiceImpl {
             .await
     }
 
+    async fn delete_account_deletion_request(&self, deletion_id: Uuid) -> anyhow::Result<()> {
+        self.user_repository
+            .delete_account_deletion_request(deletion_id)
+            .await
+    }
+
     async fn is_account_deletion_requested(&self, user_id: UserId) -> anyhow::Result<bool> {
         Ok(self
             .user_repository
@@ -133,6 +140,10 @@ impl UserService for UserServiceImpl {
         self.user_repository
             .list_owned_conversation_ids(user_id)
             .await
+    }
+
+    async fn list_owned_file_ids(&self, user_id: UserId) -> anyhow::Result<Vec<String>> {
+        self.user_repository.list_owned_file_ids(user_id).await
     }
 
     async fn validate_account_deletion_preconditions(

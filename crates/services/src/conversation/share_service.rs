@@ -955,6 +955,13 @@ mod tests {
             unimplemented!("create_account_deletion_request not needed for tests");
         }
 
+        async fn delete_account_deletion_request(
+            &self,
+            _deletion_id: uuid::Uuid,
+        ) -> anyhow::Result<()> {
+            unimplemented!("delete_account_deletion_request not needed for tests");
+        }
+
         async fn get_account_deletion_by_user_id(
             &self,
             _user_id: UserId,
@@ -1015,6 +1022,10 @@ mod tests {
             &self,
             _user_id: UserId,
         ) -> anyhow::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+
+        async fn list_owned_file_ids(&self, _user_id: UserId) -> anyhow::Result<Vec<String>> {
             Ok(Vec::new())
         }
 
@@ -1108,6 +1119,13 @@ mod tests {
             unimplemented!("create_account_deletion_request not needed for tests");
         }
 
+        async fn delete_account_deletion_request(
+            &self,
+            _deletion_id: uuid::Uuid,
+        ) -> anyhow::Result<()> {
+            unimplemented!("delete_account_deletion_request not needed for tests");
+        }
+
         async fn is_account_deletion_requested(&self, _user_id: UserId) -> anyhow::Result<bool> {
             Ok(false)
         }
@@ -1116,6 +1134,10 @@ mod tests {
             &self,
             _user_id: UserId,
         ) -> anyhow::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+
+        async fn list_owned_file_ids(&self, _user_id: UserId) -> anyhow::Result<Vec<String>> {
             Ok(Vec::new())
         }
 
