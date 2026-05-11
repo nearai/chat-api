@@ -3017,6 +3017,54 @@ pub async fn bi_top_consumers(
     }))
 }
 
+/// Query parameters for admin account deletion listing.
+#[derive(Debug, Deserialize)]
+pub struct AdminAccountDeletionsQuery {
+    pub status: Option<String>,
+    #[serde(default = "admin_deletions_default_limit")]
+    pub limit: i64,
+    #[serde(default)]
+    pub offset: i64,
+}
+
+fn admin_deletions_default_limit() -> i64 {
+    50
+}
+
+/// Admin endpoint: List account deletion requests with optional status filter.
+pub async fn admin_list_account_deletions(
+    State(app_state): State<AppState>,
+    Query(params): Query<AdminAccountDeletionsQuery>,
+) -> Result<Json<Vec<services::user::ports::AccountDeletion>>, ApiError> {
+    let status = match params.status.as_deref() {
+        Some("") | None => None,
+        Some(s) => Some(
+            services::user::ports::AccountDeletionStatus::parse_db_value(s)
+                .map_err(|_| ApiError::bad_request(format!("invalid status filter: {s}")))?,
+        ),
+    };
+
+    let limit = params.limit.min(200);
+    let deletions = app_state
+        .user_service
+        .list_account_deletions(status, limit, params.offset)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to list account deletions: {:#}", e);
+            ApiError::internal_server_error("Failed to list account deletions")
+        })?;
+
+    tracing::info!(
+        "Admin listed {} account deletion(s) (status={:?}, limit={}, offset={})",
+        deletions.len(),
+        params.status,
+        limit,
+        params.offset
+    );
+
+    Ok(Json(deletions))
+}
+
 /// Create admin router with all admin routes (requires admin authentication)
 pub fn create_admin_router() -> Router<AppState> {
     Router::new()
@@ -3044,6 +3092,7 @@ pub fn create_admin_router() -> Router<AppState> {
         .route("/analytics/top-users", get(get_top_users))
         .route("/usage/users/{user_id}", get(get_usage_by_user_id))
         .route("/usage/top", get(get_top_usage))
+        .route("/account-deletions", get(admin_list_account_deletions))
         // Admin agent routes
         .nest(
             "/agents",

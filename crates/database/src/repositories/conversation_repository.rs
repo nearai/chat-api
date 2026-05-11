@@ -134,13 +134,25 @@ impl ConversationRepository for PostgresConversationRepository {
         conversation_id: &str,
         user_id: UserId,
     ) -> Result<(), ConversationError> {
-        let client = self
+        let mut client = self
             .pool
             .get()
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
-        let result = client
+        let tx = client
+            .transaction()
+            .await
+            .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
+
+        tx.execute(
+            "DELETE FROM conversation_shares WHERE conversation_id = $1",
+            &[&conversation_id],
+        )
+        .await
+        .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
+
+        let result = tx
             .execute(
                 "DELETE FROM conversations WHERE id = $1 AND user_id = $2",
                 &[&conversation_id, &user_id.0],
@@ -151,6 +163,9 @@ impl ConversationRepository for PostgresConversationRepository {
         if result == 0 {
             Err(ConversationError::NotFound)
         } else {
+            tx.commit()
+                .await
+                .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
             Ok(())
         }
     }

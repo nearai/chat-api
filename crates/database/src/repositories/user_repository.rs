@@ -1,8 +1,14 @@
 use crate::pool::DbPool;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use services::user::ports::{BanType, LinkedOAuthAccount, OAuthProvider, User, UserRepository};
+use services::user::ports::{
+    AccountDeletion, AccountDeletionError, AccountDeletionStatus, BanType, LinkedOAuthAccount,
+    OAuthProvider, User, UserRepository,
+};
 use services::UserId;
+use std::collections::HashSet;
+use tokio_postgres::GenericClient;
+use uuid::Uuid;
 
 pub struct PostgresUserRepository {
     pool: DbPool,
@@ -11,6 +17,88 @@ pub struct PostgresUserRepository {
 impl PostgresUserRepository {
     pub fn new(pool: DbPool) -> Self {
         Self { pool }
+    }
+
+    async fn validate_account_deletion_preconditions_with_client(
+        client: &impl GenericClient,
+        user_id: UserId,
+        lock_user: bool,
+    ) -> Result<(), AccountDeletionError> {
+        let user_query = if lock_user {
+            "SELECT 1 FROM users WHERE id = $1 FOR UPDATE"
+        } else {
+            "SELECT 1 FROM users WHERE id = $1"
+        };
+        let user_exists = client
+            .query_opt(user_query, &[&user_id])
+            .await
+            .map_err(anyhow::Error::from)?
+            .is_some();
+        if !user_exists {
+            return Err(AccountDeletionError::UserNotFound);
+        }
+
+        let active_subscription_count: i64 = client
+            .query_one(
+                "SELECT COUNT(*)
+                 FROM subscriptions
+                 WHERE user_id = $1 AND status IN ('active', 'trialing')",
+                &[&user_id],
+            )
+            .await
+            .map_err(anyhow::Error::from)?
+            .get(0);
+        if active_subscription_count > 0 {
+            return Err(AccountDeletionError::ActiveSubscriptions {
+                count: active_subscription_count,
+            });
+        }
+
+        let blocking_instance_rows = client
+            .query(
+                "SELECT status, COUNT(*)::bigint AS count
+                 FROM agent_instances
+                 WHERE user_id = $1 AND status NOT IN ('stopped', 'deleted')
+                 GROUP BY status
+                 ORDER BY status",
+                &[&user_id],
+            )
+            .await
+            .map_err(anyhow::Error::from)?;
+        if !blocking_instance_rows.is_empty() {
+            let mut total = 0_i64;
+            let mut statuses = Vec::with_capacity(blocking_instance_rows.len());
+            for row in blocking_instance_rows {
+                let status: String = row.get("status");
+                let count: i64 = row.get("count");
+                total += count;
+                statuses.push(format!("{status}:{count}"));
+            }
+            return Err(AccountDeletionError::InstancesNotStopped {
+                count: total,
+                statuses,
+            });
+        }
+
+        Ok(())
+    }
+
+    fn account_deletion_from_row(row: tokio_postgres::Row) -> anyhow::Result<AccountDeletion> {
+        let status: String = row.get("status");
+        Ok(AccountDeletion {
+            id: row.get("id"),
+            user_id: row.get("user_id"),
+            status: AccountDeletionStatus::parse_db_value(&status)?,
+            requested_at: row.get("requested_at"),
+            started_at: row.get("started_at"),
+            completed_at: row.get("completed_at"),
+            attempt_count: row.get("attempt_count"),
+            lease_until: row.get("lease_until"),
+            last_error: row.get("last_error"),
+            progress: row.get("progress"),
+            created_at: row.get("created_at"),
+            updated_at: row.get("updated_at"),
+        })
     }
 }
 
@@ -139,14 +227,452 @@ impl UserRepository for PostgresUserRepository {
         })
     }
 
-    async fn delete_user(&self, user_id: UserId) -> anyhow::Result<()> {
-        let client = self.pool.get().await?;
+    /// Delete all account data that can be tied to the user.
+    ///
+    /// Explicitly deleted: conversations, files, user_settings, sessions, oauth
+    /// data, billing rows (stripe_customers, user_credits, subscriptions*),
+    /// sharing groups, agent api keys, activity log, bans, passkey credentials,
+    /// email verification challenges, and the users row itself.
+    /// Agent instances are soft-deleted (status = 'deleted', credentials wiped).
+    ///
+    /// Intentionally retained for audit / billing reconciliation:
+    /// - agent_usage_log, user_usage_event, credit_transactions – their user_id
+    ///   FK was removed in V34 so they survive the users row deletion.
+    /// - agent_instance_status_history – changed_by_user_id is SET NULL on
+    ///   instance delete; old history rows remain.
+    /// - user_account_deletions – the deletion audit record itself.
+    async fn delete_user_account(
+        &self,
+        user_id: UserId,
+        cloud_deleted_conversation_ids: &[String],
+    ) -> Result<(), AccountDeletionError> {
+        let mut client = self.pool.get().await.map_err(anyhow::Error::from)?;
+        let tx = client.transaction().await.map_err(anyhow::Error::from)?;
 
-        client
+        Self::validate_account_deletion_preconditions_with_client(&*tx, user_id, true).await?;
+
+        let verified_conversation_ids: HashSet<&str> = cloud_deleted_conversation_ids
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let current_conversation_rows = tx
+            .query(
+                "SELECT id FROM conversations WHERE user_id = $1 ORDER BY id",
+                &[&user_id],
+            )
+            .await
+            .map_err(anyhow::Error::from)?;
+        let missing_cloud_deletes: Vec<String> = current_conversation_rows
+            .into_iter()
+            .map(|row| row.get::<_, String>("id"))
+            .filter(|id| !verified_conversation_ids.contains(id.as_str()))
+            .collect();
+        if !missing_cloud_deletes.is_empty() {
+            return Err(AccountDeletionError::ConversationCleanupIncomplete {
+                conversation_ids: missing_cloud_deletes,
+            });
+        }
+
+        tx.execute(
+            "DELETE FROM conversation_shares
+             WHERE owner_user_id = $1
+                OR conversation_id IN (SELECT id FROM conversations WHERE user_id = $1)
+                OR group_id IN (SELECT id FROM conversation_share_groups WHERE owner_user_id = $1)",
+            &[&user_id],
+        )
+        .await
+        .map_err(anyhow::Error::from)?;
+
+        tx.execute(
+            "DELETE FROM conversation_share_group_members
+             WHERE group_id IN (SELECT id FROM conversation_share_groups WHERE owner_user_id = $1)",
+            &[&user_id],
+        )
+        .await
+        .map_err(anyhow::Error::from)?;
+
+        tx.execute(
+            "DELETE FROM conversation_share_groups WHERE owner_user_id = $1",
+            &[&user_id],
+        )
+        .await
+        .map_err(anyhow::Error::from)?;
+
+        tx.execute("DELETE FROM conversations WHERE user_id = $1", &[&user_id])
+            .await
+            .map_err(anyhow::Error::from)?;
+
+        tx.execute("DELETE FROM files WHERE user_id = $1", &[&user_id])
+            .await
+            .map_err(anyhow::Error::from)?;
+
+        tx.execute("DELETE FROM user_settings WHERE user_id = $1", &[&user_id])
+            .await
+            .map_err(anyhow::Error::from)?;
+
+        tx.execute(
+            "DELETE FROM user_passkey_credentials WHERE user_id = $1",
+            &[&user_id],
+        )
+        .await
+        .map_err(anyhow::Error::from)?;
+
+        tx.execute("DELETE FROM sessions WHERE user_id = $1", &[&user_id])
+            .await
+            .map_err(anyhow::Error::from)?;
+
+        tx.execute("DELETE FROM oauth_tokens WHERE user_id = $1", &[&user_id])
+            .await
+            .map_err(anyhow::Error::from)?;
+
+        tx.execute("DELETE FROM oauth_accounts WHERE user_id = $1", &[&user_id])
+            .await
+            .map_err(anyhow::Error::from)?;
+
+        tx.execute("DELETE FROM user_bans WHERE user_id = $1", &[&user_id])
+            .await
+            .map_err(anyhow::Error::from)?;
+
+        tx.execute(
+            "DELETE FROM user_activity_log WHERE user_id = $1",
+            &[&user_id],
+        )
+        .await
+        .map_err(anyhow::Error::from)?;
+
+        tx.execute(
+            "DELETE FROM stripe_customers WHERE user_id = $1",
+            &[&user_id],
+        )
+        .await
+        .map_err(anyhow::Error::from)?;
+
+        tx.execute("DELETE FROM user_credits WHERE user_id = $1", &[&user_id])
+            .await
+            .map_err(anyhow::Error::from)?;
+
+        tx.execute("DELETE FROM agent_api_keys WHERE user_id = $1", &[&user_id])
+            .await
+            .map_err(anyhow::Error::from)?;
+
+        tx.execute(
+            "WITH candidates AS (
+                 SELECT id, status AS old_status
+                 FROM agent_instances
+                 WHERE user_id = $1 AND status != 'deleted'
+                 FOR UPDATE
+             ),
+             updated AS (
+                 UPDATE agent_instances ai
+                 SET status = 'deleted',
+                     name = 'deleted-account-instance',
+                     public_ssh_key = NULL,
+                     instance_url = NULL,
+                     instance_token = NULL,
+                     dashboard_url = NULL,
+                     agent_api_base_url = NULL,
+                     updated_at = NOW()
+                 FROM candidates c
+                 WHERE ai.id = c.id
+                 RETURNING ai.id, c.old_status
+             )
+             INSERT INTO agent_instance_status_history
+                 (instance_id, old_status, new_status, changed_by_user_id, change_reason, changed_at)
+             SELECT id, old_status, 'deleted', NULL, 'user_account_deleted', NOW()
+             FROM updated
+             WHERE old_status != 'deleted'",
+            &[&user_id],
+        )
+        .await
+        .map_err(anyhow::Error::from)?;
+
+        let user_email: Option<String> = tx
+            .query_opt("SELECT email FROM users WHERE id = $1", &[&user_id])
+            .await
+            .map_err(anyhow::Error::from)?
+            .map(|row| row.get("email"));
+
+        if let Some(ref email) = user_email {
+            tx.execute(
+                "DELETE FROM email_verification_challenges WHERE email = $1",
+                &[&email],
+            )
+            .await
+            .map_err(anyhow::Error::from)?;
+        }
+
+        let deleted = tx
             .execute("DELETE FROM users WHERE id = $1", &[&user_id])
+            .await
+            .map_err(anyhow::Error::from)?;
+        if deleted == 0 {
+            return Err(AccountDeletionError::UserNotFound);
+        }
+
+        tx.commit().await.map_err(anyhow::Error::from)?;
+        Ok(())
+    }
+
+    async fn create_account_deletion_request(
+        &self,
+        user_id: UserId,
+    ) -> Result<AccountDeletion, AccountDeletionError> {
+        let mut client = self.pool.get().await.map_err(anyhow::Error::from)?;
+        let tx = client.transaction().await.map_err(anyhow::Error::from)?;
+
+        Self::validate_account_deletion_preconditions_with_client(&*tx, user_id, true).await?;
+
+        let row = tx
+            .query_one(
+                "INSERT INTO user_account_deletions (user_id, status)
+                 VALUES ($1, 'pending')
+                 ON CONFLICT (user_id) DO UPDATE
+                    SET updated_at = NOW()
+                 RETURNING id, user_id, status, requested_at, started_at, completed_at,
+                           attempt_count, lease_until, last_error, progress, created_at, updated_at",
+                &[&user_id],
+            )
+            .await
+            .map_err(anyhow::Error::from)?;
+
+        let deletion =
+            Self::account_deletion_from_row(row).map_err(AccountDeletionError::Internal)?;
+
+        if matches!(
+            deletion.status,
+            AccountDeletionStatus::FailedNeedsReview | AccountDeletionStatus::Completed
+        ) {
+            return Err(AccountDeletionError::AlreadyInTerminalState {
+                status: deletion.status,
+            });
+        }
+
+        tx.commit().await.map_err(anyhow::Error::from)?;
+        Ok(deletion)
+    }
+
+    async fn delete_account_deletion_request(&self, deletion_id: Uuid) -> anyhow::Result<()> {
+        let client = self.pool.get().await?;
+        client
+            .execute(
+                "DELETE FROM user_account_deletions WHERE id = $1",
+                &[&deletion_id],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn get_account_deletion_by_user_id(
+        &self,
+        user_id: UserId,
+    ) -> anyhow::Result<Option<AccountDeletion>> {
+        let client = self.pool.get().await?;
+        let row = client
+            .query_opt(
+                "SELECT id, user_id, status, requested_at, started_at, completed_at,
+                        attempt_count, lease_until, last_error, progress, created_at, updated_at
+                 FROM user_account_deletions
+                 WHERE user_id = $1",
+                &[&user_id],
+            )
             .await?;
 
+        row.map(Self::account_deletion_from_row).transpose()
+    }
+
+    async fn get_account_deletion(
+        &self,
+        deletion_id: Uuid,
+    ) -> anyhow::Result<Option<AccountDeletion>> {
+        let client = self.pool.get().await?;
+        let row = client
+            .query_opt(
+                "SELECT id, user_id, status, requested_at, started_at, completed_at,
+                        attempt_count, lease_until, last_error, progress, created_at, updated_at
+                 FROM user_account_deletions
+                 WHERE id = $1",
+                &[&deletion_id],
+            )
+            .await?;
+
+        row.map(Self::account_deletion_from_row).transpose()
+    }
+
+    async fn claim_account_deletion(
+        &self,
+        deletion_id: Uuid,
+        lease_seconds: i64,
+    ) -> anyhow::Result<Option<AccountDeletion>> {
+        let client = self.pool.get().await?;
+        let row = client
+            .query_opt(
+                "UPDATE user_account_deletions
+                 SET status = 'processing',
+                     started_at = COALESCE(started_at, NOW()),
+                     attempt_count = attempt_count + 1,
+                     lease_until = NOW() + ($2::bigint * INTERVAL '1 second'),
+                     last_error = NULL,
+                     updated_at = NOW()
+                 WHERE id = $1
+                   AND status IN ('pending', 'retrying', 'processing')
+                   AND (lease_until IS NULL OR lease_until < NOW() OR status IN ('pending', 'retrying'))
+                 RETURNING id, user_id, status, requested_at, started_at, completed_at,
+                           attempt_count, lease_until, last_error, progress, created_at, updated_at",
+                &[&deletion_id, &lease_seconds],
+            )
+            .await?;
+
+        row.map(Self::account_deletion_from_row).transpose()
+    }
+
+    async fn update_account_deletion_progress(
+        &self,
+        deletion_id: Uuid,
+        progress: serde_json::Value,
+        lease_seconds: i64,
+    ) -> anyhow::Result<()> {
+        let client = self.pool.get().await?;
+        client
+            .execute(
+                "UPDATE user_account_deletions
+                 SET progress = $2,
+                     lease_until = NOW() + ($3::bigint * INTERVAL '1 second'),
+                     updated_at = NOW()
+                 WHERE id = $1",
+                &[&deletion_id, &progress, &lease_seconds],
+            )
+            .await?;
         Ok(())
+    }
+
+    async fn mark_account_deletion_retrying(
+        &self,
+        deletion_id: Uuid,
+        last_error: String,
+        progress: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let client = self.pool.get().await?;
+        client
+            .execute(
+                "UPDATE user_account_deletions
+                 SET status = 'retrying',
+                     lease_until = NULL,
+                     last_error = $2,
+                     progress = $3,
+                     updated_at = NOW()
+                 WHERE id = $1
+                   AND status <> 'completed'",
+                &[&deletion_id, &last_error, &progress],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn mark_account_deletion_completed(&self, deletion_id: Uuid) -> anyhow::Result<()> {
+        let client = self.pool.get().await?;
+        client
+            .execute(
+                "UPDATE user_account_deletions
+                 SET status = 'completed',
+                     lease_until = NULL,
+                     completed_at = COALESCE(completed_at, NOW()),
+                     last_error = NULL,
+                     updated_at = NOW()
+                 WHERE id = $1",
+                &[&deletion_id],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn mark_account_deletion_failed_needs_review(
+        &self,
+        deletion_id: Uuid,
+        last_error: String,
+        progress: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let client = self.pool.get().await?;
+        client
+            .execute(
+                "UPDATE user_account_deletions
+                 SET status = 'failed_needs_review',
+                     lease_until = NULL,
+                     last_error = $2,
+                     progress = $3,
+                     updated_at = NOW()
+                 WHERE id = $1
+                   AND status <> 'completed'",
+                &[&deletion_id, &last_error, &progress],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn list_owned_conversation_ids(&self, user_id: UserId) -> anyhow::Result<Vec<String>> {
+        let client = self.pool.get().await?;
+        let rows = client
+            .query(
+                "SELECT id FROM conversations WHERE user_id = $1 ORDER BY id",
+                &[&user_id],
+            )
+            .await?;
+        Ok(rows.into_iter().map(|row| row.get("id")).collect())
+    }
+
+    async fn list_owned_file_ids(&self, user_id: UserId) -> anyhow::Result<Vec<String>> {
+        let client = self.pool.get().await?;
+        let rows = client
+            .query(
+                "SELECT id FROM files WHERE user_id = $1 ORDER BY id",
+                &[&user_id],
+            )
+            .await?;
+        Ok(rows.into_iter().map(|row| row.get("id")).collect())
+    }
+
+    async fn list_account_deletions(
+        &self,
+        status: Option<AccountDeletionStatus>,
+        limit: i64,
+        offset: i64,
+    ) -> anyhow::Result<Vec<AccountDeletion>> {
+        let client = self.pool.get().await?;
+        let rows = if let Some(ref s) = status {
+            client
+                .query(
+                    "SELECT id, user_id, status, requested_at, started_at, completed_at,
+                            attempt_count, lease_until, last_error, progress, created_at, updated_at
+                     FROM user_account_deletions
+                     WHERE status = $1
+                     ORDER BY created_at DESC
+                     LIMIT $2 OFFSET $3",
+                    &[&s.as_str(), &limit, &offset],
+                )
+                .await?
+        } else {
+            client
+                .query(
+                    "SELECT id, user_id, status, requested_at, started_at, completed_at,
+                            attempt_count, lease_until, last_error, progress, created_at, updated_at
+                     FROM user_account_deletions
+                     ORDER BY created_at DESC
+                     LIMIT $1 OFFSET $2",
+                    &[&limit, &offset],
+                )
+                .await?
+        };
+        rows.into_iter()
+            .map(Self::account_deletion_from_row)
+            .collect()
+    }
+
+    async fn validate_account_deletion_preconditions(
+        &self,
+        user_id: UserId,
+    ) -> Result<(), AccountDeletionError> {
+        let mut client = self.pool.get().await.map_err(anyhow::Error::from)?;
+        let tx = client.transaction().await.map_err(anyhow::Error::from)?;
+        Self::validate_account_deletion_preconditions_with_client(&*tx, user_id, false).await
     }
 
     async fn get_linked_accounts(

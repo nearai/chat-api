@@ -1,11 +1,14 @@
 use crate::{error::ApiError, middleware::AuthenticatedUser, models::*, state::AppState};
 use axum::{
     extract::{Extension, Query, State},
+    http::StatusCode,
     routing::{get, patch, post},
     Json, Router,
 };
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
+use services::tasks::{AccountDeletionTaskPayload, TaskId, TaskMessage, TaskPayload};
+use services::user::ports::AccountDeletionError;
 /// Get current user
 ///
 /// Returns the profile of the currently authenticated user, including their linked OAuth accounts.
@@ -39,6 +42,120 @@ pub async fn get_current_user(
         })?;
 
     Ok(Json(profile.into()))
+}
+
+/// Delete current user account
+///
+/// Requests asynchronous account deletion after verifying the user has no active subscriptions
+/// and no running/provisioning/error instances.
+#[utoipa::path(
+    delete,
+    path = "/v1/users/me",
+    tag = "Users",
+    responses(
+        (status = 202, description = "User account deletion requested", body = UserAccountDeletionResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "User not found", body = crate::error::ApiErrorResponse),
+        (status = 409, description = "Account cannot be deleted until subscriptions are inactive and instances are stopped", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn delete_current_user(
+    State(app_state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+) -> Result<(StatusCode, Json<UserAccountDeletionResponse>), ApiError> {
+    tracing::warn!(
+        "Requesting current user account deletion: user_id={}",
+        user.user_id
+    );
+
+    let task_publisher = app_state
+        .account_deletion_task_publisher
+        .as_ref()
+        .ok_or_else(|| {
+            ApiError::internal_server_error("Account deletion queue is not configured")
+        })?;
+
+    let deletion = app_state
+        .user_service
+        .create_account_deletion_request(user.user_id)
+        .await
+        .map_err(account_deletion_error_to_api_error)?;
+
+    let task_id = TaskId::new(format!("account-deletion-{}", deletion.id)).map_err(|e| {
+        tracing::error!("Failed to create account deletion task id: {}", e);
+        ApiError::internal_server_error("Failed to enqueue account deletion")
+    })?;
+    let message = TaskMessage {
+        task_id,
+        payload: TaskPayload::AccountDeletion(AccountDeletionTaskPayload {
+            deletion_id: deletion.id,
+        }),
+    };
+
+    if let Err(e) = task_publisher.publish(message).await {
+        tracing::error!(
+            "Failed to enqueue account deletion task, cleaning up request: user_id={}, deletion_id={}, error={:#}",
+            user.user_id,
+            deletion.id,
+            e
+        );
+        let _ = app_state
+            .user_service
+            .delete_account_deletion_request(deletion.id)
+            .await;
+        return Err(ApiError::internal_server_error(
+            "Failed to enqueue account deletion",
+        ));
+    }
+
+    Ok((StatusCode::ACCEPTED, Json(deletion.into())))
+}
+
+fn account_deletion_error_to_api_error(e: AccountDeletionError) -> ApiError {
+    match e {
+        AccountDeletionError::UserNotFound => {
+            tracing::warn!("Account deletion failed: user not found");
+            ApiError::not_found("User not found")
+        }
+        AccountDeletionError::ActiveSubscriptions { count } => {
+            tracing::warn!("Account deletion blocked: {count} active subscription(s) exist");
+            ApiError::conflict(format!(
+                "Cannot delete account while {count} active subscription(s) exist"
+            ))
+        }
+        AccountDeletionError::InstancesNotStopped { count, statuses } => {
+            tracing::warn!(
+                "Account deletion blocked: {count} instance(s) not stopped (statuses: {})",
+                statuses.join(", ")
+            );
+            ApiError::conflict(format!(
+                "Cannot delete account while {count} instance(s) are not stopped",
+            ))
+            .with_details(format!(
+                "Blocking instance statuses: {}",
+                statuses.join(", ")
+            ))
+        }
+        AccountDeletionError::ConversationCleanupIncomplete { conversation_ids } => {
+            tracing::error!(
+                "Unexpected ConversationCleanupIncomplete during delete request validation/create path: {}",
+                conversation_ids.join(", ")
+            );
+            ApiError::internal_server_error("Failed to delete account")
+        }
+        AccountDeletionError::AlreadyInTerminalState { status } => {
+            tracing::warn!("Account deletion blocked: already in terminal state ({status})");
+            ApiError::conflict(format!("Account deletion is already {status}"))
+        }
+        AccountDeletionError::Internal(err) => {
+            tracing::error!("Failed to delete account: {:#}", err);
+            ApiError::internal_server_error("Failed to delete account")
+        }
+    }
 }
 
 /// Query parameters for usage time range.
@@ -248,7 +365,7 @@ pub async fn update_user_settings_partially(
 /// Create user router with all routes (requires authentication)
 pub fn create_user_router() -> Router<AppState> {
     Router::new()
-        .route("/me", get(get_current_user))
+        .route("/me", get(get_current_user).delete(delete_current_user))
         .route("/me/usage", get(get_my_usage))
         .route("/me/settings", get(get_user_settings))
         .route("/me/settings", post(update_user_settings))

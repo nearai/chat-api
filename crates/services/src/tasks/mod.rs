@@ -2,6 +2,7 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
+use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
@@ -88,6 +89,11 @@ pub struct CleanupCanceledInstancesTaskPayload {
     pub dry_run: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AccountDeletionTaskPayload {
+    pub deletion_id: Uuid,
+}
+
 pub const CLEANUP_CANCELED_INSTANCES_DAILY_CRON_UTC: &str = "cron(0 0 * * ? *)";
 pub const CLEANUP_CANCELED_INSTANCES_DEFAULT_GRACE_DAYS: i64 = 15;
 
@@ -96,6 +102,7 @@ pub const CLEANUP_CANCELED_INSTANCES_DEFAULT_GRACE_DAYS: i64 = 15;
 pub enum TaskPayload {
     Noop(NoopTaskPayload),
     CleanupCanceledInstances(CleanupCanceledInstancesTaskPayload),
+    AccountDeletion(AccountDeletionTaskPayload),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -153,6 +160,11 @@ pub trait TaskExecutor: Send + Sync {
         &self,
         payload: &CleanupCanceledInstancesTaskPayload,
     ) -> anyhow::Result<()>;
+
+    async fn execute_account_deletion(
+        &self,
+        payload: &AccountDeletionTaskPayload,
+    ) -> anyhow::Result<()>;
 }
 
 pub async fn dispatch_task<E>(executor: &E, payload: &TaskPayload) -> anyhow::Result<()>
@@ -164,6 +176,7 @@ where
         TaskPayload::CleanupCanceledInstances(payload) => {
             executor.execute_cleanup_canceled_instances(payload).await
         }
+        TaskPayload::AccountDeletion(payload) => executor.execute_account_deletion(payload).await,
     }
 }
 
@@ -243,6 +256,7 @@ mod tests {
         match msg.payload {
             TaskPayload::Noop(payload) => assert_eq!(payload.note.as_deref(), Some("hello")),
             TaskPayload::CleanupCanceledInstances(_) => panic!("unexpected payload variant"),
+            TaskPayload::AccountDeletion(_) => panic!("unexpected payload variant"),
         }
     }
 
@@ -271,6 +285,7 @@ mod tests {
                 assert!(!payload.dry_run);
             }
             TaskPayload::Noop(_) => panic!("unexpected payload variant"),
+            TaskPayload::AccountDeletion(_) => panic!("unexpected payload variant"),
         }
     }
 
@@ -291,6 +306,13 @@ mod tests {
             _: &CleanupCanceledInstancesTaskPayload,
         ) -> anyhow::Result<()> {
             self.cleanup_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn execute_account_deletion(
+            &self,
+            _: &AccountDeletionTaskPayload,
+        ) -> anyhow::Result<()> {
             Ok(())
         }
     }

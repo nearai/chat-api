@@ -354,6 +354,7 @@ pub async fn create_test_server_and_db(
         system_configs_cache: Arc::new(tokio::sync::RwLock::new(None)),
         rate_limit_state,
         bi_metrics_service,
+        account_deletion_task_publisher: Some(Arc::new(api::tasks::NoopTaskPublisher)),
     };
 
     // Create router
@@ -629,6 +630,13 @@ pub async fn cleanup_user_agent_instances(db: &database::Database, user_email: &
         .ok();
     client
         .execute(
+            "DELETE FROM agent_instance_status_history WHERE instance_id IN (SELECT id FROM agent_instances WHERE user_id = $1)",
+            &[&user.id],
+        )
+        .await
+        .ok();
+    client
+        .execute(
             "DELETE FROM agent_instances WHERE user_id = $1",
             &[&user.id],
         )
@@ -682,7 +690,7 @@ pub async fn cleanup_user_usage(db: &database::Database, user_email: &str) {
         .expect("delete usage events");
 }
 
-/// Delete a user by email ( cascades to subscriptions, sessions, etc. via FK).
+/// Delete a user by email after removing account-owned rows that use restrictive FKs.
 pub async fn cleanup_user(db: &database::Database, user_email: &str) {
     let user = match db
         .user_repository()
@@ -695,6 +703,10 @@ pub async fn cleanup_user(db: &database::Database, user_email: &str) {
     };
 
     let client = db.pool().get().await.expect("get pool client");
+    client
+        .execute("DELETE FROM sessions WHERE user_id = $1", &[&user.id])
+        .await
+        .expect("delete user sessions");
     client
         .execute("DELETE FROM users WHERE id = $1", &[&user.id])
         .await
