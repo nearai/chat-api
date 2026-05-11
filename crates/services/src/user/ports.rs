@@ -173,6 +173,9 @@ pub trait UserRepository: Send + Sync {
         user_id: UserId,
     ) -> Result<AccountDeletion, AccountDeletionError>;
 
+    /// Delete an account deletion request (used for rollback when task enqueue fails).
+    async fn delete_account_deletion_request(&self, deletion_id: Uuid) -> anyhow::Result<()>;
+
     async fn get_account_deletion_by_user_id(
         &self,
         user_id: UserId,
@@ -214,6 +217,9 @@ pub trait UserRepository: Send + Sync {
 
     /// List locally tracked conversations owned by a user.
     async fn list_owned_conversation_ids(&self, user_id: UserId) -> anyhow::Result<Vec<String>>;
+
+    /// List file IDs owned by a user (for provider cleanup before account deletion).
+    async fn list_owned_file_ids(&self, user_id: UserId) -> anyhow::Result<Vec<String>>;
 
     /// Validate current account deletion preconditions without deleting any data.
     async fn validate_account_deletion_preconditions(
@@ -282,10 +288,16 @@ pub trait UserService: Send + Sync {
         user_id: UserId,
     ) -> Result<AccountDeletion, AccountDeletionError>;
 
+    /// Delete an account deletion request (rollback when task enqueue fails).
+    async fn delete_account_deletion_request(&self, deletion_id: Uuid) -> anyhow::Result<()>;
+
     async fn is_account_deletion_requested(&self, user_id: UserId) -> anyhow::Result<bool>;
 
     /// List locally tracked conversations owned by a user.
     async fn list_owned_conversation_ids(&self, user_id: UserId) -> anyhow::Result<Vec<String>>;
+
+    /// List file IDs owned by a user (for provider cleanup before account deletion).
+    async fn list_owned_file_ids(&self, user_id: UserId) -> anyhow::Result<Vec<String>>;
 
     /// Validate current account deletion preconditions without deleting any data.
     async fn validate_account_deletion_preconditions(

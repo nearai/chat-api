@@ -332,6 +332,28 @@ impl TaskExecutor for DefaultTaskExecutor {
                 .context("failed to update account deletion progress")?;
         }
 
+        let file_ids = self
+            .user_repository
+            .list_owned_file_ids(request.user_id)
+            .await
+            .context("failed to list account files")?;
+
+        for file_id in &file_ids {
+            if let Err(err) = self
+                .conversation_service
+                .delete_file_from_provider(file_id)
+                .await
+            {
+                let progress = build_account_deletion_progress(&cloud_deleted_conversation_ids);
+                let last_error = format!("failed to delete provider file {file_id}: {err}");
+                self.user_repository
+                    .mark_account_deletion_retrying(request.id, last_error.clone(), progress)
+                    .await
+                    .context("failed to mark account deletion retrying")?;
+                anyhow::bail!(last_error);
+            }
+        }
+
         match self
             .user_repository
             .delete_user_account(request.user_id, &cloud_deleted_conversation_ids)

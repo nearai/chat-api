@@ -96,15 +96,21 @@ pub async fn delete_current_user(
         }),
     };
 
-    task_publisher.publish(message).await.map_err(|e| {
+    if let Err(e) = task_publisher.publish(message).await {
         tracing::error!(
-            "Failed to enqueue account deletion task: user_id={}, deletion_id={}, error={:#}",
+            "Failed to enqueue account deletion task, cleaning up request: user_id={}, deletion_id={}, error={:#}",
             user.user_id,
             deletion.id,
             e
         );
-        ApiError::internal_server_error("Failed to enqueue account deletion")
-    })?;
+        let _ = app_state
+            .user_service
+            .delete_account_deletion_request(deletion.id)
+            .await;
+        return Err(ApiError::internal_server_error(
+            "Failed to enqueue account deletion",
+        ));
+    }
 
     Ok((StatusCode::ACCEPTED, Json(deletion.into())))
 }
