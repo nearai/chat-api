@@ -117,17 +117,29 @@ pub async fn delete_current_user(
 
 fn account_deletion_error_to_api_error(e: AccountDeletionError) -> ApiError {
     match e {
-        AccountDeletionError::UserNotFound => ApiError::not_found("User not found"),
-        AccountDeletionError::ActiveSubscriptions { count } => ApiError::conflict(format!(
-            "Cannot delete account while {count} active subscription(s) exist"
-        )),
-        AccountDeletionError::InstancesNotStopped { count, statuses } => ApiError::conflict(
-            format!("Cannot delete account while {count} instance(s) are not stopped"),
-        )
-        .with_details(format!(
-            "Blocking instance statuses: {}",
-            statuses.join(", ")
-        )),
+        AccountDeletionError::UserNotFound => {
+            tracing::warn!("Account deletion failed: user not found");
+            ApiError::not_found("User not found")
+        }
+        AccountDeletionError::ActiveSubscriptions { count } => {
+            tracing::warn!("Account deletion blocked: {count} active subscription(s) exist");
+            ApiError::conflict(format!(
+                "Cannot delete account while {count} active subscription(s) exist"
+            ))
+        }
+        AccountDeletionError::InstancesNotStopped { count, statuses } => {
+            tracing::warn!(
+                "Account deletion blocked: {count} instance(s) not stopped (statuses: {})",
+                statuses.join(", ")
+            );
+            ApiError::conflict(format!(
+                "Cannot delete account while {count} instance(s) are not stopped",
+            ))
+            .with_details(format!(
+                "Blocking instance statuses: {}",
+                statuses.join(", ")
+            ))
+        }
         AccountDeletionError::ConversationCleanupIncomplete { conversation_ids } => {
             tracing::error!(
                 "Unexpected ConversationCleanupIncomplete during delete request validation/create path: {}",
@@ -136,6 +148,7 @@ fn account_deletion_error_to_api_error(e: AccountDeletionError) -> ApiError {
             ApiError::internal_server_error("Failed to delete account")
         }
         AccountDeletionError::AlreadyInTerminalState { status } => {
+            tracing::warn!("Account deletion blocked: already in terminal state ({status})");
             ApiError::conflict(format!("Account deletion is already {status}"))
         }
         AccountDeletionError::Internal(err) => {
