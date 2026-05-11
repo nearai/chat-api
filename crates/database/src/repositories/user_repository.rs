@@ -227,6 +227,20 @@ impl UserRepository for PostgresUserRepository {
         })
     }
 
+    /// Delete all account data that can be tied to the user.
+    ///
+    /// Explicitly deleted: conversations, files, user_settings, sessions, oauth
+    /// data, billing rows (stripe_customers, user_credits, subscriptions*),
+    /// sharing groups, agent api keys, activity log, bans, passkey credentials,
+    /// email verification challenges, and the users row itself.
+    /// Agent instances are soft-deleted (status = 'deleted', credentials wiped).
+    ///
+    /// Intentionally retained for audit / billing reconciliation:
+    /// - agent_usage_log, user_usage_event, credit_transactions – their user_id
+    ///   FK was removed in V34 so they survive the users row deletion.
+    /// - agent_instance_status_history – changed_by_user_id is SET NULL on
+    ///   instance delete; old history rows remain.
+    /// - user_account_deletions – the deletion audit record itself.
     async fn delete_user_account(
         &self,
         user_id: UserId,
