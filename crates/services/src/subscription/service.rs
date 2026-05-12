@@ -821,7 +821,9 @@ impl SubscriptionServiceImpl {
             .get_configs()
             .await
             .map_err(|e| SubscriptionError::InternalError(e.to_string()))?;
-        let subscription_plans = configs.and_then(|c| c.subscription_plans).unwrap_or_default();
+        let subscription_plans = configs
+            .and_then(|c| c.subscription_plans)
+            .unwrap_or_default();
         let Some(anchor_price_id) = Self::anchor_hos_price_id(&subscription_plans) else {
             return Ok(());
         };
@@ -1137,7 +1139,10 @@ impl SubscriptionService for SubscriptionServiceImpl {
         &self,
         provider: Option<&str>,
     ) -> Result<Vec<SubscriptionPlan>, SubscriptionError> {
-        tracing::debug!("Getting available subscription plans provider={:?}", provider);
+        tracing::debug!(
+            "Getting available subscription plans provider={:?}",
+            provider
+        );
 
         let provider_key = match provider.map(|p| p.to_lowercase()).as_deref() {
             None | Some("stripe") => "stripe",
@@ -1333,12 +1338,15 @@ impl SubscriptionService for SubscriptionServiceImpl {
             if contract_id.is_empty() {
                 return Err(SubscriptionError::HouseOfStakeNotConfigured);
             }
-            let price_json = view_get_price(&self.near_rpc_url, contract_id, &subscription.price_id)
-                .await
-                .map_err(Self::near_rpc_err)?
-                .ok_or_else(|| {
-                    SubscriptionError::InternalError("HoS catalog price not found on-chain".into())
-                })?;
+            let price_json =
+                view_get_price(&self.near_rpc_url, contract_id, &subscription.price_id)
+                    .await
+                    .map_err(Self::near_rpc_err)?
+                    .ok_or_else(|| {
+                        SubscriptionError::InternalError(
+                            "HoS catalog price not found on-chain".into(),
+                        )
+                    })?;
             let product_id = price_json
                 .get("product_id")
                 .and_then(|x| x.as_str())
@@ -1434,12 +1442,15 @@ impl SubscriptionService for SubscriptionServiceImpl {
             if contract_id.is_empty() {
                 return Err(SubscriptionError::HouseOfStakeNotConfigured);
             }
-            let price_json = view_get_price(&self.near_rpc_url, contract_id, &subscription.price_id)
-                .await
-                .map_err(Self::near_rpc_err)?
-                .ok_or_else(|| {
-                    SubscriptionError::InternalError("HoS catalog price not found on-chain".into())
-                })?;
+            let price_json =
+                view_get_price(&self.near_rpc_url, contract_id, &subscription.price_id)
+                    .await
+                    .map_err(Self::near_rpc_err)?
+                    .ok_or_else(|| {
+                        SubscriptionError::InternalError(
+                            "HoS catalog price not found on-chain".into(),
+                        )
+                    })?;
             let product_id = price_json
                 .get("product_id")
                 .and_then(|x| x.as_str())
@@ -1507,7 +1518,10 @@ impl SubscriptionService for SubscriptionServiceImpl {
         Ok(ResumeSubscriptionOutcome::Completed)
     }
 
-    async fn sync_near_staking_subscription(&self, user_id: UserId) -> Result<(), SubscriptionError> {
+    async fn sync_near_staking_subscription(
+        &self,
+        user_id: UserId,
+    ) -> Result<(), SubscriptionError> {
         self.reconcile_near_staking_from_rpc(user_id).await
     }
 
@@ -1560,12 +1574,15 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 return Ok(ChangePlanOutcome::NoOp);
             }
 
-            let cur_price_j = view_get_price(&self.near_rpc_url, contract_id, &subscription.price_id)
-                .await
-                .map_err(Self::near_rpc_err)?
-                .ok_or_else(|| {
-                    SubscriptionError::InternalError("HoS current price not found on-chain".into())
-                })?;
+            let cur_price_j =
+                view_get_price(&self.near_rpc_url, contract_id, &subscription.price_id)
+                    .await
+                    .map_err(Self::near_rpc_err)?
+                    .ok_or_else(|| {
+                        SubscriptionError::InternalError(
+                            "HoS current price not found on-chain".into(),
+                        )
+                    })?;
             let new_price_j = view_get_price(&self.near_rpc_url, contract_id, &price_id)
                 .await
                 .map_err(Self::near_rpc_err)?
@@ -1573,8 +1590,14 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     SubscriptionError::InternalError("HoS target price not found on-chain".into())
                 })?;
 
-            let cur_prod = cur_price_j.get("product_id").and_then(|x| x.as_str()).unwrap_or("");
-            let new_prod = new_price_j.get("product_id").and_then(|x| x.as_str()).unwrap_or("");
+            let cur_prod = cur_price_j
+                .get("product_id")
+                .and_then(|x| x.as_str())
+                .unwrap_or("");
+            let new_prod = new_price_j
+                .get("product_id")
+                .and_then(|x| x.as_str())
+                .unwrap_or("");
             if cur_prod != new_prod {
                 return Err(SubscriptionError::InvalidPlan(
                     "Target plan must belong to the same catalog product as the current subscription"

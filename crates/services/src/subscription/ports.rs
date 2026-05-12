@@ -779,7 +779,10 @@ pub trait SubscriptionService: Send + Sync {
     ) -> Result<ResumeSubscriptionOutcome, SubscriptionError>;
 
     /// Re-fetch staking subscription from RPC and upsert/delete the local `house-of-stake` row.
-    async fn sync_near_staking_subscription(&self, user_id: UserId) -> Result<(), SubscriptionError>;
+    async fn sync_near_staking_subscription(
+        &self,
+        user_id: UserId,
+    ) -> Result<(), SubscriptionError>;
 
     /// Change the user's subscription to a different plan.
     /// Upgrades are applied immediately; downgrades are scheduled for period-end checks.

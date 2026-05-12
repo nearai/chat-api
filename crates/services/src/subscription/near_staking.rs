@@ -83,13 +83,13 @@ pub fn subscription_row_from_chain_json(
         .ok_or_else(|| "missing price_id".to_string())?
         .to_string();
 
-    let end_ns = json_u64(v.get("end_ns").ok_or_else(|| "missing end_ns".to_string())?)?;
+    let end_ns = json_u64(
+        v.get("end_ns")
+            .ok_or_else(|| "missing end_ns".to_string())?,
+    )?;
     let current_period_end = ts_ns_to_datetime(end_ns)?;
 
-    let status_raw = v
-        .get("status")
-        .and_then(|x| x.as_str())
-        .unwrap_or("Active");
+    let status_raw = v.get("status").and_then(|x| x.as_str()).unwrap_or("Active");
     let status_lower = status_raw.to_ascii_lowercase();
     let status = match status_lower.as_str() {
         "active" => "active".to_string(),
@@ -152,7 +152,9 @@ pub fn subscription_row_from_chain_json(
 
 fn json_u64(v: &Value) -> Result<u64, String> {
     match v {
-        Value::String(s) => s.parse::<u64>().map_err(|e: std::num::ParseIntError| e.to_string()),
+        Value::String(s) => s
+            .parse::<u64>()
+            .map_err(|e: std::num::ParseIntError| e.to_string()),
         Value::Number(n) => n.as_u64().ok_or_else(|| "expected u64".to_string()),
         _ => Err("bad json for u64".to_string()),
     }

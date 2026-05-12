@@ -355,11 +355,12 @@ pub async fn resume_subscription(
         })?;
 
     let (message, near_wallet_intent) = match outcome {
-        ResumeSubscriptionOutcome::Completed => ("Subscription resumed successfully".to_string(), None),
-        ResumeSubscriptionOutcome::NearWalletIntent(p) => (
-            "Complete resume in your NEAR wallet".to_string(),
-            Some(p),
-        ),
+        ResumeSubscriptionOutcome::Completed => {
+            ("Subscription resumed successfully".to_string(), None)
+        }
+        ResumeSubscriptionOutcome::NearWalletIntent(p) => {
+            ("Complete resume in your NEAR wallet".to_string(), Some(p))
+        }
     };
 
     Ok(Json(ResumeSubscriptionResponse {
@@ -475,7 +476,10 @@ pub async fn list_plans(
     State(app_state): State<AppState>,
     Query(params): Query<ListPlansParams>,
 ) -> Result<Json<ListPlansResponse>, ApiError> {
-    tracing::debug!("Listing available subscription plans provider={:?}", params.provider);
+    tracing::debug!(
+        "Listing available subscription plans provider={:?}",
+        params.provider
+    );
 
     let provider_filter = params
         .provider
