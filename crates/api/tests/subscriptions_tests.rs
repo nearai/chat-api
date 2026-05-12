@@ -781,6 +781,10 @@ async fn test_list_subscriptions_successfully() {
     let sub = &subscriptions[0];
     assert_eq!(sub.get("plan").and_then(|v| v.as_str()), Some("basic"));
     assert_eq!(
+        sub.get("price_id").and_then(|v| v.as_str()),
+        Some("price_test_basic")
+    );
+    assert_eq!(
         sub.get("cancel_at_period_end").and_then(|v| v.as_bool()),
         Some(false)
     );

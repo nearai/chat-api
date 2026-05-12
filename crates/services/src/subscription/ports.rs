@@ -88,13 +88,14 @@ pub struct SubscriptionReplacement {
     pub pending_downgrade_updated_at: Option<DateTime<Utc>>,
 }
 
-/// API response model with plan name resolved from price_id
+/// API response model with plan name resolved from `price_id` (HoS clients use `price_id` + `provider` for wallet flows).
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubscriptionWithPlan {
     pub subscription_id: String,
     pub user_id: String,
     pub provider: String,
+    pub price_id: String,
     pub plan: String, // Resolved from price_id
     pub status: String,
     pub current_period_end: DateTime<Utc>,
@@ -132,51 +133,24 @@ pub enum ChangePlanOutcome {
     NoOp,
     /// A pending downgrade was cancelled (same plan requested with active pending downgrade).
     DowngradeCancelled,
-    /// Complete the change by signing NEAR transactions (`near_wallet_intent`).
-    NearWalletIntent(NearWalletIntentPayload),
+    /// HoS: call `upgrade_subscription` in the wallet with this `new_price_id` (contract + network from app config).
+    NearStakingUpgrade { new_price_id: String },
+    /// HoS: call `schedule_downgrade_subscription` with this `target_price_id`.
+    NearStakingScheduleDowngrade { target_price_id: String },
 }
 
-/// Bundle returned when Stripe-equivalent operations are executed on-chain via the user's wallet.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-pub struct NearWalletIntentPayload {
-    pub contract_id: String,
-    pub network_id: String,
-    pub actions: Vec<NearWalletAction>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-pub struct NearWalletAction {
-    pub method_name: String,
-    pub args: serde_json::Value,
-    pub deposit: NearDepositKind,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum NearDepositKind {
-    /// Attach exactly 1 yoctoNEAR (`assert_one_yocto` paths).
-    YoctoOne,
-    /// Attach stake according to catalog rules (`lock_for_subscription`, `upgrade_subscription`, etc.).
-    AttachNear,
-}
-
-/// Stripe cancellation completed, or NEAR wallet intents for `cancel_subscription`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+/// Stripe path updated DB; HoS path leaves chain to the wallet (`price_id` on GET /subscriptions).
+#[derive(Debug, Clone)]
 pub enum CancelSubscriptionOutcome {
     Completed,
-    NearWalletIntent(NearWalletIntentPayload),
+    NearStakingCancel,
 }
 
-/// Stripe resume completed, or NEAR wallet intents for `resume_subscription`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+/// Stripe path updated DB; HoS path leaves chain to the wallet (`price_id` on GET /subscriptions).
+#[derive(Debug, Clone)]
 pub enum ResumeSubscriptionOutcome {
     Completed,
-    NearWalletIntent(NearWalletIntentPayload),
+    NearStakingResume,
 }
 
 /// Stripe customer mapping data
@@ -728,22 +702,18 @@ pub struct SubscriptionPlan {
     pub allowed_models: Option<Vec<String>>,
 }
 
-/// Result of [`SubscriptionService::create_subscription`]: Stripe redirect or on-chain lock intent.
+/// Result of [`SubscriptionService::create_subscription`]: Stripe redirect or HoS catalog `price_id` for a client-side `lock_for_subscription`.
 ///
 /// Serialized JSON:
-/// - **Stripe** — legacy flat object `{"checkout_url":"..."}` (backward compatible with pre-enum clients).
-/// - **NEAR** — `{"kind":"near_wallet_intent","contract_id","network_id","actions"}`.
+/// - **Stripe** — legacy flat object `{"checkout_url":"..."}`.
+/// - **HoS** — `{"kind":"near_stake_lock","price_id":"..."}` (contract, network, and call shape live in the app).
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub enum CreateSubscriptionOutcome {
     /// Complete checkout on Stripe (`checkout_url`).
     StripeCheckout { checkout_url: String },
-    /// Sign one or more NEAR calls against the staking contract (`NEAR_STAKING_CONTRACT_ID`).
-    NearWalletIntent {
-        contract_id: String,
-        network_id: String,
-        actions: Vec<NearWalletAction>,
-    },
+    /// Catalog recurring price id for `lock_for_subscription` (client supplies `product_id` xor `price_id` per contract rules).
+    NearStakeLock { price_id: String },
 }
 
 impl Serialize for CreateSubscriptionOutcome {
@@ -758,16 +728,10 @@ impl Serialize for CreateSubscriptionOutcome {
                 st.serialize_field("checkout_url", checkout_url)?;
                 st.end()
             }
-            CreateSubscriptionOutcome::NearWalletIntent {
-                contract_id,
-                network_id,
-                actions,
-            } => {
-                let mut st = serializer.serialize_struct("NearWalletIntent", 4)?;
-                st.serialize_field("kind", &"near_wallet_intent")?;
-                st.serialize_field("contract_id", contract_id)?;
-                st.serialize_field("network_id", network_id)?;
-                st.serialize_field("actions", actions)?;
+            CreateSubscriptionOutcome::NearStakeLock { price_id } => {
+                let mut st = serializer.serialize_struct("NearStakeLock", 2)?;
+                st.serialize_field("kind", &"near_stake_lock")?;
+                st.serialize_field("price_id", price_id)?;
                 st.end()
             }
         }
@@ -784,36 +748,28 @@ impl<'de> Deserialize<'de> for CreateSubscriptionOutcome {
         let obj = v
             .as_object()
             .ok_or_else(|| D::Error::custom("create subscription outcome must be a JSON object"))?;
-        if obj.contains_key("contract_id") && obj.contains_key("actions") {
-            let contract_id = obj
-                .get("contract_id")
-                .and_then(|x| x.as_str())
-                .ok_or_else(|| D::Error::custom("missing contract_id"))?
-                .to_string();
-            let network_id = obj
-                .get("network_id")
-                .and_then(|x| x.as_str())
-                .ok_or_else(|| D::Error::custom("missing network_id"))?
-                .to_string();
-            let actions_val = obj
-                .get("actions")
-                .cloned()
-                .ok_or_else(|| D::Error::custom("missing actions"))?;
-            let actions: Vec<NearWalletAction> =
-                serde_json::from_value(actions_val).map_err(|e| D::Error::custom(e.to_string()))?;
-            return Ok(CreateSubscriptionOutcome::NearWalletIntent {
-                contract_id,
-                network_id,
-                actions,
-            });
-        }
         if let Some(url) = obj.get("checkout_url").and_then(|x| x.as_str()) {
             return Ok(CreateSubscriptionOutcome::StripeCheckout {
                 checkout_url: url.to_string(),
             });
         }
+        if let Some(kind) = obj.get("kind").and_then(|x| x.as_str()) {
+            if kind == "near_stake_lock" {
+                let price_id = obj
+                    .get("price_id")
+                    .and_then(|x| x.as_str())
+                    .ok_or_else(|| D::Error::custom("missing price_id"))?
+                    .to_string();
+                return Ok(CreateSubscriptionOutcome::NearStakeLock { price_id });
+            }
+        }
+        if let Some(pid) = obj.get("price_id").and_then(|x| x.as_str()) {
+            return Ok(CreateSubscriptionOutcome::NearStakeLock {
+                price_id: pid.to_string(),
+            });
+        }
         Err(D::Error::custom(
-            "invalid create subscription outcome: expected checkout_url or NEAR wallet intent fields",
+            "invalid create subscription outcome: expected checkout_url or near_stake_lock with price_id",
         ))
     }
 }

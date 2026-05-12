@@ -5,9 +5,8 @@ use super::near_staking::{
 use super::ports::{
     BillingCycleAnchor, BillingPeriod, CancelSubscriptionOutcome, ChangePlanOutcome,
     CreateSubscriptionOutcome, CreditsRepository, CreditsSummary, DowngradeIntentStatus,
-    NearDepositKind, NearWalletAction, NearWalletIntentPayload, PaymentBehavior,
-    PaymentWebhookRepository, ProrationBehavior, ResumeSubscriptionOutcome, StripeClientPort,
-    StripeCreateCreditsCheckoutParams, StripeCreateSubscriptionCheckoutParams,
+    PaymentBehavior, PaymentWebhookRepository, ProrationBehavior, ResumeSubscriptionOutcome,
+    StripeClientPort, StripeCreateCreditsCheckoutParams, StripeCreateSubscriptionCheckoutParams,
     StripeCustomerRepository, StripeSubscriptionSnapshot, StripeUpdateSubscriptionParams,
     Subscription, SubscriptionError, SubscriptionPlan, SubscriptionReplacement,
     SubscriptionRepository, SubscriptionService, SubscriptionWithPlan, DEFAULT_MONTHLY_TOKEN_LIMIT,
@@ -45,8 +44,6 @@ pub struct SubscriptionServiceConfig {
     pub near_staking_contract_id: Option<String>,
     /// NEAR JSON-RPC URL for staking contract view calls (same as `NEAR_RPC_URL`).
     pub near_rpc_url: String,
-    /// Display / wallet hint (e.g. `mainnet`, `testnet`).
-    pub near_network_id: String,
 }
 
 /// Cached credit limit for a user. Invalid after TTL_CACHE_SECS (10 mins) or when plan/credits change.
@@ -90,7 +87,6 @@ pub struct SubscriptionServiceImpl {
     stripe_webhook_secret: String,
     near_staking_contract_id: Option<String>,
     near_rpc_url: String,
-    near_network_id: String,
     credit_limit_cache: Arc<RwLock<HashMap<UserId, CachedCreditLimit>>>,
     system_configs_cache: Arc<RwLock<Option<CachedSystemConfigs>>>,
 }
@@ -123,7 +119,6 @@ impl SubscriptionServiceImpl {
             stripe_webhook_secret: config.stripe_webhook_secret,
             near_staking_contract_id: config.near_staking_contract_id,
             near_rpc_url: config.near_rpc_url,
-            near_network_id: config.near_network_id,
             credit_limit_cache: Arc::new(RwLock::new(HashMap::new())),
             system_configs_cache: Arc::new(RwLock::new(None)),
         }
@@ -900,26 +895,6 @@ impl SubscriptionServiceImpl {
         self.invalidate_credit_limit_cache(user_id).await;
         Ok(())
     }
-
-    fn near_wallet_bundle(
-        &self,
-        actions: Vec<NearWalletAction>,
-    ) -> Result<NearWalletIntentPayload, SubscriptionError> {
-        let contract_id = self
-            .near_staking_contract_id
-            .as_deref()
-            .ok_or(SubscriptionError::HouseOfStakeNotConfigured)?
-            .trim()
-            .to_string();
-        if contract_id.is_empty() {
-            return Err(SubscriptionError::HouseOfStakeNotConfigured);
-        }
-        Ok(NearWalletIntentPayload {
-            contract_id,
-            network_id: self.near_network_id.clone(),
-            actions,
-        })
-    }
 }
 
 /// Subtract one calendar month from a datetime, keeping the same day when possible.
@@ -1275,22 +1250,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
 
         if provider_lc == "house-of-stake" {
             self.get_near_account_id(user_id).await?;
-            let contract_id = self
-                .near_staking_contract_id
-                .clone()
-                .ok_or(SubscriptionError::HouseOfStakeNotConfigured)?;
-            return Ok(CreateSubscriptionOutcome::NearWalletIntent {
-                contract_id,
-                network_id: self.near_network_id.clone(),
-                actions: vec![NearWalletAction {
-                    method_name: "lock_for_subscription".to_string(),
-                    args: serde_json::json!({
-                        "price_id": price_id,
-                        "product_id": serde_json::Value::Null,
-                    }),
-                    deposit: NearDepositKind::AttachNear,
-                }],
-            });
+            return Ok(CreateSubscriptionOutcome::NearStakeLock { price_id });
         }
 
         let trial_period_days = plan_config
@@ -1355,28 +1315,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
             if contract_id.is_empty() {
                 return Err(SubscriptionError::HouseOfStakeNotConfigured);
             }
-            let price_json =
-                view_get_price(&self.near_rpc_url, contract_id, &subscription.price_id)
-                    .await
-                    .map_err(Self::near_rpc_err)?
-                    .ok_or_else(|| {
-                        SubscriptionError::InternalError(
-                            "HoS catalog price not found on-chain".into(),
-                        )
-                    })?;
-            let product_id = price_json
-                .get("product_id")
-                .and_then(|x| x.as_str())
-                .ok_or_else(|| {
-                    SubscriptionError::InternalError("HoS price JSON missing product_id".into())
-                })?
-                .to_string();
-            let bundle = self.near_wallet_bundle(vec![NearWalletAction {
-                method_name: "cancel_subscription".to_string(),
-                args: serde_json::json!({ "product_id": product_id }),
-                deposit: NearDepositKind::YoctoOne,
-            }])?;
-            return Ok(CancelSubscriptionOutcome::NearWalletIntent(bundle));
+            return Ok(CancelSubscriptionOutcome::NearStakingCancel);
         }
 
         let updated_sub = self
@@ -1460,28 +1399,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
             if contract_id.is_empty() {
                 return Err(SubscriptionError::HouseOfStakeNotConfigured);
             }
-            let price_json =
-                view_get_price(&self.near_rpc_url, contract_id, &subscription.price_id)
-                    .await
-                    .map_err(Self::near_rpc_err)?
-                    .ok_or_else(|| {
-                        SubscriptionError::InternalError(
-                            "HoS catalog price not found on-chain".into(),
-                        )
-                    })?;
-            let product_id = price_json
-                .get("product_id")
-                .and_then(|x| x.as_str())
-                .ok_or_else(|| {
-                    SubscriptionError::InternalError("HoS price JSON missing product_id".into())
-                })?
-                .to_string();
-            let bundle = self.near_wallet_bundle(vec![NearWalletAction {
-                method_name: "resume_subscription".to_string(),
-                args: serde_json::json!({ "product_id": product_id }),
-                deposit: NearDepositKind::YoctoOne,
-            }])?;
-            return Ok(ResumeSubscriptionOutcome::NearWalletIntent(bundle));
+            return Ok(ResumeSubscriptionOutcome::NearStakingResume);
         }
 
         let updated_sub = self
@@ -1641,23 +1559,17 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 SubscriptionError::InternalError("HoS price missing amount".into())
             })?;
 
-            let bundle = if new_amt > cur_amt {
-                self.near_wallet_bundle(vec![NearWalletAction {
-                    method_name: "upgrade_subscription".to_string(),
-                    args: serde_json::json!({ "new_price_id": price_id }),
-                    deposit: NearDepositKind::AttachNear,
-                }])?
+            if new_amt > cur_amt {
+                return Ok(ChangePlanOutcome::NearStakingUpgrade {
+                    new_price_id: price_id,
+                });
             } else if new_amt < cur_amt {
-                self.near_wallet_bundle(vec![NearWalletAction {
-                    method_name: "schedule_downgrade_subscription".to_string(),
-                    args: serde_json::json!({ "target_price_id": price_id }),
-                    deposit: NearDepositKind::YoctoOne,
-                }])?
+                return Ok(ChangePlanOutcome::NearStakingScheduleDowngrade {
+                    target_price_id: price_id,
+                });
             } else {
                 return Ok(ChangePlanOutcome::NoOp);
-            };
-
-            return Ok(ChangePlanOutcome::NearWalletIntent(bundle));
+            }
         }
 
         // Same plan requested: cancel pending downgrade if one exists, otherwise no-op
@@ -1853,6 +1765,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 subscription_id: sub.subscription_id,
                 user_id: sub.user_id.0.to_string(),
                 provider: sub.provider,
+                price_id: sub.price_id.clone(),
                 plan,
                 status: sub.status,
                 current_period_end: sub.current_period_end,
@@ -2734,6 +2647,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
             subscription_id: result.subscription_id,
             user_id: user_id.to_string(),
             provider: result.provider,
+            price_id: result.price_id,
             plan: plan_name,
             status: result.status,
             current_period_end: result.current_period_end,

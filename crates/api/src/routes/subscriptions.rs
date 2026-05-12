@@ -10,8 +10,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use services::subscription::ports::{
     CancelSubscriptionOutcome, ChangePlanOutcome, CreateSubscriptionOutcome,
-    NearWalletIntentPayload, ResumeSubscriptionOutcome, SubscriptionError, SubscriptionPlan,
-    SubscriptionWithPlan,
+    ResumeSubscriptionOutcome, SubscriptionError, SubscriptionPlan, SubscriptionWithPlan,
 };
 use utoipa::ToSchema;
 
@@ -36,26 +35,19 @@ fn default_provider() -> String {
     "stripe".to_string()
 }
 
-/// Subscription checkout: Stripe redirect URL or House-of-Stake contract call parameters.
+/// Subscription checkout: Stripe redirect URL or HoS catalog `price_id` for client-side locking.
 pub type CreateSubscriptionResponse = CreateSubscriptionOutcome;
 
 /// Response for subscription cancellation
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct CancelSubscriptionResponse {
-    /// Success message
     pub message: String,
-    /// Present when the subscription is billed via NEAR staking (`house-of-stake`): sign these calls in the wallet.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub near_wallet_intent: Option<NearWalletIntentPayload>,
 }
 
 /// Response for subscription resume
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ResumeSubscriptionResponse {
-    /// Success message
     pub message: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub near_wallet_intent: Option<NearWalletIntentPayload>,
 }
 
 /// Request to change subscription plan
@@ -134,7 +126,7 @@ pub struct CreatePortalSessionResponse {
     tag = "Subscriptions",
     request_body = CreateSubscriptionRequest,
     responses(
-        (status = 200, description = "Stripe: flat `{ \"checkout_url\": \"...\" }`. NEAR: `{ \"kind\": \"near_wallet_intent\", ... }`.", body = CreateSubscriptionResponse),
+        (status = 200, description = "Stripe: flat `{ \"checkout_url\": \"...\" }`. HoS: `{ \"kind\": \"near_stake_lock\", \"price_id\": \"...\" }`.", body = CreateSubscriptionResponse),
         (status = 400, description = "Invalid plan or bad request", body = crate::error::ApiErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 403, description = "House-of-Stake requires a linked NEAR wallet", body = crate::error::ApiErrorResponse),
@@ -299,21 +291,16 @@ pub async fn cancel_subscription(
             }
         })?;
 
-    let (message, near_wallet_intent) = match outcome {
-        CancelSubscriptionOutcome::Completed => (
-            "Subscription will be canceled at period end".to_string(),
-            None,
-        ),
-        CancelSubscriptionOutcome::NearWalletIntent(p) => (
-            "Complete cancellation in your NEAR wallet".to_string(),
-            Some(p),
-        ),
+    let message = match outcome {
+        CancelSubscriptionOutcome::Completed => {
+            "Subscription will be canceled at period end".to_string()
+        }
+        CancelSubscriptionOutcome::NearStakingCancel => {
+            "Complete cancellation in your NEAR wallet".to_string()
+        }
     };
 
-    Ok(Json(CancelSubscriptionResponse {
-        message,
-        near_wallet_intent,
-    }))
+    Ok(Json(CancelSubscriptionResponse { message }))
 }
 
 /// Resume a subscription that was scheduled to cancel at period end
@@ -371,19 +358,14 @@ pub async fn resume_subscription(
             }
         })?;
 
-    let (message, near_wallet_intent) = match outcome {
-        ResumeSubscriptionOutcome::Completed => {
-            ("Subscription resumed successfully".to_string(), None)
-        }
-        ResumeSubscriptionOutcome::NearWalletIntent(p) => {
-            ("Complete resume in your NEAR wallet".to_string(), Some(p))
+    let message = match outcome {
+        ResumeSubscriptionOutcome::Completed => "Subscription resumed successfully".to_string(),
+        ResumeSubscriptionOutcome::NearStakingResume => {
+            "Complete resume in your NEAR wallet".to_string()
         }
     };
 
-    Ok(Json(ResumeSubscriptionResponse {
-        message,
-        near_wallet_intent,
-    }))
+    Ok(Json(ResumeSubscriptionResponse { message }))
 }
 
 /// Change the user's subscription plan
@@ -472,7 +454,8 @@ pub async fn change_plan(
             }
             ChangePlanOutcome::NoOp => "User is already on the target plan".to_string(),
             ChangePlanOutcome::DowngradeCancelled => "Pending downgrade cancelled".to_string(),
-            ChangePlanOutcome::NearWalletIntent(_) => {
+            ChangePlanOutcome::NearStakingUpgrade { .. }
+            | ChangePlanOutcome::NearStakingScheduleDowngrade { .. } => {
                 "Complete plan change in your NEAR wallet".to_string()
             }
         },
