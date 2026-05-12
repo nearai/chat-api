@@ -789,7 +789,7 @@ impl SubscriptionServiceImpl {
     fn anchor_hos_price_id(
         subscription_plans: &HashMap<String, SubscriptionPlanConfig>,
     ) -> Option<String> {
-        for (_, cfg) in subscription_plans {
+        for cfg in subscription_plans.values() {
             if let Some(p) = cfg.providers.get("house-of-stake") {
                 return Some(p.price_id.clone());
             }
