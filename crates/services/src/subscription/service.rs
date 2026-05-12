@@ -764,7 +764,7 @@ impl SubscriptionServiceImpl {
     }
 
     /// Billing window for users without an active paid subscription: calendar month by default,
-    /// or monthly periods aligned to `current_period_end` of the user’s latest **canceled** subscription row.
+    /// or monthly periods aligned to `current_period_end` of the user's latest **canceled** subscription row.
     async fn resolve_free_plan_period_for_user(
         &self,
         user_id: UserId,
@@ -1140,6 +1140,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
             provider
         );
 
+        // Catalog keys for `provider_key` (stripe or house-of-stake), merged with subscription_plans limits
         let provider_key = match provider.map(|p| p.to_lowercase()).as_deref() {
             None | Some("stripe") => "stripe",
             Some("house-of-stake") => "house-of-stake",
@@ -1203,11 +1204,14 @@ impl SubscriptionService for SubscriptionServiceImpl {
             plan
         );
 
+        // Validate provider (must be in SUPPORTED_PROVIDERS, e.g. stripe or house-of-stake)
         Self::validate_provider(&provider)?;
 
+        // Get plans for provider from system configs
         let provider_lc = provider.to_lowercase();
         let provider_plans = self.get_plans_for_provider(&provider_lc).await?;
 
+        // Check if user already has active subscription
         if self
             .subscription_repo
             .get_active_subscription(user_id)
@@ -1218,11 +1222,14 @@ impl SubscriptionService for SubscriptionServiceImpl {
             return Err(SubscriptionError::ActiveSubscriptionExists);
         }
 
+        // Validate plan and get price_id
         let price_id = provider_plans
             .get(&plan)
             .ok_or_else(|| SubscriptionError::InvalidPlan(plan.clone()))?
             .clone();
 
+        // Validate instance count: user may have leftover instances from a prior higher-tier plan.
+        // Fail before checkout to avoid subscribing to a lower-tier plan they cannot use.
         let configs = self
             .system_configs_service
             .get_configs()
@@ -1249,20 +1256,25 @@ impl SubscriptionService for SubscriptionServiceImpl {
             });
         }
 
+        // house-of-stake: linked NEAR wallet required; response carries catalog price_id for on-chain lock
         if provider_lc == "house-of-stake" {
             self.get_near_account_id(user_id).await?;
             return Ok(CreateSubscriptionOutcome::NearStakeLock { price_id });
         }
 
+        // Fetch trial_period_days from subscription plan config (reuse plan_config from instance check)
         let trial_period_days = plan_config
             .as_ref()
             .and_then(|p| p.trial_period_days)
+            // Stripe supports a maximum trial period of 730 days
             .filter(|&n| n > 0 && n <= 730);
 
+        // Get or create Stripe customer
         let customer_id = self
             .get_or_create_stripe_customer(user_id, test_clock_id)
             .await?;
 
+        // Generate idempotency key with 1-hour time window
         let idempotency_key = generate_checkout_idempotency_key(&user_id, &price_id);
 
         let session = self
@@ -1300,6 +1312,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
         self.reconcile_near_staking_from_rpc_or_warn(user_id, "cancel_subscription")
             .await;
 
+        // Get active subscription
         let subscription = self
             .subscription_repo
             .get_active_subscription(user_id)
@@ -1334,6 +1347,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
             )
             .await?;
 
+        // Update database (with transaction)
         let updated_model =
             self.stripe_subscription_to_model(&updated_sub, user_id, &subscription.provider)?;
         let mut db_client = self
@@ -1351,11 +1365,13 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
+        // Cancel is a stronger intent than downgrade — clear any pending downgrade
         self.subscription_repo
             .clear_pending_downgrade(&txn, &subscription.subscription_id)
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
+        // Invalidate cache before commit so no request sees stale cache after DB is updated
         self.invalidate_credit_limit_cache(user_id).await;
 
         txn.commit()
@@ -1380,6 +1396,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
         self.reconcile_near_staking_from_rpc_or_warn(user_id, "resume_subscription")
             .await;
 
+        // Get active subscription
         let subscription = self
             .subscription_repo
             .get_active_subscription(user_id)
@@ -1387,6 +1404,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
             .ok_or(SubscriptionError::NoActiveSubscription)?;
 
+        // Only allow resume when subscription is scheduled to cancel at period end
         if !subscription.cancel_at_period_end {
             return Err(SubscriptionError::SubscriptionNotScheduledForCancellation);
         }
@@ -1418,6 +1436,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
             )
             .await?;
 
+        // Update database (with transaction)
         let updated_model =
             self.stripe_subscription_to_model(&updated_sub, user_id, &subscription.provider)?;
         let mut db_client = self
@@ -1435,11 +1454,13 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
+        // Resume is a stronger intent than downgrade — clear any pending downgrade
         self.subscription_repo
             .clear_pending_downgrade(&txn, &subscription.subscription_id)
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
+        // Invalidate cache before commit so no request sees stale cache after DB is updated
         self.invalidate_credit_limit_cache(user_id).await;
 
         txn.commit()
@@ -1476,6 +1497,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
         self.reconcile_near_staking_from_rpc_or_warn(user_id, "change_plan")
             .await;
 
+        // Get active subscription first (fail fast before resolving target plan / downgrade rules)
         let subscription = self
             .subscription_repo
             .get_active_subscription(user_id)
@@ -1492,6 +1514,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
         } else {
             "stripe"
         };
+        // Resolve target plan's catalog price_id for this subscription's provider
         let provider_plans = self.get_plans_for_provider(provider_key).await?;
         let price_id = provider_plans
             .get(&target_plan)
@@ -1716,6 +1739,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
         self.reconcile_near_staking_from_rpc_or_warn(user_id, "get_user_subscriptions")
             .await;
 
+        // Require at least one configured billing catalog (Stripe and/or house-of-stake)
         let stripe_ok = self.get_plans_for_provider("stripe").await.is_ok();
         let hos_ok = self.get_plans_for_provider("house-of-stake").await.is_ok();
         if !stripe_ok && !hos_ok {
