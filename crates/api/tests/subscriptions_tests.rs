@@ -6,16 +6,19 @@ use common::{
     cleanup_user_agent_instances, cleanup_user_subscription_credits, cleanup_user_subscriptions,
     cleanup_user_usage, clear_subscription_plans, create_test_server, create_test_server_and_db,
     insert_test_agent_instances, insert_test_subscription, insert_test_subscription_with_price_id,
-    mock_login, set_subscription_plans, TestServerConfig,
+    insert_test_subscription_with_provider_and_price, mock_login, set_subscription_plans,
+    TestServerConfig,
 };
 use hmac::Mac;
 use serde_json::json;
 use serial_test::serial;
-use services::subscription::ports::SubscriptionRepository;
+use services::subscription::ports::{ChangePlanOutcome, CreateSubscriptionOutcome};
 use services::system_configs::ports::RateLimitConfig;
 use services::user::ports::UserRepository;
 use services::user_usage::{UserUsageRepository, METRIC_KEY_LLM_TOKENS};
 use uuid::Uuid;
+use wiremock::matchers::{body_string_contains, method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// Stripe secrets must be non-empty for subscription gating; otherwise requests reach upstream (401).
 fn ensure_stripe_env_for_gating() {
@@ -3405,5 +3408,431 @@ async fn test_list_subscriptions_includes_pending_downgrade_info() {
     assert!(
         sub["pending_downgrade_period_end"].is_string(),
         "Should include pending_downgrade_period_end"
+    );
+}
+
+fn clear_proxy_env_for_local_wiremock() {
+    for k in [
+        "http_proxy",
+        "https_proxy",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "all_proxy",
+    ] {
+        std::env::remove_var(k);
+    }
+    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
+}
+
+fn near_rpc_call_function_body(result_json: &serde_json::Value) -> serde_json::Value {
+    let payload = serde_json::to_vec(result_json).expect("serialize view result");
+    let encoded: Vec<serde_json::Value> = payload.iter().map(|b| json!(*b)).collect();
+    json!({
+        "jsonrpc": "2.0",
+        "id": "0",
+        "result": {
+            "block_hash": "11111111111111111111111111111111",
+            "block_height": 12345u64,
+            "logs": [],
+            "result": encoded
+        }
+    })
+}
+
+#[test]
+fn test_change_plan_outcome_serde_uses_kind_discriminant() {
+    let o = ChangePlanOutcome::NearStakingUpgrade {
+        new_price_id: "price_hos_pro".to_string(),
+    };
+    let v = serde_json::to_value(&o).expect("serialize");
+    assert_eq!(
+        v.get("kind").and_then(|x| x.as_str()),
+        Some("near_staking_upgrade")
+    );
+    assert_eq!(
+        v.get("new_price_id").and_then(|x| x.as_str()),
+        Some("price_hos_pro")
+    );
+    let back: ChangePlanOutcome = serde_json::from_value(v).expect("deserialize");
+    assert!(matches!(back, ChangePlanOutcome::NearStakingUpgrade { .. }));
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_create_subscription_house_of_stake_returns_flat_json() {
+    let (server, _) = create_test_server_and_db(TestServerConfig {
+        near_staking_contract_id: Some("staking.testnet".to_string()),
+        near_network_id: Some("testnet".to_string()),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": { "providers": { "house-of-stake": { "price_id": "price_hos_basic" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } }
+        }),
+    )
+    .await;
+
+    let user_email = "hos_create_ok@example.com";
+    let login = json!({
+        "email": format!("{}@near", "hos_create_ok.testnet"),
+        "name": "HoS Test",
+        "oauth_provider": "near"
+    });
+    let response = server.post("/v1/auth/mock-login").json(&login).await;
+    assert_eq!(response.status_code(), 200);
+    let token = response.json::<serde_json::Value>()["token"]
+        .as_str()
+        .expect("token")
+        .to_string();
+
+    let response = server
+        .post("/v1/subscriptions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&json!({
+            "provider": "house-of-stake",
+            "plan": "basic",
+            "success_url": "https://example.com/success",
+            "cancel_url": "https://example.com/cancel"
+        }))
+        .await;
+
+    assert_eq!(response.status_code(), 200, "{}", response.text());
+    let body: serde_json::Value = response.json();
+    assert_eq!(
+        body.get("kind").and_then(|x| x.as_str()),
+        Some("house_of_stake")
+    );
+    assert_eq!(
+        body.get("price_id").and_then(|x| x.as_str()),
+        Some("price_hos_basic")
+    );
+    assert_eq!(
+        body.get("network_id").and_then(|x| x.as_str()),
+        Some("testnet")
+    );
+
+    let parsed: CreateSubscriptionOutcome = serde_json::from_value(body).expect("parse outcome");
+    assert!(matches!(
+        parsed,
+        CreateSubscriptionOutcome::NearStakeLock { .. }
+    ));
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_create_subscription_house_of_stake_requires_near_wallet() {
+    let (server, _) = create_test_server_and_db(TestServerConfig {
+        near_staking_contract_id: Some("staking.testnet".to_string()),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": { "providers": { "house-of-stake": { "price_id": "price_hos_basic" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } }
+        }),
+    )
+    .await;
+
+    let user_email = "hos_create_no_near@example.com";
+    let token = mock_login(&server, user_email).await;
+
+    let response = server
+        .post("/v1/subscriptions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&json!({
+            "provider": "house-of-stake",
+            "plan": "basic",
+            "success_url": "https://example.com/success",
+            "cancel_url": "https://example.com/cancel"
+        }))
+        .await;
+
+    assert_eq!(response.status_code(), 403);
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_near_staking_sync_skipped_without_contract() {
+    let (server, _) = create_test_server_and_db(TestServerConfig {
+        near_staking_contract_id: Some(String::new()),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": { "providers": { "house-of-stake": { "price_id": "price_hos_basic" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } }
+        }),
+    )
+    .await;
+
+    let login = json!({
+        "email": format!("{}@near", "hos_sync_skip_contract.testnet"),
+        "name": "HoS Sync",
+        "oauth_provider": "near"
+    });
+    let response = server.post("/v1/auth/mock-login").json(&login).await;
+    let token = response.json::<serde_json::Value>()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let response = server
+        .post("/v1/subscriptions/near/sync")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 200);
+    let body: serde_json::Value = response.json();
+    assert_eq!(body.get("skipped").and_then(|x| x.as_bool()), Some(true));
+    assert_eq!(
+        body.get("deleted_house_of_stake_rows")
+            .and_then(|x| x.as_u64()),
+        Some(0)
+    );
+    assert_eq!(
+        body.get("upserted_house_of_stake_row")
+            .and_then(|x| x.as_bool()),
+        Some(false)
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_near_staking_sync_skipped_without_linked_near() {
+    let (server, _) = create_test_server_and_db(TestServerConfig {
+        near_staking_contract_id: Some("staking.testnet".to_string()),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": { "providers": { "house-of-stake": { "price_id": "price_hos_basic" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } }
+        }),
+    )
+    .await;
+
+    let token = mock_login(&server, "hos_sync_skip_near@example.com").await;
+
+    let response = server
+        .post("/v1/subscriptions/near/sync")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 200);
+    let body: serde_json::Value = response.json();
+    assert_eq!(body.get("skipped").and_then(|x| x.as_bool()), Some(true));
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_near_staking_sync_deletes_local_hos_when_chain_returns_null() {
+    clear_proxy_env_for_local_wiremock();
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(near_rpc_call_function_body(&serde_json::Value::Null)),
+        )
+        .mount(&mock)
+        .await;
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        near_rpc_url: Some(mock.uri().to_string()),
+        near_staking_contract_id: Some("staking.testnet".to_string()),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": { "providers": { "house-of-stake": { "price_id": "price_hos_basic" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } }
+        }),
+    )
+    .await;
+
+    let near_email = "hos_sync_delete.testnet@near";
+    let login = json!({
+        "email": near_email,
+        "name": "HoS Sync Delete",
+        "oauth_provider": "near"
+    });
+    let response = server.post("/v1/auth/mock-login").json(&login).await;
+    let token = response.json::<serde_json::Value>()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    insert_test_subscription_with_provider_and_price(
+        &server,
+        &db,
+        near_email,
+        "house-of-stake",
+        "price_hos_basic",
+        false,
+    )
+    .await;
+
+    let response = server
+        .post("/v1/subscriptions/near/sync")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 200, "{}", response.text());
+    let body: serde_json::Value = response.json();
+    assert_eq!(body.get("skipped").and_then(|x| x.as_bool()), Some(false));
+    assert_eq!(
+        body.get("deleted_house_of_stake_rows")
+            .and_then(|x| x.as_u64()),
+        Some(1)
+    );
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(near_email)
+        .await
+        .unwrap()
+        .unwrap();
+    let client = db.pool().get().await.unwrap();
+    let cnt: i64 = client
+        .query_one(
+            "SELECT COUNT(*)::bigint FROM subscriptions WHERE user_id = $1 AND provider = 'house-of-stake'",
+            &[&user.id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        cnt, 0,
+        "HoS rows should be removed after chain reports null"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_change_plan_house_of_stake_upgrade_json_shape() {
+    clear_proxy_env_for_local_wiremock();
+    let mock = MockServer::start().await;
+    let price_basic = json!({
+        "product_id": "nearai|prod_cat",
+        "amount": "1000000000000000000000000"
+    });
+    let price_pro = json!({
+        "product_id": "nearai|prod_cat",
+        "amount": "2000000000000000000000000"
+    });
+
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .and(body_string_contains("price_hos_basic"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(near_rpc_call_function_body(&price_basic)),
+        )
+        .mount(&mock)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .and(body_string_contains("price_hos_pro"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(near_rpc_call_function_body(&price_pro)),
+        )
+        .mount(&mock)
+        .await;
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        near_rpc_url: Some(mock.uri().to_string()),
+        near_staking_contract_id: Some("staking.testnet".to_string()),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": { "providers": { "house-of-stake": { "price_id": "price_hos_basic" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } },
+            "pro": { "providers": { "house-of-stake": { "price_id": "price_hos_pro" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } }
+        }),
+    )
+    .await;
+
+    let near_email = "hos_change_plan.testnet@near";
+    let login = json!({
+        "email": near_email,
+        "name": "HoS Change",
+        "oauth_provider": "near"
+    });
+    let response = server.post("/v1/auth/mock-login").json(&login).await;
+    let token = response.json::<serde_json::Value>()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    insert_test_subscription_with_provider_and_price(
+        &server,
+        &db,
+        near_email,
+        "house-of-stake",
+        "price_hos_basic",
+        false,
+    )
+    .await;
+
+    let response = server
+        .post("/v1/subscriptions/change")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&json!({ "plan": "pro" }))
+        .await;
+
+    assert_eq!(response.status_code(), 200, "{}", response.text());
+    let body: serde_json::Value = response.json();
+    let result = &body["result"];
+    assert_eq!(
+        result.get("kind").and_then(|x| x.as_str()),
+        Some("near_staking_upgrade")
+    );
+    assert_eq!(
+        result.get("new_price_id").and_then(|x| x.as_str()),
+        Some("price_hos_pro")
     );
 }

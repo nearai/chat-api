@@ -45,6 +45,8 @@ pub struct SubscriptionServiceConfig {
     pub near_staking_contract_id: Option<String>,
     /// NEAR JSON-RPC URL for staking contract view calls (same as `NEAR_RPC_URL`).
     pub near_rpc_url: String,
+    /// Logical network id for clients (from `NEAR_NETWORK_ID` / `near.network_id`), included in HoS create-subscription JSON.
+    pub near_network_id: String,
 }
 
 /// Cached credit limit for a user. Invalid after TTL_CACHE_SECS (10 mins) or when plan/credits change.
@@ -88,6 +90,7 @@ pub struct SubscriptionServiceImpl {
     stripe_webhook_secret: String,
     near_staking_contract_id: Option<String>,
     near_rpc_url: String,
+    near_network_id: String,
     credit_limit_cache: Arc<RwLock<HashMap<UserId, CachedCreditLimit>>>,
     system_configs_cache: Arc<RwLock<Option<CachedSystemConfigs>>>,
 }
@@ -120,6 +123,7 @@ impl SubscriptionServiceImpl {
             stripe_webhook_secret: config.stripe_webhook_secret,
             near_staking_contract_id: config.near_staking_contract_id,
             near_rpc_url: config.near_rpc_url,
+            near_network_id: config.near_network_id,
             credit_limit_cache: Arc::new(RwLock::new(HashMap::new())),
             system_configs_cache: Arc::new(RwLock::new(None)),
         }
@@ -782,6 +786,10 @@ impl SubscriptionServiceImpl {
         SubscriptionError::NearRpcError(e.to_string())
     }
 
+    /// Deterministic HoS catalog `price_id` used only when there is **no** local `house-of-stake` row
+    /// yet (e.g. first sync after wallet link). `get_subscription_for_price` resolves via product;
+    /// we never delete local HoS rows unless the RPC returns `null` **and** we still have local rows
+    /// for that user — so a wrong anchor with no local state only yields a no-op upsert path, not mass delete.
     fn anchor_hos_price_id(
         subscription_plans: &HashMap<String, SubscriptionPlanConfig>,
     ) -> Option<String> {
@@ -1319,7 +1327,10 @@ impl SubscriptionService for SubscriptionServiceImpl {
         // house-of-stake: linked NEAR wallet required; response carries catalog price_id for on-chain lock
         if provider_lc == "house-of-stake" {
             self.get_near_account_id(user_id).await?;
-            return Ok(CreateSubscriptionOutcome::NearStakeLock { price_id });
+            return Ok(CreateSubscriptionOutcome::NearStakeLock {
+                price_id,
+                network_id: self.near_network_id.clone(),
+            });
         }
 
         // Fetch trial_period_days from subscription plan config (reuse plan_config from instance check)
@@ -2722,8 +2733,13 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .map(|s| s.subscription_id.clone())
             .unwrap_or_else(|| format!("admin_sub_{}", uuid::Uuid::new_v4()));
 
-        // Get or create a dummy customer ID for admin subscriptions
-        let customer_id = format!("admin_{}", user_id);
+        let provider_lc = provider.to_lowercase();
+        let customer_id = if provider_lc == "house-of-stake" {
+            let near = self.get_near_account_id(user_id).await?;
+            format!("near:{near}")
+        } else {
+            format!("admin_{}", user_id)
+        };
 
         let subscription = Subscription {
             subscription_id: subscription_id.clone(),

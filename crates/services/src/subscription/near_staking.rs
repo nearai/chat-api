@@ -11,7 +11,7 @@ use tokio::time::timeout;
 /// Upper bound for NEAR JSON-RPC view calls so API handlers do not block indefinitely.
 const NEAR_VIEW_RPC_TIMEOUT: Duration = Duration::from_secs(15);
 
-fn view_timeout_err() -> Box<dyn std::error::Error + Send + Sync> {
+fn view_timeout_boxed_err() -> Box<dyn std::error::Error + Send + Sync> {
     Box::new(std::io::Error::new(
         std::io::ErrorKind::TimedOut,
         "NEAR RPC view call timed out",
@@ -47,7 +47,7 @@ pub async fn view_get_subscription_for_price(
         Ok::<Option<Value>, Box<dyn std::error::Error + Send + Sync>>(data.data)
     })
     .await
-    .map_err(|_| view_timeout_err())?
+    .map_err(|_| view_timeout_boxed_err())?
 }
 
 /// Fetch `get_price(price_id)` for catalog comparisons (upgrade vs downgrade).
@@ -72,7 +72,7 @@ pub async fn view_get_price(
         Ok::<Option<Value>, Box<dyn std::error::Error + Send + Sync>>(data.data)
     })
     .await
-    .map_err(|_| view_timeout_err())?
+    .map_err(|_| view_timeout_boxed_err())?
 }
 
 /// Parse catalog `amount` field (`U128` JSON) as yoctoNEAR integer.
@@ -180,4 +180,58 @@ fn ts_ns_to_datetime(ns: u64) -> Result<DateTime<Utc>, String> {
     let secs = (ns / 1_000_000_000) as i64;
     let nsec = (ns % 1_000_000_000) as u32;
     DateTime::from_timestamp(secs, nsec).ok_or_else(|| "timestamp out of range".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn call_function_query_response(result_json: &Value) -> Value {
+        let payload = serde_json::to_vec(result_json).expect("serialize contract return");
+        let encoded: Vec<Value> = payload.iter().map(|b| json!(b)).collect();
+        json!({
+            "jsonrpc": "2.0",
+            "id": "0",
+            "result": {
+                "block_hash": "11111111111111111111111111111111",
+                "block_height": 12345u64,
+                "logs": [],
+                "result": encoded
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn view_get_subscription_for_price_null_from_rpc() {
+        for k in [
+            "http_proxy",
+            "https_proxy",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "all_proxy",
+        ] {
+            std::env::remove_var(k);
+        }
+        std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(call_function_query_response(&Value::Null)),
+            )
+            .mount(&mock)
+            .await;
+
+        let url = mock.uri();
+        let out =
+            view_get_subscription_for_price(&url, "staking.testnet", "alice.testnet", "price_fake")
+                .await
+                .expect("rpc client");
+        assert!(out.is_none());
+    }
 }

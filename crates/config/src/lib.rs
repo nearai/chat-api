@@ -358,7 +358,9 @@ fn default_near_network_id() -> String {
 pub struct NearConfig {
     /// NEAR JSON-RPC endpoint used for on-chain queries (e.g. balance checks)
     pub rpc_url: Url,
-    /// Network id for wallets and staking intents (e.g. `mainnet`, `testnet`). Defaults from `NEAR_NETWORK_ID`.
+    /// Logical NEAR network id (e.g. `mainnet`, `testnet`). Set via `NEAR_NETWORK_ID`; passed through to
+    /// subscription service and included in HoS `POST /v1/subscriptions` JSON as `network_id` so clients
+    /// can pair RPC URLs with the intended network in testnet/staging.
     #[serde(default = "default_near_network_id")]
     pub network_id: String,
     /// Optional staking contract account id (e.g. `stake.dao`).

@@ -120,10 +120,11 @@ pub struct BillingPeriod {
     pub end_at: DateTime<Utc>,
 }
 
-/// Result of a plan-change request.
+/// Result of a plan-change request. JSON is **internally tagged** with `"kind"` so every variant
+/// serializes as a JSON object (same pattern as HoS create-subscription outcomes).
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ChangePlanOutcome {
     /// Stripe subscription was updated immediately.
     ChangedImmediately,
@@ -728,14 +729,18 @@ pub struct SubscriptionPlan {
 ///
 /// Serialized JSON:
 /// - **Stripe** — legacy flat object `{"checkout_url":"..."}`.
-/// - **HoS** — `{"kind":"house_of_stake","price_id":"..."}` (contract, network, and call shape live in the app).
+/// - **HoS** — `{"kind":"house_of_stake","price_id":"...","network_id":"mainnet"}` (`network_id` from server `NEAR_NETWORK_ID` / `near.network_id`).
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub enum CreateSubscriptionOutcome {
     /// Complete checkout on Stripe (`checkout_url`).
     StripeCheckout { checkout_url: String },
     /// Catalog recurring price id for `lock_for_subscription` (client supplies `product_id` xor `price_id` per contract rules).
-    NearStakeLock { price_id: String },
+    NearStakeLock {
+        price_id: String,
+        /// NEAR network id (e.g. `mainnet`, `testnet`) from server config; wallets use with RPC URL.
+        network_id: String,
+    },
 }
 
 impl Serialize for CreateSubscriptionOutcome {
@@ -750,10 +755,14 @@ impl Serialize for CreateSubscriptionOutcome {
                 st.serialize_field("checkout_url", checkout_url)?;
                 st.end()
             }
-            CreateSubscriptionOutcome::NearStakeLock { price_id } => {
-                let mut st = serializer.serialize_struct("NearStakeLock", 2)?;
+            CreateSubscriptionOutcome::NearStakeLock {
+                price_id,
+                network_id,
+            } => {
+                let mut st = serializer.serialize_struct("NearStakeLock", 3)?;
                 st.serialize_field("kind", &"house_of_stake")?;
                 st.serialize_field("price_id", price_id)?;
+                st.serialize_field("network_id", network_id)?;
                 st.end()
             }
         }
@@ -782,12 +791,25 @@ impl<'de> Deserialize<'de> for CreateSubscriptionOutcome {
                     .and_then(|x| x.as_str())
                     .ok_or_else(|| D::Error::custom("missing price_id"))?
                     .to_string();
-                return Ok(CreateSubscriptionOutcome::NearStakeLock { price_id });
+                let network_id = obj
+                    .get("network_id")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("mainnet")
+                    .to_string();
+                return Ok(CreateSubscriptionOutcome::NearStakeLock {
+                    price_id,
+                    network_id,
+                });
             }
         }
         if let Some(pid) = obj.get("price_id").and_then(|x| x.as_str()) {
             return Ok(CreateSubscriptionOutcome::NearStakeLock {
                 price_id: pid.to_string(),
+                network_id: obj
+                    .get("network_id")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("mainnet")
+                    .to_string(),
             });
         }
         Err(D::Error::custom(
