@@ -5,11 +5,12 @@ use super::near_staking::{
 use super::ports::{
     BillingCycleAnchor, BillingPeriod, CancelSubscriptionOutcome, ChangePlanOutcome,
     CreateSubscriptionOutcome, CreditsRepository, CreditsSummary, DowngradeIntentStatus,
-    PaymentBehavior, PaymentWebhookRepository, ProrationBehavior, ResumeSubscriptionOutcome,
-    StripeClientPort, StripeCreateCreditsCheckoutParams, StripeCreateSubscriptionCheckoutParams,
-    StripeCustomerRepository, StripeSubscriptionSnapshot, StripeUpdateSubscriptionParams,
-    Subscription, SubscriptionError, SubscriptionPlan, SubscriptionReplacement,
-    SubscriptionRepository, SubscriptionService, SubscriptionWithPlan, DEFAULT_MONTHLY_TOKEN_LIMIT,
+    NearStakingSyncSummary, PaymentBehavior, PaymentWebhookRepository, ProrationBehavior,
+    ResumeSubscriptionOutcome, StripeClientPort, StripeCreateCreditsCheckoutParams,
+    StripeCreateSubscriptionCheckoutParams, StripeCustomerRepository, StripeSubscriptionSnapshot,
+    StripeUpdateSubscriptionParams, Subscription, SubscriptionError, SubscriptionPlan,
+    SubscriptionReplacement, SubscriptionRepository, SubscriptionService, SubscriptionWithPlan,
+    DEFAULT_MONTHLY_TOKEN_LIMIT,
 };
 use crate::agent::ports::AgentRepository;
 use crate::agent::ports::AgentService;
@@ -817,19 +818,29 @@ impl SubscriptionServiceImpl {
     pub async fn reconcile_near_staking_from_rpc(
         &self,
         user_id: UserId,
-    ) -> Result<(), SubscriptionError> {
+    ) -> Result<NearStakingSyncSummary, SubscriptionError> {
         let Some(contract_id) = self
             .near_staking_contract_id
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
         else {
-            return Ok(());
+            return Ok(NearStakingSyncSummary {
+                skipped: true,
+                deleted_house_of_stake_rows: 0,
+                upserted_house_of_stake_row: false,
+            });
         };
 
         let near_account = match self.get_near_account_id(user_id).await {
             Ok(a) => a,
-            Err(_) => return Ok(()),
+            Err(_) => {
+                return Ok(NearStakingSyncSummary {
+                    skipped: true,
+                    deleted_house_of_stake_rows: 0,
+                    upserted_house_of_stake_row: false,
+                });
+            }
         };
 
         let configs = self
@@ -841,17 +852,12 @@ impl SubscriptionServiceImpl {
             .and_then(|c| c.subscription_plans)
             .unwrap_or_default();
         let Some(anchor_price_id) = Self::anchor_hos_price_id(&subscription_plans) else {
-            return Ok(());
+            return Ok(NearStakingSyncSummary {
+                skipped: true,
+                deleted_house_of_stake_rows: 0,
+                upserted_house_of_stake_row: false,
+            });
         };
-
-        let raw = view_get_subscription_for_price(
-            &self.near_rpc_url,
-            contract_id,
-            &near_account,
-            &anchor_price_id,
-        )
-        .await
-        .map_err(Self::near_rpc_err)?;
 
         let subs = self
             .subscription_repo
@@ -859,15 +865,65 @@ impl SubscriptionServiceImpl {
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
+        // Prefer the user's stored HoS `price_id` so we query the same catalog SKU they hold.
+        // Fall back to the deterministic anchor only when there is no local HoS row yet.
+        let probe_price_id = subs
+            .iter()
+            .filter(|s| s.provider == "house-of-stake")
+            .find(|s| s.status == "active" || s.status == "trialing")
+            .or_else(|| subs.iter().find(|s| s.provider == "house-of-stake"))
+            .map(|s| s.price_id.as_str())
+            .filter(|p| !p.is_empty())
+            .unwrap_or(anchor_price_id.as_str());
+
+        let raw = view_get_subscription_for_price(
+            &self.near_rpc_url,
+            contract_id,
+            &near_account,
+            probe_price_id,
+        )
+        .await
+        .map_err(Self::near_rpc_err)?;
+
+        let hos_subscription_ids: Vec<String> = subs
+            .iter()
+            .filter(|s| s.provider == "house-of-stake")
+            .map(|s| s.subscription_id.clone())
+            .collect();
+
         if raw.is_none() {
-            for s in subs.into_iter().filter(|s| s.provider == "house-of-stake") {
+            if hos_subscription_ids.is_empty() {
+                return Ok(NearStakingSyncSummary {
+                    skipped: false,
+                    deleted_house_of_stake_rows: 0,
+                    upserted_house_of_stake_row: false,
+                });
+            }
+            let deleted = hos_subscription_ids.len() as u32;
+            let mut db_client = self
+                .db_pool
+                .get()
+                .await
+                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+            let txn = db_client
+                .transaction()
+                .await
+                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+            for sid in &hos_subscription_ids {
                 self.subscription_repo
-                    .delete_subscription(&s.subscription_id)
+                    .delete_subscription_txn(&txn, sid)
                     .await
                     .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
             }
+            txn.commit()
+                .await
+                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
             self.invalidate_credit_limit_cache(user_id).await;
-            return Ok(());
+            return Ok(NearStakingSyncSummary {
+                skipped: false,
+                deleted_house_of_stake_rows: deleted,
+                upserted_house_of_stake_row: false,
+            });
         }
 
         let chain_json = raw.as_ref().expect("checked is_some");
@@ -894,7 +950,11 @@ impl SubscriptionServiceImpl {
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
         self.invalidate_credit_limit_cache(user_id).await;
-        Ok(())
+        Ok(NearStakingSyncSummary {
+            skipped: false,
+            deleted_house_of_stake_rows: 0,
+            upserted_house_of_stake_row: true,
+        })
     }
 }
 
@@ -1479,7 +1539,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
     async fn sync_near_staking_subscription(
         &self,
         user_id: UserId,
-    ) -> Result<(), SubscriptionError> {
+    ) -> Result<NearStakingSyncSummary, SubscriptionError> {
         self.reconcile_near_staking_from_rpc(user_id).await
     }
 
@@ -1532,24 +1592,53 @@ impl SubscriptionService for SubscriptionServiceImpl {
             }
 
             if subscription.price_id == price_id {
+                if subscription.pending_downgrade_status == Some(DowngradeIntentStatus::Pending) {
+                    let mut client = self
+                        .db_pool
+                        .get()
+                        .await
+                        .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+                    let txn = client
+                        .transaction()
+                        .await
+                        .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+                    self.subscription_repo
+                        .clear_pending_downgrade(&txn, &subscription.subscription_id)
+                        .await
+                        .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+                    txn.commit()
+                        .await
+                        .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+                    self.invalidate_credit_limit_cache(user_id).await;
+                    tracing::info!(
+                        "HoS pending downgrade cancelled in DB: user_id={}, subscription_id={}",
+                        user_id,
+                        subscription.subscription_id
+                    );
+                    return Ok(ChangePlanOutcome::DowngradeCancelled);
+                }
                 return Ok(ChangePlanOutcome::NoOp);
             }
 
-            let cur_price_j =
-                view_get_price(&self.near_rpc_url, contract_id, &subscription.price_id)
-                    .await
-                    .map_err(Self::near_rpc_err)?
-                    .ok_or_else(|| {
-                        SubscriptionError::InternalError(
-                            "HoS current price not found on-chain".into(),
-                        )
-                    })?;
-            let new_price_j = view_get_price(&self.near_rpc_url, contract_id, &price_id)
-                .await
-                .map_err(Self::near_rpc_err)?
-                .ok_or_else(|| {
-                    SubscriptionError::InternalError("HoS target price not found on-chain".into())
-                })?;
+            let (cur_price_j, new_price_j) = tokio::try_join!(
+                async {
+                    view_get_price(&self.near_rpc_url, contract_id, &subscription.price_id)
+                        .await
+                        .map_err(Self::near_rpc_err)
+                },
+                async {
+                    view_get_price(&self.near_rpc_url, contract_id, &price_id)
+                        .await
+                        .map_err(Self::near_rpc_err)
+                },
+            )?;
+
+            let cur_price_j = cur_price_j.ok_or_else(|| {
+                SubscriptionError::InternalError("HoS current price not found on-chain".into())
+            })?;
+            let new_price_j = new_price_j.ok_or_else(|| {
+                SubscriptionError::InternalError("HoS target price not found on-chain".into())
+            })?;
 
             let cur_prod = cur_price_j
                 .get("product_id")
@@ -1736,10 +1825,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
             active_only
         );
 
-        self.reconcile_near_staking_from_rpc_or_warn(user_id, "get_user_subscriptions")
-            .await;
-
-        // Require at least one configured billing catalog (Stripe and/or house-of-stake)
+        // Listing is DB-only; chain sync is POST /v1/subscriptions/near/sync (or reconcile on mutations).
         let stripe_ok = self.get_plans_for_provider("stripe").await.is_ok();
         let hos_ok = self.get_plans_for_provider("house-of-stake").await.is_ok();
         if !stripe_ok && !hos_ok {
@@ -2298,17 +2384,37 @@ impl SubscriptionService for SubscriptionServiceImpl {
         &self,
         user_id: UserId,
     ) -> Result<(), SubscriptionError> {
-        // When Stripe is not configured, allow access (no subscription gating)
-        match self.get_plans_for_provider("stripe").await {
-            Err(SubscriptionError::NotConfigured) => {
-                tracing::debug!(
-                    "Subscription gating skipped: Stripe not configured, allowing user_id={}",
-                    user_id
-                );
-                return Ok(());
+        let stripe_res = self.get_plans_for_provider("stripe").await;
+        let hos_res = self.get_plans_for_provider("house-of-stake").await;
+
+        let stripe_missing = matches!(stripe_res, Err(SubscriptionError::NotConfigured));
+        let hos_missing = matches!(
+            hos_res,
+            Err(SubscriptionError::NotConfigured | SubscriptionError::HouseOfStakeNotConfigured)
+        );
+
+        if stripe_missing && hos_missing {
+            tracing::debug!(
+                "Subscription gating skipped: no Stripe or HoS billing catalog configured, allowing user_id={}",
+                user_id.0
+            );
+            return Ok(());
+        }
+
+        match stripe_res {
+            Err(e) if !matches!(e, SubscriptionError::NotConfigured) => return Err(e),
+            _ => {}
+        }
+        match hos_res {
+            Err(e)
+                if !matches!(
+                    e,
+                    SubscriptionError::NotConfigured | SubscriptionError::HouseOfStakeNotConfigured
+                ) =>
+            {
+                return Err(e);
             }
-            Err(e) => return Err(e),
-            Ok(_) => {}
+            _ => {}
         }
 
         if self

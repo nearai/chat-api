@@ -188,7 +188,7 @@ use utoipa::OpenApi;
         services::subscription::ports::ChangePlanOutcome,
         crate::routes::subscriptions::ListSubscriptionsResponse,
         crate::routes::subscriptions::ListPlansResponse,
-        crate::routes::subscriptions::NearStakingSyncResponse,
+        services::subscription::ports::NearStakingSyncSummary,
         services::subscription::ports::SubscriptionWithPlan,
         services::subscription::ports::SubscriptionPlan,
         // Attestation models

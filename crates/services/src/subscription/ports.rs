@@ -139,18 +139,33 @@ pub enum ChangePlanOutcome {
     NearStakingScheduleDowngrade { target_price_id: String },
 }
 
-/// Stripe path updated DB; HoS path leaves chain to the wallet (`price_id` on GET /subscriptions).
+/// Stripe path updates `cancel_at_period_end` in the DB. HoS returns a wallet intent only: local
+/// `cancel_at_period_end` and related fields change after the chain transaction lands and the user
+/// calls `POST /v1/subscriptions/near/sync` (or a mutation that reconciles from RPC).
 #[derive(Debug, Clone)]
 pub enum CancelSubscriptionOutcome {
     Completed,
     NearStakingCancel,
 }
 
-/// Stripe path updated DB; HoS path leaves chain to the wallet (`price_id` on GET /subscriptions).
+/// Stripe path updates the DB. HoS returns a wallet intent only; local rows refresh after chain
+/// settlement and `POST /v1/subscriptions/near/sync` (or reconcile-on-mutation).
 #[derive(Debug, Clone)]
 pub enum ResumeSubscriptionOutcome {
     Completed,
     NearStakingResume,
+}
+
+/// Summary from `POST /v1/subscriptions/near/sync` / internal HoS reconcile.
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NearStakingSyncSummary {
+    /// True when reconcile exited early (no HoS contract configured, user has no linked NEAR account, or no HoS anchor price in catalog). No RPC or DB mutation was attempted.
+    pub skipped: bool,
+    /// Local `house-of-stake` rows removed after chain reported no subscription for the probed price.
+    pub deleted_house_of_stake_rows: u32,
+    /// True when a local row was upserted from chain JSON.
+    pub upserted_house_of_stake_row: bool,
 }
 
 /// Stripe customer mapping data
@@ -542,6 +557,13 @@ pub trait SubscriptionRepository: Send + Sync {
     /// Delete a subscription record
     async fn delete_subscription(&self, subscription_id: &str) -> anyhow::Result<()>;
 
+    /// Delete a subscription row inside an existing transaction.
+    async fn delete_subscription_txn(
+        &self,
+        txn: &tokio_postgres::Transaction<'_>,
+        subscription_id: &str,
+    ) -> anyhow::Result<()>;
+
     /// Deactivate all subscriptions for a user (set status = 'canceled').
     /// Used when admin sets a new subscription to ensure only one active plan.
     async fn deactivate_user_subscriptions(
@@ -813,7 +835,7 @@ pub trait SubscriptionService: Send + Sync {
     async fn sync_near_staking_subscription(
         &self,
         user_id: UserId,
-    ) -> Result<(), SubscriptionError>;
+    ) -> Result<NearStakingSyncSummary, SubscriptionError>;
 
     /// Change the user's subscription to a different plan.
     /// Upgrades are applied immediately; downgrades are scheduled for period-end checks.

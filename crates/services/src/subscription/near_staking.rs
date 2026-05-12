@@ -5,6 +5,18 @@ use crate::UserId;
 use chrono::{DateTime, Utc};
 use near_api::{AccountId, Contract, Data, NetworkConfig};
 use serde_json::{json, Value};
+use std::time::Duration;
+use tokio::time::timeout;
+
+/// Upper bound for NEAR JSON-RPC view calls so API handlers do not block indefinitely.
+const NEAR_VIEW_RPC_TIMEOUT: Duration = Duration::from_secs(15);
+
+fn view_timeout_err() -> Box<dyn std::error::Error + Send + Sync> {
+    Box::new(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        "NEAR RPC view call timed out",
+    ))
+}
 
 /// Fetch `get_subscription_for_price(account_id, price_id)` (returns JSON `null` when absent).
 pub async fn view_get_subscription_for_price(
@@ -13,25 +25,29 @@ pub async fn view_get_subscription_for_price(
     account_id: &str,
     anchor_price_id: &str,
 ) -> Result<Option<Value>, Box<dyn std::error::Error + Send + Sync>> {
-    let url = rpc_url.parse()?;
-    let network = NetworkConfig::from_rpc_url("configured", url);
-    let cid: AccountId = contract_id
-        .parse()
-        .map_err(|e| format!("invalid staking contract account id: {e}"))?;
+    timeout(NEAR_VIEW_RPC_TIMEOUT, async {
+        let url = rpc_url.parse()?;
+        let network = NetworkConfig::from_rpc_url("configured", url);
+        let cid: AccountId = contract_id
+            .parse()
+            .map_err(|e| format!("invalid staking contract account id: {e}"))?;
 
-    let data: Data<Option<Value>> = Contract(cid)
-        .call_function(
-            "get_subscription_for_price",
-            json!({
-                "account_id": account_id,
-                "price_id": anchor_price_id,
-            }),
-        )
-        .read_only()
-        .fetch_from(&network)
-        .await?;
+        let data: Data<Option<Value>> = Contract(cid)
+            .call_function(
+                "get_subscription_for_price",
+                json!({
+                    "account_id": account_id,
+                    "price_id": anchor_price_id,
+                }),
+            )
+            .read_only()
+            .fetch_from(&network)
+            .await?;
 
-    Ok(data.data)
+        Ok::<Option<Value>, Box<dyn std::error::Error + Send + Sync>>(data.data)
+    })
+    .await
+    .map_err(|_| view_timeout_err())?
 }
 
 /// Fetch `get_price(price_id)` for catalog comparisons (upgrade vs downgrade).
@@ -40,19 +56,23 @@ pub async fn view_get_price(
     contract_id: &str,
     price_id: &str,
 ) -> Result<Option<Value>, Box<dyn std::error::Error + Send + Sync>> {
-    let url = rpc_url.parse()?;
-    let network = NetworkConfig::from_rpc_url("configured", url);
-    let cid: AccountId = contract_id
-        .parse()
-        .map_err(|e| format!("invalid staking contract account id: {e}"))?;
+    timeout(NEAR_VIEW_RPC_TIMEOUT, async {
+        let url = rpc_url.parse()?;
+        let network = NetworkConfig::from_rpc_url("configured", url);
+        let cid: AccountId = contract_id
+            .parse()
+            .map_err(|e| format!("invalid staking contract account id: {e}"))?;
 
-    let data: Data<Option<Value>> = Contract(cid)
-        .call_function("get_price", json!({ "price_id": price_id }))
-        .read_only()
-        .fetch_from(&network)
-        .await?;
+        let data: Data<Option<Value>> = Contract(cid)
+            .call_function("get_price", json!({ "price_id": price_id }))
+            .read_only()
+            .fetch_from(&network)
+            .await?;
 
-    Ok(data.data)
+        Ok::<Option<Value>, Box<dyn std::error::Error + Send + Sync>>(data.data)
+    })
+    .await
+    .map_err(|_| view_timeout_err())?
 }
 
 /// Parse catalog `amount` field (`U128` JSON) as yoctoNEAR integer.
@@ -142,11 +162,7 @@ pub fn subscription_row_from_chain_json(
         pending_downgrade_from_price_id: pd_from,
         pending_downgrade_expected_period_end: pd_end,
         pending_downgrade_status: pd_status,
-        pending_downgrade_updated_at: if pd_status.is_some() {
-            Some(Utc::now())
-        } else {
-            None
-        },
+        pending_downgrade_updated_at: pd_status.map(|_| Utc::now()),
     })
 }
 

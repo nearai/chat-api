@@ -10,7 +10,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use services::subscription::ports::{
     CancelSubscriptionOutcome, ChangePlanOutcome, CreateSubscriptionOutcome,
-    ResumeSubscriptionOutcome, SubscriptionError, SubscriptionPlan, SubscriptionWithPlan,
+    NearStakingSyncSummary, ResumeSubscriptionOutcome, SubscriptionError, SubscriptionPlan,
+    SubscriptionWithPlan,
 };
 use utoipa::ToSchema;
 
@@ -92,11 +93,8 @@ pub struct ListPlansResponse {
     pub plans: Vec<SubscriptionPlan>,
 }
 
-/// Response from POST /v1/subscriptions/near/sync
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct NearStakingSyncResponse {
-    pub synced: bool,
-}
+/// Response from POST /v1/subscriptions/near/sync (see [`NearStakingSyncSummary`]).
+pub type NearStakingSyncResponse = NearStakingSyncSummary;
 
 /// Query `provider`: omit or `stripe` for Stripe-backed plans; `house-of-stake` for staking-contract SKUs.
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
@@ -246,7 +244,7 @@ pub async fn create_subscription(
     path = "/v1/subscriptions/cancel",
     tag = "Subscriptions",
     responses(
-        (status = 200, description = "Subscription canceled successfully", body = CancelSubscriptionResponse),
+        (status = 200, description = "Stripe: subscription set to cancel at period end. House-of-stake: wallet instructions only — local `cancel_at_period_end` updates after chain sync (`POST /v1/subscriptions/near/sync` or reconcile on other subscription calls).", body = CancelSubscriptionResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 404, description = "No active subscription found", body = crate::error::ApiErrorResponse),
         (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse),
@@ -309,7 +307,7 @@ pub async fn cancel_subscription(
     path = "/v1/subscriptions/resume",
     tag = "Subscriptions",
     responses(
-        (status = 200, description = "Subscription resumed successfully", body = ResumeSubscriptionResponse),
+        (status = 200, description = "Stripe: cancellation at period end cleared. House-of-stake: wallet instructions only — local DB updates after chain sync (`POST /v1/subscriptions/near/sync` or reconcile on other subscription calls).", body = ResumeSubscriptionResponse),
         (status = 400, description = "Subscription is not scheduled for cancellation", body = crate::error::ApiErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 404, description = "No active subscription found", body = crate::error::ApiErrorResponse),
@@ -619,7 +617,7 @@ pub async fn create_portal_session(
     path = "/v1/subscriptions/near/sync",
     tag = "Subscriptions",
     responses(
-        (status = 200, description = "Local subscription row refreshed from chain", body = NearStakingSyncResponse),
+        (status = 200, description = "Reconcile finished; see `skipped`, `deleted_house_of_stake_rows`, and `upserted_house_of_stake_row` in the body.", body = NearStakingSyncSummary),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse),
         (status = 503, description = "NEAR RPC unavailable", body = crate::error::ApiErrorResponse)
@@ -632,7 +630,7 @@ pub async fn sync_near_staking_subscription(
     State(app_state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
 ) -> Result<Json<NearStakingSyncResponse>, ApiError> {
-    app_state
+    let summary = app_state
         .subscription_service
         .sync_near_staking_subscription(user.user_id)
         .await
@@ -651,7 +649,7 @@ pub async fn sync_near_staking_subscription(
             }
         })?;
 
-    Ok(Json(NearStakingSyncResponse { synced: true }))
+    Ok(Json(summary))
 }
 
 /// Handle Stripe webhook events (public endpoint - no auth required)
