@@ -361,9 +361,9 @@ pub struct NearConfig {
     /// Network id for wallets and staking intents (e.g. `mainnet`, `testnet`). Defaults from `NEAR_NETWORK_ID`.
     #[serde(default = "default_near_network_id")]
     pub network_id: String,
-    /// Optional `stake.dao` staking contract account id (e.g. `stake.dao.near`).
-    /// Required for `house-of-stake` subscription intents and RPC sync.
-    #[serde(default, alias = "house_of_stake_contract_id")]
+    /// Optional staking contract account id (e.g. `stake.dao`).
+    /// Required for `house-of-stake` subscription intents and RPC sync (`NEAR_STAKING_CONTRACT_ID` or `near.near_staking_contract_id` in config).
+    #[serde(default)]
     pub near_staking_contract_id: Option<String>,
 }
 
@@ -374,13 +374,7 @@ impl Default for NearConfig {
         let near_staking_contract_id = std::env::var("NEAR_STAKING_CONTRACT_ID")
             .ok()
             .filter(|s| !s.trim().is_empty())
-            .map(|s| s.trim().to_string())
-            .or_else(|| {
-                std::env::var("HOUSE_OF_STAKE_CONTRACT_ID")
-                    .ok()
-                    .filter(|s| !s.trim().is_empty())
-                    .map(|s| s.trim().to_string())
-            });
+            .map(|s| s.trim().to_string());
         Self {
             rpc_url: Url::parse(&raw).expect("NEAR_RPC_URL must be a valid URL"),
             network_id: default_near_network_id(),
