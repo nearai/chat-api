@@ -796,8 +796,9 @@ impl SubscriptionServiceImpl {
         candidates.into_iter().next().map(|(_, price_id)| price_id)
     }
 
-    /// Refresh local HoS row from chain when configured; logs and continues on RPC failure so Stripe flows are not blocked.
-    async fn reconcile_near_staking_from_rpc_best_effort(
+    /// When HoS is configured, refresh the user's staking-backed subscription row from chain.
+    /// RPC failures are logged and ignored so callers (e.g. Stripe cancel) are not blocked.
+    async fn reconcile_near_staking_from_rpc_or_warn(
         &self,
         user_id: UserId,
         context: &'static str,
@@ -1296,7 +1297,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
     ) -> Result<CancelSubscriptionOutcome, SubscriptionError> {
         tracing::info!("Canceling subscription for user_id={}", user_id);
 
-        self.reconcile_near_staking_from_rpc_best_effort(user_id, "cancel_subscription")
+        self.reconcile_near_staking_from_rpc_or_warn(user_id, "cancel_subscription")
             .await;
 
         let subscription = self
@@ -1376,7 +1377,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
     ) -> Result<ResumeSubscriptionOutcome, SubscriptionError> {
         tracing::info!("Resuming subscription for user_id={}", user_id);
 
-        self.reconcile_near_staking_from_rpc_best_effort(user_id, "resume_subscription")
+        self.reconcile_near_staking_from_rpc_or_warn(user_id, "resume_subscription")
             .await;
 
         let subscription = self
@@ -1472,7 +1473,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
             target_plan
         );
 
-        self.reconcile_near_staking_from_rpc_best_effort(user_id, "change_plan")
+        self.reconcile_near_staking_from_rpc_or_warn(user_id, "change_plan")
             .await;
 
         let subscription = self
@@ -1712,7 +1713,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
             active_only
         );
 
-        self.reconcile_near_staking_from_rpc_best_effort(user_id, "get_user_subscriptions")
+        self.reconcile_near_staking_from_rpc_or_warn(user_id, "get_user_subscriptions")
             .await;
 
         let stripe_ok = self.get_plans_for_provider("stripe").await.is_ok();

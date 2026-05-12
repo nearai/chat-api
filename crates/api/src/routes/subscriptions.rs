@@ -126,7 +126,7 @@ pub struct CreatePortalSessionResponse {
     tag = "Subscriptions",
     request_body = CreateSubscriptionRequest,
     responses(
-        (status = 200, description = "Stripe: flat `{ \"checkout_url\": \"...\" }`. HoS: `{ \"kind\": \"near_stake_lock\", \"price_id\": \"...\" }`.", body = CreateSubscriptionResponse),
+        (status = 200, description = "Stripe: flat `{ \"checkout_url\": \"...\" }`. HoS: `{ \"kind\": \"house_of_stake\", \"price_id\": \"...\" }`.", body = CreateSubscriptionResponse),
         (status = 400, description = "Invalid plan or bad request", body = crate::error::ApiErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 403, description = "House-of-Stake requires a linked NEAR wallet", body = crate::error::ApiErrorResponse),

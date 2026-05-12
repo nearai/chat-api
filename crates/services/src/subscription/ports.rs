@@ -706,7 +706,7 @@ pub struct SubscriptionPlan {
 ///
 /// Serialized JSON:
 /// - **Stripe** — legacy flat object `{"checkout_url":"..."}`.
-/// - **HoS** — `{"kind":"near_stake_lock","price_id":"..."}` (contract, network, and call shape live in the app).
+/// - **HoS** — `{"kind":"house_of_stake","price_id":"..."}` (contract, network, and call shape live in the app).
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub enum CreateSubscriptionOutcome {
@@ -730,7 +730,7 @@ impl Serialize for CreateSubscriptionOutcome {
             }
             CreateSubscriptionOutcome::NearStakeLock { price_id } => {
                 let mut st = serializer.serialize_struct("NearStakeLock", 2)?;
-                st.serialize_field("kind", &"near_stake_lock")?;
+                st.serialize_field("kind", &"house_of_stake")?;
                 st.serialize_field("price_id", price_id)?;
                 st.end()
             }
@@ -754,7 +754,7 @@ impl<'de> Deserialize<'de> for CreateSubscriptionOutcome {
             });
         }
         if let Some(kind) = obj.get("kind").and_then(|x| x.as_str()) {
-            if kind == "near_stake_lock" {
+            if kind == "house_of_stake" || kind == "near_stake_lock" {
                 let price_id = obj
                     .get("price_id")
                     .and_then(|x| x.as_str())
@@ -769,7 +769,7 @@ impl<'de> Deserialize<'de> for CreateSubscriptionOutcome {
             });
         }
         Err(D::Error::custom(
-            "invalid create subscription outcome: expected checkout_url or near_stake_lock with price_id",
+            "invalid create subscription outcome: expected checkout_url or kind house_of_stake with price_id",
         ))
     }
 }
