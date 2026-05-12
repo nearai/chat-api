@@ -349,11 +349,18 @@ impl Default for StripeConfig {
     }
 }
 
+fn default_near_network_id() -> String {
+    std::env::var("NEAR_NETWORK_ID").unwrap_or_else(|_| "mainnet".to_string())
+}
+
 /// NEAR-related configuration (shared between services)
 #[derive(Debug, Clone, Deserialize)]
 pub struct NearConfig {
     /// NEAR JSON-RPC endpoint used for on-chain queries (e.g. balance checks)
     pub rpc_url: Url,
+    /// Network id for wallets and staking intents (e.g. `mainnet`, `testnet`). Defaults from `NEAR_NETWORK_ID`.
+    #[serde(default = "default_near_network_id")]
+    pub network_id: String,
     /// Optional `stake.dao` staking contract account id (e.g. `stake.dao.near`).
     /// Required for `house-of-stake` subscription intents and RPC sync.
     #[serde(default, alias = "house_of_stake_contract_id")]
@@ -376,6 +383,7 @@ impl Default for NearConfig {
             });
         Self {
             rpc_url: Url::parse(&raw).expect("NEAR_RPC_URL must be a valid URL"),
+            network_id: default_near_network_id(),
             near_staking_contract_id,
         }
     }

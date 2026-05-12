@@ -70,6 +70,7 @@ use utoipa::OpenApi;
         crate::routes::subscriptions::change_plan,
         crate::routes::subscriptions::list_plans,
         crate::routes::subscriptions::list_subscriptions,
+        crate::routes::subscriptions::sync_near_staking_subscription,
         // Admin endpoints
         crate::routes::admin::list_users,
         crate::routes::admin::list_models,
@@ -187,6 +188,7 @@ use utoipa::OpenApi;
         services::subscription::ports::ChangePlanOutcome,
         crate::routes::subscriptions::ListSubscriptionsResponse,
         crate::routes::subscriptions::ListPlansResponse,
+        crate::routes::subscriptions::NearStakingSyncResponse,
         services::subscription::ports::SubscriptionWithPlan,
         services::subscription::ports::SubscriptionPlan,
         // Attestation models

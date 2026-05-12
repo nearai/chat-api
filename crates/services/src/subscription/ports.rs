@@ -729,9 +729,12 @@ pub struct SubscriptionPlan {
 }
 
 /// Result of [`SubscriptionService::create_subscription`]: Stripe redirect or on-chain lock intent.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Serialized JSON:
+/// - **Stripe** — legacy flat object `{"checkout_url":"..."}` (backward compatible with pre-enum clients).
+/// - **NEAR** — `{"kind":"near_wallet_intent","contract_id","network_id","actions"}`.
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CreateSubscriptionOutcome {
     /// Complete checkout on Stripe (`checkout_url`).
     StripeCheckout { checkout_url: String },
@@ -741,6 +744,78 @@ pub enum CreateSubscriptionOutcome {
         network_id: String,
         actions: Vec<NearWalletAction>,
     },
+}
+
+impl Serialize for CreateSubscriptionOutcome {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        match self {
+            CreateSubscriptionOutcome::StripeCheckout { checkout_url } => {
+                let mut st = serializer.serialize_struct("StripeCheckout", 1)?;
+                st.serialize_field("checkout_url", checkout_url)?;
+                st.end()
+            }
+            CreateSubscriptionOutcome::NearWalletIntent {
+                contract_id,
+                network_id,
+                actions,
+            } => {
+                let mut st = serializer.serialize_struct("NearWalletIntent", 4)?;
+                st.serialize_field("kind", &"near_wallet_intent")?;
+                st.serialize_field("contract_id", contract_id)?;
+                st.serialize_field("network_id", network_id)?;
+                st.serialize_field("actions", actions)?;
+                st.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for CreateSubscriptionOutcome {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+        let v = serde_json::Value::deserialize(deserializer)?;
+        let obj = v
+            .as_object()
+            .ok_or_else(|| D::Error::custom("create subscription outcome must be a JSON object"))?;
+        if obj.contains_key("contract_id") && obj.contains_key("actions") {
+            let contract_id = obj
+                .get("contract_id")
+                .and_then(|x| x.as_str())
+                .ok_or_else(|| D::Error::custom("missing contract_id"))?
+                .to_string();
+            let network_id = obj
+                .get("network_id")
+                .and_then(|x| x.as_str())
+                .ok_or_else(|| D::Error::custom("missing network_id"))?
+                .to_string();
+            let actions_val = obj
+                .get("actions")
+                .cloned()
+                .ok_or_else(|| D::Error::custom("missing actions"))?;
+            let actions: Vec<NearWalletAction> =
+                serde_json::from_value(actions_val).map_err(|e| D::Error::custom(e.to_string()))?;
+            return Ok(CreateSubscriptionOutcome::NearWalletIntent {
+                contract_id,
+                network_id,
+                actions,
+            });
+        }
+        if let Some(url) = obj.get("checkout_url").and_then(|x| x.as_str()) {
+            return Ok(CreateSubscriptionOutcome::StripeCheckout {
+                checkout_url: url.to_string(),
+            });
+        }
+        Err(D::Error::custom(
+            "invalid create subscription outcome: expected checkout_url or NEAR wallet intent fields",
+        ))
+    }
 }
 
 /// Service trait for subscription management

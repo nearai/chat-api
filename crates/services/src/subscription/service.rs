@@ -268,10 +268,13 @@ impl SubscriptionServiceImpl {
         }
 
         if provider_lc == "house-of-stake" {
-            let Some(cid) = self.near_staking_contract_id.as_deref() else {
-                return Err(SubscriptionError::HouseOfStakeNotConfigured);
-            };
-            if cid.trim().is_empty() {
+            let has_contract = self
+                .near_staking_contract_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .is_some();
+            if !has_contract {
                 return Err(SubscriptionError::HouseOfStakeNotConfigured);
             }
         }
@@ -305,7 +308,7 @@ impl SubscriptionServiceImpl {
         // Extract plan_name -> price_id for the requested provider
         let mut plans = HashMap::new();
         for (plan_name, plan_config) in subscription_plans {
-            if let Some(provider_config) = plan_config.providers.get(provider) {
+            if let Some(provider_config) = plan_config.providers.get(provider_lc.as_str()) {
                 plans.insert(plan_name, provider_config.price_id.clone());
             }
         }
@@ -410,11 +413,8 @@ impl SubscriptionServiceImpl {
         }
     }
 
-    /// NEAR account id from linked oauth_accounts (required for house-of-stake).
-    async fn house_of_stake_near_account_id(
-        &self,
-        user_id: UserId,
-    ) -> Result<String, SubscriptionError> {
+    /// Linked NEAR account id from `oauth_accounts` (needed for house-of-stake / RPC reconcile).
+    async fn get_near_account_id(&self, user_id: UserId) -> Result<String, SubscriptionError> {
         let accounts = self
             .user_repository
             .get_linked_accounts(user_id)
@@ -789,12 +789,32 @@ impl SubscriptionServiceImpl {
     fn anchor_hos_price_id(
         subscription_plans: &HashMap<String, SubscriptionPlanConfig>,
     ) -> Option<String> {
-        for cfg in subscription_plans.values() {
-            if let Some(p) = cfg.providers.get("house-of-stake") {
-                return Some(p.price_id.clone());
-            }
+        let mut candidates: Vec<(String, String)> = subscription_plans
+            .iter()
+            .filter_map(|(plan_name, cfg)| {
+                cfg.providers
+                    .get("house-of-stake")
+                    .map(|p| (plan_name.clone(), p.price_id.clone()))
+            })
+            .collect();
+        candidates.sort_by(|a, b| a.0.cmp(&b.0));
+        candidates.into_iter().next().map(|(_, price_id)| price_id)
+    }
+
+    /// Refresh local HoS row from chain when configured; logs and continues on RPC failure so Stripe flows are not blocked.
+    async fn reconcile_near_staking_from_rpc_best_effort(
+        &self,
+        user_id: UserId,
+        context: &'static str,
+    ) {
+        if let Err(err) = self.reconcile_near_staking_from_rpc(user_id).await {
+            tracing::warn!(
+                user_id = %user_id.0,
+                context,
+                error = %err,
+                "NEAR staking reconcile from RPC failed; continuing with stored subscription state"
+            );
         }
-        None
     }
 
     /// Refresh local `house-of-stake` subscription row from chain (no-op when HoS not configured or user has no NEAR link).
@@ -811,7 +831,7 @@ impl SubscriptionServiceImpl {
             return Ok(());
         };
 
-        let near_account = match self.house_of_stake_near_account_id(user_id).await {
+        let near_account = match self.get_near_account_id(user_id).await {
             Ok(a) => a,
             Err(_) => return Ok(()),
         };
@@ -1209,7 +1229,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
 
         Self::validate_provider(&provider)?;
 
-        let provider_plans = self.get_plans_for_provider(&provider).await?;
+        let provider_lc = provider.to_lowercase();
+        let provider_plans = self.get_plans_for_provider(&provider_lc).await?;
 
         if self
             .subscription_repo
@@ -1252,17 +1273,12 @@ impl SubscriptionService for SubscriptionServiceImpl {
             });
         }
 
-        if provider.to_lowercase() == "house-of-stake" {
-            self.house_of_stake_near_account_id(user_id).await?;
+        if provider_lc == "house-of-stake" {
+            self.get_near_account_id(user_id).await?;
             let contract_id = self
                 .near_staking_contract_id
-                .as_deref()
-                .ok_or(SubscriptionError::HouseOfStakeNotConfigured)?
-                .trim()
-                .to_string();
-            if contract_id.is_empty() {
-                return Err(SubscriptionError::HouseOfStakeNotConfigured);
-            }
+                .clone()
+                .ok_or(SubscriptionError::HouseOfStakeNotConfigured)?;
             return Ok(CreateSubscriptionOutcome::NearWalletIntent {
                 contract_id,
                 network_id: self.near_network_id.clone(),
@@ -1320,7 +1336,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
     ) -> Result<CancelSubscriptionOutcome, SubscriptionError> {
         tracing::info!("Canceling subscription for user_id={}", user_id);
 
-        self.reconcile_near_staking_from_rpc(user_id).await?;
+        self.reconcile_near_staking_from_rpc_best_effort(user_id, "cancel_subscription")
+            .await;
 
         let subscription = self
             .subscription_repo
@@ -1420,7 +1437,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
     ) -> Result<ResumeSubscriptionOutcome, SubscriptionError> {
         tracing::info!("Resuming subscription for user_id={}", user_id);
 
-        self.reconcile_near_staking_from_rpc(user_id).await?;
+        self.reconcile_near_staking_from_rpc_best_effort(user_id, "resume_subscription")
+            .await;
 
         let subscription = self
             .subscription_repo
@@ -1536,7 +1554,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
             target_plan
         );
 
-        self.reconcile_near_staking_from_rpc(user_id).await?;
+        self.reconcile_near_staking_from_rpc_best_effort(user_id, "change_plan")
+            .await;
 
         let subscription = self
             .subscription_repo
@@ -1593,11 +1612,21 @@ impl SubscriptionService for SubscriptionServiceImpl {
             let cur_prod = cur_price_j
                 .get("product_id")
                 .and_then(|x| x.as_str())
-                .unwrap_or("");
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    SubscriptionError::InternalError(
+                        "HoS current price JSON missing or empty product_id".into(),
+                    )
+                })?;
             let new_prod = new_price_j
                 .get("product_id")
                 .and_then(|x| x.as_str())
-                .unwrap_or("");
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    SubscriptionError::InternalError(
+                        "HoS target price JSON missing or empty product_id".into(),
+                    )
+                })?;
             if cur_prod != new_prod {
                 return Err(SubscriptionError::InvalidPlan(
                     "Target plan must belong to the same catalog product as the current subscription"
@@ -1771,10 +1800,14 @@ impl SubscriptionService for SubscriptionServiceImpl {
             active_only
         );
 
-        self.reconcile_near_staking_from_rpc(user_id).await?;
+        self.reconcile_near_staking_from_rpc_best_effort(user_id, "get_user_subscriptions")
+            .await;
 
-        // Verify subscriptions are configured (at least Stripe provider has plans)
-        self.get_plans_for_provider("stripe").await?;
+        let stripe_ok = self.get_plans_for_provider("stripe").await.is_ok();
+        let hos_ok = self.get_plans_for_provider("house-of-stake").await.is_ok();
+        if !stripe_ok && !hos_ok {
+            return Err(SubscriptionError::NotConfigured);
+        }
 
         // Get subscription_plans from config for plan name resolution across providers
         let configs = self

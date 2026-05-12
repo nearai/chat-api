@@ -223,8 +223,7 @@ pub async fn create_test_server_and_db(
             stripe_webhook_secret: config.stripe.webhook_secret.clone(),
             near_rpc_url: config.near.rpc_url.to_string(),
             near_staking_contract_id: config.near.near_staking_contract_id.clone(),
-            near_network_id: std::env::var("NEAR_NETWORK_ID")
-                .unwrap_or_else(|_| "mainnet".to_string()),
+            near_network_id: config.near.network_id.clone(),
         },
     ));
 

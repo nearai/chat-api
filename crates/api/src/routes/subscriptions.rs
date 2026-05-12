@@ -100,6 +100,12 @@ pub struct ListPlansResponse {
     pub plans: Vec<SubscriptionPlan>,
 }
 
+/// Response from POST /v1/subscriptions/near/sync
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct NearStakingSyncResponse {
+    pub synced: bool,
+}
+
 /// Query `provider`: omit or `stripe` for Stripe-backed plans; `house-of-stake` for staking-contract SKUs.
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
 pub struct ListPlansParams {
@@ -128,12 +134,13 @@ pub struct CreatePortalSessionResponse {
     tag = "Subscriptions",
     request_body = CreateSubscriptionRequest,
     responses(
-        (status = 200, description = "Checkout session created successfully", body = CreateSubscriptionResponse),
+        (status = 200, description = "Stripe: flat `{ \"checkout_url\": \"...\" }`. NEAR: `{ \"kind\": \"near_wallet_intent\", ... }`.", body = CreateSubscriptionResponse),
         (status = 400, description = "Invalid plan or bad request", body = crate::error::ApiErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "House-of-Stake requires a linked NEAR wallet", body = crate::error::ApiErrorResponse),
         (status = 409, description = "Active subscription already exists", body = crate::error::ApiErrorResponse),
         (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse),
-        (status = 503, description = "Stripe not configured", body = crate::error::ApiErrorResponse)
+        (status = 503, description = "Billing not configured (Stripe or House-of-Stake)", body = crate::error::ApiErrorResponse)
     ),
     security(
         ("session_token" = [])
@@ -161,6 +168,9 @@ pub async fn create_subscription(
         return Err(ApiError::bad_request("Test clock feature is not enabled"));
     }
 
+    // Snapshot for error mapping (provider is moved into the service call).
+    let provider_lc = req.provider.to_lowercase();
+
     let outcome = app_state
         .subscription_service
         .create_subscription(
@@ -183,7 +193,12 @@ pub async fn create_subscription(
                 ApiError::bad_request(format!("Invalid provider: {}", provider))
             }
             SubscriptionError::NotConfigured => {
-                ApiError::service_unavailable("Stripe is not configured")
+                let msg = if provider_lc == "house-of-stake" {
+                    "House-of-Stake subscription billing is not configured"
+                } else {
+                    "Stripe is not configured"
+                };
+                ApiError::service_unavailable(msg)
             }
             SubscriptionError::DatabaseError(msg) => {
                 tracing::error!(error = ?msg, "Database error creating subscription");
@@ -242,7 +257,8 @@ pub async fn create_subscription(
         (status = 200, description = "Subscription canceled successfully", body = CancelSubscriptionResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 404, description = "No active subscription found", body = crate::error::ApiErrorResponse),
-        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse),
+        (status = 503, description = "House-of-Stake not configured or NEAR RPC error", body = crate::error::ApiErrorResponse)
     ),
     security(
         ("session_token" = [])
@@ -310,7 +326,8 @@ pub async fn cancel_subscription(
         (status = 400, description = "Subscription is not scheduled for cancellation", body = crate::error::ApiErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 404, description = "No active subscription found", body = crate::error::ApiErrorResponse),
-        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse),
+        (status = 503, description = "House-of-Stake not configured or NEAR RPC error", body = crate::error::ApiErrorResponse)
     ),
     security(
         ("session_token" = [])
@@ -381,7 +398,7 @@ pub async fn resume_subscription(
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 404, description = "No active subscription found", body = crate::error::ApiErrorResponse),
         (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse),
-        (status = 503, description = "Stripe not configured", body = crate::error::ApiErrorResponse)
+        (status = 503, description = "House-of-Stake not configured, NEAR RPC error, or Stripe not configured", body = crate::error::ApiErrorResponse)
     ),
     security(
         ("session_token" = [])
@@ -419,7 +436,9 @@ pub async fn change_plan(
                 ApiError::bad_request("Subscription is scheduled for cancellation; resume it before changing plans")
             }
             SubscriptionError::NotConfigured => {
-                ApiError::service_unavailable("Stripe is not configured")
+                ApiError::service_unavailable(
+                    "Subscription billing is not configured for this operation",
+                )
             }
             SubscriptionError::DatabaseError(msg) => {
                 tracing::error!(error = ?msg, "Database error changing plan");
@@ -466,10 +485,12 @@ pub async fn change_plan(
     get,
     path = "/v1/subscriptions/plans",
     tag = "Subscriptions",
+    params(ListPlansParams),
     responses(
         (status = 200, description = "Plans retrieved successfully", body = ListPlansResponse),
+        (status = 400, description = "Invalid provider filter", body = crate::error::ApiErrorResponse),
         (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse),
-        (status = 503, description = "Stripe not configured", body = crate::error::ApiErrorResponse)
+        (status = 503, description = "Billing provider not configured", body = crate::error::ApiErrorResponse)
     )
 )]
 pub async fn list_plans(
@@ -492,9 +513,9 @@ pub async fn list_plans(
         .get_available_plans(provider_filter)
         .await
         .map_err(|e| match e {
-            SubscriptionError::NotConfigured => {
-                ApiError::service_unavailable("Stripe is not configured")
-            }
+            SubscriptionError::NotConfigured => ApiError::service_unavailable(
+                "Subscription plans are not configured for the requested provider",
+            ),
             SubscriptionError::InvalidProvider(msg) => ApiError::bad_request(msg),
             SubscriptionError::HouseOfStakeNotConfigured => {
                 ApiError::service_unavailable("House-of-Stake billing is not configured")
@@ -520,7 +541,7 @@ pub async fn list_plans(
         (status = 200, description = "Subscriptions retrieved successfully", body = ListSubscriptionsResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse),
-        (status = 503, description = "Stripe not configured", body = crate::error::ApiErrorResponse)
+        (status = 503, description = "No billing provider configured or NEAR RPC sync failed", body = crate::error::ApiErrorResponse)
     ),
     security(
         ("session_token" = [])
@@ -542,9 +563,9 @@ pub async fn list_subscriptions(
         .get_user_subscriptions(user.user_id, !params.include_inactive)
         .await
         .map_err(|e| match e {
-            SubscriptionError::NotConfigured => {
-                ApiError::service_unavailable("Stripe is not configured")
-            }
+            SubscriptionError::NotConfigured => ApiError::service_unavailable(
+                "Subscription plans are not configured for any billing provider",
+            ),
             SubscriptionError::NearRpcError(msg) => {
                 tracing::error!(error = ?msg, "NEAR RPC error listing subscriptions");
                 ApiError::service_unavailable("Failed to sync subscription from NEAR RPC")
@@ -610,10 +631,24 @@ pub async fn create_portal_session(
 }
 
 /// POST /v1/subscriptions/near/sync — refresh local `house-of-stake` row from chain (authenticated).
+#[utoipa::path(
+    post,
+    path = "/v1/subscriptions/near/sync",
+    tag = "Subscriptions",
+    responses(
+        (status = 200, description = "Local subscription row refreshed from chain", body = NearStakingSyncResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse),
+        (status = 503, description = "NEAR RPC unavailable", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
 pub async fn sync_near_staking_subscription(
     State(app_state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<NearStakingSyncResponse>, ApiError> {
     app_state
         .subscription_service
         .sync_near_staking_subscription(user.user_id)
@@ -633,7 +668,7 @@ pub async fn sync_near_staking_subscription(
             }
         })?;
 
-    Ok(Json(serde_json::json!({ "synced": true })))
+    Ok(Json(NearStakingSyncResponse { synced: true }))
 }
 
 /// Handle Stripe webhook events (public endpoint - no auth required)
