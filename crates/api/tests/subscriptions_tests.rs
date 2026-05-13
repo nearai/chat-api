@@ -3663,12 +3663,18 @@ async fn test_create_subscription_house_of_stake_requires_near_wallet() {
 #[serial(subscription_tests)]
 async fn test_cancel_subscription_house_of_stake_returns_wallet_intent_message() {
     clear_proxy_env_for_local_wiremock();
+    // Reconcile runs before cancel; RPC `null` would delete local HoS rows — return a minimal chain view.
+    let chain_sub = json!({
+        "subscription_id": "sub_on_chain_hos_cancel_msg",
+        "price_id": "price_hos_basic",
+        "end_ns": "2000000000000000000",
+        "status": "Active",
+        "cancel_at_period_end": false
+    });
     let mock = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/"))
-        .respond_with(near_rpc_wiremock_hos_subscription_probe_only(
-            serde_json::Value::Null,
-        ))
+        .respond_with(near_rpc_wiremock_hos_subscription_probe_only(chain_sub))
         .mount(&mock)
         .await;
 
@@ -3729,12 +3735,18 @@ async fn test_cancel_subscription_house_of_stake_returns_wallet_intent_message()
 #[serial(subscription_tests)]
 async fn test_resume_subscription_house_of_stake_returns_wallet_intent_message() {
     clear_proxy_env_for_local_wiremock();
+    // Reconcile runs before resume; keep `cancel_at_period_end` true so resume preconditions still hold.
+    let chain_sub = json!({
+        "subscription_id": "sub_on_chain_hos_resume_msg",
+        "price_id": "price_hos_basic",
+        "end_ns": "2000000000000000000",
+        "status": "Active",
+        "cancel_at_period_end": true
+    });
     let mock = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/"))
-        .respond_with(near_rpc_wiremock_hos_subscription_probe_only(
-            serde_json::Value::Null,
-        ))
+        .respond_with(near_rpc_wiremock_hos_subscription_probe_only(chain_sub))
         .mount(&mock)
         .await;
 
