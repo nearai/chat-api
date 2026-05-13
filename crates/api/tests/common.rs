@@ -210,7 +210,7 @@ async fn create_test_server_and_db_inner(
         .clone()
         .unwrap_or_else(|| config.near.rpc_url.to_string());
     let near_staking_contract_id = match &test_config.near_staking_contract_id {
-        None => config.near.near_staking_contract_id.clone(),
+        None => config.near.staking_contract_id.clone(),
         Some(s) if s.trim().is_empty() => None,
         Some(s) => Some(s.trim().to_string()),
     };

@@ -797,8 +797,8 @@ impl SubscriptionServiceImpl {
         Ok(free_plan_period_for_user(anchor, Utc::now()))
     }
 
-    fn near_rpc_err(e: Box<dyn std::error::Error + Send + Sync>) -> SubscriptionError {
-        SubscriptionError::NearRpcError(e.to_string())
+    fn near_rpc_err(e: String) -> SubscriptionError {
+        SubscriptionError::NearRpcError(e)
     }
 
     /// Deterministic HoS catalog `price_id` used only when there is **no** local `house-of-stake` row
@@ -820,21 +820,6 @@ impl SubscriptionServiceImpl {
         candidates.into_iter().next().map(|(_, price_id)| price_id)
     }
 
-    /// True when the user has any local `house-of-stake` row in `active` or `trialing`.
-    async fn user_has_active_or_trialing_hos_row(
-        &self,
-        user_id: UserId,
-    ) -> Result<bool, SubscriptionError> {
-        let subs = self
-            .subscription_repo
-            .get_user_subscriptions(user_id)
-            .await
-            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-        Ok(subs.iter().any(|s| {
-            s.provider == "house-of-stake" && (s.status == "active" || s.status == "trialing")
-        }))
-    }
-
     /// Best-effort chain reconcile only when local DB shows HoS billing (avoids NEAR RPC on every
     /// Stripe cancel/resume/change for users who only linked NEAR for sign-in).
     async fn reconcile_near_staking_from_rpc_if_hos_context(
@@ -842,18 +827,34 @@ impl SubscriptionServiceImpl {
         user_id: UserId,
         context: &'static str,
     ) {
-        match self.user_has_active_or_trialing_hos_row(user_id).await {
-            Ok(true) => {
-                self.reconcile_near_staking_from_rpc_or_warn(user_id, context)
-                    .await
+        let subs = match self.subscription_repo.get_user_subscriptions(user_id).await {
+            Ok(s) => s,
+            Err(err) => {
+                tracing::warn!(
+                    user_id = %user_id.0,
+                    context,
+                    error = %err,
+                    "could not load subscriptions for HoS reconcile gate; skipping NEAR reconcile"
+                );
+                return;
             }
-            Ok(false) => {}
-            Err(err) => tracing::warn!(
+        };
+        let has_hos = subs.iter().any(|s| {
+            s.provider == "house-of-stake" && (s.status == "active" || s.status == "trialing")
+        });
+        if !has_hos {
+            return;
+        }
+        if let Err(err) = self
+            .reconcile_near_staking_from_rpc_with_subs(user_id, subs)
+            .await
+        {
+            tracing::warn!(
                 user_id = %user_id.0,
                 context,
                 error = %err,
-                "could not check for HoS subscription rows; skipping NEAR reconcile"
-            ),
+                "NEAR staking reconcile from RPC failed; continuing with stored subscription state"
+            );
         }
     }
 
@@ -878,6 +879,22 @@ impl SubscriptionServiceImpl {
     pub async fn reconcile_near_staking_from_rpc(
         &self,
         user_id: UserId,
+    ) -> Result<NearStakingSyncSummary, SubscriptionError> {
+        let subs = self
+            .subscription_repo
+            .get_user_subscriptions(user_id)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+        self.reconcile_near_staking_from_rpc_with_subs(user_id, subs)
+            .await
+    }
+
+    /// Same as `reconcile_near_staking_from_rpc` after loading subscriptions; pass `subs` when
+    /// already available (avoids a second `get_user_subscriptions` when the caller just read rows).
+    async fn reconcile_near_staking_from_rpc_with_subs(
+        &self,
+        user_id: UserId,
+        subs: Vec<Subscription>,
     ) -> Result<NearStakingSyncSummary, SubscriptionError> {
         let Some(contract_id) = self
             .near_staking_contract_id
@@ -907,14 +924,10 @@ impl SubscriptionServiceImpl {
             return Ok(Self::hos_reconcile_summary(true, 0, false, None));
         };
 
-        let subs = self
-            .subscription_repo
-            .get_user_subscriptions(user_id)
-            .await
-            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-
         // Prefer the user's stored HoS `price_id` so we query the same catalog SKU they hold.
-        // Fall back to the deterministic anchor only when there is no local HoS row yet.
+        // Fall back to the deterministic anchor only when there is no local HoS row yet — safe
+        // because we only delete local HoS rows when RPC returns null *and* those rows still exist;
+        // a wrong anchor with no local HoS state is a no-op, not a mass delete.
         let probe_price_id = subs
             .iter()
             .filter(|s| s.provider == "house-of-stake")

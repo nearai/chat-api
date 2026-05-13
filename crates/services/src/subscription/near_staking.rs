@@ -11,12 +11,7 @@ use tokio::time::timeout;
 /// Upper bound for NEAR JSON-RPC view calls so API handlers do not block indefinitely.
 const NEAR_VIEW_RPC_TIMEOUT: Duration = Duration::from_secs(15);
 
-fn view_timeout_boxed_err() -> Box<dyn std::error::Error + Send + Sync> {
-    Box::new(std::io::Error::new(
-        std::io::ErrorKind::TimedOut,
-        "NEAR RPC view call timed out",
-    ))
-}
+const NEAR_VIEW_RPC_TIMEOUT_MSG: &str = "NEAR RPC view call timed out";
 
 /// Fetch `get_subscription_for_price(account_id, price_id)` (returns JSON `null` when absent).
 pub async fn view_get_subscription_for_price(
@@ -24,9 +19,11 @@ pub async fn view_get_subscription_for_price(
     contract_id: &str,
     account_id: &str,
     anchor_price_id: &str,
-) -> Result<Option<Value>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Option<Value>, String> {
     timeout(NEAR_VIEW_RPC_TIMEOUT, async {
-        let url = rpc_url.parse()?;
+        let url = rpc_url
+            .parse()
+            .map_err(|e: url::ParseError| e.to_string())?;
         let network = NetworkConfig::from_rpc_url("configured", url);
         let cid: AccountId = contract_id
             .parse()
@@ -42,12 +39,13 @@ pub async fn view_get_subscription_for_price(
             )
             .read_only()
             .fetch_from(&network)
-            .await?;
+            .await
+            .map_err(|e| e.to_string())?;
 
-        Ok::<Option<Value>, Box<dyn std::error::Error + Send + Sync>>(data.data)
+        Ok::<Option<Value>, String>(data.data)
     })
     .await
-    .map_err(|_| view_timeout_boxed_err())?
+    .map_err(|_| NEAR_VIEW_RPC_TIMEOUT_MSG.to_string())?
 }
 
 /// Fetch `get_price(price_id)` for catalog comparisons (upgrade vs downgrade).
@@ -55,9 +53,11 @@ pub async fn view_get_price(
     rpc_url: &str,
     contract_id: &str,
     price_id: &str,
-) -> Result<Option<Value>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Option<Value>, String> {
     timeout(NEAR_VIEW_RPC_TIMEOUT, async {
-        let url = rpc_url.parse()?;
+        let url = rpc_url
+            .parse()
+            .map_err(|e: url::ParseError| e.to_string())?;
         let network = NetworkConfig::from_rpc_url("configured", url);
         let cid: AccountId = contract_id
             .parse()
@@ -67,12 +67,13 @@ pub async fn view_get_price(
             .call_function("get_price", json!({ "price_id": price_id }))
             .read_only()
             .fetch_from(&network)
-            .await?;
+            .await
+            .map_err(|e| e.to_string())?;
 
-        Ok::<Option<Value>, Box<dyn std::error::Error + Send + Sync>>(data.data)
+        Ok::<Option<Value>, String>(data.data)
     })
     .await
-    .map_err(|_| view_timeout_boxed_err())?
+    .map_err(|_| NEAR_VIEW_RPC_TIMEOUT_MSG.to_string())?
 }
 
 /// Parse catalog `amount` field (`U128` JSON) as yoctoNEAR integer.

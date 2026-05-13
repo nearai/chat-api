@@ -3661,6 +3661,138 @@ async fn test_create_subscription_house_of_stake_requires_near_wallet() {
 
 #[tokio::test]
 #[serial(subscription_tests)]
+async fn test_cancel_subscription_house_of_stake_returns_wallet_intent_message() {
+    clear_proxy_env_for_local_wiremock();
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(near_rpc_wiremock_hos_subscription_probe_only(
+            serde_json::Value::Null,
+        ))
+        .mount(&mock)
+        .await;
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        near_rpc_url: Some(mock.uri().to_string()),
+        near_staking_contract_id: Some("staking.testnet".to_string()),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": { "providers": { "house-of-stake": { "price_id": "price_hos_basic" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } }
+        }),
+    )
+    .await;
+
+    let near_email = "hos_cancel_msg.testnet@near";
+    let login = json!({
+        "email": near_email,
+        "name": "HoS Cancel Msg",
+        "oauth_provider": "near"
+    });
+    let response = server.post("/v1/auth/mock-login").json(&login).await;
+    let token = response.json::<serde_json::Value>()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    insert_test_subscription_with_provider_and_price(
+        &server,
+        &db,
+        near_email,
+        "house-of-stake",
+        "price_hos_basic",
+        false,
+    )
+    .await;
+
+    let response = server
+        .post("/v1/subscriptions/cancel")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 200, "{}", response.text());
+    let body: serde_json::Value = response.json();
+    assert_eq!(
+        body.get("message").and_then(|x| x.as_str()),
+        Some("Complete cancellation in your NEAR wallet")
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_resume_subscription_house_of_stake_returns_wallet_intent_message() {
+    clear_proxy_env_for_local_wiremock();
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(near_rpc_wiremock_hos_subscription_probe_only(
+            serde_json::Value::Null,
+        ))
+        .mount(&mock)
+        .await;
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        near_rpc_url: Some(mock.uri().to_string()),
+        near_staking_contract_id: Some("staking.testnet".to_string()),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": { "providers": { "house-of-stake": { "price_id": "price_hos_basic" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } }
+        }),
+    )
+    .await;
+
+    let near_email = "hos_resume_msg.testnet@near";
+    let login = json!({
+        "email": near_email,
+        "name": "HoS Resume Msg",
+        "oauth_provider": "near"
+    });
+    let response = server.post("/v1/auth/mock-login").json(&login).await;
+    let token = response.json::<serde_json::Value>()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    insert_test_subscription_with_provider_and_price(
+        &server,
+        &db,
+        near_email,
+        "house-of-stake",
+        "price_hos_basic",
+        true,
+    )
+    .await;
+
+    let response = server
+        .post("/v1/subscriptions/resume")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 200, "{}", response.text());
+    let body: serde_json::Value = response.json();
+    assert_eq!(
+        body.get("message").and_then(|x| x.as_str()),
+        Some("Complete resume in your NEAR wallet")
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
 async fn test_near_staking_sync_skipped_without_contract() {
     let (server, _) = create_test_server_and_db(TestServerConfig {
         near_staking_contract_id: Some(String::new()),

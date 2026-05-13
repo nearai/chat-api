@@ -93,9 +93,6 @@ pub struct ListPlansResponse {
     pub plans: Vec<SubscriptionPlan>,
 }
 
-/// Response from POST /v1/subscriptions/near/sync (see [`NearStakingSyncSummary`]).
-pub type NearStakingSyncResponse = NearStakingSyncSummary;
-
 /// Query `provider`: omit or `stripe` for Stripe-backed plans; `house-of-stake` for staking-contract SKUs.
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
 pub struct ListPlansParams {
@@ -629,7 +626,7 @@ pub async fn create_portal_session(
 pub async fn sync_near_staking_subscription(
     State(app_state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
-) -> Result<Json<NearStakingSyncResponse>, ApiError> {
+) -> Result<Json<NearStakingSyncSummary>, ApiError> {
     let summary = app_state
         .subscription_service
         .sync_near_staking_subscription(user.user_id)

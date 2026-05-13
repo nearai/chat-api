@@ -364,23 +364,23 @@ pub struct NearConfig {
     #[serde(default = "default_near_network_id")]
     pub network_id: String,
     /// Optional staking contract account id (e.g. `stake.dao`).
-    /// Required for `house-of-stake` subscription intents and RPC sync (`NEAR_STAKING_CONTRACT_ID` or `near.near_staking_contract_id` in config).
-    #[serde(default)]
-    pub near_staking_contract_id: Option<String>,
+    /// Required for `house-of-stake` subscription intents and RPC sync (`NEAR_STAKING_CONTRACT_ID` env or `near.staking_contract_id` in config; `near.near_staking_contract_id` remains accepted as a legacy TOML key).
+    #[serde(default, alias = "near_staking_contract_id")]
+    pub staking_contract_id: Option<String>,
 }
 
 impl Default for NearConfig {
     fn default() -> Self {
         let raw =
             std::env::var("NEAR_RPC_URL").unwrap_or("https://free.rpc.fastnear.com".to_string());
-        let near_staking_contract_id = std::env::var("NEAR_STAKING_CONTRACT_ID")
+        let staking_contract_id = std::env::var("NEAR_STAKING_CONTRACT_ID")
             .ok()
             .filter(|s| !s.trim().is_empty())
             .map(|s| s.trim().to_string());
         Self {
             rpc_url: Url::parse(&raw).expect("NEAR_RPC_URL must be a valid URL"),
             network_id: default_near_network_id(),
-            near_staking_contract_id,
+            staking_contract_id,
         }
     }
 }
