@@ -13,6 +13,7 @@ use hmac::Mac;
 use serde_json::json;
 use serial_test::serial;
 use services::subscription::ports::{ChangePlanOutcome, CreateSubscriptionOutcome};
+use services::subscription::SubscriptionRepository;
 use services::system_configs::ports::RateLimitConfig;
 use services::user::ports::UserRepository;
 use services::user_usage::{UserUsageRepository, METRIC_KEY_LLM_TOKENS};
@@ -3476,7 +3477,6 @@ async fn test_create_subscription_house_of_stake_returns_flat_json() {
     )
     .await;
 
-    let user_email = "hos_create_ok@example.com";
     let login = json!({
         "email": format!("{}@near", "hos_create_ok.testnet"),
         "name": "HoS Test",

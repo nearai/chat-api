@@ -805,6 +805,43 @@ impl SubscriptionServiceImpl {
         candidates.into_iter().next().map(|(_, price_id)| price_id)
     }
 
+    /// True when the user has any local `house-of-stake` row in `active` or `trialing`.
+    async fn user_has_active_or_trialing_hos_row(
+        &self,
+        user_id: UserId,
+    ) -> Result<bool, SubscriptionError> {
+        let subs = self
+            .subscription_repo
+            .get_user_subscriptions(user_id)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+        Ok(subs.iter().any(|s| {
+            s.provider == "house-of-stake" && (s.status == "active" || s.status == "trialing")
+        }))
+    }
+
+    /// Best-effort chain reconcile only when local DB shows HoS billing (avoids NEAR RPC on every
+    /// Stripe cancel/resume/change for users who only linked NEAR for sign-in).
+    async fn reconcile_near_staking_from_rpc_if_hos_context(
+        &self,
+        user_id: UserId,
+        context: &'static str,
+    ) {
+        match self.user_has_active_or_trialing_hos_row(user_id).await {
+            Ok(true) => {
+                self.reconcile_near_staking_from_rpc_or_warn(user_id, context)
+                    .await
+            }
+            Ok(false) => {}
+            Err(err) => tracing::warn!(
+                user_id = %user_id.0,
+                context,
+                error = %err,
+                "could not check for HoS subscription rows; skipping NEAR reconcile"
+            ),
+        }
+    }
+
     /// When HoS is configured, refresh the user's staking-backed subscription row from chain.
     /// RPC failures are logged and ignored so callers (e.g. Stripe cancel) are not blocked.
     async fn reconcile_near_staking_from_rpc_or_warn(
@@ -937,6 +974,24 @@ impl SubscriptionServiceImpl {
         let chain_json = raw.as_ref().expect("checked is_some");
         let row = subscription_row_from_chain_json(user_id, &near_account, chain_json)
             .map_err(SubscriptionError::InternalError)?;
+
+        // Do not insert/update a HoS row while a non-HoS subscription is active/trialing locally:
+        // `get_active_subscription` picks newest `created_at`, so a fresh HoS upsert could wrongly
+        // become the "active" row for Stripe-primary users who also staked on-chain separately.
+        let has_active_non_hos = subs.iter().any(|s| {
+            (s.status == "active" || s.status == "trialing") && s.provider != "house-of-stake"
+        });
+        if has_active_non_hos {
+            tracing::warn!(
+                user_id = %user_id.0,
+                "Skipping HoS reconcile upsert: user has an active or trialing non-house-of-stake subscription row"
+            );
+            return Ok(NearStakingSyncSummary {
+                skipped: false,
+                deleted_house_of_stake_rows: 0,
+                upserted_house_of_stake_row: false,
+            });
+        }
 
         let mut db_client = self
             .db_pool
@@ -1279,6 +1334,11 @@ impl SubscriptionService for SubscriptionServiceImpl {
         let provider_lc = provider.to_lowercase();
         let provider_plans = self.get_plans_for_provider(&provider_lc).await?;
 
+        if provider_lc == "house-of-stake" {
+            self.reconcile_near_staking_from_rpc_or_warn(user_id, "create_subscription")
+                .await;
+        }
+
         // Check if user already has active subscription
         if self
             .subscription_repo
@@ -1380,7 +1440,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
     ) -> Result<CancelSubscriptionOutcome, SubscriptionError> {
         tracing::info!("Canceling subscription for user_id={}", user_id);
 
-        self.reconcile_near_staking_from_rpc_or_warn(user_id, "cancel_subscription")
+        self.reconcile_near_staking_from_rpc_if_hos_context(user_id, "cancel_subscription")
             .await;
 
         // Get active subscription
@@ -1464,7 +1524,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
     ) -> Result<ResumeSubscriptionOutcome, SubscriptionError> {
         tracing::info!("Resuming subscription for user_id={}", user_id);
 
-        self.reconcile_near_staking_from_rpc_or_warn(user_id, "resume_subscription")
+        self.reconcile_near_staking_from_rpc_if_hos_context(user_id, "resume_subscription")
             .await;
 
         // Get active subscription
@@ -1565,7 +1625,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
             target_plan
         );
 
-        self.reconcile_near_staking_from_rpc_or_warn(user_id, "change_plan")
+        self.reconcile_near_staking_from_rpc_if_hos_context(user_id, "change_plan")
             .await;
 
         // Get active subscription first (fail fast before resolving target plan / downgrade rules)
