@@ -617,7 +617,7 @@ pub async fn create_portal_session(
     path = "/v1/subscriptions/near/sync",
     tag = "Subscriptions",
     responses(
-        (status = 200, description = "Reconcile finished; see `skipped`, `deleted_house_of_stake_rows`, and `upserted_house_of_stake_row` in the body.", body = NearStakingSyncSummary),
+        (status = 200, description = "Reconcile finished; see `skipped`, `deleted_house_of_stake_rows`, `upserted_house_of_stake_row`, and optional `skipped_reason` in the body.", body = NearStakingSyncSummary),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse),
         (status = 503, description = "NEAR RPC unavailable", body = crate::error::ApiErrorResponse)

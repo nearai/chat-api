@@ -12,7 +12,10 @@ use common::{
 use hmac::Mac;
 use serde_json::json;
 use serial_test::serial;
-use services::subscription::ports::{ChangePlanOutcome, CreateSubscriptionOutcome};
+use services::subscription::ports::{
+    ChangePlanOutcome, CreateSubscriptionOutcome,
+    NEAR_STAKING_SYNC_SKIPPED_REASON_UPSERT_BLOCKED_NON_HOS,
+};
 use services::subscription::SubscriptionRepository;
 use services::system_configs::ports::RateLimitConfig;
 use services::user::ports::UserRepository;
@@ -3500,6 +3503,22 @@ fn near_rpc_hos_catalog_respond(
     }
 }
 
+/// WireMock responder for tests that only need `get_subscription_for_price` (all other methods 500).
+fn near_rpc_wiremock_hos_subscription_probe_only(
+    subscription_result: serde_json::Value,
+) -> impl wiremock::Respond {
+    move |req: &wiremock::Request| {
+        let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or(json!({}));
+        let empty = json!({});
+        let params = body.get("params").unwrap_or(&empty);
+        match params.get("method_name").and_then(|x| x.as_str()) {
+            Some("get_subscription_for_price") => ResponseTemplate::new(200)
+                .set_body_json(near_rpc_call_function_body(&subscription_result)),
+            _ => ResponseTemplate::new(500).set_body_json(json!({ "error": "unmocked NEAR RPC" })),
+        }
+    }
+}
+
 #[test]
 fn test_change_plan_outcome_serde_uses_kind_discriminant() {
     let o = ChangePlanOutcome::NearStakingUpgrade {
@@ -3521,7 +3540,18 @@ fn test_change_plan_outcome_serde_uses_kind_discriminant() {
 #[tokio::test]
 #[serial(subscription_tests)]
 async fn test_create_subscription_house_of_stake_returns_flat_json() {
+    clear_proxy_env_for_local_wiremock();
+    let near_mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(near_rpc_wiremock_hos_subscription_probe_only(
+            serde_json::Value::Null,
+        ))
+        .mount(&near_mock)
+        .await;
+
     let (server, _) = create_test_server_and_db(TestServerConfig {
+        near_rpc_url: Some(near_mock.uri().to_string()),
         near_staking_contract_id: Some("staking.testnet".to_string()),
         near_network_id: Some("testnet".to_string()),
         ..Default::default()
@@ -3710,6 +3740,80 @@ async fn test_near_staking_sync_skipped_without_linked_near() {
     assert_eq!(response.status_code(), 200);
     let body: serde_json::Value = response.json();
     assert_eq!(body.get("skipped").and_then(|x| x.as_bool()), Some(true));
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_near_staking_sync_skipped_reason_when_upsert_blocked_by_active_stripe() {
+    clear_proxy_env_for_local_wiremock();
+    let chain_sub = json!({
+        "subscription_id": "sub_on_chain_hos",
+        "price_id": "price_hos_basic",
+        "end_ns": "2000000000000000000",
+        "status": "Active",
+        "cancel_at_period_end": false
+    });
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(near_rpc_wiremock_hos_subscription_probe_only(chain_sub))
+        .mount(&mock)
+        .await;
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        near_rpc_url: Some(mock.uri().to_string()),
+        near_staking_contract_id: Some("staking.testnet".to_string()),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": { "providers": { "house-of-stake": { "price_id": "price_hos_basic" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } }
+        }),
+    )
+    .await;
+
+    let near_email = "hos_sync_stripe_blocks.testnet@near";
+    let login = json!({
+        "email": near_email,
+        "name": "HoS Stripe Block",
+        "oauth_provider": "near"
+    });
+    let response = server.post("/v1/auth/mock-login").json(&login).await;
+    let token = response.json::<serde_json::Value>()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    insert_test_subscription(&server, &db, near_email, false).await;
+
+    let response = server
+        .post("/v1/subscriptions/near/sync")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 200, "{}", response.text());
+    let body: serde_json::Value = response.json();
+    assert_eq!(body.get("skipped").and_then(|x| x.as_bool()), Some(false));
+    assert_eq!(
+        body.get("deleted_house_of_stake_rows")
+            .and_then(|x| x.as_u64()),
+        Some(0)
+    );
+    assert_eq!(
+        body.get("upserted_house_of_stake_row")
+            .and_then(|x| x.as_bool()),
+        Some(false)
+    );
+    assert_eq!(
+        body.get("skipped_reason").and_then(|x| x.as_str()),
+        Some(NEAR_STAKING_SYNC_SKIPPED_REASON_UPSERT_BLOCKED_NON_HOS)
+    );
 }
 
 #[tokio::test]

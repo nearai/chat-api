@@ -8,6 +8,6 @@ pub use ports::{
     CreditsRepository, CreditsSummary, PaymentWebhook, PaymentWebhookRepository,
     ResumeSubscriptionOutcome, StoreWebhookResult, StripeCustomer, StripeCustomerRepository,
     Subscription, SubscriptionError, SubscriptionRepository, SubscriptionService,
-    SubscriptionWithPlan,
+    SubscriptionWithPlan, NEAR_STAKING_SYNC_SKIPPED_REASON_UPSERT_BLOCKED_NON_HOS,
 };
 pub use service::{SubscriptionServiceConfig, SubscriptionServiceImpl};

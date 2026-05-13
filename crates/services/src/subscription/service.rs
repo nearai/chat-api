@@ -10,7 +10,7 @@ use super::ports::{
     StripeCreateSubscriptionCheckoutParams, StripeCustomerRepository, StripeSubscriptionSnapshot,
     StripeUpdateSubscriptionParams, Subscription, SubscriptionError, SubscriptionPlan,
     SubscriptionReplacement, SubscriptionRepository, SubscriptionService, SubscriptionWithPlan,
-    DEFAULT_MONTHLY_TOKEN_LIMIT,
+    DEFAULT_MONTHLY_TOKEN_LIMIT, NEAR_STAKING_SYNC_SKIPPED_REASON_UPSERT_BLOCKED_NON_HOS,
 };
 use crate::agent::ports::AgentRepository;
 use crate::agent::ports::AgentService;
@@ -96,9 +96,24 @@ pub struct SubscriptionServiceImpl {
 }
 
 impl SubscriptionServiceImpl {
-    /// Returns true when Stripe is configured well enough to perform API calls.
+    /// Returns true when Stripe is configured well enough to perform Stripe API calls.
     fn is_stripe_configured(&self) -> bool {
         !self.stripe_secret_key.is_empty() && !self.stripe_webhook_secret.is_empty()
+    }
+
+    #[inline]
+    fn hos_reconcile_summary(
+        skipped: bool,
+        deleted: u32,
+        upserted: bool,
+        skipped_reason: Option<&'static str>,
+    ) -> NearStakingSyncSummary {
+        NearStakingSyncSummary {
+            skipped,
+            deleted_house_of_stake_rows: deleted,
+            upserted_house_of_stake_row: upserted,
+            skipped_reason: skipped_reason.map(String::from),
+        }
     }
 
     pub fn new(config: SubscriptionServiceConfig) -> Self {
@@ -870,21 +885,13 @@ impl SubscriptionServiceImpl {
             .map(str::trim)
             .filter(|s| !s.is_empty())
         else {
-            return Ok(NearStakingSyncSummary {
-                skipped: true,
-                deleted_house_of_stake_rows: 0,
-                upserted_house_of_stake_row: false,
-            });
+            return Ok(Self::hos_reconcile_summary(true, 0, false, None));
         };
 
         let near_account = match self.get_near_account_id(user_id).await {
             Ok(a) => a,
             Err(_) => {
-                return Ok(NearStakingSyncSummary {
-                    skipped: true,
-                    deleted_house_of_stake_rows: 0,
-                    upserted_house_of_stake_row: false,
-                });
+                return Ok(Self::hos_reconcile_summary(true, 0, false, None));
             }
         };
 
@@ -897,11 +904,7 @@ impl SubscriptionServiceImpl {
             .and_then(|c| c.subscription_plans)
             .unwrap_or_default();
         let Some(anchor_price_id) = Self::anchor_hos_price_id(&subscription_plans) else {
-            return Ok(NearStakingSyncSummary {
-                skipped: true,
-                deleted_house_of_stake_rows: 0,
-                upserted_house_of_stake_row: false,
-            });
+            return Ok(Self::hos_reconcile_summary(true, 0, false, None));
         };
 
         let subs = self
@@ -938,11 +941,7 @@ impl SubscriptionServiceImpl {
 
         if raw.is_none() {
             if hos_subscription_ids.is_empty() {
-                return Ok(NearStakingSyncSummary {
-                    skipped: false,
-                    deleted_house_of_stake_rows: 0,
-                    upserted_house_of_stake_row: false,
-                });
+                return Ok(Self::hos_reconcile_summary(false, 0, false, None));
             }
             let deleted = hos_subscription_ids.len() as u32;
             let mut db_client = self
@@ -964,11 +963,7 @@ impl SubscriptionServiceImpl {
                 .await
                 .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
             self.invalidate_credit_limit_cache(user_id).await;
-            return Ok(NearStakingSyncSummary {
-                skipped: false,
-                deleted_house_of_stake_rows: deleted,
-                upserted_house_of_stake_row: false,
-            });
+            return Ok(Self::hos_reconcile_summary(false, deleted, false, None));
         }
 
         let chain_json = raw.as_ref().expect("checked is_some");
@@ -986,11 +981,12 @@ impl SubscriptionServiceImpl {
                 user_id = %user_id.0,
                 "Skipping HoS reconcile upsert: user has an active or trialing non-house-of-stake subscription row"
             );
-            return Ok(NearStakingSyncSummary {
-                skipped: false,
-                deleted_house_of_stake_rows: 0,
-                upserted_house_of_stake_row: false,
-            });
+            return Ok(Self::hos_reconcile_summary(
+                false,
+                0,
+                false,
+                Some(NEAR_STAKING_SYNC_SKIPPED_REASON_UPSERT_BLOCKED_NON_HOS),
+            ));
         }
 
         let mut db_client = self
@@ -1013,11 +1009,7 @@ impl SubscriptionServiceImpl {
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
         self.invalidate_credit_limit_cache(user_id).await;
-        Ok(NearStakingSyncSummary {
-            skipped: false,
-            deleted_house_of_stake_rows: 0,
-            upserted_house_of_stake_row: true,
-        })
+        Ok(Self::hos_reconcile_summary(false, 0, true, None))
     }
 }
 

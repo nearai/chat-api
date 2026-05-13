@@ -157,6 +157,12 @@ pub enum ResumeSubscriptionOutcome {
     NearStakingResume,
 }
 
+/// Machine-readable [`NearStakingSyncSummary::skipped_reason`] when chain returned a HoS
+/// subscription but reconcile refused to upsert because the user has an active or trialing
+/// non-`house-of-stake` subscription row (avoids a fresh HoS row becoming `get_active_subscription`).
+pub const NEAR_STAKING_SYNC_SKIPPED_REASON_UPSERT_BLOCKED_NON_HOS: &str =
+    "upsert_blocked_active_non_house_of_stake_subscription";
+
 /// Summary from `POST /v1/subscriptions/near/sync` / internal HoS reconcile.
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -167,6 +173,10 @@ pub struct NearStakingSyncSummary {
     pub deleted_house_of_stake_rows: u32,
     /// True when a local row was upserted from chain JSON.
     pub upserted_house_of_stake_row: bool,
+    /// When reconcile ran but did not upsert or delete, optionally explains a no-op (e.g. blocked
+    /// upsert). Omitted from JSON when `None`. Distinct from [`Self::skipped`] (early exit before RPC).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped_reason: Option<String>,
 }
 
 /// Stripe customer mapping data
