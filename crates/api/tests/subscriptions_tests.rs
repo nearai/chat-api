@@ -18,7 +18,7 @@ use services::system_configs::ports::RateLimitConfig;
 use services::user::ports::UserRepository;
 use services::user_usage::{UserUsageRepository, METRIC_KEY_LLM_TOKENS};
 use uuid::Uuid;
-use wiremock::matchers::{body_string_contains, method, path};
+use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// Stripe secrets must be non-empty for subscription gating; otherwise requests reach upstream (401).
@@ -597,9 +597,13 @@ async fn test_change_plan_downgrade_schedules_even_if_instance_limit_exceeded() 
     );
 
     let body: serde_json::Value = response.json();
-    let result = body.get("result").and_then(|v| v.as_str()).unwrap_or("");
+    let result_kind = body
+        .get("result")
+        .and_then(|r| r.get("kind"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     assert_eq!(
-        result, "scheduled_for_period_end",
+        result_kind, "scheduled_for_period_end",
         "Should return scheduled_for_period_end for downgrade scheduling"
     );
 
@@ -3441,6 +3445,61 @@ fn near_rpc_call_function_body(result_json: &serde_json::Value) -> serde_json::V
     })
 }
 
+/// NEAR JSON-RPC `query` bodies use `args_base64` (not literal `price_*` in the wire payload), so
+/// WireMock must decode args and branch on `method_name`.
+fn near_rpc_hos_catalog_respond(
+    req: &wiremock::Request,
+    price_basic: &serde_json::Value,
+    price_pro: &serde_json::Value,
+) -> ResponseTemplate {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or(json!({}));
+    let empty = json!({});
+    let params = body.get("params").unwrap_or(&empty);
+    let method_name = params
+        .get("method_name")
+        .and_then(|x| x.as_str())
+        .unwrap_or("");
+    match method_name {
+        "get_subscription_for_price" => {
+            let sub = json!({
+                "subscription_id": "sub_chain_hos_change_plan",
+                "price_id": "price_hos_basic",
+                "end_ns": "2000000000000000000",
+                "status": "Active",
+                "cancel_at_period_end": false
+            });
+            ResponseTemplate::new(200).set_body_json(near_rpc_call_function_body(&sub))
+        }
+        "get_price" => {
+            let args_b64 = params
+                .get("args_base64")
+                .and_then(|x| x.as_str())
+                .unwrap_or("");
+            let decoded = STANDARD
+                .decode(args_b64)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .unwrap_or_default();
+            let pid = decoded
+                .get("price_id")
+                .and_then(|x| x.as_str())
+                .unwrap_or("");
+            let price = if pid == "price_hos_pro" {
+                price_pro
+            } else {
+                price_basic
+            };
+            ResponseTemplate::new(200).set_body_json(near_rpc_call_function_body(price))
+        }
+        _ => ResponseTemplate::new(500).set_body_json(json!({
+            "error": "unexpected NEAR RPC mock",
+            "method_name": method_name
+        })),
+    }
+}
+
 #[test]
 fn test_change_plan_outcome_serde_uses_kind_discriminant() {
     let o = ChangePlanOutcome::NearStakingUpgrade {
@@ -3758,18 +3817,13 @@ async fn test_change_plan_house_of_stake_upgrade_json_shape() {
 
     Mock::given(method("POST"))
         .and(path("/"))
-        .and(body_string_contains("price_hos_basic"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(near_rpc_call_function_body(&price_basic)),
-        )
-        .mount(&mock)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/"))
-        .and(body_string_contains("price_hos_pro"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(near_rpc_call_function_body(&price_pro)),
-        )
+        .respond_with({
+            let price_basic = price_basic.clone();
+            let price_pro = price_pro.clone();
+            move |req: &wiremock::Request| {
+                near_rpc_hos_catalog_respond(req, &price_basic, &price_pro)
+            }
+        })
         .mount(&mock)
         .await;
 
