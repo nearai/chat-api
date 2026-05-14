@@ -10,6 +10,7 @@ use services::analytics::AnalyticsServiceImpl;
 use services::conversation::share_service::ConversationShareServiceImpl;
 use services::file::service::FileServiceImpl;
 use services::metrics::MockMetricsService;
+use services::subscription::ports::SubscriptionService;
 use services::system_configs::ports::RateLimitConfig;
 use services::user::ports::UserRepository;
 use services::vpc::test_helpers::MockVpcCredentialsService;
@@ -43,6 +44,12 @@ pub struct TestServerConfig {
     pub email_turnstile_verify_url: Option<String>,
     /// Optional override to enable/disable email auth in tests.
     pub email_auth_enabled: Option<bool>,
+    /// Override NEAR JSON-RPC URL for subscription staking views (e.g. WireMock `http://127.0.0.1:PORT/`).
+    pub near_rpc_url: Option<String>,
+    /// Override HoS staking contract id. Use `Some("".into())` to force-disable HoS in the subscription service.
+    pub near_staking_contract_id: Option<String>,
+    /// Override logical NEAR network id (`mainnet` / `testnet`) for HoS create payloads.
+    pub near_network_id: Option<String>,
 }
 
 /// Restrictive rate limit config for rate limit tests.
@@ -69,8 +76,7 @@ pub async fn create_test_server_with_config(test_config: TestServerConfig) -> Te
     server
 }
 
-/// Create a test server and database for tests that need to pre-populate DB (e.g. token/cost rate limit).
-pub async fn create_test_server_and_db(
+async fn create_test_server_and_db_inner(
     test_config: TestServerConfig,
 ) -> (TestServer, database::Database) {
     // Load .env file
@@ -199,30 +205,49 @@ pub async fn create_test_server_and_db(
 
     // Initialize subscription service for testing
     let stripe_client = Arc::new(StripeClientAdapter::new(config.stripe.secret_key.clone()));
-    let subscription_service = Arc::new(services::subscription::SubscriptionServiceImpl::new(
-        services::subscription::SubscriptionServiceConfig {
-            db_pool: db.pool().clone(),
-            stripe_customer_repo: db.stripe_customer_repository()
-                as Arc<dyn services::subscription::ports::StripeCustomerRepository>,
-            stripe_client: stripe_client.clone()
-                as Arc<dyn services::subscription::ports::StripeClientPort>,
-            subscription_repo: db.subscription_repository()
-                as Arc<dyn services::subscription::ports::SubscriptionRepository>,
-            webhook_repo: db.payment_webhook_repository()
-                as Arc<dyn services::subscription::ports::PaymentWebhookRepository>,
-            credits_repo: db.credits_repository()
-                as Arc<dyn services::subscription::ports::CreditsRepository>,
-            system_configs_service: system_configs_service.clone()
-                as Arc<dyn services::system_configs::ports::SystemConfigsService>,
-            user_repository: user_repo.clone(),
-            user_usage_repo: db.user_usage_repository()
-                as Arc<dyn services::user_usage::UserUsageRepository>,
-            agent_repo: agent_repo.clone() as Arc<dyn services::agent::ports::AgentRepository>,
-            agent_service: agent_service.clone() as Arc<dyn services::agent::ports::AgentService>,
-            stripe_secret_key: config.stripe.secret_key.clone(),
-            stripe_webhook_secret: config.stripe.webhook_secret.clone(),
-        },
-    ));
+    let near_rpc_url = test_config
+        .near_rpc_url
+        .clone()
+        .unwrap_or_else(|| config.near.rpc_url.to_string());
+    let near_staking_contract_id = match &test_config.near_staking_contract_id {
+        None => config.near.staking_contract_id.clone(),
+        Some(s) if s.trim().is_empty() => None,
+        Some(s) => Some(s.trim().to_string()),
+    };
+    let near_network_id = test_config
+        .near_network_id
+        .clone()
+        .unwrap_or_else(|| config.near.network_id.clone());
+
+    let subscription_service: Arc<dyn SubscriptionService> =
+        Arc::new(services::subscription::SubscriptionServiceImpl::new(
+            services::subscription::SubscriptionServiceConfig {
+                db_pool: db.pool().clone(),
+                stripe_customer_repo: db.stripe_customer_repository()
+                    as Arc<dyn services::subscription::ports::StripeCustomerRepository>,
+                stripe_client: stripe_client.clone()
+                    as Arc<dyn services::subscription::ports::StripeClientPort>,
+                subscription_repo: db.subscription_repository()
+                    as Arc<dyn services::subscription::ports::SubscriptionRepository>,
+                webhook_repo: db.payment_webhook_repository()
+                    as Arc<dyn services::subscription::ports::PaymentWebhookRepository>,
+                credits_repo: db.credits_repository()
+                    as Arc<dyn services::subscription::ports::CreditsRepository>,
+                system_configs_service: system_configs_service.clone()
+                    as Arc<dyn services::system_configs::ports::SystemConfigsService>,
+                user_repository: user_repo.clone(),
+                user_usage_repo: db.user_usage_repository()
+                    as Arc<dyn services::user_usage::UserUsageRepository>,
+                agent_repo: agent_repo.clone() as Arc<dyn services::agent::ports::AgentRepository>,
+                agent_service: agent_service.clone()
+                    as Arc<dyn services::agent::ports::AgentService>,
+                stripe_secret_key: config.stripe.secret_key.clone(),
+                stripe_webhook_secret: config.stripe.webhook_secret.clone(),
+                near_rpc_url,
+                near_staking_contract_id,
+                near_network_id,
+            },
+        ));
 
     // Create VPC credentials service based on provided credentials
     let vpc_credentials_service: Arc<dyn services::vpc::VpcCredentialsService> =
@@ -362,6 +387,13 @@ pub async fn create_test_server_and_db(
     // Create test server
     let server = TestServer::new(app).expect("Failed to create test server");
     (server, db)
+}
+
+/// Create a test server and database for tests that need to pre-populate DB (e.g. token/cost rate limit).
+pub async fn create_test_server_and_db(
+    test_config: TestServerConfig,
+) -> (TestServer, database::Database) {
+    create_test_server_and_db_inner(test_config).await
 }
 
 /// Helper function to get/create a user and get a session token via mock login.

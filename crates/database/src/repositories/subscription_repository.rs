@@ -296,6 +296,23 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
         Ok(())
     }
 
+    async fn delete_subscription_txn(
+        &self,
+        txn: &tokio_postgres::Transaction<'_>,
+        subscription_id: &str,
+    ) -> anyhow::Result<()> {
+        tracing::info!(
+            "Repository: Deleting subscription (in txn) - subscription_id={}",
+            subscription_id
+        );
+        txn.execute(
+            "DELETE FROM subscriptions WHERE subscription_id = $1",
+            &[&subscription_id],
+        )
+        .await?;
+        Ok(())
+    }
+
     async fn deactivate_user_subscriptions(
         &self,
         txn: &tokio_postgres::Transaction<'_>,

@@ -349,19 +349,38 @@ impl Default for StripeConfig {
     }
 }
 
+fn default_near_network_id() -> String {
+    std::env::var("NEAR_NETWORK_ID").unwrap_or_else(|_| "mainnet".to_string())
+}
+
 /// NEAR-related configuration (shared between services)
 #[derive(Debug, Clone, Deserialize)]
 pub struct NearConfig {
     /// NEAR JSON-RPC endpoint used for on-chain queries (e.g. balance checks)
     pub rpc_url: Url,
+    /// Logical NEAR network id (e.g. `mainnet`, `testnet`). Set via `NEAR_NETWORK_ID`; passed through to
+    /// subscription service and included in HoS `POST /v1/subscriptions` JSON as `network_id` so clients
+    /// can pair RPC URLs with the intended network in testnet/staging.
+    #[serde(default = "default_near_network_id")]
+    pub network_id: String,
+    /// Optional staking contract account id (e.g. `stake.dao`).
+    /// Required for `house-of-stake` subscription intents and RPC sync (`NEAR_STAKING_CONTRACT_ID` env or `near.staking_contract_id` in config; `near.near_staking_contract_id` remains accepted as a legacy TOML key).
+    #[serde(default, alias = "near_staking_contract_id")]
+    pub staking_contract_id: Option<String>,
 }
 
 impl Default for NearConfig {
     fn default() -> Self {
         let raw =
             std::env::var("NEAR_RPC_URL").unwrap_or("https://free.rpc.fastnear.com".to_string());
+        let staking_contract_id = std::env::var("NEAR_STAKING_CONTRACT_ID")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.trim().to_string());
         Self {
             rpc_url: Url::parse(&raw).expect("NEAR_RPC_URL must be a valid URL"),
+            network_id: default_near_network_id(),
+            staking_contract_id,
         }
     }
 }

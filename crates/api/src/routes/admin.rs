@@ -770,6 +770,11 @@ pub async fn admin_set_user_subscription(
                 services::subscription::ports::SubscriptionError::InvalidProvider(msg) => {
                     ApiError::bad_request(msg)
                 }
+                services::subscription::ports::SubscriptionError::HouseOfStakeRequiresNearWallet => {
+                    ApiError::forbidden(
+                        "Cannot assign a House-of-Stake plan: this user has no linked NEAR wallet.",
+                    )
+                }
                 _ => ApiError::internal_server_error("Failed to set subscription"),
             }
         })?;

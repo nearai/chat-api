@@ -88,13 +88,14 @@ pub struct SubscriptionReplacement {
     pub pending_downgrade_updated_at: Option<DateTime<Utc>>,
 }
 
-/// API response model with plan name resolved from price_id
+/// API response model with plan name resolved from `price_id` (HoS clients use `price_id` + `provider` for wallet flows).
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubscriptionWithPlan {
     pub subscription_id: String,
     pub user_id: String,
     pub provider: String,
+    pub price_id: String,
     pub plan: String, // Resolved from price_id
     pub status: String,
     pub current_period_end: DateTime<Utc>,
@@ -119,10 +120,11 @@ pub struct BillingPeriod {
     pub end_at: DateTime<Utc>,
 }
 
-/// Result of a plan-change request.
+/// Result of a plan-change request. JSON is **internally tagged** with `"kind"` so every variant
+/// serializes as a JSON object (same pattern as HoS create-subscription outcomes).
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ChangePlanOutcome {
     /// Stripe subscription was updated immediately.
     ChangedImmediately,
@@ -132,6 +134,49 @@ pub enum ChangePlanOutcome {
     NoOp,
     /// A pending downgrade was cancelled (same plan requested with active pending downgrade).
     DowngradeCancelled,
+    /// HoS: call `upgrade_subscription` in the wallet with this `new_price_id` (contract + network from app config).
+    NearStakingUpgrade { new_price_id: String },
+    /// HoS: call `schedule_downgrade_subscription` with this `target_price_id`.
+    NearStakingScheduleDowngrade { target_price_id: String },
+}
+
+/// Stripe path updates `cancel_at_period_end` in the DB. HoS returns a wallet intent only: local
+/// `cancel_at_period_end` and related fields change after the chain transaction lands and the user
+/// calls `POST /v1/subscriptions/near/sync` (or a mutation that reconciles from RPC).
+#[derive(Debug, Clone)]
+pub enum CancelSubscriptionOutcome {
+    Completed,
+    NearStakingCancel,
+}
+
+/// Stripe path updates the DB. HoS returns a wallet intent only; local rows refresh after chain
+/// settlement and `POST /v1/subscriptions/near/sync` (or reconcile-on-mutation).
+#[derive(Debug, Clone)]
+pub enum ResumeSubscriptionOutcome {
+    Completed,
+    NearStakingResume,
+}
+
+/// Machine-readable [`NearStakingSyncSummary::skipped_reason`] when chain returned a HoS
+/// subscription but reconcile refused to upsert because the user has an active or trialing
+/// non-`house-of-stake` subscription row (avoids a fresh HoS row becoming `get_active_subscription`).
+pub const NEAR_STAKING_SYNC_SKIPPED_REASON_UPSERT_BLOCKED_NON_HOS: &str =
+    "upsert_blocked_active_non_house_of_stake_subscription";
+
+/// Summary from `POST /v1/subscriptions/near/sync` / internal HoS reconcile.
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NearStakingSyncSummary {
+    /// True when reconcile exited early (no HoS contract configured, user has no linked NEAR account, or no HoS anchor price in catalog). No RPC or DB mutation was attempted.
+    pub skipped: bool,
+    /// Local `house-of-stake` rows removed after chain reported no subscription for the probed price.
+    pub deleted_house_of_stake_rows: u32,
+    /// True when a local row was upserted from chain JSON.
+    pub upserted_house_of_stake_row: bool,
+    /// When reconcile ran but did not upsert or delete, optionally explains a no-op (e.g. blocked
+    /// upsert). Omitted from JSON when `None`. Distinct from [`Self::skipped`] (early exit before RPC).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped_reason: Option<String>,
 }
 
 /// Stripe customer mapping data
@@ -204,6 +249,12 @@ pub enum SubscriptionError {
     NoPendingDowngrade,
     /// No subscription row found for the requested subscription_id.
     SubscriptionNotFound,
+    /// House-of-Stake contract id is not configured
+    HouseOfStakeNotConfigured,
+    /// House-of-Stake requires the user to authenticate with a NEAR wallet
+    HouseOfStakeRequiresNearWallet,
+    /// NEAR JSON-RPC view call failed
+    NearRpcError(String),
 }
 
 impl fmt::Display for SubscriptionError {
@@ -267,6 +318,16 @@ impl fmt::Display for SubscriptionError {
             Self::SubscriptionNotFound => {
                 write!(f, "Subscription not found")
             }
+            Self::HouseOfStakeNotConfigured => {
+                write!(f, "House-of-Stake billing is not configured")
+            }
+            Self::HouseOfStakeRequiresNearWallet => {
+                write!(
+                    f,
+                    "House-of-Stake subscription requires signing in with a NEAR wallet"
+                )
+            }
+            Self::NearRpcError(msg) => write!(f, "NEAR RPC error: {}", msg),
         }
     }
 }
@@ -507,6 +568,13 @@ pub trait SubscriptionRepository: Send + Sync {
     /// Delete a subscription record
     async fn delete_subscription(&self, subscription_id: &str) -> anyhow::Result<()>;
 
+    /// Delete a subscription row inside an existing transaction.
+    async fn delete_subscription_txn(
+        &self,
+        txn: &tokio_postgres::Transaction<'_>,
+        subscription_id: &str,
+    ) -> anyhow::Result<()>;
+
     /// Deactivate all subscriptions for a user (set status = 'canceled').
     /// Used when admin sets a new subscription to ensure only one active plan.
     async fn deactivate_user_subscriptions(
@@ -667,15 +735,111 @@ pub struct SubscriptionPlan {
     pub allowed_models: Option<Vec<String>>,
 }
 
+/// Result of [`SubscriptionService::create_subscription`]: Stripe redirect or HoS catalog `price_id` for a client-side `lock_for_subscription`.
+///
+/// Serialized JSON:
+/// - **Stripe** — legacy flat object `{"checkout_url":"..."}`.
+/// - **HoS** — `{"kind":"house_of_stake","price_id":"...","network_id":"mainnet"}` (`network_id` from server `NEAR_NETWORK_ID` / `near.network_id`).
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub enum CreateSubscriptionOutcome {
+    /// Complete checkout on Stripe (`checkout_url`).
+    StripeCheckout { checkout_url: String },
+    /// Catalog recurring price id for `lock_for_subscription` (client supplies `product_id` xor `price_id` per contract rules).
+    NearStakeLock {
+        price_id: String,
+        /// NEAR network id (e.g. `mainnet`, `testnet`) from server config; wallets use with RPC URL.
+        network_id: String,
+    },
+}
+
+impl Serialize for CreateSubscriptionOutcome {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        match self {
+            CreateSubscriptionOutcome::StripeCheckout { checkout_url } => {
+                let mut st = serializer.serialize_struct("StripeCheckout", 1)?;
+                st.serialize_field("checkout_url", checkout_url)?;
+                st.end()
+            }
+            CreateSubscriptionOutcome::NearStakeLock {
+                price_id,
+                network_id,
+            } => {
+                let mut st = serializer.serialize_struct("NearStakeLock", 3)?;
+                st.serialize_field("kind", &"house_of_stake")?;
+                st.serialize_field("price_id", price_id)?;
+                st.serialize_field("network_id", network_id)?;
+                st.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for CreateSubscriptionOutcome {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+        let v = serde_json::Value::deserialize(deserializer)?;
+        let obj = v
+            .as_object()
+            .ok_or_else(|| D::Error::custom("create subscription outcome must be a JSON object"))?;
+        if let Some(url) = obj.get("checkout_url").and_then(|x| x.as_str()) {
+            return Ok(CreateSubscriptionOutcome::StripeCheckout {
+                checkout_url: url.to_string(),
+            });
+        }
+        if let Some(kind) = obj.get("kind").and_then(|x| x.as_str()) {
+            if kind == "house_of_stake" || kind == "near_stake_lock" {
+                let price_id = obj
+                    .get("price_id")
+                    .and_then(|x| x.as_str())
+                    .ok_or_else(|| D::Error::custom("missing price_id"))?
+                    .to_string();
+                let network_id = obj
+                    .get("network_id")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("mainnet")
+                    .to_string();
+                return Ok(CreateSubscriptionOutcome::NearStakeLock {
+                    price_id,
+                    network_id,
+                });
+            }
+        }
+        if let Some(pid) = obj.get("price_id").and_then(|x| x.as_str()) {
+            return Ok(CreateSubscriptionOutcome::NearStakeLock {
+                price_id: pid.to_string(),
+                network_id: obj
+                    .get("network_id")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("mainnet")
+                    .to_string(),
+            });
+        }
+        Err(D::Error::custom(
+            "invalid create subscription outcome: expected checkout_url or kind house_of_stake with price_id",
+        ))
+    }
+}
+
 /// Service trait for subscription management
 #[async_trait]
 pub trait SubscriptionService: Send + Sync {
-    /// Get available subscription plans
-    async fn get_available_plans(&self) -> Result<Vec<SubscriptionPlan>, SubscriptionError>;
+    /// Get available subscription plans (`provider`: `None` or `"stripe"` → Stripe catalog; `"house-of-stake"` → HoS catalog).
+    async fn get_available_plans(
+        &self,
+        provider: Option<&str>,
+    ) -> Result<Vec<SubscriptionPlan>, SubscriptionError>;
 
     /// Create a subscription checkout session for a user
-    /// Returns the checkout URL
-    /// provider: payment provider name (e.g. "stripe")
+    /// Returns either a Stripe checkout URL or House-of-Stake contract call parameters.
+    /// provider: payment provider name (e.g. "stripe", "house-of-stake")
     /// test_clock_id: optional test clock ID to bind customer to (requires STRIPE_TEST_CLOCK_ENABLED)
     async fn create_subscription(
         &self,
@@ -685,13 +849,25 @@ pub trait SubscriptionService: Send + Sync {
         success_url: String,
         cancel_url: String,
         test_clock_id: Option<String>,
-    ) -> Result<String, SubscriptionError>;
+    ) -> Result<CreateSubscriptionOutcome, SubscriptionError>;
 
-    /// Cancel a user's active subscription (at period end)
-    async fn cancel_subscription(&self, user_id: UserId) -> Result<(), SubscriptionError>;
+    /// Cancel a user's active subscription (at period end), or return NEAR wallet intents for HoS.
+    async fn cancel_subscription(
+        &self,
+        user_id: UserId,
+    ) -> Result<CancelSubscriptionOutcome, SubscriptionError>;
 
-    /// Resume a subscription that was scheduled to cancel at period end
-    async fn resume_subscription(&self, user_id: UserId) -> Result<(), SubscriptionError>;
+    /// Resume a subscription that was scheduled to cancel at period end, or return NEAR wallet intents for HoS.
+    async fn resume_subscription(
+        &self,
+        user_id: UserId,
+    ) -> Result<ResumeSubscriptionOutcome, SubscriptionError>;
+
+    /// Re-fetch staking subscription from RPC and upsert/delete the local `house-of-stake` row.
+    async fn sync_near_staking_subscription(
+        &self,
+        user_id: UserId,
+    ) -> Result<NearStakingSyncSummary, SubscriptionError>;
 
     /// Change the user's subscription to a different plan.
     /// Upgrades are applied immediately; downgrades are scheduled for period-end checks.
