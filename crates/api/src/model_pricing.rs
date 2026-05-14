@@ -27,8 +27,8 @@ pub struct ModelPricing {
 impl ModelPricing {
     /// Compute input cost in nano-dollars, applying cache-read pricing when configured.
     /// Uses i128 for intermediate math to avoid overflow; panics if result exceeds i64 range.
-    pub fn input_cost_nano_usd(&self, input_tokens: u64, cached_tokens: u64) -> i64 {
-        let cache_read = cached_tokens.min(input_tokens);
+    pub fn input_cost_nano_usd(&self, input_tokens: u64, cache_read_tokens: u64) -> i64 {
+        let cache_read = cache_read_tokens.min(input_tokens);
         let non_cached_input = input_tokens - cache_read;
         let cache_rate = if self.cache_read_nano_per_token == 0 {
             self.input_nano_per_token
@@ -53,8 +53,13 @@ impl ModelPricing {
 
     /// Compute total cost in nano-dollars from input and output token counts.
     /// Uses i128 for intermediate math to avoid overflow; panics if result exceeds i64 range.
-    pub fn cost_nano_usd(&self, input_tokens: u64, output_tokens: u64, cached_tokens: u64) -> i64 {
-        let input_cost = self.input_cost_nano_usd(input_tokens, cached_tokens) as i128;
+    pub fn cost_nano_usd(
+        &self,
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_read_tokens: u64,
+    ) -> i64 {
+        let input_cost = self.input_cost_nano_usd(input_tokens, cache_read_tokens) as i128;
         let output_cost = self.output_cost_nano_usd(output_tokens) as i128;
         let total = input_cost + output_cost;
         total
@@ -102,6 +107,28 @@ struct ModelPricingResponse {
     cost_per_image: DecimalPrice,
     #[serde(rename = "cacheReadCostPerToken")]
     cache_read_cost_per_token: Option<DecimalPrice>,
+}
+
+fn is_usd_nano_price(price: &DecimalPrice) -> bool {
+    price.currency == "USD" && price.scale == 9
+}
+
+fn cache_read_nano_per_token(model_name: &str, price: Option<&DecimalPrice>) -> i64 {
+    let Some(price) = price else {
+        return 0;
+    };
+
+    if is_usd_nano_price(price) {
+        price.amount
+    } else {
+        tracing::warn!(
+            "Ignoring unsupported cache read pricing for model_name={}: currency={}, scale={}",
+            model_name,
+            price.currency,
+            price.scale,
+        );
+        0
+    }
 }
 
 /// Cache entry with fetched-at time for TTL.
@@ -204,36 +231,26 @@ impl ModelPricingCache {
 
         // Current cloud-api returns cost with scale=9 (nano-USD). We intentionally keep
         // the logic simple: only accept scale=9 and treat `amount` as nano-dollars.
-        let cache_read_price = body.cache_read_cost_per_token.as_ref();
-        let cache_read_scale = cache_read_price.map(|p| p.scale).unwrap_or(9);
-        let cache_read_currency = cache_read_price
-            .map(|p| p.currency.as_str())
-            .unwrap_or("USD");
-
-        if body.input_cost_per_token.currency != "USD"
-            || body.output_cost_per_token.currency != "USD"
-            || body.cost_per_image.currency != "USD"
-            || cache_read_currency != "USD"
-            || body.input_cost_per_token.scale != 9
-            || body.output_cost_per_token.scale != 9
-            || body.cost_per_image.scale != 9
-            || cache_read_scale != 9
+        if !is_usd_nano_price(&body.input_cost_per_token)
+            || !is_usd_nano_price(&body.output_cost_per_token)
+            || !is_usd_nano_price(&body.cost_per_image)
         {
             tracing::warn!(
-                "Unsupported pricing scale for model_name={}: input_scale={}, output_scale={}, cost_per_image_scale={}, cache_read_scale={}",
+                "Unsupported pricing scale for model_name={}: input_scale={}, output_scale={}, cost_per_image_scale={}",
                 model_name,
                 body.input_cost_per_token.scale,
                 body.output_cost_per_token.scale,
                 body.cost_per_image.scale,
-                cache_read_scale,
             );
             return None;
         }
+        let cache_read_nano_per_token =
+            cache_read_nano_per_token(model_name, body.cache_read_cost_per_token.as_ref());
 
         let pricing = ModelPricing {
             input_nano_per_token: body.input_cost_per_token.amount,
             output_nano_per_token: body.output_cost_per_token.amount,
-            cache_read_nano_per_token: cache_read_price.map(|p| p.amount).unwrap_or(0),
+            cache_read_nano_per_token,
             nano_per_image: body.cost_per_image.amount,
         };
 
@@ -254,7 +271,7 @@ impl ModelPricingCache {
 
 #[cfg(test)]
 mod tests {
-    use super::ModelPricing;
+    use super::{cache_read_nano_per_token, DecimalPrice, ModelPricing};
 
     #[test]
     fn cost_uses_cache_read_rate_when_configured() {
@@ -284,7 +301,7 @@ mod tests {
     }
 
     #[test]
-    fn cached_tokens_are_capped_to_input_tokens() {
+    fn cache_read_tokens_are_capped_to_input_tokens() {
         let pricing = ModelPricing {
             input_nano_per_token: 10,
             output_nano_per_token: 20,
@@ -293,5 +310,33 @@ mod tests {
         };
 
         assert_eq!(pricing.input_cost_nano_usd(100, 150), 200);
+    }
+
+    #[test]
+    fn invalid_cache_read_price_falls_back_to_normal_input_pricing() {
+        let invalid_cache_price = DecimalPrice {
+            amount: 2,
+            scale: 6,
+            currency: "USD".to_string(),
+        };
+
+        assert_eq!(
+            cache_read_nano_per_token("test-model", Some(&invalid_cache_price)),
+            0
+        );
+    }
+
+    #[test]
+    fn valid_cache_read_price_is_used() {
+        let cache_price = DecimalPrice {
+            amount: 2,
+            scale: 9,
+            currency: "USD".to_string(),
+        };
+
+        assert_eq!(
+            cache_read_nano_per_token("test-model", Some(&cache_price)),
+            2
+        );
     }
 }
