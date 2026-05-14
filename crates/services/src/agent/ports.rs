@@ -145,6 +145,7 @@ pub struct UsageLogEntry {
     pub api_key_name: String,
     pub input_tokens: i64,
     pub output_tokens: i64,
+    pub cached_tokens: i64,
     pub total_tokens: i64,
     pub metric_key: String,
     pub quantity: i64,

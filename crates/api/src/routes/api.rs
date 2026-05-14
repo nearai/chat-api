@@ -5030,15 +5030,15 @@ async fn record_chat_usage_from_body(
     let pricing = state.model_pricing_cache.get_pricing(&request_model).await;
     let cost_nano_usd = pricing
         .as_ref()
-        .map(|p| p.cost_nano_usd(usage.input_tokens, usage.output_tokens));
+        .map(|p| p.cost_nano_usd(usage.input_tokens, usage.output_tokens, usage.cached_tokens));
 
     let input_cost = pricing
         .as_ref()
-        .map(|p| usage.input_tokens as i64 * p.input_nano_per_token)
+        .map(|p| p.input_cost_nano_usd(usage.input_tokens, usage.cached_tokens))
         .unwrap_or(0);
     let output_cost = pricing
         .as_ref()
-        .map(|p| usage.output_tokens as i64 * p.output_nano_per_token)
+        .map(|p| p.output_cost_nano_usd(usage.output_tokens))
         .unwrap_or(0);
 
     let (instance_id, api_key_id) = api_key_ext
@@ -5049,6 +5049,7 @@ async fn record_chat_usage_from_body(
     let details = serde_json::json!({
         "input_tokens": usage.input_tokens as i64,
         "output_tokens": usage.output_tokens as i64,
+        "cached_tokens": usage.cached_tokens as i64,
         "input_cost": input_cost,
         "output_cost": output_cost,
         "request_type": "chat_completion",
@@ -5113,15 +5114,15 @@ async fn record_response_usage_from_body(
     let pricing = state.model_pricing_cache.get_pricing(&usage.model).await;
     let cost_nano_usd = pricing
         .as_ref()
-        .map(|p| p.cost_nano_usd(usage.input_tokens, usage.output_tokens));
+        .map(|p| p.cost_nano_usd(usage.input_tokens, usage.output_tokens, usage.cached_tokens));
 
     let input_cost = pricing
         .as_ref()
-        .map(|p| usage.input_tokens as i64 * p.input_nano_per_token)
+        .map(|p| p.input_cost_nano_usd(usage.input_tokens, usage.cached_tokens))
         .unwrap_or(0);
     let output_cost = pricing
         .as_ref()
-        .map(|p| usage.output_tokens as i64 * p.output_nano_per_token)
+        .map(|p| p.output_cost_nano_usd(usage.output_tokens))
         .unwrap_or(0);
 
     let (instance_id, api_key_id) = api_key_ext
@@ -5132,6 +5133,7 @@ async fn record_response_usage_from_body(
     let details = serde_json::json!({
         "input_tokens": usage.input_tokens as i64,
         "output_tokens": usage.output_tokens as i64,
+        "cached_tokens": usage.cached_tokens as i64,
         "input_cost": input_cost,
         "output_cost": output_cost,
         "request_type": "response",

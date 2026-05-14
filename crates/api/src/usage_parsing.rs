@@ -6,7 +6,9 @@
 //!   - **Responses**: only the line with `"type": "response.completed"` has `response.usage` and `response.model`; use `parse_usage_from_response_completed_sse_line` and take that single usage.
 //!
 //! Usage object accepts both OpenAI naming (`prompt_tokens`, `completion_tokens`) and cloud-api (`input_tokens`, `output_tokens`).
-//! `total_tokens` is optional (computed from input+output when missing). `model` is required.
+//! Cached input tokens are read from `prompt_tokens_details.cached_tokens` (chat completions) or
+//! `input_tokens_details.cached_tokens` (/v1/responses). `total_tokens` is optional (computed from
+//! input+output when missing). `model` is required.
 
 use bytes::Bytes;
 use futures::Stream;
@@ -23,6 +25,7 @@ pub struct ParsedUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub total_tokens: u64,
+    pub cached_tokens: u64,
     pub model: String,
 }
 
@@ -62,6 +65,7 @@ fn parse_chat_completion_usage_from_json(root: &serde_json::Value) -> Option<Par
         .get("total_tokens")
         .and_then(|v| v.as_u64())
         .unwrap_or(input_tokens + output_tokens);
+    let cached_tokens = cached_tokens_from_details(usage, "prompt_tokens_details", input_tokens);
     let model = root
         .get("model")
         .and_then(|v| v.as_str())
@@ -70,6 +74,7 @@ fn parse_chat_completion_usage_from_json(root: &serde_json::Value) -> Option<Par
         input_tokens,
         output_tokens,
         total_tokens,
+        cached_tokens,
         model,
     })
 }
@@ -84,6 +89,7 @@ fn parse_response_usage_from_json(root: &serde_json::Value) -> Option<ParsedUsag
         .get("total_tokens")
         .and_then(|v| v.as_u64())
         .unwrap_or(input_tokens + output_tokens);
+    let cached_tokens = cached_tokens_from_details(usage, "input_tokens_details", input_tokens);
     let model = root
         .get("model")
         .and_then(|v| v.as_str())
@@ -92,8 +98,23 @@ fn parse_response_usage_from_json(root: &serde_json::Value) -> Option<ParsedUsag
         input_tokens,
         output_tokens,
         total_tokens,
+        cached_tokens,
         model,
     })
+}
+
+fn cached_tokens_from_details(
+    usage: &serde_json::Map<String, serde_json::Value>,
+    details_key: &str,
+    input_tokens: u64,
+) -> u64 {
+    usage
+        .get(details_key)
+        .and_then(|v| v.as_object())
+        .and_then(|details| details.get("cached_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0)
+        .min(input_tokens)
 }
 
 /// Parses usage from one **chat/completions** SSE data line (`data: {...}`).
@@ -338,22 +359,23 @@ fn record_usage_on_stream_end(usage: Option<ParsedUsage>, ctx: StreamUsageContex
         if usage.total_tokens > 0 {
             tokio::spawn(async move {
                 let pricing = ctx.pricing_cache.get_pricing(&usage.model).await;
-                let cost_nano_usd = pricing
-                    .as_ref()
-                    .map(|p| p.cost_nano_usd(usage.input_tokens, usage.output_tokens));
+                let cost_nano_usd = pricing.as_ref().map(|p| {
+                    p.cost_nano_usd(usage.input_tokens, usage.output_tokens, usage.cached_tokens)
+                });
 
                 let input_cost = pricing
                     .as_ref()
-                    .map(|p| usage.input_tokens as i64 * p.input_nano_per_token)
+                    .map(|p| p.input_cost_nano_usd(usage.input_tokens, usage.cached_tokens))
                     .unwrap_or(0);
                 let output_cost = pricing
                     .as_ref()
-                    .map(|p| usage.output_tokens as i64 * p.output_nano_per_token)
+                    .map(|p| p.output_cost_nano_usd(usage.output_tokens))
                     .unwrap_or(0);
 
                 let details = serde_json::json!({
                     "input_tokens": usage.input_tokens as i64,
                     "output_tokens": usage.output_tokens as i64,
+                    "cached_tokens": usage.cached_tokens as i64,
                     "input_cost": input_cost,
                     "output_cost": output_cost,
                     "request_type": ctx.request_type,
@@ -422,6 +444,7 @@ mod tests {
         assert_eq!(parsed.input_tokens, 5);
         assert_eq!(parsed.output_tokens, 7);
         assert_eq!(parsed.total_tokens, 12);
+        assert_eq!(parsed.cached_tokens, 0);
         assert_eq!(parsed.model, "gpt-test");
     }
 
@@ -432,7 +455,29 @@ mod tests {
         assert_eq!(parsed.input_tokens, 10);
         assert_eq!(parsed.output_tokens, 5);
         assert_eq!(parsed.total_tokens, 15);
+        assert_eq!(parsed.cached_tokens, 0);
         assert_eq!(parsed.model, "gpt-4");
+    }
+
+    #[test]
+    fn chat_completion_parses_cached_tokens() {
+        let body = br#"{"model":"gpt-4","usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15,"prompt_tokens_details":{"cached_tokens":6}}}"#;
+        let parsed = parse_chat_completion_usage_from_bytes(body).expect("should parse");
+        assert_eq!(parsed.cached_tokens, 6);
+    }
+
+    #[test]
+    fn response_parses_cached_tokens() {
+        let body = br#"{"model":"gpt-test","usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15,"input_tokens_details":{"cached_tokens":4}}}"#;
+        let parsed = parse_response_usage_from_bytes(body).expect("should parse");
+        assert_eq!(parsed.cached_tokens, 4);
+    }
+
+    #[test]
+    fn cached_tokens_are_capped_to_input_tokens() {
+        let body = br#"{"model":"gpt-4","usage":{"prompt_tokens":10,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":99}}}"#;
+        let parsed = parse_chat_completion_usage_from_bytes(body).expect("should parse");
+        assert_eq!(parsed.cached_tokens, 10);
     }
 
     #[test]
@@ -442,6 +487,7 @@ mod tests {
         assert_eq!(parsed.input_tokens, 9);
         assert_eq!(parsed.output_tokens, 11);
         assert_eq!(parsed.total_tokens, 20);
+        assert_eq!(parsed.cached_tokens, 0);
         assert_eq!(parsed.model, "Qwen/Qwen3-VL-30B");
     }
 
@@ -455,6 +501,7 @@ mod tests {
         let line = r#"data: {"type":"response.completed","response":{"model":"gpt-test","usage":{"total_tokens":8,"input_tokens":3,"output_tokens":5}}}"#;
         let parsed = parse_usage_from_response_completed_sse_line(line).expect("should parse");
         assert_eq!(parsed.total_tokens, 8);
+        assert_eq!(parsed.cached_tokens, 0);
         assert_eq!(parsed.model, "gpt-test");
     }
 
@@ -476,12 +523,14 @@ mod tests {
             input_tokens: 10,
             output_tokens: 20,
             total_tokens: 30,
+            cached_tokens: 0,
             model: "old-model".to_string(),
         };
         let latest = ParsedUsage {
             input_tokens: 1,
             output_tokens: 2,
             total_tokens: 3,
+            cached_tokens: 1,
             model: "new-model".to_string(),
         };
 
@@ -491,6 +540,7 @@ mod tests {
         assert_eq!(acc.input_tokens, 1);
         assert_eq!(acc.output_tokens, 2);
         assert_eq!(acc.total_tokens, 3);
+        assert_eq!(acc.cached_tokens, 1);
         assert_eq!(acc.model, "new-model");
     }
 }
