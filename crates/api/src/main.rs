@@ -326,7 +326,7 @@ async fn main() -> anyhow::Result<()> {
     // Create application state
     let account_deletion_task_publisher = match (
         config.tasks.aws_region.clone(),
-        config.tasks.account_deletion_sqs_queue_url.clone(),
+        config.tasks.sqs_queue_url.clone(),
     ) {
         (Some(region), Some(queue_url)) => {
             let aws_config = api::tasks::load_aws_sdk_config(region).await;
