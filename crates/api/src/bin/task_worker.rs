@@ -422,6 +422,27 @@ impl TaskExecutor for DefaultTaskExecutor {
                 );
                 Ok(())
             }
+            Err(
+                err @ (AccountDeletionError::ActiveSubscriptions { .. }
+                | AccountDeletionError::InstancesNotDeleted { .. }),
+            ) => {
+                let progress = build_account_deletion_progress(
+                    &cloud_deleted_conversation_ids,
+                    &cloud_deleted_file_ids,
+                );
+                let last_error = err.to_string();
+                self.user_repository
+                    .mark_account_deletion_failed_needs_review(
+                        request.id,
+                        last_error.clone(),
+                        progress,
+                    )
+                    .await
+                    .context(
+                        "failed to mark account deletion failed_needs_review after policy error",
+                    )?;
+                Err(anyhow!(last_error))
+            }
             Err(err) => {
                 let progress = build_account_deletion_progress(
                     &cloud_deleted_conversation_ids,
