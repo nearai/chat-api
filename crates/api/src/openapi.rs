@@ -22,6 +22,7 @@ use utoipa::OpenApi;
         crate::routes::oauth::logout,
         // User endpoints
         crate::routes::users::get_current_user,
+        crate::routes::users::delete_current_user,
         crate::routes::users::get_my_usage,
         // Conversation endpoints
         crate::routes::api::create_conversation,
@@ -107,6 +108,8 @@ use utoipa::OpenApi;
         crate::routes::admin::bi_status_history,
         crate::routes::admin::bi_usage,
         crate::routes::admin::bi_top_consumers,
+        crate::routes::admin::admin_list_account_deletions,
+        crate::routes::admin::admin_retry_account_deletion,
         crate::routes::agents::start_instance,
         crate::routes::agents::stop_instance,
         crate::routes::agents::restart_instance,
@@ -132,6 +135,10 @@ use utoipa::OpenApi;
         crate::models::AdminUserListResponse,
         crate::models::LinkedAccountResponse,
         crate::models::UserProfileResponse,
+        crate::models::UserAccountDeletionResponse,
+        services::user::ports::AccountDeletion,
+        services::user::ports::AccountDeletionStatus,
+        crate::routes::admin::AdminRetryAccountDeletionResponse,
         crate::models::AuthResponse,
         crate::error::ApiErrorResponse,
         // Auth request models

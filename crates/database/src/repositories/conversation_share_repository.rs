@@ -372,23 +372,53 @@ impl ConversationShareRepository for PostgresConversationShareRepository {
         owner_user_id: UserId,
         group_id: Uuid,
     ) -> Result<(), ConversationError> {
-        let client = self
+        let mut client = self
             .pool
             .get()
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
-        let deleted = client
-            .execute(
-                "DELETE FROM conversation_share_groups WHERE owner_user_id = $1 AND id = $2",
-                &[&owner_user_id.0, &group_id],
-            )
+        let tx = client
+            .transaction()
             .await
             .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
-        if deleted == 0 {
+        let group_exists = tx
+            .query_opt(
+                "SELECT 1 FROM conversation_share_groups WHERE owner_user_id = $1 AND id = $2 FOR UPDATE",
+                &[&owner_user_id.0, &group_id],
+            )
+            .await
+            .map_err(|e| ConversationError::DatabaseError(e.to_string()))?
+            .is_some();
+        if !group_exists {
             return Err(ConversationError::NotFound);
         }
+
+        tx.execute(
+            "DELETE FROM conversation_shares WHERE group_id = $1",
+            &[&group_id],
+        )
+        .await
+        .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
+
+        tx.execute(
+            "DELETE FROM conversation_share_group_members WHERE group_id = $1",
+            &[&group_id],
+        )
+        .await
+        .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
+
+        tx.execute(
+            "DELETE FROM conversation_share_groups WHERE owner_user_id = $1 AND id = $2",
+            &[&owner_user_id.0, &group_id],
+        )
+        .await
+        .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| ConversationError::DatabaseError(e.to_string()))?;
 
         Ok(())
     }

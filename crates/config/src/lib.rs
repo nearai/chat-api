@@ -627,6 +627,10 @@ impl TaskConfig {
     pub fn is_worker_configured(&self) -> bool {
         self.sqs_queue_url.is_some()
     }
+
+    pub fn worker_sqs_queue_url(&self) -> Option<&String> {
+        self.sqs_queue_url.as_ref()
+    }
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]

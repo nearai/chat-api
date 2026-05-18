@@ -44,6 +44,25 @@ pub struct EmailAuthResponse {
     pub is_new_user: bool,
 }
 
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UserAccountDeletionResponse {
+    pub id: uuid::Uuid,
+    pub user_id: UserId,
+    pub status: String,
+    pub requested_at: String,
+}
+
+impl From<services::user::ports::AccountDeletion> for UserAccountDeletionResponse {
+    fn from(deletion: services::user::ports::AccountDeletion) -> Self {
+        Self {
+            id: deletion.id,
+            user_id: deletion.user_id,
+            status: deletion.status.as_str().to_string(),
+            requested_at: deletion.requested_at.to_rfc3339(),
+        }
+    }
+}
+
 /// Response for successful authentication
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct AuthResponse {

@@ -161,6 +161,60 @@ impl ConversationService for ConversationServiceImpl {
 
         Ok(deleted)
     }
+
+    async fn delete_conversation_from_provider(
+        &self,
+        conversation_id: &str,
+    ) -> Result<serde_json::Value, ConversationError> {
+        self.delete_conversation_from_openai(conversation_id).await
+    }
+
+    async fn delete_file_from_provider(
+        &self,
+        file_id: &str,
+    ) -> Result<serde_json::Value, ConversationError> {
+        let path = format!("files/{}", file_id);
+
+        tracing::debug!("Deleting file from provider: {}", path);
+
+        let response = self
+            .openai_proxy
+            .forward_request(Method::DELETE, &path, http::HeaderMap::new(), None)
+            .await
+            .map_err(|e| ConversationError::ApiError(e.to_string()))?;
+
+        if response.status == 404 {
+            tracing::info!(
+                "File {} already deleted from provider (404), treating as success",
+                file_id
+            );
+            return Ok(serde_json::Value::Null);
+        }
+
+        if response.status != 200 {
+            tracing::error!(
+                "Provider API returned status {} for file deletion {}",
+                response.status,
+                file_id
+            );
+            return Err(ConversationError::ApiError(format!(
+                "Provider API returned status {}",
+                response.status
+            )));
+        }
+
+        let body_bytes: Bytes = response
+            .body
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(|e| ConversationError::ApiError(format!("Failed to read response: {}", e)))?
+            .into_iter()
+            .flatten()
+            .collect();
+
+        serde_json::from_slice(&body_bytes)
+            .map_err(|e| ConversationError::ApiError(format!("Failed to parse JSON: {}", e)))
+    }
 }
 
 impl ConversationServiceImpl {
@@ -375,6 +429,14 @@ impl ConversationServiceImpl {
             .forward_request(Method::DELETE, &path, http::HeaderMap::new(), None)
             .await
             .map_err(|e| ConversationError::ApiError(e.to_string()))?;
+
+        if response.status == 404 {
+            tracing::info!(
+                "Conversation {} already deleted from provider (404), treating as success",
+                conversation_id
+            );
+            return Ok(serde_json::Value::Null);
+        }
 
         if response.status != 200 {
             tracing::error!(

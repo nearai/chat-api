@@ -92,4 +92,6 @@ pub struct AppState {
     pub rate_limit_state: crate::middleware::RateLimitState,
     /// BI metrics service for deployment and usage analytics
     pub bi_metrics_service: Arc<dyn services::bi_metrics::BiMetricsService>,
+    /// Publisher for account deletion worker tasks. Kept separate from the generic task queue.
+    pub account_deletion_task_publisher: Option<Arc<dyn crate::tasks::TaskPublisher>>,
 }
