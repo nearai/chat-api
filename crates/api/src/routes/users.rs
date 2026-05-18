@@ -86,33 +86,33 @@ pub async fn delete_current_user(
         .map_err(account_deletion_error_to_api_error)?;
     let deletion = deletion_request.deletion;
 
-    let task_id = TaskId::new(format!("account-deletion-{}", deletion.id)).map_err(|e| {
-        tracing::error!("Failed to create account deletion task id: {}", e);
-        ApiError::internal_server_error("Failed to enqueue account deletion")
-    })?;
-    let message = TaskMessage {
-        task_id,
-        payload: TaskPayload::AccountDeletion(AccountDeletionTaskPayload {
-            deletion_id: deletion.id,
-        }),
-    };
+    if deletion_request.was_inserted {
+        let task_id = TaskId::new(format!("account-deletion-{}", deletion.id)).map_err(|e| {
+            tracing::error!("Failed to create account deletion task id: {}", e);
+            ApiError::internal_server_error("Failed to enqueue account deletion")
+        })?;
+        let message = TaskMessage {
+            task_id,
+            payload: TaskPayload::AccountDeletion(AccountDeletionTaskPayload {
+                deletion_id: deletion.id,
+            }),
+        };
 
-    if let Err(e) = task_publisher.publish(message).await {
-        tracing::error!(
-            "Failed to enqueue account deletion task, cleaning up request: user_id={}, deletion_id={}, error={:#}",
-            user.user_id,
-            deletion.id,
-            e
-        );
-        if deletion_request.was_inserted {
+        if let Err(e) = task_publisher.publish(message).await {
+            tracing::error!(
+                "Failed to enqueue account deletion task, cleaning up request: user_id={}, deletion_id={}, error={:#}",
+                user.user_id,
+                deletion.id,
+                e
+            );
             let _ = app_state
                 .user_service
                 .delete_account_deletion_request(deletion.id)
                 .await;
+            return Err(ApiError::internal_server_error(
+                "Failed to enqueue account deletion",
+            ));
         }
-        return Err(ApiError::internal_server_error(
-            "Failed to enqueue account deletion",
-        ));
     }
 
     Ok((StatusCode::ACCEPTED, Json(deletion.into())))

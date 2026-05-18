@@ -485,7 +485,7 @@ async fn main() -> anyhow::Result<()> {
     let queue_url = tasks
         .worker_sqs_queue_url()
         .cloned()
-        .ok_or_else(|| anyhow!("SQS queue URL is required for selected TASKS_WORKER_QUEUE"))?;
+        .ok_or_else(|| anyhow!("TASKS_SQS_QUEUE_URL is required for task worker"))?;
 
     let db = database::Database::from_config(&config.database)
         .await

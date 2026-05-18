@@ -585,7 +585,7 @@ impl UserRepository for PostgresUserRepository {
         last_error: String,
     ) -> anyhow::Result<()> {
         let client = self.pool.get().await?;
-        client
+        let rows = client
             .execute(
                 "UPDATE user_account_deletions
                  SET status = 'failed_needs_review',
@@ -597,6 +597,12 @@ impl UserRepository for PostgresUserRepository {
                 &[&deletion_id, &last_error],
             )
             .await?;
+        if rows == 0 {
+            tracing::info!(
+                "Account deletion restore skipped: deletion_id={} is no longer retrying",
+                deletion_id
+            );
+        }
         Ok(())
     }
 
@@ -699,7 +705,7 @@ impl UserRepository for PostgresUserRepository {
                      progress = $3,
                      updated_at = NOW()
                  WHERE id = $1
-                   AND status <> 'completed'",
+                   AND status IN ('pending', 'processing', 'retrying')",
                 &[&deletion_id, &last_error, &progress],
             )
             .await?;
@@ -739,7 +745,7 @@ impl UserRepository for PostgresUserRepository {
                      progress = $3,
                      updated_at = NOW()
                  WHERE id = $1
-                   AND status <> 'completed'",
+                   AND status IN ('pending', 'processing', 'retrying')",
                 &[&deletion_id, &last_error, &progress],
             )
             .await?;

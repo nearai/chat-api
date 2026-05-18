@@ -549,30 +549,12 @@ pub const TASKS_CLEANUP_CANCELED_INSTANCES_GRACE_DAYS_DEFAULT: i64 = 15;
 pub const TASKS_CLEANUP_CANCELED_INSTANCES_DAILY_TASK_ID_DEFAULT: &str =
     "cleanup.canceled-instances.daily";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum TaskWorkerQueueKind {
-    #[default]
-    Default,
-    AccountDeletion,
-}
-
-impl TaskWorkerQueueKind {
-    fn from_env_value(value: &str) -> Self {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "account_deletion" | "account-deletion" => Self::AccountDeletion,
-            _ => Self::Default,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Deserialize)]
 pub struct TaskConfig {
     pub enabled: bool,
     pub aws_region: Option<String>,
     pub sqs_queue_url: Option<String>,
     pub sqs_queue_arn: Option<String>,
-    pub worker_queue: TaskWorkerQueueKind,
     pub scheduler_role_arn: Option<String>,
     pub scheduler_group: String,
     pub cleanup_canceled_instances_daily_task_id: String,
@@ -595,9 +577,6 @@ impl Default for TaskConfig {
             aws_region: std::env::var("AWS_REGION").ok(),
             sqs_queue_url: std::env::var("TASKS_SQS_QUEUE_URL").ok(),
             sqs_queue_arn: std::env::var("TASKS_SQS_QUEUE_ARN").ok(),
-            worker_queue: std::env::var("TASKS_WORKER_QUEUE")
-                .map(|v| TaskWorkerQueueKind::from_env_value(&v))
-                .unwrap_or_default(),
             scheduler_role_arn: std::env::var("TASKS_SCHEDULER_ROLE_ARN").ok(),
             scheduler_group: std::env::var("TASKS_SCHEDULER_GROUP")
                 .unwrap_or_else(|_| "default".to_string()),
