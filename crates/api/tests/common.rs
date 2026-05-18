@@ -197,6 +197,15 @@ pub async fn create_test_server_and_db(
         config.agent.non_tee_agent_url_pattern.clone(),
     ));
 
+    let referral_service: Arc<dyn services::referral::ports::ReferralService> =
+        Arc::new(services::referral::ReferralServiceImpl::new(
+            db.pool().clone(),
+            db.referral_repository() as Arc<dyn services::referral::ports::ReferralRepository>,
+            db.credits_repository() as Arc<dyn services::subscription::ports::CreditsRepository>,
+            system_configs_service.clone()
+                as Arc<dyn services::system_configs::ports::SystemConfigsService>,
+        ));
+
     // Initialize subscription service for testing
     let stripe_client = Arc::new(StripeClientAdapter::new(config.stripe.secret_key.clone()));
     let subscription_service = Arc::new(services::subscription::SubscriptionServiceImpl::new(
@@ -219,6 +228,7 @@ pub async fn create_test_server_and_db(
                 as Arc<dyn services::user_usage::UserUsageRepository>,
             agent_repo: agent_repo.clone() as Arc<dyn services::agent::ports::AgentRepository>,
             agent_service: agent_service.clone() as Arc<dyn services::agent::ports::AgentService>,
+            referral_service: referral_service.clone(),
             stripe_secret_key: config.stripe.secret_key.clone(),
             stripe_webhook_secret: config.stripe.webhook_secret.clone(),
         },
@@ -324,6 +334,7 @@ pub async fn create_test_server_and_db(
         model_service,
         system_configs_service,
         subscription_service,
+        referral_service,
         session_repository: session_repo,
         vpc_credentials_service,
         user_repository: user_repo,

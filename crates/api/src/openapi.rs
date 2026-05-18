@@ -62,6 +62,8 @@ use utoipa::OpenApi;
         // Credits endpoints
         crate::routes::credits::get_credits,
         crate::routes::credits::create_credit_checkout,
+        // Referral endpoints
+        crate::routes::referrals::get_my_referrals,
         // Subscription endpoints
         crate::routes::subscriptions::create_subscription,
         crate::routes::subscriptions::create_portal_session,
@@ -175,6 +177,8 @@ use utoipa::OpenApi;
         crate::routes::credits::CreateCreditCheckoutRequest,
         crate::routes::credits::CreateCreditCheckoutResponse,
         services::subscription::ports::CreditsSummary,
+        services::referral::ports::ReferralDashboard,
+        services::referral::ports::ReferralListItem,
         // Subscription models
         crate::routes::subscriptions::CreateSubscriptionRequest,
         crate::routes::subscriptions::CreateSubscriptionResponse,

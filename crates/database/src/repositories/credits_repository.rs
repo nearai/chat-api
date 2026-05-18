@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use services::subscription::ports::{CreditTransaction, CreditsRepository};
 use services::UserId;
+use uuid::Uuid;
 
 pub struct PostgresCreditsRepository {
     pool: DbPool,
@@ -129,6 +130,49 @@ impl CreditsRepository for PostgresCreditsRepository {
         Ok(())
     }
 
+    async fn record_source_grant_once(
+        &self,
+        txn: &tokio_postgres::Transaction<'_>,
+        user_id: UserId,
+        amount: i64,
+        source: &str,
+        reference_id: &str,
+        metadata: serde_json::Value,
+    ) -> anyhow::Result<(Uuid, bool)> {
+        let result = txn
+            .query_one(
+                r#"
+                INSERT INTO credit_transactions (user_id, amount, type, reference_id, source, metadata)
+                VALUES ($1, $2, 'grant', $3, $4, $5)
+                RETURNING id
+                "#,
+                &[&user_id, &amount, &reference_id, &source, &metadata],
+            )
+            .await;
+
+        match result {
+            Ok(row) => Ok((row.get("id"), true)),
+            Err(e) => {
+                if let Some(db_err) = e.code() {
+                    if *db_err == tokio_postgres::error::SqlState::UNIQUE_VIOLATION {
+                        let row = txn
+                            .query_one(
+                                r#"
+                                SELECT id
+                                FROM credit_transactions
+                                WHERE source = $1 AND reference_id = $2
+                                "#,
+                                &[&source, &reference_id],
+                            )
+                            .await?;
+                        return Ok((row.get("id"), false));
+                    }
+                }
+                Err(e.into())
+            }
+        }
+    }
+
     async fn list_transactions(
         &self,
         user_id: UserId,
@@ -145,6 +189,8 @@ impl CreditsRepository for PostgresCreditsRepository {
                     amount,
                     type,
                     reference_id,
+                    source,
+                    metadata,
                     created_at,
                     COUNT(*) OVER() AS total_count
                 FROM credit_transactions
@@ -170,6 +216,8 @@ impl CreditsRepository for PostgresCreditsRepository {
                 amount: r.get("amount"),
                 r#type: r.get("type"),
                 reference_id: r.get("reference_id"),
+                source: r.get("source"),
+                metadata: r.get("metadata"),
                 created_at: r.get("created_at"),
             })
             .collect();

@@ -1,7 +1,7 @@
 use super::is_valid_service_type;
 use crate::{
     consts::LIST_USERS_LIMIT_MAX, error::ApiError, middleware::AuthenticatedUser, models::*,
-    state::AppState,
+    state::AppState, validation,
 };
 use axum::routing::post;
 use axum::{
@@ -1550,6 +1550,23 @@ pub async fn upsert_system_configs(
                     "auto_route.max_tokens must be > 0".to_string(),
                 ));
             }
+        }
+    }
+
+    if let Some(ref referrals) = request.referrals {
+        if referrals.invitee_reward_credits == 0 {
+            return Err(ApiError::bad_request(
+                "referrals.invitee_reward_credits must be > 0".to_string(),
+            ));
+        }
+        if referrals.inviter_reward_credits == 0 {
+            return Err(ApiError::bad_request(
+                "referrals.inviter_reward_credits must be > 0".to_string(),
+            ));
+        }
+        if let Some(ref signup_url_base) = referrals.signup_url_base {
+            validation::validate_redirect_url(signup_url_base, "referrals.signup_url_base")
+                .map_err(ApiError::bad_request)?;
         }
     }
 
