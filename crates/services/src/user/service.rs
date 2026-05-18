@@ -4,8 +4,8 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use super::ports::{
-    AccountDeletion, AccountDeletionError, AccountDeletionStatus, BanType, User, UserProfile,
-    UserRepository, UserService,
+    AccountDeletion, AccountDeletionError, AccountDeletionRequestResult, AccountDeletionStatus,
+    BanType, User, UserProfile, UserRepository, UserService,
 };
 use crate::types::UserId;
 
@@ -97,11 +97,16 @@ impl UserService for UserServiceImpl {
         &self,
         user_id: UserId,
         cloud_deleted_conversation_ids: &[String],
+        cloud_deleted_file_ids: &[String],
     ) -> Result<(), AccountDeletionError> {
         tracing::warn!("Deleting user account: user_id={}", user_id);
 
         self.user_repository
-            .delete_user_account(user_id, cloud_deleted_conversation_ids)
+            .delete_user_account(
+                user_id,
+                cloud_deleted_conversation_ids,
+                cloud_deleted_file_ids,
+            )
             .await?;
 
         tracing::info!("User account deleted successfully: user_id={}", user_id);
@@ -112,7 +117,7 @@ impl UserService for UserServiceImpl {
     async fn create_account_deletion_request(
         &self,
         user_id: UserId,
-    ) -> Result<AccountDeletion, AccountDeletionError> {
+    ) -> Result<AccountDeletionRequestResult, AccountDeletionError> {
         tracing::warn!(
             "Creating user account deletion request: user_id={}",
             user_id

@@ -36,9 +36,9 @@ struct DefaultTaskExecutor {
 const ACCOUNT_DELETION_LEASE_SECONDS: i64 = 300;
 const MAX_ACCOUNT_DELETION_ATTEMPTS: i32 = 5;
 
-fn progress_deleted_conversation_ids(progress: &serde_json::Value) -> Vec<String> {
+fn progress_string_ids(progress: &serde_json::Value, key: &str) -> Vec<String> {
     progress
-        .get("cloud_deleted_conversation_ids")
+        .get(key)
         .and_then(|v| v.as_array())
         .map(|ids| {
             ids.iter()
@@ -48,9 +48,21 @@ fn progress_deleted_conversation_ids(progress: &serde_json::Value) -> Vec<String
         .unwrap_or_default()
 }
 
-fn build_account_deletion_progress(ids: &[String]) -> serde_json::Value {
+fn progress_deleted_conversation_ids(progress: &serde_json::Value) -> Vec<String> {
+    progress_string_ids(progress, "cloud_deleted_conversation_ids")
+}
+
+fn progress_deleted_file_ids(progress: &serde_json::Value) -> Vec<String> {
+    progress_string_ids(progress, "cloud_deleted_file_ids")
+}
+
+fn build_account_deletion_progress(
+    conversation_ids: &[String],
+    file_ids: &[String],
+) -> serde_json::Value {
     serde_json::json!({
-        "cloud_deleted_conversation_ids": ids,
+        "cloud_deleted_conversation_ids": conversation_ids,
+        "cloud_deleted_file_ids": file_ids,
     })
 }
 
@@ -255,7 +267,10 @@ impl TaskExecutor for DefaultTaskExecutor {
                 "account deletion request is currently leased by another worker deletion_id={}",
                 payload.deletion_id
             );
-            return Ok(());
+            anyhow::bail!(
+                "account deletion request is currently leased by another worker deletion_id={}",
+                payload.deletion_id
+            );
         };
 
         tracing::warn!(
@@ -289,7 +304,12 @@ impl TaskExecutor for DefaultTaskExecutor {
 
         let mut cloud_deleted_conversation_ids =
             progress_deleted_conversation_ids(&request.progress);
+        let mut cloud_deleted_file_ids = progress_deleted_file_ids(&request.progress);
         let mut cloud_deleted_set = cloud_deleted_conversation_ids
+            .iter()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        let mut cloud_deleted_file_set = cloud_deleted_file_ids
             .iter()
             .cloned()
             .collect::<std::collections::HashSet<_>>();
@@ -310,7 +330,10 @@ impl TaskExecutor for DefaultTaskExecutor {
                 .delete_conversation_from_provider(&conversation_id)
                 .await
             {
-                let progress = build_account_deletion_progress(&cloud_deleted_conversation_ids);
+                let progress = build_account_deletion_progress(
+                    &cloud_deleted_conversation_ids,
+                    &cloud_deleted_file_ids,
+                );
                 let last_error =
                     format!("failed to delete cloud conversation {conversation_id}: {err}");
                 self.user_repository
@@ -325,7 +348,10 @@ impl TaskExecutor for DefaultTaskExecutor {
             self.user_repository
                 .update_account_deletion_progress(
                     request.id,
-                    build_account_deletion_progress(&cloud_deleted_conversation_ids),
+                    build_account_deletion_progress(
+                        &cloud_deleted_conversation_ids,
+                        &cloud_deleted_file_ids,
+                    ),
                     ACCOUNT_DELETION_LEASE_SECONDS,
                 )
                 .await
@@ -338,13 +364,20 @@ impl TaskExecutor for DefaultTaskExecutor {
             .await
             .context("failed to list account files")?;
 
-        for file_id in &file_ids {
+        for file_id in file_ids {
+            if cloud_deleted_file_set.contains(&file_id) {
+                continue;
+            }
+
             if let Err(err) = self
                 .conversation_service
-                .delete_file_from_provider(file_id)
+                .delete_file_from_provider(&file_id)
                 .await
             {
-                let progress = build_account_deletion_progress(&cloud_deleted_conversation_ids);
+                let progress = build_account_deletion_progress(
+                    &cloud_deleted_conversation_ids,
+                    &cloud_deleted_file_ids,
+                );
                 let last_error = format!("failed to delete provider file {file_id}: {err}");
                 self.user_repository
                     .mark_account_deletion_retrying(request.id, last_error.clone(), progress)
@@ -352,11 +385,29 @@ impl TaskExecutor for DefaultTaskExecutor {
                     .context("failed to mark account deletion retrying")?;
                 anyhow::bail!(last_error);
             }
+
+            cloud_deleted_file_set.insert(file_id.clone());
+            cloud_deleted_file_ids.push(file_id);
+            self.user_repository
+                .update_account_deletion_progress(
+                    request.id,
+                    build_account_deletion_progress(
+                        &cloud_deleted_conversation_ids,
+                        &cloud_deleted_file_ids,
+                    ),
+                    ACCOUNT_DELETION_LEASE_SECONDS,
+                )
+                .await
+                .context("failed to update account deletion file progress")?;
         }
 
         match self
             .user_repository
-            .delete_user_account(request.user_id, &cloud_deleted_conversation_ids)
+            .delete_user_account(
+                request.user_id,
+                &cloud_deleted_conversation_ids,
+                &cloud_deleted_file_ids,
+            )
             .await
         {
             Ok(()) | Err(AccountDeletionError::UserNotFound) => {
@@ -372,7 +423,10 @@ impl TaskExecutor for DefaultTaskExecutor {
                 Ok(())
             }
             Err(err) => {
-                let progress = build_account_deletion_progress(&cloud_deleted_conversation_ids);
+                let progress = build_account_deletion_progress(
+                    &cloud_deleted_conversation_ids,
+                    &cloud_deleted_file_ids,
+                );
                 let last_error = err.to_string();
                 self.user_repository
                     .mark_account_deletion_retrying(request.id, last_error.clone(), progress)

@@ -57,6 +57,20 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
             subscription.user_id
         );
 
+        let user_exists = txn
+            .query_opt(
+                "SELECT 1 FROM users WHERE id = $1 FOR KEY SHARE",
+                &[&subscription.user_id],
+            )
+            .await?
+            .is_some();
+        if !user_exists {
+            anyhow::bail!(
+                "cannot upsert subscription for missing user_id={}",
+                subscription.user_id
+            );
+        }
+
         let pending_downgrade_status = subscription
             .pending_downgrade_status
             .map(DowngradeIntentStatus::as_str);

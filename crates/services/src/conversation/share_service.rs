@@ -943,6 +943,7 @@ mod tests {
             &self,
             _user_id: UserId,
             _cloud_deleted_conversation_ids: &[String],
+            _cloud_deleted_file_ids: &[String],
         ) -> Result<(), crate::user::ports::AccountDeletionError> {
             Ok(())
         }
@@ -950,8 +951,10 @@ mod tests {
         async fn create_account_deletion_request(
             &self,
             _user_id: UserId,
-        ) -> Result<crate::user::ports::AccountDeletion, crate::user::ports::AccountDeletionError>
-        {
+        ) -> Result<
+            crate::user::ports::AccountDeletionRequestResult,
+            crate::user::ports::AccountDeletionError,
+        > {
             unimplemented!("create_account_deletion_request not needed for tests");
         }
 
@@ -1116,6 +1119,7 @@ mod tests {
             &self,
             _user_id: UserId,
             _cloud_deleted_conversation_ids: &[String],
+            _cloud_deleted_file_ids: &[String],
         ) -> Result<(), crate::user::ports::AccountDeletionError> {
             Ok(())
         }
@@ -1123,8 +1127,10 @@ mod tests {
         async fn create_account_deletion_request(
             &self,
             _user_id: UserId,
-        ) -> Result<crate::user::ports::AccountDeletion, crate::user::ports::AccountDeletionError>
-        {
+        ) -> Result<
+            crate::user::ports::AccountDeletionRequestResult,
+            crate::user::ports::AccountDeletionError,
+        > {
             unimplemented!("create_account_deletion_request not needed for tests");
         }
 

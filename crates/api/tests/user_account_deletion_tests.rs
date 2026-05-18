@@ -2,7 +2,7 @@ mod common;
 
 use common::{create_test_server_and_db, mock_login, TestServerConfig};
 use http::{HeaderName, HeaderValue};
-use services::user::ports::UserRepository;
+use services::user::ports::{AccountDeletionError, UserRepository};
 use uuid::Uuid;
 
 fn auth_header(token: &str) -> (HeaderName, HeaderValue) {
@@ -180,7 +180,7 @@ async fn delete_account_request_creates_pending_state_and_blocks_access() {
     assert_eq!(profile_response.status_code(), 403);
 
     db.user_repository()
-        .delete_user_account(user.id, std::slice::from_ref(&conversation_id))
+        .delete_user_account(user.id, std::slice::from_ref(&conversation_id), &[])
         .await
         .expect("finalize delete account");
     db.user_repository()
@@ -289,4 +289,194 @@ async fn pending_delete_account_request_can_be_retried() {
         .expect("count deletion requests")
         .get(0);
     assert_eq!(deletion_count, 1);
+}
+
+#[tokio::test]
+async fn account_deletion_request_reports_insert_vs_existing() {
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+    let email = format!("delete_account_insert_flag_{}@test.org", Uuid::new_v4());
+    let token = mock_login(&server, &email).await;
+    drop(token);
+    let user = db
+        .user_repository()
+        .get_user_by_email(&email)
+        .await
+        .expect("get user")
+        .expect("user exists");
+
+    let first = db
+        .user_repository()
+        .create_account_deletion_request(user.id)
+        .await
+        .expect("create first deletion request");
+    assert!(first.was_inserted);
+
+    let second = db
+        .user_repository()
+        .create_account_deletion_request(user.id)
+        .await
+        .expect("return existing deletion request");
+    assert!(!second.was_inserted);
+    assert_eq!(first.deletion.id, second.deletion.id);
+}
+
+#[tokio::test]
+async fn delete_account_requires_cloud_file_cleanup() {
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+    let email = format!("delete_account_file_guard_{}@test.org", Uuid::new_v4());
+    let token = mock_login(&server, &email).await;
+    drop(token);
+    let user = db
+        .user_repository()
+        .get_user_by_email(&email)
+        .await
+        .expect("get user")
+        .expect("user exists");
+    let file_id = format!("file-delete-guard-{}", Uuid::new_v4());
+
+    let client = db.pool().get().await.expect("db client");
+    client
+        .execute(
+            "INSERT INTO files (id, user_id, bytes, file_created_at, filename, purpose)
+             VALUES ($1, $2, 10, 123, 'delete-guard.txt', 'assistants')",
+            &[&file_id, &user.id],
+        )
+        .await
+        .expect("insert file");
+
+    let err = db
+        .user_repository()
+        .delete_user_account(user.id, &[], &[])
+        .await
+        .expect_err("file guard should block finalization");
+    match err {
+        AccountDeletionError::FileCleanupIncomplete { file_ids } => {
+            assert_eq!(file_ids, vec![file_id.clone()]);
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+
+    assert!(db
+        .user_repository()
+        .get_user(user.id)
+        .await
+        .expect("get user after blocked finalization")
+        .is_some());
+
+    db.user_repository()
+        .delete_user_account(user.id, &[], std::slice::from_ref(&file_id))
+        .await
+        .expect("finalize after file provider cleanup");
+
+    let file_count: i64 = client
+        .query_one("SELECT COUNT(*) FROM files WHERE id = $1", &[&file_id])
+        .await
+        .expect("count file")
+        .get(0);
+    assert_eq!(file_count, 0);
+}
+
+#[tokio::test]
+async fn delete_account_removes_shared_recipient_identifiers() {
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+    let deleted_email = format!("delete_account_share_recipient_{}@test.org", Uuid::new_v4());
+    let owner_email = format!("delete_account_share_owner_{}@test.org", Uuid::new_v4());
+    let deleted_token = mock_login(&server, &deleted_email).await;
+    let owner_token = mock_login(&server, &owner_email).await;
+    drop((deleted_token, owner_token));
+
+    let deleted_user = db
+        .user_repository()
+        .get_user_by_email(&deleted_email)
+        .await
+        .expect("get deleted user")
+        .expect("deleted user exists");
+    let owner_user = db
+        .user_repository()
+        .get_user_by_email(&owner_email)
+        .await
+        .expect("get owner user")
+        .expect("owner user exists");
+
+    let client = db.pool().get().await.expect("db client");
+    let near_account = format!("{}.near", Uuid::new_v4());
+    let conversation_id = format!("conv-share-recipient-{}", Uuid::new_v4());
+    let group_id = Uuid::new_v4();
+
+    client
+        .execute(
+            "INSERT INTO oauth_accounts (user_id, provider, provider_user_id)
+             VALUES ($1, 'near', $2)",
+            &[&deleted_user.id, &near_account],
+        )
+        .await
+        .expect("insert near account");
+    client
+        .execute(
+            "INSERT INTO conversations (id, user_id) VALUES ($1, $2)",
+            &[&conversation_id, &owner_user.id],
+        )
+        .await
+        .expect("insert owner conversation");
+    client
+        .execute(
+            "INSERT INTO conversation_share_groups (id, owner_user_id, name)
+             VALUES ($1, $2, 'shared group')",
+            &[&group_id, &owner_user.id],
+        )
+        .await
+        .expect("insert share group");
+    client
+        .execute(
+            "INSERT INTO conversation_shares (
+                 conversation_id, owner_user_id, share_type, permission, recipient_type, recipient_value
+             ) VALUES ($1, $2, 'direct', 'read', 'email', $3)",
+            &[&conversation_id, &owner_user.id, &deleted_email],
+        )
+        .await
+        .expect("insert direct email share");
+    client
+        .execute(
+            "INSERT INTO conversation_shares (
+                 conversation_id, owner_user_id, share_type, permission, recipient_type, recipient_value
+             ) VALUES ($1, $2, 'direct', 'read', 'near', $3)",
+            &[&conversation_id, &owner_user.id, &near_account],
+        )
+        .await
+        .expect("insert direct near share");
+    client
+        .execute(
+            "INSERT INTO conversation_share_group_members (group_id, member_type, member_value)
+             VALUES ($1, 'email', $2), ($1, 'near', $3)",
+            &[&group_id, &deleted_email, &near_account],
+        )
+        .await
+        .expect("insert group members");
+
+    db.user_repository()
+        .delete_user_account(deleted_user.id, &[], &[])
+        .await
+        .expect("delete account");
+
+    let direct_count: i64 = client
+        .query_one(
+            "SELECT COUNT(*) FROM conversation_shares
+             WHERE recipient_value = $1 OR recipient_value = $2",
+            &[&deleted_email, &near_account],
+        )
+        .await
+        .expect("count direct shares")
+        .get(0);
+    assert_eq!(direct_count, 0);
+
+    let member_count: i64 = client
+        .query_one(
+            "SELECT COUNT(*) FROM conversation_share_group_members
+             WHERE member_value = $1 OR member_value = $2",
+            &[&deleted_email, &near_account],
+        )
+        .await
+        .expect("count group members")
+        .get(0);
+    assert_eq!(member_count, 0);
 }

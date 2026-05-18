@@ -118,6 +118,12 @@ pub struct AccountDeletion {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone)]
+pub struct AccountDeletionRequestResult {
+    pub deletion: AccountDeletion,
+    pub was_inserted: bool,
+}
+
 /// Errors returned when deleting a user account.
 #[derive(Debug, Error)]
 pub enum AccountDeletionError {
@@ -129,6 +135,8 @@ pub enum AccountDeletionError {
     InstancesNotDeleted { count: i64, statuses: Vec<String> },
     #[error("Cannot delete account because conversation cleanup is incomplete")]
     ConversationCleanupIncomplete { conversation_ids: Vec<String> },
+    #[error("Cannot delete account because file cleanup is incomplete")]
+    FileCleanupIncomplete { file_ids: Vec<String> },
     #[error("Account deletion is already {status}")]
     AlreadyInTerminalState { status: AccountDeletionStatus },
     #[error(transparent)]
@@ -165,13 +173,14 @@ pub trait UserRepository: Send + Sync {
         &self,
         user_id: UserId,
         cloud_deleted_conversation_ids: &[String],
+        cloud_deleted_file_ids: &[String],
     ) -> Result<(), AccountDeletionError>;
 
     /// Create or return an existing deletion request after validating preconditions.
     async fn create_account_deletion_request(
         &self,
         user_id: UserId,
-    ) -> Result<AccountDeletion, AccountDeletionError>;
+    ) -> Result<AccountDeletionRequestResult, AccountDeletionError>;
 
     /// Delete an account deletion request (used for rollback when task enqueue fails).
     async fn delete_account_deletion_request(&self, deletion_id: Uuid) -> anyhow::Result<()>;
@@ -289,12 +298,13 @@ pub trait UserService: Send + Sync {
         &self,
         user_id: UserId,
         cloud_deleted_conversation_ids: &[String],
+        cloud_deleted_file_ids: &[String],
     ) -> Result<(), AccountDeletionError>;
 
     async fn create_account_deletion_request(
         &self,
         user_id: UserId,
-    ) -> Result<AccountDeletion, AccountDeletionError>;
+    ) -> Result<AccountDeletionRequestResult, AccountDeletionError>;
 
     /// Delete an account deletion request (rollback when task enqueue fails).
     async fn delete_account_deletion_request(&self, deletion_id: Uuid) -> anyhow::Result<()>;

@@ -3044,10 +3044,11 @@ pub async fn admin_list_account_deletions(
         ),
     };
 
-    let limit = params.limit.min(200);
+    let limit = params.limit.clamp(1, 200);
+    let offset = params.offset.max(0);
     let deletions = app_state
         .user_service
-        .list_account_deletions(status, limit, params.offset)
+        .list_account_deletions(status, limit, offset)
         .await
         .map_err(|e| {
             tracing::error!("Failed to list account deletions: {:#}", e);
@@ -3059,7 +3060,7 @@ pub async fn admin_list_account_deletions(
         deletions.len(),
         params.status,
         limit,
-        params.offset
+        offset
     );
 
     Ok(Json(deletions))

@@ -2,8 +2,8 @@ use crate::pool::DbPool;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use services::user::ports::{
-    AccountDeletion, AccountDeletionError, AccountDeletionStatus, BanType, LinkedOAuthAccount,
-    OAuthProvider, User, UserRepository,
+    AccountDeletion, AccountDeletionError, AccountDeletionRequestResult, AccountDeletionStatus,
+    BanType, LinkedOAuthAccount, OAuthProvider, User, UserRepository,
 };
 use services::UserId;
 use std::collections::HashSet;
@@ -230,7 +230,7 @@ impl UserRepository for PostgresUserRepository {
     /// Delete all account data that can be tied to the user.
     ///
     /// Explicitly deleted: conversations, files, user_settings, sessions, oauth
-    /// data, billing rows (stripe_customers, user_credits, subscriptions*),
+    /// data, mutable billing/account rows (stripe_customers, user_credits),
     /// sharing groups, agent api keys, activity log, bans, passkey credentials,
     /// email verification challenges, and the users row itself.
     /// Account deletion only proceeds after all user instances are already
@@ -239,8 +239,8 @@ impl UserRepository for PostgresUserRepository {
     /// non-deleted rows if the invariant is violated within this transaction.
     ///
     /// Intentionally retained for audit / billing reconciliation:
-    /// - agent_usage_log, user_usage_event, credit_transactions – their user_id
-    ///   FK was removed in V34 so they survive the users row deletion.
+    /// - agent_usage_log, user_usage_event, credit_transactions, subscriptions –
+    ///   their user_id FK was removed in V34 so they survive the users row deletion.
     /// - agent_instance_status_history – changed_by_user_id is SET NULL on
     ///   instance delete; old history rows remain.
     /// - user_account_deletions – the deletion audit record itself.
@@ -248,11 +248,28 @@ impl UserRepository for PostgresUserRepository {
         &self,
         user_id: UserId,
         cloud_deleted_conversation_ids: &[String],
+        cloud_deleted_file_ids: &[String],
     ) -> Result<(), AccountDeletionError> {
         let mut client = self.pool.get().await.map_err(anyhow::Error::from)?;
         let tx = client.transaction().await.map_err(anyhow::Error::from)?;
 
         Self::validate_account_deletion_preconditions_with_client(&*tx, user_id, true).await?;
+
+        let user_email: Option<String> = tx
+            .query_opt("SELECT email FROM users WHERE id = $1", &[&user_id])
+            .await
+            .map_err(anyhow::Error::from)?
+            .map(|row| row.get("email"));
+        let near_account_ids: Vec<String> = tx
+            .query(
+                "SELECT provider_user_id FROM oauth_accounts WHERE user_id = $1 AND provider = 'near'",
+                &[&user_id],
+            )
+            .await
+            .map_err(anyhow::Error::from)?
+            .into_iter()
+            .map(|row| row.get("provider_user_id"))
+            .collect();
 
         let verified_conversation_ids: HashSet<&str> = cloud_deleted_conversation_ids
             .iter()
@@ -274,6 +291,68 @@ impl UserRepository for PostgresUserRepository {
             return Err(AccountDeletionError::ConversationCleanupIncomplete {
                 conversation_ids: missing_cloud_deletes,
             });
+        }
+
+        let verified_file_ids: HashSet<&str> =
+            cloud_deleted_file_ids.iter().map(String::as_str).collect();
+        let current_file_rows = tx
+            .query(
+                "SELECT id FROM files WHERE user_id = $1 ORDER BY id",
+                &[&user_id],
+            )
+            .await
+            .map_err(anyhow::Error::from)?;
+        let missing_cloud_file_deletes: Vec<String> = current_file_rows
+            .into_iter()
+            .map(|row| row.get::<_, String>("id"))
+            .filter(|id| !verified_file_ids.contains(id.as_str()))
+            .collect();
+        if !missing_cloud_file_deletes.is_empty() {
+            return Err(AccountDeletionError::FileCleanupIncomplete {
+                file_ids: missing_cloud_file_deletes,
+            });
+        }
+
+        if let Some(ref email) = user_email {
+            tx.execute(
+                "DELETE FROM conversation_shares
+                 WHERE share_type = 'direct'
+                   AND recipient_type = 'email'
+                   AND LOWER(recipient_value) = LOWER($1)",
+                &[&email],
+            )
+            .await
+            .map_err(anyhow::Error::from)?;
+
+            tx.execute(
+                "DELETE FROM conversation_share_group_members
+                 WHERE member_type = 'email'
+                   AND LOWER(member_value) = LOWER($1)",
+                &[&email],
+            )
+            .await
+            .map_err(anyhow::Error::from)?;
+        }
+
+        if !near_account_ids.is_empty() {
+            tx.execute(
+                "DELETE FROM conversation_shares
+                 WHERE share_type = 'direct'
+                   AND recipient_type = 'near'
+                   AND recipient_value = ANY($1)",
+                &[&near_account_ids],
+            )
+            .await
+            .map_err(anyhow::Error::from)?;
+
+            tx.execute(
+                "DELETE FROM conversation_share_group_members
+                 WHERE member_type = 'near'
+                   AND member_value = ANY($1)",
+                &[&near_account_ids],
+            )
+            .await
+            .map_err(anyhow::Error::from)?;
         }
 
         tx.execute(
@@ -389,12 +468,6 @@ impl UserRepository for PostgresUserRepository {
         .await
         .map_err(anyhow::Error::from)?;
 
-        let user_email: Option<String> = tx
-            .query_opt("SELECT email FROM users WHERE id = $1", &[&user_id])
-            .await
-            .map_err(anyhow::Error::from)?
-            .map(|row| row.get("email"));
-
         if let Some(ref email) = user_email {
             tx.execute(
                 "DELETE FROM email_verification_challenges WHERE email = $1",
@@ -419,7 +492,7 @@ impl UserRepository for PostgresUserRepository {
     async fn create_account_deletion_request(
         &self,
         user_id: UserId,
-    ) -> Result<AccountDeletion, AccountDeletionError> {
+    ) -> Result<AccountDeletionRequestResult, AccountDeletionError> {
         let mut client = self.pool.get().await.map_err(anyhow::Error::from)?;
         let tx = client.transaction().await.map_err(anyhow::Error::from)?;
 
@@ -427,17 +500,31 @@ impl UserRepository for PostgresUserRepository {
 
         let row = tx
             .query_one(
-                "INSERT INTO user_account_deletions (user_id, status)
-                 VALUES ($1, 'pending')
-                 ON CONFLICT (user_id) DO UPDATE
-                    SET updated_at = NOW()
-                 RETURNING id, user_id, status, requested_at, started_at, completed_at,
-                           attempt_count, lease_until, last_error, progress, created_at, updated_at",
+                "WITH inserted AS (
+                     INSERT INTO user_account_deletions (user_id, status)
+                     VALUES ($1, 'pending')
+                     ON CONFLICT (user_id) DO NOTHING
+                     RETURNING id, user_id, status, requested_at, started_at, completed_at,
+                               attempt_count, lease_until, last_error, progress, created_at, updated_at,
+                               TRUE AS was_inserted
+                 ), existing AS (
+                     UPDATE user_account_deletions
+                     SET updated_at = NOW()
+                     WHERE user_id = $1
+                       AND NOT EXISTS (SELECT 1 FROM inserted)
+                     RETURNING id, user_id, status, requested_at, started_at, completed_at,
+                               attempt_count, lease_until, last_error, progress, created_at, updated_at,
+                               FALSE AS was_inserted
+                 )
+                 SELECT * FROM inserted
+                 UNION ALL
+                 SELECT * FROM existing",
                 &[&user_id],
             )
             .await
             .map_err(anyhow::Error::from)?;
 
+        let was_inserted: bool = row.get("was_inserted");
         let deletion =
             Self::account_deletion_from_row(row).map_err(AccountDeletionError::Internal)?;
 
@@ -451,7 +538,10 @@ impl UserRepository for PostgresUserRepository {
         }
 
         tx.commit().await.map_err(anyhow::Error::from)?;
-        Ok(deletion)
+        Ok(AccountDeletionRequestResult {
+            deletion,
+            was_inserted,
+        })
     }
 
     async fn delete_account_deletion_request(&self, deletion_id: Uuid) -> anyhow::Result<()> {

@@ -79,11 +79,12 @@ pub async fn delete_current_user(
             ApiError::internal_server_error("Account deletion queue is not configured")
         })?;
 
-    let deletion = app_state
+    let deletion_request = app_state
         .user_service
         .create_account_deletion_request(user.user_id)
         .await
         .map_err(account_deletion_error_to_api_error)?;
+    let deletion = deletion_request.deletion;
 
     let task_id = TaskId::new(format!("account-deletion-{}", deletion.id)).map_err(|e| {
         tracing::error!("Failed to create account deletion task id: {}", e);
@@ -103,10 +104,12 @@ pub async fn delete_current_user(
             deletion.id,
             e
         );
-        let _ = app_state
-            .user_service
-            .delete_account_deletion_request(deletion.id)
-            .await;
+        if deletion_request.was_inserted {
+            let _ = app_state
+                .user_service
+                .delete_account_deletion_request(deletion.id)
+                .await;
+        }
         return Err(ApiError::internal_server_error(
             "Failed to enqueue account deletion",
         ));
@@ -144,6 +147,13 @@ fn account_deletion_error_to_api_error(e: AccountDeletionError) -> ApiError {
             tracing::error!(
                 "Unexpected ConversationCleanupIncomplete during delete request validation/create path: {}",
                 conversation_ids.join(", ")
+            );
+            ApiError::internal_server_error("Failed to delete account")
+        }
+        AccountDeletionError::FileCleanupIncomplete { file_ids } => {
+            tracing::error!(
+                "Unexpected FileCleanupIncomplete during delete request validation/create path: {}",
+                file_ids.join(", ")
             );
             ApiError::internal_server_error("Failed to delete account")
         }
