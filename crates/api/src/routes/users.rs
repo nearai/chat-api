@@ -47,7 +47,7 @@ pub async fn get_current_user(
 /// Delete current user account
 ///
 /// Requests asynchronous account deletion after verifying the user has no active subscriptions
-/// and no running/provisioning/error instances.
+/// and no remaining non-deleted instances.
 #[utoipa::path(
     delete,
     path = "/v1/users/me",
@@ -56,7 +56,7 @@ pub async fn get_current_user(
         (status = 202, description = "User account deletion requested", body = UserAccountDeletionResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 404, description = "User not found", body = crate::error::ApiErrorResponse),
-        (status = 409, description = "Account cannot be deleted until subscriptions are inactive and instances are stopped", body = crate::error::ApiErrorResponse),
+        (status = 409, description = "Account cannot be deleted until subscriptions are inactive and instances are deleted", body = crate::error::ApiErrorResponse),
         (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
     ),
     security(
@@ -127,13 +127,13 @@ fn account_deletion_error_to_api_error(e: AccountDeletionError) -> ApiError {
                 "Cannot delete account while {count} active subscription(s) exist"
             ))
         }
-        AccountDeletionError::InstancesNotStopped { count, statuses } => {
+        AccountDeletionError::InstancesNotDeleted { count, statuses } => {
             tracing::warn!(
-                "Account deletion blocked: {count} instance(s) not stopped (statuses: {})",
+                "Account deletion blocked: {count} instance(s) not deleted (statuses: {})",
                 statuses.join(", ")
             );
             ApiError::conflict(format!(
-                "Cannot delete account while {count} instance(s) are not stopped",
+                "Cannot delete account while {count} instance(s) are not deleted",
             ))
             .with_details(format!(
                 "Blocking instance statuses: {}",

@@ -52,7 +52,7 @@ async fn delete_account_blocks_active_subscription() {
 }
 
 #[tokio::test]
-async fn delete_account_blocks_non_stopped_instance() {
+async fn delete_account_blocks_non_deleted_instance() {
     let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
     let email = format!("delete_account_active_instance_{}@test.org", Uuid::new_v4());
     let token = mock_login(&server, &email).await;
@@ -146,13 +146,12 @@ async fn delete_account_request_creates_pending_state_and_blocks_access() {
             "INSERT INTO agent_instances (
                 id, user_id, instance_id, name, type, public_ssh_key, instance_url,
                 instance_token, dashboard_url, agent_api_base_url, status
-            ) VALUES ($1, $2, $3, 'delete success instance', 'openclaw', 'ssh-rsa AAA',
-                'https://instance.internal', 'secret-token', 'https://dash.internal?token=secret',
-                'https://manager.internal', 'stopped')",
+            ) VALUES ($1, $2, $3, 'delete success instance', 'openclaw', NULL,
+                NULL, NULL, NULL, NULL, 'deleted')",
             &[&instance_pk, &user.id, &instance_id],
         )
         .await
-        .expect("insert stopped instance");
+        .expect("insert deleted instance");
 
     let (name, value) = auth_header(&token);
     let response = server.delete("/v1/users/me").add_header(name, value).await;

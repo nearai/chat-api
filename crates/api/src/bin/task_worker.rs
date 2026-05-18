@@ -54,63 +54,6 @@ fn build_account_deletion_progress(ids: &[String]) -> serde_json::Value {
     })
 }
 
-impl DefaultTaskExecutor {
-    async fn delete_account_instances_from_provider(&self, user_id: UserId) -> anyhow::Result<()> {
-        let batch_size = 200;
-        let mut deleted_count = 0usize;
-
-        loop {
-            // Always fetch from offset 0 because successful deletes soft-delete rows and remove
-            // them from subsequent list_instances results.
-            let (instances, _) = self
-                .agent_service
-                .list_instances(user_id, batch_size, 0)
-                .await
-                .context("failed to list account instances")?;
-
-            if instances.is_empty() {
-                break;
-            }
-
-            for instance in instances {
-                if instance.status != "stopped" {
-                    anyhow::bail!(
-                        "account deletion requires stopped instances before final delete: instance_id={} status={}",
-                        instance.id,
-                        instance.status
-                    );
-                }
-
-                self.agent_service
-                    .delete_instance(instance.id, None, "user_account_deleted")
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "failed to delete account instance from provider: instance_id={}",
-                            instance.id
-                        )
-                    })?;
-                deleted_count += 1;
-
-                tracing::info!(
-                    "account deletion deleted stopped instance from provider: user_id={} instance_id={} deleted_count={}",
-                    user_id,
-                    instance.id,
-                    deleted_count
-                );
-            }
-        }
-
-        tracing::info!(
-            "account deletion provider instance cleanup finished: user_id={} deleted_count={}",
-            user_id,
-            deleted_count
-        );
-
-        Ok(())
-    }
-}
-
 #[async_trait]
 impl TaskExecutor for DefaultTaskExecutor {
     async fn execute_noop(&self, _payload: &NoopTaskPayload) -> anyhow::Result<()> {
@@ -409,19 +352,6 @@ impl TaskExecutor for DefaultTaskExecutor {
                     .context("failed to mark account deletion retrying")?;
                 anyhow::bail!(last_error);
             }
-        }
-
-        if let Err(err) = self
-            .delete_account_instances_from_provider(request.user_id)
-            .await
-        {
-            let progress = build_account_deletion_progress(&cloud_deleted_conversation_ids);
-            let last_error = format!("failed to delete provider instances: {err}");
-            self.user_repository
-                .mark_account_deletion_retrying(request.id, last_error.clone(), progress)
-                .await
-                .context("failed to mark account deletion retrying")?;
-            anyhow::bail!(last_error);
         }
 
         match self

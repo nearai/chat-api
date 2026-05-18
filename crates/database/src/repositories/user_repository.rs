@@ -58,7 +58,7 @@ impl PostgresUserRepository {
             .query(
                 "SELECT status, COUNT(*)::bigint AS count
                  FROM agent_instances
-                 WHERE user_id = $1 AND status NOT IN ('stopped', 'deleted')
+                 WHERE user_id = $1 AND status != 'deleted'
                  GROUP BY status
                  ORDER BY status",
                 &[&user_id],
@@ -74,7 +74,7 @@ impl PostgresUserRepository {
                 total += count;
                 statuses.push(format!("{status}:{count}"));
             }
-            return Err(AccountDeletionError::InstancesNotStopped {
+            return Err(AccountDeletionError::InstancesNotDeleted {
                 count: total,
                 statuses,
             });
@@ -233,9 +233,10 @@ impl UserRepository for PostgresUserRepository {
     /// data, billing rows (stripe_customers, user_credits, subscriptions*),
     /// sharing groups, agent api keys, activity log, bans, passkey credentials,
     /// email verification challenges, and the users row itself.
-    /// Agent instance provider deletion is handled by the account-deletion worker
-    /// before this DB finalization step; this function then soft-deletes any
-    /// remaining non-deleted instance rows and wipes stored credentials.
+    /// Account deletion only proceeds after all user instances are already
+    /// deleted through the normal instance deletion flow. The final UPDATE below
+    /// is a defensive no-op in the expected path and wipes any still-visible
+    /// non-deleted rows if the invariant is violated within this transaction.
     ///
     /// Intentionally retained for audit / billing reconciliation:
     /// - agent_usage_log, user_usage_event, credit_transactions – their user_id

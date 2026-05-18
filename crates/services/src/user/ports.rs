@@ -125,8 +125,8 @@ pub enum AccountDeletionError {
     UserNotFound,
     #[error("Cannot delete account while active subscriptions exist")]
     ActiveSubscriptions { count: i64 },
-    #[error("Cannot delete account while instances are not stopped")]
-    InstancesNotStopped { count: i64, statuses: Vec<String> },
+    #[error("Cannot delete account while instances are not deleted")]
+    InstancesNotDeleted { count: i64, statuses: Vec<String> },
     #[error("Cannot delete account because conversation cleanup is incomplete")]
     ConversationCleanupIncomplete { conversation_ids: Vec<String> },
     #[error("Account deletion is already {status}")]
