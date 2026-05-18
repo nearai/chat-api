@@ -21,6 +21,7 @@ use services::bi_metrics::{
     StatusChangeRecord, TopConsumer, TopConsumerFilter, TopConsumerGroupBy, UsageAggregation,
     UsageFilter, UsageGroupBy, UsageRankBy as BiUsageRankBy, UserSummary,
 };
+use services::tasks::{AccountDeletionTaskPayload, TaskId, TaskMessage, TaskPayload};
 
 /// Maximum rows for BI usage aggregation queries.
 const BI_USAGE_MAX_ROWS: i64 = 1000;
@@ -3018,7 +3019,7 @@ pub async fn bi_top_consumers(
 }
 
 /// Query parameters for admin account deletion listing.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
 pub struct AdminAccountDeletionsQuery {
     pub status: Option<String>,
     #[serde(default = "admin_deletions_default_limit")]
@@ -3031,7 +3032,27 @@ fn admin_deletions_default_limit() -> i64 {
     50
 }
 
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct AdminRetryAccountDeletionResponse {
+    pub deletion: services::user::ports::AccountDeletion,
+    pub enqueued: bool,
+}
+
 /// Admin endpoint: List account deletion requests with optional status filter.
+#[utoipa::path(
+    get,
+    path = "/v1/admin/account-deletions",
+    tag = "Admin",
+    params(AdminAccountDeletionsQuery),
+    responses(
+        (status = 200, description = "Account deletion requests", body = Vec<services::user::ports::AccountDeletion>),
+        (status = 400, description = "Invalid status filter", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - admin only", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(("session_token" = []))
+)]
 pub async fn admin_list_account_deletions(
     State(app_state): State<AppState>,
     Query(params): Query<AdminAccountDeletionsQuery>,
@@ -3066,6 +3087,122 @@ pub async fn admin_list_account_deletions(
     Ok(Json(deletions))
 }
 
+/// Admin endpoint: Retry a failed account deletion request.
+#[utoipa::path(
+    post,
+    path = "/v1/admin/account-deletions/{deletion_id}/retry",
+    tag = "Admin",
+    params(("deletion_id" = Uuid, Path, description = "Account deletion request ID")),
+    responses(
+        (status = 200, description = "Account deletion retry enqueued", body = AdminRetryAccountDeletionResponse),
+        (status = 400, description = "Invalid deletion ID", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - admin only", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "Account deletion request not found", body = crate::error::ApiErrorResponse),
+        (status = 409, description = "Account deletion request is not retryable", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(("session_token" = []))
+)]
+pub async fn admin_retry_account_deletion(
+    State(app_state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(deletion_id): Path<Uuid>,
+) -> Result<Json<AdminRetryAccountDeletionResponse>, ApiError> {
+    tracing::warn!(
+        "Admin retrying account deletion: deletion_id={}, admin_user_id={}",
+        deletion_id,
+        user.user_id
+    );
+
+    let task_publisher = app_state
+        .account_deletion_task_publisher
+        .as_ref()
+        .ok_or_else(|| {
+            ApiError::internal_server_error("Account deletion queue is not configured")
+        })?;
+
+    let existing = app_state
+        .user_service
+        .get_account_deletion(deletion_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to load account deletion before retry: deletion_id={}, error={:#}",
+                deletion_id,
+                e
+            );
+            ApiError::internal_server_error("Failed to retry account deletion")
+        })?
+        .ok_or_else(|| ApiError::not_found("Account deletion request not found"))?;
+
+    if existing.status != services::user::ports::AccountDeletionStatus::FailedNeedsReview {
+        return Err(ApiError::conflict(format!(
+            "Account deletion request is not retryable from status {}",
+            existing.status
+        )));
+    }
+
+    let deletion = app_state
+        .user_service
+        .retry_failed_account_deletion(deletion_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to reset account deletion for retry: deletion_id={}, error={:#}",
+                deletion_id,
+                e
+            );
+            ApiError::internal_server_error("Failed to retry account deletion")
+        })?
+        .ok_or_else(|| ApiError::conflict("Account deletion request is no longer retryable"))?;
+
+    let task_id = TaskId::new(format!("account-deletion-retry-{}", deletion.id)).map_err(|e| {
+        tracing::error!(
+            "Failed to create account deletion retry task id: deletion_id={}, error={}",
+            deletion.id,
+            e
+        );
+        ApiError::internal_server_error("Failed to enqueue account deletion retry")
+    })?;
+    let message = TaskMessage {
+        task_id,
+        payload: TaskPayload::AccountDeletion(AccountDeletionTaskPayload {
+            deletion_id: deletion.id,
+        }),
+    };
+
+    if let Err(e) = task_publisher.publish(message).await {
+        let last_error = format!("failed to enqueue account deletion retry: {e:#}");
+        if let Err(restore_err) = app_state
+            .user_service
+            .restore_account_deletion_failed_needs_review(deletion.id, last_error.clone())
+            .await
+        {
+            tracing::error!(
+                "Failed to restore account deletion after retry enqueue failure: deletion_id={}, enqueue_error={:#}, restore_error={:#}",
+                deletion.id,
+                e,
+                restore_err
+            );
+        } else {
+            tracing::error!(
+                "Failed to enqueue account deletion retry, restored failed_needs_review: deletion_id={}, error={:#}",
+                deletion.id,
+                e
+            );
+        }
+        return Err(ApiError::internal_server_error(
+            "Failed to enqueue account deletion retry",
+        ));
+    }
+
+    Ok(Json(AdminRetryAccountDeletionResponse {
+        deletion,
+        enqueued: true,
+    }))
+}
+
 /// Create admin router with all admin routes (requires admin authentication)
 pub fn create_admin_router() -> Router<AppState> {
     Router::new()
@@ -3094,6 +3231,10 @@ pub fn create_admin_router() -> Router<AppState> {
         .route("/usage/users/{user_id}", get(get_usage_by_user_id))
         .route("/usage/top", get(get_top_usage))
         .route("/account-deletions", get(admin_list_account_deletions))
+        .route(
+            "/account-deletions/{deletion_id}/retry",
+            post(admin_retry_account_deletion),
+        )
         // Admin agent routes
         .nest(
             "/agents",

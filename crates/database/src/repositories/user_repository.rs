@@ -555,6 +555,51 @@ impl UserRepository for PostgresUserRepository {
         Ok(())
     }
 
+    async fn retry_failed_account_deletion(
+        &self,
+        deletion_id: Uuid,
+    ) -> anyhow::Result<Option<AccountDeletion>> {
+        let client = self.pool.get().await?;
+        let row = client
+            .query_opt(
+                "UPDATE user_account_deletions
+                 SET status = 'retrying',
+                     attempt_count = 0,
+                     lease_until = NULL,
+                     last_error = NULL,
+                     updated_at = NOW()
+                 WHERE id = $1
+                   AND status = 'failed_needs_review'
+                 RETURNING id, user_id, status, requested_at, started_at, completed_at,
+                           attempt_count, lease_until, last_error, progress, created_at, updated_at",
+                &[&deletion_id],
+            )
+            .await?;
+
+        row.map(Self::account_deletion_from_row).transpose()
+    }
+
+    async fn restore_account_deletion_failed_needs_review(
+        &self,
+        deletion_id: Uuid,
+        last_error: String,
+    ) -> anyhow::Result<()> {
+        let client = self.pool.get().await?;
+        client
+            .execute(
+                "UPDATE user_account_deletions
+                 SET status = 'failed_needs_review',
+                     lease_until = NULL,
+                     last_error = $2,
+                     updated_at = NOW()
+                 WHERE id = $1
+                   AND status = 'retrying'",
+                &[&deletion_id, &last_error],
+            )
+            .await?;
+        Ok(())
+    }
+
     async fn get_account_deletion_by_user_id(
         &self,
         user_id: UserId,

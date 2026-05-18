@@ -64,6 +64,7 @@ pub struct UserProfile {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum AccountDeletionStatus {
     Pending,
@@ -103,6 +104,7 @@ impl std::fmt::Display for AccountDeletionStatus {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct AccountDeletion {
     pub id: Uuid,
     pub user_id: UserId,
@@ -184,6 +186,19 @@ pub trait UserRepository: Send + Sync {
 
     /// Delete an account deletion request (used for rollback when task enqueue fails).
     async fn delete_account_deletion_request(&self, deletion_id: Uuid) -> anyhow::Result<()>;
+
+    /// Reset a failed account deletion request so an admin can enqueue another attempt.
+    async fn retry_failed_account_deletion(
+        &self,
+        deletion_id: Uuid,
+    ) -> anyhow::Result<Option<AccountDeletion>>;
+
+    /// Move a retry reset back to failed_needs_review if task enqueue fails.
+    async fn restore_account_deletion_failed_needs_review(
+        &self,
+        deletion_id: Uuid,
+        last_error: String,
+    ) -> anyhow::Result<()>;
 
     async fn get_account_deletion_by_user_id(
         &self,
@@ -308,6 +323,24 @@ pub trait UserService: Send + Sync {
 
     /// Delete an account deletion request (rollback when task enqueue fails).
     async fn delete_account_deletion_request(&self, deletion_id: Uuid) -> anyhow::Result<()>;
+
+    /// Reset a failed account deletion request so an admin can enqueue another attempt.
+    async fn retry_failed_account_deletion(
+        &self,
+        deletion_id: Uuid,
+    ) -> anyhow::Result<Option<AccountDeletion>>;
+
+    /// Move a retry reset back to failed_needs_review if task enqueue fails.
+    async fn restore_account_deletion_failed_needs_review(
+        &self,
+        deletion_id: Uuid,
+        last_error: String,
+    ) -> anyhow::Result<()>;
+
+    async fn get_account_deletion(
+        &self,
+        deletion_id: Uuid,
+    ) -> anyhow::Result<Option<AccountDeletion>>;
 
     async fn is_account_deletion_requested(&self, user_id: UserId) -> anyhow::Result<bool>;
 

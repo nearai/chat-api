@@ -133,6 +133,32 @@ impl UserService for UserServiceImpl {
             .await
     }
 
+    async fn retry_failed_account_deletion(
+        &self,
+        deletion_id: Uuid,
+    ) -> anyhow::Result<Option<AccountDeletion>> {
+        self.user_repository
+            .retry_failed_account_deletion(deletion_id)
+            .await
+    }
+
+    async fn restore_account_deletion_failed_needs_review(
+        &self,
+        deletion_id: Uuid,
+        last_error: String,
+    ) -> anyhow::Result<()> {
+        self.user_repository
+            .restore_account_deletion_failed_needs_review(deletion_id, last_error)
+            .await
+    }
+
+    async fn get_account_deletion(
+        &self,
+        deletion_id: Uuid,
+    ) -> anyhow::Result<Option<AccountDeletion>> {
+        self.user_repository.get_account_deletion(deletion_id).await
+    }
+
     async fn is_account_deletion_requested(&self, user_id: UserId) -> anyhow::Result<bool> {
         Ok(self
             .user_repository
