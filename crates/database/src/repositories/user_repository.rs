@@ -233,7 +233,9 @@ impl UserRepository for PostgresUserRepository {
     /// data, billing rows (stripe_customers, user_credits, subscriptions*),
     /// sharing groups, agent api keys, activity log, bans, passkey credentials,
     /// email verification challenges, and the users row itself.
-    /// Agent instances are soft-deleted (status = 'deleted', credentials wiped).
+    /// Agent instance provider deletion is handled by the account-deletion worker
+    /// before this DB finalization step; this function then soft-deletes any
+    /// remaining non-deleted instance rows and wipes stored credentials.
     ///
     /// Intentionally retained for audit / billing reconciliation:
     /// - agent_usage_log, user_usage_event, credit_transactions – their user_id
