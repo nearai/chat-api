@@ -4854,8 +4854,8 @@ async fn fetch_conversation_from_proxy(
         .await
         .map_err(|e| bad_gateway(format!("Failed to read response: {e}")))?;
 
-    let decompressed_body =
-        decompress_if_encoded(&body_bytes, &proxy_response.headers).unwrap_or_else(|e| {
+    let decompressed_body = decompress_if_encoded(&body_bytes, &proxy_response.headers)
+        .unwrap_or_else(|e| {
             tracing::warn!(
                 "Failed to decompress conversation response body for conversation_id={}: {}",
                 conversation_id,
