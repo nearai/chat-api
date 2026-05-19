@@ -1,4 +1,7 @@
-use crate::consts::{LIST_FILES_LIMIT_MAX, MAX_REQUEST_BODY_SIZE, MAX_RESPONSE_BODY_SIZE};
+use crate::consts::{
+    LIST_FILES_LIMIT_MAX, MAX_DECOMPRESSED_RESPONSE_BODY_SIZE, MAX_REQUEST_BODY_SIZE,
+    MAX_RESPONSE_BODY_SIZE,
+};
 use crate::middleware::auth::{AuthenticatedApiKey, AuthenticatedUser};
 use crate::usage_parsing::{
     parse_chat_completion_usage_from_bytes, parse_response_usage_from_bytes,
@@ -14,7 +17,7 @@ use axum::{
 };
 use bytes::Bytes;
 use chrono::{Duration, Utc};
-use flate2::read::{GzDecoder, ZlibDecoder};
+use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
 use futures::stream;
 use http::{header::CONTENT_LENGTH, HeaderValue};
 use multer::Multipart;
@@ -2525,14 +2528,14 @@ async fn proxy_responses(
             }
         };
         // For non-streaming responses, decompress encoded payload before parsing usage.
-        let usage_bytes =
-            decompress_if_encoded(&bytes, &proxy_response.headers).unwrap_or_else(|e| {
+        let usage_bytes = decompress_if_encoded(bytes.clone(), &proxy_response.headers)
+            .unwrap_or_else(|e| {
                 tracing::error!(
                     "Failed to decompress non-stream response for user_id={}: {}",
                     user.user_id,
                     e
                 );
-                bytes.to_vec()
+                bytes.clone()
             });
         // Fire-and-forget: record usage in background to avoid blocking on pricing fetch + DB write
         let state_clone = state.clone();
@@ -2870,14 +2873,14 @@ async fn proxy_model_list(
                 .into_response()
         })?;
 
-    let decompressed_body = decompress_if_encoded(&body_bytes, &proxy_response.headers)
+    let decompressed_body = decompress_if_encoded(body_bytes.clone(), &proxy_response.headers)
         .unwrap_or_else(|e| {
             tracing::warn!(
                 "Failed to decompress model list response body for user_id={}: {}",
                 user.user_id,
                 e
             );
-            body_bytes.to_vec()
+            body_bytes.clone()
         });
 
     // Try to parse JSON
@@ -3142,14 +3145,14 @@ async fn proxy_mcp(
     })?;
 
     if is_web_search_call && (200..300).contains(&status) {
-        let decompressed_body = decompress_if_encoded(&response_body, &response_headers)
+        let decompressed_body = decompress_if_encoded(response_body.clone(), &response_headers)
             .unwrap_or_else(|e| {
                 tracing::warn!(
                     "Failed to decompress MCP response for user_id={}: {}",
                     user.user_id,
                     e
                 );
-                response_body.to_vec()
+                response_body.clone()
             });
         let response_json = serde_json::from_slice::<serde_json::Value>(&decompressed_body).ok();
 
@@ -3909,15 +3912,15 @@ async fn proxy_chat_completions(
                     .into_response());
             }
         };
-        let usage_bytes =
-            decompress_if_encoded(&bytes, &proxy_response.headers).unwrap_or_else(|e| {
+        let usage_bytes = decompress_if_encoded(bytes.clone(), &proxy_response.headers)
+            .unwrap_or_else(|e| {
                 tracing::error!(
                     "Failed to decompress non-stream response for user_id={} on {}: {}",
                     user.user_id,
                     ENDPOINT_FULL_PATH,
                     e
                 );
-                bytes.to_vec()
+                bytes.clone()
             });
         // Return the original upstream bytes so they remain consistent with any forwarded content-encoding headers.
         let state_clone = state.clone();
@@ -4507,14 +4510,14 @@ async fn handle_trackable_response(
 
     // If successful, parse response and track resource (don't fail request if tracking fails)
 
-    let decompressed_bytes =
-        decompress_if_encoded(&body_bytes, &response_headers).unwrap_or_else(|e| {
+    let decompressed_bytes = decompress_if_encoded(body_bytes.clone(), &response_headers)
+        .unwrap_or_else(|e| {
             tracing::error!(
                 "Failed to decompress response for user_id={}: {}",
                 user.user_id,
                 e
             );
-            body_bytes.to_vec()
+            body_bytes.clone()
         });
 
     let Ok(response_json) = serde_json::from_slice::<serde_json::Value>(&decompressed_bytes) else {
@@ -4854,14 +4857,14 @@ async fn fetch_conversation_from_proxy(
         .await
         .map_err(|e| bad_gateway(format!("Failed to read response: {e}")))?;
 
-    let decompressed_body = decompress_if_encoded(&body_bytes, &proxy_response.headers)
+    let decompressed_body = decompress_if_encoded(body_bytes.clone(), &proxy_response.headers)
         .unwrap_or_else(|e| {
             tracing::warn!(
                 "Failed to decompress conversation response body for conversation_id={}: {}",
                 conversation_id,
                 e
             );
-            body_bytes.to_vec()
+            body_bytes.clone()
         });
 
     let conversation: serde_json::Value = serde_json::from_slice(&decompressed_body)
@@ -4916,12 +4919,28 @@ async fn extract_body_bytes(request: Request) -> Result<Bytes, Response> {
 }
 
 /// Decompress response bytes according to Content-Encoding when supported.
-fn decompress_if_encoded(bytes: &[u8], headers: &HeaderMap) -> Result<Vec<u8>, std::io::Error> {
+fn decompress_if_encoded(bytes: Bytes, headers: &HeaderMap) -> Result<Bytes, std::io::Error> {
+    fn read_to_vec_limited<R: Read>(
+        reader: R,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, std::io::Error> {
+        let mut limited_reader = reader.take((max_bytes as u64).saturating_add(1));
+        let mut out = Vec::new();
+        limited_reader.read_to_end(&mut out)?;
+        if out.len() > max_bytes {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Decompressed payload exceeds {} bytes", max_bytes),
+            ));
+        }
+        Ok(out)
+    }
+
     let Some(encoding) = headers.get("content-encoding") else {
-        return Ok(bytes.to_vec());
+        return Ok(bytes);
     };
     let Ok(encoding_str) = encoding.to_str() else {
-        return Ok(bytes.to_vec());
+        return Ok(bytes);
     };
 
     let encodings: Vec<String> = encoding_str
@@ -4931,7 +4950,7 @@ fn decompress_if_encoded(bytes: &[u8], headers: &HeaderMap) -> Result<Vec<u8>, s
         .collect();
 
     if encodings.is_empty() {
-        return Ok(bytes.to_vec());
+        return Ok(bytes);
     }
 
     tracing::debug!(
@@ -4939,45 +4958,53 @@ fn decompress_if_encoded(bytes: &[u8], headers: &HeaderMap) -> Result<Vec<u8>, s
         encoding_str
     );
 
+    let original = bytes.clone();
     let mut decoded = bytes.to_vec();
     for enc in encodings.into_iter().rev() {
         decoded = match enc.as_str() {
             "gzip" | "x-gzip" => {
-                let mut decoder = GzDecoder::new(decoded.as_slice());
-                let mut decompressed = Vec::new();
-                decoder.read_to_end(&mut decompressed)?;
-                decompressed
+                let decoder = GzDecoder::new(decoded.as_slice());
+                read_to_vec_limited(decoder, MAX_DECOMPRESSED_RESPONSE_BODY_SIZE)?
             }
             "deflate" => {
-                let mut decoder = ZlibDecoder::new(decoded.as_slice());
-                let mut decompressed = Vec::new();
-                decoder.read_to_end(&mut decompressed)?;
-                decompressed
+                let zlib_decoder = ZlibDecoder::new(decoded.as_slice());
+                match read_to_vec_limited(zlib_decoder, MAX_DECOMPRESSED_RESPONSE_BODY_SIZE) {
+                    Ok(decompressed) => decompressed,
+                    Err(zlib_err) => {
+                        tracing::debug!(
+                            "Zlib-wrapped deflate decode failed ({}), trying raw DEFLATE fallback",
+                            zlib_err
+                        );
+                        let raw_decoder = DeflateDecoder::new(decoded.as_slice());
+                        read_to_vec_limited(raw_decoder, MAX_DECOMPRESSED_RESPONSE_BODY_SIZE)?
+                    }
+                }
             }
             "br" => {
-                let mut decoder = brotli::Decompressor::new(decoded.as_slice(), 4096);
-                let mut decompressed = Vec::new();
-                decoder.read_to_end(&mut decompressed)?;
-                decompressed
+                let decoder = brotli::Decompressor::new(decoded.as_slice(), 4096);
+                read_to_vec_limited(decoder, MAX_DECOMPRESSED_RESPONSE_BODY_SIZE)?
             }
-            "zstd" => zstd::stream::decode_all(decoded.as_slice())
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?,
+            "zstd" => {
+                let decoder = zstd::stream::read::Decoder::new(decoded.as_slice())
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+                read_to_vec_limited(decoder, MAX_DECOMPRESSED_RESPONSE_BODY_SIZE)?
+            }
             unsupported => {
                 tracing::debug!(
                     "Unsupported content-encoding '{}' for response decompression",
                     unsupported
                 );
-                return Ok(bytes.to_vec());
+                return Ok(original);
             }
         };
     }
 
     tracing::debug!(
         "Decompressed {} bytes to {} bytes",
-        bytes.len(),
+        original.len(),
         decoded.len()
     );
-    Ok(decoded)
+    Ok(Bytes::from(decoded))
 }
 
 /// Returns true if response headers indicate a streaming (SSE) response.
@@ -5266,4 +5293,138 @@ async fn collect_stream_to_bytes(
     }
 
     Ok(Bytes::from(collected))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decompress_if_encoded;
+    use bytes::Bytes;
+    use flate2::{write::DeflateEncoder, write::GzEncoder, write::ZlibEncoder, Compression};
+    use http::{HeaderMap, HeaderValue};
+    use std::io::Write;
+
+    fn headers(content_encoding: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "content-encoding",
+            HeaderValue::from_str(content_encoding).unwrap(),
+        );
+        headers
+    }
+
+    fn gzip_encode(input: &[u8]) -> Vec<u8> {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(input).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    fn zlib_encode(input: &[u8]) -> Vec<u8> {
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(input).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    fn raw_deflate_encode(input: &[u8]) -> Vec<u8> {
+        let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(input).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    fn brotli_encode(input: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut compressor = brotli::CompressorWriter::new(&mut out, 4096, 5, 22);
+            compressor.write_all(input).unwrap();
+        }
+        out
+    }
+
+    fn zstd_encode(input: &[u8]) -> Vec<u8> {
+        zstd::stream::encode_all(input, 1).unwrap()
+    }
+
+    #[test]
+    fn keeps_unencoded_bytes_without_copy() {
+        let bytes = Bytes::from_static(b"{\"ok\":true}");
+        let ptr = bytes.as_ptr();
+        let out = decompress_if_encoded(bytes, &HeaderMap::new()).unwrap();
+        assert_eq!(out.as_ref(), b"{\"ok\":true}");
+        assert_eq!(out.as_ptr(), ptr);
+    }
+
+    #[test]
+    fn decodes_gzip() {
+        let payload = br#"{"a":1}"#;
+        let encoded = gzip_encode(payload);
+        let out = decompress_if_encoded(Bytes::from(encoded), &headers("gzip")).unwrap();
+        assert_eq!(out.as_ref(), payload);
+    }
+
+    #[test]
+    fn decodes_brotli() {
+        let payload = br#"{"b":"brotli"}"#;
+        let encoded = brotli_encode(payload);
+        let out = decompress_if_encoded(Bytes::from(encoded), &headers("br")).unwrap();
+        assert_eq!(out.as_ref(), payload);
+    }
+
+    #[test]
+    fn decodes_zstd() {
+        let payload = br#"{"z":"std"}"#;
+        let encoded = zstd_encode(payload);
+        let out = decompress_if_encoded(Bytes::from(encoded), &headers("zstd")).unwrap();
+        assert_eq!(out.as_ref(), payload);
+    }
+
+    #[test]
+    fn decodes_deflate_with_zlib_wrapper() {
+        let payload = br#"{"wrapped":true}"#;
+        let encoded = zlib_encode(payload);
+        let out = decompress_if_encoded(Bytes::from(encoded), &headers("deflate")).unwrap();
+        assert_eq!(out.as_ref(), payload);
+    }
+
+    #[test]
+    fn decodes_deflate_raw_fallback() {
+        let payload = br#"{"raw":true}"#;
+        let encoded = raw_deflate_encode(payload);
+        let out = decompress_if_encoded(Bytes::from(encoded), &headers("deflate")).unwrap();
+        assert_eq!(out.as_ref(), payload);
+    }
+
+    #[test]
+    fn decodes_multiple_encodings_in_reverse_order() {
+        let payload = br#"{"stack":"ok"}"#;
+        let gzip_then_br = brotli_encode(&gzip_encode(payload));
+        let out = decompress_if_encoded(Bytes::from(gzip_then_br), &headers("gzip, br")).unwrap();
+        assert_eq!(out.as_ref(), payload);
+    }
+
+    #[test]
+    fn skips_identity_encoding_without_copy() {
+        let bytes = Bytes::from_static(b"{\"identity\":true}");
+        let ptr = bytes.as_ptr();
+        let out = decompress_if_encoded(bytes, &headers("identity")).unwrap();
+        assert_eq!(out.as_ref(), b"{\"identity\":true}");
+        assert_eq!(out.as_ptr(), ptr);
+    }
+
+    #[test]
+    fn unsupported_encoding_returns_original() {
+        let bytes = Bytes::from_static(b"{\"unknown\":true}");
+        let out = decompress_if_encoded(bytes, &headers("snappy")).unwrap();
+        assert_eq!(out.as_ref(), b"{\"unknown\":true}");
+    }
+
+    #[test]
+    fn malformed_encoding_header_returns_original() {
+        let bytes = Bytes::from_static(b"{\"ok\":1}");
+        let mut hdrs = HeaderMap::new();
+        hdrs.insert(
+            "content-encoding",
+            HeaderValue::from_bytes(&[0x80, 0x81]).unwrap(),
+        );
+        let out = decompress_if_encoded(bytes, &hdrs).unwrap();
+        assert_eq!(out.as_ref(), b"{\"ok\":1}");
+    }
 }
