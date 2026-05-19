@@ -2870,8 +2870,18 @@ async fn proxy_model_list(
                 .into_response()
         })?;
 
+    let decompressed_body = decompress_if_gzipped(&body_bytes, &proxy_response.headers)
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                "Failed to decompress model list response body for user_id={}: {}",
+                user.user_id,
+                e
+            );
+            body_bytes.to_vec()
+        });
+
     // Try to parse JSON
-    let mut body_json: serde_json::Value = match serde_json::from_slice(&body_bytes) {
+    let mut body_json: serde_json::Value = match serde_json::from_slice(&decompressed_body) {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(
