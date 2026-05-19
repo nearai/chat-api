@@ -14,7 +14,7 @@ use axum::{
 };
 use bytes::Bytes;
 use chrono::{Duration, Utc};
-use flate2::read::GzDecoder;
+use flate2::read::{GzDecoder, ZlibDecoder};
 use futures::stream;
 use http::{header::CONTENT_LENGTH, HeaderValue};
 use multer::Multipart;
@@ -2524,9 +2524,9 @@ async fn proxy_responses(
                     .into_response());
             }
         };
-        // For non-streaming responses, decompress (if gzipped) before parsing usage.
+        // For non-streaming responses, decompress encoded payload before parsing usage.
         let usage_bytes =
-            decompress_if_gzipped(&bytes, &proxy_response.headers).unwrap_or_else(|e| {
+            decompress_if_encoded(&bytes, &proxy_response.headers).unwrap_or_else(|e| {
                 tracing::error!(
                     "Failed to decompress non-stream response for user_id={}: {}",
                     user.user_id,
@@ -2870,7 +2870,7 @@ async fn proxy_model_list(
                 .into_response()
         })?;
 
-    let decompressed_body = decompress_if_gzipped(&body_bytes, &proxy_response.headers)
+    let decompressed_body = decompress_if_encoded(&body_bytes, &proxy_response.headers)
         .unwrap_or_else(|e| {
             tracing::warn!(
                 "Failed to decompress model list response body for user_id={}: {}",
@@ -3142,7 +3142,7 @@ async fn proxy_mcp(
     })?;
 
     if is_web_search_call && (200..300).contains(&status) {
-        let decompressed_body = decompress_if_gzipped(&response_body, &response_headers)
+        let decompressed_body = decompress_if_encoded(&response_body, &response_headers)
             .unwrap_or_else(|e| {
                 tracing::warn!(
                     "Failed to decompress MCP response for user_id={}: {}",
@@ -3910,7 +3910,7 @@ async fn proxy_chat_completions(
             }
         };
         let usage_bytes =
-            decompress_if_gzipped(&bytes, &proxy_response.headers).unwrap_or_else(|e| {
+            decompress_if_encoded(&bytes, &proxy_response.headers).unwrap_or_else(|e| {
                 tracing::error!(
                     "Failed to decompress non-stream response for user_id={} on {}: {}",
                     user.user_id,
@@ -4508,7 +4508,7 @@ async fn handle_trackable_response(
     // If successful, parse response and track resource (don't fail request if tracking fails)
 
     let decompressed_bytes =
-        decompress_if_gzipped(&body_bytes, &response_headers).unwrap_or_else(|e| {
+        decompress_if_encoded(&body_bytes, &response_headers).unwrap_or_else(|e| {
             tracing::error!(
                 "Failed to decompress response for user_id={}: {}",
                 user.user_id,
@@ -4854,7 +4854,17 @@ async fn fetch_conversation_from_proxy(
         .await
         .map_err(|e| bad_gateway(format!("Failed to read response: {e}")))?;
 
-    let conversation: serde_json::Value = serde_json::from_slice(&body_bytes)
+    let decompressed_body =
+        decompress_if_encoded(&body_bytes, &proxy_response.headers).unwrap_or_else(|e| {
+            tracing::warn!(
+                "Failed to decompress conversation response body for conversation_id={}: {}",
+                conversation_id,
+                e
+            );
+            body_bytes.to_vec()
+        });
+
+    let conversation: serde_json::Value = serde_json::from_slice(&decompressed_body)
         .map_err(|e| bad_gateway(format!("Failed to parse JSON: {e}")))?;
 
     Ok(conversation)
@@ -4905,28 +4915,69 @@ async fn extract_body_bytes(request: Request) -> Result<Bytes, Response> {
     Ok(result)
 }
 
-/// Decompress gzip-encoded bytes if needed
-fn decompress_if_gzipped(bytes: &[u8], headers: &HeaderMap) -> Result<Vec<u8>, std::io::Error> {
-    // Check if content-encoding is gzip
-    if let Some(encoding) = headers.get("content-encoding") {
-        if let Ok(encoding_str) = encoding.to_str() {
-            if encoding_str.contains("gzip") {
-                tracing::debug!("Response is gzip-encoded, decompressing...");
-                let mut decoder = GzDecoder::new(bytes);
-                let mut decompressed = Vec::new();
-                decoder.read_to_end(&mut decompressed)?;
-                tracing::debug!(
-                    "Decompressed {} bytes to {} bytes",
-                    bytes.len(),
-                    decompressed.len()
-                );
-                return Ok(decompressed);
-            }
-        }
+/// Decompress response bytes according to Content-Encoding when supported.
+fn decompress_if_encoded(bytes: &[u8], headers: &HeaderMap) -> Result<Vec<u8>, std::io::Error> {
+    let Some(encoding) = headers.get("content-encoding") else {
+        return Ok(bytes.to_vec());
+    };
+    let Ok(encoding_str) = encoding.to_str() else {
+        return Ok(bytes.to_vec());
+    };
+
+    let encodings: Vec<String> = encoding_str
+        .split(',')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty() && s != "identity")
+        .collect();
+
+    if encodings.is_empty() {
+        return Ok(bytes.to_vec());
     }
 
-    // Not gzipped, return as-is
-    Ok(bytes.to_vec())
+    tracing::debug!(
+        "Response is '{}' encoded, decompressing for JSON parsing",
+        encoding_str
+    );
+
+    let mut decoded = bytes.to_vec();
+    for enc in encodings.into_iter().rev() {
+        decoded = match enc.as_str() {
+            "gzip" | "x-gzip" => {
+                let mut decoder = GzDecoder::new(decoded.as_slice());
+                let mut decompressed = Vec::new();
+                decoder.read_to_end(&mut decompressed)?;
+                decompressed
+            }
+            "deflate" => {
+                let mut decoder = ZlibDecoder::new(decoded.as_slice());
+                let mut decompressed = Vec::new();
+                decoder.read_to_end(&mut decompressed)?;
+                decompressed
+            }
+            "br" => {
+                let mut decoder = brotli::Decompressor::new(decoded.as_slice(), 4096);
+                let mut decompressed = Vec::new();
+                decoder.read_to_end(&mut decompressed)?;
+                decompressed
+            }
+            "zstd" => zstd::stream::decode_all(decoded.as_slice())
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?,
+            unsupported => {
+                tracing::debug!(
+                    "Unsupported content-encoding '{}' for response decompression",
+                    unsupported
+                );
+                return Ok(bytes.to_vec());
+            }
+        };
+    }
+
+    tracing::debug!(
+        "Decompressed {} bytes to {} bytes",
+        bytes.len(),
+        decoded.len()
+    );
+    Ok(decoded)
 }
 
 /// Returns true if response headers indicate a streaming (SSE) response.
