@@ -89,27 +89,20 @@ impl CreditsRepository for PostgresCreditsRepository {
         amount: i64,
         reference_id: &str,
     ) -> anyhow::Result<bool> {
-        let result = txn
-            .execute(
+        let row = txn
+            .query_opt(
                 r#"
                 INSERT INTO credit_transactions (user_id, amount, type, reference_id)
                 VALUES ($1, $2, 'purchase', $3)
+                ON CONFLICT (reference_id) WHERE type = 'purchase' AND reference_id IS NOT NULL
+                DO NOTHING
+                RETURNING id
                 "#,
                 &[&user_id, &amount, &reference_id],
             )
-            .await;
+            .await?;
 
-        match result {
-            Ok(n) => Ok(n == 1),
-            Err(e) => {
-                if let Some(db_err) = e.code() {
-                    if *db_err == tokio_postgres::error::SqlState::UNIQUE_VIOLATION {
-                        return Ok(false);
-                    }
-                }
-                Err(e.into())
-            }
-        }
+        Ok(row.is_some())
     }
 
     async fn record_grant(
@@ -139,38 +132,35 @@ impl CreditsRepository for PostgresCreditsRepository {
         reference_id: &str,
         metadata: serde_json::Value,
     ) -> anyhow::Result<(Uuid, bool)> {
-        let result = txn
-            .query_one(
+        let inserted = txn
+            .query_opt(
                 r#"
                 INSERT INTO credit_transactions (user_id, amount, type, reference_id, source, metadata)
                 VALUES ($1, $2, 'grant', $3, $4, $5)
+                ON CONFLICT (source, reference_id)
+                WHERE source IS NOT NULL AND reference_id IS NOT NULL
+                DO NOTHING
                 RETURNING id
                 "#,
                 &[&user_id, &amount, &reference_id, &source, &metadata],
             )
-            .await;
+            .await?;
 
-        match result {
-            Ok(row) => Ok((row.get("id"), true)),
-            Err(e) => {
-                if let Some(db_err) = e.code() {
-                    if *db_err == tokio_postgres::error::SqlState::UNIQUE_VIOLATION {
-                        let row = txn
-                            .query_one(
-                                r#"
-                                SELECT id
-                                FROM credit_transactions
-                                WHERE source = $1 AND reference_id = $2
-                                "#,
-                                &[&source, &reference_id],
-                            )
-                            .await?;
-                        return Ok((row.get("id"), false));
-                    }
-                }
-                Err(e.into())
-            }
+        if let Some(row) = inserted {
+            return Ok((row.get("id"), true));
         }
+
+        let row = txn
+            .query_one(
+                r#"
+                SELECT id
+                FROM credit_transactions
+                WHERE source = $1 AND reference_id = $2
+                "#,
+                &[&source, &reference_id],
+            )
+            .await?;
+        Ok((row.get("id"), false))
     }
 
     async fn list_transactions(
