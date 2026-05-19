@@ -4943,9 +4943,10 @@ fn decompress_if_encoded(bytes: Bytes, headers: &HeaderMap) -> Result<Bytes, std
         return Ok(bytes);
     };
 
-    let encodings: Vec<String> = encoding_str
+    let encoding_str_lower = encoding_str.to_ascii_lowercase();
+    let encodings: Vec<String> = encoding_str_lower
         .split(',')
-        .map(|s| s.trim().to_ascii_lowercase())
+        .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty() && s != "identity")
         .collect();
 
@@ -4958,42 +4959,57 @@ fn decompress_if_encoded(bytes: Bytes, headers: &HeaderMap) -> Result<Bytes, std
         encoding_str
     );
 
-    let original = bytes.clone();
-    let mut decoded = bytes.to_vec();
+    let original = bytes;
+    let mut decoded = original.clone();
     for enc in encodings.into_iter().rev() {
+        let current = decoded.as_ref();
         decoded = match enc.as_str() {
             "gzip" | "x-gzip" => {
-                let decoder = GzDecoder::new(decoded.as_slice());
-                read_to_vec_limited(decoder, MAX_DECOMPRESSED_RESPONSE_BODY_SIZE)?
+                let decoder = GzDecoder::new(current);
+                Bytes::from(read_to_vec_limited(
+                    decoder,
+                    MAX_DECOMPRESSED_RESPONSE_BODY_SIZE,
+                )?)
             }
             "deflate" => {
-                let zlib_decoder = ZlibDecoder::new(decoded.as_slice());
+                let zlib_decoder = ZlibDecoder::new(current);
                 match read_to_vec_limited(zlib_decoder, MAX_DECOMPRESSED_RESPONSE_BODY_SIZE) {
-                    Ok(decompressed) => decompressed,
+                    Ok(decompressed) => Bytes::from(decompressed),
                     Err(zlib_err) => {
                         tracing::debug!(
                             "Zlib-wrapped deflate decode failed ({}), trying raw DEFLATE fallback",
                             zlib_err
                         );
-                        let raw_decoder = DeflateDecoder::new(decoded.as_slice());
-                        read_to_vec_limited(raw_decoder, MAX_DECOMPRESSED_RESPONSE_BODY_SIZE)?
+                        let raw_decoder = DeflateDecoder::new(current);
+                        Bytes::from(read_to_vec_limited(
+                            raw_decoder,
+                            MAX_DECOMPRESSED_RESPONSE_BODY_SIZE,
+                        )?)
                     }
                 }
             }
             "br" => {
-                let decoder = brotli::Decompressor::new(decoded.as_slice(), 4096);
-                read_to_vec_limited(decoder, MAX_DECOMPRESSED_RESPONSE_BODY_SIZE)?
+                let decoder = brotli::Decompressor::new(current, 4096);
+                Bytes::from(read_to_vec_limited(
+                    decoder,
+                    MAX_DECOMPRESSED_RESPONSE_BODY_SIZE,
+                )?)
             }
             "zstd" => {
-                let decoder = zstd::stream::read::Decoder::new(decoded.as_slice())
+                let decoder = zstd::stream::read::Decoder::new(current)
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-                read_to_vec_limited(decoder, MAX_DECOMPRESSED_RESPONSE_BODY_SIZE)?
+                Bytes::from(read_to_vec_limited(
+                    decoder,
+                    MAX_DECOMPRESSED_RESPONSE_BODY_SIZE,
+                )?)
             }
             unsupported => {
                 tracing::debug!(
                     "Unsupported content-encoding '{}' for response decompression",
                     unsupported
                 );
+                // Keep passthrough behavior: if any encoding in the chain is unsupported,
+                // return original bytes and let the caller forward without modification.
                 return Ok(original);
             }
         };
@@ -5004,7 +5020,7 @@ fn decompress_if_encoded(bytes: Bytes, headers: &HeaderMap) -> Result<Bytes, std
         original.len(),
         decoded.len()
     );
-    Ok(Bytes::from(decoded))
+    Ok(decoded)
 }
 
 /// Returns true if response headers indicate a streaming (SSE) response.
@@ -5387,6 +5403,7 @@ mod tests {
     #[test]
     fn decodes_deflate_raw_fallback() {
         let payload = br#"{"raw":true}"#;
+        assert_ne!(raw_deflate_encode(payload), zlib_encode(payload));
         let encoded = raw_deflate_encode(payload);
         let out = decompress_if_encoded(Bytes::from(encoded), &headers("deflate")).unwrap();
         assert_eq!(out.as_ref(), payload);
