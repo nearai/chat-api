@@ -1787,6 +1787,78 @@ async fn test_proxy_blocks_when_monthly_token_limit_exceeded() {
 
 #[tokio::test]
 #[serial(subscription_tests)]
+async fn test_proxy_blocks_for_house_of_stake_plan_credit_limit() {
+    ensure_stripe_env_for_gating();
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        rate_limit_config: Some(permissive_rate_limit_config()),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": {"house-of-stake": {"price_id": "price_hos_basic"}},
+                "agent_instances": {"max": 1},
+                "monthly_credits": {"max": 100}
+            }
+        }),
+    )
+    .await;
+
+    let user_email = "test_proxy_hos_credit_limit@example.com";
+    let user_token = mock_login(&server, user_email).await;
+    insert_test_subscription_with_provider_and_price(
+        &server,
+        &db,
+        user_email,
+        "house-of-stake",
+        "price_hos_basic",
+        false,
+    )
+    .await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .expect("get user")
+        .expect("user exists");
+
+    db.user_usage_repository()
+        .record_usage_event(user.id, METRIC_KEY_LLM_TOKENS, 150, Some(150), None)
+        .await
+        .expect("record usage");
+
+    let response = server
+        .post("/v1/chat/completions")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .json(&json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}]
+        }))
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        402,
+        "Proxy should return 402 for HoS subscriptions when plan credit limit is exceeded"
+    );
+    let body_res: serde_json::Value = response.json();
+    let err_msg = body_res.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        err_msg.contains("Credit limit exceeded"),
+        "Error should mention credit limit, got: {}",
+        err_msg
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
 async fn test_proxy_blocks_exactly_at_plan_limit() {
     ensure_stripe_env_for_gating();
     let (server, db) = create_test_server_and_db(TestServerConfig {
@@ -4046,6 +4118,200 @@ async fn test_near_staking_sync_deletes_local_hos_when_chain_returns_null() {
     assert_eq!(
         cnt, 0,
         "HoS rows should be removed after chain reports null"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_near_staking_sync_marks_expired_cancel_at_period_end_row_canceled() {
+    clear_proxy_env_for_local_wiremock();
+    let past_ns = (Utc::now() - Duration::hours(1))
+        .timestamp_nanos_opt()
+        .expect("nanoseconds timestamp should be representable")
+        .to_string();
+    let chain_sub = json!({
+        "subscription_id": "sub_on_chain_hos_expired",
+        "price_id": "price_hos_basic",
+        "end_ns": past_ns,
+        "status": "Active",
+        "cancel_at_period_end": true
+    });
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(near_rpc_wiremock_hos_subscription_probe_only(chain_sub))
+        .mount(&mock)
+        .await;
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        near_rpc_url: Some(mock.uri().to_string()),
+        near_staking_contract_id: Some("staking.testnet".to_string()),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": { "providers": { "house-of-stake": { "price_id": "price_hos_basic" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } }
+        }),
+    )
+    .await;
+
+    let near_email = "hos_sync_expired_period_end.testnet@near";
+    let login = json!({
+        "email": near_email,
+        "name": "HoS Expired At Period End",
+        "oauth_provider": "near"
+    });
+    let response = server.post("/v1/auth/mock-login").json(&login).await;
+    let token = response.json::<serde_json::Value>()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let response = server
+        .post("/v1/subscriptions/near/sync")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 200, "{}", response.text());
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(near_email)
+        .await
+        .unwrap()
+        .unwrap();
+    let client = db.pool().get().await.unwrap();
+    let row = client
+        .query_one(
+            "SELECT status, cancel_at_period_end FROM subscriptions
+             WHERE user_id = $1 AND provider = 'house-of-stake'
+             ORDER BY created_at DESC LIMIT 1",
+            &[&user.id],
+        )
+        .await
+        .expect("load synced HoS row");
+    let status: String = row.get("status");
+    let cancel_at_period_end: bool = row.get("cancel_at_period_end");
+    assert!(
+        cancel_at_period_end,
+        "row should stay marked cancel_at_period_end"
+    );
+    assert_eq!(
+        status, "canceled",
+        "HoS row should be marked canceled when period already ended"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_near_staking_sync_clears_stale_pending_downgrade_fields() {
+    clear_proxy_env_for_local_wiremock();
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(near_rpc_wiremock_hos_subscription_probe_only(json!({
+            "subscription_id": "sub_chain_hos_pending_cleared",
+            "price_id": "price_hos_basic",
+            "end_ns": "2000000000000000000",
+            "status": "Active",
+            "cancel_at_period_end": false
+        })))
+        .mount(&mock)
+        .await;
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        near_rpc_url: Some(mock.uri().to_string()),
+        near_staking_contract_id: Some("staking.testnet".to_string()),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": { "providers": { "house-of-stake": { "price_id": "price_hos_basic" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } }
+        }),
+    )
+    .await;
+
+    let near_email = "hos_sync_pending_clear.testnet@near";
+    let login = json!({
+        "email": near_email,
+        "name": "HoS Pending Clear",
+        "oauth_provider": "near"
+    });
+    let response = server.post("/v1/auth/mock-login").json(&login).await;
+    let token = response.json::<serde_json::Value>()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    insert_test_subscription_with_provider_and_price(
+        &server,
+        &db,
+        near_email,
+        "house-of-stake",
+        "price_hos_basic",
+        false,
+    )
+    .await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(near_email)
+        .await
+        .unwrap()
+        .unwrap();
+    let client = db.pool().get().await.unwrap();
+    client
+        .execute(
+            "UPDATE subscriptions
+             SET subscription_id = 'sub_chain_hos_pending_cleared',
+                 pending_downgrade_target_price_id = 'price_hos_target',
+                 pending_downgrade_from_price_id = 'price_hos_basic',
+                 pending_downgrade_expected_period_end = current_period_end,
+                 pending_downgrade_status = 'pending',
+                 pending_downgrade_updated_at = NOW()
+             WHERE user_id = $1 AND provider = 'house-of-stake'",
+            &[&user.id],
+        )
+        .await
+        .expect("seed stale pending downgrade");
+
+    let response = server
+        .post("/v1/subscriptions/near/sync")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 200, "{}", response.text());
+
+    let row = client
+        .query_one(
+            "SELECT pending_downgrade_target_price_id, pending_downgrade_from_price_id,
+                    pending_downgrade_expected_period_end, pending_downgrade_status
+             FROM subscriptions
+             WHERE user_id = $1 AND provider = 'house-of-stake'
+             ORDER BY created_at DESC LIMIT 1",
+            &[&user.id],
+        )
+        .await
+        .expect("load synced HoS row");
+    let pd_target: Option<String> = row.get("pending_downgrade_target_price_id");
+    let pd_from: Option<String> = row.get("pending_downgrade_from_price_id");
+    let pd_end: Option<chrono::DateTime<Utc>> = row.get("pending_downgrade_expected_period_end");
+    let pd_status: Option<String> = row.get("pending_downgrade_status");
+    assert!(
+        pd_target.is_none() && pd_from.is_none() && pd_end.is_none() && pd_status.is_none(),
+        "HoS sync should clear pending downgrade fields when chain has none"
     );
 }
 

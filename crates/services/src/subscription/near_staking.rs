@@ -112,7 +112,7 @@ pub fn subscription_row_from_chain_json(
 
     let status_raw = v.get("status").and_then(|x| x.as_str()).unwrap_or("Active");
     let status_lower = status_raw.to_ascii_lowercase();
-    let status = match status_lower.as_str() {
+    let mut status = match status_lower.as_str() {
         "active" => "active".to_string(),
         "cancelled" | "canceled" | "expired" => "canceled".to_string(),
         _ => {
@@ -128,6 +128,9 @@ pub fn subscription_row_from_chain_json(
         .get("cancel_at_period_end")
         .and_then(|x| x.as_bool())
         .unwrap_or(false);
+    if cancel_at_period_end && current_period_end <= Utc::now() {
+        status = "canceled".to_string();
+    }
 
     let pending_down = v.get("pending_downgrade_price_id").and_then(|x| {
         if x.is_null() {
@@ -187,6 +190,7 @@ fn ts_ns_to_datetime(ns: u64) -> Result<DateTime<Utc>, String> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use uuid::Uuid;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -234,5 +238,28 @@ mod tests {
                 .await
                 .expect("rpc client");
         assert!(out.is_none());
+    }
+
+    #[test]
+    fn subscription_row_marks_cancel_at_period_end_row_canceled_after_period_end() {
+        let past_end_ns = (Utc::now() - chrono::Duration::hours(1))
+            .timestamp_nanos_opt()
+            .expect("timestamp nanos")
+            .to_string();
+        let row = subscription_row_from_chain_json(
+            UserId(Uuid::new_v4()),
+            "alice.testnet",
+            &json!({
+                "subscription_id": "sub_hos_expired",
+                "price_id": "price_hos_basic",
+                "end_ns": past_end_ns,
+                "status": "Active",
+                "cancel_at_period_end": true
+            }),
+        )
+        .expect("parse chain subscription");
+
+        assert_eq!(row.status, "canceled");
+        assert!(row.cancel_at_period_end);
     }
 }

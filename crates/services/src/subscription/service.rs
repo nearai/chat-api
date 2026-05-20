@@ -526,8 +526,11 @@ impl SubscriptionServiceImpl {
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
         {
             Some(ref sub) => {
-                let plan_name =
-                    resolve_plan_name_from_config("stripe", &sub.price_id, &subscription_plans);
+                let plan_name = resolve_plan_name_from_config(
+                    sub.provider.as_str(),
+                    &sub.price_id,
+                    &subscription_plans,
+                );
                 let plan_credits = plan_name
                     .as_ref()
                     .and_then(|n| subscription_plans.get(n))
@@ -1013,7 +1016,7 @@ impl SubscriptionServiceImpl {
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
         self.subscription_repo
-            .upsert_subscription(&txn, row)
+            .upsert_subscription_authoritative(&txn, row)
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
@@ -2544,7 +2547,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
                 {
                     Some(ref sub) => {
-                        let effective_sub = if Self::should_check_pending_downgrade(sub) {
+                        let effective_sub = if sub.provider == "stripe"
+                            && Self::should_check_pending_downgrade(sub)
+                        {
                             match self.try_apply_pending_downgrade(&sub.subscription_id).await {
                                 Ok(Some(updated)) => updated,
                                 Ok(None) => sub.clone(),
@@ -2561,7 +2566,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                             sub.clone()
                         };
                         let plan_name = resolve_plan_name_from_config(
-                            "stripe",
+                            effective_sub.provider.as_str(),
                             &effective_sub.price_id,
                             &subscription_plans,
                         );

@@ -42,19 +42,18 @@ impl PostgresSubscriptionRepository {
     pub fn new(pool: DbPool) -> Self {
         Self { pool }
     }
-}
 
-#[async_trait]
-impl SubscriptionRepository for PostgresSubscriptionRepository {
-    async fn upsert_subscription(
+    async fn upsert_subscription_inner(
         &self,
         txn: &tokio_postgres::Transaction<'_>,
         subscription: Subscription,
+        preserve_pending_when_null: bool,
     ) -> anyhow::Result<Subscription> {
         tracing::info!(
-            "Repository: Upserting subscription - subscription_id={}, user_id={}",
+            "Repository: Upserting subscription - subscription_id={}, user_id={}, preserve_pending_when_null={}",
             subscription.subscription_id,
-            subscription.user_id
+            subscription.user_id,
+            preserve_pending_when_null
         );
 
         let pending_downgrade_status = subscription
@@ -68,9 +67,45 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
                 None
             };
 
-        let row = txn
-            .query_one(
-                "INSERT INTO subscriptions (
+        let update_pending_sql = if preserve_pending_when_null {
+            "pending_downgrade_target_price_id = CASE
+                        WHEN EXCLUDED.pending_downgrade_status IS NULL
+                            THEN subscriptions.pending_downgrade_target_price_id
+                        ELSE EXCLUDED.pending_downgrade_target_price_id
+                    END,
+                    pending_downgrade_from_price_id = CASE
+                        WHEN EXCLUDED.pending_downgrade_status IS NULL
+                            THEN subscriptions.pending_downgrade_from_price_id
+                        ELSE EXCLUDED.pending_downgrade_from_price_id
+                    END,
+                    pending_downgrade_expected_period_end = CASE
+                        WHEN EXCLUDED.pending_downgrade_status IS NULL
+                            THEN subscriptions.pending_downgrade_expected_period_end
+                        ELSE EXCLUDED.pending_downgrade_expected_period_end
+                    END,
+                    pending_downgrade_status = COALESCE(
+                        EXCLUDED.pending_downgrade_status,
+                        subscriptions.pending_downgrade_status
+                    ),
+                    pending_downgrade_updated_at = CASE
+                        WHEN EXCLUDED.pending_downgrade_status IS NULL
+                            THEN subscriptions.pending_downgrade_updated_at
+                        ELSE NOW()
+                    END,"
+        } else {
+            "pending_downgrade_target_price_id = EXCLUDED.pending_downgrade_target_price_id,
+                    pending_downgrade_from_price_id = EXCLUDED.pending_downgrade_from_price_id,
+                    pending_downgrade_expected_period_end = EXCLUDED.pending_downgrade_expected_period_end,
+                    pending_downgrade_status = EXCLUDED.pending_downgrade_status,
+                    pending_downgrade_updated_at = CASE
+                        WHEN EXCLUDED.pending_downgrade_status IS NULL
+                            THEN NULL
+                        ELSE NOW()
+                    END,"
+        };
+
+        let query = format!(
+            "INSERT INTO subscriptions (
                     subscription_id, user_id, provider, customer_id, price_id,
                     status, current_period_end, cancel_at_period_end,
                     pending_downgrade_target_price_id, pending_downgrade_from_price_id,
@@ -80,43 +115,26 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
                  ON CONFLICT (subscription_id)
                  DO UPDATE SET
-                     user_id = EXCLUDED.user_id,
-                     provider = EXCLUDED.provider,
-                     customer_id = EXCLUDED.customer_id,
-                     price_id = EXCLUDED.price_id,
-                     status = EXCLUDED.status,
-                     current_period_end = EXCLUDED.current_period_end,
-                     cancel_at_period_end = EXCLUDED.cancel_at_period_end,
-                     pending_downgrade_target_price_id = CASE
-                         WHEN EXCLUDED.pending_downgrade_status IS NULL
-                             THEN subscriptions.pending_downgrade_target_price_id
-                         ELSE EXCLUDED.pending_downgrade_target_price_id
-                     END,
-                     pending_downgrade_from_price_id = CASE
-                         WHEN EXCLUDED.pending_downgrade_status IS NULL
-                             THEN subscriptions.pending_downgrade_from_price_id
-                         ELSE EXCLUDED.pending_downgrade_from_price_id
-                     END,
-                     pending_downgrade_expected_period_end = CASE
-                         WHEN EXCLUDED.pending_downgrade_status IS NULL
-                             THEN subscriptions.pending_downgrade_expected_period_end
-                         ELSE EXCLUDED.pending_downgrade_expected_period_end
-                     END,
-                     pending_downgrade_status = COALESCE(
-                         EXCLUDED.pending_downgrade_status,
-                         subscriptions.pending_downgrade_status
-                     ),
-                     pending_downgrade_updated_at = CASE
-                         WHEN EXCLUDED.pending_downgrade_status IS NULL
-                             THEN subscriptions.pending_downgrade_updated_at
-                         ELSE NOW()
-                     END,
-                     updated_at = NOW()
+                    user_id = EXCLUDED.user_id,
+                    provider = EXCLUDED.provider,
+                    customer_id = EXCLUDED.customer_id,
+                    price_id = EXCLUDED.price_id,
+                    status = EXCLUDED.status,
+                    current_period_end = EXCLUDED.current_period_end,
+                    cancel_at_period_end = EXCLUDED.cancel_at_period_end,
+                    {}
+                    updated_at = NOW()
                  RETURNING subscription_id, user_id, provider, customer_id, price_id, status,
                            current_period_end, cancel_at_period_end, created_at, updated_at,
                            pending_downgrade_target_price_id, pending_downgrade_from_price_id,
                            pending_downgrade_expected_period_end, pending_downgrade_status,
                            pending_downgrade_updated_at",
+            update_pending_sql
+        );
+
+        let row = txn
+            .query_one(
+                &query,
                 &[
                     &subscription.subscription_id,
                     &subscription.user_id,
@@ -148,6 +166,27 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
             })?;
 
         Ok(row_to_subscription(&row))
+    }
+}
+
+#[async_trait]
+impl SubscriptionRepository for PostgresSubscriptionRepository {
+    async fn upsert_subscription(
+        &self,
+        txn: &tokio_postgres::Transaction<'_>,
+        subscription: Subscription,
+    ) -> anyhow::Result<Subscription> {
+        self.upsert_subscription_inner(txn, subscription, true)
+            .await
+    }
+
+    async fn upsert_subscription_authoritative(
+        &self,
+        txn: &tokio_postgres::Transaction<'_>,
+        subscription: Subscription,
+    ) -> anyhow::Result<Subscription> {
+        self.upsert_subscription_inner(txn, subscription, false)
+            .await
     }
 
     async fn get_user_subscriptions(&self, user_id: UserId) -> anyhow::Result<Vec<Subscription>> {

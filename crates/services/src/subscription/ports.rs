@@ -536,6 +536,14 @@ pub trait SubscriptionRepository: Send + Sync {
         subscription: Subscription,
     ) -> anyhow::Result<Subscription>;
 
+    /// Insert or update a subscription with incoming pending-downgrade fields treated as
+    /// authoritative, including clearing local fields when incoming values are NULL.
+    async fn upsert_subscription_authoritative(
+        &self,
+        txn: &tokio_postgres::Transaction<'_>,
+        subscription: Subscription,
+    ) -> anyhow::Result<Subscription>;
+
     /// Get all subscriptions for a user
     async fn get_user_subscriptions(&self, user_id: UserId) -> anyhow::Result<Vec<Subscription>>;
 
