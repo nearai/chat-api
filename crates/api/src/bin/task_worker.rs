@@ -423,7 +423,7 @@ impl TaskExecutor for DefaultTaskExecutor {
                 Ok(())
             }
             Err(
-                err @ (AccountDeletionError::ActiveSubscriptions { .. }
+                err @ (AccountDeletionError::BlockingSubscriptions { .. }
                 | AccountDeletionError::InstancesNotDeleted { .. }),
             ) => {
                 let progress = build_account_deletion_progress(

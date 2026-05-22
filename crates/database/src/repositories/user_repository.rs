@@ -38,19 +38,21 @@ impl PostgresUserRepository {
             return Err(AccountDeletionError::UserNotFound);
         }
 
-        let active_subscription_count: i64 = client
+        // Only known terminal Stripe subscription states are safe to ignore.
+        let blocking_subscription_count: i64 = client
             .query_one(
                 "SELECT COUNT(*)
                  FROM subscriptions
-                 WHERE user_id = $1 AND status IN ('active', 'trialing')",
+                 WHERE user_id = $1
+                   AND status NOT IN ('canceled', 'incomplete_expired')",
                 &[&user_id],
             )
             .await
             .map_err(anyhow::Error::from)?
             .get(0);
-        if active_subscription_count > 0 {
-            return Err(AccountDeletionError::ActiveSubscriptions {
-                count: active_subscription_count,
+        if blocking_subscription_count > 0 {
+            return Err(AccountDeletionError::BlockingSubscriptions {
+                count: blocking_subscription_count,
             });
         }
 
