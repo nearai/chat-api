@@ -13,42 +13,107 @@ fn auth_header(token: &str) -> (HeaderName, HeaderValue) {
 }
 
 #[tokio::test]
-async fn delete_account_blocks_active_subscription() {
+async fn delete_account_blocks_non_terminal_subscription_statuses() {
     let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
-    let email = format!(
-        "delete_account_active_subscription_{}@test.org",
-        Uuid::new_v4()
-    );
-    let token = mock_login(&server, &email).await;
-    let user = db
-        .user_repository()
-        .get_user_by_email(&email)
-        .await
-        .expect("get user")
-        .expect("user exists");
-
     let client = db.pool().get().await.expect("db client");
-    client
-        .execute(
-            "INSERT INTO subscriptions (
-                subscription_id, user_id, provider, customer_id, price_id, status,
-                current_period_end, cancel_at_period_end
-            ) VALUES ($1, $2, 'stripe', 'cus_delete_active', 'price_test', 'active', NOW() + INTERVAL '1 day', false)",
-            &[&format!("sub_delete_active_{}", Uuid::new_v4()), &user.id],
-        )
-        .await
-        .expect("insert active subscription");
 
-    let (name, value) = auth_header(&token);
-    let response = server.delete("/v1/users/me").add_header(name, value).await;
+    for status in [
+        "active",
+        "trialing",
+        "past_due",
+        "unpaid",
+        "incomplete",
+        "paused",
+    ] {
+        let email = format!(
+            "delete_account_{}_subscription_{}@test.org",
+            status,
+            Uuid::new_v4()
+        );
+        let token = mock_login(&server, &email).await;
+        let user = db
+            .user_repository()
+            .get_user_by_email(&email)
+            .await
+            .expect("get user")
+            .expect("user exists");
+        let subscription_id = format!("sub_delete_{}_{}", status, Uuid::new_v4());
+        let customer_id = format!("cus_delete_{}_{}", status, Uuid::new_v4());
 
-    assert_eq!(response.status_code(), 409);
-    assert!(db
-        .user_repository()
-        .get_user(user.id)
-        .await
-        .expect("get user after blocked delete")
-        .is_some());
+        client
+            .execute(
+                "INSERT INTO subscriptions (
+                    subscription_id, user_id, provider, customer_id, price_id, status,
+                    current_period_end, cancel_at_period_end
+                ) VALUES ($1, $2, 'stripe', $3, 'price_test', $4, NOW() + INTERVAL '1 day', false)",
+                &[&subscription_id, &user.id, &customer_id, &status],
+            )
+            .await
+            .expect("insert non-terminal subscription");
+
+        let (name, value) = auth_header(&token);
+        let response = server.delete("/v1/users/me").add_header(name, value).await;
+
+        assert_eq!(
+            response.status_code(),
+            409,
+            "{status} subscription should block account deletion"
+        );
+        let body: serde_json::Value = response.json();
+        assert!(body
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .contains("non-terminal subscription"));
+        assert!(db
+            .user_repository()
+            .get_user(user.id)
+            .await
+            .expect("get user after blocked delete")
+            .is_some());
+    }
+}
+
+#[tokio::test]
+async fn delete_account_allows_terminal_subscription_statuses() {
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+    let client = db.pool().get().await.expect("db client");
+
+    for status in ["canceled", "incomplete_expired"] {
+        let email = format!(
+            "delete_account_{}_subscription_{}@test.org",
+            status,
+            Uuid::new_v4()
+        );
+        let token = mock_login(&server, &email).await;
+        let user = db
+            .user_repository()
+            .get_user_by_email(&email)
+            .await
+            .expect("get user")
+            .expect("user exists");
+        let subscription_id = format!("sub_delete_{}_{}", status, Uuid::new_v4());
+        let customer_id = format!("cus_delete_{}_{}", status, Uuid::new_v4());
+
+        client
+            .execute(
+                "INSERT INTO subscriptions (
+                    subscription_id, user_id, provider, customer_id, price_id, status,
+                    current_period_end, cancel_at_period_end
+                ) VALUES ($1, $2, 'stripe', $3, 'price_test', $4, NOW() - INTERVAL '1 day', false)",
+                &[&subscription_id, &user.id, &customer_id, &status],
+            )
+            .await
+            .expect("insert terminal subscription");
+
+        let (name, value) = auth_header(&token);
+        let response = server.delete("/v1/users/me").add_header(name, value).await;
+        assert_eq!(
+            response.status_code(),
+            202,
+            "{status} subscription should allow account deletion"
+        );
+    }
 }
 
 #[tokio::test]

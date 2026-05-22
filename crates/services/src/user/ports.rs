@@ -131,8 +131,8 @@ pub struct AccountDeletionRequestResult {
 pub enum AccountDeletionError {
     #[error("User not found")]
     UserNotFound,
-    #[error("Cannot delete account while active subscriptions exist")]
-    ActiveSubscriptions { count: i64 },
+    #[error("Cannot delete account while non-terminal subscriptions exist")]
+    BlockingSubscriptions { count: i64 },
     #[error("Cannot delete account while instances are not deleted")]
     InstancesNotDeleted { count: i64, statuses: Vec<String> },
     #[error("Cannot delete account because conversation cleanup is incomplete")]
