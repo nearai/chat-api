@@ -17,6 +17,7 @@ use services::auth::ports::{OAuthProvider, RequestEmailCodeError, VerifyEmailCod
 use services::metrics::consts::{
     METRIC_USER_LOGIN, METRIC_USER_SIGNUP, TAG_AUTH_METHOD, TAG_IS_NEW_USER,
 };
+use services::referral::ports::ReferralError;
 use services::SessionId;
 use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
@@ -73,6 +74,8 @@ pub struct EmailRequestCodeRequest {
 pub struct EmailVerifyCodeRequest {
     pub email: String,
     pub code: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub referral_code: Option<String>,
 }
 
 fn normalize_email_input(email: &str) -> String {
@@ -264,6 +267,22 @@ fn request_email_code_error_to_api_error(error: RequestEmailCodeError) -> ApiErr
     }
 }
 
+fn referral_error_to_api_error(error: ReferralError) -> ApiError {
+    match error {
+        ReferralError::InvalidReferralCode => ApiError::bad_request("Invalid referral code"),
+        ReferralError::SelfReferral => ApiError::bad_request("A user cannot refer themselves"),
+        ReferralError::InvalidConfig(msg) => ApiError::bad_request(msg),
+        ReferralError::Database(err) => {
+            tracing::error!(error = ?err, "Referral operation failed during auth");
+            ApiError::internal_server_error("Failed to process referral")
+        }
+    }
+}
+
+fn present_referral_code(code: &Option<String>) -> Option<&str> {
+    code.as_deref().filter(|c| !c.trim().is_empty())
+}
+
 /// Query parameters for OAuth callback
 #[derive(Debug, Deserialize)]
 pub struct OAuthCallbackQuery {
@@ -276,6 +295,8 @@ pub struct OAuthCallbackQuery {
 pub struct OAuthInitQuery {
     pub redirect_uri: Option<String>,
     pub frontend_callback: Option<String>,
+    #[serde(rename = "ref")]
+    pub referral_code: Option<String>,
 }
 
 /// Request body for logout
@@ -294,6 +315,8 @@ pub struct MockLoginRequest {
     pub avatar_url: Option<String>,
     /// Optional OAuth provider to link as a mocked linked account (google/github/near)
     pub oauth_provider: Option<String>,
+    /// Optional referral code used only when this request creates a new user.
+    pub referral_code: Option<String>,
 }
 
 /// Request body for NEAR authentication (NEP-413)
@@ -303,6 +326,9 @@ pub struct NearAuthRequest {
     pub signed_message: NearSignedMessageJson,
     /// The payload that was signed
     pub payload: NearPayloadJson,
+    /// Optional referral code used only when this request creates a new user.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub referral_code: Option<String>,
 }
 
 /// Signed message from wallet (NEP-413 SignedMessage)
@@ -461,6 +487,14 @@ pub async fn verify_email_code(
         ));
     }
 
+    if let Some(referral_code) = present_referral_code(&request.referral_code) {
+        app_state
+            .referral_service
+            .validate_referral_code(referral_code)
+            .await
+            .map_err(referral_error_to_api_error)?;
+    }
+
     let result = app_state
         .email_auth_service
         .verify_code(
@@ -474,6 +508,14 @@ pub async fn verify_email_code(
         )
         .await
         .map_err(email_verify_error_to_api_error)?;
+
+    if result.is_new_user {
+        app_state
+            .referral_service
+            .bind_referral_for_new_user(result.session.user_id, request.referral_code.clone())
+            .await
+            .map_err(referral_error_to_api_error)?;
+    }
 
     let auth_method = AuthMethod::Email;
     let metric_name = if result.is_new_user {
@@ -569,6 +611,14 @@ pub async fn google_login(
         .clone()
         .unwrap_or_else(|| format!("{}/v1/auth/callback", app_state.redirect_uri));
 
+    if let Some(referral_code) = present_referral_code(&params.referral_code) {
+        app_state
+            .referral_service
+            .validate_referral_code(referral_code)
+            .await
+            .map_err(referral_error_to_api_error)?;
+    }
+
     tracing::debug!("Using OAuth redirect_uri: {}", redirect_uri);
 
     let auth_url = app_state
@@ -577,6 +627,7 @@ pub async fn google_login(
             services::auth::ports::OAuthProvider::Google,
             redirect_uri.clone(),
             params.frontend_callback.clone(),
+            params.referral_code.clone(),
         )
         .await
         .map_err(|e| {
@@ -617,7 +668,7 @@ pub async fn oauth_callback(
 
     // The provider is determined from the state stored in the database
     // Returns (session, frontend_callback_url, is_new_user, provider)
-    let (session, frontend_callback, is_new_user, provider) = app_state
+    let (session, frontend_callback, is_new_user, provider, referral_code) = app_state
         .oauth_service
         .handle_callback_unified(params.code.clone(), params.state.clone())
         .await
@@ -625,6 +676,14 @@ pub async fn oauth_callback(
             tracing::error!("OAuth callback failed for state {}: {}", params.state, e);
             ApiError::oauth_failed()
         })?;
+
+    if is_new_user {
+        app_state
+            .referral_service
+            .bind_referral_for_new_user(session.user_id, referral_code)
+            .await
+            .map_err(referral_error_to_api_error)?;
+    }
 
     tracing::info!(
         "OAuth callback processed successfully - session_id: {}, user_id: {}, provider: {:?}",
@@ -768,6 +827,14 @@ pub async fn github_login(
         .clone()
         .unwrap_or_else(|| format!("{}/v1/auth/callback", app_state.redirect_uri));
 
+    if let Some(referral_code) = present_referral_code(&params.referral_code) {
+        app_state
+            .referral_service
+            .validate_referral_code(referral_code)
+            .await
+            .map_err(referral_error_to_api_error)?;
+    }
+
     tracing::debug!("Using OAuth redirect_uri: {}", redirect_uri);
 
     let auth_url = app_state
@@ -776,6 +843,7 @@ pub async fn github_login(
             services::auth::ports::OAuthProvider::Github,
             redirect_uri.clone(),
             params.frontend_callback.clone(),
+            params.referral_code.clone(),
         )
         .await
         .map_err(|e| {
@@ -874,6 +942,15 @@ pub async fn mock_login(
     tracing::info!("Mock login requested for email: {}", request.email);
 
     // Check if user already exists
+    if let Some(referral_code) = present_referral_code(&request.referral_code) {
+        app_state
+            .referral_service
+            .validate_referral_code(referral_code)
+            .await
+            .map_err(referral_error_to_api_error)?;
+    }
+
+    let mut is_new_user = false;
     let user = match app_state
         .user_repository
         .get_user_by_email(&request.email)
@@ -898,7 +975,10 @@ pub async fn mock_login(
                 )
                 .await
             {
-                Ok(user) => user,
+                Ok(user) => {
+                    is_new_user = true;
+                    user
+                }
                 Err(_) => {
                     // This can happen if tests run in parallel: two requests race between
                     // "get_user_by_email(None)" and "create_user", leading to a unique constraint
@@ -917,6 +997,14 @@ pub async fn mock_login(
             }
         }
     };
+
+    if is_new_user {
+        app_state
+            .referral_service
+            .bind_referral_for_new_user(user.id, request.referral_code.clone())
+            .await
+            .map_err(referral_error_to_api_error)?;
+    }
 
     // Optionally link a mocked OAuth account for this user (for tests)
     if let Some(provider_str) = request.oauth_provider.as_deref() {
@@ -1044,6 +1132,14 @@ pub async fn near_auth(
         request.signed_message.account_id
     );
 
+    if let Some(referral_code) = present_referral_code(&request.referral_code) {
+        app_state
+            .referral_service
+            .validate_referral_code(referral_code)
+            .await
+            .map_err(referral_error_to_api_error)?;
+    }
+
     // Convert to near-api types
     let signed_message: SignedMessage = request
         .signed_message
@@ -1063,6 +1159,14 @@ pub async fn near_auth(
             tracing::error!("NEAR authentication failed: {}", e);
             ApiError::unauthorized(e.to_string())
         })?;
+
+    if is_new_user {
+        app_state
+            .referral_service
+            .bind_referral_for_new_user(session.user_id, request.referral_code.clone())
+            .await
+            .map_err(referral_error_to_api_error)?;
+    }
 
     // Record metrics and analytics
     let auth_method = AuthMethod::Near;

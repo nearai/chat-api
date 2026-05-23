@@ -140,6 +140,64 @@ pub struct CreditsProviderConfig {
     pub price_id: Option<String>,
 }
 
+/// Condition that controls when referral rewards are granted.
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReferralRewardTrigger {
+    /// Grant rewards immediately after the invitee registers with a valid referral code.
+    InviteeRegistered,
+    /// Grant rewards after the invitee first has an active subscription.
+    #[default]
+    InviteeFirstActiveSubscription,
+}
+
+impl ReferralRewardTrigger {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::InviteeRegistered => "invitee_registered",
+            Self::InviteeFirstActiveSubscription => "invitee_first_active_subscription",
+        }
+    }
+
+    pub fn parse_db_value(value: &str) -> Option<Self> {
+        match value {
+            "invitee_registered" => Some(Self::InviteeRegistered),
+            "invitee_first_active_subscription" => Some(Self::InviteeFirstActiveSubscription),
+            _ => None,
+        }
+    }
+}
+
+/// Referral rewards configuration.
+///
+/// Reward values are external credits, where 1 credit = $1 = 1_000_000_000 nano-USD.
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReferralConfig {
+    /// Credits granted to the invitee when the configured trigger is met.
+    pub invitee_reward_credits: u64,
+    /// Credits granted to the inviter when the configured trigger is met.
+    pub inviter_reward_credits: u64,
+    /// Trigger shared by invitee and inviter rewards.
+    #[serde(default)]
+    pub reward_trigger: ReferralRewardTrigger,
+    /// Base signup URL used to build referral links.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signup_url_base: Option<String>,
+}
+
+impl Default for ReferralConfig {
+    fn default() -> Self {
+        Self {
+            invitee_reward_credits: 100,
+            inviter_reward_credits: 100,
+            reward_trigger: ReferralRewardTrigger::default(),
+            signup_url_base: Some("https://agent.near.ai/signup".to_string()),
+        }
+    }
+}
+
 impl Default for RateLimitConfig {
     fn default() -> Self {
         Self {
@@ -334,6 +392,9 @@ pub struct SystemConfigs {
     /// Credit purchase configuration (Stripe Price ID for buying credits)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credits: Option<CreditsConfig>,
+    /// Referral reward configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub referrals: Option<ReferralConfig>,
     /// Per-manager URL limits (agent manager URL -> max instances). Overrides max_instances_per_manager
     /// when set for a specific URL. Use normalized URLs matching AGENT_MANAGER_URLS.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -356,6 +417,7 @@ pub struct PartialSystemConfigs {
     pub subscription_plans: Option<HashMap<String, SubscriptionPlanConfig>>,
     pub max_instances_per_manager: Option<u64>,
     pub credits: Option<CreditsConfig>,
+    pub referrals: Option<ReferralConfig>,
     pub max_instances_by_manager_url: Option<HashMap<String, u64>>,
     pub auto_route: Option<AutoRouteConfig>,
     pub instance_defaults: Option<InstanceDefaultsConfig>,
@@ -371,6 +433,7 @@ impl Default for SystemConfigs {
             subscription_plans: None,
             max_instances_per_manager: Some(200),
             credits: None,
+            referrals: Some(ReferralConfig::default()),
             max_instances_by_manager_url: None,
             auto_route: None,
             instance_defaults: Some(InstanceDefaultsConfig {
@@ -457,6 +520,7 @@ impl SystemConfigs {
                 .max_instances_per_manager
                 .or(self.max_instances_per_manager),
             credits: partial.credits.or(self.credits),
+            referrals: partial.referrals.or(self.referrals),
             max_instances_by_manager_url: partial
                 .max_instances_by_manager_url
                 .or(self.max_instances_by_manager_url),

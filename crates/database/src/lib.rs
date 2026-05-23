@@ -12,9 +12,9 @@ pub use repositories::{
     PostgresConversationShareRepository, PostgresCreditsRepository,
     PostgresEmailVerificationChallengeRepository, PostgresFileRepository, PostgresModelRepository,
     PostgresNearNonceRepository, PostgresOAuthRepository, PostgresPaymentWebhookRepository,
-    PostgresSessionRepository, PostgresStripeCustomerRepository, PostgresSubscriptionRepository,
-    PostgresSystemConfigsRepository, PostgresUserRepository, PostgresUserSettingsRepository,
-    PostgresUserUsageRepository,
+    PostgresReferralRepository, PostgresSessionRepository, PostgresStripeCustomerRepository,
+    PostgresSubscriptionRepository, PostgresSystemConfigsRepository, PostgresUserRepository,
+    PostgresUserSettingsRepository, PostgresUserUsageRepository,
 };
 
 use crate::pool::create_pool_with_native_tls;
@@ -46,6 +46,7 @@ pub struct Database {
     stripe_customer_repository: Arc<PostgresStripeCustomerRepository>,
     subscription_repository: Arc<PostgresSubscriptionRepository>,
     payment_webhook_repository: Arc<PostgresPaymentWebhookRepository>,
+    referral_repository: Arc<PostgresReferralRepository>,
     agent_repository: Arc<PostgresAgentRepository>,
     bi_metrics_repository: Arc<PostgresBiMetricsRepository>,
     cluster_manager: Option<Arc<ClusterManager>>,
@@ -78,6 +79,7 @@ impl Database {
         let subscription_repository = Arc::new(PostgresSubscriptionRepository::new(pool.clone()));
         let payment_webhook_repository =
             Arc::new(PostgresPaymentWebhookRepository::new(pool.clone()));
+        let referral_repository = Arc::new(PostgresReferralRepository::new(pool.clone()));
         let agent_repository = Arc::new(PostgresAgentRepository::new(pool.clone()));
         let bi_metrics_repository = Arc::new(PostgresBiMetricsRepository::new(pool.clone()));
 
@@ -101,6 +103,7 @@ impl Database {
             stripe_customer_repository,
             subscription_repository,
             payment_webhook_repository,
+            referral_repository,
             agent_repository,
             bi_metrics_repository,
             cluster_manager: None,
@@ -312,6 +315,11 @@ impl Database {
     /// Get the subscription repository
     pub fn subscription_repository(&self) -> Arc<PostgresSubscriptionRepository> {
         self.subscription_repository.clone()
+    }
+
+    /// Get the referral repository
+    pub fn referral_repository(&self) -> Arc<PostgresReferralRepository> {
+        self.referral_repository.clone()
     }
 
     /// Get the payment webhook repository

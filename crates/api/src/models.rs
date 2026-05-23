@@ -3,7 +3,7 @@ use crate::ApiError;
 use serde::{Deserialize, Serialize};
 use services::file::ports::FileData;
 use services::system_configs::ports::{
-    AgentHostingConfig, AutoRouteConfig, CreditsConfig, InstanceDefaultsConfig,
+    AgentHostingConfig, AutoRouteConfig, CreditsConfig, InstanceDefaultsConfig, ReferralConfig,
     SubscriptionPlanConfig,
 };
 use services::UserId;
@@ -787,6 +787,9 @@ pub struct SystemConfigsResponse {
     /// Credit purchase configuration (Stripe Price ID for buying credits)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub credits: Option<CreditsConfig>,
+    /// Referral rewards configuration
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub referrals: Option<ReferralConfig>,
     /// Per-manager URL limits (agent manager URL -> max instances). Overrides max_instances_per_manager for specific URLs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_instances_by_manager_url: Option<HashMap<String, u64>>,
@@ -809,6 +812,7 @@ impl From<services::system_configs::ports::SystemConfigs> for SystemConfigsRespo
             subscription_plans: config.subscription_plans,
             max_instances_per_manager: config.max_instances_per_manager,
             credits: config.credits,
+            referrals: config.referrals,
             max_instances_by_manager_url: config.max_instances_by_manager_url,
             auto_route: config.auto_route,
             instance_defaults: config.instance_defaults,
@@ -837,6 +841,9 @@ pub struct UpsertSystemConfigsRequest {
     /// Credit purchase configuration (Stripe Price ID for buying credits)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub credits: Option<CreditsConfig>,
+    /// Referral rewards configuration
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub referrals: Option<ReferralConfig>,
     /// Per-manager URL limits (agent manager URL -> max instances). Overrides max_instances_per_manager for specific URLs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_instances_by_manager_url: Option<HashMap<String, u64>>,
@@ -867,6 +874,7 @@ impl TryFrom<UpsertSystemConfigsRequest> for services::system_configs::ports::Pa
             subscription_plans: req.subscription_plans,
             max_instances_per_manager: req.max_instances_per_manager,
             credits: req.credits,
+            referrals: req.referrals,
             max_instances_by_manager_url: req.max_instances_by_manager_url,
             auto_route: req.auto_route,
             instance_defaults: req.instance_defaults,

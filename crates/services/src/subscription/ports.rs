@@ -570,6 +570,12 @@ pub struct CreditTransaction {
     pub r#type: String,
     /// Optional external reference (e.g. Stripe session id or admin reason).
     pub reference_id: Option<String>,
+    /// Optional structured source (e.g. referral_invitee_reward).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Source-specific metadata for auditing.
+    #[serde(default)]
+    pub metadata: serde_json::Value,
     pub created_at: DateTime<Utc>,
 }
 
@@ -606,6 +612,17 @@ pub trait CreditsRepository: Send + Sync {
         amount: i64,
         reason: Option<String>,
     ) -> anyhow::Result<()>;
+
+    /// Record a grant with source/reference idempotency. Returns (transaction_id, inserted).
+    async fn record_source_grant_once(
+        &self,
+        txn: &tokio_postgres::Transaction<'_>,
+        user_id: UserId,
+        amount: i64,
+        source: &str,
+        reference_id: &str,
+        metadata: serde_json::Value,
+    ) -> anyhow::Result<(uuid::Uuid, bool)>;
 
     /// List credit transactions for a user, newest first, with total count.
     async fn list_transactions(

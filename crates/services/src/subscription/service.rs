@@ -8,6 +8,7 @@ use super::ports::{
 };
 use crate::agent::ports::AgentRepository;
 use crate::agent::ports::AgentService;
+use crate::referral::ports::ReferralService;
 use crate::system_configs::ports::{SubscriptionPlanConfig, SystemConfigs, SystemConfigsService};
 use crate::user::ports::UserRepository;
 use crate::user_usage::ports::UserUsageRepository;
@@ -32,6 +33,7 @@ pub struct SubscriptionServiceConfig {
     pub user_usage_repo: Arc<dyn UserUsageRepository>,
     pub agent_repo: Arc<dyn AgentRepository>,
     pub agent_service: Arc<dyn AgentService>,
+    pub referral_service: Arc<dyn ReferralService>,
     pub stripe_secret_key: String,
     pub stripe_webhook_secret: String,
 }
@@ -73,6 +75,7 @@ pub struct SubscriptionServiceImpl {
     user_usage_repo: Arc<dyn UserUsageRepository>,
     agent_repo: Arc<dyn AgentRepository>,
     agent_service: Arc<dyn AgentService>,
+    referral_service: Arc<dyn ReferralService>,
     stripe_secret_key: String,
     stripe_webhook_secret: String,
     credit_limit_cache: Arc<RwLock<HashMap<UserId, CachedCreditLimit>>>,
@@ -103,6 +106,7 @@ impl SubscriptionServiceImpl {
             user_usage_repo: config.user_usage_repo,
             agent_repo: config.agent_repo,
             agent_service: config.agent_service,
+            referral_service: config.referral_service,
             stripe_secret_key: config.stripe_secret_key,
             stripe_webhook_secret: config.stripe_webhook_secret,
             credit_limit_cache: Arc::new(RwLock::new(HashMap::new())),
@@ -1806,6 +1810,13 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 .await
                 .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
+            if new_sub.status == "active" {
+                self.referral_service
+                    .apply_rewards_for_invitee_active_in_txn(&txn, user_id)
+                    .await
+                    .map_err(|e| SubscriptionError::InternalError(e.to_string()))?;
+            }
+
             // Detect first transition to canceled: trigger async instance kill
             if old_status.as_deref() != Some("canceled") && new_sub.status == "canceled" {
                 user_id_to_kill_instances = Some(user_id);
@@ -2335,6 +2346,11 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .subscription_repo
             .upsert_subscription(&txn, subscription)
             .await?;
+
+        self.referral_service
+            .apply_rewards_for_invitee_active_in_txn(&txn, user_id)
+            .await
+            .map_err(|e| SubscriptionError::InternalError(e.to_string()))?;
 
         txn.commit()
             .await

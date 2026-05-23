@@ -14,6 +14,7 @@ pub struct OAuthState {
     pub provider: OAuthProvider,
     pub redirect_uri: String,
     pub frontend_callback: Option<String>,
+    pub referral_code: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -252,15 +253,22 @@ pub trait OAuthService: Send + Sync {
         provider: OAuthProvider,
         redirect_uri: String,
         frontend_callback: Option<String>,
+        referral_code: Option<String>,
     ) -> anyhow::Result<String>;
 
     /// Unified callback handler that determines provider from state
-    /// Returns (UserSession, frontend_callback_url, is_new_user, provider)
+    /// Returns (UserSession, frontend_callback_url, is_new_user, provider, referral_code)
     async fn handle_callback_unified(
         &self,
         code: String,
         state: String,
-    ) -> anyhow::Result<(UserSession, Option<String>, bool, OAuthProvider)>;
+    ) -> anyhow::Result<(
+        UserSession,
+        Option<String>,
+        bool,
+        OAuthProvider,
+        Option<String>,
+    )>;
 
     /// Refresh an access token
     async fn refresh_token(

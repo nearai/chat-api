@@ -217,6 +217,17 @@ async fn main() -> anyhow::Result<()> {
             user_usage_repo as Arc<dyn services::user_usage::UserUsageRepository>,
         ));
 
+    // Initialize referral service
+    tracing::info!("Initializing referral service...");
+    let referral_service: Arc<dyn services::referral::ports::ReferralService> =
+        Arc::new(services::referral::ReferralServiceImpl::new(
+            db.pool().clone(),
+            db.referral_repository() as Arc<dyn services::referral::ports::ReferralRepository>,
+            db.credits_repository() as Arc<dyn services::subscription::ports::CreditsRepository>,
+            system_configs_service.clone()
+                as Arc<dyn services::system_configs::ports::SystemConfigsService>,
+        ));
+
     // Initialize subscription service
     tracing::info!("Initializing subscription service...");
     let stripe_client = Arc::new(StripeClientAdapter::new(config.stripe.secret_key.clone()));
@@ -242,6 +253,7 @@ async fn main() -> anyhow::Result<()> {
             stripe_secret_key: config.stripe.secret_key.clone(),
             stripe_webhook_secret: config.stripe.webhook_secret.clone(),
             agent_service: agent_service.clone() as Arc<dyn services::agent::ports::AgentService>,
+            referral_service: referral_service.clone(),
         },
     ));
 
@@ -347,6 +359,7 @@ async fn main() -> anyhow::Result<()> {
         model_service,
         system_configs_service: system_configs_service.clone(),
         subscription_service,
+        referral_service,
         session_repository: session_repo,
         proxy_service,
         conversation_service,

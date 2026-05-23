@@ -332,13 +332,19 @@ impl OAuthServiceImpl {
     }
 
     /// Internal implementation that handles the callback with a pre-validated state
-    /// Returns (UserSession, frontend_callback_url, is_new_user, provider)
+    /// Returns (UserSession, frontend_callback_url, is_new_user, provider, referral_code)
     async fn handle_callback_impl(
         &self,
         provider: OAuthProvider,
         code: String,
         oauth_state: OAuthState,
-    ) -> anyhow::Result<(UserSession, Option<String>, bool, OAuthProvider)> {
+    ) -> anyhow::Result<(
+        UserSession,
+        Option<String>,
+        bool,
+        OAuthProvider,
+        Option<String>,
+    )> {
         tracing::info!(
             "Processing OAuth callback: provider={:?}, redirect_uri={}",
             provider,
@@ -420,6 +426,7 @@ impl OAuthServiceImpl {
             oauth_state.frontend_callback,
             is_new_user,
             provider,
+            oauth_state.referral_code,
         ))
     }
 }
@@ -806,6 +813,7 @@ impl OAuthService for OAuthServiceImpl {
         provider: OAuthProvider,
         redirect_uri: String,
         frontend_callback: Option<String>,
+        referral_code: Option<String>,
     ) -> anyhow::Result<String> {
         tracing::info!(
             "Generating authorization URL for provider={:?}, redirect_uri={}, frontend_callback={:?}",
@@ -854,6 +862,7 @@ impl OAuthService for OAuthServiceImpl {
             provider,
             redirect_uri: redirect_uri.clone(),
             frontend_callback: frontend_callback.clone(),
+            referral_code,
             created_at: Utc::now(),
         };
 
@@ -934,7 +943,13 @@ impl OAuthService for OAuthServiceImpl {
         &self,
         code: String,
         state: String,
-    ) -> anyhow::Result<(UserSession, Option<String>, bool, OAuthProvider)> {
+    ) -> anyhow::Result<(
+        UserSession,
+        Option<String>,
+        bool,
+        OAuthProvider,
+        Option<String>,
+    )> {
         tracing::info!("Handling unified OAuth callback with state: {}", state);
 
         let oauth_state = self

@@ -50,6 +50,7 @@ pub struct AppState {
     pub model_service: Arc<dyn services::model::ports::ModelService>,
     pub system_configs_service: Arc<dyn services::system_configs::ports::SystemConfigsService>,
     pub subscription_service: Arc<dyn services::subscription::ports::SubscriptionService>,
+    pub referral_service: Arc<dyn services::referral::ports::ReferralService>,
     pub session_repository: Arc<dyn services::auth::ports::SessionRepository>,
     pub user_repository: Arc<dyn services::user::ports::UserRepository>,
     pub proxy_service: Arc<dyn services::response::ports::OpenAIProxyService>,
