@@ -101,6 +101,31 @@ async fn test_admin_users_list_allowed_when_email_allowlisted() {
 }
 
 #[tokio::test]
+async fn test_admin_users_list_falls_back_to_domain_when_allowlist_empty() {
+    let server = common::create_test_server_with_config(common::TestServerConfig {
+        admin_domains: Some(vec!["admin.org".to_string()]),
+        admin_emails: Some(vec![]),
+        ..Default::default()
+    })
+    .await;
+
+    let token = mock_login(&server, "domain-only-admin@admin.org").await;
+    let response = server
+        .get("/v1/admin/users")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(
+        response.status_code(),
+        200,
+        "When admin email allowlist is empty, domain allowlist should still grant admin access"
+    );
+}
+
+#[tokio::test]
 async fn test_admin_users_list_pagination() {
     let server = create_test_server().await;
 

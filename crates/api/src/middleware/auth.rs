@@ -272,9 +272,11 @@ fn is_admin_email(email: &str, admin_emails: &[String]) -> bool {
     if admin_emails.is_empty() {
         static WARNED_EMPTY_ADMIN_EMAILS: OnceLock<()> = OnceLock::new();
         WARNED_EMPTY_ADMIN_EMAILS.get_or_init(|| {
-            tracing::warn!("Admin emails allowlist is empty, denying access");
+            tracing::warn!(
+                "Admin emails allowlist is empty; falling back to domain-only admin authorization"
+            );
         });
-        return false;
+        return true;
     }
     admin_emails.contains(&email.trim().to_lowercase())
 }
