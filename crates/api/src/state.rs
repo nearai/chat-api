@@ -61,6 +61,9 @@ pub struct AppState {
     pub agent_repository: Arc<dyn services::agent::ports::AgentRepository>,
     pub agent_proxy_service: Arc<dyn services::agent::AgentProxyService>,
     pub redirect_uri: String,
+    /// Exact frontend origins allowed for user-provided OAuth frontend callbacks.
+    /// None means origin restrictions are disabled.
+    pub frontend_callback_allowed_origins: Option<Arc<Vec<String>>>,
     pub admin_domains: Arc<Vec<String>>,
     pub vpc_credentials_service: Arc<dyn services::vpc::VpcCredentialsService>,
     /// Whether Stripe test clock feature is enabled
