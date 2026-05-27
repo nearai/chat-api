@@ -265,10 +265,7 @@ pub async fn create_test_server_and_db(
         .admin_domains
         .clone()
         .unwrap_or(config.admin.admin_domains);
-    let admin_emails = test_config
-        .admin_emails
-        .clone()
-        .unwrap_or(config.admin.admin_emails);
+    let admin_emails = test_config.admin_emails.clone().unwrap_or_default();
 
     // Add `admin.org` as test admin domain
     admin_domains.push("admin.org".to_string());
