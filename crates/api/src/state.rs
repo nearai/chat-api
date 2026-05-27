@@ -65,6 +65,7 @@ pub struct AppState {
     /// None means origin restrictions are disabled.
     pub frontend_callback_allowed_origins: Option<Arc<Vec<String>>>,
     pub admin_domains: Arc<Vec<String>>,
+    pub admin_emails: Arc<Vec<String>>,
     pub vpc_credentials_service: Arc<dyn services::vpc::VpcCredentialsService>,
     /// Whether Stripe test clock feature is enabled
     pub stripe_test_clock_enabled: bool,
