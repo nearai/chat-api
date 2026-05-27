@@ -235,20 +235,22 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
-fn validate_proxy_path_segment(value: &str, field_name: &str) -> Result<(), Response> {
-    validate_proxy_path_segment_variant(value, field_name)?;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InvalidProxyPathSegment;
 
-    let decoded =
-        urlencoding::decode(value).map_err(|_| invalid_proxy_path_segment_response(field_name))?;
+fn validate_proxy_path_segment(value: &str) -> Result<(), InvalidProxyPathSegment> {
+    validate_proxy_path_segment_variant(value)?;
+
+    let decoded = urlencoding::decode(value).map_err(|_| InvalidProxyPathSegment)?;
     if decoded.contains('%') {
-        return Err(invalid_proxy_path_segment_response(field_name));
+        return Err(InvalidProxyPathSegment);
     }
-    validate_proxy_path_segment_variant(&decoded, field_name)?;
+    validate_proxy_path_segment_variant(&decoded)?;
 
     Ok(())
 }
 
-fn validate_proxy_path_segment_variant(value: &str, field_name: &str) -> Result<(), Response> {
+fn validate_proxy_path_segment_variant(value: &str) -> Result<(), InvalidProxyPathSegment> {
     if value.is_empty()
         || value == "."
         || value == ".."
@@ -258,7 +260,7 @@ fn validate_proxy_path_segment_variant(value: &str, field_name: &str) -> Result<
         || value.contains('#')
         || value.chars().any(char::is_control)
     {
-        return Err(invalid_proxy_path_segment_response(field_name));
+        return Err(InvalidProxyPathSegment);
     }
 
     Ok(())
@@ -2112,7 +2114,8 @@ async fn get_file(
     Extension(user): Extension<AuthenticatedUser>,
     Path(file_id): Path<String>,
 ) -> Result<Json<crate::models::FileGetResponse>, Response> {
-    validate_proxy_path_segment(&file_id, "file_id")?;
+    validate_proxy_path_segment(&file_id)
+        .map_err(|_| invalid_proxy_path_segment_response("file_id"))?;
 
     tracing::info!(
         "get_file called for user_id={}, file_id={}",
@@ -2165,7 +2168,8 @@ async fn delete_file(
     Extension(user): Extension<AuthenticatedUser>,
     Path(file_id): Path<String>,
 ) -> Result<Response, Response> {
-    validate_proxy_path_segment(&file_id, "file_id")?;
+    validate_proxy_path_segment(&file_id)
+        .map_err(|_| invalid_proxy_path_segment_response("file_id"))?;
 
     tracing::info!(
         "delete_file called for user_id={}, file_id={}",
@@ -3054,7 +3058,8 @@ async fn proxy_signature(
     Path(chat_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, Response> {
-    validate_proxy_path_segment(&chat_id, "chat_id")?;
+    validate_proxy_path_segment(&chat_id)
+        .map_err(|_| invalid_proxy_path_segment_response("chat_id"))?;
 
     tracing::info!(
         "proxy_signature: GET /v1/signature/{} for user_id={}, session_id={}",
@@ -4761,7 +4766,8 @@ async fn validate_user_conversation(
     conversation_id: &str,
     required_permission: SharePermission,
 ) -> Result<(), Response> {
-    validate_proxy_path_segment(conversation_id, "conversation_id")?;
+    validate_proxy_path_segment(conversation_id)
+        .map_err(|_| invalid_proxy_path_segment_response("conversation_id"))?;
 
     state
         .conversation_share_service
@@ -4777,7 +4783,8 @@ async fn validate_user_or_public_conversation(
     conversation_id: &str,
     required_permission: SharePermission,
 ) -> Result<(), Response> {
-    validate_proxy_path_segment(conversation_id, "conversation_id")?;
+    validate_proxy_path_segment(conversation_id)
+        .map_err(|_| invalid_proxy_path_segment_response("conversation_id"))?;
 
     // First check regular access
     let user_access = state
@@ -4807,7 +4814,8 @@ async fn validate_conversation_access_optional_auth(
     conversation_id: &str,
     required_permission: SharePermission,
 ) -> Result<(), Response> {
-    validate_proxy_path_segment(conversation_id, "conversation_id")?;
+    validate_proxy_path_segment(conversation_id)
+        .map_err(|_| invalid_proxy_path_segment_response("conversation_id"))?;
 
     if let Some(user) = user {
         // User is authenticated - check their access or public share
@@ -4829,7 +4837,8 @@ async fn validate_owner_conversation(
     user: &AuthenticatedUser,
     conversation_id: &str,
 ) -> Result<(), Response> {
-    validate_proxy_path_segment(conversation_id, "conversation_id")?;
+    validate_proxy_path_segment(conversation_id)
+        .map_err(|_| invalid_proxy_path_segment_response("conversation_id"))?;
 
     state
         .conversation_service
@@ -4872,7 +4881,8 @@ async fn fetch_conversation_from_proxy(
     conversation_id: &str,
     headers: HeaderMap,
 ) -> Result<serde_json::Value, Response> {
-    validate_proxy_path_segment(conversation_id, "conversation_id")?;
+    validate_proxy_path_segment(conversation_id)
+        .map_err(|_| invalid_proxy_path_segment_response("conversation_id"))?;
 
     fn bad_gateway(message: impl Into<String>) -> Response {
         (
@@ -4933,7 +4943,8 @@ async fn validate_user_file(
     user: &AuthenticatedUser,
     file_id: &str,
 ) -> Result<(), Response> {
-    validate_proxy_path_segment(file_id, "file_id")?;
+    validate_proxy_path_segment(file_id)
+        .map_err(|_| invalid_proxy_path_segment_response("file_id"))?;
 
     state
         .file_service
@@ -5420,7 +5431,7 @@ mod tests {
     fn validates_safe_proxy_path_segments() {
         for value in ["conv_abc123", "file-abc_123", "Qwen3.5-122B-A10B"] {
             assert!(
-                validate_proxy_path_segment(value, "id").is_ok(),
+                validate_proxy_path_segment(value).is_ok(),
                 "segment should be accepted: {value}"
             );
         }
@@ -5442,7 +5453,7 @@ mod tests {
             "abc#fragment",
         ] {
             assert!(
-                validate_proxy_path_segment(value, "id").is_err(),
+                validate_proxy_path_segment(value).is_err(),
                 "segment should be rejected: {value}"
             );
         }
