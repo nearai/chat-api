@@ -285,7 +285,7 @@ impl Default for AdminConfig {
 
         admin_emails.retain(|email| {
             let Some((_, domain)) = email.split_once('@') else {
-                tracing::warn!(
+                eprintln!(
                     "Ignoring invalid AUTH_ADMIN_EMAILS entry without '@': {}",
                     email
                 );
@@ -293,7 +293,7 @@ impl Default for AdminConfig {
             };
             let allowed = admin_domains.contains(&domain.to_lowercase());
             if !allowed {
-                tracing::warn!(
+                eprintln!(
                     "Ignoring AUTH_ADMIN_EMAILS entry outside AUTH_ADMIN_DOMAINS: {}",
                     email
                 );
