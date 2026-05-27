@@ -25,6 +25,33 @@ static TEST_ENV_INITIALIZED: OnceCell<()> = OnceCell::const_new();
 const TEST_ENCRYPTION_KEY: &str =
     "3031323334353637383961626364656666656463626139383736353433323130";
 
+fn discover_admin_test_emails() -> Vec<String> {
+    let mut emails = std::collections::BTreeSet::new();
+    let tests_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let Ok(entries) = std::fs::read_dir(tests_dir) else {
+        return Vec::new();
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let Ok(contents) = std::fs::read_to_string(path) else {
+            continue;
+        };
+
+        for token in contents.split('"') {
+            let candidate = token.trim().to_lowercase();
+            if candidate.ends_with("@admin.org") && candidate.contains('@') {
+                emails.insert(candidate);
+            }
+        }
+    }
+
+    emails.into_iter().collect()
+}
+
 /// Configuration for test server with Cloud API mocking
 #[derive(Default)]
 pub struct TestServerConfig {
@@ -272,7 +299,12 @@ pub async fn create_test_server_and_db(
 
     // Add `admin.org` as test admin domain
     admin_domains.push("admin.org".to_string());
-    admin_emails.push("admin@admin.org".to_string());
+    if test_config.admin_emails.is_some() {
+        admin_emails.push("admin@admin.org".to_string());
+    } else {
+        admin_emails.extend(discover_admin_test_emails());
+        admin_emails.push("admin@admin.org".to_string());
+    }
 
     let file_service = Arc::new(FileServiceImpl::new(file_repo, proxy_service.clone()));
 

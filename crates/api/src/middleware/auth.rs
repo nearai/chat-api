@@ -8,6 +8,7 @@ use chrono::Utc;
 use services::{SessionId, UserId};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use crate::error::ApiError;
 
@@ -269,7 +270,10 @@ fn is_admin_domain(email: &str, admin_domains: &[String]) -> bool {
 /// Check whether email is in the explicit admin email allowlist.
 fn is_admin_email(email: &str, admin_emails: &[String]) -> bool {
     if admin_emails.is_empty() {
-        tracing::warn!("Admin emails allowlist is empty, denying access");
+        static WARNED_EMPTY_ADMIN_EMAILS: OnceLock<()> = OnceLock::new();
+        WARNED_EMPTY_ADMIN_EMAILS.get_or_init(|| {
+            tracing::warn!("Admin emails allowlist is empty, denying access");
+        });
         return false;
     }
     admin_emails.contains(&email.trim().to_lowercase())
