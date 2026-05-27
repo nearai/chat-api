@@ -49,19 +49,14 @@ fn validate_proxy_path(path: &str) -> Result<&str, ProxyError> {
 
     validate_proxy_path_variant(path_part)?;
 
-    let mut decoded = path_part.to_string();
-    for _ in 0..3 {
-        let next = urlencoding::decode(&decoded)
-            .map_err(|_| ProxyError::InvalidRequest("Proxy path is not valid URL encoding".into()))?
-            .into_owned();
-
-        if next == decoded {
-            break;
-        }
-
-        validate_proxy_path_variant(&next)?;
-        decoded = next;
+    let decoded = urlencoding::decode(path_part)
+        .map_err(|_| ProxyError::InvalidRequest("Proxy path is not valid URL encoding".into()))?;
+    if decoded.contains('%') {
+        return Err(ProxyError::InvalidRequest(
+            "Proxy path contains nested encoding".into(),
+        ));
     }
+    validate_proxy_path_variant(&decoded)?;
 
     Ok(clean_path)
 }

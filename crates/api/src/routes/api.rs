@@ -238,19 +238,12 @@ pub struct ErrorResponse {
 fn validate_proxy_path_segment(value: &str, field_name: &str) -> Result<(), Response> {
     validate_proxy_path_segment_variant(value, field_name)?;
 
-    let mut decoded = value.to_string();
-    for _ in 0..3 {
-        let next = urlencoding::decode(&decoded)
-            .map_err(|_| invalid_proxy_path_segment_response(field_name))?
-            .into_owned();
-
-        if next == decoded {
-            break;
-        }
-
-        validate_proxy_path_segment_variant(&next, field_name)?;
-        decoded = next;
+    let decoded =
+        urlencoding::decode(value).map_err(|_| invalid_proxy_path_segment_response(field_name))?;
+    if decoded.contains('%') {
+        return Err(invalid_proxy_path_segment_response(field_name));
     }
+    validate_proxy_path_segment_variant(&decoded, field_name)?;
 
     Ok(())
 }
