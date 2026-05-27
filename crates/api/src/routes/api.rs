@@ -235,6 +235,52 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
+fn validate_proxy_path_segment(value: &str, field_name: &str) -> Result<(), Response> {
+    validate_proxy_path_segment_variant(value, field_name)?;
+
+    let mut decoded = value.to_string();
+    for _ in 0..3 {
+        let next = urlencoding::decode(&decoded)
+            .map_err(|_| invalid_proxy_path_segment_response(field_name))?
+            .into_owned();
+
+        if next == decoded {
+            break;
+        }
+
+        validate_proxy_path_segment_variant(&next, field_name)?;
+        decoded = next;
+    }
+
+    Ok(())
+}
+
+fn validate_proxy_path_segment_variant(value: &str, field_name: &str) -> Result<(), Response> {
+    if value.is_empty()
+        || value == "."
+        || value == ".."
+        || value.contains('/')
+        || value.contains('\\')
+        || value.contains('?')
+        || value.contains('#')
+        || value.chars().any(char::is_control)
+    {
+        return Err(invalid_proxy_path_segment_response(field_name));
+    }
+
+    Ok(())
+}
+
+fn invalid_proxy_path_segment_response(field_name: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorResponse {
+            error: format!("Invalid {field_name}: unsafe path segment"),
+        }),
+    )
+        .into_response()
+}
+
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ShareRecipientPayload {
     pub kind: ShareRecipientKind,
@@ -2073,6 +2119,8 @@ async fn get_file(
     Extension(user): Extension<AuthenticatedUser>,
     Path(file_id): Path<String>,
 ) -> Result<Json<crate::models::FileGetResponse>, Response> {
+    validate_proxy_path_segment(&file_id, "file_id")?;
+
     tracing::info!(
         "get_file called for user_id={}, file_id={}",
         user.user_id,
@@ -2124,6 +2172,8 @@ async fn delete_file(
     Extension(user): Extension<AuthenticatedUser>,
     Path(file_id): Path<String>,
 ) -> Result<Response, Response> {
+    validate_proxy_path_segment(&file_id, "file_id")?;
+
     tracing::info!(
         "delete_file called for user_id={}, file_id={}",
         user.user_id,
@@ -3011,6 +3061,8 @@ async fn proxy_signature(
     Path(chat_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, Response> {
+    validate_proxy_path_segment(&chat_id, "chat_id")?;
+
     tracing::info!(
         "proxy_signature: GET /v1/signature/{} for user_id={}, session_id={}",
         chat_id,
@@ -4716,6 +4768,8 @@ async fn validate_user_conversation(
     conversation_id: &str,
     required_permission: SharePermission,
 ) -> Result<(), Response> {
+    validate_proxy_path_segment(conversation_id, "conversation_id")?;
+
     state
         .conversation_share_service
         .ensure_access(conversation_id, user.user_id, required_permission)
@@ -4730,6 +4784,8 @@ async fn validate_user_or_public_conversation(
     conversation_id: &str,
     required_permission: SharePermission,
 ) -> Result<(), Response> {
+    validate_proxy_path_segment(conversation_id, "conversation_id")?;
+
     // First check regular access
     let user_access = state
         .conversation_share_service
@@ -4758,6 +4814,8 @@ async fn validate_conversation_access_optional_auth(
     conversation_id: &str,
     required_permission: SharePermission,
 ) -> Result<(), Response> {
+    validate_proxy_path_segment(conversation_id, "conversation_id")?;
+
     if let Some(user) = user {
         // User is authenticated - check their access or public share
         validate_user_or_public_conversation(state, user, conversation_id, required_permission)
@@ -4778,6 +4836,8 @@ async fn validate_owner_conversation(
     user: &AuthenticatedUser,
     conversation_id: &str,
 ) -> Result<(), Response> {
+    validate_proxy_path_segment(conversation_id, "conversation_id")?;
+
     state
         .conversation_service
         .access_conversation(conversation_id, user.user_id)
@@ -4819,6 +4879,8 @@ async fn fetch_conversation_from_proxy(
     conversation_id: &str,
     headers: HeaderMap,
 ) -> Result<serde_json::Value, Response> {
+    validate_proxy_path_segment(conversation_id, "conversation_id")?;
+
     fn bad_gateway(message: impl Into<String>) -> Response {
         (
             StatusCode::BAD_GATEWAY,
@@ -4878,6 +4940,8 @@ async fn validate_user_file(
     user: &AuthenticatedUser,
     file_id: &str,
 ) -> Result<(), Response> {
+    validate_proxy_path_segment(file_id, "file_id")?;
+
     state
         .file_service
         .access_file(file_id, user.user_id)
@@ -5313,7 +5377,7 @@ async fn collect_stream_to_bytes(
 
 #[cfg(test)]
 mod tests {
-    use super::decompress_if_encoded;
+    use super::{decompress_if_encoded, validate_proxy_path_segment};
     use bytes::Bytes;
     use flate2::{write::DeflateEncoder, write::GzEncoder, write::ZlibEncoder, Compression};
     use http::{HeaderMap, HeaderValue};
@@ -5357,6 +5421,38 @@ mod tests {
 
     fn zstd_encode(input: &[u8]) -> Vec<u8> {
         zstd::stream::encode_all(input, 1).unwrap()
+    }
+
+    #[test]
+    fn validates_safe_proxy_path_segments() {
+        for value in ["conv_abc123", "file-abc_123", "Qwen3.5-122B-A10B"] {
+            assert!(
+                validate_proxy_path_segment(value, "id").is_ok(),
+                "segment should be accepted: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_proxy_path_segment_breakouts() {
+        for value in [
+            "",
+            ".",
+            "..",
+            "../files",
+            "..%2Ffiles",
+            "%2e%2e%2ffiles",
+            "%252e%252e%252ffiles",
+            "abc%2Fdef",
+            "abc%5Cdef",
+            "abc%3Fadmin=true",
+            "abc#fragment",
+        ] {
+            assert!(
+                validate_proxy_path_segment(value, "id").is_err(),
+                "segment should be rejected: {value}"
+            );
+        }
     }
 
     #[test]

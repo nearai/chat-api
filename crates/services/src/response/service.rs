@@ -28,6 +28,68 @@ impl OpenAIProxy {
     }
 }
 
+fn validate_proxy_path(path: &str) -> Result<&str, ProxyError> {
+    let clean_path = path.trim_start_matches('/');
+    if clean_path.is_empty() {
+        return Err(ProxyError::InvalidRequest(
+            "Proxy path cannot be empty".to_string(),
+        ));
+    }
+
+    if clean_path.contains('#') || clean_path.chars().any(char::is_control) {
+        return Err(ProxyError::InvalidRequest(
+            "Proxy path contains an unsafe delimiter".to_string(),
+        ));
+    }
+
+    let path_part = clean_path
+        .split_once('?')
+        .map(|(path_part, _)| path_part)
+        .unwrap_or(clean_path);
+
+    validate_proxy_path_variant(path_part)?;
+
+    let mut decoded = path_part.to_string();
+    for _ in 0..3 {
+        let next = urlencoding::decode(&decoded)
+            .map_err(|_| ProxyError::InvalidRequest("Proxy path is not valid URL encoding".into()))?
+            .into_owned();
+
+        if next == decoded {
+            break;
+        }
+
+        validate_proxy_path_variant(&next)?;
+        decoded = next;
+    }
+
+    Ok(clean_path)
+}
+
+fn validate_proxy_path_variant(path: &str) -> Result<(), ProxyError> {
+    if path.contains('\\') {
+        return Err(ProxyError::InvalidRequest(
+            "Proxy path cannot contain backslashes".to_string(),
+        ));
+    }
+
+    if path.contains('?') || path.contains('#') || path.chars().any(char::is_control) {
+        return Err(ProxyError::InvalidRequest(
+            "Proxy path contains an unsafe delimiter".to_string(),
+        ));
+    }
+
+    for segment in path.split('/') {
+        if segment.is_empty() || segment == "." || segment == ".." {
+            return Err(ProxyError::InvalidRequest(
+                "Proxy path contains an unsafe path segment".to_string(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 #[async_trait]
 impl OpenAIProxyService for OpenAIProxy {
     async fn forward_request(
@@ -37,15 +99,15 @@ impl OpenAIProxyService for OpenAIProxy {
         mut headers: HeaderMap,
         body: Option<Bytes>,
     ) -> Result<ProxyResponse, ProxyError> {
+        let clean_path = validate_proxy_path(path)?;
+
         // Get API key
         let api_key = self.vpc_service.get_api_key().await.map_err(|e| {
             tracing::error!("Failed to get API key: {}", e);
             ProxyError::ApiError("Failed to get API key".to_string())
         })?;
 
-        // Ensure path doesn't start with a slash
-        let clean_path = path.trim_start_matches('/');
-        let url = format!("{}/{}", self.base_url, clean_path);
+        let url = format!("{}/{}", self.base_url.trim_end_matches('/'), clean_path);
 
         tracing::info!("OpenAI Proxy: Forwarding request {} to {}", method, url);
 
@@ -129,5 +191,70 @@ mod tests {
         let service =
             OpenAIProxy::new(vpc_service).with_base_url("https://custom.api.com/v1".to_string());
         assert_eq!(service.base_url, "https://custom.api.com/v1");
+    }
+
+    #[test]
+    fn validate_proxy_path_allows_normal_paths_and_encoded_model_names() {
+        assert_eq!(
+            validate_proxy_path("chat/completions").unwrap(),
+            "chat/completions"
+        );
+        assert_eq!(
+            validate_proxy_path("/model/Qwen%2FQwen3.5-122B-A10B").unwrap(),
+            "model/Qwen%2FQwen3.5-122B-A10B"
+        );
+        assert_eq!(
+            validate_proxy_path("attestation/report?nonce=abc123").unwrap(),
+            "attestation/report?nonce=abc123"
+        );
+    }
+
+    #[test]
+    fn validate_proxy_path_rejects_raw_traversal() {
+        assert!(matches!(
+            validate_proxy_path("signature/../files"),
+            Err(ProxyError::InvalidRequest(_))
+        ));
+        assert!(matches!(
+            validate_proxy_path("signature/./files"),
+            Err(ProxyError::InvalidRequest(_))
+        ));
+    }
+
+    #[test]
+    fn validate_proxy_path_rejects_encoded_traversal() {
+        for path in [
+            "signature/..%2Ffiles",
+            "signature/%2e%2e%2ffiles",
+            "signature/%252e%252e%252ffiles",
+            "signature/%2e%2e%5cfiles",
+            "signature/%2e%2e%3Ftarget=files",
+        ] {
+            assert!(
+                matches!(
+                    validate_proxy_path(path),
+                    Err(ProxyError::InvalidRequest(_))
+                ),
+                "path should be rejected: {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_proxy_path_rejects_ambiguous_paths() {
+        for path in [
+            "",
+            "files//content",
+            "signature/..\\files",
+            "files/abc#frag",
+        ] {
+            assert!(
+                matches!(
+                    validate_proxy_path(path),
+                    Err(ProxyError::InvalidRequest(_))
+                ),
+                "path should be rejected: {path}"
+            );
+        }
     }
 }
