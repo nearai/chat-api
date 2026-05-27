@@ -62,6 +62,7 @@ pub struct AppState {
     pub agent_proxy_service: Arc<dyn services::agent::AgentProxyService>,
     pub redirect_uri: String,
     pub admin_domains: Arc<Vec<String>>,
+    pub admin_emails: Arc<Vec<String>>,
     pub vpc_credentials_service: Arc<dyn services::vpc::VpcCredentialsService>,
     /// Whether Stripe test clock feature is enabled
     pub stripe_test_clock_enabled: bool,

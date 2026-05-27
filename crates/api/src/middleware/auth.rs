@@ -47,6 +47,7 @@ pub struct AuthState {
     pub session_repository: Arc<dyn services::auth::ports::SessionRepository>,
     pub user_service: Arc<dyn services::user::ports::UserService>,
     pub admin_domains: Arc<Vec<String>>,
+    pub admin_emails: Arc<Vec<String>>,
 }
 
 /// Hash a session token for lookup
@@ -265,6 +266,15 @@ fn is_admin_domain(email: &str, admin_domains: &[String]) -> bool {
     }
 }
 
+/// Check whether email is in the explicit admin email allowlist.
+fn is_admin_email(email: &str, admin_emails: &[String]) -> bool {
+    if admin_emails.is_empty() {
+        tracing::warn!("Admin emails allowlist is empty, denying access");
+        return false;
+    }
+    admin_emails.contains(&email.trim().to_lowercase())
+}
+
 /// Authentication middleware that validates session tokens
 pub async fn auth_middleware(
     State(state): State<AuthState>,
@@ -398,7 +408,9 @@ pub async fn admin_auth_middleware(
 
     let user_email = &user_profile.user.email;
 
-    if !is_admin_domain(user_email, &state.admin_domains) {
+    if !is_admin_domain(user_email, &state.admin_domains)
+        || !is_admin_email(user_email, &state.admin_emails)
+    {
         tracing::warn!(
             "Admin access denied for user_id={}",
             authenticated_user.user_id

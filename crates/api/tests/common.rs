@@ -43,6 +43,10 @@ pub struct TestServerConfig {
     pub email_turnstile_verify_url: Option<String>,
     /// Optional override to enable/disable email auth in tests.
     pub email_auth_enabled: Option<bool>,
+    /// Optional override for admin domains allowlist in tests.
+    pub admin_domains: Option<Vec<String>>,
+    /// Optional override for explicit admin emails allowlist in tests.
+    pub admin_emails: Option<Vec<String>>,
 }
 
 /// Restrictive rate limit config for rate limit tests.
@@ -257,10 +261,18 @@ pub async fn create_test_server_and_db(
         user_repo.clone(),
     ));
 
-    let mut admin_domains = config.admin.admin_domains;
+    let mut admin_domains = test_config
+        .admin_domains
+        .clone()
+        .unwrap_or(config.admin.admin_domains);
+    let mut admin_emails = test_config
+        .admin_emails
+        .clone()
+        .unwrap_or(config.admin.admin_emails);
 
     // Add `admin.org` as test admin domain
     admin_domains.push("admin.org".to_string());
+    admin_emails.push("admin@admin.org".to_string());
 
     let file_service = Arc::new(FileServiceImpl::new(file_repo, proxy_service.clone()));
 
@@ -336,6 +348,7 @@ pub async fn create_test_server_and_db(
         agent_proxy_service,
         redirect_uri: config.oauth.redirect_uri,
         admin_domains: Arc::new(admin_domains),
+        admin_emails: Arc::new(admin_emails),
         stripe_test_clock_enabled: config.stripe.test_clock_enabled,
         cloud_api_base_url: test_config.cloud_api_base_url.clone(),
         http_client,

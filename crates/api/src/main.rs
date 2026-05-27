@@ -357,6 +357,7 @@ async fn main() -> anyhow::Result<()> {
         agent_proxy_service,
         redirect_uri: config.oauth.redirect_uri,
         admin_domains: Arc::new(config.admin.admin_domains),
+        admin_emails: Arc::new(config.admin.admin_emails),
         user_repository: user_repo.clone(),
         vpc_credentials_service,
         stripe_test_clock_enabled: config.stripe.test_clock_enabled,
