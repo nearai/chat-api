@@ -335,6 +335,9 @@ pub async fn create_test_server_and_db(
         agent_repository: agent_repo,
         agent_proxy_service,
         redirect_uri: config.oauth.redirect_uri,
+        frontend_callback_allowed_origins: Some(Arc::new(
+            vec!["http://localhost:3000".to_string()],
+        )),
         admin_domains: Arc::new(admin_domains),
         stripe_test_clock_enabled: config.stripe.test_clock_enabled,
         cloud_api_base_url: test_config.cloud_api_base_url.clone(),

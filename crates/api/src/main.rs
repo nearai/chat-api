@@ -51,6 +51,22 @@ async fn main() -> anyhow::Result<()> {
     }
 
     tracing::info!("Starting API server...");
+    let frontend_callback_allowed_origins = api::routes::oauth::frontend_callback_allowed_origins();
+    match frontend_callback_allowed_origins.as_ref() {
+        Some(origins)
+            if origins.is_empty()
+                && (!config.oauth.google_client_id.is_empty()
+                    || !config.oauth.github_client_id.is_empty()) =>
+        {
+            anyhow::bail!("FRONTEND_CALLBACK_ALLOWED_ORIGINS is set but contains no valid origins");
+        }
+        None => {
+            tracing::warn!(
+                "FRONTEND_CALLBACK_ALLOWED_ORIGINS is not set; OAuth frontend callback origins are unrestricted"
+            );
+        }
+        _ => {}
+    }
 
     tracing::info!(
         "Database: {}:{}/{}",
@@ -356,6 +372,7 @@ async fn main() -> anyhow::Result<()> {
         agent_repository: agent_repo,
         agent_proxy_service,
         redirect_uri: config.oauth.redirect_uri,
+        frontend_callback_allowed_origins: frontend_callback_allowed_origins.map(Arc::new),
         admin_domains: Arc::new(config.admin.admin_domains),
         user_repository: user_repo.clone(),
         vpc_credentials_service,
