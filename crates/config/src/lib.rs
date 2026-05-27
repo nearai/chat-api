@@ -291,7 +291,7 @@ impl Default for AdminConfig {
                 );
                 return false;
             };
-            let allowed = admin_domains.contains(&domain.to_lowercase());
+            let allowed = admin_domains.iter().any(|d| d == domain);
             if !allowed {
                 eprintln!(
                     "Ignoring AUTH_ADMIN_EMAILS entry outside AUTH_ADMIN_DOMAINS: {}",
