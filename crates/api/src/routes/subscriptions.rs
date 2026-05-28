@@ -43,12 +43,24 @@ pub type CreateSubscriptionResponse = CreateSubscriptionOutcome;
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct CancelSubscriptionResponse {
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub product_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network_id: Option<String>,
 }
 
 /// Response for subscription resume
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ResumeSubscriptionResponse {
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub product_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network_id: Option<String>,
 }
 
 /// Request to change subscription plan
@@ -286,16 +298,25 @@ pub async fn cancel_subscription(
             }
         })?;
 
-    let message = match outcome {
-        CancelSubscriptionOutcome::Completed => {
-            "Subscription will be canceled at period end".to_string()
-        }
-        CancelSubscriptionOutcome::NearStakingCancel => {
-            "Complete cancellation in your NEAR wallet".to_string()
-        }
+    let response = match outcome {
+        CancelSubscriptionOutcome::Completed => CancelSubscriptionResponse {
+            message: "Subscription will be canceled at period end".to_string(),
+            kind: None,
+            product_id: None,
+            network_id: None,
+        },
+        CancelSubscriptionOutcome::NearStakingCancel {
+            product_id,
+            network_id,
+        } => CancelSubscriptionResponse {
+            message: "Complete cancellation in your NEAR wallet".to_string(),
+            kind: Some("near_staking_cancel".to_string()),
+            product_id: Some(product_id),
+            network_id: Some(network_id),
+        },
     };
 
-    Ok(Json(CancelSubscriptionResponse { message }))
+    Ok(Json(response))
 }
 
 /// Resume a subscription that was scheduled to cancel at period end
@@ -353,14 +374,25 @@ pub async fn resume_subscription(
             }
         })?;
 
-    let message = match outcome {
-        ResumeSubscriptionOutcome::Completed => "Subscription resumed successfully".to_string(),
-        ResumeSubscriptionOutcome::NearStakingResume => {
-            "Complete resume in your NEAR wallet".to_string()
-        }
+    let response = match outcome {
+        ResumeSubscriptionOutcome::Completed => ResumeSubscriptionResponse {
+            message: "Subscription resumed successfully".to_string(),
+            kind: None,
+            product_id: None,
+            network_id: None,
+        },
+        ResumeSubscriptionOutcome::NearStakingResume {
+            product_id,
+            network_id,
+        } => ResumeSubscriptionResponse {
+            message: "Complete resume in your NEAR wallet".to_string(),
+            kind: Some("near_staking_resume".to_string()),
+            product_id: Some(product_id),
+            network_id: Some(network_id),
+        },
     };
 
-    Ok(Json(ResumeSubscriptionResponse { message }))
+    Ok(Json(response))
 }
 
 /// Change the user's subscription plan

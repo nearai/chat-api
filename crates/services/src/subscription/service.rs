@@ -804,13 +804,42 @@ impl SubscriptionServiceImpl {
         SubscriptionError::NearRpcError(e)
     }
 
-    /// Deterministic HoS catalog `price_id` used only when there is **no** local `house-of-stake` row
-    /// yet (e.g. first sync after wallet link). `get_subscription_for_price` resolves via product;
-    /// we never delete local HoS rows unless the RPC returns `null` **and** we still have local rows
-    /// for that user — so a wrong anchor with no local state only yields a no-op upsert path, not mass delete.
-    fn anchor_hos_price_id(
-        subscription_plans: &HashMap<String, SubscriptionPlanConfig>,
-    ) -> Option<String> {
+    fn configured_staking_contract_id(&self) -> Result<&str, SubscriptionError> {
+        self.near_staking_contract_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or(SubscriptionError::HouseOfStakeNotConfigured)
+    }
+
+    async fn hos_product_id_for_price(
+        &self,
+        contract_id: &str,
+        price_id: &str,
+    ) -> Result<String, SubscriptionError> {
+        let price_json = view_get_price(&self.near_rpc_url, contract_id, price_id)
+            .await
+            .map_err(Self::near_rpc_err)?
+            .ok_or_else(|| {
+                SubscriptionError::InternalError("HoS price not found on-chain".into())
+            })?;
+
+        price_json
+            .get("product_id")
+            .and_then(|x| x.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                SubscriptionError::InternalError(
+                    "HoS price JSON missing or empty product_id".into(),
+                )
+            })
+    }
+
+    /// Deterministic HoS catalog `price_id`s. `get_subscription_for_price` resolves through the
+    /// price's product, so first sync must probe every configured HoS product instead of assuming
+    /// any one price can discover all on-chain subscriptions.
+    fn hos_price_ids(subscription_plans: &HashMap<String, SubscriptionPlanConfig>) -> Vec<String> {
         let mut candidates: Vec<(String, String)> = subscription_plans
             .iter()
             .filter_map(|(plan_name, cfg)| {
@@ -820,7 +849,13 @@ impl SubscriptionServiceImpl {
             })
             .collect();
         candidates.sort_by(|a, b| a.0.cmp(&b.0));
-        candidates.into_iter().next().map(|(_, price_id)| price_id)
+        let mut price_ids = Vec::new();
+        for (_, price_id) in candidates {
+            if !price_id.trim().is_empty() && !price_ids.iter().any(|p| p == &price_id) {
+                price_ids.push(price_id);
+            }
+        }
+        price_ids
     }
 
     /// Best-effort chain reconcile only when local DB shows HoS billing (avoids NEAR RPC on every
@@ -923,31 +958,50 @@ impl SubscriptionServiceImpl {
         let subscription_plans = configs
             .and_then(|c| c.subscription_plans)
             .unwrap_or_default();
-        let Some(anchor_price_id) = Self::anchor_hos_price_id(&subscription_plans) else {
+        let configured_hos_price_ids = Self::hos_price_ids(&subscription_plans);
+        if configured_hos_price_ids.is_empty() {
             return Ok(Self::hos_reconcile_summary(true, 0, false, None));
-        };
+        }
 
         // Prefer the user's stored HoS `price_id` so we query the same catalog SKU they hold.
-        // Fall back to the deterministic anchor only when there is no local HoS row yet — safe
-        // because we only delete local HoS rows when RPC returns null *and* those rows still exist;
-        // a wrong anchor with no local HoS state is a no-op, not a mass delete.
-        let probe_price_id = subs
+        // When there is no local HoS row yet, probe all configured HoS price ids. The staking
+        // contract resolves each price through its product, so one arbitrary price can miss
+        // subscriptions for other products.
+        let local_probe_price_id = subs
             .iter()
             .filter(|s| s.provider == "house-of-stake")
             .find(|s| s.status == "active" || s.status == "trialing")
             .or_else(|| subs.iter().find(|s| s.provider == "house-of-stake"))
             .map(|s| s.price_id.as_str())
-            .filter(|p| !p.is_empty())
-            .unwrap_or(anchor_price_id.as_str());
+            .filter(|p| !p.is_empty());
 
-        let raw = view_get_subscription_for_price(
-            &self.near_rpc_url,
-            contract_id,
-            &near_account,
-            probe_price_id,
-        )
-        .await
-        .map_err(Self::near_rpc_err)?;
+        let raw = if let Some(probe_price_id) = local_probe_price_id {
+            view_get_subscription_for_price(
+                &self.near_rpc_url,
+                contract_id,
+                &near_account,
+                probe_price_id,
+            )
+            .await
+            .map_err(Self::near_rpc_err)?
+        } else {
+            let mut found = None;
+            for price_id in &configured_hos_price_ids {
+                let candidate = view_get_subscription_for_price(
+                    &self.near_rpc_url,
+                    contract_id,
+                    &near_account,
+                    price_id,
+                )
+                .await
+                .map_err(Self::near_rpc_err)?;
+                if candidate.is_some() {
+                    found = candidate;
+                    break;
+                }
+            }
+            found
+        };
 
         let hos_subscription_ids: Vec<String> = subs
             .iter()
@@ -1460,15 +1514,14 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .ok_or(SubscriptionError::NoActiveSubscription)?;
 
         if subscription.provider == "house-of-stake" {
-            let contract_id = self
-                .near_staking_contract_id
-                .as_deref()
-                .ok_or(SubscriptionError::HouseOfStakeNotConfigured)?
-                .trim();
-            if contract_id.is_empty() {
-                return Err(SubscriptionError::HouseOfStakeNotConfigured);
-            }
-            return Ok(CancelSubscriptionOutcome::NearStakingCancel);
+            let contract_id = self.configured_staking_contract_id()?;
+            let product_id = self
+                .hos_product_id_for_price(contract_id, &subscription.price_id)
+                .await?;
+            return Ok(CancelSubscriptionOutcome::NearStakingCancel {
+                product_id,
+                network_id: self.near_network_id.clone(),
+            });
         }
 
         let updated_sub = self
@@ -1549,15 +1602,14 @@ impl SubscriptionService for SubscriptionServiceImpl {
         }
 
         if subscription.provider == "house-of-stake" {
-            let contract_id = self
-                .near_staking_contract_id
-                .as_deref()
-                .ok_or(SubscriptionError::HouseOfStakeNotConfigured)?
-                .trim();
-            if contract_id.is_empty() {
-                return Err(SubscriptionError::HouseOfStakeNotConfigured);
-            }
-            return Ok(ResumeSubscriptionOutcome::NearStakingResume);
+            let contract_id = self.configured_staking_contract_id()?;
+            let product_id = self
+                .hos_product_id_for_price(contract_id, &subscription.price_id)
+                .await?;
+            return Ok(ResumeSubscriptionOutcome::NearStakingResume {
+                product_id,
+                network_id: self.near_network_id.clone(),
+            });
         }
 
         let updated_sub = self
@@ -1756,6 +1808,20 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     new_price_id: price_id,
                 });
             } else if new_amt < cur_amt {
+                let plans = self.get_subscription_plans().await?;
+                let target_limits = effective_limits(plans.get(&target_plan));
+                let instance_count = self
+                    .agent_repo
+                    .count_user_instances(user_id)
+                    .await
+                    .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
+                    as u64;
+                if instance_count > target_limits.instances_max {
+                    return Err(SubscriptionError::InstanceLimitExceeded {
+                        current: instance_count,
+                        max: target_limits.instances_max,
+                    });
+                }
                 return Ok(ChangePlanOutcome::NearStakingScheduleDowngrade {
                     target_price_id: price_id,
                 });
@@ -3203,6 +3269,23 @@ mod tests {
         }
     }
 
+    fn hos_plan_config(price_id: &str) -> SubscriptionPlanConfig {
+        SubscriptionPlanConfig {
+            providers: HashMap::from([(
+                "house-of-stake".to_string(),
+                PaymentProviderConfig {
+                    price_id: price_id.to_string(),
+                },
+            )]),
+            price: None,
+            trial_period_days: None,
+            agent_instances: None,
+            monthly_tokens: None,
+            monthly_credits: None,
+            allowed_models: None,
+        }
+    }
+
     fn base_subscription() -> Subscription {
         let period_end = Utc::now() + Duration::days(7);
         Subscription {
@@ -3421,6 +3504,23 @@ mod tests {
         assert_eq!(
             resolve_plan_name_from_config("stripe", "price_unknown", &plans),
             None
+        );
+    }
+
+    #[test]
+    fn test_hos_price_ids_are_deterministic_and_deduped() {
+        let mut plans = HashMap::new();
+        plans.insert("pro".to_string(), hos_plan_config("price_hos_pro"));
+        plans.insert("basic".to_string(), hos_plan_config("price_hos_basic"));
+        plans.insert("starter".to_string(), hos_plan_config("price_hos_basic"));
+        plans.insert(
+            "stripe_only".to_string(),
+            plan_config("price_stripe", 100, 1),
+        );
+
+        assert_eq!(
+            SubscriptionServiceImpl::hos_price_ids(&plans),
+            vec!["price_hos_basic".to_string(), "price_hos_pro".to_string()]
         );
     }
 

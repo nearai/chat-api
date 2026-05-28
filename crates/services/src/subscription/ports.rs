@@ -146,7 +146,10 @@ pub enum ChangePlanOutcome {
 #[derive(Debug, Clone)]
 pub enum CancelSubscriptionOutcome {
     Completed,
-    NearStakingCancel,
+    NearStakingCancel {
+        product_id: String,
+        network_id: String,
+    },
 }
 
 /// Stripe path updates the DB. HoS returns a wallet intent only; local rows refresh after chain
@@ -154,7 +157,10 @@ pub enum CancelSubscriptionOutcome {
 #[derive(Debug, Clone)]
 pub enum ResumeSubscriptionOutcome {
     Completed,
-    NearStakingResume,
+    NearStakingResume {
+        product_id: String,
+        network_id: String,
+    },
 }
 
 /// Machine-readable [`NearStakingSyncSummary::skipped_reason`] when chain returned a HoS

@@ -3580,12 +3580,34 @@ fn near_rpc_wiremock_hos_subscription_probe_only(
     subscription_result: serde_json::Value,
 ) -> impl wiremock::Respond {
     move |req: &wiremock::Request| {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+
         let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or(json!({}));
         let empty = json!({});
         let params = body.get("params").unwrap_or(&empty);
         match params.get("method_name").and_then(|x| x.as_str()) {
             Some("get_subscription_for_price") => ResponseTemplate::new(200)
                 .set_body_json(near_rpc_call_function_body(&subscription_result)),
+            Some("get_price") => {
+                let args_b64 = params
+                    .get("args_base64")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("");
+                let decoded = STANDARD
+                    .decode(args_b64)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                    .unwrap_or_default();
+                let pid = decoded
+                    .get("price_id")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("price_hos_basic");
+                ResponseTemplate::new(200).set_body_json(near_rpc_call_function_body(&json!({
+                    "price_id": pid,
+                    "product_id": "nearai|prod_cat",
+                    "amount": "1000000000000000000000000"
+                })))
+            }
             _ => ResponseTemplate::new(500).set_body_json(json!({ "error": "unmocked NEAR RPC" })),
         }
     }
@@ -3801,6 +3823,18 @@ async fn test_cancel_subscription_house_of_stake_returns_wallet_intent_message()
         body.get("message").and_then(|x| x.as_str()),
         Some("Complete cancellation in your NEAR wallet")
     );
+    assert_eq!(
+        body.get("kind").and_then(|x| x.as_str()),
+        Some("near_staking_cancel")
+    );
+    assert_eq!(
+        body.get("product_id").and_then(|x| x.as_str()),
+        Some("nearai|prod_cat")
+    );
+    assert_eq!(
+        body.get("network_id").and_then(|x| x.as_str()),
+        Some("mainnet")
+    );
 }
 
 #[tokio::test]
@@ -3872,6 +3906,18 @@ async fn test_resume_subscription_house_of_stake_returns_wallet_intent_message()
     assert_eq!(
         body.get("message").and_then(|x| x.as_str()),
         Some("Complete resume in your NEAR wallet")
+    );
+    assert_eq!(
+        body.get("kind").and_then(|x| x.as_str()),
+        Some("near_staking_resume")
+    );
+    assert_eq!(
+        body.get("product_id").and_then(|x| x.as_str()),
+        Some("nearai|prod_cat")
+    );
+    assert_eq!(
+        body.get("network_id").and_then(|x| x.as_str()),
+        Some("mainnet")
     );
 }
 
