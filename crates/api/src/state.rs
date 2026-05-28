@@ -61,7 +61,11 @@ pub struct AppState {
     pub agent_repository: Arc<dyn services::agent::ports::AgentRepository>,
     pub agent_proxy_service: Arc<dyn services::agent::AgentProxyService>,
     pub redirect_uri: String,
+    /// Exact frontend origins allowed for user-provided OAuth frontend callbacks.
+    /// None means origin restrictions are disabled.
+    pub frontend_callback_allowed_origins: Option<Arc<Vec<String>>>,
     pub admin_domains: Arc<Vec<String>>,
+    pub admin_emails: Arc<Vec<String>>,
     pub vpc_credentials_service: Arc<dyn services::vpc::VpcCredentialsService>,
     /// Whether Stripe test clock feature is enabled
     pub stripe_test_clock_enabled: bool,
@@ -92,4 +96,6 @@ pub struct AppState {
     pub rate_limit_state: crate::middleware::RateLimitState,
     /// BI metrics service for deployment and usage analytics
     pub bi_metrics_service: Arc<dyn services::bi_metrics::BiMetricsService>,
+    /// Publisher for account deletion worker tasks. Kept separate from the generic task queue.
+    pub account_deletion_task_publisher: Option<Arc<dyn crate::tasks::TaskPublisher>>,
 }

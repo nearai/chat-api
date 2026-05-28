@@ -88,6 +88,7 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         session_repository: app_state.session_repository.clone(),
         user_service: app_state.user_service.clone(),
         admin_domains: app_state.admin_domains.clone(),
+        admin_emails: app_state.admin_emails.clone(),
     };
 
     // Create metrics state for middleware

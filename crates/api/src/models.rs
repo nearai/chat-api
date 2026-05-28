@@ -44,6 +44,25 @@ pub struct EmailAuthResponse {
     pub is_new_user: bool,
 }
 
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UserAccountDeletionResponse {
+    pub id: uuid::Uuid,
+    pub user_id: UserId,
+    pub status: String,
+    pub requested_at: String,
+}
+
+impl From<services::user::ports::AccountDeletion> for UserAccountDeletionResponse {
+    fn from(deletion: services::user::ports::AccountDeletion) -> Self {
+        Self {
+            id: deletion.id,
+            user_id: deletion.user_id,
+            status: deletion.status.as_str().to_string(),
+            requested_at: deletion.requested_at.to_rfc3339(),
+        }
+    }
+}
+
 /// Response for successful authentication
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct AuthResponse {
@@ -1139,6 +1158,7 @@ pub struct UsageResponse {
     pub api_key_name: String,
     pub input_tokens: i64,
     pub output_tokens: i64,
+    pub cache_read_tokens: i64,
     pub total_tokens: i64,
     pub metric_key: String,
     pub quantity: i64,
@@ -1157,6 +1177,7 @@ impl From<services::agent::ports::UsageLogEntry> for UsageResponse {
             api_key_name: usage.api_key_name,
             input_tokens: usage.input_tokens,
             output_tokens: usage.output_tokens,
+            cache_read_tokens: usage.cache_read_tokens,
             total_tokens: usage.total_tokens,
             metric_key: usage.metric_key,
             quantity: usage.quantity,

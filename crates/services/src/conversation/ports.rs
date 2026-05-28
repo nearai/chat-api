@@ -282,6 +282,19 @@ pub trait ConversationService: Send + Sync {
         conversation_id: &str,
         user_id: UserId,
     ) -> Result<serde_json::Value, ConversationError>;
+
+    /// Delete a conversation from the upstream Cloud API without changing local DB state.
+    async fn delete_conversation_from_provider(
+        &self,
+        conversation_id: &str,
+    ) -> Result<serde_json::Value, ConversationError>;
+
+    /// Delete a file from the upstream provider without changing local DB state.
+    /// Treats 404 (already deleted) as success for idempotent retry.
+    async fn delete_file_from_provider(
+        &self,
+        file_id: &str,
+    ) -> Result<serde_json::Value, ConversationError>;
 }
 
 #[derive(Debug, Clone)]

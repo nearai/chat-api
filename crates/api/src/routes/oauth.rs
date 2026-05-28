@@ -18,9 +18,41 @@ use services::metrics::consts::{
     METRIC_USER_LOGIN, METRIC_USER_SIGNUP, TAG_AUTH_METHOD, TAG_IS_NEW_USER,
 };
 use services::SessionId;
+use std::collections::HashSet;
 use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
+use url::{Host, Url};
 use utoipa::ToSchema;
+
+const FRONTEND_CALLBACK_ALLOWED_ORIGINS_ENV: &str = "FRONTEND_CALLBACK_ALLOWED_ORIGINS";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FrontendCallbackValidationError {
+    Malformed,
+    UnsupportedScheme,
+    MissingHost,
+    CredentialsNotAllowed,
+    QueryOrFragmentNotAllowed,
+    Insecure,
+    UntrustedOrigin,
+}
+
+impl std::fmt::Display for FrontendCallbackValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let message = match self {
+            Self::Malformed => "malformed URL",
+            Self::UnsupportedScheme => "unsupported URL scheme",
+            Self::MissingHost => "missing URL host",
+            Self::CredentialsNotAllowed => "credentials are not allowed in callback URLs",
+            Self::QueryOrFragmentNotAllowed => {
+                "query strings and fragments are not allowed in callback URLs"
+            }
+            Self::Insecure => "callback URL must use HTTPS",
+            Self::UntrustedOrigin => "callback URL origin is not allowlisted",
+        };
+        f.write_str(message)
+    }
+}
 
 pub struct OptionalConnectInfo<T>(Option<T>);
 
@@ -59,6 +91,152 @@ fn try_add_gateway_cookie(headers: &mut HeaderMap, cookie: Option<String>, conte
             context
         );
     }
+}
+
+pub fn frontend_callback_allowed_origins() -> Option<Vec<String>> {
+    frontend_callback_allowed_origins_from(
+        std::env::var(FRONTEND_CALLBACK_ALLOWED_ORIGINS_ENV)
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn frontend_callback_allowed_origins_from(configured_origins: Option<&str>) -> Option<Vec<String>> {
+    let raw_origins = configured_origins?;
+    let mut origins = Vec::new();
+    let mut seen = HashSet::new();
+
+    for origin in raw_origins
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        match validate_frontend_origin(origin) {
+            Ok(url) => insert_origin(&mut origins, &mut seen, &url),
+            Err(err) => tracing::warn!(
+                "Ignoring invalid {FRONTEND_CALLBACK_ALLOWED_ORIGINS_ENV} entry '{origin}': {err}"
+            ),
+        }
+    }
+
+    Some(origins)
+}
+
+fn validate_frontend_callback_url(
+    raw_url: &str,
+    allowed_origins: Option<&[String]>,
+) -> Result<String, FrontendCallbackValidationError> {
+    if let Some(origins) = allowed_origins {
+        if origins.is_empty() {
+            return Err(FrontendCallbackValidationError::UntrustedOrigin);
+        }
+    }
+
+    validate_frontend_url(raw_url, allowed_origins.unwrap_or(&[]))
+        .map(|url| trim_trailing_slash(url.as_str()))
+}
+
+fn build_oauth_frontend_redirect(
+    frontend_base_url: &str,
+    token: &str,
+    session_id: &str,
+    expires_at: &str,
+    is_new_user: bool,
+) -> Result<String, url::ParseError> {
+    let mut url = Url::parse(frontend_base_url)?;
+    let base_path = url.path().trim_end_matches('/');
+    let callback_path = if base_path.is_empty() {
+        "/auth/callback".to_string()
+    } else {
+        format!("{base_path}/auth/callback")
+    };
+
+    url.set_path(&callback_path);
+    url.query_pairs_mut()
+        .clear()
+        .append_pair("token", token)
+        .append_pair("session_id", session_id)
+        .append_pair("expires_at", expires_at);
+
+    if is_new_user {
+        url.query_pairs_mut().append_pair("is_new_user", "true");
+    }
+
+    Ok(url.to_string())
+}
+
+fn validate_frontend_origin(raw_url: &str) -> Result<Url, FrontendCallbackValidationError> {
+    let url = validate_frontend_url(raw_url, &[])?;
+    if !url.path().is_empty() && url.path() != "/" {
+        return Err(FrontendCallbackValidationError::Malformed);
+    }
+    Ok(url)
+}
+
+fn validate_frontend_url(
+    raw_url: &str,
+    allowed_origins: &[String],
+) -> Result<Url, FrontendCallbackValidationError> {
+    let url = Url::parse(raw_url.trim()).map_err(|_| FrontendCallbackValidationError::Malformed)?;
+
+    match url.scheme() {
+        "http" | "https" => {}
+        _ => return Err(FrontendCallbackValidationError::UnsupportedScheme),
+    }
+
+    if url.host().is_none() {
+        return Err(FrontendCallbackValidationError::MissingHost);
+    }
+
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(FrontendCallbackValidationError::CredentialsNotAllowed);
+    }
+
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err(FrontendCallbackValidationError::QueryOrFragmentNotAllowed);
+    }
+
+    if url.scheme() != "https" && !is_loopback_http_url(&url) {
+        return Err(FrontendCallbackValidationError::Insecure);
+    }
+
+    if !allowed_origins.is_empty()
+        && !allowed_origins
+            .iter()
+            .any(|origin| origin == &url_origin(&url))
+    {
+        return Err(FrontendCallbackValidationError::UntrustedOrigin);
+    }
+
+    Ok(url)
+}
+
+fn is_loopback_http_url(url: &Url) -> bool {
+    if url.scheme() != "http" {
+        return false;
+    }
+
+    match url.host() {
+        Some(Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        Some(Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(Host::Ipv6(ip)) => IpAddr::V6(ip).is_loopback(),
+        None => false,
+    }
+}
+
+fn insert_origin(origins: &mut Vec<String>, seen: &mut HashSet<String>, url: &Url) {
+    let origin = url_origin(url);
+    if seen.insert(origin.clone()) {
+        origins.push(origin);
+    }
+}
+
+fn url_origin(url: &Url) -> String {
+    url.origin().ascii_serialization()
+}
+
+fn trim_trailing_slash(value: &str) -> String {
+    value.trim_end_matches('/').to_string()
 }
 
 /// Request body for email OTP code request
@@ -275,7 +453,24 @@ pub struct OAuthCallbackQuery {
 #[derive(Debug, Deserialize)]
 pub struct OAuthInitQuery {
     pub redirect_uri: Option<String>,
-    pub frontend_callback: Option<String>,
+    pub frontend_callback: String,
+}
+
+fn validate_oauth_frontend_callback(
+    frontend_callback: &str,
+    app_state: &AppState,
+) -> Result<String, ApiError> {
+    validate_frontend_callback_url(
+        frontend_callback,
+        app_state
+            .frontend_callback_allowed_origins
+            .as_deref()
+            .map(|origins| origins.as_slice()),
+    )
+    .map_err(|err| {
+        tracing::warn!("Rejected OAuth frontend_callback: {}", err);
+        ApiError::bad_request("Invalid frontend_callback")
+    })
 }
 
 /// Request body for logout
@@ -547,7 +742,7 @@ pub async fn verify_email_code(
     tag = "Auth",
     params(
         ("redirect_uri" = Option<String>, Query, description = "Optional OAuth redirect URI (usually your API callback)"),
-        ("frontend_callback" = Option<String>, Query, description = "Frontend URL to redirect to after authentication")
+        ("frontend_callback" = String, Query, description = "Required frontend URL to redirect to after authentication")
     ),
     responses(
         (status = 302, description = "Redirect to Google OAuth"),
@@ -559,15 +754,16 @@ pub async fn google_login(
     Query(params): Query<OAuthInitQuery>,
 ) -> Result<Redirect, ApiError> {
     tracing::info!(
-        "Google OAuth login initiated - redirect_uri: {:?}, frontend_callback: {:?}",
+        "Google OAuth login initiated - redirect_uri: {:?}, frontend_callback_provided=true",
         params.redirect_uri,
-        params.frontend_callback
     );
 
     let redirect_uri = params
         .redirect_uri
         .clone()
         .unwrap_or_else(|| format!("{}/v1/auth/callback", app_state.redirect_uri));
+    let frontend_callback =
+        validate_oauth_frontend_callback(&params.frontend_callback, &app_state)?;
 
     tracing::debug!("Using OAuth redirect_uri: {}", redirect_uri);
 
@@ -576,7 +772,7 @@ pub async fn google_login(
         .get_authorization_url(
             services::auth::ports::OAuthProvider::Google,
             redirect_uri.clone(),
-            params.frontend_callback.clone(),
+            Some(frontend_callback),
         )
         .await
         .map_err(|e| {
@@ -703,31 +899,44 @@ pub async fn oauth_callback(
     let mut headers = HeaderMap::new();
     try_add_gateway_cookie(&mut headers, gateway_cookie, "oauth_callback");
 
-    // Use frontend_callback from OAuth state, or fall back to FRONTEND_URL env var
-    let frontend_url = frontend_callback.clone().unwrap_or_else(|| {
-        let fallback =
-            std::env::var("FRONTEND_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
-        tracing::debug!(
-            "No frontend_callback in OAuth state, using fallback: {}",
-            fallback
-        );
-        fallback
-    });
+    // Use the validated frontend_callback from OAuth state as the only redirect destination.
+    let frontend_url = match frontend_callback.as_deref() {
+        Some(callback) => {
+            match validate_frontend_callback_url(
+                callback,
+                app_state
+                    .frontend_callback_allowed_origins
+                    .as_deref()
+                    .map(|origins| origins.as_slice()),
+            ) {
+                Ok(validated) => validated,
+                Err(err) => {
+                    tracing::warn!("Stored OAuth frontend_callback is invalid: {}", err);
+                    return Err(ApiError::bad_request("Invalid frontend_callback"));
+                }
+            }
+        }
+        None => {
+            tracing::warn!("OAuth state is missing frontend_callback");
+            return Err(ApiError::bad_request("frontend_callback is required"));
+        }
+    };
 
-    tracing::info!("Redirecting to frontend: {}", frontend_url);
+    tracing::info!("Redirecting to validated OAuth frontend callback");
 
-    let mut callback_url = format!(
-        "{}/auth/callback?token={}&session_id={}&expires_at={}",
-        frontend_url,
-        urlencoding::encode(&token),
-        urlencoding::encode(&session.session_id.to_string()),
-        urlencoding::encode(&session.expires_at.to_rfc3339())
-    );
-    if is_new_user {
-        callback_url.push_str("&is_new_user=true");
-    }
+    let callback_url = build_oauth_frontend_redirect(
+        &frontend_url,
+        &token,
+        &session.session_id.to_string(),
+        &session.expires_at.to_rfc3339(),
+        is_new_user,
+    )
+    .map_err(|err| {
+        tracing::error!("Failed to build OAuth frontend callback URL: {}", err);
+        ApiError::internal_server_error("Invalid callback URL")
+    })?;
 
-    tracing::debug!("Final callback URL: {}", callback_url);
+    tracing::debug!("OAuth frontend callback URL built successfully");
     headers.insert(
         LOCATION,
         callback_url.parse().map_err(|_| {
@@ -746,7 +955,7 @@ pub async fn oauth_callback(
     tag = "Auth",
     params(
         ("redirect_uri" = Option<String>, Query, description = "Optional OAuth redirect URI (usually your API callback)"),
-        ("frontend_callback" = Option<String>, Query, description = "Frontend URL to redirect to after authentication")
+        ("frontend_callback" = String, Query, description = "Required frontend URL to redirect to after authentication")
     ),
     responses(
         (status = 302, description = "Redirect to Github OAuth"),
@@ -758,15 +967,16 @@ pub async fn github_login(
     Query(params): Query<OAuthInitQuery>,
 ) -> Result<Redirect, ApiError> {
     tracing::info!(
-        "Github OAuth login initiated - redirect_uri: {:?}, frontend_callback: {:?}",
+        "Github OAuth login initiated - redirect_uri: {:?}, frontend_callback_provided=true",
         params.redirect_uri,
-        params.frontend_callback
     );
 
     let redirect_uri = params
         .redirect_uri
         .clone()
         .unwrap_or_else(|| format!("{}/v1/auth/callback", app_state.redirect_uri));
+    let frontend_callback =
+        validate_oauth_frontend_callback(&params.frontend_callback, &app_state)?;
 
     tracing::debug!("Using OAuth redirect_uri: {}", redirect_uri);
 
@@ -775,7 +985,7 @@ pub async fn github_login(
         .get_authorization_url(
             services::auth::ports::OAuthProvider::Github,
             redirect_uri.clone(),
-            params.frontend_callback.clone(),
+            Some(frontend_callback),
         )
         .await
         .map_err(|e| {
@@ -1168,9 +1378,122 @@ pub fn create_oauth_router() -> Router<AppState> {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_client_ip, select_proxy_chain_ip};
+    use super::{
+        build_oauth_frontend_redirect, extract_client_ip, frontend_callback_allowed_origins_from,
+        select_proxy_chain_ip, validate_frontend_callback_url, FrontendCallbackValidationError,
+    };
     use axum::http::{HeaderMap, HeaderValue};
     use std::net::{IpAddr, SocketAddr};
+
+    fn allowlist() -> Vec<String> {
+        vec![
+            "https://app.near.ai".to_string(),
+            "http://localhost:3000".to_string(),
+        ]
+    }
+
+    #[test]
+    fn validates_https_callback_on_allowlisted_origin() {
+        let callback =
+            validate_frontend_callback_url("https://app.near.ai/app/", Some(&allowlist())).unwrap();
+        assert_eq!(callback, "https://app.near.ai/app");
+    }
+
+    #[test]
+    fn rejects_untrusted_callback_origin() {
+        let err = validate_frontend_callback_url("https://evil.example/auth", Some(&allowlist()))
+            .unwrap_err();
+        assert_eq!(err, FrontendCallbackValidationError::UntrustedOrigin);
+    }
+
+    #[test]
+    fn allows_any_origin_when_allowlist_is_unset() {
+        let callback = validate_frontend_callback_url("https://staging.example.dev", None).unwrap();
+        assert_eq!(callback, "https://staging.example.dev");
+    }
+
+    #[test]
+    fn rejects_callbacks_when_allowlist_is_explicitly_empty() {
+        let err = validate_frontend_callback_url("https://app.near.ai", Some(&[])).unwrap_err();
+        assert_eq!(err, FrontendCallbackValidationError::UntrustedOrigin);
+    }
+
+    #[test]
+    fn rejects_insecure_remote_callback_even_when_allowlisted() {
+        let allowed = vec!["http://app.near.ai".to_string()];
+        let err = validate_frontend_callback_url("http://app.near.ai", Some(&allowed)).unwrap_err();
+        assert_eq!(err, FrontendCallbackValidationError::Insecure);
+    }
+
+    #[test]
+    fn allows_localhost_http_for_local_development() {
+        let callback =
+            validate_frontend_callback_url("http://localhost:3000", Some(&allowlist())).unwrap();
+        assert_eq!(callback, "http://localhost:3000");
+    }
+
+    #[test]
+    fn rejects_ambiguous_callback_urls() {
+        assert_eq!(
+            validate_frontend_callback_url("javascript:alert(1)", Some(&allowlist())).unwrap_err(),
+            FrontendCallbackValidationError::UnsupportedScheme
+        );
+        assert_eq!(
+            validate_frontend_callback_url("https://user@app.near.ai", Some(&allowlist()))
+                .unwrap_err(),
+            FrontendCallbackValidationError::CredentialsNotAllowed
+        );
+        assert_eq!(
+            validate_frontend_callback_url(
+                "https://app.near.ai?next=https://evil.example",
+                Some(&allowlist())
+            )
+            .unwrap_err(),
+            FrontendCallbackValidationError::QueryOrFragmentNotAllowed
+        );
+        assert_eq!(
+            validate_frontend_callback_url("https://app.near.ai#token", Some(&allowlist()))
+                .unwrap_err(),
+            FrontendCallbackValidationError::QueryOrFragmentNotAllowed
+        );
+    }
+
+    #[test]
+    fn builds_oauth_redirect_under_validated_frontend_base() {
+        let redirect = build_oauth_frontend_redirect(
+            "https://app.near.ai/app",
+            "tok en",
+            "session-1",
+            "2026-05-27T00:00:00Z",
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(
+            redirect,
+            "https://app.near.ai/app/auth/callback?token=tok+en&session_id=session-1&expires_at=2026-05-27T00%3A00%3A00Z&is_new_user=true"
+        );
+    }
+
+    #[test]
+    fn derives_allowed_origins_from_env_list() {
+        let origins = frontend_callback_allowed_origins_from(Some(
+            "https://admin.near.ai,ftp://bad.example,http://localhost:3000",
+        ));
+
+        assert_eq!(
+            origins,
+            Some(vec![
+                "https://admin.near.ai".to_string(),
+                "http://localhost:3000".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn unset_env_origin_list_disables_origin_restrictions() {
+        assert_eq!(frontend_callback_allowed_origins_from(None), None);
+    }
 
     #[test]
     fn select_proxy_chain_ip_uses_ip_before_trusted_suffix() {

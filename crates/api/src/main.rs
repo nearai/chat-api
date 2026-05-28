@@ -51,6 +51,22 @@ async fn main() -> anyhow::Result<()> {
     }
 
     tracing::info!("Starting API server...");
+    let frontend_callback_allowed_origins = api::routes::oauth::frontend_callback_allowed_origins();
+    match frontend_callback_allowed_origins.as_ref() {
+        Some(origins)
+            if origins.is_empty()
+                && (!config.oauth.google_client_id.is_empty()
+                    || !config.oauth.github_client_id.is_empty()) =>
+        {
+            anyhow::bail!("FRONTEND_CALLBACK_ALLOWED_ORIGINS is set but contains no valid origins");
+        }
+        None => {
+            tracing::warn!(
+                "FRONTEND_CALLBACK_ALLOWED_ORIGINS is not set; OAuth frontend callback origins are unrestricted"
+            );
+        }
+        _ => {}
+    }
 
     tracing::info!(
         "Database: {}:{}/{}",
@@ -327,6 +343,20 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Create application state
+    let account_deletion_task_publisher = match (
+        config.tasks.aws_region.clone(),
+        config.tasks.sqs_queue_url.clone(),
+    ) {
+        (Some(region), Some(queue_url)) => {
+            let aws_config = api::tasks::load_aws_sdk_config(region).await;
+            Some(Arc::new(api::tasks::AwsSqsTaskPublisher::new(
+                aws_sdk_sqs::Client::new(&aws_config),
+                queue_url,
+            )) as Arc<dyn api::tasks::TaskPublisher>)
+        }
+        _ => None,
+    };
+
     let app_state = AppState {
         oauth_service,
         email_auth_service,
@@ -345,7 +375,9 @@ async fn main() -> anyhow::Result<()> {
         agent_repository: agent_repo,
         agent_proxy_service,
         redirect_uri: config.oauth.redirect_uri,
+        frontend_callback_allowed_origins: frontend_callback_allowed_origins.map(Arc::new),
         admin_domains: Arc::new(config.admin.admin_domains),
+        admin_emails: Arc::new(config.admin.admin_emails),
         user_repository: user_repo.clone(),
         vpc_credentials_service,
         stripe_test_clock_enabled: config.stripe.test_clock_enabled,
@@ -366,6 +398,7 @@ async fn main() -> anyhow::Result<()> {
         system_configs_cache: Arc::new(tokio::sync::RwLock::new(None)),
         rate_limit_state,
         bi_metrics_service,
+        account_deletion_task_publisher,
     };
 
     // Create router with CORS support

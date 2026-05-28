@@ -1,4 +1,7 @@
-use crate::consts::{LIST_FILES_LIMIT_MAX, MAX_REQUEST_BODY_SIZE, MAX_RESPONSE_BODY_SIZE};
+use crate::consts::{
+    LIST_FILES_LIMIT_MAX, MAX_DECOMPRESSED_RESPONSE_BODY_SIZE, MAX_REQUEST_BODY_SIZE,
+    MAX_RESPONSE_BODY_SIZE,
+};
 use crate::middleware::auth::{AuthenticatedApiKey, AuthenticatedUser};
 use crate::usage_parsing::{
     parse_chat_completion_usage_from_bytes, parse_response_usage_from_bytes,
@@ -14,7 +17,7 @@ use axum::{
 };
 use bytes::Bytes;
 use chrono::{Duration, Utc};
-use flate2::read::GzDecoder;
+use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
 use futures::stream;
 use http::{header::CONTENT_LENGTH, HeaderValue};
 use multer::Multipart;
@@ -230,6 +233,47 @@ enum TrackableResource {
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct ErrorResponse {
     pub error: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InvalidProxyPathSegment;
+
+fn validate_proxy_path_segment(value: &str) -> Result<(), InvalidProxyPathSegment> {
+    validate_proxy_path_segment_variant(value)?;
+
+    let decoded = urlencoding::decode(value).map_err(|_| InvalidProxyPathSegment)?;
+    if decoded.contains('%') {
+        return Err(InvalidProxyPathSegment);
+    }
+    validate_proxy_path_segment_variant(&decoded)?;
+
+    Ok(())
+}
+
+fn validate_proxy_path_segment_variant(value: &str) -> Result<(), InvalidProxyPathSegment> {
+    if value.is_empty()
+        || value == "."
+        || value == ".."
+        || value.contains('/')
+        || value.contains('\\')
+        || value.contains('?')
+        || value.contains('#')
+        || value.chars().any(char::is_control)
+    {
+        return Err(InvalidProxyPathSegment);
+    }
+
+    Ok(())
+}
+
+fn invalid_proxy_path_segment_response(field_name: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorResponse {
+            error: format!("Invalid {field_name}: unsafe path segment"),
+        }),
+    )
+        .into_response()
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -2070,6 +2114,9 @@ async fn get_file(
     Extension(user): Extension<AuthenticatedUser>,
     Path(file_id): Path<String>,
 ) -> Result<Json<crate::models::FileGetResponse>, Response> {
+    validate_proxy_path_segment(&file_id)
+        .map_err(|_| invalid_proxy_path_segment_response("file_id"))?;
+
     tracing::info!(
         "get_file called for user_id={}, file_id={}",
         user.user_id,
@@ -2121,6 +2168,9 @@ async fn delete_file(
     Extension(user): Extension<AuthenticatedUser>,
     Path(file_id): Path<String>,
 ) -> Result<Response, Response> {
+    validate_proxy_path_segment(&file_id)
+        .map_err(|_| invalid_proxy_path_segment_response("file_id"))?;
+
     tracing::info!(
         "delete_file called for user_id={}, file_id={}",
         user.user_id,
@@ -2524,15 +2574,15 @@ async fn proxy_responses(
                     .into_response());
             }
         };
-        // For non-streaming responses, decompress (if gzipped) before parsing usage.
-        let usage_bytes =
-            decompress_if_gzipped(&bytes, &proxy_response.headers).unwrap_or_else(|e| {
+        // For non-streaming responses, decompress encoded payload before parsing usage.
+        let usage_bytes = decompress_if_encoded(bytes.clone(), &proxy_response.headers)
+            .unwrap_or_else(|e| {
                 tracing::error!(
                     "Failed to decompress non-stream response for user_id={}: {}",
                     user.user_id,
                     e
                 );
-                bytes.to_vec()
+                bytes.clone()
             });
         // Fire-and-forget: record usage in background to avoid blocking on pricing fetch + DB write
         let state_clone = state.clone();
@@ -2870,8 +2920,18 @@ async fn proxy_model_list(
                 .into_response()
         })?;
 
+    let decompressed_body = decompress_if_encoded(body_bytes.clone(), &proxy_response.headers)
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                "Failed to decompress model list response body for user_id={}: {}",
+                user.user_id,
+                e
+            );
+            body_bytes.clone()
+        });
+
     // Try to parse JSON
-    let mut body_json: serde_json::Value = match serde_json::from_slice(&body_bytes) {
+    let mut body_json: serde_json::Value = match serde_json::from_slice(&decompressed_body) {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(
@@ -2998,6 +3058,9 @@ async fn proxy_signature(
     Path(chat_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, Response> {
+    validate_proxy_path_segment(&chat_id)
+        .map_err(|_| invalid_proxy_path_segment_response("chat_id"))?;
+
     tracing::info!(
         "proxy_signature: GET /v1/signature/{} for user_id={}, session_id={}",
         chat_id,
@@ -3132,14 +3195,14 @@ async fn proxy_mcp(
     })?;
 
     if is_web_search_call && (200..300).contains(&status) {
-        let decompressed_body = decompress_if_gzipped(&response_body, &response_headers)
+        let decompressed_body = decompress_if_encoded(response_body.clone(), &response_headers)
             .unwrap_or_else(|e| {
                 tracing::warn!(
                     "Failed to decompress MCP response for user_id={}: {}",
                     user.user_id,
                     e
                 );
-                response_body.to_vec()
+                response_body.clone()
             });
         let response_json = serde_json::from_slice::<serde_json::Value>(&decompressed_body).ok();
 
@@ -3899,15 +3962,15 @@ async fn proxy_chat_completions(
                     .into_response());
             }
         };
-        let usage_bytes =
-            decompress_if_gzipped(&bytes, &proxy_response.headers).unwrap_or_else(|e| {
+        let usage_bytes = decompress_if_encoded(bytes.clone(), &proxy_response.headers)
+            .unwrap_or_else(|e| {
                 tracing::error!(
                     "Failed to decompress non-stream response for user_id={} on {}: {}",
                     user.user_id,
                     ENDPOINT_FULL_PATH,
                     e
                 );
-                bytes.to_vec()
+                bytes.clone()
             });
         // Return the original upstream bytes so they remain consistent with any forwarded content-encoding headers.
         let state_clone = state.clone();
@@ -4497,14 +4560,14 @@ async fn handle_trackable_response(
 
     // If successful, parse response and track resource (don't fail request if tracking fails)
 
-    let decompressed_bytes =
-        decompress_if_gzipped(&body_bytes, &response_headers).unwrap_or_else(|e| {
+    let decompressed_bytes = decompress_if_encoded(body_bytes.clone(), &response_headers)
+        .unwrap_or_else(|e| {
             tracing::error!(
                 "Failed to decompress response for user_id={}: {}",
                 user.user_id,
                 e
             );
-            body_bytes.to_vec()
+            body_bytes.clone()
         });
 
     let Ok(response_json) = serde_json::from_slice::<serde_json::Value>(&decompressed_bytes) else {
@@ -4703,6 +4766,9 @@ async fn validate_user_conversation(
     conversation_id: &str,
     required_permission: SharePermission,
 ) -> Result<(), Response> {
+    validate_proxy_path_segment(conversation_id)
+        .map_err(|_| invalid_proxy_path_segment_response("conversation_id"))?;
+
     state
         .conversation_share_service
         .ensure_access(conversation_id, user.user_id, required_permission)
@@ -4717,6 +4783,9 @@ async fn validate_user_or_public_conversation(
     conversation_id: &str,
     required_permission: SharePermission,
 ) -> Result<(), Response> {
+    validate_proxy_path_segment(conversation_id)
+        .map_err(|_| invalid_proxy_path_segment_response("conversation_id"))?;
+
     // First check regular access
     let user_access = state
         .conversation_share_service
@@ -4745,6 +4814,9 @@ async fn validate_conversation_access_optional_auth(
     conversation_id: &str,
     required_permission: SharePermission,
 ) -> Result<(), Response> {
+    validate_proxy_path_segment(conversation_id)
+        .map_err(|_| invalid_proxy_path_segment_response("conversation_id"))?;
+
     if let Some(user) = user {
         // User is authenticated - check their access or public share
         validate_user_or_public_conversation(state, user, conversation_id, required_permission)
@@ -4765,6 +4837,9 @@ async fn validate_owner_conversation(
     user: &AuthenticatedUser,
     conversation_id: &str,
 ) -> Result<(), Response> {
+    validate_proxy_path_segment(conversation_id)
+        .map_err(|_| invalid_proxy_path_segment_response("conversation_id"))?;
+
     state
         .conversation_service
         .access_conversation(conversation_id, user.user_id)
@@ -4806,6 +4881,9 @@ async fn fetch_conversation_from_proxy(
     conversation_id: &str,
     headers: HeaderMap,
 ) -> Result<serde_json::Value, Response> {
+    validate_proxy_path_segment(conversation_id)
+        .map_err(|_| invalid_proxy_path_segment_response("conversation_id"))?;
+
     fn bad_gateway(message: impl Into<String>) -> Response {
         (
             StatusCode::BAD_GATEWAY,
@@ -4844,7 +4922,17 @@ async fn fetch_conversation_from_proxy(
         .await
         .map_err(|e| bad_gateway(format!("Failed to read response: {e}")))?;
 
-    let conversation: serde_json::Value = serde_json::from_slice(&body_bytes)
+    let decompressed_body = decompress_if_encoded(body_bytes.clone(), &proxy_response.headers)
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                "Failed to decompress conversation response body for conversation_id={}: {}",
+                conversation_id,
+                e
+            );
+            body_bytes.clone()
+        });
+
+    let conversation: serde_json::Value = serde_json::from_slice(&decompressed_body)
         .map_err(|e| bad_gateway(format!("Failed to parse JSON: {e}")))?;
 
     Ok(conversation)
@@ -4855,6 +4943,9 @@ async fn validate_user_file(
     user: &AuthenticatedUser,
     file_id: &str,
 ) -> Result<(), Response> {
+    validate_proxy_path_segment(file_id)
+        .map_err(|_| invalid_proxy_path_segment_response("file_id"))?;
+
     state
         .file_service
         .access_file(file_id, user.user_id)
@@ -4895,28 +4986,109 @@ async fn extract_body_bytes(request: Request) -> Result<Bytes, Response> {
     Ok(result)
 }
 
-/// Decompress gzip-encoded bytes if needed
-fn decompress_if_gzipped(bytes: &[u8], headers: &HeaderMap) -> Result<Vec<u8>, std::io::Error> {
-    // Check if content-encoding is gzip
-    if let Some(encoding) = headers.get("content-encoding") {
-        if let Ok(encoding_str) = encoding.to_str() {
-            if encoding_str.contains("gzip") {
-                tracing::debug!("Response is gzip-encoded, decompressing...");
-                let mut decoder = GzDecoder::new(bytes);
-                let mut decompressed = Vec::new();
-                decoder.read_to_end(&mut decompressed)?;
-                tracing::debug!(
-                    "Decompressed {} bytes to {} bytes",
-                    bytes.len(),
-                    decompressed.len()
-                );
-                return Ok(decompressed);
-            }
+/// Decompress response bytes according to Content-Encoding when supported.
+fn decompress_if_encoded(bytes: Bytes, headers: &HeaderMap) -> Result<Bytes, std::io::Error> {
+    fn read_to_vec_limited<R: Read>(
+        reader: R,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, std::io::Error> {
+        let mut limited_reader = reader.take((max_bytes as u64).saturating_add(1));
+        let mut out = Vec::new();
+        limited_reader.read_to_end(&mut out)?;
+        if out.len() > max_bytes {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Decompressed payload exceeds {} bytes", max_bytes),
+            ));
         }
+        Ok(out)
     }
 
-    // Not gzipped, return as-is
-    Ok(bytes.to_vec())
+    let Some(encoding) = headers.get("content-encoding") else {
+        return Ok(bytes);
+    };
+    let Ok(encoding_str) = encoding.to_str() else {
+        return Ok(bytes);
+    };
+
+    let encoding_str_lower = encoding_str.to_ascii_lowercase();
+    let encodings: Vec<String> = encoding_str_lower
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && s != "identity")
+        .collect();
+
+    if encodings.is_empty() {
+        return Ok(bytes);
+    }
+
+    tracing::debug!(
+        "Response is '{}' encoded, decompressing for JSON parsing",
+        encoding_str
+    );
+
+    let original = bytes;
+    let mut decoded = original.clone();
+    for enc in encodings.into_iter().rev() {
+        let current = decoded.as_ref();
+        decoded = match enc.as_str() {
+            "gzip" | "x-gzip" => {
+                let decoder = GzDecoder::new(current);
+                Bytes::from(read_to_vec_limited(
+                    decoder,
+                    MAX_DECOMPRESSED_RESPONSE_BODY_SIZE,
+                )?)
+            }
+            "deflate" => {
+                let zlib_decoder = ZlibDecoder::new(current);
+                match read_to_vec_limited(zlib_decoder, MAX_DECOMPRESSED_RESPONSE_BODY_SIZE) {
+                    Ok(decompressed) => Bytes::from(decompressed),
+                    Err(zlib_err) => {
+                        tracing::debug!(
+                            "Zlib-wrapped deflate decode failed ({}), trying raw DEFLATE fallback",
+                            zlib_err
+                        );
+                        let raw_decoder = DeflateDecoder::new(current);
+                        Bytes::from(read_to_vec_limited(
+                            raw_decoder,
+                            MAX_DECOMPRESSED_RESPONSE_BODY_SIZE,
+                        )?)
+                    }
+                }
+            }
+            "br" => {
+                let decoder = brotli::Decompressor::new(current, 4096);
+                Bytes::from(read_to_vec_limited(
+                    decoder,
+                    MAX_DECOMPRESSED_RESPONSE_BODY_SIZE,
+                )?)
+            }
+            "zstd" => {
+                let decoder = zstd::stream::read::Decoder::new(current)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+                Bytes::from(read_to_vec_limited(
+                    decoder,
+                    MAX_DECOMPRESSED_RESPONSE_BODY_SIZE,
+                )?)
+            }
+            unsupported => {
+                tracing::debug!(
+                    "Unsupported content-encoding '{}' for response decompression",
+                    unsupported
+                );
+                // Keep passthrough behavior: if any encoding in the chain is unsupported,
+                // return original bytes and let the caller forward without modification.
+                return Ok(original);
+            }
+        };
+    }
+
+    tracing::debug!(
+        "Decompressed {} bytes to {} bytes",
+        original.len(),
+        decoded.len()
+    );
+    Ok(decoded)
 }
 
 /// Returns true if response headers indicate a streaming (SSE) response.
@@ -5028,17 +5200,21 @@ async fn record_chat_usage_from_body(
         .unwrap_or_else(|| usage.model.clone());
 
     let pricing = state.model_pricing_cache.get_pricing(&request_model).await;
-    let cost_nano_usd = pricing
-        .as_ref()
-        .map(|p| p.cost_nano_usd(usage.input_tokens, usage.output_tokens));
+    let cost_nano_usd = pricing.as_ref().map(|p| {
+        p.cost_nano_usd(
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_read_tokens,
+        )
+    });
 
     let input_cost = pricing
         .as_ref()
-        .map(|p| usage.input_tokens as i64 * p.input_nano_per_token)
+        .map(|p| p.input_cost_nano_usd(usage.input_tokens, usage.cache_read_tokens))
         .unwrap_or(0);
     let output_cost = pricing
         .as_ref()
-        .map(|p| usage.output_tokens as i64 * p.output_nano_per_token)
+        .map(|p| p.output_cost_nano_usd(usage.output_tokens))
         .unwrap_or(0);
 
     let (instance_id, api_key_id) = api_key_ext
@@ -5049,6 +5225,7 @@ async fn record_chat_usage_from_body(
     let details = serde_json::json!({
         "input_tokens": usage.input_tokens as i64,
         "output_tokens": usage.output_tokens as i64,
+        "cache_read_tokens": usage.cache_read_tokens as i64,
         "input_cost": input_cost,
         "output_cost": output_cost,
         "request_type": "chat_completion",
@@ -5111,17 +5288,21 @@ async fn record_response_usage_from_body(
     }
 
     let pricing = state.model_pricing_cache.get_pricing(&usage.model).await;
-    let cost_nano_usd = pricing
-        .as_ref()
-        .map(|p| p.cost_nano_usd(usage.input_tokens, usage.output_tokens));
+    let cost_nano_usd = pricing.as_ref().map(|p| {
+        p.cost_nano_usd(
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_read_tokens,
+        )
+    });
 
     let input_cost = pricing
         .as_ref()
-        .map(|p| usage.input_tokens as i64 * p.input_nano_per_token)
+        .map(|p| p.input_cost_nano_usd(usage.input_tokens, usage.cache_read_tokens))
         .unwrap_or(0);
     let output_cost = pricing
         .as_ref()
-        .map(|p| usage.output_tokens as i64 * p.output_nano_per_token)
+        .map(|p| p.output_cost_nano_usd(usage.output_tokens))
         .unwrap_or(0);
 
     let (instance_id, api_key_id) = api_key_ext
@@ -5132,6 +5313,7 @@ async fn record_response_usage_from_body(
     let details = serde_json::json!({
         "input_tokens": usage.input_tokens as i64,
         "output_tokens": usage.output_tokens as i64,
+        "cache_read_tokens": usage.cache_read_tokens as i64,
         "input_cost": input_cost,
         "output_cost": output_cost,
         "request_type": "response",
@@ -5195,4 +5377,171 @@ async fn collect_stream_to_bytes(
     }
 
     Ok(Bytes::from(collected))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decompress_if_encoded, validate_proxy_path_segment};
+    use bytes::Bytes;
+    use flate2::{write::DeflateEncoder, write::GzEncoder, write::ZlibEncoder, Compression};
+    use http::{HeaderMap, HeaderValue};
+    use std::io::Write;
+
+    fn headers(content_encoding: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "content-encoding",
+            HeaderValue::from_str(content_encoding).unwrap(),
+        );
+        headers
+    }
+
+    fn gzip_encode(input: &[u8]) -> Vec<u8> {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(input).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    fn zlib_encode(input: &[u8]) -> Vec<u8> {
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(input).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    fn raw_deflate_encode(input: &[u8]) -> Vec<u8> {
+        let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(input).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    fn brotli_encode(input: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut compressor = brotli::CompressorWriter::new(&mut out, 4096, 5, 22);
+            compressor.write_all(input).unwrap();
+        }
+        out
+    }
+
+    fn zstd_encode(input: &[u8]) -> Vec<u8> {
+        zstd::stream::encode_all(input, 1).unwrap()
+    }
+
+    #[test]
+    fn validates_safe_proxy_path_segments() {
+        for value in ["conv_abc123", "file-abc_123", "Qwen3.5-122B-A10B"] {
+            assert!(
+                validate_proxy_path_segment(value).is_ok(),
+                "segment should be accepted: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_proxy_path_segment_breakouts() {
+        for value in [
+            "",
+            ".",
+            "..",
+            "../files",
+            "..%2Ffiles",
+            "%2e%2e%2ffiles",
+            "%252e%252e%252ffiles",
+            "abc%2Fdef",
+            "abc%5Cdef",
+            "abc%3Fadmin=true",
+            "abc#fragment",
+        ] {
+            assert!(
+                validate_proxy_path_segment(value).is_err(),
+                "segment should be rejected: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_unencoded_bytes_without_copy() {
+        let bytes = Bytes::from_static(b"{\"ok\":true}");
+        let ptr = bytes.as_ptr();
+        let out = decompress_if_encoded(bytes, &HeaderMap::new()).unwrap();
+        assert_eq!(out.as_ref(), b"{\"ok\":true}");
+        assert_eq!(out.as_ptr(), ptr);
+    }
+
+    #[test]
+    fn decodes_gzip() {
+        let payload = br#"{"a":1}"#;
+        let encoded = gzip_encode(payload);
+        let out = decompress_if_encoded(Bytes::from(encoded), &headers("gzip")).unwrap();
+        assert_eq!(out.as_ref(), payload);
+    }
+
+    #[test]
+    fn decodes_brotli() {
+        let payload = br#"{"b":"brotli"}"#;
+        let encoded = brotli_encode(payload);
+        let out = decompress_if_encoded(Bytes::from(encoded), &headers("br")).unwrap();
+        assert_eq!(out.as_ref(), payload);
+    }
+
+    #[test]
+    fn decodes_zstd() {
+        let payload = br#"{"z":"std"}"#;
+        let encoded = zstd_encode(payload);
+        let out = decompress_if_encoded(Bytes::from(encoded), &headers("zstd")).unwrap();
+        assert_eq!(out.as_ref(), payload);
+    }
+
+    #[test]
+    fn decodes_deflate_with_zlib_wrapper() {
+        let payload = br#"{"wrapped":true}"#;
+        let encoded = zlib_encode(payload);
+        let out = decompress_if_encoded(Bytes::from(encoded), &headers("deflate")).unwrap();
+        assert_eq!(out.as_ref(), payload);
+    }
+
+    #[test]
+    fn decodes_deflate_raw_fallback() {
+        let payload = br#"{"raw":true}"#;
+        assert_ne!(raw_deflate_encode(payload), zlib_encode(payload));
+        let encoded = raw_deflate_encode(payload);
+        let out = decompress_if_encoded(Bytes::from(encoded), &headers("deflate")).unwrap();
+        assert_eq!(out.as_ref(), payload);
+    }
+
+    #[test]
+    fn decodes_multiple_encodings_in_reverse_order() {
+        let payload = br#"{"stack":"ok"}"#;
+        let gzip_then_br = brotli_encode(&gzip_encode(payload));
+        let out = decompress_if_encoded(Bytes::from(gzip_then_br), &headers("gzip, br")).unwrap();
+        assert_eq!(out.as_ref(), payload);
+    }
+
+    #[test]
+    fn skips_identity_encoding_without_copy() {
+        let bytes = Bytes::from_static(b"{\"identity\":true}");
+        let ptr = bytes.as_ptr();
+        let out = decompress_if_encoded(bytes, &headers("identity")).unwrap();
+        assert_eq!(out.as_ref(), b"{\"identity\":true}");
+        assert_eq!(out.as_ptr(), ptr);
+    }
+
+    #[test]
+    fn unsupported_encoding_returns_original() {
+        let bytes = Bytes::from_static(b"{\"unknown\":true}");
+        let out = decompress_if_encoded(bytes, &headers("snappy")).unwrap();
+        assert_eq!(out.as_ref(), b"{\"unknown\":true}");
+    }
+
+    #[test]
+    fn malformed_encoding_header_returns_original() {
+        let bytes = Bytes::from_static(b"{\"ok\":1}");
+        let mut hdrs = HeaderMap::new();
+        hdrs.insert(
+            "content-encoding",
+            HeaderValue::from_bytes(&[0x80, 0x81]).unwrap(),
+        );
+        let out = decompress_if_encoded(bytes, &hdrs).unwrap();
+        assert_eq!(out.as_ref(), b"{\"ok\":1}");
+    }
 }

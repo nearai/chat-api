@@ -50,6 +50,10 @@ pub struct TestServerConfig {
     pub near_staking_contract_id: Option<String>,
     /// Override logical NEAR network id (`mainnet` / `testnet`) for HoS create payloads.
     pub near_network_id: Option<String>,
+    /// Optional override for admin domains allowlist in tests.
+    pub admin_domains: Option<Vec<String>>,
+    /// Optional override for explicit admin emails allowlist in tests.
+    pub admin_emails: Option<Vec<String>>,
 }
 
 /// Restrictive rate limit config for rate limit tests.
@@ -282,7 +286,11 @@ async fn create_test_server_and_db_inner(
         user_repo.clone(),
     ));
 
-    let mut admin_domains = config.admin.admin_domains;
+    let mut admin_domains = test_config
+        .admin_domains
+        .clone()
+        .unwrap_or(config.admin.admin_domains);
+    let admin_emails = test_config.admin_emails.clone().unwrap_or_default();
 
     // Add `admin.org` as test admin domain
     admin_domains.push("admin.org".to_string());
@@ -360,7 +368,11 @@ async fn create_test_server_and_db_inner(
         agent_repository: agent_repo,
         agent_proxy_service,
         redirect_uri: config.oauth.redirect_uri,
+        frontend_callback_allowed_origins: Some(Arc::new(
+            vec!["http://localhost:3000".to_string()],
+        )),
         admin_domains: Arc::new(admin_domains),
+        admin_emails: Arc::new(admin_emails),
         stripe_test_clock_enabled: config.stripe.test_clock_enabled,
         cloud_api_base_url: test_config.cloud_api_base_url.clone(),
         http_client,
@@ -379,6 +391,7 @@ async fn create_test_server_and_db_inner(
         system_configs_cache: Arc::new(tokio::sync::RwLock::new(None)),
         rate_limit_state,
         bi_metrics_service,
+        account_deletion_task_publisher: Some(Arc::new(api::tasks::NoopTaskPublisher)),
     };
 
     // Create router
@@ -661,6 +674,13 @@ pub async fn cleanup_user_agent_instances(db: &database::Database, user_email: &
         .ok();
     client
         .execute(
+            "DELETE FROM agent_instance_status_history WHERE instance_id IN (SELECT id FROM agent_instances WHERE user_id = $1)",
+            &[&user.id],
+        )
+        .await
+        .ok();
+    client
+        .execute(
             "DELETE FROM agent_instances WHERE user_id = $1",
             &[&user.id],
         )
@@ -714,7 +734,7 @@ pub async fn cleanup_user_usage(db: &database::Database, user_email: &str) {
         .expect("delete usage events");
 }
 
-/// Delete a user by email ( cascades to subscriptions, sessions, etc. via FK).
+/// Delete a user by email after removing account-owned rows that use restrictive FKs.
 pub async fn cleanup_user(db: &database::Database, user_email: &str) {
     let user = match db
         .user_repository()
@@ -727,6 +747,10 @@ pub async fn cleanup_user(db: &database::Database, user_email: &str) {
     };
 
     let client = db.pool().get().await.expect("get pool client");
+    client
+        .execute("DELETE FROM sessions WHERE user_id = $1", &[&user.id])
+        .await
+        .expect("delete user sessions");
     client
         .execute("DELETE FROM users WHERE id = $1", &[&user.id])
         .await

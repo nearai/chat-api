@@ -62,6 +62,55 @@ pub async fn load_aws_sdk_config(region: String) -> aws_config::SdkConfig {
         .await
 }
 
+#[async_trait]
+pub trait TaskPublisher: Send + Sync {
+    async fn publish(&self, message: TaskMessage) -> anyhow::Result<()>;
+}
+
+#[derive(Clone)]
+pub struct AwsSqsTaskPublisher {
+    client: aws_sdk_sqs::Client,
+    queue_url: String,
+}
+
+impl AwsSqsTaskPublisher {
+    pub fn new(client: aws_sdk_sqs::Client, queue_url: String) -> Self {
+        Self { client, queue_url }
+    }
+}
+
+#[async_trait]
+impl TaskPublisher for AwsSqsTaskPublisher {
+    async fn publish(&self, message: TaskMessage) -> anyhow::Result<()> {
+        let body = serde_json::to_string(&message).context("failed to serialize task message")?;
+        self.client
+            .send_message()
+            .queue_url(&self.queue_url)
+            .message_body(body)
+            .send()
+            .await
+            .map_err(|err| {
+                anyhow!(
+                    "failed to publish SQS task message task_id={}: {}",
+                    message.task_id,
+                    format_aws_sdk_error(&err)
+                )
+            })?;
+
+        Ok(())
+    }
+}
+
+pub struct NoopTaskPublisher;
+
+#[async_trait]
+impl TaskPublisher for NoopTaskPublisher {
+    async fn publish(&self, message: TaskMessage) -> anyhow::Result<()> {
+        tracing::info!("noop task publisher accepted task_id={}", message.task_id);
+        Ok(())
+    }
+}
+
 #[derive(Clone)]
 pub struct AwsTaskScheduler {
     client: aws_sdk_scheduler::Client,
@@ -426,7 +475,7 @@ async fn process_message<E: TaskExecutor + 'static>(
     // SQS would redeliver the message to another worker.
     if matches!(
         task_message.payload,
-        TaskPayload::CleanupCanceledInstances(_)
+        TaskPayload::CleanupCanceledInstances(_) | TaskPayload::AccountDeletion(_)
     ) {
         if let Some(receipt_handle) = receipt_handle.as_deref() {
             client
@@ -519,7 +568,8 @@ pub async fn ensure_daily_cleanup_task(task_config: &config::TaskConfig) -> anyh
 mod tests {
     use super::*;
     use services::tasks::{
-        CleanupCanceledInstancesTaskPayload, NoopTaskPayload, TaskId, TaskPayload,
+        AccountDeletionTaskPayload, CleanupCanceledInstancesTaskPayload, NoopTaskPayload, TaskId,
+        TaskPayload,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -546,6 +596,13 @@ mod tests {
             self.cleanup_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
+
+        async fn execute_account_deletion(
+            &self,
+            _: &AccountDeletionTaskPayload,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
     }
 
     #[test]
@@ -559,6 +616,7 @@ mod tests {
         match message.payload {
             TaskPayload::Noop(payload) => assert_eq!(payload.note.as_deref(), Some("ok")),
             TaskPayload::CleanupCanceledInstances(_) => panic!("unexpected payload variant"),
+            TaskPayload::AccountDeletion(_) => panic!("unexpected payload variant"),
         }
     }
 
