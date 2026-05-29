@@ -758,7 +758,7 @@ pub struct SubscriptionPlan {
     pub allowed_models: Option<Vec<String>>,
 }
 
-/// Result of [`SubscriptionService::create_subscription`]: Stripe redirect or HoS catalog `price_id` for a client-side `lock_for_subscription`.
+/// Result of [`SubscriptionService::create_subscription`]: Stripe redirect or HoS catalog `price_id` for a client-side `lock`.
 ///
 /// Serialized JSON:
 /// - **Stripe** — legacy flat object `{"checkout_url":"..."}`.
@@ -768,7 +768,7 @@ pub struct SubscriptionPlan {
 pub enum CreateSubscriptionOutcome {
     /// Complete checkout on Stripe (`checkout_url`).
     StripeCheckout { checkout_url: String },
-    /// Catalog recurring price id for `lock_for_subscription` (client supplies `product_id` xor `price_id` per contract rules).
+    /// Catalog recurring price id for `lock` (client supplies `product_id` xor `price_id` per contract rules, with `lock_duration_ns: null` for subscriptions).
     NearStakeLock {
         price_id: String,
         /// NEAR network id (e.g. `mainnet`, `testnet`) from server config; wallets use with RPC URL.
