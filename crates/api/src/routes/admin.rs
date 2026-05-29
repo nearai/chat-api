@@ -3279,12 +3279,12 @@ pub async fn admin_migration_status(
     tracing::info!("Admin: Getting migration status");
 
     // Legacy compose-api URLs contain "claws" or "sare.dev"; CrabShack URLs contain "agents.near.ai"
-    let legacy_pattern = "%claws%";
+    let legacy_patterns = &["%claws%", "%sare.dev%"];
     let crabshack_pattern = "%agents.near.ai%";
 
     let (total, migrated, pending, unknown) = app_state
         .agent_repository
-        .get_migration_status_counts(legacy_pattern, crabshack_pattern)
+        .get_migration_status_counts(legacy_patterns, crabshack_pattern)
         .await
         .map_err(|e| {
             tracing::error!("Failed to get migration status: error={}", e);
@@ -3671,15 +3671,28 @@ fn is_encrypted_format(s: &str) -> bool {
         && ciphertext.chars().all(|c| c.is_ascii_hexdigit())
 }
 
+/// Maximum buffer size for SSE parsing (1 MB).
+const SSE_BUFFER_LIMIT: usize = 1024 * 1024;
+/// Timeout for receiving each SSE chunk (30 seconds).
+const SSE_CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Parse an SSE response stream to extract the backup presigned URL from the "complete" event.
 async fn parse_sse_for_backup_url(response: reqwest::Response) -> anyhow::Result<String> {
     use futures::stream::StreamExt;
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
 
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
+    loop {
+        let chunk = match tokio::time::timeout(SSE_CHUNK_TIMEOUT, stream.next()).await {
+            Ok(Some(chunk)) => chunk?,
+            Ok(None) => break,
+            Err(_) => anyhow::bail!("Timed out waiting for SSE chunk from backup stream ({}s)", SSE_CHUNK_TIMEOUT.as_secs()),
+        };
         buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+        if buffer.len() > SSE_BUFFER_LIMIT {
+            anyhow::bail!("SSE buffer exceeded {} bytes limit in backup stream", SSE_BUFFER_LIMIT);
+        }
 
         while let Some(newline_pos) = buffer.find('\n') {
             let line = buffer[..newline_pos].to_string();
@@ -3717,9 +3730,17 @@ async fn parse_sse_for_import_result(
     let mut buffer = String::new();
     let mut last_event = None;
 
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
+    loop {
+        let chunk = match tokio::time::timeout(SSE_CHUNK_TIMEOUT, stream.next()).await {
+            Ok(Some(chunk)) => chunk?,
+            Ok(None) => break,
+            Err(_) => anyhow::bail!("Timed out waiting for SSE chunk from import stream ({}s)", SSE_CHUNK_TIMEOUT.as_secs()),
+        };
         buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+        if buffer.len() > SSE_BUFFER_LIMIT {
+            anyhow::bail!("SSE buffer exceeded {} bytes limit in import stream", SSE_BUFFER_LIMIT);
+        }
 
         while let Some(newline_pos) = buffer.find('\n') {
             let line = buffer[..newline_pos].to_string();
@@ -3743,7 +3764,7 @@ async fn parse_sse_for_import_result(
     last_event.ok_or_else(|| anyhow::anyhow!("No events received from CrabShack import"))
 }
 
-/// Best-effort restart of an instance on compose-api if it was stopped for backup.
+/// Best-effort restart of an instance on compose-api if we stopped it for backup.
 /// Errors are logged but not propagated — this is cleanup after a failure.
 fn maybe_restart_on_failure(
     app_state: &AppState,
@@ -3752,7 +3773,9 @@ fn maybe_restart_on_failure(
     token: &str,
     was_stopped: bool,
 ) {
-    if !was_stopped {
+    // was_stopped=true means the instance was already stopped before migration,
+    // so we only need to restart it if it was RUNNING (i.e. we stopped it ourselves).
+    if was_stopped {
         return;
     }
     let start_url = format!("{}/instances/{}/start", compose_api_url, encoded_name);

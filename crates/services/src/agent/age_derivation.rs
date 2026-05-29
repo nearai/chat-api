@@ -1,6 +1,6 @@
 //! Deterministic age X25519 keypair derivation from a passphrase.
 //!
-//! Produces IDENTICAL output to CrabShack's TypeScript implementation at
+//! Intended to produce identical output to CrabShack's TypeScript implementation at
 //! `orchestrator-api/src/backup/age-identity.ts`.
 //!
 //! Algorithm:
@@ -172,13 +172,15 @@ mod tests {
         assert_ne!(r1, r2);
     }
 
-    // TODO: Add golden test vectors from CrabShack TypeScript implementation.
+    // Golden test vectors from CrabShack TypeScript implementation.
     // Run the TypeScript `deriveAgeKeypair("test-passphrase", "golden-test-instance")`
-    // and add the expected (recipient, identity) here.
+    // and fill in the expected (recipient, identity) here.
     #[test]
-    fn test_golden_vectors_placeholder() {
-        let (_recipient, _identity) = derive_age_keypair("test-passphrase", "golden-test-instance");
-        // TODO: Uncomment after generating golden values from TypeScript:
+    #[ignore = "golden vectors not yet generated from TypeScript implementation"]
+    fn test_golden_vectors() {
+        let (recipient, identity) = derive_age_keypair("test-passphrase", "golden-test-instance");
+        // TODO: Fill in after generating golden values from TypeScript:
+        let _ = (recipient, identity);
         // assert_eq!(recipient, "age1...");
         // assert_eq!(identity, "AGE-SECRET-KEY-1...");
     }

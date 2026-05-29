@@ -3967,9 +3967,10 @@ impl AgentService for AgentServiceImpl {
     }
 
     fn find_manager_for_url(&self, agent_api_base_url: &str) -> Option<config::AgentManager> {
+        let normalized = agent_api_base_url.trim_end_matches('/');
         self.managers
             .iter()
-            .find(|m| m.url == agent_api_base_url)
+            .find(|m| m.url.trim_end_matches('/') == normalized)
             .cloned()
     }
 

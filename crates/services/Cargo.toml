@@ -41,8 +41,6 @@ hmac = "0.12"
 sha2 = "0.10"
 # X25519 key derivation for age encryption (backup keypair derivation)
 x25519-dalek = { version = "2", features = ["static_secrets"] }
-# Bech32 encoding for age key formatting
-bech32 = "0.11"
 dstack-sdk = "0.1"
 # OpenTelemetry for metrics
 opentelemetry = { version = "0.31", features = ["metrics"] }

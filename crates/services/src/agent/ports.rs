@@ -382,7 +382,7 @@ pub trait AgentRepository: Send + Sync {
     /// Returns (total, migrated, pending, unknown).
     async fn get_migration_status_counts(
         &self,
-        legacy_pattern: &str,
+        legacy_patterns: &[&str],
         crabshack_pattern: &str,
     ) -> anyhow::Result<(i64, i64, i64, i64)>;
 }

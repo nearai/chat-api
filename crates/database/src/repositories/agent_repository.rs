@@ -1213,23 +1213,46 @@ impl AgentRepository for PostgresAgentRepository {
 
     async fn get_migration_status_counts(
         &self,
-        legacy_pattern: &str,
+        legacy_patterns: &[&str],
         crabshack_pattern: &str,
     ) -> anyhow::Result<(i64, i64, i64, i64)> {
         let client = self.pool.get().await?;
 
-        let row = client
-            .query_one(
-                "SELECT
-                    COUNT(*) AS total,
-                    COUNT(*) FILTER (WHERE agent_api_base_url LIKE $2) AS migrated,
-                    COUNT(*) FILTER (WHERE agent_api_base_url LIKE $1) AS pending,
-                    COUNT(*) FILTER (WHERE agent_api_base_url IS NULL) AS unknown
-                 FROM agent_instances
-                 WHERE status != 'deleted'",
-                &[&legacy_pattern, &crabshack_pattern],
-            )
-            .await?;
+        // Build OR clauses for multiple legacy patterns
+        let mut pending_clauses = Vec::new();
+        let mut params: Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>> = Vec::new();
+        let mut param_idx = 1u32;
+
+        for pattern in legacy_patterns {
+            pending_clauses.push(format!("agent_api_base_url LIKE ${}", param_idx));
+            params.push(Box::new(pattern.to_string()));
+            param_idx += 1;
+        }
+
+        let crabshack_param_idx = param_idx;
+        params.push(Box::new(crabshack_pattern.to_string()));
+
+        let pending_expr = if pending_clauses.is_empty() {
+            "FALSE".to_string()
+        } else {
+            pending_clauses.join(" OR ")
+        };
+
+        let query = format!(
+            "SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE agent_api_base_url LIKE ${}) AS migrated,
+                COUNT(*) FILTER (WHERE {}) AS pending,
+                COUNT(*) FILTER (WHERE agent_api_base_url IS NULL) AS unknown
+             FROM agent_instances
+             WHERE status != 'deleted'",
+            crabshack_param_idx, pending_expr
+        );
+
+        let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+            params.iter().map(|p| p.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync)).collect();
+
+        let row = client.query_one(&query, &param_refs).await?;
 
         Ok((row.get(0), row.get(1), row.get(2), row.get(3)))
     }
