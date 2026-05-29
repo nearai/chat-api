@@ -361,6 +361,7 @@ pub trait AgentRepository: Send + Sync {
 
     /// List all instances with last_usage_at from agent_balance (admin only).
     /// Returns (instances, last_usage_at_map, total_count).
+    #[allow(clippy::type_complexity)]
     async fn list_all_instances_with_usage(
         &self,
         limit: i64,
