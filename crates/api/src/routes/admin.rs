@@ -3279,8 +3279,8 @@ pub async fn admin_migration_status(
     tracing::info!("Admin: Getting migration status");
 
     // Legacy compose-api URLs contain "claws" or "sare.dev"; CrabShack URLs contain "agents.near.ai"
-    let legacy_patterns = &["%claws%", "%sare.dev%"];
-    let crabshack_pattern = "%agents.near.ai%";
+    let legacy_patterns = vec!["%claws%".to_string(), "%sare.dev%".to_string()];
+    let crabshack_pattern = "%agents.near.ai%".to_string();
 
     let (total, migrated, pending, unknown) = app_state
         .agent_repository

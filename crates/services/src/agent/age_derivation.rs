@@ -172,17 +172,32 @@ mod tests {
         assert_ne!(r1, r2);
     }
 
-    // Golden test vectors from CrabShack TypeScript implementation.
-    // Run the TypeScript `deriveAgeKeypair("test-passphrase", "golden-test-instance")`
-    // and fill in the expected (recipient, identity) here.
     #[test]
-    #[ignore = "golden vectors not yet generated from TypeScript implementation"]
-    fn test_golden_vectors() {
-        let (recipient, identity) = derive_age_keypair("test-passphrase", "golden-test-instance");
-        // TODO: Fill in after generating golden values from TypeScript:
-        let _ = (recipient, identity);
-        // assert_eq!(recipient, "age1...");
-        // assert_eq!(identity, "AGE-SECRET-KEY-1...");
+    fn test_golden_vector_1() {
+        let (r, i) = derive_age_keypair("test-passphrase", "golden-test-instance");
+        assert_eq!(r, "age1x96uqc6ucwvsfeqj0p83dme4ve76xj6jh9v5q2tcez8efqg7g9zs9kdp0y");
+        assert_eq!(i, "AGE-SECRET-KEY-1S6ZSMWVK9M6MRMRQW5V5G099ZDK4PHKE9HD3QKM527E5ET4D0Y3S8GVUCK");
+    }
+
+    #[test]
+    fn test_golden_vector_2() {
+        let (r, i) = derive_age_keypair("abc123def456", "mighty-jay");
+        assert_eq!(r, "age1shyzgr34w6cw4kkp9pny725cduu7u3xfntx79u8nzgzseh0pyguqnr882m");
+        assert_eq!(i, "AGE-SECRET-KEY-1HDD0KF7VU5HWEF4VS96Q5EQQFDXH8E8A7VN75YWGC8WZ73AZTVZQJ7V8SU");
+    }
+
+    #[test]
+    fn test_golden_vector_3_empty_passphrase() {
+        let (r, i) = derive_age_keypair("", "empty-passphrase");
+        assert_eq!(r, "age1xhfpav4rtg4286njkse6akpwyq6l80xgw7tw5cxz5m3k46l99plqp6mzke");
+        assert_eq!(i, "AGE-SECRET-KEY-13ZNRYFR3X7RQUZNNCP6FCCAJ73X82F2WUUSM3MS8NG5A8LJ90L8S46PSE5");
+    }
+
+    #[test]
+    fn test_golden_vector_4_special_chars() {
+        let (r, i) = derive_age_keypair("a]very/long+passphrase!with@special#chars$", "special-chars-test");
+        assert_eq!(r, "age12ayk7rn78uujvqp4a7cae42g6hvzjx8dgkrgcc6zulq32ffmq3ts0npdgp");
+        assert_eq!(i, "AGE-SECRET-KEY-169JM43WKP2FSJ3XX6VZA6DYHPP0TTYJUPH9UNAJ72XS4TDCX5ATQY4GGMT");
     }
 
     #[test]

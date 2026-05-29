@@ -1213,8 +1213,8 @@ impl AgentRepository for PostgresAgentRepository {
 
     async fn get_migration_status_counts(
         &self,
-        legacy_patterns: &[&str],
-        crabshack_pattern: &str,
+        legacy_patterns: Vec<String>,
+        crabshack_pattern: String,
     ) -> anyhow::Result<(i64, i64, i64, i64)> {
         let client = self.pool.get().await?;
 
