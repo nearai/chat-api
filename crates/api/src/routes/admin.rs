@@ -3209,7 +3209,7 @@ pub async fn admin_retry_account_deletion(
 // ========== Migration Admin Endpoints ==========
 
 /// Request body for PATCH /v1/admin/agents/instances/{id}
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct PatchInstanceRequest {
     pub agent_api_base_url: Option<String>,
     pub instance_url: Option<String>,
@@ -3242,6 +3242,17 @@ pub async fn admin_patch_instance(
         None => None,
     };
 
+    // Verify instance exists first
+    let _existing = app_state
+        .agent_repository
+        .get_instance(id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get instance: instance_id={}, error={}", id, e);
+            ApiError::internal_server_error("Failed to get instance")
+        })?
+        .ok_or_else(|| ApiError::not_found("Instance not found"))?;
+
     let instance = app_state
         .agent_repository
         .admin_update_instance(
@@ -3261,7 +3272,7 @@ pub async fn admin_patch_instance(
 }
 
 /// Migration status response
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct MigrationStatusResponse {
     pub total: i64,
     pub migrated: i64,
@@ -3300,7 +3311,7 @@ pub async fn admin_migration_status(
 }
 
 /// Response for migrate endpoint
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct MigrateInstanceResponse {
     pub status: String,
     pub instance_name: String,
@@ -3809,20 +3820,25 @@ async fn parse_sse_for_backup_url(response: reqwest::Response) -> anyhow::Result
         }
 
         while let Some(newline_pos) = buffer.find('\n') {
-            let line = buffer[..newline_pos].to_string();
+            let line = buffer[..newline_pos].trim_end_matches('\r').to_string();
             buffer.drain(..=newline_pos);
 
             if let Some(data) = line.strip_prefix("data: ") {
                 if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
                     let stage = event.get("stage").and_then(|v| v.as_str()).unwrap_or("");
+                    if stage == "error" {
+                        let msg = event
+                            .get("message")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown error");
+                        anyhow::bail!("Backup failed: {}", msg);
+                    }
                     if stage == "complete" || stage == "done" {
-                        // compose-api returns download_url inside "backup" object
                         if let Some(backup) = event.get("backup") {
                             if let Some(url) = backup.get("download_url").and_then(|v| v.as_str()) {
                                 return Ok(url.to_string());
                             }
                         }
-                        // fallback: top-level field
                         if let Some(url) = event.get("download_url").and_then(|v| v.as_str()) {
                             return Ok(url.to_string());
                         }
@@ -3836,13 +3852,13 @@ async fn parse_sse_for_backup_url(response: reqwest::Response) -> anyhow::Result
 }
 
 /// Parse an SSE response stream to extract the final import result from CrabShack.
+/// Returns only on "complete"/"done" event — fails if stream ends without one.
 async fn parse_sse_for_import_result(
     response: reqwest::Response,
 ) -> anyhow::Result<serde_json::Value> {
     use futures::stream::StreamExt;
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
-    let mut last_event = None;
 
     loop {
         let chunk = match tokio::time::timeout(SSE_CHUNK_TIMEOUT, stream.next()).await {
@@ -3863,25 +3879,36 @@ async fn parse_sse_for_import_result(
         }
 
         while let Some(newline_pos) = buffer.find('\n') {
-            let line = buffer[..newline_pos].to_string();
+            let line = buffer[..newline_pos].trim_end_matches('\r').to_string();
             buffer.drain(..=newline_pos);
 
             if let Some(data) = line.strip_prefix("data: ") {
                 if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
                     let stage = event.get("stage").and_then(|v| v.as_str()).unwrap_or("");
-                    if stage == "complete" || stage == "done" {
+                    let event_type = event.get("event").and_then(|v| v.as_str()).unwrap_or("");
+                    if stage == "error" || event_type == "error" {
+                        let msg = event
+                            .get("message")
+                            .or_else(|| event.get("data").and_then(|d| d.get("message")))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown error");
+                        anyhow::bail!("CrabShack import failed: {}", msg);
+                    }
+                    if stage == "complete" || stage == "done" || event_type == "import_complete" {
                         if let Some(inst) = event.get("instance") {
                             return Ok(inst.clone());
                         }
+                        if let Some(data) = event.get("data") {
+                            return Ok(data.clone());
+                        }
                         return Ok(event);
                     }
-                    last_event = Some(event);
                 }
             }
         }
     }
 
-    last_event.ok_or_else(|| anyhow::anyhow!("No events received from CrabShack import"))
+    anyhow::bail!("CrabShack import stream ended without completion event")
 }
 
 /// Best-effort restart of an instance on compose-api if we stopped it for backup.
