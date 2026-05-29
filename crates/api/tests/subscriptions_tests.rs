@@ -3617,6 +3617,7 @@ fn near_rpc_wiremock_hos_subscription_probe_only(
 #[test]
 fn test_change_plan_outcome_serde_uses_kind_discriminant() {
     let o = ChangePlanOutcome::NearStakingUpgrade {
+        subscription_id: "sub_hos_current".to_string(),
         new_price_id: "price_hos_pro".to_string(),
     };
     let v = serde_json::to_value(&o).expect("serialize");
@@ -3627,6 +3628,10 @@ fn test_change_plan_outcome_serde_uses_kind_discriminant() {
     assert_eq!(
         v.get("new_price_id").and_then(|x| x.as_str()),
         Some("price_hos_pro")
+    );
+    assert_eq!(
+        v.get("subscription_id").and_then(|x| x.as_str()),
+        Some("sub_hos_current")
     );
     let back: ChangePlanOutcome = serde_json::from_value(v).expect("deserialize");
     assert!(matches!(back, ChangePlanOutcome::NearStakingUpgrade { .. }));
@@ -4450,6 +4455,10 @@ async fn test_change_plan_house_of_stake_upgrade_allows_different_product_ids() 
         result.get("new_price_id").and_then(|x| x.as_str()),
         Some("price_hos_pro")
     );
+    assert!(result
+        .get("subscription_id")
+        .and_then(|x| x.as_str())
+        .is_some_and(|id| id.starts_with("sub_test_")));
 }
 
 #[tokio::test]
@@ -4540,4 +4549,8 @@ async fn test_change_plan_house_of_stake_downgrade_allows_different_product_ids(
         result.get("target_price_id").and_then(|x| x.as_str()),
         Some("price_hos_basic")
     );
+    assert!(result
+        .get("subscription_id")
+        .and_then(|x| x.as_str())
+        .is_some_and(|id| id.starts_with("sub_test_")));
 }
