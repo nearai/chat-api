@@ -3965,6 +3965,30 @@ impl AgentService for AgentServiceImpl {
 
         Ok(balance)
     }
+
+    fn find_manager_for_url(&self, agent_api_base_url: &str) -> Option<config::AgentManager> {
+        self.managers
+            .iter()
+            .find(|m| m.url == agent_api_base_url)
+            .cloned()
+    }
+
+    fn find_crabshack_manager(&self) -> Option<config::AgentManager> {
+        // Find a manager that is NOT a legacy compose-api (not non-TEE)
+        self.managers
+            .iter()
+            .find(|m| !m.get_is_non_tee())
+            .cloned()
+            .or_else(|| {
+                // Fallback: find any manager whose URL does not match the non-TEE pattern
+                self.managers
+                    .iter()
+                    .find(|m| {
+                        !m.url.contains(&self.non_tee_agent_url_pattern)
+                    })
+                    .cloned()
+            })
+    }
 }
 
 /// Response structure from crabshack /images endpoint

@@ -1079,4 +1079,158 @@ impl AgentRepository for PostgresAgentRepository {
 
         Ok(())
     }
+
+    async fn list_all_instances_with_usage(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> anyhow::Result<(Vec<AgentInstance>, std::collections::HashMap<Uuid, DateTime<Utc>>, i64)> {
+        let client = self.pool.get().await?;
+
+        let count_row = client
+            .query_one("SELECT COUNT(*) FROM agent_instances", &[])
+            .await?;
+        let total: i64 = count_row.get(0);
+
+        let rows = client
+            .query(
+                "SELECT ai.id, ai.user_id, ai.instance_id, ai.name, ai.type, ai.public_ssh_key,
+                        ai.instance_url, ai.instance_token, ai.dashboard_url, ai.agent_api_base_url,
+                        ai.status, ai.created_at, ai.updated_at, ab.last_usage_at
+                 FROM agent_instances ai
+                 LEFT JOIN agent_balance ab ON ab.instance_id = ai.id
+                 ORDER BY ai.created_at DESC
+                 LIMIT $1 OFFSET $2",
+                &[&limit, &offset],
+            )
+            .await?;
+
+        let mut usage_map = std::collections::HashMap::new();
+        let instances = rows
+            .into_iter()
+            .map(|r| {
+                let id: Uuid = r.get(0);
+                let last_usage: Option<DateTime<Utc>> = r.get(13);
+                if let Some(ts) = last_usage {
+                    usage_map.insert(id, ts);
+                }
+                AgentInstance {
+                    id,
+                    user_id: r.get(1),
+                    instance_id: r.get(2),
+                    name: r.get(3),
+                    public_ssh_key: r.get(5),
+                    instance_url: r.get(6),
+                    instance_token: decrypt_token(r.get(7)),
+                    dashboard_url: r.get(8),
+                    agent_api_base_url: r.get(9),
+                    service_type: r.get(4),
+                    status: r.get(10),
+                    created_at: r.get(11),
+                    updated_at: r.get(12),
+                }
+            })
+            .collect();
+
+        Ok((instances, usage_map, total))
+    }
+
+    async fn admin_update_instance(
+        &self,
+        instance_id: Uuid,
+        agent_api_base_url: Option<String>,
+        instance_url: Option<String>,
+        encrypted_instance_token: Option<String>,
+        dashboard_url: Option<String>,
+    ) -> anyhow::Result<AgentInstance> {
+        let client = self.pool.get().await?;
+
+        // Build dynamic SET clause for provided fields
+        let mut set_clauses = Vec::new();
+        let mut param_values: Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>> = Vec::new();
+        let mut param_idx = 1u32;
+
+        if let Some(ref val) = agent_api_base_url {
+            set_clauses.push(format!("agent_api_base_url = ${}", param_idx));
+            param_values.push(Box::new(val.clone()));
+            param_idx += 1;
+        }
+        if let Some(ref val) = instance_url {
+            set_clauses.push(format!("instance_url = ${}", param_idx));
+            param_values.push(Box::new(val.clone()));
+            param_idx += 1;
+        }
+        if let Some(ref val) = encrypted_instance_token {
+            set_clauses.push(format!("instance_token = ${}", param_idx));
+            param_values.push(Box::new(val.clone()));
+            param_idx += 1;
+        }
+        if let Some(ref val) = dashboard_url {
+            set_clauses.push(format!("dashboard_url = ${}", param_idx));
+            param_values.push(Box::new(val.clone()));
+            param_idx += 1;
+        }
+
+        if set_clauses.is_empty() {
+            // No changes, just return current instance
+            return self.get_instance(instance_id).await?.ok_or_else(|| {
+                anyhow::anyhow!("Instance not found: instance_id={}", instance_id)
+            });
+        }
+
+        set_clauses.push("updated_at = NOW()".to_string());
+
+        let query = format!(
+            "UPDATE agent_instances SET {} WHERE id = ${} \
+             RETURNING id, user_id, instance_id, name, type, public_ssh_key, instance_url, \
+             instance_token, dashboard_url, agent_api_base_url, status, created_at, updated_at",
+            set_clauses.join(", "),
+            param_idx
+        );
+        param_values.push(Box::new(instance_id));
+
+        let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+            param_values.iter().map(|p| p.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync)).collect();
+
+        let row = client.query_one(&query, &params).await?;
+
+        Ok(AgentInstance {
+            id: row.get(0),
+            user_id: row.get(1),
+            instance_id: row.get(2),
+            name: row.get(3),
+            public_ssh_key: row.get(5),
+            instance_url: row.get(6),
+            instance_token: decrypt_token(row.get(7)),
+            dashboard_url: row.get(8),
+            agent_api_base_url: row.get(9),
+            service_type: row.get(4),
+            status: row.get(10),
+            created_at: row.get(11),
+            updated_at: row.get(12),
+        })
+    }
+
+    async fn get_migration_status_counts(
+        &self,
+        legacy_pattern: &str,
+        crabshack_pattern: &str,
+    ) -> anyhow::Result<(i64, i64, i64, i64)> {
+        let client = self.pool.get().await?;
+
+        let row = client
+            .query_one(
+                "SELECT
+                    COUNT(*) AS total,
+                    COUNT(*) FILTER (WHERE agent_api_base_url LIKE $2) AS migrated,
+                    COUNT(*) FILTER (WHERE agent_api_base_url LIKE $1) AS pending,
+                    COUNT(*) FILTER (WHERE agent_api_base_url IS NULL) AS unknown
+                 FROM agent_instances
+                 WHERE status != 'deleted'",
+                &[&legacy_pattern, &crabshack_pattern],
+            )
+            .await?;
+
+        Ok((row.get(0), row.get(1), row.get(2), row.get(3)))
+    }
 }
