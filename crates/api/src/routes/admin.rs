@@ -3542,6 +3542,28 @@ pub async fn admin_migrate_instance(
     let nearai_api_url = compose_data
         .get("nearai_api_url")
         .and_then(|v| v.as_str());
+    let image = compose_data
+        .get("image")
+        .and_then(|v| v.as_str())
+        .unwrap_or("docker.io/nearaidev/ironclaw-dind:latest");
+    let mem_limit = compose_data
+        .get("mem_limit")
+        .and_then(|v| v.as_str())
+        .unwrap_or("4g");
+    let cpus = compose_data
+        .get("cpus")
+        .and_then(|v| v.as_str())
+        .unwrap_or("1");
+    let storage_size = compose_data
+        .get("storage_size")
+        .and_then(|v| v.as_str())
+        .unwrap_or("10G");
+
+    // Store overwritten values in extra_env for rollback reference
+    let extra_env = serde_json::json!({
+        "LEGACY_API_BASE_URL": agent_api_base_url,
+        "LEGACY_INSTANCE_URL": instance.instance_url.as_deref().unwrap_or(""),
+    });
 
     // Find a CrabShack (non-legacy) manager for import
     let crabshack_manager = app_state
@@ -3549,7 +3571,6 @@ pub async fn admin_migrate_instance(
         .find_crabshack_manager()
         .ok_or_else(|| {
             tracing::error!("No CrabShack manager configured for import");
-            // Restart on compose-api if we stopped it
             maybe_restart_on_failure(&app_state, compose_api_url, &encoded_name, &manager.token, was_stopped);
             ApiError::internal_server_error("No CrabShack manager configured")
         })?;
@@ -3557,14 +3578,18 @@ pub async fn admin_migrate_instance(
     let import_url = format!("{}/instances/import", crabshack_manager.url);
     let import_body = serde_json::json!({
         "name": instance.name,
+        "token": instance_token,
         "backup_url": backup_presigned_url,
         "backup_passphrase": backup_passphrase,
-        "legacy_token": instance_token,
         "service_type": crabshack_service_type,
+        "image": image,
         "ssh_pubkey": ssh_pubkey,
         "nearai_api_key": nearai_api_key,
         "nearai_api_url": nearai_api_url,
-        "user_id": instance.user_id.to_string(),
+        "mem_limit": mem_limit,
+        "cpus": cpus,
+        "storage_size": storage_size,
+        "extra_env": extra_env,
     });
 
     let import_resp = app_state
@@ -3664,10 +3689,14 @@ async fn parse_sse_for_backup_url(response: reqwest::Response) -> anyhow::Result
                 if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
                     let stage = event.get("stage").and_then(|v| v.as_str()).unwrap_or("");
                     if stage == "complete" || stage == "done" {
-                        if let Some(url) = event.get("presigned_url").and_then(|v| v.as_str()) {
-                            return Ok(url.to_string());
+                        // compose-api returns download_url inside "backup" object
+                        if let Some(backup) = event.get("backup") {
+                            if let Some(url) = backup.get("download_url").and_then(|v| v.as_str()) {
+                                return Ok(url.to_string());
+                            }
                         }
-                        if let Some(url) = event.get("backup_url").and_then(|v| v.as_str()) {
+                        // fallback: top-level field
+                        if let Some(url) = event.get("download_url").and_then(|v| v.as_str()) {
                             return Ok(url.to_string());
                         }
                     }
