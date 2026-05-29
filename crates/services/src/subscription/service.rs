@@ -1,6 +1,6 @@
 use super::near_staking::{
-    price_amount_yocto_json, subscription_row_from_chain_json, view_get_price,
-    view_get_subscription_for_price,
+    lock_amount_yocto_json, price_amount_yocto_json, subscription_row_from_chain_json,
+    view_get_lock, view_get_price, view_get_subscription_for_price,
 };
 use super::ports::{
     BillingCycleAnchor, BillingPeriod, CancelSubscriptionOutcome, ChangePlanOutcome,
@@ -1106,6 +1106,30 @@ fn sub_one_month_same_day(dt: chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
     chrono::DateTime::from_naive_utc_and_offset(new_d.and_time(dt.time()), Utc)
 }
 
+fn parse_required_hos_target_amount_yocto(
+    target_amount: Option<&str>,
+) -> Result<u128, SubscriptionError> {
+    let raw = target_amount
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            SubscriptionError::InvalidTargetAmount(
+                "target_amount is required for House-of-Stake plan changes".into(),
+            )
+        })?;
+    let parsed = raw.parse::<u128>().map_err(|_| {
+        SubscriptionError::InvalidTargetAmount(
+            "target_amount must be a positive integer yoctoNEAR string".into(),
+        )
+    })?;
+    if parsed == 0 {
+        return Err(SubscriptionError::InvalidTargetAmount(
+            "target_amount must be greater than zero".into(),
+        ));
+    }
+    Ok(parsed)
+}
+
 /// Add `months_to_add` whole calendar months to `anchor` in **one step** (same rules as
 /// `sub_one_month_same_day` for day overflow). This matches Stripe-style billing: e.g. anchor Jan 31
 /// → +1 month Feb 28/29, → +2 months **Mar 31** (not Mar 28 from chaining one-month steps).
@@ -1349,8 +1373,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .unwrap_or_default();
 
         let plans: Vec<SubscriptionPlan> = filtered_plans
-            .into_keys()
-            .map(|name| {
+            .into_iter()
+            .map(|(name, price_id)| {
                 let plan_config = subscription_plans.get(&name);
                 let price = plan_config.and_then(|c| c.price);
                 let agent_instances = plan_config.and_then(|c| c.agent_instances.clone());
@@ -1360,6 +1384,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 let allowed_models = plan_config.and_then(|c| c.allowed_models.clone());
                 SubscriptionPlan {
                     name,
+                    price_id: Some(price_id),
                     price,
                     trial_period_days,
                     agent_instances,
@@ -1678,6 +1703,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
         &self,
         user_id: UserId,
         target_plan: String,
+        target_amount: Option<String>,
     ) -> Result<ChangePlanOutcome, SubscriptionError> {
         tracing::info!(
             "Changing plan for user_id={} to plan={}",
@@ -1751,7 +1777,13 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 return Ok(ChangePlanOutcome::NoOp);
             }
 
-            let (cur_price_j, new_price_j) = tokio::try_join!(
+            let target_amount = parse_required_hos_target_amount_yocto(target_amount.as_deref())?;
+            let near_account = self
+                .get_near_account_id(user_id)
+                .await
+                .map_err(|_| SubscriptionError::HouseOfStakeRequiresNearWallet)?;
+
+            let (cur_price_j, new_price_j, chain_sub_j) = tokio::try_join!(
                 async {
                     view_get_price(&self.near_rpc_url, contract_id, &subscription.price_id)
                         .await
@@ -1762,6 +1794,16 @@ impl SubscriptionService for SubscriptionServiceImpl {
                         .await
                         .map_err(Self::near_rpc_err)
                 },
+                async {
+                    view_get_subscription_for_price(
+                        &self.near_rpc_url,
+                        contract_id,
+                        &near_account,
+                        &subscription.price_id,
+                    )
+                    .await
+                    .map_err(Self::near_rpc_err)
+                },
             )?;
 
             let cur_price_j = cur_price_j.ok_or_else(|| {
@@ -1769,6 +1811,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
             })?;
             let new_price_j = new_price_j.ok_or_else(|| {
                 SubscriptionError::InternalError("HoS target price not found on-chain".into())
+            })?;
+            let chain_sub_j = chain_sub_j.ok_or_else(|| {
+                SubscriptionError::InternalError("HoS subscription not found on-chain".into())
             })?;
 
             let cur_amt = price_amount_yocto_json(&cur_price_j).ok_or_else(|| {
@@ -1778,33 +1823,79 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 SubscriptionError::InternalError("HoS price missing amount".into())
             })?;
 
-            if new_amt > cur_amt {
-                return Ok(ChangePlanOutcome::NearStakingUpgrade {
-                    subscription_id: subscription.subscription_id,
-                    new_price_id: price_id,
-                });
-            } else if new_amt < cur_amt {
-                let plans = self.get_subscription_plans().await?;
-                let target_limits = effective_limits(plans.get(&target_plan));
-                let instance_count = self
-                    .agent_repo
-                    .count_user_instances(user_id)
-                    .await
-                    .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
-                    as u64;
-                if instance_count > target_limits.instances_max {
-                    return Err(SubscriptionError::InstanceLimitExceeded {
-                        current: instance_count,
-                        max: target_limits.instances_max,
-                    });
+            let chain_subscription_id = chain_sub_j
+                .get("subscription_id")
+                .and_then(|x| x.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| {
+                    SubscriptionError::InternalError(
+                        "HoS subscription missing subscription_id".into(),
+                    )
+                })?;
+            let last_lock_id = chain_sub_j
+                .get("last_lock_id")
+                .and_then(|x| x.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| {
+                    SubscriptionError::InternalError("HoS subscription missing last_lock_id".into())
+                })?;
+            let lock_j = view_get_lock(&self.near_rpc_url, contract_id, last_lock_id)
+                .await
+                .map_err(Self::near_rpc_err)?
+                .ok_or_else(|| {
+                    SubscriptionError::InternalError("HoS subscription lock not found".into())
+                })?;
+            let current_lock_amount = lock_amount_yocto_json(&lock_j).ok_or_else(|| {
+                SubscriptionError::InternalError("HoS lock missing amount_near".into())
+            })?;
+
+            let timing = match target_amount.cmp(&current_lock_amount) {
+                std::cmp::Ordering::Greater => {
+                    if new_amt <= cur_amt {
+                        return Err(SubscriptionError::InvalidTargetAmount(
+                            "target_amount increase requires a higher target price amount".into(),
+                        ));
+                    }
+                    "immediate"
                 }
-                return Ok(ChangePlanOutcome::NearStakingScheduleDowngrade {
-                    subscription_id: subscription.subscription_id,
-                    target_price_id: price_id,
-                });
-            } else {
-                return Ok(ChangePlanOutcome::NoOp);
-            }
+                std::cmp::Ordering::Less => {
+                    if new_amt >= cur_amt {
+                        return Err(SubscriptionError::InvalidTargetAmount(
+                            "target_amount decrease requires a lower target price amount".into(),
+                        ));
+                    }
+                    let plans = self.get_subscription_plans().await?;
+                    let target_limits = effective_limits(plans.get(&target_plan));
+                    let instance_count = self
+                        .agent_repo
+                        .count_user_instances(user_id)
+                        .await
+                        .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
+                        as u64;
+                    if instance_count > target_limits.instances_max {
+                        return Err(SubscriptionError::InstanceLimitExceeded {
+                            current: instance_count,
+                            max: target_limits.instances_max,
+                        });
+                    }
+                    "period_end"
+                }
+                std::cmp::Ordering::Equal => {
+                    if new_amt != cur_amt {
+                        return Err(SubscriptionError::InvalidTargetAmount(
+                            "unchanged target_amount requires the target price amount to match the current price amount".into(),
+                        ));
+                    }
+                    "immediate"
+                }
+            };
+
+            return Ok(ChangePlanOutcome::NearStakingChangePlan {
+                subscription_id: chain_subscription_id.to_string(),
+                target_price_id: price_id,
+                target_amount: target_amount.to_string(),
+                timing: timing.to_string(),
+            });
         }
 
         // Same plan requested: cancel pending downgrade if one exists, otherwise no-op

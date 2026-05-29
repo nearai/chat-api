@@ -76,9 +76,48 @@ pub async fn view_get_price(
     .map_err(|_| NEAR_VIEW_RPC_TIMEOUT_MSG.to_string())?
 }
 
+/// Fetch `get_lock(lock_id)` for current HoS subscription stake amount comparisons.
+pub async fn view_get_lock(
+    rpc_url: &str,
+    contract_id: &str,
+    lock_id: &str,
+) -> Result<Option<Value>, String> {
+    timeout(NEAR_VIEW_RPC_TIMEOUT, async {
+        let url = rpc_url
+            .parse()
+            .map_err(|e: url::ParseError| e.to_string())?;
+        let network = NetworkConfig::from_rpc_url("configured", url);
+        let cid: AccountId = contract_id
+            .parse()
+            .map_err(|e| format!("invalid staking contract account id: {e}"))?;
+
+        let data: Data<Option<Value>> = Contract(cid)
+            .call_function("get_lock", json!({ "lock_id": lock_id }))
+            .read_only()
+            .fetch_from(&network)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        Ok::<Option<Value>, String>(data.data)
+    })
+    .await
+    .map_err(|_| NEAR_VIEW_RPC_TIMEOUT_MSG.to_string())?
+}
+
 /// Parse catalog `amount` field (`U128` JSON) as yoctoNEAR integer.
 pub fn price_amount_yocto_json(price: &Value) -> Option<u128> {
     let a = price.get("amount")?;
+    let s = match a {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        _ => return None,
+    };
+    s.parse().ok()
+}
+
+/// Parse lock `amount_near` field as yoctoNEAR integer.
+pub fn lock_amount_yocto_json(lock: &Value) -> Option<u128> {
+    let a = lock.get("amount_near")?;
     let s = match a {
         Value::String(s) => s.clone(),
         Value::Number(n) => n.to_string(),

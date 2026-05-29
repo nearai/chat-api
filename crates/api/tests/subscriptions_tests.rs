@@ -3542,6 +3542,7 @@ fn near_rpc_hos_catalog_respond(
             let sub = json!({
                 "subscription_id": "sub_chain_hos_change_plan",
                 "price_id": active_price_id,
+                "last_lock_id": "lock_chain_hos_change_plan",
                 "end_ns": "2000000000000000000",
                 "status": "Active",
                 "cancel_at_period_end": false
@@ -3568,6 +3569,17 @@ fn near_rpc_hos_catalog_respond(
                 price_basic
             };
             ResponseTemplate::new(200).set_body_json(near_rpc_call_function_body(price))
+        }
+        "get_lock" => {
+            let amount_near = if active_price_id == "price_hos_pro" {
+                "2000000000000000000000000"
+            } else {
+                "1000000000000000000000000"
+            };
+            ResponseTemplate::new(200).set_body_json(near_rpc_call_function_body(&json!({
+                "lock_id": "lock_chain_hos_change_plan",
+                "amount_near": amount_near
+            })))
         }
         _ => ResponseTemplate::new(500).set_body_json(json!({
             "error": "unexpected NEAR RPC mock",
@@ -3616,17 +3628,19 @@ fn near_rpc_wiremock_hos_subscription_probe_only(
 
 #[test]
 fn test_change_plan_outcome_serde_uses_kind_discriminant() {
-    let o = ChangePlanOutcome::NearStakingUpgrade {
+    let o = ChangePlanOutcome::NearStakingChangePlan {
         subscription_id: "sub_hos_current".to_string(),
-        new_price_id: "price_hos_pro".to_string(),
+        target_price_id: "price_hos_pro".to_string(),
+        target_amount: "2000000000000000000000000".to_string(),
+        timing: "immediate".to_string(),
     };
     let v = serde_json::to_value(&o).expect("serialize");
     assert_eq!(
         v.get("kind").and_then(|x| x.as_str()),
-        Some("near_staking_upgrade")
+        Some("near_staking_change_plan")
     );
     assert_eq!(
-        v.get("new_price_id").and_then(|x| x.as_str()),
+        v.get("target_price_id").and_then(|x| x.as_str()),
         Some("price_hos_pro")
     );
     assert_eq!(
@@ -3634,7 +3648,10 @@ fn test_change_plan_outcome_serde_uses_kind_discriminant() {
         Some("sub_hos_current")
     );
     let back: ChangePlanOutcome = serde_json::from_value(v).expect("deserialize");
-    assert!(matches!(back, ChangePlanOutcome::NearStakingUpgrade { .. }));
+    assert!(matches!(
+        back,
+        ChangePlanOutcome::NearStakingChangePlan { .. }
+    ));
 }
 
 #[tokio::test]
@@ -4441,7 +4458,10 @@ async fn test_change_plan_house_of_stake_upgrade_allows_different_product_ids() 
             http::HeaderName::from_static("content-type"),
             http::HeaderValue::from_static("application/json"),
         )
-        .json(&json!({ "plan": "pro" }))
+        .json(&json!({
+            "plan": "pro",
+            "target_amount": "2000000000000000000000000"
+        }))
         .await;
 
     assert_eq!(response.status_code(), 200, "{}", response.text());
@@ -4449,16 +4469,24 @@ async fn test_change_plan_house_of_stake_upgrade_allows_different_product_ids() 
     let result = &body["result"];
     assert_eq!(
         result.get("kind").and_then(|x| x.as_str()),
-        Some("near_staking_upgrade")
+        Some("near_staking_change_plan")
     );
     assert_eq!(
-        result.get("new_price_id").and_then(|x| x.as_str()),
+        result.get("target_price_id").and_then(|x| x.as_str()),
         Some("price_hos_pro")
     );
-    assert!(result
-        .get("subscription_id")
-        .and_then(|x| x.as_str())
-        .is_some_and(|id| id.starts_with("sub_test_")));
+    assert_eq!(
+        result.get("target_amount").and_then(|x| x.as_str()),
+        Some("2000000000000000000000000")
+    );
+    assert_eq!(
+        result.get("timing").and_then(|x| x.as_str()),
+        Some("immediate")
+    );
+    assert_eq!(
+        result.get("subscription_id").and_then(|x| x.as_str()),
+        Some("sub_chain_hos_change_plan")
+    );
 }
 
 #[tokio::test]
@@ -4535,7 +4563,10 @@ async fn test_change_plan_house_of_stake_downgrade_allows_different_product_ids(
             http::HeaderName::from_static("content-type"),
             http::HeaderValue::from_static("application/json"),
         )
-        .json(&json!({ "plan": "basic" }))
+        .json(&json!({
+            "plan": "basic",
+            "target_amount": "1000000000000000000000000"
+        }))
         .await;
 
     assert_eq!(response.status_code(), 200, "{}", response.text());
@@ -4543,14 +4574,22 @@ async fn test_change_plan_house_of_stake_downgrade_allows_different_product_ids(
     let result = &body["result"];
     assert_eq!(
         result.get("kind").and_then(|x| x.as_str()),
-        Some("near_staking_schedule_downgrade")
+        Some("near_staking_change_plan")
     );
     assert_eq!(
         result.get("target_price_id").and_then(|x| x.as_str()),
         Some("price_hos_basic")
     );
-    assert!(result
-        .get("subscription_id")
-        .and_then(|x| x.as_str())
-        .is_some_and(|id| id.starts_with("sub_test_")));
+    assert_eq!(
+        result.get("target_amount").and_then(|x| x.as_str()),
+        Some("1000000000000000000000000")
+    );
+    assert_eq!(
+        result.get("timing").and_then(|x| x.as_str()),
+        Some("period_end")
+    );
+    assert_eq!(
+        result.get("subscription_id").and_then(|x| x.as_str()),
+        Some("sub_chain_hos_change_plan")
+    );
 }

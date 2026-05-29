@@ -68,6 +68,9 @@ pub struct ResumeSubscriptionResponse {
 pub struct ChangePlanRequest {
     /// Target plan name (e.g., "starter", "basic")
     pub plan: String,
+    /// Target HoS stake amount in yoctoNEAR. Required for House-of-Stake subscriptions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_amount: Option<String>,
 }
 
 /// Response for plan change
@@ -426,7 +429,7 @@ pub async fn change_plan(
 
     let outcome = app_state
         .subscription_service
-        .change_plan(user.user_id, req.plan.clone())
+        .change_plan(user.user_id, req.plan.clone(), req.target_amount.clone())
         .await
         .map_err(|e| match e {
             SubscriptionError::InstanceLimitExceeded { current, max } => {
@@ -438,6 +441,7 @@ pub async fn change_plan(
             SubscriptionError::InvalidPlan(plan) => {
                 ApiError::bad_request(format!("Invalid plan: {}", plan))
             }
+            SubscriptionError::InvalidTargetAmount(msg) => ApiError::bad_request(msg),
             SubscriptionError::NoActiveSubscription => {
                 ApiError::not_found("No active subscription found")
             }
@@ -463,6 +467,9 @@ pub async fn change_plan(
             SubscriptionError::HouseOfStakeNotConfigured => {
                 ApiError::service_unavailable("House-of-Stake billing is not configured")
             }
+            SubscriptionError::HouseOfStakeRequiresNearWallet => {
+                ApiError::bad_request("House-of-Stake plan changes require NEAR wallet authentication")
+            }
             SubscriptionError::NearRpcError(msg) => {
                 tracing::error!(error = ?msg, "NEAR RPC error changing plan");
                 ApiError::service_unavailable("Failed to reach NEAR RPC for staking catalog")
@@ -481,8 +488,7 @@ pub async fn change_plan(
             }
             ChangePlanOutcome::NoOp => "User is already on the target plan".to_string(),
             ChangePlanOutcome::DowngradeCancelled => "Pending downgrade cancelled".to_string(),
-            ChangePlanOutcome::NearStakingUpgrade { .. }
-            | ChangePlanOutcome::NearStakingScheduleDowngrade { .. } => {
+            ChangePlanOutcome::NearStakingChangePlan { .. } => {
                 "Complete plan change in your NEAR wallet".to_string()
             }
         },

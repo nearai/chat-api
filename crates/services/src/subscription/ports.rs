@@ -134,15 +134,12 @@ pub enum ChangePlanOutcome {
     NoOp,
     /// A pending downgrade was cancelled (same plan requested with active pending downgrade).
     DowngradeCancelled,
-    /// HoS: call `upgrade_subscription` in the wallet with this `subscription_id` and `new_price_id`.
-    NearStakingUpgrade {
-        subscription_id: String,
-        new_price_id: String,
-    },
-    /// HoS: call `schedule_downgrade_subscription` with this `subscription_id` and `target_price_id`.
-    NearStakingScheduleDowngrade {
+    /// HoS: call `update_subscription` in the wallet with this subscription id, price id, and stake amount.
+    NearStakingChangePlan {
         subscription_id: String,
         target_price_id: String,
+        target_amount: String,
+        timing: String,
     },
 }
 
@@ -255,6 +252,8 @@ pub enum SubscriptionError {
     CreditsNotConfigured,
     /// Invalid credits amount for purchase
     InvalidCredits(String),
+    /// Invalid target staking amount for a House-of-Stake plan change
+    InvalidTargetAmount(String),
     /// Cannot associate test clock with existing Stripe customer
     TestClockNotAllowedForExistingCustomer,
     /// No pending downgrade to cancel (same plan requested but no pending downgrade exists)
@@ -318,6 +317,7 @@ impl fmt::Display for SubscriptionError {
             Self::InternalError(msg) => write!(f, "Internal error: {}", msg),
             Self::CreditsNotConfigured => write!(f, "Credit purchase is not configured"),
             Self::InvalidCredits(msg) => write!(f, "Invalid credits: {}", msg),
+            Self::InvalidTargetAmount(msg) => write!(f, "Invalid target amount: {}", msg),
             Self::TestClockNotAllowedForExistingCustomer => {
                 write!(
                     f,
@@ -732,6 +732,9 @@ pub trait PaymentWebhookRepository: Send + Sync {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubscriptionPlan {
     pub name: String,
+    /// Provider-specific price id for the requested catalog provider.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub price_id: Option<String>,
     /// Plan price in cents (e.g. 999 for $9.99, 0 for free)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub price: Option<i64>,
@@ -895,6 +898,7 @@ pub trait SubscriptionService: Send + Sync {
         &self,
         user_id: UserId,
         target_plan: String,
+        target_amount: Option<String>,
     ) -> Result<ChangePlanOutcome, SubscriptionError>;
 
     /// Get subscriptions for a user with plan names resolved
