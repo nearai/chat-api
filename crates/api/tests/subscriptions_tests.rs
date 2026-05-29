@@ -1791,6 +1791,7 @@ async fn test_proxy_blocks_for_house_of_stake_plan_credit_limit() {
     ensure_stripe_env_for_gating();
     let (server, db) = create_test_server_and_db(TestServerConfig {
         rate_limit_config: Some(permissive_rate_limit_config()),
+        near_staking_contract_id: Some("staking.testnet".to_string()),
         ..Default::default()
     })
     .await;
