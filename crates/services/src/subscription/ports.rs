@@ -768,7 +768,7 @@ pub struct SubscriptionPlan {
 pub enum CreateSubscriptionOutcome {
     /// Complete checkout on Stripe (`checkout_url`).
     StripeCheckout { checkout_url: String },
-    /// Catalog recurring price id for `lock` (client supplies `product_id` xor `price_id` per contract rules, with `lock_duration_ns: null` for subscriptions).
+    /// Catalog recurring price id for `lock` (client supplies `product_id` xor `price_id` per contract rules, with `duration_ns: null` for subscriptions).
     NearStakeLock {
         price_id: String,
         /// NEAR network id (e.g. `mainnet`, `testnet`) from server config; wallets use with RPC URL.
