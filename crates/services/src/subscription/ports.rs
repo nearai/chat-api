@@ -134,10 +134,16 @@ pub enum ChangePlanOutcome {
     NoOp,
     /// A pending downgrade was cancelled (same plan requested with active pending downgrade).
     DowngradeCancelled,
-    /// HoS: call `upgrade_subscription` in the wallet with this `new_price_id` (contract + network from app config).
-    NearStakingUpgrade { new_price_id: String },
-    /// HoS: call `schedule_downgrade_subscription` with this `target_price_id`.
-    NearStakingScheduleDowngrade { target_price_id: String },
+    /// HoS: call `upgrade_subscription` in the wallet with this `subscription_id` and `new_price_id`.
+    NearStakingUpgrade {
+        subscription_id: String,
+        new_price_id: String,
+    },
+    /// HoS: call `schedule_downgrade_subscription` with this `subscription_id` and `target_price_id`.
+    NearStakingScheduleDowngrade {
+        subscription_id: String,
+        target_price_id: String,
+    },
 }
 
 /// Stripe path updates `cancel_at_period_end` in the DB. HoS returns a wallet intent only: local
@@ -809,7 +815,7 @@ impl<'de> Deserialize<'de> for CreateSubscriptionOutcome {
             });
         }
         if let Some(kind) = obj.get("kind").and_then(|x| x.as_str()) {
-            if kind == "house_of_stake" || kind == "near_stake_lock" {
+            if kind == "house_of_stake" {
                 let price_id = obj
                     .get("price_id")
                     .and_then(|x| x.as_str())

@@ -3524,6 +3524,7 @@ fn near_rpc_call_function_body(result_json: &serde_json::Value) -> serde_json::V
 /// WireMock must decode args and branch on `method_name`.
 fn near_rpc_hos_catalog_respond(
     req: &wiremock::Request,
+    active_price_id: &str,
     price_basic: &serde_json::Value,
     price_pro: &serde_json::Value,
 ) -> ResponseTemplate {
@@ -3540,7 +3541,7 @@ fn near_rpc_hos_catalog_respond(
         "get_subscription_for_price" => {
             let sub = json!({
                 "subscription_id": "sub_chain_hos_change_plan",
-                "price_id": "price_hos_basic",
+                "price_id": active_price_id,
                 "end_ns": "2000000000000000000",
                 "status": "Active",
                 "cancel_at_period_end": false
@@ -4363,15 +4364,15 @@ async fn test_near_staking_sync_clears_stale_pending_downgrade_fields() {
 
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn test_change_plan_house_of_stake_upgrade_json_shape() {
+async fn test_change_plan_house_of_stake_upgrade_allows_different_product_ids() {
     clear_proxy_env_for_local_wiremock();
     let mock = MockServer::start().await;
     let price_basic = json!({
-        "product_id": "nearai|prod_cat",
+        "product_id": "nearai|prod_basic",
         "amount": "1000000000000000000000000"
     });
     let price_pro = json!({
-        "product_id": "nearai|prod_cat",
+        "product_id": "nearai|prod_pro",
         "amount": "2000000000000000000000000"
     });
 
@@ -4381,7 +4382,7 @@ async fn test_change_plan_house_of_stake_upgrade_json_shape() {
             let price_basic = price_basic.clone();
             let price_pro = price_pro.clone();
             move |req: &wiremock::Request| {
-                near_rpc_hos_catalog_respond(req, &price_basic, &price_pro)
+                near_rpc_hos_catalog_respond(req, "price_hos_basic", &price_basic, &price_pro)
             }
         })
         .mount(&mock)
@@ -4448,5 +4449,95 @@ async fn test_change_plan_house_of_stake_upgrade_json_shape() {
     assert_eq!(
         result.get("new_price_id").and_then(|x| x.as_str()),
         Some("price_hos_pro")
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_change_plan_house_of_stake_downgrade_allows_different_product_ids() {
+    clear_proxy_env_for_local_wiremock();
+    let mock = MockServer::start().await;
+    let price_basic = json!({
+        "product_id": "nearai|prod_basic",
+        "amount": "1000000000000000000000000"
+    });
+    let price_pro = json!({
+        "product_id": "nearai|prod_pro",
+        "amount": "2000000000000000000000000"
+    });
+
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with({
+            let price_basic = price_basic.clone();
+            let price_pro = price_pro.clone();
+            move |req: &wiremock::Request| {
+                near_rpc_hos_catalog_respond(req, "price_hos_pro", &price_basic, &price_pro)
+            }
+        })
+        .mount(&mock)
+        .await;
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        near_rpc_url: Some(mock.uri().to_string()),
+        near_staking_contract_id: Some("staking.testnet".to_string()),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": { "providers": { "house-of-stake": { "price_id": "price_hos_basic" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } },
+            "pro": { "providers": { "house-of-stake": { "price_id": "price_hos_pro" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } }
+        }),
+    )
+    .await;
+
+    let near_email = "hos_change_plan_downgrade.testnet@near";
+    let login = json!({
+        "email": near_email,
+        "name": "HoS Change Downgrade",
+        "oauth_provider": "near"
+    });
+    let response = server.post("/v1/auth/mock-login").json(&login).await;
+    let token = response.json::<serde_json::Value>()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    insert_test_subscription_with_provider_and_price(
+        &server,
+        &db,
+        near_email,
+        "house-of-stake",
+        "price_hos_pro",
+        false,
+    )
+    .await;
+
+    let response = server
+        .post("/v1/subscriptions/change")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&json!({ "plan": "basic" }))
+        .await;
+
+    assert_eq!(response.status_code(), 200, "{}", response.text());
+    let body: serde_json::Value = response.json();
+    let result = &body["result"];
+    assert_eq!(
+        result.get("kind").and_then(|x| x.as_str()),
+        Some("near_staking_schedule_downgrade")
+    );
+    assert_eq!(
+        result.get("target_price_id").and_then(|x| x.as_str()),
+        Some("price_hos_basic")
     );
 }

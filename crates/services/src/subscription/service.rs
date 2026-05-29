@@ -1771,31 +1771,6 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 SubscriptionError::InternalError("HoS target price not found on-chain".into())
             })?;
 
-            let cur_prod = cur_price_j
-                .get("product_id")
-                .and_then(|x| x.as_str())
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| {
-                    SubscriptionError::InternalError(
-                        "HoS current price JSON missing or empty product_id".into(),
-                    )
-                })?;
-            let new_prod = new_price_j
-                .get("product_id")
-                .and_then(|x| x.as_str())
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| {
-                    SubscriptionError::InternalError(
-                        "HoS target price JSON missing or empty product_id".into(),
-                    )
-                })?;
-            if cur_prod != new_prod {
-                return Err(SubscriptionError::InvalidPlan(
-                    "Target plan must belong to the same catalog product as the current subscription"
-                        .into(),
-                ));
-            }
-
             let cur_amt = price_amount_yocto_json(&cur_price_j).ok_or_else(|| {
                 SubscriptionError::InternalError("HoS price missing amount".into())
             })?;
@@ -1805,6 +1780,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
 
             if new_amt > cur_amt {
                 return Ok(ChangePlanOutcome::NearStakingUpgrade {
+                    subscription_id: subscription.subscription_id,
                     new_price_id: price_id,
                 });
             } else if new_amt < cur_amt {
@@ -1823,6 +1799,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     });
                 }
                 return Ok(ChangePlanOutcome::NearStakingScheduleDowngrade {
+                    subscription_id: subscription.subscription_id,
                     target_price_id: price_id,
                 });
             } else {
