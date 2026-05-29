@@ -1084,7 +1084,11 @@ impl AgentRepository for PostgresAgentRepository {
         &self,
         limit: i64,
         offset: i64,
-    ) -> anyhow::Result<(Vec<AgentInstance>, std::collections::HashMap<Uuid, DateTime<Utc>>, i64)> {
+    ) -> anyhow::Result<(
+        Vec<AgentInstance>,
+        std::collections::HashMap<Uuid, DateTime<Utc>>,
+        i64,
+    )> {
         let client = self.pool.get().await?;
 
         let count_row = client
@@ -1173,9 +1177,10 @@ impl AgentRepository for PostgresAgentRepository {
 
         if set_clauses.is_empty() {
             // No changes, just return current instance
-            return self.get_instance(instance_id).await?.ok_or_else(|| {
-                anyhow::anyhow!("Instance not found: instance_id={}", instance_id)
-            });
+            return self
+                .get_instance(instance_id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("Instance not found: instance_id={}", instance_id));
         }
 
         set_clauses.push("updated_at = NOW()".to_string());
@@ -1189,8 +1194,10 @@ impl AgentRepository for PostgresAgentRepository {
         );
         param_values.push(Box::new(instance_id));
 
-        let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
-            param_values.iter().map(|p| p.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync)).collect();
+        let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = param_values
+            .iter()
+            .map(|p| p.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
+            .collect();
 
         let row = client.query_one(&query, &params).await?;
 
@@ -1249,8 +1256,10 @@ impl AgentRepository for PostgresAgentRepository {
             crabshack_param_idx, pending_expr
         );
 
-        let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
-            params.iter().map(|p| p.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync)).collect();
+        let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = params
+            .iter()
+            .map(|p| p.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
+            .collect();
 
         let row = client.query_one(&query, &param_refs).await?;
 

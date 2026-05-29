@@ -365,7 +365,11 @@ pub trait AgentRepository: Send + Sync {
         &self,
         limit: i64,
         offset: i64,
-    ) -> anyhow::Result<(Vec<AgentInstance>, std::collections::HashMap<Uuid, DateTime<Utc>>, i64)>;
+    ) -> anyhow::Result<(
+        Vec<AgentInstance>,
+        std::collections::HashMap<Uuid, DateTime<Utc>>,
+        i64,
+    )>;
 
     /// Admin update instance fields for migration (agent_api_base_url, instance_url, instance_token, dashboard_url).
     /// Only updates fields that are Some. instance_token is stored already-encrypted.

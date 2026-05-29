@@ -91,14 +91,12 @@ fn bech32_encode(hrp: &str, data: &[u8]) -> String {
 /// then `createHmac("sha256", prk).update(info || 0x01).digest()[0..32]` for OKM.
 fn hkdf_sha256(ikm: &str, salt: &str, info: &str) -> [u8; 32] {
     // Extract: PRK = HMAC-SHA256(key=salt, data=ikm)
-    let mut mac =
-        HmacSha256::new_from_slice(salt.as_bytes()).expect("HMAC accepts any key length");
+    let mut mac = HmacSha256::new_from_slice(salt.as_bytes()).expect("HMAC accepts any key length");
     mac.update(ikm.as_bytes());
     let prk = mac.finalize().into_bytes();
 
     // Expand: OKM = HMAC-SHA256(key=PRK, data=(info || 0x01))[0..32]
-    let mut mac =
-        HmacSha256::new_from_slice(&prk).expect("HMAC accepts any key length");
+    let mut mac = HmacSha256::new_from_slice(&prk).expect("HMAC accepts any key length");
     mac.update(info.as_bytes());
     mac.update(&[0x01]);
     let okm = mac.finalize().into_bytes();
@@ -149,7 +147,11 @@ mod tests {
     #[test]
     fn test_derive_age_keypair_format() {
         let (recipient, identity) = derive_age_keypair("test-passphrase", "my-instance");
-        assert!(recipient.starts_with("age1"), "recipient should start with 'age1': {}", recipient);
+        assert!(
+            recipient.starts_with("age1"),
+            "recipient should start with 'age1': {}",
+            recipient
+        );
         assert!(
             identity.starts_with("AGE-SECRET-KEY-1"),
             "identity should start with 'AGE-SECRET-KEY-1': {}",
@@ -175,29 +177,56 @@ mod tests {
     #[test]
     fn test_golden_vector_1() {
         let (r, i) = derive_age_keypair("test-passphrase", "golden-test-instance");
-        assert_eq!(r, "age1x96uqc6ucwvsfeqj0p83dme4ve76xj6jh9v5q2tcez8efqg7g9zs9kdp0y");
-        assert_eq!(i, "AGE-SECRET-KEY-1S6ZSMWVK9M6MRMRQW5V5G099ZDK4PHKE9HD3QKM527E5ET4D0Y3S8GVUCK");
+        assert_eq!(
+            r,
+            "age1x96uqc6ucwvsfeqj0p83dme4ve76xj6jh9v5q2tcez8efqg7g9zs9kdp0y"
+        );
+        assert_eq!(
+            i,
+            "AGE-SECRET-KEY-1S6ZSMWVK9M6MRMRQW5V5G099ZDK4PHKE9HD3QKM527E5ET4D0Y3S8GVUCK"
+        );
     }
 
     #[test]
     fn test_golden_vector_2() {
         let (r, i) = derive_age_keypair("abc123def456", "mighty-jay");
-        assert_eq!(r, "age1shyzgr34w6cw4kkp9pny725cduu7u3xfntx79u8nzgzseh0pyguqnr882m");
-        assert_eq!(i, "AGE-SECRET-KEY-1HDD0KF7VU5HWEF4VS96Q5EQQFDXH8E8A7VN75YWGC8WZ73AZTVZQJ7V8SU");
+        assert_eq!(
+            r,
+            "age1shyzgr34w6cw4kkp9pny725cduu7u3xfntx79u8nzgzseh0pyguqnr882m"
+        );
+        assert_eq!(
+            i,
+            "AGE-SECRET-KEY-1HDD0KF7VU5HWEF4VS96Q5EQQFDXH8E8A7VN75YWGC8WZ73AZTVZQJ7V8SU"
+        );
     }
 
     #[test]
     fn test_golden_vector_3_empty_passphrase() {
         let (r, i) = derive_age_keypair("", "empty-passphrase");
-        assert_eq!(r, "age1xhfpav4rtg4286njkse6akpwyq6l80xgw7tw5cxz5m3k46l99plqp6mzke");
-        assert_eq!(i, "AGE-SECRET-KEY-13ZNRYFR3X7RQUZNNCP6FCCAJ73X82F2WUUSM3MS8NG5A8LJ90L8S46PSE5");
+        assert_eq!(
+            r,
+            "age1xhfpav4rtg4286njkse6akpwyq6l80xgw7tw5cxz5m3k46l99plqp6mzke"
+        );
+        assert_eq!(
+            i,
+            "AGE-SECRET-KEY-13ZNRYFR3X7RQUZNNCP6FCCAJ73X82F2WUUSM3MS8NG5A8LJ90L8S46PSE5"
+        );
     }
 
     #[test]
     fn test_golden_vector_4_special_chars() {
-        let (r, i) = derive_age_keypair("a]very/long+passphrase!with@special#chars$", "special-chars-test");
-        assert_eq!(r, "age12ayk7rn78uujvqp4a7cae42g6hvzjx8dgkrgcc6zulq32ffmq3ts0npdgp");
-        assert_eq!(i, "AGE-SECRET-KEY-169JM43WKP2FSJ3XX6VZA6DYHPP0TTYJUPH9UNAJ72XS4TDCX5ATQY4GGMT");
+        let (r, i) = derive_age_keypair(
+            "a]very/long+passphrase!with@special#chars$",
+            "special-chars-test",
+        );
+        assert_eq!(
+            r,
+            "age12ayk7rn78uujvqp4a7cae42g6hvzjx8dgkrgcc6zulq32ffmq3ts0npdgp"
+        );
+        assert_eq!(
+            i,
+            "AGE-SECRET-KEY-169JM43WKP2FSJ3XX6VZA6DYHPP0TTYJUPH9UNAJ72XS4TDCX5ATQY4GGMT"
+        );
     }
 
     #[test]

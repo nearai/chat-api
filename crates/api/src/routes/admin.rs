@@ -3225,9 +3225,8 @@ pub async fn admin_patch_instance(
     Path(instance_id): Path<String>,
     Json(request): Json<PatchInstanceRequest>,
 ) -> Result<Json<InstanceResponse>, ApiError> {
-    let id = Uuid::parse_str(&instance_id).map_err(|_| {
-        ApiError::bad_request("Invalid instance ID format")
-    })?;
+    let id = Uuid::parse_str(&instance_id)
+        .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
 
     tracing::info!("Admin: Patching instance id={}", id);
 
@@ -3314,9 +3313,8 @@ pub async fn admin_migrate_instance(
     Extension(_user): Extension<AuthenticatedUser>,
     Path(instance_id): Path<String>,
 ) -> Result<Json<MigrateInstanceResponse>, ApiError> {
-    let id = Uuid::parse_str(&instance_id).map_err(|_| {
-        ApiError::bad_request("Invalid instance ID format")
-    })?;
+    let id = Uuid::parse_str(&instance_id)
+        .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
 
     tracing::info!("Admin: Starting migration for instance_id={}", id);
 
@@ -3351,7 +3349,11 @@ pub async fn admin_migrate_instance(
         .get_user_passkey_credentials(instance.user_id)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to get passkey credentials: user_id={}, error={}", instance.user_id, e);
+            tracing::error!(
+                "Failed to get passkey credentials: user_id={}, error={}",
+                instance.user_id,
+                e
+            );
             ApiError::internal_server_error("Failed to get user credentials")
         })?;
 
@@ -3375,7 +3377,11 @@ pub async fn admin_migrate_instance(
                 .upsert_user_passkey_credentials(instance.user_id, &auth_secret, &passphrase)
                 .await
                 .map_err(|e| {
-                    tracing::error!("Failed to store passkey credentials: user_id={}, error={}", instance.user_id, e);
+                    tracing::error!(
+                        "Failed to store passkey credentials: user_id={}, error={}",
+                        instance.user_id,
+                        e
+                    );
                     ApiError::internal_server_error("Failed to store credentials")
                 })?;
             passphrase
@@ -3387,9 +3393,10 @@ pub async fn admin_migrate_instance(
         services::agent::age_derivation::derive_age_keypair(&backup_passphrase, &instance.name);
 
     // Decrypt and validate instance_token
-    let instance_token = instance.instance_token.as_deref().ok_or_else(|| {
-        ApiError::bad_request("Instance has no instance_token")
-    })?;
+    let instance_token = instance
+        .instance_token
+        .as_deref()
+        .ok_or_else(|| ApiError::bad_request("Instance has no instance_token"))?;
 
     // Validate decrypted token is not still in encrypted format
     if is_encrypted_format(instance_token) {
@@ -3419,20 +3426,32 @@ pub async fn admin_migrate_instance(
         .send()
         .await
         .map_err(|e| {
-            tracing::error!("Failed to get instance from compose-api: instance_id={}, error={}", id, e);
+            tracing::error!(
+                "Failed to get instance from compose-api: instance_id={}, error={}",
+                id,
+                e
+            );
             ApiError::internal_server_error("Failed to contact legacy compose-api")
         })?;
 
     if !compose_resp.status().is_success() {
         let status = compose_resp.status();
-        tracing::error!("Compose-api GET /instances failed: instance_id={}, status={}", id, status);
+        tracing::error!(
+            "Compose-api GET /instances failed: instance_id={}, status={}",
+            id,
+            status
+        );
         return Err(ApiError::internal_server_error(
             "Failed to get instance metadata from legacy compose-api",
         ));
     }
 
     let compose_data: serde_json::Value = compose_resp.json().await.map_err(|e| {
-        tracing::error!("Failed to parse compose-api response: instance_id={}, error={}", id, e);
+        tracing::error!(
+            "Failed to parse compose-api response: instance_id={}, error={}",
+            id,
+            e
+        );
         ApiError::internal_server_error("Failed to parse legacy instance metadata")
     })?;
 
@@ -3444,7 +3463,10 @@ pub async fn admin_migrate_instance(
     // If instance is stopped, start it first (backup requires running instance)
     let was_stopped = compose_status == "stopped" || compose_status == "exited";
     if was_stopped {
-        tracing::info!("Instance is stopped, starting before backup: instance_id={}", id);
+        tracing::info!(
+            "Instance is stopped, starting before backup: instance_id={}",
+            id
+        );
         let start_url = format!("{}/instances/{}/start", compose_api_url, encoded_name);
         let start_resp = app_state
             .http_client
@@ -3454,12 +3476,20 @@ pub async fn admin_migrate_instance(
             .send()
             .await
             .map_err(|e| {
-                tracing::error!("Failed to start instance on compose-api: instance_id={}, error={}", id, e);
+                tracing::error!(
+                    "Failed to start instance on compose-api: instance_id={}, error={}",
+                    id,
+                    e
+                );
                 ApiError::internal_server_error("Failed to start legacy instance")
             })?;
 
         if !start_resp.status().is_success() {
-            tracing::error!("Compose-api start failed: instance_id={}, status={}", id, start_resp.status());
+            tracing::error!(
+                "Compose-api start failed: instance_id={}, status={}",
+                id,
+                start_resp.status()
+            );
             return Err(ApiError::internal_server_error(
                 "Failed to start legacy instance for backup",
             ));
@@ -3484,14 +3514,30 @@ pub async fn admin_migrate_instance(
         .await
         .map_err(|e| {
             tracing::error!("Failed to create backup: instance_id={}, error={}", id, e);
-            maybe_restart_on_failure(&app_state, compose_api_url, &encoded_name, &manager.token, was_stopped);
+            maybe_restart_on_failure(
+                &app_state,
+                compose_api_url,
+                &encoded_name,
+                &manager.token,
+                was_stopped,
+            );
             ApiError::internal_server_error("Failed to initiate backup on legacy compose-api")
         })?;
 
     if !backup_resp.status().is_success() {
         let status = backup_resp.status();
-        tracing::error!("Compose-api backup failed: instance_id={}, status={}", id, status);
-        maybe_restart_on_failure(&app_state, compose_api_url, &encoded_name, &manager.token, was_stopped);
+        tracing::error!(
+            "Compose-api backup failed: instance_id={}, status={}",
+            id,
+            status
+        );
+        maybe_restart_on_failure(
+            &app_state,
+            compose_api_url,
+            &encoded_name,
+            &manager.token,
+            was_stopped,
+        );
         return Err(ApiError::internal_server_error(
             "Failed to create backup on legacy compose-api",
         ));
@@ -3501,8 +3547,18 @@ pub async fn admin_migrate_instance(
     let backup_presigned_url = match parse_sse_for_backup_url(backup_resp).await {
         Ok(url) => url,
         Err(e) => {
-            tracing::error!("Failed to parse backup SSE stream: instance_id={}, error={}", id, e);
-            maybe_restart_on_failure(&app_state, compose_api_url, &encoded_name, &manager.token, was_stopped);
+            tracing::error!(
+                "Failed to parse backup SSE stream: instance_id={}, error={}",
+                id,
+                e
+            );
+            maybe_restart_on_failure(
+                &app_state,
+                compose_api_url,
+                &encoded_name,
+                &manager.token,
+                was_stopped,
+            );
             return Err(ApiError::internal_server_error(
                 "Failed to get backup URL from legacy compose-api",
             ));
@@ -3520,10 +3576,18 @@ pub async fn admin_migrate_instance(
         .await;
 
     if let Err(e) = &stop_resp {
-        tracing::warn!("Failed to stop instance on compose-api (continuing): instance_id={}, error={}", id, e);
+        tracing::warn!(
+            "Failed to stop instance on compose-api (continuing): instance_id={}, error={}",
+            id,
+            e
+        );
     } else if let Ok(resp) = &stop_resp {
         if !resp.status().is_success() {
-            tracing::warn!("Compose-api stop returned non-success (continuing): instance_id={}, status={}", id, resp.status());
+            tracing::warn!(
+                "Compose-api stop returned non-success (continuing): instance_id={}, status={}",
+                id,
+                resp.status()
+            );
         }
     }
 
@@ -3536,12 +3600,8 @@ pub async fn admin_migrate_instance(
         .get("ssh_pubkey")
         .and_then(|v| v.as_str())
         .or(instance.public_ssh_key.as_deref());
-    let nearai_api_key = compose_data
-        .get("nearai_api_key")
-        .and_then(|v| v.as_str());
-    let nearai_api_url = compose_data
-        .get("nearai_api_url")
-        .and_then(|v| v.as_str());
+    let nearai_api_key = compose_data.get("nearai_api_key").and_then(|v| v.as_str());
+    let nearai_api_url = compose_data.get("nearai_api_url").and_then(|v| v.as_str());
     let image = compose_data
         .get("image")
         .and_then(|v| v.as_str())
@@ -3571,7 +3631,13 @@ pub async fn admin_migrate_instance(
         .find_crabshack_manager()
         .ok_or_else(|| {
             tracing::error!("No CrabShack manager configured for import");
-            maybe_restart_on_failure(&app_state, compose_api_url, &encoded_name, &manager.token, was_stopped);
+            maybe_restart_on_failure(
+                &app_state,
+                compose_api_url,
+                &encoded_name,
+                &manager.token,
+                was_stopped,
+            );
             ApiError::internal_server_error("No CrabShack manager configured")
         })?;
 
@@ -3601,26 +3667,54 @@ pub async fn admin_migrate_instance(
         .send()
         .await
         .map_err(|e| {
-            tracing::error!("Failed to import into CrabShack: instance_id={}, error={}", id, e);
-            maybe_restart_on_failure(&app_state, compose_api_url, &encoded_name, &manager.token, was_stopped);
+            tracing::error!(
+                "Failed to import into CrabShack: instance_id={}, error={}",
+                id,
+                e
+            );
+            maybe_restart_on_failure(
+                &app_state,
+                compose_api_url,
+                &encoded_name,
+                &manager.token,
+                was_stopped,
+            );
             ApiError::internal_server_error("Failed to import into CrabShack")
         })?;
 
     if !import_resp.status().is_success() {
         let status = import_resp.status();
-        tracing::error!("CrabShack import failed: instance_id={}, status={}", id, status);
-        maybe_restart_on_failure(&app_state, compose_api_url, &encoded_name, &manager.token, was_stopped);
-        return Err(ApiError::internal_server_error(
-            "CrabShack import failed",
-        ));
+        tracing::error!(
+            "CrabShack import failed: instance_id={}, status={}",
+            id,
+            status
+        );
+        maybe_restart_on_failure(
+            &app_state,
+            compose_api_url,
+            &encoded_name,
+            &manager.token,
+            was_stopped,
+        );
+        return Err(ApiError::internal_server_error("CrabShack import failed"));
     }
 
     // Parse CrabShack import SSE response for the new instance details
     let import_data = match parse_sse_for_import_result(import_resp).await {
         Ok(data) => data,
         Err(e) => {
-            tracing::error!("Failed to parse CrabShack import SSE: instance_id={}, error={}", id, e);
-            maybe_restart_on_failure(&app_state, compose_api_url, &encoded_name, &manager.token, was_stopped);
+            tracing::error!(
+                "Failed to parse CrabShack import SSE: instance_id={}, error={}",
+                id,
+                e
+            );
+            maybe_restart_on_failure(
+                &app_state,
+                compose_api_url,
+                &encoded_name,
+                &manager.token,
+                was_stopped,
+            );
             return Err(ApiError::internal_server_error(
                 "Failed to parse CrabShack import response",
             ));
@@ -3628,8 +3722,14 @@ pub async fn admin_migrate_instance(
     };
 
     // Extract new URLs from CrabShack response
-    let new_instance_url = import_data.get("url").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let new_dashboard_url = import_data.get("dashboard_url").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let new_instance_url = import_data
+        .get("url")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let new_dashboard_url = import_data
+        .get("dashboard_url")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
 
     // Update chat-api DB to point to CrabShack
     let _updated = app_state
@@ -3643,11 +3743,19 @@ pub async fn admin_migrate_instance(
         )
         .await
         .map_err(|e| {
-            tracing::error!("Failed to update instance after migration: instance_id={}, error={}", id, e);
+            tracing::error!(
+                "Failed to update instance after migration: instance_id={}, error={}",
+                id,
+                e
+            );
             ApiError::internal_server_error("Migration succeeded but failed to update DB")
         })?;
 
-    tracing::info!("Migration completed: instance_id={}, instance_name={}", id, instance_name);
+    tracing::info!(
+        "Migration completed: instance_id={}, instance_name={}",
+        id,
+        instance_name
+    );
 
     Ok(Json(MigrateInstanceResponse {
         status: "success".to_string(),
@@ -3686,12 +3794,18 @@ async fn parse_sse_for_backup_url(response: reqwest::Response) -> anyhow::Result
         let chunk = match tokio::time::timeout(SSE_CHUNK_TIMEOUT, stream.next()).await {
             Ok(Some(chunk)) => chunk?,
             Ok(None) => break,
-            Err(_) => anyhow::bail!("Timed out waiting for SSE chunk from backup stream ({}s)", SSE_CHUNK_TIMEOUT.as_secs()),
+            Err(_) => anyhow::bail!(
+                "Timed out waiting for SSE chunk from backup stream ({}s)",
+                SSE_CHUNK_TIMEOUT.as_secs()
+            ),
         };
         buffer.push_str(&String::from_utf8_lossy(&chunk));
 
         if buffer.len() > SSE_BUFFER_LIMIT {
-            anyhow::bail!("SSE buffer exceeded {} bytes limit in backup stream", SSE_BUFFER_LIMIT);
+            anyhow::bail!(
+                "SSE buffer exceeded {} bytes limit in backup stream",
+                SSE_BUFFER_LIMIT
+            );
         }
 
         while let Some(newline_pos) = buffer.find('\n') {
@@ -3734,12 +3848,18 @@ async fn parse_sse_for_import_result(
         let chunk = match tokio::time::timeout(SSE_CHUNK_TIMEOUT, stream.next()).await {
             Ok(Some(chunk)) => chunk?,
             Ok(None) => break,
-            Err(_) => anyhow::bail!("Timed out waiting for SSE chunk from import stream ({}s)", SSE_CHUNK_TIMEOUT.as_secs()),
+            Err(_) => anyhow::bail!(
+                "Timed out waiting for SSE chunk from import stream ({}s)",
+                SSE_CHUNK_TIMEOUT.as_secs()
+            ),
         };
         buffer.push_str(&String::from_utf8_lossy(&chunk));
 
         if buffer.len() > SSE_BUFFER_LIMIT {
-            anyhow::bail!("SSE buffer exceeded {} bytes limit in import stream", SSE_BUFFER_LIMIT);
+            anyhow::bail!(
+                "SSE buffer exceeded {} bytes limit in import stream",
+                SSE_BUFFER_LIMIT
+            );
         }
 
         while let Some(newline_pos) = buffer.find('\n') {
@@ -3849,11 +3969,11 @@ pub fn create_admin_router() -> Router<AppState> {
                     get(admin_list_all_instances).post(admin_create_instance),
                 )
                 .route("/instances/sync-status", post(admin_sync_agent_status))
+                .route("/instances/migration-status", get(admin_migration_status))
                 .route(
-                    "/instances/migration-status",
-                    get(admin_migration_status),
+                    "/instances/{id}",
+                    patch(admin_patch_instance).delete(admin_delete_instance),
                 )
-                .route("/instances/{id}", patch(admin_patch_instance).delete(admin_delete_instance))
                 .route("/instances/{id}/start", post(admin_start_instance))
                 .route("/instances/{id}/stop", post(admin_stop_instance))
                 .route("/instances/{id}/restart", post(admin_restart_instance))

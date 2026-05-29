@@ -3984,9 +3984,7 @@ impl AgentService for AgentServiceImpl {
                 // Fallback: find any manager whose URL does not match the non-TEE pattern
                 self.managers
                     .iter()
-                    .find(|m| {
-                        !m.url.contains(&self.non_tee_agent_url_pattern)
-                    })
+                    .find(|m| !m.url.contains(&self.non_tee_agent_url_pattern))
                     .cloned()
             })
     }
