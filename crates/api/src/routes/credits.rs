@@ -15,13 +15,16 @@ use utoipa::ToSchema;
 pub struct CreateCreditCheckoutRequest {
     /// Number of credits to purchase
     pub credits: u64,
+    /// Optional payment provider override (`stripe` or `house-of-stake`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     /// URL to redirect after successful checkout
     pub success_url: String,
     /// URL to redirect after cancelled checkout
     pub cancel_url: String,
 }
 
-/// Response containing a House-of-Stake direct payment intent for credit purchase.
+/// Response containing either a Stripe Checkout redirect or House-of-Stake payment intent.
 pub type CreateCreditCheckoutResponse = CreateCreditPurchaseOutcome;
 
 /// Request to confirm a House-of-Stake credit purchase after wallet signing.
@@ -73,11 +76,11 @@ pub async fn get_credits(
     tag = "Credits",
     request_body = CreateCreditCheckoutRequest,
     responses(
-        (status = 200, description = "House-of-Stake payment intent", body = CreateCreditCheckoutResponse),
+        (status = 200, description = "Stripe checkout redirect or House-of-Stake payment intent", body = CreateCreditCheckoutResponse),
         (status = 400, description = "Invalid request"),
         (status = 401, description = "Unauthorized"),
-        (status = 403, description = "Credit purchase requires a linked NEAR wallet"),
-        (status = 503, description = "Credits or House-of-Stake billing not configured")
+        (status = 403, description = "House-of-Stake credit purchase requires a linked NEAR wallet"),
+        (status = 503, description = "Credits or selected payment provider is not configured")
     ),
     security(("session_token" = []))
 )]
@@ -93,11 +96,20 @@ pub async fn create_credit_checkout(
 
     let outcome = app_state
         .subscription_service
-        .create_credit_purchase_checkout(user.user_id, req.credits, req.success_url, req.cancel_url)
+        .create_credit_purchase_checkout(
+            user.user_id,
+            req.credits,
+            req.provider,
+            req.success_url,
+            req.cancel_url,
+        )
         .await
         .map_err(|e| match e {
             SubscriptionError::CreditsNotConfigured => {
                 ApiError::service_unavailable("Credit purchase is not configured")
+            }
+            SubscriptionError::NotConfigured => {
+                ApiError::service_unavailable("Selected payment provider is not configured")
             }
             SubscriptionError::InvalidProvider(msg) => ApiError::bad_request(msg),
             SubscriptionError::HouseOfStakeNotConfigured => {
@@ -107,6 +119,10 @@ pub async fn create_credit_checkout(
                 ApiError::forbidden("Credit purchase requires signing in with a NEAR wallet")
             }
             SubscriptionError::InvalidCredits(msg) => ApiError::bad_request(msg),
+            SubscriptionError::StripeError(msg) => {
+                tracing::error!(error = ?msg, "Stripe error creating credit checkout");
+                ApiError::internal_server_error("Failed to create checkout")
+            }
             SubscriptionError::DatabaseError(msg) => {
                 tracing::error!(error = ?msg, "Database error creating checkout");
                 ApiError::internal_server_error("Failed to create checkout")

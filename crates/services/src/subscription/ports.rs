@@ -980,16 +980,21 @@ impl<'de> Deserialize<'de> for CreateSubscriptionOutcome {
 
 /// Result of [`SubscriptionService::create_credit_purchase_checkout`].
 ///
-/// One-off credit purchases use House-of-Stake direct `pay` only. The frontend signs the
-/// returned intent, then confirms the resulting `purchase_id` through chat-api.
+/// Stripe credit purchases redirect to Checkout and are fulfilled by webhook. HoS purchases
+/// return a wallet intent; the frontend signs `pay`, then confirms the resulting `purchase_id`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-pub struct CreateCreditPurchaseOutcome {
-    pub kind: String,
-    pub price_id: String,
-    pub network_id: String,
-    pub contract_id: String,
-    pub quantity: u64,
+pub enum CreateCreditPurchaseOutcome {
+    HouseOfStake {
+        price_id: String,
+        network_id: String,
+        contract_id: String,
+        quantity: u64,
+    },
+    Stripe {
+        checkout_url: String,
+    },
 }
 
 /// Service trait for subscription management
@@ -1125,6 +1130,7 @@ pub trait SubscriptionService: Send + Sync {
         &self,
         user_id: UserId,
         credits: u64,
+        provider: Option<String>,
         success_url: String,
         cancel_url: String,
     ) -> Result<CreateCreditPurchaseOutcome, SubscriptionError>;

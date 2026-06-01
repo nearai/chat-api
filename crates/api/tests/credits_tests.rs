@@ -1,13 +1,128 @@
 mod common;
 
+use async_trait::async_trait;
 use common::{
     clear_credits_config, create_test_server, create_test_server_and_db, mock_login,
-    set_credits_config, set_hos_credits_config, set_subscription_plans, TestServerConfig,
+    set_credits_config, set_hos_credits_config, set_multi_provider_credits_config,
+    set_subscription_plans, TestServerConfig,
 };
 use serde_json::json;
 use serial_test::serial;
+use services::subscription::ports::{
+    StripeCheckoutSessionResult, StripeClientPort, StripeCreateCreditsCheckoutParams,
+    StripeCreateSubscriptionCheckoutParams, StripeCustomerRef, StripePortalSessionResult,
+    StripeSubscriptionSnapshot, StripeUpdateSubscriptionParams, SubscriptionError,
+};
+use std::collections::HashMap;
+use std::sync::Arc;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+#[derive(Debug)]
+struct MockStripeClient {
+    checkout_url: String,
+}
+
+impl MockStripeClient {
+    fn new(checkout_url: &str) -> Self {
+        Self {
+            checkout_url: checkout_url.to_string(),
+        }
+    }
+}
+
+#[async_trait]
+impl StripeClientPort for MockStripeClient {
+    async fn verify_webhook_signature(
+        &self,
+        _payload: &[u8],
+        _signature: &str,
+        _secret: &str,
+    ) -> Result<(), SubscriptionError> {
+        Ok(())
+    }
+
+    async fn create_customer(
+        &self,
+        _email: Option<&str>,
+        _name: Option<&str>,
+        user_id: &str,
+        _test_clock_id: Option<&str>,
+    ) -> Result<String, SubscriptionError> {
+        Ok(format!("cus_{user_id}"))
+    }
+
+    async fn retrieve_customer(
+        &self,
+        customer_id: &str,
+    ) -> Result<StripeCustomerRef, SubscriptionError> {
+        Ok(StripeCustomerRef {
+            id: customer_id.to_string(),
+            metadata: HashMap::new(),
+        })
+    }
+
+    async fn create_subscription_checkout_session(
+        &self,
+        _params: StripeCreateSubscriptionCheckoutParams,
+    ) -> Result<StripeCheckoutSessionResult, SubscriptionError> {
+        Err(SubscriptionError::StripeError(
+            "subscription checkout not mocked".to_string(),
+        ))
+    }
+
+    async fn create_credits_checkout_session(
+        &self,
+        params: StripeCreateCreditsCheckoutParams,
+    ) -> Result<StripeCheckoutSessionResult, SubscriptionError> {
+        assert_eq!(params.price_id, "price_stripe_credits");
+        assert_eq!(params.credits, 10);
+        Ok(StripeCheckoutSessionResult {
+            id: "cs_test_credits".to_string(),
+            url: Some(self.checkout_url.clone()),
+            line_items: None,
+            line_items_has_more: false,
+        })
+    }
+
+    async fn retrieve_checkout_session(
+        &self,
+        _checkout_session_id: &str,
+    ) -> Result<StripeCheckoutSessionResult, SubscriptionError> {
+        Err(SubscriptionError::StripeError(
+            "retrieve checkout not mocked".to_string(),
+        ))
+    }
+
+    async fn retrieve_subscription(
+        &self,
+        _subscription_id: &str,
+    ) -> Result<StripeSubscriptionSnapshot, SubscriptionError> {
+        Err(SubscriptionError::StripeError(
+            "retrieve subscription not mocked".to_string(),
+        ))
+    }
+
+    async fn update_subscription(
+        &self,
+        _subscription_id: &str,
+        _params: StripeUpdateSubscriptionParams,
+    ) -> Result<StripeSubscriptionSnapshot, SubscriptionError> {
+        Err(SubscriptionError::StripeError(
+            "update subscription not mocked".to_string(),
+        ))
+    }
+
+    async fn create_billing_portal_session(
+        &self,
+        _customer_id: &str,
+        _return_url: &str,
+    ) -> Result<StripePortalSessionResult, SubscriptionError> {
+        Err(SubscriptionError::StripeError(
+            "billing portal not mocked".to_string(),
+        ))
+    }
+}
 
 /// Ensure Stripe env vars are set (needed for subscription/credits service to not return NotConfigured).
 fn ensure_stripe_env() {
@@ -339,6 +454,153 @@ async fn test_post_credits_checkout_house_of_stake_returns_intent() {
         Some("staking.testnet")
     );
     assert_eq!(body.get("quantity").and_then(|v| v.as_u64()), Some(10));
+}
+
+#[tokio::test]
+#[serial(credits_tests)]
+async fn test_post_credits_checkout_stripe_default_returns_checkout_url_without_near_wallet() {
+    ensure_stripe_env();
+    let (server, _) = create_test_server_and_db(TestServerConfig {
+        stripe_client: Some(Arc::new(MockStripeClient::new(
+            "https://checkout.stripe.com/c/pay/cs_test_credits",
+        ))),
+        ..Default::default()
+    })
+    .await;
+    set_multi_provider_credits_config(
+        &server,
+        "stripe",
+        "price_stripe_credits",
+        "price_hos_credits",
+    )
+    .await;
+
+    let token = mock_login(&server, "stripe-credits@example.com").await;
+
+    let response = server
+        .post("/v1/credits")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&json!({
+            "credits": 10,
+            "success_url": "https://example.com/success",
+            "cancel_url": "https://example.com/cancel"
+        }))
+        .await;
+
+    assert_eq!(response.status_code(), 200, "{}", response.text());
+    let body: serde_json::Value = response.json();
+    assert_eq!(body.get("kind").and_then(|v| v.as_str()), Some("stripe"));
+    assert_eq!(
+        body.get("checkout_url").and_then(|v| v.as_str()),
+        Some("https://checkout.stripe.com/c/pay/cs_test_credits")
+    );
+}
+
+#[tokio::test]
+#[serial(credits_tests)]
+async fn test_post_credits_checkout_request_provider_overrides_default_provider() {
+    ensure_stripe_env();
+    let (server, _) = create_test_server_and_db(TestServerConfig {
+        near_staking_contract_id: Some("staking.testnet".to_string()),
+        near_network_id: Some("testnet".to_string()),
+        stripe_client: Some(Arc::new(MockStripeClient::new(
+            "https://checkout.stripe.com/c/pay/cs_test_credits",
+        ))),
+        ..Default::default()
+    })
+    .await;
+    set_multi_provider_credits_config(
+        &server,
+        "stripe",
+        "price_stripe_credits",
+        "price_hos_credits",
+    )
+    .await;
+
+    let token = near_login_token(&server, "hos-credits.testnet").await;
+
+    let response = server
+        .post("/v1/credits")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&json!({
+            "credits": 10,
+            "provider": "house-of-stake",
+            "success_url": "https://example.com/success",
+            "cancel_url": "https://example.com/cancel"
+        }))
+        .await;
+
+    assert_eq!(response.status_code(), 200, "{}", response.text());
+    let body: serde_json::Value = response.json();
+    assert_eq!(
+        body.get("kind").and_then(|v| v.as_str()),
+        Some("house_of_stake")
+    );
+    assert_eq!(
+        body.get("price_id").and_then(|v| v.as_str()),
+        Some("price_hos_credits")
+    );
+    assert_eq!(
+        body.get("contract_id").and_then(|v| v.as_str()),
+        Some("staking.testnet")
+    );
+    assert_eq!(body.get("quantity").and_then(|v| v.as_u64()), Some(10));
+}
+
+#[tokio::test]
+#[serial(credits_tests)]
+async fn test_post_credits_checkout_unsupported_provider_returns_400() {
+    ensure_stripe_env();
+    let (server, _) = create_test_server_and_db(TestServerConfig {
+        stripe_client: Some(Arc::new(MockStripeClient::new(
+            "https://checkout.stripe.com/c/pay/cs_test_credits",
+        ))),
+        ..Default::default()
+    })
+    .await;
+    set_multi_provider_credits_config(
+        &server,
+        "stripe",
+        "price_stripe_credits",
+        "price_hos_credits",
+    )
+    .await;
+
+    let token = mock_login(&server, "unsupported-credits@example.com").await;
+
+    let response = server
+        .post("/v1/credits")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&json!({
+            "credits": 10,
+            "provider": "paypal",
+            "success_url": "https://example.com/success",
+            "cancel_url": "https://example.com/cancel"
+        }))
+        .await;
+
+    assert_eq!(response.status_code(), 400, "{}", response.text());
 }
 
 #[tokio::test]

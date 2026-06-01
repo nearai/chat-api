@@ -7,14 +7,17 @@ use super::ports::{
     CreateCreditPurchaseOutcome, CreateSubscriptionOutcome, CreditsRepository, CreditsSummary,
     DowngradeIntentStatus, NearStakingSyncSummary, PaymentBehavior, PaymentWebhookRepository,
     ProrationBehavior, ResumeSubscriptionOutcome, StripeClientPort,
-    StripeCreateSubscriptionCheckoutParams, StripeCustomerRepository, StripeSubscriptionSnapshot,
-    StripeUpdateSubscriptionParams, Subscription, SubscriptionError, SubscriptionPlan,
-    SubscriptionReplacement, SubscriptionRepository, SubscriptionService, SubscriptionWithPlan,
-    DEFAULT_MONTHLY_TOKEN_LIMIT, NEAR_STAKING_SYNC_SKIPPED_REASON_UPSERT_BLOCKED_NON_HOS,
+    StripeCreateCreditsCheckoutParams, StripeCreateSubscriptionCheckoutParams,
+    StripeCustomerRepository, StripeSubscriptionSnapshot, StripeUpdateSubscriptionParams,
+    Subscription, SubscriptionError, SubscriptionPlan, SubscriptionReplacement,
+    SubscriptionRepository, SubscriptionService, SubscriptionWithPlan, DEFAULT_MONTHLY_TOKEN_LIMIT,
+    NEAR_STAKING_SYNC_SKIPPED_REASON_UPSERT_BLOCKED_NON_HOS,
 };
 use crate::agent::ports::AgentRepository;
 use crate::agent::ports::AgentService;
-use crate::system_configs::ports::{SubscriptionPlanConfig, SystemConfigs, SystemConfigsService};
+use crate::system_configs::ports::{
+    CreditsProviderConfig, SubscriptionPlanConfig, SystemConfigs, SystemConfigsService,
+};
 use crate::user::ports::OAuthProvider;
 use crate::user::ports::UserRepository;
 use crate::user_usage::ports::UserUsageRepository;
@@ -444,7 +447,18 @@ impl SubscriptionServiceImpl {
         Err(SubscriptionError::HouseOfStakeRequiresNearWallet)
     }
 
-    async fn get_hos_credits_price_id(&self) -> Result<String, SubscriptionError> {
+    async fn get_credits_provider_config(
+        &self,
+        requested_provider: Option<&str>,
+    ) -> Result<(String, CreditsProviderConfig), SubscriptionError> {
+        let requested_provider = requested_provider
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(str::to_string);
+        if let Some(provider) = requested_provider.as_deref() {
+            Self::validate_provider(provider)?;
+        }
+
         let configs = self
             .system_configs_service
             .get_configs()
@@ -453,20 +467,35 @@ impl SubscriptionServiceImpl {
         let credits_cfg = configs
             .and_then(|c| c.credits)
             .ok_or(SubscriptionError::CreditsNotConfigured)?;
-        let provider = credits_cfg
-            .default_provider
-            .clone()
-            .unwrap_or_else(|| "house-of-stake".to_string());
-        if provider != "house-of-stake" {
-            return Err(SubscriptionError::InvalidProvider(format!(
-                "Credits purchase is not supported for provider '{}'",
-                provider
-            )));
-        }
-        credits_cfg
+
+        let provider = requested_provider
+            .or_else(|| {
+                credits_cfg
+                    .default_provider
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|p| !p.is_empty())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| "stripe".to_string());
+        let provider_lc = provider.to_lowercase();
+        Self::validate_provider(&provider_lc)?;
+
+        let provider_config = credits_cfg
             .providers
-            .get("house-of-stake")
-            .and_then(|p| p.price_id.clone())
+            .get(provider_lc.as_str())
+            .cloned()
+            .ok_or(SubscriptionError::CreditsNotConfigured)?;
+
+        Ok((provider_lc, provider_config))
+    }
+
+    async fn get_hos_credits_price_id(&self) -> Result<String, SubscriptionError> {
+        let (_provider, provider_config) = self
+            .get_credits_provider_config(Some("house-of-stake"))
+            .await?;
+        provider_config
+            .price_id
             .ok_or(SubscriptionError::CreditsNotConfigured)
     }
 
@@ -1408,6 +1437,20 @@ fn generate_checkout_idempotency_key(user_id: &UserId, price_id: &str) -> String
 
     let mut hasher = Sha256::new();
     hasher.update(format!("{}:{}:{}", user_id.0, price_id, time_window).as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+fn generate_credit_checkout_idempotency_key(
+    user_id: &UserId,
+    price_id: &str,
+    credits: u64,
+) -> String {
+    use sha2::{Digest, Sha256};
+
+    let time_window = chrono::Utc::now().timestamp() / 3600;
+
+    let mut hasher = Sha256::new();
+    hasher.update(format!("{}:{}:{}:{}", user_id.0, price_id, credits, time_window).as_bytes());
     format!("{:x}", hasher.finalize())
 }
 
@@ -3189,8 +3232,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
         &self,
         user_id: UserId,
         credits: u64,
-        _success_url: String,
-        _cancel_url: String,
+        provider: Option<String>,
+        success_url: String,
+        cancel_url: String,
     ) -> Result<CreateCreditPurchaseOutcome, SubscriptionError> {
         const MAX_CREDITS_PER_PURCHASE: u64 = 1_000_000_000;
 
@@ -3206,24 +3250,72 @@ impl SubscriptionService for SubscriptionServiceImpl {
             )));
         }
 
-        let price_id = self.get_hos_credits_price_id().await?;
-        let contract_id = self.hos_contract_id()?;
-        let _near_account = self.get_near_account_id(user_id).await?;
+        let (provider, provider_config) = self
+            .get_credits_provider_config(provider.as_deref())
+            .await?;
+        let price_id = provider_config
+            .price_id
+            .ok_or(SubscriptionError::CreditsNotConfigured)?;
 
-        tracing::info!(
-            "House-of-Stake credit payment intent created: user_id={}, credits={}, price_id={}",
-            user_id,
-            credits,
-            price_id
-        );
+        match provider.as_str() {
+            "house-of-stake" => {
+                let contract_id = self.hos_contract_id()?;
+                let _near_account = self.get_near_account_id(user_id).await?;
 
-        Ok(CreateCreditPurchaseOutcome {
-            kind: "house_of_stake".to_string(),
-            price_id,
-            network_id: self.near_network_id.clone(),
-            contract_id,
-            quantity: credits,
-        })
+                tracing::info!(
+                    "House-of-Stake credit payment intent created: user_id={}, credits={}, price_id={}",
+                    user_id,
+                    credits,
+                    price_id
+                );
+
+                Ok(CreateCreditPurchaseOutcome::HouseOfStake {
+                    price_id,
+                    network_id: self.near_network_id.clone(),
+                    contract_id,
+                    quantity: credits,
+                })
+            }
+            "stripe" => {
+                if !self.is_stripe_configured() {
+                    return Err(SubscriptionError::NotConfigured);
+                }
+
+                let customer_id = self.get_or_create_stripe_customer(user_id, None).await?;
+                let idempotency_key =
+                    generate_credit_checkout_idempotency_key(&user_id, &price_id, credits);
+                let session = self
+                    .stripe_client
+                    .create_credits_checkout_session(StripeCreateCreditsCheckoutParams {
+                        customer_id,
+                        price_id,
+                        credits,
+                        success_url,
+                        cancel_url,
+                        user_id: user_id.0.to_string(),
+                        idempotency_key: idempotency_key.clone(),
+                    })
+                    .await?;
+                let checkout_url = session.url.ok_or_else(|| {
+                    SubscriptionError::StripeError("No checkout URL returned".into())
+                })?;
+
+                tracing::info!(
+                    "Stripe credit checkout session created: user_id={}, credits={}, session_id={}, idempotency_key={}...",
+                    user_id,
+                    credits,
+                    session.id,
+                    &idempotency_key.chars().take(16).collect::<String>()
+                );
+
+                Ok(CreateCreditPurchaseOutcome::Stripe { checkout_url })
+            }
+            _ => Err(SubscriptionError::InvalidProvider(format!(
+                "Unsupported provider: '{}'. Supported: {}",
+                provider,
+                Self::SUPPORTED_PROVIDERS.join(", ")
+            ))),
+        }
     }
 
     async fn confirm_credit_purchase(
