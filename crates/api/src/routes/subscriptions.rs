@@ -502,6 +502,9 @@ pub async fn change_plan(
             ChangePlanOutcome::NearStakingChangePlan { .. } => {
                 "Complete plan change in your NEAR wallet".to_string()
             }
+            ChangePlanOutcome::NearStakingCancelPendingDowngrade { .. } => {
+                "Complete pending downgrade cancellation in your NEAR wallet".to_string()
+            }
         },
         result: outcome,
     }))

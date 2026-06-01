@@ -523,7 +523,7 @@ impl SubscriptionServiceImpl {
     fn json_yocto_field(value: &serde_json::Value, key: &str) -> Option<u128> {
         match value.get(key)? {
             serde_json::Value::String(s) => s.parse().ok(),
-            serde_json::Value::Number(n) => n.as_u64().map(u128::from),
+            serde_json::Value::Number(n) => n.to_string().parse().ok(),
             _ => None,
         }
     }
@@ -1197,17 +1197,31 @@ impl SubscriptionServiceImpl {
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
+        let chain_subscription_id = row.subscription_id.clone();
         self.subscription_repo
             .upsert_subscription_authoritative(&txn, row)
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        let stale_subscription_ids: Vec<String> = hos_subscription_ids
+            .iter()
+            .filter(|sid| sid.as_str() != chain_subscription_id.as_str())
+            .cloned()
+            .collect();
+        let deleted = stale_subscription_ids.len() as u32;
+        for sid in &stale_subscription_ids {
+            self.subscription_repo
+                .delete_subscription_txn(&txn, sid)
+                .await
+                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+        }
 
         txn.commit()
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
         self.invalidate_credit_limit_cache(user_id).await;
-        Ok(Self::hos_reconcile_summary(false, 0, true, None))
+        Ok(Self::hos_reconcile_summary(false, deleted, true, None))
     }
 }
 
@@ -1870,29 +1884,10 @@ impl SubscriptionService for SubscriptionServiceImpl {
 
             if subscription.price_id == price_id {
                 if subscription.pending_downgrade_status == Some(DowngradeIntentStatus::Pending) {
-                    let mut client = self
-                        .db_pool
-                        .get()
-                        .await
-                        .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-                    let txn = client
-                        .transaction()
-                        .await
-                        .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-                    self.subscription_repo
-                        .clear_pending_downgrade(&txn, &subscription.subscription_id)
-                        .await
-                        .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-                    txn.commit()
-                        .await
-                        .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-                    self.invalidate_credit_limit_cache(user_id).await;
-                    tracing::info!(
-                        "HoS pending downgrade cancelled in DB: user_id={}, subscription_id={}",
-                        user_id,
-                        subscription.subscription_id
-                    );
-                    return Ok(ChangePlanOutcome::DowngradeCancelled);
+                    return Ok(ChangePlanOutcome::NearStakingCancelPendingDowngrade {
+                        contract_id: contract_id.to_string(),
+                        subscription_id: subscription.subscription_id,
+                    });
                 }
                 return Ok(ChangePlanOutcome::NoOp);
             }
@@ -3261,6 +3256,19 @@ impl SubscriptionService for SubscriptionServiceImpl {
             "house-of-stake" => {
                 let contract_id = self.hos_contract_id()?;
                 let _near_account = self.get_near_account_id(user_id).await?;
+                let price = view_get_price(&self.near_rpc_url, &contract_id, &price_id)
+                    .await
+                    .map_err(Self::near_rpc_err)?
+                    .ok_or_else(|| {
+                        SubscriptionError::InvalidPlan(
+                            "House-of-Stake credit price not found".into(),
+                        )
+                    })?;
+                if !Self::price_is_active(&price) || !Self::price_is_one_off(&price) {
+                    return Err(SubscriptionError::InvalidPlan(
+                        "House-of-Stake credit price must be active and one-off".into(),
+                    ));
+                }
 
                 tracing::info!(
                     "House-of-Stake credit payment intent created: user_id={}, credits={}, price_id={}",
