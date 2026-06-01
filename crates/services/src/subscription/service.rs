@@ -1,12 +1,12 @@
 use super::near_staking::{
     lock_amount_yocto_json, price_amount_yocto_json, subscription_row_from_chain_json,
-    view_get_lock, view_get_price, view_get_subscription_for_price,
+    view_get_lock, view_get_price, view_get_purchase, view_get_subscription_for_price,
 };
 use super::ports::{
     BillingCycleAnchor, BillingPeriod, CancelSubscriptionOutcome, ChangePlanOutcome,
-    CreateSubscriptionOutcome, CreditsRepository, CreditsSummary, DowngradeIntentStatus,
-    NearStakingSyncSummary, PaymentBehavior, PaymentWebhookRepository, ProrationBehavior,
-    ResumeSubscriptionOutcome, StripeClientPort, StripeCreateCreditsCheckoutParams,
+    CreateCreditPurchaseOutcome, CreateSubscriptionOutcome, CreditsRepository, CreditsSummary,
+    DowngradeIntentStatus, NearStakingSyncSummary, PaymentBehavior, PaymentWebhookRepository,
+    ProrationBehavior, ResumeSubscriptionOutcome, StripeClientPort,
     StripeCreateSubscriptionCheckoutParams, StripeCustomerRepository, StripeSubscriptionSnapshot,
     StripeUpdateSubscriptionParams, Subscription, SubscriptionError, SubscriptionPlan,
     SubscriptionReplacement, SubscriptionRepository, SubscriptionService, SubscriptionWithPlan,
@@ -441,6 +441,75 @@ impl SubscriptionServiceImpl {
             }
         }
         Err(SubscriptionError::HouseOfStakeRequiresNearWallet)
+    }
+
+    async fn get_hos_credits_price_id(&self) -> Result<String, SubscriptionError> {
+        let configs = self
+            .system_configs_service
+            .get_configs()
+            .await
+            .map_err(|e| SubscriptionError::InternalError(e.to_string()))?;
+        let credits_cfg = configs
+            .and_then(|c| c.credits)
+            .ok_or(SubscriptionError::CreditsNotConfigured)?;
+        let provider = credits_cfg
+            .default_provider
+            .clone()
+            .unwrap_or_else(|| "house-of-stake".to_string());
+        if provider != "house-of-stake" {
+            return Err(SubscriptionError::InvalidProvider(format!(
+                "Credits purchase is not supported for provider '{}'",
+                provider
+            )));
+        }
+        credits_cfg
+            .providers
+            .get("house-of-stake")
+            .and_then(|p| p.price_id.clone())
+            .ok_or(SubscriptionError::CreditsNotConfigured)
+    }
+
+    fn hos_contract_id(&self) -> Result<String, SubscriptionError> {
+        self.near_staking_contract_id
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string)
+            .ok_or(SubscriptionError::HouseOfStakeNotConfigured)
+    }
+
+    fn json_string_field<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+        value.get(key).and_then(|v| v.as_str())
+    }
+
+    fn json_u64_field(value: &serde_json::Value, key: &str) -> Option<u64> {
+        match value.get(key)? {
+            serde_json::Value::String(s) => s.parse().ok(),
+            serde_json::Value::Number(n) => n.as_u64(),
+            _ => None,
+        }
+    }
+
+    fn json_yocto_field(value: &serde_json::Value, key: &str) -> Option<u128> {
+        match value.get(key)? {
+            serde_json::Value::String(s) => s.parse().ok(),
+            serde_json::Value::Number(n) => n.as_u64().map(u128::from),
+            _ => None,
+        }
+    }
+
+    fn price_is_one_off(price: &serde_json::Value) -> bool {
+        matches!(
+            Self::json_string_field(price, "price_type"),
+            Some("OneOff") | Some("one_off") | Some("one-off")
+        )
+    }
+
+    fn price_is_active(price: &serde_json::Value) -> bool {
+        matches!(
+            Self::json_string_field(price, "status"),
+            Some("Active") | Some("active")
+        )
     }
 
     async fn get_subscription_plans(
@@ -1309,32 +1378,6 @@ fn generate_checkout_idempotency_key(user_id: &UserId, price_id: &str) -> String
 
     let mut hasher = Sha256::new();
     hasher.update(format!("{}:{}:{}", user_id.0, price_id, time_window).as_bytes());
-    format!("{:x}", hasher.finalize())
-}
-
-/// Generate idempotency key for credit checkout session creation.
-/// Format: SHA-256(user_id:credits:success_url:cancel_url:time_window)
-/// Time window: current timestamp / 3600 (1 hour window). Within the same window and with
-/// identical inputs, Stripe will reuse the same session; changing URLs or credits yields
-/// a different key even within the same window.
-fn generate_credit_checkout_idempotency_key(
-    user_id: &UserId,
-    credits: u64,
-    success_url: &str,
-    cancel_url: &str,
-) -> String {
-    use sha2::{Digest, Sha256};
-
-    let time_window = chrono::Utc::now().timestamp() / 3600;
-
-    let mut hasher = Sha256::new();
-    hasher.update(
-        format!(
-            "{}:{}:{}:{}:{}",
-            user_id.0, credits, success_url, cancel_url, time_window
-        )
-        .as_bytes(),
-    );
     format!("{:x}", hasher.finalize())
 }
 
@@ -3114,20 +3157,11 @@ impl SubscriptionService for SubscriptionServiceImpl {
         &self,
         user_id: UserId,
         credits: u64,
-        success_url: String,
-        cancel_url: String,
-    ) -> Result<String, SubscriptionError> {
+        _success_url: String,
+        _cancel_url: String,
+    ) -> Result<CreateCreditPurchaseOutcome, SubscriptionError> {
         const MAX_CREDITS_PER_PURCHASE: u64 = 1_000_000_000;
 
-        // When Stripe is not configured, credit purchase is not available.
-        if !self.is_stripe_configured() {
-            tracing::debug!(
-                "Credit purchase skipped: Stripe not configured (secret_key_empty={}, webhook_secret_empty={})",
-                self.stripe_secret_key.is_empty(),
-                self.stripe_webhook_secret.is_empty(),
-            );
-            return Err(SubscriptionError::CreditsNotConfigured);
-        }
         if credits == 0 {
             return Err(SubscriptionError::InvalidCredits(
                 "credits must be positive".to_string(),
@@ -3140,63 +3174,169 @@ impl SubscriptionService for SubscriptionServiceImpl {
             )));
         }
 
-        let configs = self
-            .system_configs_service
-            .get_configs()
-            .await
-            .map_err(|e| SubscriptionError::InternalError(e.to_string()))?;
-        let credits_cfg = configs
-            .and_then(|c| c.credits)
-            .ok_or(SubscriptionError::CreditsNotConfigured)?;
-        let provider = credits_cfg
-            .default_provider
-            .clone()
-            .unwrap_or_else(|| "stripe".to_string());
-        if provider != "stripe" {
-            tracing::warn!(
-                "Credit purchase requested for unsupported provider: {}",
-                provider
-            );
-            return Err(SubscriptionError::InvalidProvider(format!(
-                "Credits purchase is not supported for provider '{}'",
-                provider
-            )));
-        }
-        let credit_price_id = credits_cfg
-            .providers
-            .get(&provider)
-            .and_then(|p| p.price_id.clone())
-            .ok_or(SubscriptionError::CreditsNotConfigured)?;
-
-        let customer_id = self.get_or_create_stripe_customer(user_id, None).await?;
-
-        let idempotency_key =
-            generate_credit_checkout_idempotency_key(&user_id, credits, &success_url, &cancel_url);
-
-        let session = self
-            .stripe_client
-            .create_credits_checkout_session(StripeCreateCreditsCheckoutParams {
-                customer_id,
-                price_id: credit_price_id,
-                credits,
-                success_url,
-                cancel_url,
-                user_id: user_id.to_string(),
-                idempotency_key,
-            })
-            .await?;
-
-        let checkout_url = session
-            .url
-            .ok_or_else(|| SubscriptionError::StripeError("No checkout URL returned".into()))?;
+        let price_id = self.get_hos_credits_price_id().await?;
+        let contract_id = self.hos_contract_id()?;
+        let _near_account = self.get_near_account_id(user_id).await?;
 
         tracing::info!(
-            "Credit checkout session created: user_id={}, credits={}",
+            "House-of-Stake credit payment intent created: user_id={}, credits={}, price_id={}",
             user_id,
-            credits
+            credits,
+            price_id
         );
 
-        Ok(checkout_url)
+        Ok(CreateCreditPurchaseOutcome {
+            kind: "house_of_stake".to_string(),
+            price_id,
+            network_id: self.near_network_id.clone(),
+            contract_id,
+        })
+    }
+
+    async fn confirm_credit_purchase(
+        &self,
+        user_id: UserId,
+        purchase_id: String,
+        expected_credits: u64,
+    ) -> Result<CreditsSummary, SubscriptionError> {
+        if expected_credits == 0 {
+            return Err(SubscriptionError::InvalidCredits(
+                "credits must be positive".to_string(),
+            ));
+        }
+
+        let price_id = self.get_hos_credits_price_id().await?;
+        let contract_id = self.hos_contract_id()?;
+        let near_account = self.get_near_account_id(user_id).await?;
+
+        let purchase = view_get_purchase(&self.near_rpc_url, &contract_id, &purchase_id)
+            .await
+            .map_err(Self::near_rpc_err)?
+            .ok_or_else(|| {
+                SubscriptionError::InvalidCredits("House-of-Stake purchase not found".to_string())
+            })?;
+        let price = view_get_price(&self.near_rpc_url, &contract_id, &price_id)
+            .await
+            .map_err(Self::near_rpc_err)?
+            .ok_or_else(|| {
+                SubscriptionError::InvalidCredits(
+                    "House-of-Stake credit price not found".to_string(),
+                )
+            })?;
+
+        let purchase_account =
+            Self::json_string_field(&purchase, "account_id").ok_or_else(|| {
+                SubscriptionError::InvalidCredits(
+                    "House-of-Stake purchase is missing account_id".to_string(),
+                )
+            })?;
+        if purchase_account != near_account {
+            return Err(SubscriptionError::InvalidCredits(
+                "House-of-Stake purchase account does not match the linked NEAR wallet".to_string(),
+            ));
+        }
+
+        let purchase_price = Self::json_string_field(&purchase, "price_id").ok_or_else(|| {
+            SubscriptionError::InvalidCredits(
+                "House-of-Stake purchase is missing price_id".to_string(),
+            )
+        })?;
+        if purchase_price != price_id {
+            return Err(SubscriptionError::InvalidCredits(
+                "House-of-Stake purchase price does not match the configured credit price"
+                    .to_string(),
+            ));
+        }
+
+        let quantity = Self::json_u64_field(&purchase, "quantity").ok_or_else(|| {
+            SubscriptionError::InvalidCredits(
+                "House-of-Stake purchase is missing quantity".to_string(),
+            )
+        })?;
+        if quantity != expected_credits {
+            return Err(SubscriptionError::InvalidCredits(
+                "House-of-Stake purchase quantity does not match requested credits".to_string(),
+            ));
+        }
+
+        if !Self::price_is_active(&price) || !Self::price_is_one_off(&price) {
+            return Err(SubscriptionError::InvalidCredits(
+                "Configured House-of-Stake credit price must be active and one-off".to_string(),
+            ));
+        }
+
+        let unit_amount = price_amount_yocto_json(&price).ok_or_else(|| {
+            SubscriptionError::InvalidCredits(
+                "Configured House-of-Stake credit price is missing amount".to_string(),
+            )
+        })?;
+        let amount_paid = Self::json_yocto_field(&purchase, "amount_paid").ok_or_else(|| {
+            SubscriptionError::InvalidCredits(
+                "House-of-Stake purchase is missing amount_paid".to_string(),
+            )
+        })?;
+        let expected_amount = unit_amount
+            .checked_mul(u128::from(quantity))
+            .ok_or_else(|| {
+                SubscriptionError::InvalidCredits(
+                    "House-of-Stake purchase amount overflow".to_string(),
+                )
+            })?;
+        if amount_paid != expected_amount {
+            return Err(SubscriptionError::InvalidCredits(
+                "House-of-Stake purchase amount does not match price times quantity".to_string(),
+            ));
+        }
+
+        let amount_nano_usd =
+            Self::credits_to_nano_usd(expected_credits as i64).ok_or_else(|| {
+                SubscriptionError::InvalidCredits(
+                    "credits amount is too large to convert to nano-USD".to_string(),
+                )
+            })?;
+
+        let mut client = self
+            .db_pool
+            .get()
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+        let txn = client
+            .transaction()
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+        let inserted = self
+            .credits_repo
+            .try_record_purchase(&txn, user_id, amount_nano_usd, &purchase_id)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+        if inserted {
+            self.credits_repo
+                .add_credits(&txn, user_id, amount_nano_usd)
+                .await
+                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+        }
+        txn.commit()
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        if inserted {
+            self.invalidate_credit_limit_cache(user_id).await;
+            tracing::info!(
+                "House-of-Stake credits added for user_id={}, amount_nano_usd={}, credits={}, purchase_id={}",
+                user_id,
+                amount_nano_usd,
+                expected_credits,
+                purchase_id
+            );
+        } else {
+            tracing::info!(
+                "House-of-Stake credit purchase already processed: user_id={}, purchase_id={}",
+                user_id,
+                purchase_id
+            );
+        }
+
+        self.get_credits(user_id).await
     }
 
     async fn reconcile_purchased_after_usage(

@@ -63,6 +63,7 @@ use utoipa::OpenApi;
         // Credits endpoints
         crate::routes::credits::get_credits,
         crate::routes::credits::create_credit_checkout,
+        crate::routes::credits::confirm_credit_purchase,
         // Subscription endpoints
         crate::routes::subscriptions::create_subscription,
         crate::routes::subscriptions::create_portal_session,
@@ -182,6 +183,8 @@ use utoipa::OpenApi;
         // Credits models
         crate::routes::credits::CreateCreditCheckoutRequest,
         crate::routes::credits::CreateCreditCheckoutResponse,
+        crate::routes::credits::ConfirmCreditPurchaseRequest,
+        services::subscription::ports::CreateCreditPurchaseOutcome,
         services::subscription::ports::CreditsSummary,
         // Subscription models
         crate::routes::subscriptions::CreateSubscriptionRequest,

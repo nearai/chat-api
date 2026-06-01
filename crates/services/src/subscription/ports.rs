@@ -851,6 +851,19 @@ impl<'de> Deserialize<'de> for CreateSubscriptionOutcome {
     }
 }
 
+/// Result of [`SubscriptionService::create_credit_purchase_checkout`].
+///
+/// One-off credit purchases use House-of-Stake direct `pay` only. The frontend signs the
+/// returned intent, then confirms the resulting `purchase_id` through chat-api.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct CreateCreditPurchaseOutcome {
+    pub kind: String,
+    pub price_id: String,
+    pub network_id: String,
+    pub contract_id: String,
+}
+
 /// Service trait for subscription management
 #[async_trait]
 pub trait SubscriptionService: Send + Sync {
@@ -979,14 +992,22 @@ pub trait SubscriptionService: Send + Sync {
         replacement: SubscriptionReplacement,
     ) -> Result<Subscription, SubscriptionError>;
 
-    /// Create checkout session for purchasing credits. Returns checkout URL.
+    /// Create a House-of-Stake direct-payment intent for purchasing credits.
     async fn create_credit_purchase_checkout(
         &self,
         user_id: UserId,
         credits: u64,
         success_url: String,
         cancel_url: String,
-    ) -> Result<String, SubscriptionError>;
+    ) -> Result<CreateCreditPurchaseOutcome, SubscriptionError>;
+
+    /// Verify a House-of-Stake direct purchase and grant user credits idempotently.
+    async fn confirm_credit_purchase(
+        &self,
+        user_id: UserId,
+        purchase_id: String,
+        expected_credits: u64,
+    ) -> Result<CreditsSummary, SubscriptionError>;
 
     /// Get user's credits: remaining balance, totals, used in period, effective max.
     async fn get_credits(&self, user_id: UserId) -> Result<CreditsSummary, SubscriptionError>;

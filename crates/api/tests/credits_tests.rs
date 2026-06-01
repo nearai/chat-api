@@ -2,10 +2,12 @@ mod common;
 
 use common::{
     clear_credits_config, create_test_server, create_test_server_and_db, mock_login,
-    set_credits_config, set_subscription_plans, TestServerConfig,
+    set_credits_config, set_hos_credits_config, set_subscription_plans, TestServerConfig,
 };
 use serde_json::json;
 use serial_test::serial;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// Ensure Stripe env vars are set (needed for subscription/credits service to not return NotConfigured).
 fn ensure_stripe_env() {
@@ -18,6 +20,82 @@ fn ensure_stripe_env() {
     if std::env::var("AGENT_API_TOKEN").is_err() {
         std::env::set_var("AGENT_API_TOKEN", "test_token");
     }
+}
+
+fn clear_proxy_env_for_local_wiremock() {
+    for k in [
+        "http_proxy",
+        "https_proxy",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "all_proxy",
+    ] {
+        std::env::remove_var(k);
+    }
+    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
+}
+
+fn near_rpc_call_function_body(result_json: &serde_json::Value) -> serde_json::Value {
+    let payload = serde_json::to_vec(result_json).expect("serialize view result");
+    let encoded: Vec<serde_json::Value> = payload.iter().map(|b| json!(*b)).collect();
+    json!({
+        "jsonrpc": "2.0",
+        "id": "0",
+        "result": {
+            "block_hash": "11111111111111111111111111111111",
+            "block_height": 12345u64,
+            "logs": [],
+            "result": encoded
+        }
+    })
+}
+
+fn near_rpc_hos_credit_purchase_respond(req: &wiremock::Request) -> ResponseTemplate {
+    let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or(json!({}));
+    match body
+        .pointer("/params/method_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+    {
+        "get_purchase" => {
+            ResponseTemplate::new(200).set_body_json(near_rpc_call_function_body(&json!({
+                "purchase_id": "pay_test",
+                "account_id": "hos-credits.testnet",
+                "product_id": "prod_credits",
+                "price_id": "price_hos_credits",
+                "quantity": "10",
+                "amount_paid": "50",
+                "created_ns": "1"
+            })))
+        }
+        "get_price" => {
+            ResponseTemplate::new(200).set_body_json(near_rpc_call_function_body(&json!({
+                "price_id": "price_hos_credits",
+                "product_id": "prod_credits",
+                "amount": "5",
+                "price_type": "OneOff",
+                "status": "Active"
+            })))
+        }
+        _ => ResponseTemplate::new(500).set_body_json(json!({ "error": "unmocked NEAR RPC" })),
+    }
+}
+
+async fn near_login_token(server: &axum_test::TestServer, account_id: &str) -> String {
+    let response = server
+        .post("/v1/auth/mock-login")
+        .json(&json!({
+            "email": format!("{account_id}@near"),
+            "name": "HoS Credits Test",
+            "oauth_provider": "near"
+        }))
+        .await;
+    assert_eq!(response.status_code(), 200);
+    response.json::<serde_json::Value>()["token"]
+        .as_str()
+        .expect("token")
+        .to_string()
 }
 
 #[tokio::test]
@@ -177,4 +255,113 @@ async fn test_post_credits_checkout_02_invalid_credits_zero() {
         400,
         "POST /v1/credits with credits=0 should return 400"
     );
+}
+
+#[tokio::test]
+#[serial(credits_tests)]
+async fn test_post_credits_checkout_house_of_stake_returns_intent() {
+    let (server, _) = create_test_server_and_db(TestServerConfig {
+        near_staking_contract_id: Some("staking.testnet".to_string()),
+        near_network_id: Some("testnet".to_string()),
+        ..Default::default()
+    })
+    .await;
+    set_hos_credits_config(&server, "price_hos_credits").await;
+
+    let token = near_login_token(&server, "hos-credits.testnet").await;
+
+    let response = server
+        .post("/v1/credits")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&json!({
+            "credits": 10,
+            "success_url": "https://example.com/success",
+            "cancel_url": "https://example.com/cancel"
+        }))
+        .await;
+
+    assert_eq!(response.status_code(), 200, "{}", response.text());
+    let body: serde_json::Value = response.json();
+    assert_eq!(
+        body.get("kind").and_then(|v| v.as_str()),
+        Some("house_of_stake")
+    );
+    assert_eq!(
+        body.get("price_id").and_then(|v| v.as_str()),
+        Some("price_hos_credits")
+    );
+    assert_eq!(
+        body.get("network_id").and_then(|v| v.as_str()),
+        Some("testnet")
+    );
+    assert_eq!(
+        body.get("contract_id").and_then(|v| v.as_str()),
+        Some("staking.testnet")
+    );
+}
+
+#[tokio::test]
+#[serial(credits_tests)]
+async fn test_confirm_house_of_stake_credit_purchase_is_idempotent() {
+    clear_proxy_env_for_local_wiremock();
+    let near_mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(near_rpc_hos_credit_purchase_respond)
+        .mount(&near_mock)
+        .await;
+
+    let (server, _) = create_test_server_and_db(TestServerConfig {
+        near_rpc_url: Some(near_mock.uri().to_string()),
+        near_staking_contract_id: Some("staking.testnet".to_string()),
+        near_network_id: Some("testnet".to_string()),
+        ..Default::default()
+    })
+    .await;
+    set_subscription_plans(
+        &server,
+        json!({
+            "free": { "providers": {}, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 0 } }
+        }),
+    )
+    .await;
+    set_hos_credits_config(&server, "price_hos_credits").await;
+
+    let token = near_login_token(&server, "hos-credits.testnet").await;
+    for _ in 0..2 {
+        let response = server
+            .post("/v1/credits/confirm")
+            .add_header(
+                http::HeaderName::from_static("authorization"),
+                http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+            )
+            .add_header(
+                http::HeaderName::from_static("content-type"),
+                http::HeaderValue::from_static("application/json"),
+            )
+            .json(&json!({
+                "purchase_id": "pay_test",
+                "expected_credits": 10
+            }))
+            .await;
+
+        assert_eq!(response.status_code(), 200, "{}", response.text());
+        let body: serde_json::Value = response.json();
+        assert_eq!(
+            body.get("total_purchased_nano_usd")
+                .and_then(|v| v.as_i64()),
+            Some(10_000_000_000)
+        );
+        assert_eq!(
+            body.get("balance").and_then(|v| v.as_i64()),
+            Some(10_000_000_000)
+        );
+    }
 }

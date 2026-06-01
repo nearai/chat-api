@@ -76,6 +76,34 @@ pub async fn view_get_price(
     .map_err(|_| NEAR_VIEW_RPC_TIMEOUT_MSG.to_string())?
 }
 
+/// Fetch `get_purchase(purchase_id)` for direct one-off `pay` verification.
+pub async fn view_get_purchase(
+    rpc_url: &str,
+    contract_id: &str,
+    purchase_id: &str,
+) -> Result<Option<Value>, String> {
+    timeout(NEAR_VIEW_RPC_TIMEOUT, async {
+        let url = rpc_url
+            .parse()
+            .map_err(|e: url::ParseError| e.to_string())?;
+        let network = NetworkConfig::from_rpc_url("configured", url);
+        let cid: AccountId = contract_id
+            .parse()
+            .map_err(|e| format!("invalid staking contract account id: {e}"))?;
+
+        let data: Data<Option<Value>> = Contract(cid)
+            .call_function("get_purchase", json!({ "purchase_id": purchase_id }))
+            .read_only()
+            .fetch_from(&network)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        Ok::<Option<Value>, String>(data.data)
+    })
+    .await
+    .map_err(|_| NEAR_VIEW_RPC_TIMEOUT_MSG.to_string())?
+}
+
 /// Fetch `get_lock(lock_id)` for current HoS subscription stake amount comparisons.
 pub async fn view_get_lock(
     rpc_url: &str,

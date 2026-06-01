@@ -851,3 +851,37 @@ pub async fn set_credits_config(server: &axum_test::TestServer, credit_price_id:
         response.status_code()
     );
 }
+
+/// Set credits configuration for House-of-Stake one-off purchases.
+pub async fn set_hos_credits_config(server: &axum_test::TestServer, credit_price_id: &str) {
+    let admin_email = "test_setup_admin@admin.org";
+    let admin_token = mock_login(server, admin_email).await;
+
+    let config_body = json!({
+        "credits": {
+            "default_provider": "house-of-stake",
+            "providers": {
+                "house-of-stake": { "price_id": credit_price_id }
+            }
+        }
+    });
+
+    let response = server
+        .patch("/v1/admin/configs")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&config_body)
+        .await;
+
+    assert!(
+        response.status_code().is_success(),
+        "Failed to set HoS credits config: {}",
+        response.status_code()
+    );
+}
