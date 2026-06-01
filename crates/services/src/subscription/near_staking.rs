@@ -195,7 +195,7 @@ pub fn subscription_row_from_chain_json(
         .get("cancel_at_period_end")
         .and_then(|x| x.as_bool())
         .unwrap_or(false);
-    if cancel_at_period_end && current_period_end <= Utc::now() {
+    if status == "active" && current_period_end <= Utc::now() {
         status = "canceled".to_string();
     }
 
@@ -328,5 +328,28 @@ mod tests {
 
         assert_eq!(row.status, "canceled");
         assert!(row.cancel_at_period_end);
+    }
+
+    #[test]
+    fn subscription_row_marks_active_row_canceled_after_period_end() {
+        let past_end_ns = (Utc::now() - chrono::Duration::hours(1))
+            .timestamp_nanos_opt()
+            .expect("timestamp nanos")
+            .to_string();
+        let row = subscription_row_from_chain_json(
+            UserId(Uuid::new_v4()),
+            "alice.testnet",
+            &json!({
+                "subscription_id": "sub_hos_expired",
+                "price_id": "price_hos_basic",
+                "end_ns": past_end_ns,
+                "status": "Active",
+                "cancel_at_period_end": false
+            }),
+        )
+        .expect("parse chain subscription");
+
+        assert_eq!(row.status, "canceled");
+        assert!(!row.cancel_at_period_end);
     }
 }
