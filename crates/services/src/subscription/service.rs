@@ -61,6 +61,12 @@ struct CachedCreditLimit {
     cached_at: Instant,
 }
 
+/// Cached House-of-Stake lock amount. Invalid after short TTL or when the user's credit-limit cache is invalidated.
+struct CachedHouseOfStakeLockAmount {
+    amount_yocto: u128,
+    cached_at: Instant,
+}
+
 /// Cached system configs snapshot for model access checks.
 struct CachedSystemConfigs {
     configs: Option<Arc<SystemConfigs>>,
@@ -69,6 +75,7 @@ struct CachedSystemConfigs {
 
 const TTL_CACHE_SECS: u64 = 600; // 10 minutes
 const SYSTEM_CONFIGS_TTL_CACHE_SECS: u64 = 60; // 1 minute
+const HOUSE_OF_STAKE_LOCK_AMOUNT_TTL_SECS: u64 = 60; // 1 minute
 /// Default monthly credits when plan has no monthly_credits config. 1 USD in nano-dollars ($1 = 1_000_000_000).
 const DEFAULT_MONTHLY_CREDITS_NANO_USD: u64 = 1_000_000_000;
 const YOCTO_PER_NEAR: u128 = 1_000_000_000_000_000_000_000_000;
@@ -97,6 +104,8 @@ pub struct SubscriptionServiceImpl {
     near_rpc_url: String,
     near_network_id: String,
     credit_limit_cache: Arc<RwLock<HashMap<UserId, CachedCreditLimit>>>,
+    house_of_stake_lock_amount_cache:
+        Arc<RwLock<HashMap<(UserId, String), CachedHouseOfStakeLockAmount>>>,
     system_configs_cache: Arc<RwLock<Option<CachedSystemConfigs>>>,
 }
 
@@ -145,14 +154,18 @@ impl SubscriptionServiceImpl {
             near_rpc_url: config.near_rpc_url,
             near_network_id: config.near_network_id,
             credit_limit_cache: Arc::new(RwLock::new(HashMap::new())),
+            house_of_stake_lock_amount_cache: Arc::new(RwLock::new(HashMap::new())),
             system_configs_cache: Arc::new(RwLock::new(None)),
         }
     }
 
-    /// Invalidate credit limit cache for a user (e.g. when plan/credits change via webhook).
+    /// Invalidate cached credit-limit state for a user (e.g. when plan, credits, or HoS lock state changes via webhook/reconcile).
     async fn invalidate_credit_limit_cache(&self, user_id: UserId) {
-        let mut guard = self.credit_limit_cache.write().await;
-        guard.remove(&user_id);
+        self.credit_limit_cache.write().await.remove(&user_id);
+        self.house_of_stake_lock_amount_cache
+            .write()
+            .await
+            .retain(|(cached_user_id, _), _| *cached_user_id != user_id);
         tracing::debug!("Invalidated credit limit cache for user_id={}", user_id);
     }
 
@@ -478,7 +491,15 @@ impl SubscriptionServiceImpl {
                     .filter(|p| !p.is_empty())
                     .map(str::to_string)
             })
-            .unwrap_or_else(|| "stripe".to_string());
+            .unwrap_or_else(|| {
+                if !credits_cfg.providers.contains_key("stripe")
+                    && credits_cfg.providers.contains_key("house-of-stake")
+                {
+                    "house-of-stake".to_string()
+                } else {
+                    "stripe".to_string()
+                }
+            });
         let provider_lc = provider.to_lowercase();
         Self::validate_provider(&provider_lc)?;
 
@@ -703,26 +724,130 @@ impl SubscriptionServiceImpl {
         if subscription.provider != "house-of-stake" {
             return None;
         }
-        let contract_id = self.near_staking_contract_id.as_deref()?.trim();
+
+        let Some(contract_id) = self.near_staking_contract_id.as_deref().map(str::trim) else {
+            tracing::warn!(
+                user_id = %user_id.0,
+                subscription_id = %subscription.subscription_id,
+                "cannot resolve HoS stake-based credits: staking contract is not configured"
+            );
+            return None;
+        };
         if contract_id.is_empty() {
+            tracing::warn!(
+                user_id = %user_id.0,
+                subscription_id = %subscription.subscription_id,
+                "cannot resolve HoS stake-based credits: staking contract is empty"
+            );
             return None;
         }
-        let near_account = self.get_near_account_id(user_id).await.ok()?;
-        let chain_sub = view_get_subscription_for_price(
+
+        let near_account = match self.get_near_account_id(user_id).await {
+            Ok(account) => account,
+            Err(err) => {
+                tracing::warn!(
+                    user_id = %user_id.0,
+                    subscription_id = %subscription.subscription_id,
+                    error = %err,
+                    "cannot resolve HoS stake-based credits: NEAR account unavailable"
+                );
+                return None;
+            }
+        };
+
+        let chain_sub = match view_get_subscription_for_price(
             &self.near_rpc_url,
             contract_id,
             &near_account,
             &subscription.price_id,
         )
         .await
-        .ok()
-        .flatten()?;
-        let last_lock_id = chain_sub.get("last_lock_id").and_then(|x| x.as_str())?;
-        let lock = view_get_lock(&self.near_rpc_url, contract_id, last_lock_id)
+        {
+            Ok(Some(chain_sub)) => chain_sub,
+            Ok(None) => {
+                tracing::warn!(
+                    user_id = %user_id.0,
+                    subscription_id = %subscription.subscription_id,
+                    price_id = %subscription.price_id,
+                    "cannot resolve HoS stake-based credits: subscription missing on chain"
+                );
+                return None;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    user_id = %user_id.0,
+                    subscription_id = %subscription.subscription_id,
+                    price_id = %subscription.price_id,
+                    error = %err,
+                    "cannot resolve HoS stake-based credits: subscription RPC failed"
+                );
+                return None;
+            }
+        };
+
+        let Some(last_lock_id) = chain_sub.get("last_lock_id").and_then(|x| x.as_str()) else {
+            tracing::warn!(
+                user_id = %user_id.0,
+                subscription_id = %subscription.subscription_id,
+                price_id = %subscription.price_id,
+                "cannot resolve HoS stake-based credits: last_lock_id missing on chain subscription"
+            );
+            return None;
+        };
+
+        let cache_key = (user_id, last_lock_id.to_string());
+        if let Some(cached) = self
+            .house_of_stake_lock_amount_cache
+            .read()
             .await
-            .ok()
-            .flatten()?;
-        let lock_amount = lock_amount_yocto_json(&lock)?;
+            .get(&cache_key)
+        {
+            if cached.cached_at.elapsed().as_secs() < HOUSE_OF_STAKE_LOCK_AMOUNT_TTL_SECS {
+                return Self::stake_based_credits_for_lock(plan_config, cached.amount_yocto);
+            }
+        }
+
+        let lock = match view_get_lock(&self.near_rpc_url, contract_id, last_lock_id).await {
+            Ok(Some(lock)) => lock,
+            Ok(None) => {
+                tracing::warn!(
+                    user_id = %user_id.0,
+                    subscription_id = %subscription.subscription_id,
+                    last_lock_id,
+                    "cannot resolve HoS stake-based credits: lock missing on chain"
+                );
+                return None;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    user_id = %user_id.0,
+                    subscription_id = %subscription.subscription_id,
+                    last_lock_id,
+                    error = %err,
+                    "cannot resolve HoS stake-based credits: lock RPC failed"
+                );
+                return None;
+            }
+        };
+
+        let Some(lock_amount) = lock_amount_yocto_json(&lock) else {
+            tracing::warn!(
+                user_id = %user_id.0,
+                subscription_id = %subscription.subscription_id,
+                last_lock_id,
+                "cannot resolve HoS stake-based credits: lock amount missing or invalid"
+            );
+            return None;
+        };
+
+        self.house_of_stake_lock_amount_cache.write().await.insert(
+            cache_key,
+            CachedHouseOfStakeLockAmount {
+                amount_yocto: lock_amount,
+                cached_at: Instant::now(),
+            },
+        );
+
         Self::stake_based_credits_for_lock(plan_config, lock_amount)
     }
 
@@ -3673,7 +3798,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::system_configs::ports::{PaymentProviderConfig, SubscriptionPlanConfig};
+    use crate::system_configs::ports::{
+        PaymentProviderConfig, StakeBasedMonthlyCreditsConfig, SubscriptionPlanConfig,
+    };
     use crate::UserId;
     use chrono::TimeZone;
     use std::collections::HashMap;
@@ -3712,6 +3839,42 @@ mod tests {
             stake_based_monthly_credits: None,
             allowed_models: None,
         }
+    }
+
+    #[test]
+    fn test_stake_based_credits_for_lock() {
+        let mut config = hos_plan_config("hos_basic");
+
+        assert_eq!(
+            SubscriptionServiceImpl::stake_based_credits_for_lock(&config, YOCTO_PER_NEAR),
+            None
+        );
+
+        config.stake_based_monthly_credits = Some(StakeBasedMonthlyCreditsConfig {
+            credits_per_staked_near_nano_usd: Some(10_000_000),
+        });
+
+        let cases = [
+            (0, 0),
+            (YOCTO_PER_NEAR, 10_000_000),
+            (YOCTO_PER_NEAR + YOCTO_PER_NEAR / 2, 15_000_000),
+            (500 * YOCTO_PER_NEAR, 5_000_000_000),
+        ];
+
+        for (lock_amount_yocto, expected_credits) in cases {
+            assert_eq!(
+                SubscriptionServiceImpl::stake_based_credits_for_lock(&config, lock_amount_yocto),
+                Some(expected_credits)
+            );
+        }
+
+        config.stake_based_monthly_credits = Some(StakeBasedMonthlyCreditsConfig {
+            credits_per_staked_near_nano_usd: Some(u64::MAX),
+        });
+        assert_eq!(
+            SubscriptionServiceImpl::stake_based_credits_for_lock(&config, u128::MAX),
+            Some((u128::MAX / YOCTO_PER_NEAR) as u64)
+        );
     }
 
     fn base_subscription() -> Subscription {
