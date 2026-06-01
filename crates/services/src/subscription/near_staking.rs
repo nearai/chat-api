@@ -13,12 +13,11 @@ const NEAR_VIEW_RPC_TIMEOUT: Duration = Duration::from_secs(15);
 
 const NEAR_VIEW_RPC_TIMEOUT_MSG: &str = "NEAR RPC view call timed out";
 
-/// Fetch `get_subscription_for_price(account_id, price_id)` (returns JSON `null` when absent).
-pub async fn view_get_subscription_for_price(
+async fn view_call(
     rpc_url: &str,
     contract_id: &str,
-    account_id: &str,
-    anchor_price_id: &str,
+    method_name: &str,
+    args: Value,
 ) -> Result<Option<Value>, String> {
     timeout(NEAR_VIEW_RPC_TIMEOUT, async {
         let url = rpc_url
@@ -30,13 +29,7 @@ pub async fn view_get_subscription_for_price(
             .map_err(|e| format!("invalid staking contract account id: {e}"))?;
 
         let data: Data<Option<Value>> = Contract(cid)
-            .call_function(
-                "get_subscription_for_price",
-                json!({
-                    "account_id": account_id,
-                    "price_id": anchor_price_id,
-                }),
-            )
+            .call_function(method_name, args)
             .read_only()
             .fetch_from(&network)
             .await
@@ -46,6 +39,25 @@ pub async fn view_get_subscription_for_price(
     })
     .await
     .map_err(|_| NEAR_VIEW_RPC_TIMEOUT_MSG.to_string())?
+}
+
+/// Fetch `get_subscription_for_price(account_id, price_id)` (returns JSON `null` when absent).
+pub async fn view_get_subscription_for_price(
+    rpc_url: &str,
+    contract_id: &str,
+    account_id: &str,
+    anchor_price_id: &str,
+) -> Result<Option<Value>, String> {
+    view_call(
+        rpc_url,
+        contract_id,
+        "get_subscription_for_price",
+        json!({
+            "account_id": account_id,
+            "price_id": anchor_price_id,
+        }),
+    )
+    .await
 }
 
 /// Fetch `get_price(price_id)` for catalog comparisons (upgrade vs downgrade).
@@ -54,26 +66,13 @@ pub async fn view_get_price(
     contract_id: &str,
     price_id: &str,
 ) -> Result<Option<Value>, String> {
-    timeout(NEAR_VIEW_RPC_TIMEOUT, async {
-        let url = rpc_url
-            .parse()
-            .map_err(|e: url::ParseError| e.to_string())?;
-        let network = NetworkConfig::from_rpc_url("configured", url);
-        let cid: AccountId = contract_id
-            .parse()
-            .map_err(|e| format!("invalid staking contract account id: {e}"))?;
-
-        let data: Data<Option<Value>> = Contract(cid)
-            .call_function("get_price", json!({ "price_id": price_id }))
-            .read_only()
-            .fetch_from(&network)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        Ok::<Option<Value>, String>(data.data)
-    })
+    view_call(
+        rpc_url,
+        contract_id,
+        "get_price",
+        json!({ "price_id": price_id }),
+    )
     .await
-    .map_err(|_| NEAR_VIEW_RPC_TIMEOUT_MSG.to_string())?
 }
 
 /// Fetch `get_purchase(purchase_id)` for direct one-off `pay` verification.
@@ -82,26 +81,13 @@ pub async fn view_get_purchase(
     contract_id: &str,
     purchase_id: &str,
 ) -> Result<Option<Value>, String> {
-    timeout(NEAR_VIEW_RPC_TIMEOUT, async {
-        let url = rpc_url
-            .parse()
-            .map_err(|e: url::ParseError| e.to_string())?;
-        let network = NetworkConfig::from_rpc_url("configured", url);
-        let cid: AccountId = contract_id
-            .parse()
-            .map_err(|e| format!("invalid staking contract account id: {e}"))?;
-
-        let data: Data<Option<Value>> = Contract(cid)
-            .call_function("get_purchase", json!({ "purchase_id": purchase_id }))
-            .read_only()
-            .fetch_from(&network)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        Ok::<Option<Value>, String>(data.data)
-    })
+    view_call(
+        rpc_url,
+        contract_id,
+        "get_purchase",
+        json!({ "purchase_id": purchase_id }),
+    )
     .await
-    .map_err(|_| NEAR_VIEW_RPC_TIMEOUT_MSG.to_string())?
 }
 
 /// Fetch `get_lock(lock_id)` for current HoS subscription stake amount comparisons.
@@ -110,26 +96,13 @@ pub async fn view_get_lock(
     contract_id: &str,
     lock_id: &str,
 ) -> Result<Option<Value>, String> {
-    timeout(NEAR_VIEW_RPC_TIMEOUT, async {
-        let url = rpc_url
-            .parse()
-            .map_err(|e: url::ParseError| e.to_string())?;
-        let network = NetworkConfig::from_rpc_url("configured", url);
-        let cid: AccountId = contract_id
-            .parse()
-            .map_err(|e| format!("invalid staking contract account id: {e}"))?;
-
-        let data: Data<Option<Value>> = Contract(cid)
-            .call_function("get_lock", json!({ "lock_id": lock_id }))
-            .read_only()
-            .fetch_from(&network)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        Ok::<Option<Value>, String>(data.data)
-    })
+    view_call(
+        rpc_url,
+        contract_id,
+        "get_lock",
+        json!({ "lock_id": lock_id }),
+    )
     .await
-    .map_err(|_| NEAR_VIEW_RPC_TIMEOUT_MSG.to_string())?
 }
 
 /// Parse catalog `amount` field (`U128` JSON) as yoctoNEAR integer.

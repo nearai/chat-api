@@ -408,6 +408,7 @@ pub async fn resume_subscription(
         (status = 200, description = "Plan changed successfully", body = ChangePlanResponse),
         (status = 400, description = "Invalid plan, instance limit exceeded, or subscription is scheduled for cancellation", body = crate::error::ApiErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "House-of-Stake plan changes require a linked NEAR wallet", body = crate::error::ApiErrorResponse),
         (status = 404, description = "No active subscription found", body = crate::error::ApiErrorResponse),
         (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse),
         (status = 503, description = "House-of-Stake not configured, NEAR RPC error, or Stripe not configured", body = crate::error::ApiErrorResponse)
@@ -468,7 +469,7 @@ pub async fn change_plan(
                 ApiError::service_unavailable("House-of-Stake billing is not configured")
             }
             SubscriptionError::HouseOfStakeRequiresNearWallet => {
-                ApiError::bad_request("House-of-Stake plan changes require NEAR wallet authentication")
+                ApiError::forbidden("House-of-Stake plan changes require NEAR wallet authentication")
             }
             SubscriptionError::NearRpcError(msg) => {
                 tracing::error!(error = ?msg, "NEAR RPC error changing plan");

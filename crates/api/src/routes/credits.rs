@@ -76,6 +76,7 @@ pub async fn get_credits(
         (status = 200, description = "House-of-Stake payment intent", body = CreateCreditCheckoutResponse),
         (status = 400, description = "Invalid request"),
         (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Credit purchase requires a linked NEAR wallet"),
         (status = 503, description = "Credits not configured")
     ),
     security(("session_token" = []))
@@ -103,18 +104,18 @@ pub async fn create_credit_checkout(
                 ApiError::service_unavailable("House-of-Stake billing is not configured")
             }
             SubscriptionError::HouseOfStakeRequiresNearWallet => {
-                ApiError::bad_request("Credit purchase requires signing in with a NEAR wallet")
+                ApiError::forbidden("Credit purchase requires signing in with a NEAR wallet")
             }
             SubscriptionError::NoStripeCustomer => ApiError::service_unavailable(
-                "Credit purchase requires an active subscription. Please subscribe first.",
+                "Credit purchase provider is not available",
             ),
             SubscriptionError::InvalidCredits(msg) => ApiError::bad_request(msg),
             SubscriptionError::NotConfigured => {
-                ApiError::service_unavailable("Stripe is not configured")
+                ApiError::service_unavailable("Credit purchase provider is not configured")
             }
             SubscriptionError::StripeError(msg) => {
-                tracing::error!(error = ?msg, "Stripe error creating checkout");
-                ApiError::internal_server_error("Failed to create checkout")
+                tracing::error!(error = ?msg, "Payment provider error creating credit purchase intent");
+                ApiError::service_unavailable("Credit purchase provider is temporarily unavailable")
             }
             SubscriptionError::DatabaseError(msg) => {
                 tracing::error!(error = ?msg, "Database error creating checkout");
@@ -136,6 +137,7 @@ pub async fn create_credit_checkout(
         (status = 200, description = "Credits summary after confirmed purchase", body = CreditsSummary),
         (status = 400, description = "Invalid purchase"),
         (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Credit purchase requires a linked NEAR wallet"),
         (status = 503, description = "Credits not configured")
     ),
     security(("session_token" = []))
@@ -161,7 +163,7 @@ pub async fn confirm_credit_purchase(
                 ApiError::service_unavailable("House-of-Stake billing is not configured")
             }
             SubscriptionError::HouseOfStakeRequiresNearWallet => {
-                ApiError::bad_request("Credit purchase requires signing in with a NEAR wallet")
+                ApiError::forbidden("Credit purchase requires signing in with a NEAR wallet")
             }
             SubscriptionError::InvalidCredits(msg) => ApiError::bad_request(msg),
             SubscriptionError::NearRpcError(msg) => {

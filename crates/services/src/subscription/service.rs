@@ -21,6 +21,7 @@ use crate::user_usage::ports::UserUsageRepository;
 use crate::UserId;
 use async_trait::async_trait;
 use chrono::{Datelike, Duration, NaiveTime, Utc};
+use futures::future::join_all;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -1019,6 +1020,24 @@ impl SubscriptionServiceImpl {
             }
         };
 
+        let has_active_non_hos = subs.iter().any(|s| {
+            (s.status == "active" || s.status == "trialing") && s.provider != "house-of-stake"
+        });
+        let hos_subscription_ids: Vec<String> = subs
+            .iter()
+            .filter(|s| s.provider == "house-of-stake")
+            .map(|s| s.subscription_id.clone())
+            .collect();
+
+        if has_active_non_hos && hos_subscription_ids.is_empty() {
+            return Ok(Self::hos_reconcile_summary(
+                false,
+                0,
+                false,
+                Some(NEAR_STAKING_SYNC_SKIPPED_REASON_UPSERT_BLOCKED_NON_HOS),
+            ));
+        }
+
         let configs = self
             .system_configs_service
             .get_configs()
@@ -1053,27 +1072,46 @@ impl SubscriptionServiceImpl {
             }
         }
 
+        let rpc_url = self.near_rpc_url.clone();
+        let contract_id = contract_id.to_string();
+        let probe_results = join_all(probe_price_ids.iter().map(|price_id| {
+            let rpc_url = rpc_url.clone();
+            let contract_id = contract_id.clone();
+            let near_account = near_account.clone();
+            let price_id = price_id.clone();
+            async move {
+                let result = view_get_subscription_for_price(
+                    &rpc_url,
+                    &contract_id,
+                    &near_account,
+                    &price_id,
+                )
+                .await;
+                (price_id, result)
+            }
+        }))
+        .await;
+
         let mut raw = None;
+        let mut first_err = None;
         for price_id in &probe_price_ids {
-            let candidate = view_get_subscription_for_price(
-                &self.near_rpc_url,
-                contract_id,
-                &near_account,
-                price_id,
-            )
-            .await
-            .map_err(Self::near_rpc_err)?;
-            if candidate.is_some() {
-                raw = candidate;
-                break;
+            if let Some((_, result)) = probe_results.iter().find(|(p, _)| p == price_id) {
+                match result {
+                    Ok(Some(v)) => {
+                        raw = Some(v.clone());
+                        break;
+                    }
+                    Ok(None) => {}
+                    Err(e) if first_err.is_none() => first_err = Some(e.clone()),
+                    Err(_) => {}
+                }
             }
         }
-
-        let hos_subscription_ids: Vec<String> = subs
-            .iter()
-            .filter(|s| s.provider == "house-of-stake")
-            .map(|s| s.subscription_id.clone())
-            .collect();
+        if raw.is_none() {
+            if let Some(err) = first_err {
+                return Err(Self::near_rpc_err(err));
+            }
+        }
 
         if raw.is_none() {
             if hos_subscription_ids.is_empty() {
@@ -1109,9 +1147,6 @@ impl SubscriptionServiceImpl {
         // Do not insert/update a HoS row while a non-HoS subscription is active/trialing locally:
         // `get_active_subscription` picks newest `created_at`, so a fresh HoS upsert could wrongly
         // become the "active" row for Stripe-primary users who also staked on-chain separately.
-        let has_active_non_hos = subs.iter().any(|s| {
-            (s.status == "active" || s.status == "trialing") && s.provider != "house-of-stake"
-        });
         if has_active_non_hos {
             tracing::warn!(
                 user_id = %user_id.0,
@@ -3184,6 +3219,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
             price_id,
             network_id: self.near_network_id.clone(),
             contract_id,
+            quantity: credits,
         })
     }
 
@@ -3348,19 +3384,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
     }
 
     async fn get_credits(&self, user_id: UserId) -> Result<CreditsSummary, SubscriptionError> {
-        // Refresh remaining balance from period usage vs plan before returning summary
-        if let Err(e) = self.reconcile_purchased_after_usage(user_id).await {
-            tracing::warn!(error = ?e, "Failed to reconcile purchased credits before get_credits");
-        }
-
         let (plan_credits, period_start, period_end) =
             self.resolve_plan_period_for_user(user_id).await?;
-
-        let (balance, total_purchased_nano_usd, spent_purchased_nano_usd) = self
-            .credits_repo
-            .get_purchased_breakdown(user_id)
-            .await
-            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
         let period_spent_credits = self
             .user_usage_repo
@@ -3369,6 +3394,25 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .map_err(|e| SubscriptionError::InternalError(e.to_string()))?
             .map(|s| s.cost_nano_usd)
             .unwrap_or(0);
+
+        if period_spent_credits > 0 {
+            if let Err(e) = self
+                .credits_repo
+                .reconcile_purchased_after_usage(user_id, plan_credits, period_start, period_end)
+                .await
+                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))
+            {
+                tracing::warn!(error = ?e, "Failed to reconcile purchased credits before get_credits");
+            } else {
+                self.invalidate_credit_limit_cache(user_id).await;
+            }
+        }
+
+        let (balance, total_purchased_nano_usd, spent_purchased_nano_usd) = self
+            .credits_repo
+            .get_purchased_breakdown(user_id)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
         Ok(CreditsSummary {
             balance,

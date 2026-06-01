@@ -259,6 +259,39 @@ async fn test_post_credits_checkout_02_invalid_credits_zero() {
 
 #[tokio::test]
 #[serial(credits_tests)]
+async fn test_post_credits_checkout_requires_near_wallet() {
+    let (server, _) = create_test_server_and_db(TestServerConfig {
+        near_staking_contract_id: Some("staking.testnet".to_string()),
+        near_network_id: Some("testnet".to_string()),
+        ..Default::default()
+    })
+    .await;
+    set_hos_credits_config(&server, "price_hos_credits").await;
+
+    let token = mock_login(&server, "hos-credits-email@example.com").await;
+
+    let response = server
+        .post("/v1/credits")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&json!({
+            "credits": 10,
+            "success_url": "https://example.com/success",
+            "cancel_url": "https://example.com/cancel"
+        }))
+        .await;
+
+    assert_eq!(response.status_code(), 403, "{}", response.text());
+}
+
+#[tokio::test]
+#[serial(credits_tests)]
 async fn test_post_credits_checkout_house_of_stake_returns_intent() {
     let (server, _) = create_test_server_and_db(TestServerConfig {
         near_staking_contract_id: Some("staking.testnet".to_string()),
@@ -305,6 +338,7 @@ async fn test_post_credits_checkout_house_of_stake_returns_intent() {
         body.get("contract_id").and_then(|v| v.as_str()),
         Some("staking.testnet")
     );
+    assert_eq!(body.get("quantity").and_then(|v| v.as_u64()), Some(10));
 }
 
 #[tokio::test]

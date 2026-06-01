@@ -233,6 +233,16 @@ async fn main() -> anyhow::Result<()> {
             user_usage_repo as Arc<dyn services::user_usage::UserUsageRepository>,
         ));
 
+    let near_rpc_url_hint = config.near.rpc_url.as_str().to_ascii_lowercase();
+    let near_network_id_hint = config.near.network_id.to_ascii_lowercase();
+    if near_rpc_url_hint.contains("testnet") && near_network_id_hint == "mainnet" {
+        tracing::warn!(
+            near_rpc_url = %config.near.rpc_url,
+            near_network_id = %config.near.network_id,
+            "NEAR network id appears inconsistent with NEAR RPC URL"
+        );
+    }
+
     // Initialize subscription service
     tracing::info!("Initializing subscription service...");
     let stripe_client = Arc::new(StripeClientAdapter::new(config.stripe.secret_key.clone()));

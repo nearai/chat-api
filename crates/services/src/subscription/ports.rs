@@ -964,6 +964,7 @@ pub struct CreateCreditPurchaseOutcome {
     pub price_id: String,
     pub network_id: String,
     pub contract_id: String,
+    pub quantity: u64,
 }
 
 /// Service trait for subscription management
