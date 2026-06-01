@@ -77,7 +77,7 @@ pub async fn get_credits(
         (status = 400, description = "Invalid request"),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Credit purchase requires a linked NEAR wallet"),
-        (status = 503, description = "Credits not configured")
+        (status = 503, description = "Credits or House-of-Stake billing not configured")
     ),
     security(("session_token" = []))
 )]
@@ -106,17 +106,7 @@ pub async fn create_credit_checkout(
             SubscriptionError::HouseOfStakeRequiresNearWallet => {
                 ApiError::forbidden("Credit purchase requires signing in with a NEAR wallet")
             }
-            SubscriptionError::NoStripeCustomer => ApiError::service_unavailable(
-                "Credit purchase provider is not available",
-            ),
             SubscriptionError::InvalidCredits(msg) => ApiError::bad_request(msg),
-            SubscriptionError::NotConfigured => {
-                ApiError::service_unavailable("Credit purchase provider is not configured")
-            }
-            SubscriptionError::StripeError(msg) => {
-                tracing::error!(error = ?msg, "Payment provider error creating credit purchase intent");
-                ApiError::service_unavailable("Credit purchase provider is temporarily unavailable")
-            }
             SubscriptionError::DatabaseError(msg) => {
                 tracing::error!(error = ?msg, "Database error creating checkout");
                 ApiError::internal_server_error("Failed to create checkout")
@@ -138,7 +128,7 @@ pub async fn create_credit_checkout(
         (status = 400, description = "Invalid purchase"),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Credit purchase requires a linked NEAR wallet"),
-        (status = 503, description = "Credits not configured")
+        (status = 503, description = "Credits or House-of-Stake billing not configured, or NEAR RPC unavailable")
     ),
     security(("session_token" = []))
 )]
@@ -168,7 +158,9 @@ pub async fn confirm_credit_purchase(
             SubscriptionError::InvalidCredits(msg) => ApiError::bad_request(msg),
             SubscriptionError::NearRpcError(msg) => {
                 tracing::error!(error = ?msg, "NEAR RPC error confirming credit purchase");
-                ApiError::bad_request("Failed to verify House-of-Stake purchase")
+                ApiError::service_unavailable(
+                    "Failed to reach NEAR RPC to verify House-of-Stake purchase",
+                )
             }
             SubscriptionError::DatabaseError(msg) => {
                 tracing::error!(error = ?msg, "Database error confirming credit purchase");

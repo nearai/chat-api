@@ -26,6 +26,16 @@ use std::sync::Arc;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
+fn near_rpc_network_hint(host: Option<&str>) -> Option<&'static str> {
+    match host?.to_ascii_lowercase().as_str() {
+        "rpc.mainnet.near.org" | "archival-rpc.mainnet.near.org" | "free.rpc.fastnear.com" => {
+            Some("mainnet")
+        }
+        "rpc.testnet.near.org" | "archival-rpc.testnet.near.org" => Some("testnet"),
+        _ => None,
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Load .env file if it exists
@@ -233,14 +243,16 @@ async fn main() -> anyhow::Result<()> {
             user_usage_repo as Arc<dyn services::user_usage::UserUsageRepository>,
         ));
 
-    let near_rpc_url_hint = config.near.rpc_url.as_str().to_ascii_lowercase();
     let near_network_id_hint = config.near.network_id.to_ascii_lowercase();
-    if near_rpc_url_hint.contains("testnet") && near_network_id_hint == "mainnet" {
-        tracing::warn!(
-            near_rpc_url = %config.near.rpc_url,
-            near_network_id = %config.near.network_id,
-            "NEAR network id appears inconsistent with NEAR RPC URL"
-        );
+    if let Some(rpc_network_hint) = near_rpc_network_hint(config.near.rpc_url.host_str()) {
+        if rpc_network_hint != near_network_id_hint {
+            tracing::warn!(
+                near_rpc_url = %config.near.rpc_url,
+                near_network_id = %config.near.network_id,
+                expected_network_id = rpc_network_hint,
+                "NEAR network id appears inconsistent with NEAR RPC URL"
+            );
+        }
     }
 
     // Initialize subscription service

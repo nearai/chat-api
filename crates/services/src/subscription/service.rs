@@ -1094,17 +1094,15 @@ impl SubscriptionServiceImpl {
 
         let mut raw = None;
         let mut first_err = None;
-        for price_id in &probe_price_ids {
-            if let Some((_, result)) = probe_results.iter().find(|(p, _)| p == price_id) {
-                match result {
-                    Ok(Some(v)) => {
-                        raw = Some(v.clone());
-                        break;
-                    }
-                    Ok(None) => {}
-                    Err(e) if first_err.is_none() => first_err = Some(e.clone()),
-                    Err(_) => {}
+        for (_, result) in &probe_results {
+            match result {
+                Ok(Some(v)) => {
+                    raw = Some(v.clone());
+                    break;
                 }
+                Ok(None) => {}
+                Err(e) if first_err.is_none() => first_err = Some(e.clone()),
+                Err(_) => {}
             }
         }
         if raw.is_none() {
