@@ -120,11 +120,12 @@ pub struct BillingPeriod {
     pub end_at: DateTime<Utc>,
 }
 
-/// Result of a plan-change request. JSON is **internally tagged** with `"kind"` so every variant
-/// serializes as a JSON object (same pattern as HoS create-subscription outcomes).
+/// Result of a plan-change request.
+///
+/// Serialized JSON preserves the legacy string shape for Stripe/unit outcomes, while HoS plan
+/// changes use an object because they need wallet intent fields.
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Debug, Clone)]
 pub enum ChangePlanOutcome {
     /// Stripe subscription was updated immediately.
     ChangedImmediately,
@@ -141,6 +142,107 @@ pub enum ChangePlanOutcome {
         target_amount: String,
         timing: String,
     },
+}
+
+impl ChangePlanOutcome {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::ChangedImmediately => "changed_immediately",
+            Self::ScheduledForPeriodEnd => "scheduled_for_period_end",
+            Self::NoOp => "no_op",
+            Self::DowngradeCancelled => "downgrade_cancelled",
+            Self::NearStakingChangePlan { .. } => "near_staking_change_plan",
+        }
+    }
+}
+
+impl Serialize for ChangePlanOutcome {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        match self {
+            Self::ChangedImmediately
+            | Self::ScheduledForPeriodEnd
+            | Self::NoOp
+            | Self::DowngradeCancelled => serializer.serialize_str(self.kind()),
+            Self::NearStakingChangePlan {
+                subscription_id,
+                target_price_id,
+                target_amount,
+                timing,
+            } => {
+                let mut st = serializer.serialize_struct("NearStakingChangePlan", 5)?;
+                st.serialize_field("kind", self.kind())?;
+                st.serialize_field("subscription_id", subscription_id)?;
+                st.serialize_field("target_price_id", target_price_id)?;
+                st.serialize_field("target_amount", target_amount)?;
+                st.serialize_field("timing", timing)?;
+                st.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ChangePlanOutcome {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+        let v = serde_json::Value::deserialize(deserializer)?;
+        if let Some(kind) = v.as_str() {
+            return match kind {
+                "changed_immediately" => Ok(Self::ChangedImmediately),
+                "scheduled_for_period_end" => Ok(Self::ScheduledForPeriodEnd),
+                "no_op" => Ok(Self::NoOp),
+                "downgrade_cancelled" => Ok(Self::DowngradeCancelled),
+                other => Err(D::Error::custom(format!(
+                    "unknown change plan outcome kind: {other}"
+                ))),
+            };
+        }
+
+        let obj = v
+            .as_object()
+            .ok_or_else(|| D::Error::custom("change plan outcome must be a string or object"))?;
+        let kind = obj
+            .get("kind")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| D::Error::custom("missing kind"))?;
+        match kind {
+            "changed_immediately" => Ok(Self::ChangedImmediately),
+            "scheduled_for_period_end" => Ok(Self::ScheduledForPeriodEnd),
+            "no_op" => Ok(Self::NoOp),
+            "downgrade_cancelled" => Ok(Self::DowngradeCancelled),
+            "near_staking_change_plan" => Ok(Self::NearStakingChangePlan {
+                subscription_id: obj
+                    .get("subscription_id")
+                    .and_then(|x| x.as_str())
+                    .ok_or_else(|| D::Error::custom("missing subscription_id"))?
+                    .to_string(),
+                target_price_id: obj
+                    .get("target_price_id")
+                    .and_then(|x| x.as_str())
+                    .ok_or_else(|| D::Error::custom("missing target_price_id"))?
+                    .to_string(),
+                target_amount: obj
+                    .get("target_amount")
+                    .and_then(|x| x.as_str())
+                    .ok_or_else(|| D::Error::custom("missing target_amount"))?
+                    .to_string(),
+                timing: obj
+                    .get("timing")
+                    .and_then(|x| x.as_str())
+                    .ok_or_else(|| D::Error::custom("missing timing"))?
+                    .to_string(),
+            }),
+            other => Err(D::Error::custom(format!(
+                "unknown change plan outcome kind: {other}"
+            ))),
+        }
+    }
 }
 
 /// Stripe path updates `cancel_at_period_end` in the DB. HoS returns a wallet intent only: local

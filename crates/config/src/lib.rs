@@ -379,7 +379,11 @@ impl Default for StripeConfig {
 }
 
 fn default_near_network_id() -> String {
-    std::env::var("NEAR_NETWORK_ID").unwrap_or_else(|_| "mainnet".to_string())
+    std::env::var("NEAR_NETWORK_ID")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "mainnet".to_string())
 }
 
 /// NEAR-related configuration (shared between services)

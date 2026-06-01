@@ -600,11 +600,7 @@ async fn test_change_plan_downgrade_schedules_even_if_instance_limit_exceeded() 
     );
 
     let body: serde_json::Value = response.json();
-    let result_kind = body
-        .get("result")
-        .and_then(|r| r.get("kind"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let result_kind = body.get("result").and_then(|v| v.as_str()).unwrap_or("");
     assert_eq!(
         result_kind, "scheduled_for_period_end",
         "Should return scheduled_for_period_end for downgrade scheduling"
@@ -3692,6 +3688,13 @@ fn test_change_plan_outcome_serde_uses_kind_discriminant() {
     ));
 }
 
+#[test]
+fn test_change_plan_outcome_unit_variants_preserve_legacy_string_shape() {
+    let v = serde_json::to_value(&ChangePlanOutcome::ScheduledForPeriodEnd).expect("serialize");
+    assert_eq!(v.as_str(), Some("scheduled_for_period_end"));
+    let back: ChangePlanOutcome = serde_json::from_value(v).expect("deserialize");
+    assert!(matches!(back, ChangePlanOutcome::ScheduledForPeriodEnd));
+}
 #[tokio::test]
 #[serial(subscription_tests)]
 async fn test_create_subscription_house_of_stake_returns_flat_json() {

@@ -1818,10 +1818,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
             }
 
             let target_amount = parse_required_hos_target_amount_yocto(target_amount.as_deref())?;
-            let near_account = self
-                .get_near_account_id(user_id)
-                .await
-                .map_err(|_| SubscriptionError::HouseOfStakeRequiresNearWallet)?;
+            let near_account = self.get_near_account_id(user_id).await?;
 
             let (cur_price_j, new_price_j, chain_sub_j) = tokio::try_join!(
                 async {
