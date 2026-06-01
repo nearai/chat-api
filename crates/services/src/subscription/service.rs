@@ -1549,7 +1549,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
         // house-of-stake: linked NEAR wallet required; response carries catalog price_id for on-chain lock
         if provider_lc == "house-of-stake" {
             self.get_near_account_id(user_id).await?;
+            let contract_id = self.hos_contract_id()?;
             return Ok(CreateSubscriptionOutcome::NearStakeLock {
+                contract_id,
                 price_id,
                 network_id: self.near_network_id.clone(),
             });
@@ -1619,6 +1621,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 .hos_product_id_for_price(contract_id, &subscription.price_id)
                 .await?;
             return Ok(CancelSubscriptionOutcome::NearStakingCancel {
+                contract_id: contract_id.to_string(),
                 product_id,
                 network_id: self.near_network_id.clone(),
             });
@@ -1707,6 +1710,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 .hos_product_id_for_price(contract_id, &subscription.price_id)
                 .await?;
             return Ok(ResumeSubscriptionOutcome::NearStakingResume {
+                contract_id: contract_id.to_string(),
                 product_id,
                 network_id: self.near_network_id.clone(),
             });
@@ -1963,6 +1967,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
             };
 
             return Ok(ChangePlanOutcome::NearStakingChangePlan {
+                contract_id: contract_id.to_string(),
                 subscription_id: chain_subscription_id.to_string(),
                 target_price_id: price_id,
                 target_amount: target_amount.to_string(),

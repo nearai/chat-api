@@ -46,6 +46,8 @@ pub struct CancelSubscriptionResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub contract_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub product_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub network_id: Option<String>,
@@ -57,6 +59,8 @@ pub struct ResumeSubscriptionResponse {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contract_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub product_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -136,7 +140,7 @@ pub struct CreatePortalSessionResponse {
     tag = "Subscriptions",
     request_body = CreateSubscriptionRequest,
     responses(
-        (status = 200, description = "Stripe: flat `{ \"checkout_url\": \"...\" }`. HoS: `{ \"kind\": \"house_of_stake\", \"price_id\": \"...\" }`.", body = CreateSubscriptionResponse),
+        (status = 200, description = "Stripe: flat `{ \"checkout_url\": \"...\" }`. HoS: `{ \"kind\": \"house_of_stake\", \"contract_id\": \"...\", \"price_id\": \"...\", \"network_id\": \"...\" }`.", body = CreateSubscriptionResponse),
         (status = 400, description = "Invalid plan or bad request", body = crate::error::ApiErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 403, description = "House-of-Stake requires a linked NEAR wallet", body = crate::error::ApiErrorResponse),
@@ -305,15 +309,18 @@ pub async fn cancel_subscription(
         CancelSubscriptionOutcome::Completed => CancelSubscriptionResponse {
             message: "Subscription will be canceled at period end".to_string(),
             kind: None,
+            contract_id: None,
             product_id: None,
             network_id: None,
         },
         CancelSubscriptionOutcome::NearStakingCancel {
+            contract_id,
             product_id,
             network_id,
         } => CancelSubscriptionResponse {
             message: "Complete cancellation in your NEAR wallet".to_string(),
             kind: Some("near_staking_cancel".to_string()),
+            contract_id: Some(contract_id),
             product_id: Some(product_id),
             network_id: Some(network_id),
         },
@@ -381,15 +388,18 @@ pub async fn resume_subscription(
         ResumeSubscriptionOutcome::Completed => ResumeSubscriptionResponse {
             message: "Subscription resumed successfully".to_string(),
             kind: None,
+            contract_id: None,
             product_id: None,
             network_id: None,
         },
         ResumeSubscriptionOutcome::NearStakingResume {
+            contract_id,
             product_id,
             network_id,
         } => ResumeSubscriptionResponse {
             message: "Complete resume in your NEAR wallet".to_string(),
             kind: Some("near_staking_resume".to_string()),
+            contract_id: Some(contract_id),
             product_id: Some(product_id),
             network_id: Some(network_id),
         },

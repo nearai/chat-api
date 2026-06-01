@@ -3663,6 +3663,7 @@ fn near_rpc_wiremock_hos_subscription_by_price(
 #[test]
 fn test_change_plan_outcome_serde_uses_kind_discriminant() {
     let o = ChangePlanOutcome::NearStakingChangePlan {
+        contract_id: "staking.testnet".to_string(),
         subscription_id: "sub_hos_current".to_string(),
         target_price_id: "price_hos_pro".to_string(),
         target_amount: "2000000000000000000000000".to_string(),
@@ -3676,6 +3677,10 @@ fn test_change_plan_outcome_serde_uses_kind_discriminant() {
     assert_eq!(
         v.get("target_price_id").and_then(|x| x.as_str()),
         Some("price_hos_pro")
+    );
+    assert_eq!(
+        v.get("contract_id").and_then(|x| x.as_str()),
+        Some("staking.testnet")
     );
     assert_eq!(
         v.get("subscription_id").and_then(|x| x.as_str()),
@@ -3763,6 +3768,10 @@ async fn test_create_subscription_house_of_stake_returns_flat_json() {
     assert_eq!(
         body.get("price_id").and_then(|x| x.as_str()),
         Some("price_hos_basic")
+    );
+    assert_eq!(
+        body.get("contract_id").and_then(|x| x.as_str()),
+        Some("staking.testnet")
     );
     assert_eq!(
         body.get("network_id").and_then(|x| x.as_str()),
@@ -3896,6 +3905,10 @@ async fn test_cancel_subscription_house_of_stake_returns_wallet_intent_message()
         Some("nearai|prod_cat")
     );
     assert_eq!(
+        body.get("contract_id").and_then(|x| x.as_str()),
+        Some("staking.testnet")
+    );
+    assert_eq!(
         body.get("network_id").and_then(|x| x.as_str()),
         Some("mainnet")
     );
@@ -3978,6 +3991,10 @@ async fn test_resume_subscription_house_of_stake_returns_wallet_intent_message()
     assert_eq!(
         body.get("product_id").and_then(|x| x.as_str()),
         Some("nearai|prod_cat")
+    );
+    assert_eq!(
+        body.get("contract_id").and_then(|x| x.as_str()),
+        Some("staking.testnet")
     );
     assert_eq!(
         body.get("network_id").and_then(|x| x.as_str()),
@@ -4623,6 +4640,10 @@ async fn test_change_plan_house_of_stake_upgrade_allows_different_product_ids() 
         Some("near_staking_change_plan")
     );
     assert_eq!(
+        result.get("contract_id").and_then(|x| x.as_str()),
+        Some("staking.testnet")
+    );
+    assert_eq!(
         result.get("target_price_id").and_then(|x| x.as_str()),
         Some("price_hos_pro")
     );
@@ -4726,6 +4747,10 @@ async fn test_change_plan_house_of_stake_downgrade_allows_different_product_ids(
     assert_eq!(
         result.get("kind").and_then(|x| x.as_str()),
         Some("near_staking_change_plan")
+    );
+    assert_eq!(
+        result.get("contract_id").and_then(|x| x.as_str()),
+        Some("staking.testnet")
     );
     assert_eq!(
         result.get("target_price_id").and_then(|x| x.as_str()),
