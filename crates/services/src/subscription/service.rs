@@ -1032,10 +1032,9 @@ impl SubscriptionServiceImpl {
             return Ok(Self::hos_reconcile_summary(true, 0, false, None));
         }
 
-        // Prefer the user's stored HoS `price_id` so we query the same catalog SKU they hold.
-        // When there is no local HoS row yet, probe all configured HoS price ids. The staking
-        // contract resolves each price through its product, so one arbitrary price can miss
-        // subscriptions for other products.
+        // Prefer the user's stored HoS `price_id`, then fall back to every configured HoS price.
+        // This protects cross-product plan changes where the local row can still point at the old
+        // product until sync observes the new chain subscription.
         let local_probe_price_id = subs
             .iter()
             .filter(|s| s.provider == "house-of-stake")
@@ -1044,33 +1043,31 @@ impl SubscriptionServiceImpl {
             .map(|s| s.price_id.as_str())
             .filter(|p| !p.is_empty());
 
-        let raw = if let Some(probe_price_id) = local_probe_price_id {
-            view_get_subscription_for_price(
+        let mut probe_price_ids = Vec::new();
+        if let Some(price_id) = local_probe_price_id {
+            probe_price_ids.push(price_id.to_string());
+        }
+        for price_id in &configured_hos_price_ids {
+            if !probe_price_ids.iter().any(|p| p == price_id) {
+                probe_price_ids.push(price_id.clone());
+            }
+        }
+
+        let mut raw = None;
+        for price_id in &probe_price_ids {
+            let candidate = view_get_subscription_for_price(
                 &self.near_rpc_url,
                 contract_id,
                 &near_account,
-                probe_price_id,
+                price_id,
             )
             .await
-            .map_err(Self::near_rpc_err)?
-        } else {
-            let mut found = None;
-            for price_id in &configured_hos_price_ids {
-                let candidate = view_get_subscription_for_price(
-                    &self.near_rpc_url,
-                    contract_id,
-                    &near_account,
-                    price_id,
-                )
-                .await
-                .map_err(Self::near_rpc_err)?;
-                if candidate.is_some() {
-                    found = candidate;
-                    break;
-                }
+            .map_err(Self::near_rpc_err)?;
+            if candidate.is_some() {
+                raw = candidate;
+                break;
             }
-            found
-        };
+        }
 
         let hos_subscription_ids: Vec<String> = subs
             .iter()

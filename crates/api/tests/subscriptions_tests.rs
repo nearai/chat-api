@@ -3627,6 +3627,43 @@ fn near_rpc_wiremock_hos_subscription_probe_only(
     }
 }
 
+fn near_rpc_wiremock_hos_subscription_by_price(
+    active_price_id: &'static str,
+    subscription_result: serde_json::Value,
+) -> impl wiremock::Respond {
+    move |req: &wiremock::Request| {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+
+        let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or(json!({}));
+        let empty = json!({});
+        let params = body.get("params").unwrap_or(&empty);
+        match params.get("method_name").and_then(|x| x.as_str()) {
+            Some("get_subscription_for_price") => {
+                let args_b64 = params
+                    .get("args_base64")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("");
+                let decoded = STANDARD
+                    .decode(args_b64)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                    .unwrap_or_default();
+                let price_id = decoded
+                    .get("price_id")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("");
+                let result = if price_id == active_price_id {
+                    subscription_result.clone()
+                } else {
+                    serde_json::Value::Null
+                };
+                ResponseTemplate::new(200).set_body_json(near_rpc_call_function_body(&result))
+            }
+            _ => ResponseTemplate::new(500).set_body_json(json!({ "error": "unmocked NEAR RPC" })),
+        }
+    }
+}
+
 #[test]
 fn test_change_plan_outcome_serde_uses_kind_discriminant() {
     let o = ChangePlanOutcome::NearStakingChangePlan {
@@ -4191,6 +4228,116 @@ async fn test_near_staking_sync_deletes_local_hos_when_chain_returns_null() {
     );
 }
 
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_near_staking_sync_falls_back_to_configured_prices_before_delete() {
+    clear_proxy_env_for_local_wiremock();
+    let chain_sub = json!({
+        "subscription_id": "sub_chain_hos_fallback",
+        "price_id": "price_hos_pro",
+        "end_ns": "2000000000000000000",
+        "status": "Active",
+        "cancel_at_period_end": false
+    });
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(near_rpc_wiremock_hos_subscription_by_price(
+            "price_hos_pro",
+            chain_sub,
+        ))
+        .mount(&mock)
+        .await;
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        near_rpc_url: Some(mock.uri().to_string()),
+        near_staking_contract_id: Some("staking.testnet".to_string()),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": { "providers": { "house-of-stake": { "price_id": "price_hos_basic" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } },
+            "pro": { "providers": { "house-of-stake": { "price_id": "price_hos_pro" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } }
+        }),
+    )
+    .await;
+
+    let near_email = "hos_sync_fallback_price.testnet@near";
+    let login = json!({
+        "email": near_email,
+        "name": "HoS Sync Fallback",
+        "oauth_provider": "near"
+    });
+    let response = server.post("/v1/auth/mock-login").json(&login).await;
+    let token = response.json::<serde_json::Value>()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    insert_test_subscription_with_provider_and_price(
+        &server,
+        &db,
+        near_email,
+        "house-of-stake",
+        "price_hos_basic",
+        false,
+    )
+    .await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(near_email)
+        .await
+        .unwrap()
+        .unwrap();
+    let client = db.pool().get().await.unwrap();
+    client
+        .execute(
+            "UPDATE subscriptions SET subscription_id = 'sub_chain_hos_fallback'
+             WHERE user_id = $1 AND provider = 'house-of-stake'",
+            &[&user.id],
+        )
+        .await
+        .expect("seed old local HoS price with chain subscription id");
+
+    let response = server
+        .post("/v1/subscriptions/near/sync")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 200, "{}", response.text());
+    let body: serde_json::Value = response.json();
+    assert_eq!(body.get("skipped").and_then(|x| x.as_bool()), Some(false));
+    assert_eq!(
+        body.get("deleted_house_of_stake_rows")
+            .and_then(|x| x.as_u64()),
+        Some(0)
+    );
+    assert_eq!(
+        body.get("upserted_house_of_stake_row")
+            .and_then(|x| x.as_bool()),
+        Some(true)
+    );
+
+    let row = client
+        .query_one(
+            "SELECT COUNT(*)::bigint, MAX(price_id) FROM subscriptions
+             WHERE user_id = $1 AND provider = 'house-of-stake'",
+            &[&user.id],
+        )
+        .await
+        .expect("load synced HoS rows");
+    let cnt: i64 = row.get(0);
+    let price_id: Option<String> = row.get(1);
+    assert_eq!(cnt, 1, "sync should update the existing HoS row");
+    assert_eq!(price_id.as_deref(), Some("price_hos_pro"));
+}
 #[tokio::test]
 #[serial(subscription_tests)]
 async fn test_near_staking_sync_marks_expired_cancel_at_period_end_row_canceled() {

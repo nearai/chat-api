@@ -56,18 +56,6 @@ async fn get_instance_limit(
     app_state: &AppState,
     user_id: services::UserId,
 ) -> Result<(u64, u64), ApiError> {
-    if let Err(e) = app_state
-        .subscription_service
-        .sync_near_staking_subscription(user_id)
-        .await
-    {
-        tracing::warn!(
-            "Best-effort HoS subscription sync failed before instance limit check: user_id={}, error={}",
-            user_id,
-            e
-        );
-    }
-
     let subscriptions = app_state
         .subscription_service
         .get_user_subscriptions(user_id, true)
