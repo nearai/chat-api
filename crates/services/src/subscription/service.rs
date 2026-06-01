@@ -71,8 +71,7 @@ const TTL_CACHE_SECS: u64 = 600; // 10 minutes
 const SYSTEM_CONFIGS_TTL_CACHE_SECS: u64 = 60; // 1 minute
 /// Default monthly credits when plan has no monthly_credits config. 1 USD in nano-dollars ($1 = 1_000_000_000).
 const DEFAULT_MONTHLY_CREDITS_NANO_USD: u64 = 1_000_000_000;
-const HOUSE_OF_STAKE_STARTER_CREDITS_NANO_USD: u64 = 5_000_000_000;
-const YOCTO_PER_HOUSE_OF_STAKE_CREDIT_NANO_USD: u128 = 100_000_000_000_000_000;
+const YOCTO_PER_NEAR: u128 = 1_000_000_000_000_000_000_000_000;
 /// When falling back from monthly_tokens: 1.5 USD per M tokens. M = 1 million tokens.
 const TOKENS_TO_CREDITS_PER_M: u64 = 1_000_000;
 /// 1.5 USD in nano-USD. Used for monthly_tokens fallback: limit_nano_usd = (monthly_tokens / M) * this.
@@ -633,11 +632,13 @@ impl SubscriptionServiceImpl {
                     &subscription_plans,
                 );
                 let plan_credits = match plan_name.as_deref() {
-                    Some(name) => self
-                        .house_of_stake_plan_limit_max(user_id, sub, name)
-                        .await
-                        .or_else(|| subscription_plans.get(name).map(Self::plan_limit_max))
-                        .unwrap_or(DEFAULT_MONTHLY_CREDITS_NANO_USD),
+                    Some(name) => match subscription_plans.get(name) {
+                        Some(plan_config) => self
+                            .stake_based_plan_limit_max(user_id, sub, plan_config)
+                            .await
+                            .unwrap_or_else(|| Self::plan_limit_max(plan_config)),
+                        None => DEFAULT_MONTHLY_CREDITS_NANO_USD,
+                    },
                     None => DEFAULT_MONTHLY_CREDITS_NANO_USD,
                 };
                 let period_end = sub.current_period_end;
@@ -679,22 +680,25 @@ impl SubscriptionServiceImpl {
         credits_max_nano_usd(Some(config))
     }
 
-    fn house_of_stake_credits_for_lock(plan_name: &str, lock_amount_yocto: u128) -> Option<u64> {
-        match plan_name {
-            "starter" => Some(HOUSE_OF_STAKE_STARTER_CREDITS_NANO_USD),
-            "basic" | "pro" => {
-                let credits = lock_amount_yocto / YOCTO_PER_HOUSE_OF_STAKE_CREDIT_NANO_USD;
-                Some(credits.min(u64::MAX as u128) as u64)
-            }
-            _ => None,
-        }
+    fn stake_based_credits_for_lock(
+        plan_config: &SubscriptionPlanConfig,
+        lock_amount_yocto: u128,
+    ) -> Option<u64> {
+        let rate = plan_config
+            .stake_based_monthly_credits
+            .as_ref()
+            .and_then(|c| c.credits_per_staked_near_nano_usd)?;
+        let credits = lock_amount_yocto
+            .saturating_mul(rate as u128)
+            .saturating_div(YOCTO_PER_NEAR);
+        Some(credits.min(u64::MAX as u128) as u64)
     }
 
-    async fn house_of_stake_plan_limit_max(
+    async fn stake_based_plan_limit_max(
         &self,
         user_id: UserId,
         subscription: &Subscription,
-        plan_name: &str,
+        plan_config: &SubscriptionPlanConfig,
     ) -> Option<u64> {
         if subscription.provider != "house-of-stake" {
             return None;
@@ -719,7 +723,7 @@ impl SubscriptionServiceImpl {
             .ok()
             .flatten()?;
         let lock_amount = lock_amount_yocto_json(&lock)?;
-        Self::house_of_stake_credits_for_lock(plan_name, lock_amount)
+        Self::stake_based_credits_for_lock(plan_config, lock_amount)
     }
 
     fn should_check_pending_downgrade(subscription: &Subscription) -> bool {
@@ -1558,6 +1562,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 let agent_instances = plan_config.and_then(|c| c.agent_instances.clone());
                 let monthly_tokens = plan_config.and_then(|c| c.monthly_tokens.clone());
                 let monthly_credits = plan_config.and_then(|c| c.monthly_credits.clone());
+                let stake_based_monthly_credits =
+                    plan_config.and_then(|c| c.stake_based_monthly_credits.clone());
                 let trial_period_days = plan_config.and_then(|c| c.trial_period_days);
                 let allowed_models = plan_config.and_then(|c| c.allowed_models.clone());
                 SubscriptionPlan {
@@ -1568,6 +1574,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     agent_instances,
                     monthly_tokens,
                     monthly_credits,
+                    stake_based_monthly_credits,
                     allowed_models,
                 }
             })
@@ -2872,18 +2879,24 @@ impl SubscriptionService for SubscriptionServiceImpl {
                             &subscription_plans,
                         );
                         let plan_credits = match plan_name.as_deref() {
-                            Some(name) => self
-                                .house_of_stake_plan_limit_max(user_id, &effective_sub, name)
-                                .await
-                                .or_else(|| subscription_plans.get(name).map(Self::plan_limit_max))
-                                .unwrap_or_else(|| {
+                            Some(name) => match subscription_plans.get(name) {
+                                Some(plan_config) => self
+                                    .stake_based_plan_limit_max(
+                                        user_id,
+                                        &effective_sub,
+                                        plan_config,
+                                    )
+                                    .await
+                                    .unwrap_or_else(|| Self::plan_limit_max(plan_config)),
+                                None => {
                                     tracing::warn!(
                                         "Falling back to default monthly credits for unmatched plan '{:?}'; using {} nano-USD",
                                         plan_name,
                                         DEFAULT_MONTHLY_CREDITS_NANO_USD
                                     );
                                     DEFAULT_MONTHLY_CREDITS_NANO_USD
-                                }),
+                                }
+                            },
                             None => {
                                 tracing::warn!(
                                     "Falling back to default monthly credits for unmatched plan '{:?}'; using {} nano-USD",
@@ -3678,6 +3691,7 @@ mod tests {
             agent_instances: Some(crate::system_configs::ports::PlanLimitConfig { max: instances }),
             monthly_tokens: Some(crate::system_configs::ports::PlanLimitConfig { max: tokens }),
             monthly_credits: None,
+            stake_based_monthly_credits: None,
             allowed_models: None,
         }
     }
@@ -3695,6 +3709,7 @@ mod tests {
             agent_instances: None,
             monthly_tokens: None,
             monthly_credits: None,
+            stake_based_monthly_credits: None,
             allowed_models: None,
         }
     }

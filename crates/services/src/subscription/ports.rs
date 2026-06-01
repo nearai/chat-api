@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 
-use crate::system_configs::ports::PlanLimitConfig;
+use crate::system_configs::ports::{PlanLimitConfig, StakeBasedMonthlyCreditsConfig};
 use crate::UserId;
 
 pub const DEFAULT_MONTHLY_TOKEN_LIMIT: u64 = 1_000_000;
@@ -894,6 +894,9 @@ pub struct SubscriptionPlan {
     /// Monthly credit limits in nano-USD (e.g. { "max": 1000000000 } for $1; $1 = 1_000_000_000 nano-USD). When missing, defaults to 1_000_000_000. Used for quota enforcement.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub monthly_credits: Option<PlanLimitConfig>,
+    /// Optional stake-based monthly credit calculation for variable stake-backed plans.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stake_based_monthly_credits: Option<StakeBasedMonthlyCreditsConfig>,
     /// List of model IDs allowed for this plan (e.g. ["gpt-3.5-turbo", "gpt-4o"])
     /// None = allow all models (default); Some(vec) = only allow models in the list.
     /// An empty list denies all models.
