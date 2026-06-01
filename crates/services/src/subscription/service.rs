@@ -71,6 +71,8 @@ const TTL_CACHE_SECS: u64 = 600; // 10 minutes
 const SYSTEM_CONFIGS_TTL_CACHE_SECS: u64 = 60; // 1 minute
 /// Default monthly credits when plan has no monthly_credits config. 1 USD in nano-dollars ($1 = 1_000_000_000).
 const DEFAULT_MONTHLY_CREDITS_NANO_USD: u64 = 1_000_000_000;
+const HOUSE_OF_STAKE_STARTER_CREDITS_NANO_USD: u64 = 5_000_000_000;
+const YOCTO_PER_HOUSE_OF_STAKE_CREDIT_NANO_USD: u128 = 100_000_000_000_000_000;
 /// When falling back from monthly_tokens: 1.5 USD per M tokens. M = 1 million tokens.
 const TOKENS_TO_CREDITS_PER_M: u64 = 1_000_000;
 /// 1.5 USD in nano-USD. Used for monthly_tokens fallback: limit_nano_usd = (monthly_tokens / M) * this.
@@ -630,11 +632,14 @@ impl SubscriptionServiceImpl {
                     &sub.price_id,
                     &subscription_plans,
                 );
-                let plan_credits = plan_name
-                    .as_ref()
-                    .and_then(|n| subscription_plans.get(n))
-                    .map(Self::plan_limit_max)
-                    .unwrap_or(DEFAULT_MONTHLY_CREDITS_NANO_USD);
+                let plan_credits = match plan_name.as_deref() {
+                    Some(name) => self
+                        .house_of_stake_plan_limit_max(user_id, sub, name)
+                        .await
+                        .or_else(|| subscription_plans.get(name).map(Self::plan_limit_max))
+                        .unwrap_or(DEFAULT_MONTHLY_CREDITS_NANO_USD),
+                    None => DEFAULT_MONTHLY_CREDITS_NANO_USD,
+                };
                 let period_end = sub.current_period_end;
                 let period_start = sub_one_month_same_day(sub.current_period_end);
                 (plan_credits, period_start, period_end)
@@ -672,6 +677,49 @@ impl SubscriptionServiceImpl {
     /// Returns the plan's monthly credit limit in nano-USD (see `credits_max_nano_usd`).
     fn plan_limit_max(config: &SubscriptionPlanConfig) -> u64 {
         credits_max_nano_usd(Some(config))
+    }
+
+    fn house_of_stake_credits_for_lock(plan_name: &str, lock_amount_yocto: u128) -> Option<u64> {
+        match plan_name {
+            "starter" => Some(HOUSE_OF_STAKE_STARTER_CREDITS_NANO_USD),
+            "basic" | "pro" => {
+                let credits = lock_amount_yocto / YOCTO_PER_HOUSE_OF_STAKE_CREDIT_NANO_USD;
+                Some(credits.min(u64::MAX as u128) as u64)
+            }
+            _ => None,
+        }
+    }
+
+    async fn house_of_stake_plan_limit_max(
+        &self,
+        user_id: UserId,
+        subscription: &Subscription,
+        plan_name: &str,
+    ) -> Option<u64> {
+        if subscription.provider != "house-of-stake" {
+            return None;
+        }
+        let contract_id = self.near_staking_contract_id.as_deref()?.trim();
+        if contract_id.is_empty() {
+            return None;
+        }
+        let near_account = self.get_near_account_id(user_id).await.ok()?;
+        let chain_sub = view_get_subscription_for_price(
+            &self.near_rpc_url,
+            contract_id,
+            &near_account,
+            &subscription.price_id,
+        )
+        .await
+        .ok()
+        .flatten()?;
+        let last_lock_id = chain_sub.get("last_lock_id").and_then(|x| x.as_str())?;
+        let lock = view_get_lock(&self.near_rpc_url, contract_id, last_lock_id)
+            .await
+            .ok()
+            .flatten()?;
+        let lock_amount = lock_amount_yocto_json(&lock)?;
+        Self::house_of_stake_credits_for_lock(plan_name, lock_amount)
     }
 
     fn should_check_pending_downgrade(subscription: &Subscription) -> bool {
@@ -1882,7 +1930,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 return Err(SubscriptionError::HouseOfStakeNotConfigured);
             }
 
-            if subscription.price_id == price_id {
+            if subscription.price_id == price_id
+                && target_amount.as_deref().is_none_or(str::is_empty)
+            {
                 if subscription.pending_downgrade_status == Some(DowngradeIntentStatus::Pending) {
                     return Ok(ChangePlanOutcome::NearStakingCancelPendingDowngrade {
                         contract_id: contract_id.to_string(),
@@ -1894,6 +1944,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
 
             let target_amount = parse_required_hos_target_amount_yocto(target_amount.as_deref())?;
             let near_account = self.get_near_account_id(user_id).await?;
+            let same_price = subscription.price_id == price_id;
 
             let (cur_price_j, new_price_j, chain_sub_j) = tokio::try_join!(
                 async {
@@ -1963,7 +2014,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
 
             let timing = match target_amount.cmp(&current_lock_amount) {
                 std::cmp::Ordering::Greater => {
-                    if new_amt <= cur_amt {
+                    if !same_price && new_amt <= cur_amt {
                         return Err(SubscriptionError::InvalidTargetAmount(
                             "target_amount increase requires a higher target price amount".into(),
                         ));
@@ -1971,7 +2022,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     "immediate"
                 }
                 std::cmp::Ordering::Less => {
-                    if new_amt >= cur_amt {
+                    if !same_price && new_amt >= cur_amt {
                         return Err(SubscriptionError::InvalidTargetAmount(
                             "target_amount decrease requires a lower target price amount".into(),
                         ));
@@ -1993,6 +2044,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     "period_end"
                 }
                 std::cmp::Ordering::Equal => {
+                    if same_price {
+                        return Ok(ChangePlanOutcome::NoOp);
+                    }
                     if new_amt != cur_amt {
                         return Err(SubscriptionError::InvalidTargetAmount(
                             "unchanged target_amount requires the target price amount to match the current price amount".into(),
@@ -2817,18 +2871,28 @@ impl SubscriptionService for SubscriptionServiceImpl {
                             &effective_sub.price_id,
                             &subscription_plans,
                         );
-                        let plan_credits = plan_name
-                            .as_deref()
-                            .and_then(|n| subscription_plans.get(n))
-                            .map(Self::plan_limit_max)
-                            .unwrap_or_else(|| {
+                        let plan_credits = match plan_name.as_deref() {
+                            Some(name) => self
+                                .house_of_stake_plan_limit_max(user_id, &effective_sub, name)
+                                .await
+                                .or_else(|| subscription_plans.get(name).map(Self::plan_limit_max))
+                                .unwrap_or_else(|| {
+                                    tracing::warn!(
+                                        "Falling back to default monthly credits for unmatched plan '{:?}'; using {} nano-USD",
+                                        plan_name,
+                                        DEFAULT_MONTHLY_CREDITS_NANO_USD
+                                    );
+                                    DEFAULT_MONTHLY_CREDITS_NANO_USD
+                                }),
+                            None => {
                                 tracing::warn!(
                                     "Falling back to default monthly credits for unmatched plan '{:?}'; using {} nano-USD",
                                     plan_name,
                                     DEFAULT_MONTHLY_CREDITS_NANO_USD
                                 );
                                 DEFAULT_MONTHLY_CREDITS_NANO_USD
-                            });
+                            }
+                        };
                         let period_end = effective_sub.current_period_end;
                         let period_start = sub_one_month_same_day(effective_sub.current_period_end);
                         (plan_credits, period_start, period_end)
