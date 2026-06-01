@@ -61,8 +61,9 @@ struct CachedCreditLimit {
     cached_at: Instant,
 }
 
-/// Cached House-of-Stake lock amount. Invalid after short TTL or when the user's credit-limit cache is invalidated.
-struct CachedHouseOfStakeLockAmount {
+/// Cached House-of-Stake stake source. Invalid after short TTL or when the user's credit-limit cache is invalidated.
+struct CachedHouseOfStakeStakeSource {
+    last_lock_id: String,
     amount_yocto: u128,
     cached_at: Instant,
 }
@@ -75,7 +76,8 @@ struct CachedSystemConfigs {
 
 const TTL_CACHE_SECS: u64 = 600; // 10 minutes
 const SYSTEM_CONFIGS_TTL_CACHE_SECS: u64 = 60; // 1 minute
-const HOUSE_OF_STAKE_LOCK_AMOUNT_TTL_SECS: u64 = 60; // 1 minute
+/// Upper bound for cached HoS stake sources; invalidate_credit_limit_cache also clears this on subscription, credit, and sync changes.
+const HOUSE_OF_STAKE_STAKE_SOURCE_TTL_SECS: u64 = 60;
 /// Default monthly credits when plan has no monthly_credits config. 1 USD in nano-dollars ($1 = 1_000_000_000).
 const DEFAULT_MONTHLY_CREDITS_NANO_USD: u64 = 1_000_000_000;
 const YOCTO_PER_NEAR: u128 = 1_000_000_000_000_000_000_000_000;
@@ -104,8 +106,8 @@ pub struct SubscriptionServiceImpl {
     near_rpc_url: String,
     near_network_id: String,
     credit_limit_cache: Arc<RwLock<HashMap<UserId, CachedCreditLimit>>>,
-    house_of_stake_lock_amount_cache:
-        Arc<RwLock<HashMap<(UserId, String), CachedHouseOfStakeLockAmount>>>,
+    house_of_stake_stake_source_cache:
+        Arc<RwLock<HashMap<(UserId, String), CachedHouseOfStakeStakeSource>>>,
     system_configs_cache: Arc<RwLock<Option<CachedSystemConfigs>>>,
 }
 
@@ -154,7 +156,7 @@ impl SubscriptionServiceImpl {
             near_rpc_url: config.near_rpc_url,
             near_network_id: config.near_network_id,
             credit_limit_cache: Arc::new(RwLock::new(HashMap::new())),
-            house_of_stake_lock_amount_cache: Arc::new(RwLock::new(HashMap::new())),
+            house_of_stake_stake_source_cache: Arc::new(RwLock::new(HashMap::new())),
             system_configs_cache: Arc::new(RwLock::new(None)),
         }
     }
@@ -162,7 +164,7 @@ impl SubscriptionServiceImpl {
     /// Invalidate cached credit-limit state for a user (e.g. when plan, credits, or HoS lock state changes via webhook/reconcile).
     async fn invalidate_credit_limit_cache(&self, user_id: UserId) {
         self.credit_limit_cache.write().await.remove(&user_id);
-        self.house_of_stake_lock_amount_cache
+        self.house_of_stake_stake_source_cache
             .write()
             .await
             .retain(|(cached_user_id, _), _| *cached_user_id != user_id);
@@ -724,6 +726,32 @@ impl SubscriptionServiceImpl {
         if subscription.provider != "house-of-stake" {
             return None;
         }
+        if plan_config
+            .stake_based_monthly_credits
+            .as_ref()
+            .and_then(|c| c.credits_per_staked_near_nano_usd)
+            .is_none()
+        {
+            return None;
+        }
+
+        let cache_key = (user_id, subscription.subscription_id.clone());
+        if let Some(cached) = self
+            .house_of_stake_stake_source_cache
+            .read()
+            .await
+            .get(&cache_key)
+        {
+            if cached.cached_at.elapsed().as_secs() < HOUSE_OF_STAKE_STAKE_SOURCE_TTL_SECS {
+                tracing::debug!(
+                    user_id = %user_id.0,
+                    subscription_id = %subscription.subscription_id,
+                    last_lock_id = %cached.last_lock_id,
+                    "using cached HoS stake-based credit source"
+                );
+                return Self::stake_based_credits_for_lock(plan_config, cached.amount_yocto);
+            }
+        }
 
         let Some(contract_id) = self.near_staking_contract_id.as_deref().map(str::trim) else {
             tracing::warn!(
@@ -795,18 +823,6 @@ impl SubscriptionServiceImpl {
             return None;
         };
 
-        let cache_key = (user_id, last_lock_id.to_string());
-        if let Some(cached) = self
-            .house_of_stake_lock_amount_cache
-            .read()
-            .await
-            .get(&cache_key)
-        {
-            if cached.cached_at.elapsed().as_secs() < HOUSE_OF_STAKE_LOCK_AMOUNT_TTL_SECS {
-                return Self::stake_based_credits_for_lock(plan_config, cached.amount_yocto);
-            }
-        }
-
         let lock = match view_get_lock(&self.near_rpc_url, contract_id, last_lock_id).await {
             Ok(Some(lock)) => lock,
             Ok(None) => {
@@ -840,9 +856,10 @@ impl SubscriptionServiceImpl {
             return None;
         };
 
-        self.house_of_stake_lock_amount_cache.write().await.insert(
+        self.house_of_stake_stake_source_cache.write().await.insert(
             cache_key,
-            CachedHouseOfStakeLockAmount {
+            CachedHouseOfStakeStakeSource {
+                last_lock_id: last_lock_id.to_string(),
                 amount_yocto: lock_amount,
                 cached_at: Instant::now(),
             },
