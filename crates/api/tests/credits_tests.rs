@@ -408,7 +408,16 @@ async fn test_post_credits_checkout_requires_near_wallet() {
 #[tokio::test]
 #[serial(credits_tests)]
 async fn test_post_credits_checkout_house_of_stake_returns_intent() {
+    clear_proxy_env_for_local_wiremock();
+    let near_mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(near_rpc_hos_credit_purchase_respond)
+        .mount(&near_mock)
+        .await;
+
     let (server, _) = create_test_server_and_db(TestServerConfig {
+        near_rpc_url: Some(near_mock.uri().to_string()),
         near_staking_contract_id: Some("staking.testnet".to_string()),
         near_network_id: Some("testnet".to_string()),
         ..Default::default()
@@ -507,7 +516,16 @@ async fn test_post_credits_checkout_stripe_default_returns_checkout_url_without_
 #[serial(credits_tests)]
 async fn test_post_credits_checkout_request_provider_overrides_default_provider() {
     ensure_stripe_env();
+    clear_proxy_env_for_local_wiremock();
+    let near_mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(near_rpc_hos_credit_purchase_respond)
+        .mount(&near_mock)
+        .await;
+
     let (server, _) = create_test_server_and_db(TestServerConfig {
+        near_rpc_url: Some(near_mock.uri().to_string()),
         near_staking_contract_id: Some("staking.testnet".to_string()),
         near_network_id: Some("testnet".to_string()),
         stripe_client: Some(Arc::new(MockStripeClient::new(
