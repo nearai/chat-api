@@ -583,34 +583,54 @@ impl SubscriptionServiceImpl {
         &self,
         user_id: UserId,
     ) -> Result<Option<Subscription>, SubscriptionError> {
-        let subscription = self
+        let active_subscriptions = self
             .subscription_repo
-            .get_active_subscription(user_id)
+            .get_active_subscriptions(user_id)
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
-        let Some(subscription) = subscription else {
+        if active_subscriptions.is_empty() {
             return Ok(None);
-        };
+        }
 
-        if subscription.provider == "house-of-stake"
-            && subscription.current_period_end <= Utc::now()
-        {
-            self.subscription_repo
-                .delete_subscription(&subscription.subscription_id)
+        let now = Utc::now();
+        let expired_hos_ids: Vec<String> = active_subscriptions
+            .iter()
+            .filter(|s| s.provider == "house-of-stake" && s.current_period_end <= now)
+            .map(|s| s.subscription_id.clone())
+            .collect();
+
+        if !expired_hos_ids.is_empty() {
+            let mut db_client = self
+                .db_pool
+                .get()
+                .await
+                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+            let txn = db_client
+                .transaction()
+                .await
+                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+            for subscription_id in &expired_hos_ids {
+                self.subscription_repo
+                    .delete_subscription_txn(&txn, subscription_id)
+                    .await
+                    .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+            }
+            txn.commit()
                 .await
                 .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
             self.invalidate_credit_limit_cache(user_id).await;
             tracing::warn!(
                 user_id = %user_id.0,
-                subscription_id = %subscription.subscription_id,
-                current_period_end = %subscription.current_period_end,
-                "expired stale local HoS subscription before entitlement check"
+                deleted_house_of_stake_rows = expired_hos_ids.len(),
+                "expired stale local HoS subscriptions before entitlement check"
             );
-            return Ok(None);
         }
 
-        Ok(Some(subscription))
+        Ok(active_subscriptions
+            .into_iter()
+            .filter(|s| !(s.provider == "house-of-stake" && s.current_period_end <= now))
+            .max_by_key(|s| s.created_at))
     }
 
     /// Returns true only when the user has no linked OAuth accounts (email-only account)
