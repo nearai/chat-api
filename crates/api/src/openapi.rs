@@ -63,6 +63,7 @@ use utoipa::OpenApi;
         // Credits endpoints
         crate::routes::credits::get_credits,
         crate::routes::credits::create_credit_checkout,
+        crate::routes::credits::confirm_credit_purchase,
         // Subscription endpoints
         crate::routes::subscriptions::create_subscription,
         crate::routes::subscriptions::create_portal_session,
@@ -71,6 +72,7 @@ use utoipa::OpenApi;
         crate::routes::subscriptions::change_plan,
         crate::routes::subscriptions::list_plans,
         crate::routes::subscriptions::list_subscriptions,
+        crate::routes::subscriptions::sync_near_staking_subscription,
         // Admin endpoints
         crate::routes::admin::list_users,
         crate::routes::admin::list_models,
@@ -181,6 +183,8 @@ use utoipa::OpenApi;
         // Credits models
         crate::routes::credits::CreateCreditCheckoutRequest,
         crate::routes::credits::CreateCreditCheckoutResponse,
+        crate::routes::credits::ConfirmCreditPurchaseRequest,
+        services::subscription::ports::CreateCreditPurchaseOutcome,
         services::subscription::ports::CreditsSummary,
         // Subscription models
         crate::routes::subscriptions::CreateSubscriptionRequest,
@@ -194,6 +198,7 @@ use utoipa::OpenApi;
         services::subscription::ports::ChangePlanOutcome,
         crate::routes::subscriptions::ListSubscriptionsResponse,
         crate::routes::subscriptions::ListPlansResponse,
+        services::subscription::ports::NearStakingSyncSummary,
         services::subscription::ports::SubscriptionWithPlan,
         services::subscription::ports::SubscriptionPlan,
         // Attestation models

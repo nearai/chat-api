@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 
-use crate::system_configs::ports::PlanLimitConfig;
+use crate::system_configs::ports::{PlanLimitConfig, StakeBasedMonthlyCreditsConfig};
 use crate::UserId;
 
 pub const DEFAULT_MONTHLY_TOKEN_LIMIT: u64 = 1_000_000;
@@ -88,13 +88,14 @@ pub struct SubscriptionReplacement {
     pub pending_downgrade_updated_at: Option<DateTime<Utc>>,
 }
 
-/// API response model with plan name resolved from price_id
+/// API response model with plan name resolved from `price_id` (HoS clients use `price_id` + `provider` for wallet flows).
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubscriptionWithPlan {
     pub subscription_id: String,
     pub user_id: String,
     pub provider: String,
+    pub price_id: String,
     pub plan: String, // Resolved from price_id
     pub status: String,
     pub current_period_end: DateTime<Utc>,
@@ -120,9 +121,11 @@ pub struct BillingPeriod {
 }
 
 /// Result of a plan-change request.
+///
+/// Serialized JSON preserves the legacy string shape for Stripe/unit outcomes, while HoS plan
+/// changes use an object because they need wallet intent fields.
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone)]
 pub enum ChangePlanOutcome {
     /// Stripe subscription was updated immediately.
     ChangedImmediately,
@@ -132,6 +135,187 @@ pub enum ChangePlanOutcome {
     NoOp,
     /// A pending downgrade was cancelled (same plan requested with active pending downgrade).
     DowngradeCancelled,
+    /// HoS: call `update_subscription` in the wallet with this subscription id, price id, and stake amount.
+    NearStakingChangePlan {
+        contract_id: String,
+        network_id: String,
+        subscription_id: String,
+        target_price_id: String,
+        target_amount: String,
+        required_deposit_yocto: String,
+        timing: String,
+    },
+}
+
+impl ChangePlanOutcome {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::ChangedImmediately => "changed_immediately",
+            Self::ScheduledForPeriodEnd => "scheduled_for_period_end",
+            Self::NoOp => "no_op",
+            Self::DowngradeCancelled => "downgrade_cancelled",
+            Self::NearStakingChangePlan { .. } => "near_staking_change_plan",
+        }
+    }
+}
+
+impl Serialize for ChangePlanOutcome {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        match self {
+            Self::ChangedImmediately
+            | Self::ScheduledForPeriodEnd
+            | Self::NoOp
+            | Self::DowngradeCancelled => serializer.serialize_str(self.kind()),
+            Self::NearStakingChangePlan {
+                contract_id,
+                network_id,
+                subscription_id,
+                target_price_id,
+                target_amount,
+                required_deposit_yocto,
+                timing,
+            } => {
+                let mut st = serializer.serialize_struct("NearStakingChangePlan", 8)?;
+                st.serialize_field("kind", self.kind())?;
+                st.serialize_field("contract_id", contract_id)?;
+                st.serialize_field("network_id", network_id)?;
+                st.serialize_field("subscription_id", subscription_id)?;
+                st.serialize_field("target_price_id", target_price_id)?;
+                st.serialize_field("target_amount", target_amount)?;
+                st.serialize_field("required_deposit_yocto", required_deposit_yocto)?;
+                st.serialize_field("timing", timing)?;
+                st.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ChangePlanOutcome {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+        let v = serde_json::Value::deserialize(deserializer)?;
+        if let Some(kind) = v.as_str() {
+            return match kind {
+                "changed_immediately" => Ok(Self::ChangedImmediately),
+                "scheduled_for_period_end" => Ok(Self::ScheduledForPeriodEnd),
+                "no_op" => Ok(Self::NoOp),
+                "downgrade_cancelled" => Ok(Self::DowngradeCancelled),
+                other => Err(D::Error::custom(format!(
+                    "unknown change plan outcome kind: {other}"
+                ))),
+            };
+        }
+
+        let obj = v
+            .as_object()
+            .ok_or_else(|| D::Error::custom("change plan outcome must be a string or object"))?;
+        let kind = obj
+            .get("kind")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| D::Error::custom("missing kind"))?;
+        match kind {
+            "changed_immediately" => Ok(Self::ChangedImmediately),
+            "scheduled_for_period_end" => Ok(Self::ScheduledForPeriodEnd),
+            "no_op" => Ok(Self::NoOp),
+            "downgrade_cancelled" => Ok(Self::DowngradeCancelled),
+            "near_staking_change_plan" => Ok(Self::NearStakingChangePlan {
+                contract_id: obj
+                    .get("contract_id")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                network_id: obj
+                    .get("network_id")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("mainnet")
+                    .to_string(),
+                subscription_id: obj
+                    .get("subscription_id")
+                    .and_then(|x| x.as_str())
+                    .ok_or_else(|| D::Error::custom("missing subscription_id"))?
+                    .to_string(),
+                target_price_id: obj
+                    .get("target_price_id")
+                    .and_then(|x| x.as_str())
+                    .ok_or_else(|| D::Error::custom("missing target_price_id"))?
+                    .to_string(),
+                target_amount: obj
+                    .get("target_amount")
+                    .and_then(|x| x.as_str())
+                    .ok_or_else(|| D::Error::custom("missing target_amount"))?
+                    .to_string(),
+                required_deposit_yocto: obj
+                    .get("required_deposit_yocto")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                timing: obj
+                    .get("timing")
+                    .and_then(|x| x.as_str())
+                    .ok_or_else(|| D::Error::custom("missing timing"))?
+                    .to_string(),
+            }),
+            other => Err(D::Error::custom(format!(
+                "unknown change plan outcome kind: {other}"
+            ))),
+        }
+    }
+}
+
+/// Stripe path updates `cancel_at_period_end` in the DB. HoS returns a wallet intent only: local
+/// `cancel_at_period_end` and related fields change after the chain transaction lands and the user
+/// calls `POST /v1/subscriptions/near/sync` (or a mutation that reconciles from RPC).
+#[derive(Debug, Clone)]
+pub enum CancelSubscriptionOutcome {
+    Completed,
+    NearStakingCancel {
+        contract_id: String,
+        product_id: String,
+        network_id: String,
+        required_deposit_yocto: String,
+    },
+}
+
+/// Stripe path updates the DB. HoS returns a wallet intent only; local rows refresh after chain
+/// settlement and `POST /v1/subscriptions/near/sync` (or reconcile-on-mutation).
+#[derive(Debug, Clone)]
+pub enum ResumeSubscriptionOutcome {
+    Completed,
+    NearStakingResume {
+        contract_id: String,
+        product_id: String,
+        network_id: String,
+        required_deposit_yocto: String,
+    },
+}
+
+/// Machine-readable [`NearStakingSyncSummary::skipped_reason`] when chain returned a HoS
+/// subscription but reconcile refused to upsert because the user has an active or trialing
+/// non-`house-of-stake` subscription row (avoids a fresh HoS row becoming `get_active_subscription`).
+pub const NEAR_STAKING_SYNC_SKIPPED_REASON_UPSERT_BLOCKED_NON_HOS: &str =
+    "upsert_blocked_active_non_house_of_stake_subscription";
+
+/// Summary from `POST /v1/subscriptions/near/sync` / internal HoS reconcile.
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NearStakingSyncSummary {
+    /// True when reconcile exited early (no HoS contract configured, user has no linked NEAR account, or no HoS anchor price in catalog). No RPC or DB mutation was attempted.
+    pub skipped: bool,
+    /// Local `house-of-stake` rows removed after chain reported no subscription for the probed price.
+    pub deleted_house_of_stake_rows: u32,
+    /// True when a local row was upserted from chain JSON.
+    pub upserted_house_of_stake_row: bool,
+    /// When reconcile ran but did not upsert or delete, optionally explains a no-op (e.g. blocked
+    /// upsert). Omitted from JSON when `None`. Distinct from [`Self::skipped`] (early exit before RPC).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped_reason: Option<String>,
 }
 
 /// Stripe customer mapping data
@@ -198,12 +382,20 @@ pub enum SubscriptionError {
     CreditsNotConfigured,
     /// Invalid credits amount for purchase
     InvalidCredits(String),
+    /// Invalid target staking amount for a House-of-Stake plan change
+    InvalidTargetAmount(String),
     /// Cannot associate test clock with existing Stripe customer
     TestClockNotAllowedForExistingCustomer,
     /// No pending downgrade to cancel (same plan requested but no pending downgrade exists)
     NoPendingDowngrade,
     /// No subscription row found for the requested subscription_id.
     SubscriptionNotFound,
+    /// House-of-Stake contract id is not configured
+    HouseOfStakeNotConfigured,
+    /// House-of-Stake requires the user to authenticate with a NEAR wallet
+    HouseOfStakeRequiresNearWallet,
+    /// NEAR JSON-RPC view call failed
+    NearRpcError(String),
 }
 
 impl fmt::Display for SubscriptionError {
@@ -255,6 +447,7 @@ impl fmt::Display for SubscriptionError {
             Self::InternalError(msg) => write!(f, "Internal error: {}", msg),
             Self::CreditsNotConfigured => write!(f, "Credit purchase is not configured"),
             Self::InvalidCredits(msg) => write!(f, "Invalid credits: {}", msg),
+            Self::InvalidTargetAmount(msg) => write!(f, "Invalid target amount: {}", msg),
             Self::TestClockNotAllowedForExistingCustomer => {
                 write!(
                     f,
@@ -267,6 +460,16 @@ impl fmt::Display for SubscriptionError {
             Self::SubscriptionNotFound => {
                 write!(f, "Subscription not found")
             }
+            Self::HouseOfStakeNotConfigured => {
+                write!(f, "House-of-Stake billing is not configured")
+            }
+            Self::HouseOfStakeRequiresNearWallet => {
+                write!(
+                    f,
+                    "House-of-Stake subscription requires signing in with a NEAR wallet"
+                )
+            }
+            Self::NearRpcError(msg) => write!(f, "NEAR RPC error: {}", msg),
         }
     }
 }
@@ -475,6 +678,14 @@ pub trait SubscriptionRepository: Send + Sync {
         subscription: Subscription,
     ) -> anyhow::Result<Subscription>;
 
+    /// Insert or update a subscription with incoming pending-downgrade fields treated as
+    /// authoritative, including clearing local fields when incoming values are NULL.
+    async fn upsert_subscription_authoritative(
+        &self,
+        txn: &tokio_postgres::Transaction<'_>,
+        subscription: Subscription,
+    ) -> anyhow::Result<Subscription>;
+
     /// Get all subscriptions for a user
     async fn get_user_subscriptions(&self, user_id: UserId) -> anyhow::Result<Vec<Subscription>>;
 
@@ -506,6 +717,13 @@ pub trait SubscriptionRepository: Send + Sync {
 
     /// Delete a subscription record
     async fn delete_subscription(&self, subscription_id: &str) -> anyhow::Result<()>;
+
+    /// Delete a subscription row inside an existing transaction.
+    async fn delete_subscription_txn(
+        &self,
+        txn: &tokio_postgres::Transaction<'_>,
+        subscription_id: &str,
+    ) -> anyhow::Result<()>;
 
     /// Deactivate all subscriptions for a user (set status = 'canceled').
     /// Used when admin sets a new subscription to ensure only one active plan.
@@ -644,6 +862,9 @@ pub trait PaymentWebhookRepository: Send + Sync {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubscriptionPlan {
     pub name: String,
+    /// Provider-specific price id for the requested catalog provider.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub price_id: Option<String>,
     /// Plan price in cents (e.g. 999 for $9.99, 0 for free)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub price: Option<i64>,
@@ -660,6 +881,9 @@ pub struct SubscriptionPlan {
     /// Monthly credit limits in nano-USD (e.g. { "max": 1000000000 } for $1; $1 = 1_000_000_000 nano-USD). When missing, defaults to 1_000_000_000. Used for quota enforcement.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub monthly_credits: Option<PlanLimitConfig>,
+    /// Optional stake-based monthly credit calculation for variable stake-backed plans.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stake_based_monthly_credits: Option<StakeBasedMonthlyCreditsConfig>,
     /// List of model IDs allowed for this plan (e.g. ["gpt-3.5-turbo", "gpt-4o"])
     /// None = allow all models (default); Some(vec) = only allow models in the list.
     /// An empty list denies all models.
@@ -667,15 +891,210 @@ pub struct SubscriptionPlan {
     pub allowed_models: Option<Vec<String>>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct NearStakingStorageIntent {
+    pub method_name: String,
+    pub account_id: String,
+    pub required_deposit_yocto: String,
+    pub balance_total_yocto: String,
+    pub balance_available_yocto: String,
+    pub bounds_min_yocto: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bounds_max_yocto: Option<String>,
+    pub args: serde_json::Value,
+}
+
+/// Result of [`SubscriptionService::create_subscription`]: Stripe redirect or HoS catalog `price_id` for a client-side `lock`.
+///
+/// Serialized JSON:
+/// - **Stripe** — legacy flat object `{"checkout_url":"..."}`.
+/// - **HoS** — `{"kind":"house_of_stake","contract_id":"...","price_id":"...","network_id":"mainnet"}` (`contract_id` from server `NEAR_STAKING_CONTRACT_ID`; `network_id` from server `NEAR_NETWORK_ID` / `near.network_id`).
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub enum CreateSubscriptionOutcome {
+    /// Complete checkout on Stripe (`checkout_url`).
+    StripeCheckout { checkout_url: String },
+    /// Catalog recurring price id for `lock` (client supplies `product_id` xor `price_id` per contract rules, with `duration_ns: null` for subscriptions).
+    NearStakeLock {
+        /// Staking contract account id to call from the wallet.
+        contract_id: String,
+        price_id: String,
+        /// NEAR network id (e.g. `mainnet`, `testnet`) from server config; wallets use with RPC URL.
+        network_id: String,
+        /// YoctoNEAR to attach to the `lock` call.
+        attached_deposit_yocto: String,
+        /// NEP-145 storage preflight/top-up intent.
+        storage: Box<NearStakingStorageIntent>,
+    },
+}
+
+impl Serialize for CreateSubscriptionOutcome {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        match self {
+            CreateSubscriptionOutcome::StripeCheckout { checkout_url } => {
+                let mut st = serializer.serialize_struct("StripeCheckout", 1)?;
+                st.serialize_field("checkout_url", checkout_url)?;
+                st.end()
+            }
+            CreateSubscriptionOutcome::NearStakeLock {
+                contract_id,
+                price_id,
+                network_id,
+                attached_deposit_yocto,
+                storage,
+            } => {
+                let mut st = serializer.serialize_struct("NearStakeLock", 6)?;
+                st.serialize_field("kind", &"house_of_stake")?;
+                st.serialize_field("contract_id", contract_id)?;
+                st.serialize_field("price_id", price_id)?;
+                st.serialize_field("network_id", network_id)?;
+                st.serialize_field("attached_deposit_yocto", attached_deposit_yocto)?;
+                st.serialize_field("storage", storage)?;
+                st.end()
+            }
+        }
+    }
+}
+
+fn default_near_staking_storage_intent() -> NearStakingStorageIntent {
+    NearStakingStorageIntent {
+        method_name: "storage_deposit".to_string(),
+        account_id: String::new(),
+        required_deposit_yocto: "0".to_string(),
+        balance_total_yocto: "0".to_string(),
+        balance_available_yocto: "0".to_string(),
+        bounds_min_yocto: "0".to_string(),
+        bounds_max_yocto: None,
+        args: serde_json::json!({}),
+    }
+}
+
+impl<'de> Deserialize<'de> for CreateSubscriptionOutcome {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+        let v = serde_json::Value::deserialize(deserializer)?;
+        let obj = v
+            .as_object()
+            .ok_or_else(|| D::Error::custom("create subscription outcome must be a JSON object"))?;
+        if let Some(url) = obj.get("checkout_url").and_then(|x| x.as_str()) {
+            return Ok(CreateSubscriptionOutcome::StripeCheckout {
+                checkout_url: url.to_string(),
+            });
+        }
+        if let Some(kind) = obj.get("kind").and_then(|x| x.as_str()) {
+            if kind == "house_of_stake" {
+                let price_id = obj
+                    .get("price_id")
+                    .and_then(|x| x.as_str())
+                    .ok_or_else(|| D::Error::custom("missing price_id"))?
+                    .to_string();
+                let network_id = obj
+                    .get("network_id")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("mainnet")
+                    .to_string();
+                let contract_id = obj
+                    .get("contract_id")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let attached_deposit_yocto = obj
+                    .get("attached_deposit_yocto")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("0")
+                    .to_string();
+                let storage = obj
+                    .get("storage")
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(D::Error::custom)?
+                    .unwrap_or_else(default_near_staking_storage_intent);
+                return Ok(CreateSubscriptionOutcome::NearStakeLock {
+                    contract_id,
+                    price_id,
+                    network_id,
+                    attached_deposit_yocto,
+                    storage: Box::new(storage),
+                });
+            }
+        }
+        if let Some(pid) = obj.get("price_id").and_then(|x| x.as_str()) {
+            let attached_deposit_yocto = obj
+                .get("attached_deposit_yocto")
+                .and_then(|x| x.as_str())
+                .unwrap_or("0")
+                .to_string();
+            let storage = obj
+                .get("storage")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(D::Error::custom)?
+                .unwrap_or_else(default_near_staking_storage_intent);
+            return Ok(CreateSubscriptionOutcome::NearStakeLock {
+                contract_id: obj
+                    .get("contract_id")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                price_id: pid.to_string(),
+                network_id: obj
+                    .get("network_id")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("mainnet")
+                    .to_string(),
+                attached_deposit_yocto,
+                storage: Box::new(storage),
+            });
+        }
+        Err(D::Error::custom(
+            "invalid create subscription outcome: expected checkout_url or kind house_of_stake with price_id",
+        ))
+    }
+}
+
+/// Result of [`SubscriptionService::create_credit_purchase_checkout`].
+///
+/// Stripe credit purchases redirect to Checkout and are fulfilled by webhook. HoS purchases
+/// return a wallet intent; the frontend signs `pay`, then confirms the resulting `purchase_id`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub enum CreateCreditPurchaseOutcome {
+    HouseOfStake {
+        price_id: String,
+        network_id: String,
+        contract_id: String,
+        quantity: u64,
+        attached_deposit_yocto: String,
+        storage: Box<NearStakingStorageIntent>,
+    },
+    Stripe {
+        checkout_url: String,
+    },
+}
+
 /// Service trait for subscription management
 #[async_trait]
 pub trait SubscriptionService: Send + Sync {
-    /// Get available subscription plans
-    async fn get_available_plans(&self) -> Result<Vec<SubscriptionPlan>, SubscriptionError>;
+    /// Get available subscription plans (`provider`: `None` or `"stripe"` → Stripe catalog; `"house-of-stake"` → HoS catalog).
+    async fn get_available_plans(
+        &self,
+        provider: Option<&str>,
+    ) -> Result<Vec<SubscriptionPlan>, SubscriptionError>;
 
     /// Create a subscription checkout session for a user
-    /// Returns the checkout URL
-    /// provider: payment provider name (e.g. "stripe")
+    /// Returns either a Stripe checkout URL or House-of-Stake contract call parameters.
+    /// provider: payment provider name (e.g. "stripe", "house-of-stake")
     /// test_clock_id: optional test clock ID to bind customer to (requires STRIPE_TEST_CLOCK_ENABLED)
     async fn create_subscription(
         &self,
@@ -685,13 +1104,25 @@ pub trait SubscriptionService: Send + Sync {
         success_url: String,
         cancel_url: String,
         test_clock_id: Option<String>,
-    ) -> Result<String, SubscriptionError>;
+    ) -> Result<CreateSubscriptionOutcome, SubscriptionError>;
 
-    /// Cancel a user's active subscription (at period end)
-    async fn cancel_subscription(&self, user_id: UserId) -> Result<(), SubscriptionError>;
+    /// Cancel a user's active subscription (at period end), or return NEAR wallet intents for HoS.
+    async fn cancel_subscription(
+        &self,
+        user_id: UserId,
+    ) -> Result<CancelSubscriptionOutcome, SubscriptionError>;
 
-    /// Resume a subscription that was scheduled to cancel at period end
-    async fn resume_subscription(&self, user_id: UserId) -> Result<(), SubscriptionError>;
+    /// Resume a subscription that was scheduled to cancel at period end, or return NEAR wallet intents for HoS.
+    async fn resume_subscription(
+        &self,
+        user_id: UserId,
+    ) -> Result<ResumeSubscriptionOutcome, SubscriptionError>;
+
+    /// Re-fetch staking subscription from RPC and upsert/delete the local `house-of-stake` row.
+    async fn sync_near_staking_subscription(
+        &self,
+        user_id: UserId,
+    ) -> Result<NearStakingSyncSummary, SubscriptionError>;
 
     /// Change the user's subscription to a different plan.
     /// Upgrades are applied immediately; downgrades are scheduled for period-end checks.
@@ -699,6 +1130,7 @@ pub trait SubscriptionService: Send + Sync {
         &self,
         user_id: UserId,
         target_plan: String,
+        target_amount: Option<String>,
     ) -> Result<ChangePlanOutcome, SubscriptionError>;
 
     /// Get subscriptions for a user with plan names resolved
@@ -779,14 +1211,23 @@ pub trait SubscriptionService: Send + Sync {
         replacement: SubscriptionReplacement,
     ) -> Result<Subscription, SubscriptionError>;
 
-    /// Create checkout session for purchasing credits. Returns checkout URL.
+    /// Create a House-of-Stake direct-payment intent for purchasing credits.
     async fn create_credit_purchase_checkout(
         &self,
         user_id: UserId,
         credits: u64,
+        provider: Option<String>,
         success_url: String,
         cancel_url: String,
-    ) -> Result<String, SubscriptionError>;
+    ) -> Result<CreateCreditPurchaseOutcome, SubscriptionError>;
+
+    /// Verify a House-of-Stake direct purchase and grant user credits idempotently.
+    async fn confirm_credit_purchase(
+        &self,
+        user_id: UserId,
+        purchase_id: String,
+        expected_credits: u64,
+    ) -> Result<CreditsSummary, SubscriptionError>;
 
     /// Get user's credits: remaining balance, totals, used in period, effective max.
     async fn get_credits(&self, user_id: UserId) -> Result<CreditsSummary, SubscriptionError>;

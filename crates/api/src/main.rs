@@ -26,6 +26,16 @@ use std::sync::Arc;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
+fn near_rpc_network_hint(host: Option<&str>) -> Option<&'static str> {
+    match host?.to_ascii_lowercase().as_str() {
+        "rpc.mainnet.near.org" | "archival-rpc.mainnet.near.org" | "free.rpc.fastnear.com" => {
+            Some("mainnet")
+        }
+        "rpc.testnet.near.org" | "archival-rpc.testnet.near.org" => Some("testnet"),
+        _ => None,
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Load .env file if it exists
@@ -233,6 +243,18 @@ async fn main() -> anyhow::Result<()> {
             user_usage_repo as Arc<dyn services::user_usage::UserUsageRepository>,
         ));
 
+    let near_network_id_hint = config.near.network_id.to_ascii_lowercase();
+    if let Some(rpc_network_hint) = near_rpc_network_hint(config.near.rpc_url.host_str()) {
+        if rpc_network_hint != near_network_id_hint {
+            tracing::warn!(
+                near_rpc_url = %config.near.rpc_url,
+                near_network_id = %config.near.network_id,
+                expected_network_id = rpc_network_hint,
+                "NEAR network id appears inconsistent with NEAR RPC URL"
+            );
+        }
+    }
+
     // Initialize subscription service
     tracing::info!("Initializing subscription service...");
     let stripe_client = Arc::new(StripeClientAdapter::new(config.stripe.secret_key.clone()));
@@ -258,6 +280,9 @@ async fn main() -> anyhow::Result<()> {
             stripe_secret_key: config.stripe.secret_key.clone(),
             stripe_webhook_secret: config.stripe.webhook_secret.clone(),
             agent_service: agent_service.clone() as Arc<dyn services::agent::ports::AgentService>,
+            near_rpc_url: config.near.rpc_url.to_string(),
+            near_staking_contract_id: config.near.staking_contract_id.clone(),
+            near_network_id: config.near.network_id.clone(),
         },
     ));
 
