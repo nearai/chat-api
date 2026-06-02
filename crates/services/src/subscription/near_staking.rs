@@ -4,7 +4,8 @@ use crate::subscription::ports::{DowngradeIntentStatus, Subscription};
 use crate::UserId;
 use chrono::{DateTime, Utc};
 use near_api::{AccountId, Contract, Data, NetworkConfig};
-use serde_json::{json, Value};
+use serde::de::{DeserializeOwned, Error as _};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::time::Duration;
 use tokio::time::timeout;
 
@@ -13,12 +14,168 @@ const NEAR_VIEW_RPC_TIMEOUT: Duration = Duration::from_secs(15);
 
 const NEAR_VIEW_RPC_TIMEOUT_MSG: &str = "NEAR RPC view call timed out";
 
-async fn view_call(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct YoctoNear(u128);
+
+impl YoctoNear {
+    pub fn as_u128(self) -> u128 {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum IntegerStringOrNumber {
+    String(String),
+    Number(u64),
+}
+
+fn parse_u128_value<'de, D>(value: IntegerStringOrNumber) -> Result<u128, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    match value {
+        IntegerStringOrNumber::String(s) => s.parse::<u128>().map_err(D::Error::custom),
+        IntegerStringOrNumber::Number(n) => Ok(u128::from(n)),
+    }
+}
+
+fn deserialize_required_u64<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = IntegerStringOrNumber::deserialize(deserializer)?;
+    parse_u128_value::<D>(value).and_then(|n| {
+        u64::try_from(n).map_err(|_| D::Error::custom("expected u64-compatible integer"))
+    })
+}
+
+fn deserialize_optional_u64<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let Some(value) = Option::<IntegerStringOrNumber>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    parse_u128_value::<D>(value).and_then(|n| {
+        u64::try_from(n)
+            .map(Some)
+            .map_err(|_| D::Error::custom("expected u64-compatible integer"))
+    })
+}
+
+fn deserialize_optional_yocto_near<'de, D>(deserializer: D) -> Result<Option<YoctoNear>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let Some(value) = Option::<IntegerStringOrNumber>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    parse_u128_value::<D>(value).map(|amount| Some(YoctoNear(amount)))
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct GetSubscriptionForPriceArgs<'a> {
+    account_id: &'a str,
+    price_id: &'a str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct GetPriceArgs<'a> {
+    price_id: &'a str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct GetPurchaseArgs<'a> {
+    purchase_id: &'a str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct GetLockArgs<'a> {
+    lock_id: &'a str,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct NearStakingSubscription {
+    pub subscription_id: String,
+    pub price_id: String,
+    #[serde(deserialize_with = "deserialize_required_u64")]
+    pub end_ns: u64,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub cancel_at_period_end: bool,
+    #[serde(default)]
+    pub pending_update: Option<NearStakingPendingUpdate>,
+    #[serde(default)]
+    pub pending_downgrade_price_id: Option<String>,
+    #[serde(default)]
+    pub last_lock_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct NearStakingPendingUpdate {
+    #[serde(default)]
+    pub target_price_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct NearStakingPrice {
+    #[serde(default, deserialize_with = "deserialize_optional_yocto_near")]
+    pub amount: Option<YoctoNear>,
+    #[serde(default)]
+    pub product_id: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub price_type: Option<String>,
+}
+
+impl NearStakingPrice {
+    pub fn amount_yocto(&self) -> Option<u128> {
+        self.amount.map(YoctoNear::as_u128)
+    }
+
+    pub fn is_one_off(&self) -> bool {
+        matches!(
+            self.price_type.as_deref(),
+            Some("OneOff") | Some("one_off") | Some("one-off")
+        )
+    }
+
+    pub fn is_active(&self) -> bool {
+        matches!(self.status.as_deref(), Some("Active") | Some("active"))
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct NearStakingPurchase {
+    #[serde(default)]
+    pub account_id: Option<String>,
+    #[serde(default)]
+    pub price_id: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_u64")]
+    pub quantity: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_optional_yocto_near")]
+    pub amount_paid: Option<YoctoNear>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct NearStakingLock {
+    #[serde(default, deserialize_with = "deserialize_optional_yocto_near")]
+    pub amount_near: Option<YoctoNear>,
+}
+
+async fn view_call<Args, Response>(
     rpc_url: &str,
     contract_id: &str,
     method_name: &str,
-    args: Value,
-) -> Result<Option<Value>, String> {
+    args: Args,
+) -> Result<Option<Response>, String>
+where
+    Args: Serialize + Send,
+    Response: DeserializeOwned + Send + Sync,
+{
     timeout(NEAR_VIEW_RPC_TIMEOUT, async {
         let url = rpc_url
             .parse()
@@ -28,34 +185,34 @@ async fn view_call(
             .parse()
             .map_err(|e| format!("invalid staking contract account id: {e}"))?;
 
-        let data: Data<Option<Value>> = Contract(cid)
+        let data: Data<Option<Response>> = Contract(cid)
             .call_function(method_name, args)
             .read_only()
             .fetch_from(&network)
             .await
             .map_err(|e| e.to_string())?;
 
-        Ok::<Option<Value>, String>(data.data)
+        Ok::<Option<Response>, String>(data.data)
     })
     .await
     .map_err(|_| NEAR_VIEW_RPC_TIMEOUT_MSG.to_string())?
 }
 
-/// Fetch `get_subscription_for_price(account_id, price_id)` (returns JSON `null` when absent).
+/// Fetch `get_subscription_for_price(account_id, price_id)` (returns `null` when absent).
 pub async fn view_get_subscription_for_price(
     rpc_url: &str,
     contract_id: &str,
     account_id: &str,
     anchor_price_id: &str,
-) -> Result<Option<Value>, String> {
+) -> Result<Option<NearStakingSubscription>, String> {
     view_call(
         rpc_url,
         contract_id,
         "get_subscription_for_price",
-        json!({
-            "account_id": account_id,
-            "price_id": anchor_price_id,
-        }),
+        GetSubscriptionForPriceArgs {
+            account_id,
+            price_id: anchor_price_id,
+        },
     )
     .await
 }
@@ -65,14 +222,8 @@ pub async fn view_get_price(
     rpc_url: &str,
     contract_id: &str,
     price_id: &str,
-) -> Result<Option<Value>, String> {
-    view_call(
-        rpc_url,
-        contract_id,
-        "get_price",
-        json!({ "price_id": price_id }),
-    )
-    .await
+) -> Result<Option<NearStakingPrice>, String> {
+    view_call(rpc_url, contract_id, "get_price", GetPriceArgs { price_id }).await
 }
 
 /// Fetch `get_purchase(purchase_id)` for direct one-off `pay` verification.
@@ -80,12 +231,12 @@ pub async fn view_get_purchase(
     rpc_url: &str,
     contract_id: &str,
     purchase_id: &str,
-) -> Result<Option<Value>, String> {
+) -> Result<Option<NearStakingPurchase>, String> {
     view_call(
         rpc_url,
         contract_id,
         "get_purchase",
-        json!({ "purchase_id": purchase_id }),
+        GetPurchaseArgs { purchase_id },
     )
     .await
 }
@@ -95,62 +246,26 @@ pub async fn view_get_lock(
     rpc_url: &str,
     contract_id: &str,
     lock_id: &str,
-) -> Result<Option<Value>, String> {
-    view_call(
-        rpc_url,
-        contract_id,
-        "get_lock",
-        json!({ "lock_id": lock_id }),
-    )
-    .await
-}
-
-/// Parse catalog `amount` field (`U128` JSON) as yoctoNEAR integer.
-pub fn price_amount_yocto_json(price: &Value) -> Option<u128> {
-    let a = price.get("amount")?;
-    let s = match a {
-        Value::String(s) => s.clone(),
-        Value::Number(n) => n.to_string(),
-        _ => return None,
-    };
-    s.parse().ok()
+) -> Result<Option<NearStakingLock>, String> {
+    view_call(rpc_url, contract_id, "get_lock", GetLockArgs { lock_id }).await
 }
 
 /// Parse lock `amount_near` field as yoctoNEAR integer.
-pub fn lock_amount_yocto_json(lock: &Value) -> Option<u128> {
-    let a = lock.get("amount_near")?;
-    let s = match a {
-        Value::String(s) => s.clone(),
-        Value::Number(n) => n.to_string(),
-        _ => return None,
-    };
-    s.parse().ok()
+pub fn lock_amount_yocto(lock: &NearStakingLock) -> Option<u128> {
+    lock.amount_near.map(YoctoNear::as_u128)
 }
 
-/// Map stake.dao `Subscription` JSON into our DB [`Subscription`] row (`provider = house-of-stake`).
-pub fn subscription_row_from_chain_json(
+/// Map stake.dao `Subscription` into our DB [`Subscription`] row (`provider = house-of-stake`).
+pub fn subscription_row_from_chain(
     user_id: UserId,
     near_account: &str,
-    v: &Value,
+    chain: &NearStakingSubscription,
 ) -> Result<Subscription, String> {
-    let subscription_id = v
-        .get("subscription_id")
-        .and_then(|x| x.as_str())
-        .ok_or_else(|| "missing subscription_id".to_string())?
-        .to_string();
-    let price_id = v
-        .get("price_id")
-        .and_then(|x| x.as_str())
-        .ok_or_else(|| "missing price_id".to_string())?
-        .to_string();
+    let subscription_id = chain.subscription_id.clone();
+    let price_id = chain.price_id.clone();
+    let current_period_end = ts_ns_to_datetime(chain.end_ns)?;
 
-    let end_ns = json_u64(
-        v.get("end_ns")
-            .ok_or_else(|| "missing end_ns".to_string())?,
-    )?;
-    let current_period_end = ts_ns_to_datetime(end_ns)?;
-
-    let status_raw = v.get("status").and_then(|x| x.as_str()).unwrap_or("Active");
+    let status_raw = chain.status.as_deref().unwrap_or("Active");
     let status_lower = status_raw.to_ascii_lowercase();
     let mut status = match status_lower.as_str() {
         "active" => "active".to_string(),
@@ -164,15 +279,12 @@ pub fn subscription_row_from_chain_json(
         }
     };
 
-    let cancel_at_period_end = v
-        .get("cancel_at_period_end")
-        .and_then(|x| x.as_bool())
-        .unwrap_or(false);
+    let cancel_at_period_end = chain.cancel_at_period_end;
     if status == "active" && current_period_end <= Utc::now() {
         status = "canceled".to_string();
     }
 
-    let pending_down = pending_downgrade_price_id(v);
+    let pending_down = pending_downgrade_price_id(chain);
 
     let (pd_target, pd_from, pd_end, pd_status) = if let Some(ref tgt) = pending_down {
         (
@@ -204,63 +316,12 @@ pub fn subscription_row_from_chain_json(
     })
 }
 
-fn pending_downgrade_price_id(v: &Value) -> Option<String> {
-    v.get("pending_update")
-        .and_then(pending_update_downgrade_price_id)
-        .or_else(|| v.get("pending_downgrade_price_id").and_then(json_string))
-}
-
-fn pending_update_downgrade_price_id(v: &Value) -> Option<String> {
-    match v {
-        Value::Null => None,
-        Value::String(s) => Some(s.clone()),
-        Value::Object(map) => {
-            for variant in [
-                "downgrade",
-                "Downgrade",
-                "pending_downgrade",
-                "PendingDowngrade",
-            ] {
-                if let Some(inner) = map.get(variant) {
-                    return json_string(inner).or_else(|| pending_update_downgrade_price_id(inner));
-                }
-            }
-
-            let kind = ["kind", "type", "update_type", "change"]
-                .iter()
-                .filter_map(|key| map.get(*key).and_then(|x| x.as_str()))
-                .next();
-            let is_downgrade = kind
-                .map(|s| s.to_ascii_lowercase().contains("downgrade"))
-                .unwrap_or(true);
-            if !is_downgrade {
-                return None;
-            }
-
-            ["price_id", "target_price_id", "new_price_id"]
-                .iter()
-                .find_map(|key| json_string(map.get(*key)?))
-        }
-        _ => None,
-    }
-}
-
-fn json_string(v: &Value) -> Option<String> {
-    if v.is_null() {
-        None
-    } else {
-        v.as_str().map(|s| s.to_string())
-    }
-}
-
-fn json_u64(v: &Value) -> Result<u64, String> {
-    match v {
-        Value::String(s) => s
-            .parse::<u64>()
-            .map_err(|e: std::num::ParseIntError| e.to_string()),
-        Value::Number(n) => n.as_u64().ok_or_else(|| "expected u64".to_string()),
-        _ => Err("bad json for u64".to_string()),
-    }
+fn pending_downgrade_price_id(chain: &NearStakingSubscription) -> Option<String> {
+    chain
+        .pending_update
+        .as_ref()
+        .and_then(|pending| pending.target_price_id.clone())
+        .or_else(|| chain.pending_downgrade_price_id.clone())
 }
 
 fn ts_ns_to_datetime(ns: u64) -> Result<DateTime<Utc>, String> {
@@ -272,7 +333,7 @@ fn ts_ns_to_datetime(ns: u64) -> Result<DateTime<Utc>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{json, Value};
     use uuid::Uuid;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -290,6 +351,10 @@ mod tests {
                 "result": encoded
             }
         })
+    }
+
+    fn chain_subscription(value: Value) -> NearStakingSubscription {
+        serde_json::from_value(value).expect("typed chain subscription")
     }
 
     #[tokio::test]
@@ -329,18 +394,15 @@ mod tests {
             .timestamp_nanos_opt()
             .expect("timestamp nanos")
             .to_string();
-        let row = subscription_row_from_chain_json(
-            UserId(Uuid::new_v4()),
-            "alice.testnet",
-            &json!({
-                "subscription_id": "sub_hos_expired",
-                "price_id": "price_hos_basic",
-                "end_ns": past_end_ns,
-                "status": "Active",
-                "cancel_at_period_end": true
-            }),
-        )
-        .expect("parse chain subscription");
+        let chain = chain_subscription(json!({
+            "subscription_id": "sub_hos_expired",
+            "price_id": "price_hos_basic",
+            "end_ns": past_end_ns,
+            "status": "Active",
+            "cancel_at_period_end": true
+        }));
+        let row = subscription_row_from_chain(UserId(Uuid::new_v4()), "alice.testnet", &chain)
+            .expect("parse chain subscription");
 
         assert_eq!(row.status, "canceled");
         assert!(row.cancel_at_period_end);
@@ -352,18 +414,15 @@ mod tests {
             .timestamp_nanos_opt()
             .expect("timestamp nanos")
             .to_string();
-        let row = subscription_row_from_chain_json(
-            UserId(Uuid::new_v4()),
-            "alice.testnet",
-            &json!({
-                "subscription_id": "sub_hos_expired",
-                "price_id": "price_hos_basic",
-                "end_ns": past_end_ns,
-                "status": "Active",
-                "cancel_at_period_end": false
-            }),
-        )
-        .expect("parse chain subscription");
+        let chain = chain_subscription(json!({
+            "subscription_id": "sub_hos_expired",
+            "price_id": "price_hos_basic",
+            "end_ns": past_end_ns,
+            "status": "Active",
+            "cancel_at_period_end": false
+        }));
+        let row = subscription_row_from_chain(UserId(Uuid::new_v4()), "alice.testnet", &chain)
+            .expect("parse chain subscription");
 
         assert_eq!(row.status, "canceled");
         assert!(!row.cancel_at_period_end);
@@ -375,21 +434,19 @@ mod tests {
             .timestamp_nanos_opt()
             .expect("timestamp nanos")
             .to_string();
-        let row = subscription_row_from_chain_json(
-            UserId(Uuid::new_v4()),
-            "alice.testnet",
-            &json!({
-                "subscription_id": "sub_hos_pending",
-                "price_id": "price_hos_pro",
-                "end_ns": future_end_ns,
-                "status": "Active",
-                "pending_update": {
-                    "kind": "downgrade",
-                    "price_id": "price_hos_basic"
-                }
-            }),
-        )
-        .expect("parse chain subscription");
+        let chain = chain_subscription(json!({
+            "subscription_id": "sub_hos_pending",
+            "price_id": "price_hos_pro",
+            "end_ns": future_end_ns,
+            "status": "Active",
+            "pending_update": {
+                "target_price_id": "price_hos_basic",
+                "target_amount": null,
+                "apply_ns": future_end_ns
+            }
+        }));
+        let row = subscription_row_from_chain(UserId(Uuid::new_v4()), "alice.testnet", &chain)
+            .expect("parse chain subscription");
 
         assert_eq!(
             row.pending_downgrade_target_price_id.as_deref(),
@@ -413,18 +470,15 @@ mod tests {
             .timestamp_nanos_opt()
             .expect("timestamp nanos")
             .to_string();
-        let row = subscription_row_from_chain_json(
-            UserId(Uuid::new_v4()),
-            "alice.testnet",
-            &json!({
-                "subscription_id": "sub_hos_pending_legacy",
-                "price_id": "price_hos_pro",
-                "end_ns": future_end_ns,
-                "status": "Active",
-                "pending_downgrade_price_id": "price_hos_basic"
-            }),
-        )
-        .expect("parse chain subscription");
+        let chain = chain_subscription(json!({
+            "subscription_id": "sub_hos_pending_legacy",
+            "price_id": "price_hos_pro",
+            "end_ns": future_end_ns,
+            "status": "Active",
+            "pending_downgrade_price_id": "price_hos_basic"
+        }));
+        let row = subscription_row_from_chain(UserId(Uuid::new_v4()), "alice.testnet", &chain)
+            .expect("parse chain subscription");
 
         assert_eq!(
             row.pending_downgrade_target_price_id.as_deref(),

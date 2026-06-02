@@ -1,6 +1,6 @@
 use super::near_staking::{
-    lock_amount_yocto_json, price_amount_yocto_json, subscription_row_from_chain_json,
-    view_get_lock, view_get_price, view_get_purchase, view_get_subscription_for_price,
+    lock_amount_yocto, subscription_row_from_chain, view_get_lock, view_get_price,
+    view_get_purchase, view_get_subscription_for_price,
 };
 use super::ports::{
     BillingCycleAnchor, BillingPeriod, CancelSubscriptionOutcome, ChangePlanOutcome,
@@ -532,40 +532,6 @@ impl SubscriptionServiceImpl {
             .ok_or(SubscriptionError::HouseOfStakeNotConfigured)
     }
 
-    fn json_string_field<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
-        value.get(key).and_then(|v| v.as_str())
-    }
-
-    fn json_u64_field(value: &serde_json::Value, key: &str) -> Option<u64> {
-        match value.get(key)? {
-            serde_json::Value::String(s) => s.parse().ok(),
-            serde_json::Value::Number(n) => n.as_u64(),
-            _ => None,
-        }
-    }
-
-    fn json_yocto_field(value: &serde_json::Value, key: &str) -> Option<u128> {
-        match value.get(key)? {
-            serde_json::Value::String(s) => s.parse().ok(),
-            serde_json::Value::Number(n) => n.to_string().parse().ok(),
-            _ => None,
-        }
-    }
-
-    fn price_is_one_off(price: &serde_json::Value) -> bool {
-        matches!(
-            Self::json_string_field(price, "price_type"),
-            Some("OneOff") | Some("one_off") | Some("one-off")
-        )
-    }
-
-    fn price_is_active(price: &serde_json::Value) -> bool {
-        matches!(
-            Self::json_string_field(price, "status"),
-            Some("Active") | Some("active")
-        )
-    }
-
     async fn get_subscription_plans(
         &self,
     ) -> Result<HashMap<String, SubscriptionPlanConfig>, SubscriptionError> {
@@ -809,7 +775,11 @@ impl SubscriptionServiceImpl {
             }
         };
 
-        let Some(last_lock_id) = chain_sub.get("last_lock_id").and_then(|x| x.as_str()) else {
+        let Some(last_lock_id) = chain_sub
+            .last_lock_id
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        else {
             tracing::warn!(
                 user_id = %user_id.0,
                 subscription_id = %subscription.subscription_id,
@@ -842,7 +812,7 @@ impl SubscriptionServiceImpl {
             }
         };
 
-        let Some(lock_amount) = lock_amount_yocto_json(&lock) else {
+        let Some(lock_amount) = lock_amount_yocto(&lock) else {
             tracing::warn!(
                 user_id = %user_id.0,
                 subscription_id = %subscription.subscription_id,
@@ -1114,14 +1084,12 @@ impl SubscriptionServiceImpl {
             })?;
 
         price_json
-            .get("product_id")
-            .and_then(|x| x.as_str())
+            .product_id
+            .as_deref()
             .filter(|s| !s.is_empty())
             .map(str::to_string)
             .ok_or_else(|| {
-                SubscriptionError::InternalError(
-                    "HoS price JSON missing or empty product_id".into(),
-                )
+                SubscriptionError::InternalError("HoS price missing or empty product_id".into())
             })
     }
 
@@ -1357,8 +1325,8 @@ impl SubscriptionServiceImpl {
             return Ok(Self::hos_reconcile_summary(false, deleted, false, None));
         }
 
-        let chain_json = raw.as_ref().expect("checked is_some");
-        let row = subscription_row_from_chain_json(user_id, &near_account, chain_json)
+        let chain_subscription = raw.as_ref().expect("checked is_some");
+        let row = subscription_row_from_chain(user_id, &near_account, chain_subscription)
             .map_err(SubscriptionError::InternalError)?;
 
         // Do not insert/update a HoS row while a non-HoS subscription is active/trialing locally:
@@ -2156,18 +2124,15 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 SubscriptionError::InternalError("HoS subscription not found on-chain".into())
             })?;
 
-            let chain_subscription_id = chain_sub_j
-                .get("subscription_id")
-                .and_then(|x| x.as_str())
-                .filter(|s| !s.trim().is_empty())
-                .ok_or_else(|| {
-                    SubscriptionError::InternalError(
-                        "HoS subscription missing subscription_id".into(),
-                    )
-                })?;
+            if chain_sub_j.subscription_id.trim().is_empty() {
+                return Err(SubscriptionError::InternalError(
+                    "HoS subscription missing subscription_id".into(),
+                ));
+            }
+            let chain_subscription_id = chain_sub_j.subscription_id.as_str();
             let last_lock_id = chain_sub_j
-                .get("last_lock_id")
-                .and_then(|x| x.as_str())
+                .last_lock_id
+                .as_deref()
                 .filter(|s| !s.trim().is_empty())
                 .ok_or_else(|| {
                     SubscriptionError::InternalError("HoS subscription missing last_lock_id".into())
@@ -2178,7 +2143,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 .ok_or_else(|| {
                     SubscriptionError::InternalError("HoS subscription lock not found".into())
                 })?;
-            let current_lock_amount = lock_amount_yocto_json(&lock_j).ok_or_else(|| {
+            let current_lock_amount = lock_amount_yocto(&lock_j).ok_or_else(|| {
                 SubscriptionError::InternalError("HoS lock missing amount_near".into())
             })?;
 
@@ -3483,7 +3448,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                             "House-of-Stake credit price not found".into(),
                         )
                     })?;
-                if !Self::price_is_active(&price) || !Self::price_is_one_off(&price) {
+                if !price.is_active() || !price.is_one_off() {
                     return Err(SubscriptionError::InvalidPlan(
                         "House-of-Stake credit price must be active and one-off".into(),
                     ));
@@ -3581,19 +3546,18 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 )
             })?;
 
-        let purchase_account =
-            Self::json_string_field(&purchase, "account_id").ok_or_else(|| {
-                SubscriptionError::InvalidCredits(
-                    "House-of-Stake purchase is missing account_id".to_string(),
-                )
-            })?;
+        let purchase_account = purchase.account_id.as_deref().ok_or_else(|| {
+            SubscriptionError::InvalidCredits(
+                "House-of-Stake purchase is missing account_id".to_string(),
+            )
+        })?;
         if purchase_account != near_account {
             return Err(SubscriptionError::InvalidCredits(
                 "House-of-Stake purchase account does not match the linked NEAR wallet".to_string(),
             ));
         }
 
-        let purchase_price = Self::json_string_field(&purchase, "price_id").ok_or_else(|| {
+        let purchase_price = purchase.price_id.as_deref().ok_or_else(|| {
             SubscriptionError::InvalidCredits(
                 "House-of-Stake purchase is missing price_id".to_string(),
             )
@@ -3605,7 +3569,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
             ));
         }
 
-        let quantity = Self::json_u64_field(&purchase, "quantity").ok_or_else(|| {
+        let quantity = purchase.quantity.ok_or_else(|| {
             SubscriptionError::InvalidCredits(
                 "House-of-Stake purchase is missing quantity".to_string(),
             )
@@ -3616,16 +3580,19 @@ impl SubscriptionService for SubscriptionServiceImpl {
             ));
         }
 
-        let unit_amount = price_amount_yocto_json(&price).ok_or_else(|| {
+        let unit_amount = price.amount_yocto().ok_or_else(|| {
             SubscriptionError::InvalidCredits(
                 "Configured House-of-Stake credit price is missing amount".to_string(),
             )
         })?;
-        let amount_paid = Self::json_yocto_field(&purchase, "amount_paid").ok_or_else(|| {
-            SubscriptionError::InvalidCredits(
-                "House-of-Stake purchase is missing amount_paid".to_string(),
-            )
-        })?;
+        let amount_paid = purchase
+            .amount_paid
+            .map(|amount| amount.as_u128())
+            .ok_or_else(|| {
+                SubscriptionError::InvalidCredits(
+                    "House-of-Stake purchase is missing amount_paid".to_string(),
+                )
+            })?;
         let expected_amount = unit_amount
             .checked_mul(u128::from(quantity))
             .ok_or_else(|| {
