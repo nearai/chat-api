@@ -541,6 +541,40 @@ impl SubscriptionServiceImpl {
             .unwrap_or_default())
     }
 
+    async fn get_active_subscription_for_entitlement(
+        &self,
+        user_id: UserId,
+    ) -> Result<Option<Subscription>, SubscriptionError> {
+        let subscription = self
+            .subscription_repo
+            .get_active_subscription(user_id)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        let Some(subscription) = subscription else {
+            return Ok(None);
+        };
+
+        if subscription.provider == "house-of-stake"
+            && subscription.current_period_end <= Utc::now()
+        {
+            self.subscription_repo
+                .delete_subscription(&subscription.subscription_id)
+                .await
+                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+            self.invalidate_credit_limit_cache(user_id).await;
+            tracing::warn!(
+                user_id = %user_id.0,
+                subscription_id = %subscription.subscription_id,
+                current_period_end = %subscription.current_period_end,
+                "expired stale local HoS subscription before entitlement check"
+            );
+            return Ok(None);
+        }
+
+        Ok(Some(subscription))
+    }
+
     /// Returns true only when the user has no linked OAuth accounts (email-only account)
     /// and has no active/trialing subscription. Email-only users with any active
     /// subscription, including a free-priced plan, may access LLM APIs subject to
@@ -560,10 +594,8 @@ impl SubscriptionServiceImpl {
         }
 
         let active_subscription = self
-            .subscription_repo
-            .get_active_subscription(user_id)
-            .await
-            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+            .get_active_subscription_for_entitlement(user_id)
+            .await?;
 
         Ok(active_subscription.is_none())
     }
@@ -609,10 +641,8 @@ impl SubscriptionServiceImpl {
             .unwrap_or_default();
 
         let (plan_credits, period_start, period_end) = match self
-            .subscription_repo
-            .get_active_subscription(user_id)
-            .await
-            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
+            .get_active_subscription_for_entitlement(user_id)
+            .await?
         {
             Some(ref sub) => {
                 let plan_name = resolve_plan_name_from_config(
@@ -774,6 +804,27 @@ impl SubscriptionServiceImpl {
                 return None;
             }
         };
+
+        let status_lower = chain_sub
+            .status
+            .as_deref()
+            .unwrap_or("Active")
+            .to_ascii_lowercase();
+        let now_ns = Utc::now()
+            .timestamp_nanos_opt()
+            .and_then(|ns| u64::try_from(ns).ok())
+            .unwrap_or(u64::MAX);
+        if status_lower != "active" || chain_sub.end_ns <= now_ns {
+            tracing::warn!(
+                user_id = %user_id.0,
+                subscription_id = %subscription.subscription_id,
+                price_id = %subscription.price_id,
+                chain_status = %status_lower,
+                chain_end_ns = chain_sub.end_ns,
+                "cannot resolve HoS stake-based credits: chain subscription is not active"
+            );
+            return None;
+        }
 
         let Some(last_lock_id) = chain_sub
             .last_lock_id
@@ -2836,10 +2887,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
 
     async fn has_paid_subscription(&self, user_id: UserId) -> Result<bool, SubscriptionError> {
         let sub = self
-            .subscription_repo
-            .get_active_subscription(user_id)
-            .await
-            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+            .get_active_subscription_for_entitlement(user_id)
+            .await?;
         let Some(ref sub) = sub else {
             return Ok(false);
         };
@@ -2956,10 +3005,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
 
                 // Use monthly_credits when set (nano USD); else monthly_tokens → nano USD at 1.5 USD per M tokens. Never fail for missing config.
                 let (plan_credits, period_start, period_end) = match self
-                    .subscription_repo
-                    .get_active_subscription(user_id)
-                    .await
-                    .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
+                    .get_active_subscription_for_entitlement(user_id)
+                    .await?
                 {
                     Some(ref sub) => {
                         let effective_sub = if sub.provider == "stripe"
@@ -3109,10 +3156,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
 
         // Try to get user's active subscription
         let active_subscription = self
-            .subscription_repo
-            .get_active_subscription(user_id)
-            .await
-            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+            .get_active_subscription_for_entitlement(user_id)
+            .await?;
 
         // Determine which allowlist to use
         let allowed_models: Option<&Vec<String>> = match active_subscription {
