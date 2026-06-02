@@ -1,7 +1,7 @@
 use super::near_staking::{
     lock_amount_yocto, subscription_row_from_chain, view_get_lock, view_get_price,
     view_get_purchase, view_get_subscription_for_price, view_storage_balance_bounds,
-    view_storage_balance_of,
+    view_storage_balance_of, NearStakingStorageBalance, NearStakingStorageBalanceBounds,
 };
 use super::ports::{
     BillingCycleAnchor, BillingPeriod, CancelSubscriptionOutcome, ChangePlanOutcome,
@@ -533,29 +533,17 @@ impl SubscriptionServiceImpl {
             .ok_or(SubscriptionError::HouseOfStakeNotConfigured)
     }
 
-    async fn near_staking_storage_intent(
-        &self,
-        contract_id: &str,
+    fn near_staking_storage_intent_from_views(
         near_account: &str,
-    ) -> Result<NearStakingStorageIntent, SubscriptionError> {
-        let bounds = view_storage_balance_bounds(&self.near_rpc_url, contract_id)
-            .await
-            .map_err(Self::near_rpc_err)?
-            .ok_or_else(|| {
-                SubscriptionError::NearRpcError(
-                    "House-of-Stake storage_balance_bounds returned no data".to_string(),
-                )
-            })?;
-        let balance = view_storage_balance_of(&self.near_rpc_url, contract_id, near_account)
-            .await
-            .map_err(Self::near_rpc_err)?;
-
+        bounds: NearStakingStorageBalanceBounds,
+        balance: Option<NearStakingStorageBalance>,
+    ) -> NearStakingStorageIntent {
         let balance_total = balance.as_ref().map(|b| b.total.as_u128()).unwrap_or(0);
         let balance_available = balance.as_ref().map(|b| b.available.as_u128()).unwrap_or(0);
         let bounds_min = bounds.min.as_u128();
         let required_deposit = bounds_min.saturating_sub(balance_total);
 
-        Ok(NearStakingStorageIntent {
+        NearStakingStorageIntent {
             method_name: "storage_deposit".to_string(),
             account_id: near_account.to_string(),
             required_deposit_yocto: required_deposit.to_string(),
@@ -567,7 +555,7 @@ impl SubscriptionServiceImpl {
                 "account_id": near_account,
                 "registration_only": false,
             }),
-        })
+        }
     }
 
     async fn get_subscription_plans(
@@ -1907,14 +1895,31 @@ impl SubscriptionService for SubscriptionServiceImpl {
         if provider_lc == "house-of-stake" {
             let near_account = self.get_near_account_id(user_id).await?;
             let contract_id = self.hos_contract_id()?;
-            let price = view_get_price(&self.near_rpc_url, &contract_id, &price_id)
-                .await
-                .map_err(Self::near_rpc_err)?
-                .ok_or_else(|| {
-                    SubscriptionError::InvalidPlan(
-                        "House-of-Stake subscription price not found".into(),
-                    )
-                })?;
+            let (price, storage_bounds, storage_balance) = tokio::try_join!(
+                async {
+                    view_get_price(&self.near_rpc_url, &contract_id, &price_id)
+                        .await
+                        .map_err(Self::near_rpc_err)
+                },
+                async {
+                    view_storage_balance_bounds(&self.near_rpc_url, &contract_id)
+                        .await
+                        .map_err(Self::near_rpc_err)
+                },
+                async {
+                    view_storage_balance_of(&self.near_rpc_url, &contract_id, &near_account)
+                        .await
+                        .map_err(Self::near_rpc_err)
+                },
+            )?;
+            let price = price.ok_or_else(|| {
+                SubscriptionError::InvalidPlan("House-of-Stake subscription price not found".into())
+            })?;
+            let storage_bounds = storage_bounds.ok_or_else(|| {
+                SubscriptionError::NearRpcError(
+                    "House-of-Stake storage_balance_bounds returned no data".to_string(),
+                )
+            })?;
             if !price.is_active() {
                 return Err(SubscriptionError::InvalidPlan(
                     "House-of-Stake subscription price must be active".into(),
@@ -1925,9 +1930,11 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     "House-of-Stake subscription price is missing amount".into(),
                 )
             })?;
-            let storage = self
-                .near_staking_storage_intent(&contract_id, &near_account)
-                .await?;
+            let storage = Self::near_staking_storage_intent_from_views(
+                &near_account,
+                storage_bounds,
+                storage_balance,
+            );
             return Ok(CreateSubscriptionOutcome::NearStakeLock {
                 contract_id,
                 price_id,
@@ -3578,14 +3585,31 @@ impl SubscriptionService for SubscriptionServiceImpl {
             "house-of-stake" => {
                 let contract_id = self.hos_contract_id()?;
                 let near_account = self.get_near_account_id(user_id).await?;
-                let price = view_get_price(&self.near_rpc_url, &contract_id, &price_id)
-                    .await
-                    .map_err(Self::near_rpc_err)?
-                    .ok_or_else(|| {
-                        SubscriptionError::InvalidPlan(
-                            "House-of-Stake credit price not found".into(),
-                        )
-                    })?;
+                let (price, storage_bounds, storage_balance) = tokio::try_join!(
+                    async {
+                        view_get_price(&self.near_rpc_url, &contract_id, &price_id)
+                            .await
+                            .map_err(Self::near_rpc_err)
+                    },
+                    async {
+                        view_storage_balance_bounds(&self.near_rpc_url, &contract_id)
+                            .await
+                            .map_err(Self::near_rpc_err)
+                    },
+                    async {
+                        view_storage_balance_of(&self.near_rpc_url, &contract_id, &near_account)
+                            .await
+                            .map_err(Self::near_rpc_err)
+                    },
+                )?;
+                let price = price.ok_or_else(|| {
+                    SubscriptionError::InvalidPlan("House-of-Stake credit price not found".into())
+                })?;
+                let storage_bounds = storage_bounds.ok_or_else(|| {
+                    SubscriptionError::NearRpcError(
+                        "House-of-Stake storage_balance_bounds returned no data".to_string(),
+                    )
+                })?;
                 if !price.is_active() || !price.is_one_off() {
                     return Err(SubscriptionError::InvalidPlan(
                         "House-of-Stake credit price must be active and one-off".into(),
@@ -3604,9 +3628,11 @@ impl SubscriptionService for SubscriptionServiceImpl {
                             "credit purchase amount exceeds supported range".to_string(),
                         )
                     })?;
-                let storage = self
-                    .near_staking_storage_intent(&contract_id, &near_account)
-                    .await?;
+                let storage = Self::near_staking_storage_intent_from_views(
+                    &near_account,
+                    storage_bounds,
+                    storage_balance,
+                );
 
                 tracing::info!(
                     "House-of-Stake credit payment intent created: user_id={}, credits={}, price_id={}",

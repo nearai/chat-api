@@ -144,10 +144,6 @@ pub enum ChangePlanOutcome {
         required_deposit_yocto: String,
         timing: String,
     },
-    NearStakingCancelPendingDowngrade {
-        contract_id: String,
-        subscription_id: String,
-    },
 }
 
 impl ChangePlanOutcome {
@@ -158,9 +154,6 @@ impl ChangePlanOutcome {
             Self::NoOp => "no_op",
             Self::DowngradeCancelled => "downgrade_cancelled",
             Self::NearStakingChangePlan { .. } => "near_staking_change_plan",
-            Self::NearStakingCancelPendingDowngrade { .. } => {
-                "near_staking_cancel_pending_downgrade"
-            }
         }
     }
 }
@@ -192,16 +185,6 @@ impl Serialize for ChangePlanOutcome {
                 st.serialize_field("target_amount", target_amount)?;
                 st.serialize_field("required_deposit_yocto", required_deposit_yocto)?;
                 st.serialize_field("timing", timing)?;
-                st.end()
-            }
-            Self::NearStakingCancelPendingDowngrade {
-                contract_id,
-                subscription_id,
-            } => {
-                let mut st = serializer.serialize_struct("NearStakingCancelPendingDowngrade", 3)?;
-                st.serialize_field("kind", self.kind())?;
-                st.serialize_field("contract_id", contract_id)?;
-                st.serialize_field("subscription_id", subscription_id)?;
                 st.end()
             }
         }
@@ -271,20 +254,6 @@ impl<'de> Deserialize<'de> for ChangePlanOutcome {
                     .ok_or_else(|| D::Error::custom("missing timing"))?
                     .to_string(),
             }),
-            "near_staking_cancel_pending_downgrade" => {
-                Ok(Self::NearStakingCancelPendingDowngrade {
-                    contract_id: obj
-                        .get("contract_id")
-                        .and_then(|x| x.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
-                    subscription_id: obj
-                        .get("subscription_id")
-                        .and_then(|x| x.as_str())
-                        .ok_or_else(|| D::Error::custom("missing subscription_id"))?
-                        .to_string(),
-                })
-            }
             other => Err(D::Error::custom(format!(
                 "unknown change plan outcome kind: {other}"
             ))),

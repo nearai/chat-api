@@ -509,11 +509,12 @@ pub async fn change_plan(
             }
             ChangePlanOutcome::NoOp => "User is already on the target plan".to_string(),
             ChangePlanOutcome::DowngradeCancelled => "Pending downgrade cancelled".to_string(),
-            ChangePlanOutcome::NearStakingChangePlan { .. } => {
-                "Complete plan change in your NEAR wallet".to_string()
-            }
-            ChangePlanOutcome::NearStakingCancelPendingDowngrade { .. } => {
-                "Complete pending downgrade cancellation in your NEAR wallet".to_string()
+            ChangePlanOutcome::NearStakingChangePlan { timing, .. } => {
+                if timing == "cancel_pending_downgrade" {
+                    "Complete pending downgrade cancellation in your NEAR wallet".to_string()
+                } else {
+                    "Complete plan change in your NEAR wallet".to_string()
+                }
             }
         },
         result: outcome,

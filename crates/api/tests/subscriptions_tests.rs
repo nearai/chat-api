@@ -4930,6 +4930,10 @@ async fn test_change_plan_house_of_stake_cancel_pending_downgrade_returns_wallet
     let body: serde_json::Value = response.json();
     let result = &body["result"];
     assert_eq!(
+        body.get("message").and_then(|x| x.as_str()),
+        Some("Complete pending downgrade cancellation in your NEAR wallet")
+    );
+    assert_eq!(
         result.get("kind").and_then(|x| x.as_str()),
         Some("near_staking_change_plan")
     );
