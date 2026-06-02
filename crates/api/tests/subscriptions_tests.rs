@@ -4647,6 +4647,7 @@ async fn test_change_plan_house_of_stake_upgrade_allows_different_product_ids() 
     let (server, db) = create_test_server_and_db(TestServerConfig {
         near_rpc_url: Some(mock.uri().to_string()),
         near_staking_contract_id: Some("staking.testnet".to_string()),
+        near_network_id: Some("testnet".to_string()),
         ..Default::default()
     })
     .await;
