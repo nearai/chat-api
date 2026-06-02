@@ -141,6 +141,7 @@ pub enum ChangePlanOutcome {
         subscription_id: String,
         target_price_id: String,
         target_amount: String,
+        required_deposit_yocto: String,
         timing: String,
     },
     NearStakingCancelPendingDowngrade {
@@ -180,14 +181,16 @@ impl Serialize for ChangePlanOutcome {
                 subscription_id,
                 target_price_id,
                 target_amount,
+                required_deposit_yocto,
                 timing,
             } => {
-                let mut st = serializer.serialize_struct("NearStakingChangePlan", 6)?;
+                let mut st = serializer.serialize_struct("NearStakingChangePlan", 7)?;
                 st.serialize_field("kind", self.kind())?;
                 st.serialize_field("contract_id", contract_id)?;
                 st.serialize_field("subscription_id", subscription_id)?;
                 st.serialize_field("target_price_id", target_price_id)?;
                 st.serialize_field("target_amount", target_amount)?;
+                st.serialize_field("required_deposit_yocto", required_deposit_yocto)?;
                 st.serialize_field("timing", timing)?;
                 st.end()
             }
@@ -256,6 +259,11 @@ impl<'de> Deserialize<'de> for ChangePlanOutcome {
                     .get("target_amount")
                     .and_then(|x| x.as_str())
                     .ok_or_else(|| D::Error::custom("missing target_amount"))?
+                    .to_string(),
+                required_deposit_yocto: obj
+                    .get("required_deposit_yocto")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default()
                     .to_string(),
                 timing: obj
                     .get("timing")

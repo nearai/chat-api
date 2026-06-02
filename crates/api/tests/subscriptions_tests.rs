@@ -3667,7 +3667,8 @@ fn test_change_plan_outcome_serde_uses_kind_discriminant() {
         subscription_id: "sub_hos_current".to_string(),
         target_price_id: "price_hos_pro".to_string(),
         target_amount: "2000000000000000000000000".to_string(),
-        timing: "immediate".to_string(),
+        required_deposit_yocto: "1000000000000000000000000".to_string(),
+        timing: "contract_decides".to_string(),
     };
     let v = serde_json::to_value(&o).expect("serialize");
     assert_eq!(
@@ -4652,8 +4653,14 @@ async fn test_change_plan_house_of_stake_upgrade_allows_different_product_ids() 
         Some("2000000000000000000000000")
     );
     assert_eq!(
+        result
+            .get("required_deposit_yocto")
+            .and_then(|x| x.as_str()),
+        Some("1000000000000000000000000")
+    );
+    assert_eq!(
         result.get("timing").and_then(|x| x.as_str()),
-        Some("immediate")
+        Some("contract_decides")
     );
     assert_eq!(
         result.get("subscription_id").and_then(|x| x.as_str()),
@@ -4761,8 +4768,14 @@ async fn test_change_plan_house_of_stake_downgrade_allows_different_product_ids(
         Some("1000000000000000000000000")
     );
     assert_eq!(
+        result
+            .get("required_deposit_yocto")
+            .and_then(|x| x.as_str()),
+        Some("1")
+    );
+    assert_eq!(
         result.get("timing").and_then(|x| x.as_str()),
-        Some("period_end")
+        Some("contract_decides")
     );
     assert_eq!(
         result.get("subscription_id").and_then(|x| x.as_str()),

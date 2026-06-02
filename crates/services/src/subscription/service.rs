@@ -1365,13 +1365,37 @@ impl SubscriptionServiceImpl {
         // `get_active_subscription` picks newest `created_at`, so a fresh HoS upsert could wrongly
         // become the "active" row for Stripe-primary users who also staked on-chain separately.
         if has_active_non_hos {
+            let deleted = hos_subscription_ids.len() as u32;
+            if !hos_subscription_ids.is_empty() {
+                let mut db_client = self
+                    .db_pool
+                    .get()
+                    .await
+                    .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+                let txn = db_client
+                    .transaction()
+                    .await
+                    .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+                for sid in &hos_subscription_ids {
+                    self.subscription_repo
+                        .delete_subscription_txn(&txn, sid)
+                        .await
+                        .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+                }
+                txn.commit()
+                    .await
+                    .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+                self.invalidate_credit_limit_cache(user_id).await;
+            }
+
             tracing::warn!(
                 user_id = %user_id.0,
+                deleted_house_of_stake_rows = deleted,
                 "Skipping HoS reconcile upsert: user has an active or trialing non-house-of-stake subscription row"
             );
             return Ok(Self::hos_reconcile_summary(
                 false,
-                0,
+                deleted,
                 false,
                 Some(NEAR_STAKING_SYNC_SKIPPED_REASON_UPSERT_BLOCKED_NON_HOS),
             ));
@@ -1648,13 +1672,21 @@ fn generate_credit_checkout_idempotency_key(
     user_id: &UserId,
     price_id: &str,
     credits: u64,
+    success_url: &str,
+    cancel_url: &str,
 ) -> String {
     use sha2::{Digest, Sha256};
 
     let time_window = chrono::Utc::now().timestamp() / 3600;
 
     let mut hasher = Sha256::new();
-    hasher.update(format!("{}:{}:{}:{}", user_id.0, price_id, credits, time_window).as_bytes());
+    hasher.update(
+        format!(
+            "{}:{}:{}:{}:{}:{}",
+            user_id.0, price_id, credits, success_url, cancel_url, time_window
+        )
+        .as_bytes(),
+    );
     format!("{:x}", hasher.finalize())
 }
 
@@ -2114,21 +2146,14 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 },
             )?;
 
-            let cur_price_j = cur_price_j.ok_or_else(|| {
+            let _cur_price_j = cur_price_j.ok_or_else(|| {
                 SubscriptionError::InternalError("HoS current price not found on-chain".into())
             })?;
-            let new_price_j = new_price_j.ok_or_else(|| {
+            let _new_price_j = new_price_j.ok_or_else(|| {
                 SubscriptionError::InternalError("HoS target price not found on-chain".into())
             })?;
             let chain_sub_j = chain_sub_j.ok_or_else(|| {
                 SubscriptionError::InternalError("HoS subscription not found on-chain".into())
-            })?;
-
-            let cur_amt = price_amount_yocto_json(&cur_price_j).ok_or_else(|| {
-                SubscriptionError::InternalError("HoS price missing amount".into())
-            })?;
-            let new_amt = price_amount_yocto_json(&new_price_j).ok_or_else(|| {
-                SubscriptionError::InternalError("HoS price missing amount".into())
             })?;
 
             let chain_subscription_id = chain_sub_j
@@ -2157,55 +2182,34 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 SubscriptionError::InternalError("HoS lock missing amount_near".into())
             })?;
 
-            let timing = match target_amount.cmp(&current_lock_amount) {
-                std::cmp::Ordering::Greater => {
-                    if !same_price && new_amt <= cur_amt {
-                        return Err(SubscriptionError::InvalidTargetAmount(
-                            "target_amount increase requires a higher target price amount".into(),
-                        ));
-                    }
-                    "immediate"
+            if !same_price {
+                let plans = self.get_subscription_plans().await?;
+                let target_limits = effective_limits(plans.get(&target_plan));
+                let instance_count = self
+                    .agent_repo
+                    .count_user_instances(user_id)
+                    .await
+                    .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
+                    as u64;
+                if instance_count > target_limits.instances_max {
+                    return Err(SubscriptionError::InstanceLimitExceeded {
+                        current: instance_count,
+                        max: target_limits.instances_max,
+                    });
                 }
-                std::cmp::Ordering::Less => {
-                    if !same_price && new_amt >= cur_amt {
-                        return Err(SubscriptionError::InvalidTargetAmount(
-                            "target_amount decrease requires a lower target price amount".into(),
-                        ));
-                    }
-                    let plans = self.get_subscription_plans().await?;
-                    let target_limits = effective_limits(plans.get(&target_plan));
-                    let instance_count = self
-                        .agent_repo
-                        .count_user_instances(user_id)
-                        .await
-                        .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
-                        as u64;
-                    if instance_count > target_limits.instances_max {
-                        return Err(SubscriptionError::InstanceLimitExceeded {
-                            current: instance_count,
-                            max: target_limits.instances_max,
-                        });
-                    }
-                    "period_end"
-                }
-                std::cmp::Ordering::Equal => {
-                    if same_price {
-                        return Ok(ChangePlanOutcome::NoOp);
-                    }
-                    if new_amt != cur_amt {
-                        return Err(SubscriptionError::InvalidTargetAmount(
-                            "unchanged target_amount requires the target price amount to match the current price amount".into(),
-                        ));
-                    }
-                    "immediate"
-                }
-            };
+            } else if target_amount == current_lock_amount {
+                return Ok(ChangePlanOutcome::NoOp);
+            }
+
+            let required_deposit_yocto = target_amount.saturating_sub(current_lock_amount).max(1);
+            let timing = "contract_decides";
 
             return Ok(ChangePlanOutcome::NearStakingChangePlan {
                 contract_id: contract_id.to_string(),
                 subscription_id: chain_subscription_id.to_string(),
                 target_price_id: price_id,
                 target_amount: target_amount.to_string(),
+                required_deposit_yocto: required_deposit_yocto.to_string(),
                 timing: timing.to_string(),
             });
         }
@@ -3505,8 +3509,13 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 }
 
                 let customer_id = self.get_or_create_stripe_customer(user_id, None).await?;
-                let idempotency_key =
-                    generate_credit_checkout_idempotency_key(&user_id, &price_id, credits);
+                let idempotency_key = generate_credit_checkout_idempotency_key(
+                    &user_id,
+                    &price_id,
+                    credits,
+                    &success_url,
+                    &cancel_url,
+                );
                 let session = self
                     .stripe_client
                     .create_credits_checkout_session(StripeCreateCreditsCheckoutParams {
@@ -3604,12 +3613,6 @@ impl SubscriptionService for SubscriptionServiceImpl {
         if quantity != expected_credits {
             return Err(SubscriptionError::InvalidCredits(
                 "House-of-Stake purchase quantity does not match requested credits".to_string(),
-            ));
-        }
-
-        if !Self::price_is_active(&price) || !Self::price_is_one_off(&price) {
-            return Err(SubscriptionError::InvalidCredits(
-                "Configured House-of-Stake credit price must be active and one-off".to_string(),
             ));
         }
 
