@@ -3525,6 +3525,22 @@ fn near_rpc_hos_catalog_respond(
     price_basic: &serde_json::Value,
     price_pro: &serde_json::Value,
 ) -> ResponseTemplate {
+    near_rpc_hos_catalog_respond_with_pending_update(
+        req,
+        active_price_id,
+        price_basic,
+        price_pro,
+        None,
+    )
+}
+
+fn near_rpc_hos_catalog_respond_with_pending_update(
+    req: &wiremock::Request,
+    active_price_id: &str,
+    price_basic: &serde_json::Value,
+    price_pro: &serde_json::Value,
+    pending_update_target_price_id: Option<&str>,
+) -> ResponseTemplate {
     use base64::{engine::general_purpose::STANDARD, Engine};
 
     let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or(json!({}));
@@ -3536,7 +3552,7 @@ fn near_rpc_hos_catalog_respond(
         .unwrap_or("");
     match method_name {
         "get_subscription_for_price" => {
-            let sub = json!({
+            let mut sub = json!({
                 "subscription_id": "sub_chain_hos_change_plan",
                 "price_id": active_price_id,
                 "last_lock_id": "lock_chain_hos_change_plan",
@@ -3544,6 +3560,13 @@ fn near_rpc_hos_catalog_respond(
                 "status": "Active",
                 "cancel_at_period_end": false
             });
+            if let Some(target_price_id) = pending_update_target_price_id {
+                sub["pending_update"] = json!({
+                    "target_price_id": target_price_id,
+                    "target_amount": null,
+                    "apply_ns": "2000000000000000000"
+                });
+            }
             ResponseTemplate::new(200).set_body_json(near_rpc_call_function_body(&sub))
         }
         "get_price" => {
@@ -4811,6 +4834,126 @@ async fn test_change_plan_house_of_stake_downgrade_allows_different_product_ids(
     assert_eq!(
         result.get("timing").and_then(|x| x.as_str()),
         Some("contract_decides")
+    );
+    assert_eq!(
+        result.get("subscription_id").and_then(|x| x.as_str()),
+        Some("sub_chain_hos_change_plan")
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_change_plan_house_of_stake_cancel_pending_downgrade_returns_wallet_intent() {
+    clear_proxy_env_for_local_wiremock();
+    let mock = MockServer::start().await;
+    let price_basic = json!({
+        "product_id": "nearai|prod_basic",
+        "amount": "1000000000000000000000000"
+    });
+    let price_pro = json!({
+        "product_id": "nearai|prod_pro",
+        "amount": "2000000000000000000000000"
+    });
+
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with({
+            let price_basic = price_basic.clone();
+            let price_pro = price_pro.clone();
+            move |req: &wiremock::Request| {
+                near_rpc_hos_catalog_respond_with_pending_update(
+                    req,
+                    "price_hos_pro",
+                    &price_basic,
+                    &price_pro,
+                    Some("price_hos_basic"),
+                )
+            }
+        })
+        .mount(&mock)
+        .await;
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        near_rpc_url: Some(mock.uri().to_string()),
+        near_staking_contract_id: Some("staking.testnet".to_string()),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": { "providers": { "house-of-stake": { "price_id": "price_hos_basic" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } },
+            "pro": { "providers": { "house-of-stake": { "price_id": "price_hos_pro" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } }
+        }),
+    )
+    .await;
+
+    let near_email = "hos_cancel_pending_downgrade.testnet@near";
+    let login = json!({
+        "email": near_email,
+        "name": "HoS Cancel Pending Downgrade",
+        "oauth_provider": "near"
+    });
+    let response = server.post("/v1/auth/mock-login").json(&login).await;
+    let token = response.json::<serde_json::Value>()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    insert_test_subscription_with_provider_and_price(
+        &server,
+        &db,
+        near_email,
+        "house-of-stake",
+        "price_hos_pro",
+        false,
+    )
+    .await;
+
+    let response = server
+        .post("/v1/subscriptions/change")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&json!({
+            "plan": "pro"
+        }))
+        .await;
+
+    assert_eq!(response.status_code(), 200, "{}", response.text());
+    let body: serde_json::Value = response.json();
+    let result = &body["result"];
+    assert_eq!(
+        result.get("kind").and_then(|x| x.as_str()),
+        Some("near_staking_change_plan")
+    );
+    assert_eq!(
+        result.get("contract_id").and_then(|x| x.as_str()),
+        Some("staking.testnet")
+    );
+    assert_eq!(
+        result.get("target_price_id").and_then(|x| x.as_str()),
+        Some("price_hos_pro")
+    );
+    assert_eq!(
+        result.get("target_amount").and_then(|x| x.as_str()),
+        Some("2000000000000000000000000")
+    );
+    assert_eq!(
+        result
+            .get("required_deposit_yocto")
+            .and_then(|x| x.as_str()),
+        Some("1")
+    );
+    assert_eq!(
+        result.get("timing").and_then(|x| x.as_str()),
+        Some("cancel_pending_downgrade")
     );
     assert_eq!(
         result.get("subscription_id").and_then(|x| x.as_str()),
