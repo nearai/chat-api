@@ -948,7 +948,7 @@ pub enum CreateSubscriptionOutcome {
         /// YoctoNEAR to attach to the `lock` call.
         attached_deposit_yocto: String,
         /// NEP-145 storage preflight/top-up intent.
-        storage: NearStakingStorageIntent,
+        storage: Box<NearStakingStorageIntent>,
     },
 }
 
@@ -1046,7 +1046,7 @@ impl<'de> Deserialize<'de> for CreateSubscriptionOutcome {
                     price_id,
                     network_id,
                     attached_deposit_yocto,
-                    storage,
+                    storage: Box::new(storage),
                 });
             }
         }
@@ -1076,7 +1076,7 @@ impl<'de> Deserialize<'de> for CreateSubscriptionOutcome {
                     .unwrap_or("mainnet")
                     .to_string(),
                 attached_deposit_yocto,
-                storage,
+                storage: Box::new(storage),
             });
         }
         Err(D::Error::custom(
@@ -1099,7 +1099,7 @@ pub enum CreateCreditPurchaseOutcome {
         contract_id: String,
         quantity: u64,
         attached_deposit_yocto: String,
-        storage: NearStakingStorageIntent,
+        storage: Box<NearStakingStorageIntent>,
     },
     Stripe {
         checkout_url: String,

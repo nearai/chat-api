@@ -1913,7 +1913,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 price_id,
                 network_id: self.near_network_id.clone(),
                 attached_deposit_yocto: attached_deposit_yocto.to_string(),
-                storage,
+                storage: Box::new(storage),
             });
         }
 
@@ -3592,7 +3592,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     contract_id,
                     quantity: credits,
                     attached_deposit_yocto: attached_deposit_yocto.to_string(),
-                    storage,
+                    storage: Box::new(storage),
                 })
             }
             "stripe" => {
