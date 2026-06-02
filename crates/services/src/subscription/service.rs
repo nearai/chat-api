@@ -726,14 +726,10 @@ impl SubscriptionServiceImpl {
         if subscription.provider != "house-of-stake" {
             return None;
         }
-        if plan_config
+        plan_config
             .stake_based_monthly_credits
             .as_ref()
-            .and_then(|c| c.credits_per_staked_near_nano_usd)
-            .is_none()
-        {
-            return None;
-        }
+            .and_then(|c| c.credits_per_staked_near_nano_usd)?;
 
         let cache_key = (user_id, subscription.subscription_id.clone());
         if let Some(cached) = self
