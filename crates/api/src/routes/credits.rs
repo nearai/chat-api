@@ -141,7 +141,7 @@ pub async fn create_credit_checkout(
     request_body = ConfirmCreditPurchaseRequest,
     responses(
         (status = 200, description = "Credits summary after confirmed purchase", body = CreditsSummary),
-        (status = 400, description = "Invalid purchase"),
+        (status = 400, description = "Invalid or stale purchase"),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Credit purchase requires a linked NEAR wallet"),
         (status = 503, description = "Credits or House-of-Stake billing not configured, or NEAR RPC unavailable")

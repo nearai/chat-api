@@ -207,30 +207,38 @@ impl SubscriptionServiceImpl {
         i64::try_from(v).ok()
     }
 
-    /// HoS one-off purchase confirmations must be tied to a recent wallet payment.
-    /// The contract has durable purchase history, so accepting arbitrary old purchase ids
-    /// would let historical payments be replayed into fresh chat-api credits.
-    const HOS_CREDIT_PURCHASE_CONFIRM_WINDOW_NS: u64 = 15 * 60 * 1_000_000_000;
+    const NANOS_PER_SECOND: u64 = 1_000_000_000;
+    const HOS_CREDIT_PURCHASE_CONFIRM_WINDOW_NS: u64 = 24 * 60 * 60 * Self::NANOS_PER_SECOND;
 
-    fn validate_hos_credit_purchase_freshness(
-        created_ns: Option<u64>,
-    ) -> Result<(), SubscriptionError> {
-        let created_ns = created_ns.ok_or_else(|| {
-            SubscriptionError::InvalidCredits(
-                "House-of-Stake purchase is missing created_ns".to_string(),
-            )
-        })?;
+    fn current_time_ns() -> Result<u64, SubscriptionError> {
         let now_ns = Utc::now().timestamp_nanos_opt().ok_or_else(|| {
             SubscriptionError::InternalError("current time is out of range".to_string())
         })?;
-        let now_ns = u64::try_from(now_ns).map_err(|_| {
+        u64::try_from(now_ns).map_err(|_| {
             SubscriptionError::InternalError("current time is before Unix epoch".to_string())
+        })
+    }
+
+    /// HoS one-off purchase confirmations must be tied to a recent wallet payment.
+    /// The contract has durable purchase history, so accepting arbitrary old purchase ids
+    /// would let historical payments be replayed into fresh chat-api credits. Operators can
+    /// tune the window per HoS credit provider; purchases outside it require support recovery.
+    fn validate_hos_credit_purchase_freshness(
+        created_ns: Option<u64>,
+        now_ns: u64,
+        confirm_window_ns: u64,
+    ) -> Result<(), SubscriptionError> {
+        let created_ns = created_ns.ok_or_else(|| {
+            SubscriptionError::InvalidCredits(
+                "House-of-Stake purchase is missing created_ns; please contact support".to_string(),
+            )
         })?;
         let age_ns = now_ns.saturating_sub(created_ns);
-        if age_ns > Self::HOS_CREDIT_PURCHASE_CONFIRM_WINDOW_NS {
-            return Err(SubscriptionError::InvalidCredits(
-                "House-of-Stake purchase is outside the confirmation window".to_string(),
-            ));
+        if age_ns > confirm_window_ns {
+            let window_seconds = confirm_window_ns / Self::NANOS_PER_SECOND;
+            return Err(SubscriptionError::InvalidCredits(format!(
+                "House-of-Stake purchase is outside the confirmation window of {window_seconds} seconds"
+            )));
         }
         Ok(())
     }
@@ -2263,36 +2271,15 @@ impl SubscriptionService for SubscriptionServiceImpl {
             let near_account = self.get_near_account_id(user_id).await?;
             let same_price = subscription.price_id == price_id;
 
-            let (cur_price_j, new_price_j, chain_sub_j) = tokio::try_join!(
-                async {
-                    view_get_price(&self.near_rpc_url, contract_id, &subscription.price_id)
-                        .await
-                        .map_err(Self::near_rpc_err)
-                },
-                async {
-                    view_get_price(&self.near_rpc_url, contract_id, &price_id)
-                        .await
-                        .map_err(Self::near_rpc_err)
-                },
-                async {
-                    view_get_subscription_for_price(
-                        &self.near_rpc_url,
-                        contract_id,
-                        &near_account,
-                        &subscription.price_id,
-                    )
-                    .await
-                    .map_err(Self::near_rpc_err)
-                },
-            )?;
-
-            let _cur_price_j = cur_price_j.ok_or_else(|| {
-                SubscriptionError::InternalError("HoS current price not found on-chain".into())
-            })?;
-            let _new_price_j = new_price_j.ok_or_else(|| {
-                SubscriptionError::InternalError("HoS target price not found on-chain".into())
-            })?;
-            let chain_sub_j = chain_sub_j.ok_or_else(|| {
+            let chain_sub_j = view_get_subscription_for_price(
+                &self.near_rpc_url,
+                contract_id,
+                &near_account,
+                &subscription.price_id,
+            )
+            .await
+            .map_err(Self::near_rpc_err)?
+            .ok_or_else(|| {
                 SubscriptionError::InternalError("HoS subscription not found on-chain".into())
             })?;
 
@@ -3742,21 +3729,43 @@ impl SubscriptionService for SubscriptionServiceImpl {
         let contract_id = self.hos_contract_id()?;
         let near_account = self.get_near_account_id(user_id).await?;
 
-        let purchase = view_get_purchase(&self.near_rpc_url, &contract_id, &purchase_id)
-            .await
-            .map_err(Self::near_rpc_err)?
-            .ok_or_else(|| {
-                SubscriptionError::InvalidCredits("House-of-Stake purchase not found".to_string())
-            })?;
-        Self::validate_hos_credit_purchase_freshness(purchase.created_ns)?;
-        let price = view_get_price(&self.near_rpc_url, &contract_id, &price_id)
-            .await
-            .map_err(Self::near_rpc_err)?
-            .ok_or_else(|| {
-                SubscriptionError::InvalidCredits(
-                    "House-of-Stake credit price not found".to_string(),
-                )
-            })?;
+        let (purchase, price) = tokio::try_join!(
+            async {
+                view_get_purchase(&self.near_rpc_url, &contract_id, &purchase_id)
+                    .await
+                    .map_err(Self::near_rpc_err)
+            },
+            async {
+                view_get_price(&self.near_rpc_url, &contract_id, &price_id)
+                    .await
+                    .map_err(Self::near_rpc_err)
+            }
+        )?;
+
+        let purchase = purchase.ok_or_else(|| {
+            SubscriptionError::InvalidCredits("House-of-Stake purchase not found".to_string())
+        })?;
+        let now_ns = Self::current_time_ns()?;
+        let age_ns = purchase
+            .created_ns
+            .map(|created_ns| now_ns.saturating_sub(created_ns));
+        if let Err(err) = Self::validate_hos_credit_purchase_freshness(
+            purchase.created_ns,
+            now_ns,
+            Self::HOS_CREDIT_PURCHASE_CONFIRM_WINDOW_NS,
+        ) {
+            tracing::warn!(
+                user_id = %user_id,
+                purchase_id = %purchase_id,
+                age_ns = ?age_ns,
+                confirm_window_ns = Self::HOS_CREDIT_PURCHASE_CONFIRM_WINDOW_NS,
+                "Rejected House-of-Stake credit purchase confirmation outside freshness policy"
+            );
+            return Err(err);
+        }
+        let price = price.ok_or_else(|| {
+            SubscriptionError::InvalidCredits("House-of-Stake credit price not found".to_string())
+        })?;
 
         let purchase_account = purchase.account_id.as_deref().ok_or_else(|| {
             SubscriptionError::InvalidCredits(
@@ -4034,6 +4043,87 @@ mod tests {
             stake_based_monthly_credits: None,
             allowed_models: None,
         }
+    }
+
+    fn invalid_credits_message(err: SubscriptionError) -> String {
+        match err {
+            SubscriptionError::InvalidCredits(message) => message,
+            other => panic!("expected InvalidCredits, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_hos_credit_purchase_freshness_validation_boundaries() {
+        let now_ns = 1_000_000_000_000_000;
+        let window_ns = 15 * 60 * SubscriptionServiceImpl::NANOS_PER_SECOND;
+
+        assert!(
+            SubscriptionServiceImpl::validate_hos_credit_purchase_freshness(
+                Some(now_ns),
+                now_ns,
+                window_ns,
+            )
+            .is_ok()
+        );
+        assert!(
+            SubscriptionServiceImpl::validate_hos_credit_purchase_freshness(
+                Some(now_ns - window_ns + 1),
+                now_ns,
+                window_ns,
+            )
+            .is_ok()
+        );
+        assert!(
+            SubscriptionServiceImpl::validate_hos_credit_purchase_freshness(
+                Some(now_ns - window_ns),
+                now_ns,
+                window_ns,
+            )
+            .is_ok()
+        );
+
+        let err = SubscriptionServiceImpl::validate_hos_credit_purchase_freshness(
+            Some(now_ns - window_ns - 1),
+            now_ns,
+            window_ns,
+        )
+        .unwrap_err();
+        assert!(invalid_credits_message(err).contains("confirmation window"));
+    }
+
+    #[test]
+    fn test_hos_credit_purchase_freshness_validation_missing_created_ns() {
+        let err = SubscriptionServiceImpl::validate_hos_credit_purchase_freshness(
+            None,
+            1_000_000_000_000_000,
+            15 * 60 * SubscriptionServiceImpl::NANOS_PER_SECOND,
+        )
+        .unwrap_err();
+
+        assert!(invalid_credits_message(err).contains("missing created_ns"));
+    }
+
+    #[test]
+    fn test_hos_credit_purchase_freshness_allows_future_timestamps() {
+        let now_ns = 1_000_000_000_000_000;
+        let window_ns = 15 * 60 * SubscriptionServiceImpl::NANOS_PER_SECOND;
+
+        assert!(
+            SubscriptionServiceImpl::validate_hos_credit_purchase_freshness(
+                Some(now_ns + 5 * 60 * SubscriptionServiceImpl::NANOS_PER_SECOND),
+                now_ns,
+                window_ns,
+            )
+            .is_ok()
+        );
+        assert!(
+            SubscriptionServiceImpl::validate_hos_credit_purchase_freshness(
+                Some(u64::MAX),
+                now_ns,
+                window_ns,
+            )
+            .is_ok()
+        );
     }
 
     #[test]
