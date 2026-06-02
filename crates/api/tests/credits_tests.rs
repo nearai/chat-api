@@ -193,6 +193,18 @@ fn near_rpc_hos_credit_purchase_respond(req: &wiremock::Request) -> ResponseTemp
                 "status": "Active"
             })))
         }
+        "storage_balance_bounds" => {
+            ResponseTemplate::new(200).set_body_json(near_rpc_call_function_body(&json!({
+                "min": "1250000000000000000000",
+                "max": "1250000000000000000000"
+            })))
+        }
+        "storage_balance_of" => {
+            ResponseTemplate::new(200).set_body_json(near_rpc_call_function_body(&json!({
+                "total": "0",
+                "available": "0"
+            })))
+        }
         _ => ResponseTemplate::new(500).set_body_json(json!({ "error": "unmocked NEAR RPC" })),
     }
 }
@@ -463,6 +475,20 @@ async fn test_post_credits_checkout_house_of_stake_returns_intent() {
         Some("staking.testnet")
     );
     assert_eq!(body.get("quantity").and_then(|v| v.as_u64()), Some(10));
+    assert_eq!(
+        body.get("attached_deposit_yocto").and_then(|v| v.as_str()),
+        Some("50")
+    );
+    assert_eq!(
+        body.pointer("/storage/method_name")
+            .and_then(|v| v.as_str()),
+        Some("storage_deposit")
+    );
+    assert_eq!(
+        body.pointer("/storage/required_deposit_yocto")
+            .and_then(|v| v.as_str()),
+        Some("1250000000000000000000")
+    );
 }
 
 #[tokio::test]

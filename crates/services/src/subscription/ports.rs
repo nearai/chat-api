@@ -302,6 +302,7 @@ pub enum CancelSubscriptionOutcome {
         contract_id: String,
         product_id: String,
         network_id: String,
+        required_deposit_yocto: String,
     },
 }
 
@@ -314,6 +315,7 @@ pub enum ResumeSubscriptionOutcome {
         contract_id: String,
         product_id: String,
         network_id: String,
+        required_deposit_yocto: String,
     },
 }
 
@@ -912,6 +914,20 @@ pub struct SubscriptionPlan {
     pub allowed_models: Option<Vec<String>>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct NearStakingStorageIntent {
+    pub method_name: String,
+    pub account_id: String,
+    pub required_deposit_yocto: String,
+    pub balance_total_yocto: String,
+    pub balance_available_yocto: String,
+    pub bounds_min_yocto: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bounds_max_yocto: Option<String>,
+    pub args: serde_json::Value,
+}
+
 /// Result of [`SubscriptionService::create_subscription`]: Stripe redirect or HoS catalog `price_id` for a client-side `lock`.
 ///
 /// Serialized JSON:
@@ -929,6 +945,10 @@ pub enum CreateSubscriptionOutcome {
         price_id: String,
         /// NEAR network id (e.g. `mainnet`, `testnet`) from server config; wallets use with RPC URL.
         network_id: String,
+        /// YoctoNEAR to attach to the `lock` call.
+        attached_deposit_yocto: String,
+        /// NEP-145 storage preflight/top-up intent.
+        storage: NearStakingStorageIntent,
     },
 }
 
@@ -948,15 +968,32 @@ impl Serialize for CreateSubscriptionOutcome {
                 contract_id,
                 price_id,
                 network_id,
+                attached_deposit_yocto,
+                storage,
             } => {
-                let mut st = serializer.serialize_struct("NearStakeLock", 4)?;
+                let mut st = serializer.serialize_struct("NearStakeLock", 6)?;
                 st.serialize_field("kind", &"house_of_stake")?;
                 st.serialize_field("contract_id", contract_id)?;
                 st.serialize_field("price_id", price_id)?;
                 st.serialize_field("network_id", network_id)?;
+                st.serialize_field("attached_deposit_yocto", attached_deposit_yocto)?;
+                st.serialize_field("storage", storage)?;
                 st.end()
             }
         }
+    }
+}
+
+fn default_near_staking_storage_intent() -> NearStakingStorageIntent {
+    NearStakingStorageIntent {
+        method_name: "storage_deposit".to_string(),
+        account_id: String::new(),
+        required_deposit_yocto: "0".to_string(),
+        balance_total_yocto: "0".to_string(),
+        balance_available_yocto: "0".to_string(),
+        bounds_min_yocto: "0".to_string(),
+        bounds_max_yocto: None,
+        args: serde_json::json!({}),
     }
 }
 
@@ -992,14 +1029,40 @@ impl<'de> Deserialize<'de> for CreateSubscriptionOutcome {
                     .and_then(|x| x.as_str())
                     .unwrap_or_default()
                     .to_string();
+                let attached_deposit_yocto = obj
+                    .get("attached_deposit_yocto")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("0")
+                    .to_string();
+                let storage = obj
+                    .get("storage")
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(D::Error::custom)?
+                    .unwrap_or_else(default_near_staking_storage_intent);
                 return Ok(CreateSubscriptionOutcome::NearStakeLock {
                     contract_id,
                     price_id,
                     network_id,
+                    attached_deposit_yocto,
+                    storage,
                 });
             }
         }
         if let Some(pid) = obj.get("price_id").and_then(|x| x.as_str()) {
+            let attached_deposit_yocto = obj
+                .get("attached_deposit_yocto")
+                .and_then(|x| x.as_str())
+                .unwrap_or("0")
+                .to_string();
+            let storage = obj
+                .get("storage")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(D::Error::custom)?
+                .unwrap_or_else(default_near_staking_storage_intent);
             return Ok(CreateSubscriptionOutcome::NearStakeLock {
                 contract_id: obj
                     .get("contract_id")
@@ -1012,6 +1075,8 @@ impl<'de> Deserialize<'de> for CreateSubscriptionOutcome {
                     .and_then(|x| x.as_str())
                     .unwrap_or("mainnet")
                     .to_string(),
+                attached_deposit_yocto,
+                storage,
             });
         }
         Err(D::Error::custom(
@@ -1033,6 +1098,8 @@ pub enum CreateCreditPurchaseOutcome {
         network_id: String,
         contract_id: String,
         quantity: u64,
+        attached_deposit_yocto: String,
+        storage: NearStakingStorageIntent,
     },
     Stripe {
         checkout_url: String,

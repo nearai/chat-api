@@ -64,6 +64,14 @@ where
     })
 }
 
+fn deserialize_required_yocto_near<'de, D>(deserializer: D) -> Result<YoctoNear, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = IntegerStringOrNumber::deserialize(deserializer)?;
+    parse_u128_value::<D>(value).map(YoctoNear)
+}
+
 fn deserialize_optional_yocto_near<'de, D>(deserializer: D) -> Result<Option<YoctoNear>, D::Error>
 where
     D: Deserializer<'de>,
@@ -95,6 +103,11 @@ struct GetLockArgs<'a> {
     lock_id: &'a str,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct StorageBalanceOfArgs<'a> {
+    account_id: &'a str,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct NearStakingSubscription {
     pub subscription_id: String,
@@ -117,6 +130,26 @@ pub struct NearStakingSubscription {
 pub struct NearStakingPendingUpdate {
     #[serde(default)]
     pub target_price_id: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_yocto_near")]
+    pub target_amount: Option<YoctoNear>,
+    #[serde(default, deserialize_with = "deserialize_optional_u64")]
+    pub apply_ns: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct NearStakingStorageBalance {
+    #[serde(deserialize_with = "deserialize_required_yocto_near")]
+    pub total: YoctoNear,
+    #[serde(deserialize_with = "deserialize_required_yocto_near")]
+    pub available: YoctoNear,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct NearStakingStorageBalanceBounds {
+    #[serde(deserialize_with = "deserialize_required_yocto_near")]
+    pub min: YoctoNear,
+    #[serde(default, deserialize_with = "deserialize_optional_yocto_near")]
+    pub max: Option<YoctoNear>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -241,6 +274,35 @@ pub async fn view_get_purchase(
     .await
 }
 
+/// Fetch NEP-145 `storage_balance_of(account_id)` for wallet preflight.
+pub async fn view_storage_balance_of(
+    rpc_url: &str,
+    contract_id: &str,
+    account_id: &str,
+) -> Result<Option<NearStakingStorageBalance>, String> {
+    view_call(
+        rpc_url,
+        contract_id,
+        "storage_balance_of",
+        StorageBalanceOfArgs { account_id },
+    )
+    .await
+}
+
+/// Fetch NEP-145 `storage_balance_bounds()` for wallet preflight.
+pub async fn view_storage_balance_bounds(
+    rpc_url: &str,
+    contract_id: &str,
+) -> Result<Option<NearStakingStorageBalanceBounds>, String> {
+    view_call(
+        rpc_url,
+        contract_id,
+        "storage_balance_bounds",
+        serde_json::json!({}),
+    )
+    .await
+}
+
 /// Fetch `get_lock(lock_id)` for current HoS subscription stake amount comparisons.
 pub async fn view_get_lock(
     rpc_url: &str,
@@ -285,12 +347,30 @@ pub fn subscription_row_from_chain(
     }
 
     let pending_down = pending_downgrade_price_id(chain);
+    let has_stake_only_pending_update = chain
+        .pending_update
+        .as_ref()
+        .and_then(|pending| pending.target_amount)
+        .is_some();
+    let pending_apply_at = chain
+        .pending_update
+        .as_ref()
+        .and_then(|pending| pending.apply_ns)
+        .map(ts_ns_to_datetime)
+        .transpose()?;
 
     let (pd_target, pd_from, pd_end, pd_status) = if let Some(ref tgt) = pending_down {
         (
             Some(tgt.clone()),
             Some(price_id.clone()),
-            Some(current_period_end),
+            Some(pending_apply_at.unwrap_or(current_period_end)),
+            Some(DowngradeIntentStatus::Pending),
+        )
+    } else if has_stake_only_pending_update {
+        (
+            None,
+            Some(price_id.clone()),
+            Some(pending_apply_at.unwrap_or(current_period_end)),
             Some(DowngradeIntentStatus::Pending),
         )
     } else {
@@ -462,6 +542,43 @@ mod tests {
         );
         assert!(row.pending_downgrade_expected_period_end.is_some());
         assert!(row.pending_downgrade_updated_at.is_some());
+    }
+
+    #[test]
+    fn subscription_row_reads_pending_update_stake_only_apply_ns() {
+        let future_end_ns = (Utc::now() + chrono::Duration::hours(2))
+            .timestamp_nanos_opt()
+            .expect("timestamp nanos");
+        let chain = chain_subscription(json!({
+            "subscription_id": "sub_hos_pending_stake_only",
+            "price_id": "price_hos_pro",
+            "end_ns": (future_end_ns + 1_000_000_000).to_string(),
+            "status": "Active",
+            "pending_update": {
+                "target_price_id": null,
+                "target_amount": "1000000000000000000000000",
+                "apply_ns": future_end_ns.to_string()
+            }
+        }));
+        let row = subscription_row_from_chain(UserId(Uuid::new_v4()), "alice.testnet", &chain)
+            .expect("parse chain subscription");
+
+        assert_eq!(row.pending_downgrade_target_price_id, None);
+        assert_eq!(
+            row.pending_downgrade_from_price_id.as_deref(),
+            Some("price_hos_pro")
+        );
+        assert_eq!(
+            row.pending_downgrade_status,
+            Some(DowngradeIntentStatus::Pending)
+        );
+        assert_eq!(
+            row.pending_downgrade_expected_period_end,
+            Some(
+                ts_ns_to_datetime(u64::try_from(future_end_ns).expect("positive apply_ns"))
+                    .expect("apply_ns datetime")
+            )
+        );
     }
 
     #[test]

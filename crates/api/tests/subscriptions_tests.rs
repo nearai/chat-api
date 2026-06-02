@@ -3615,7 +3615,20 @@ fn near_rpc_wiremock_hos_subscription_probe_only(
                 ResponseTemplate::new(200).set_body_json(near_rpc_call_function_body(&json!({
                     "price_id": pid,
                     "product_id": "nearai|prod_cat",
-                    "amount": "1000000000000000000000000"
+                    "amount": "1000000000000000000000000",
+                    "status": "Active"
+                })))
+            }
+            Some("storage_balance_bounds") => {
+                ResponseTemplate::new(200).set_body_json(near_rpc_call_function_body(&json!({
+                    "min": "1250000000000000000000",
+                    "max": "1250000000000000000000"
+                })))
+            }
+            Some("storage_balance_of") => {
+                ResponseTemplate::new(200).set_body_json(near_rpc_call_function_body(&json!({
+                    "total": "0",
+                    "available": "0"
                 })))
             }
             _ => ResponseTemplate::new(500).set_body_json(json!({ "error": "unmocked NEAR RPC" })),
@@ -3778,6 +3791,20 @@ async fn test_create_subscription_house_of_stake_returns_flat_json() {
         body.get("network_id").and_then(|x| x.as_str()),
         Some("testnet")
     );
+    assert_eq!(
+        body.get("attached_deposit_yocto").and_then(|x| x.as_str()),
+        Some("1000000000000000000000000")
+    );
+    assert_eq!(
+        body.pointer("/storage/method_name")
+            .and_then(|x| x.as_str()),
+        Some("storage_deposit")
+    );
+    assert_eq!(
+        body.pointer("/storage/required_deposit_yocto")
+            .and_then(|x| x.as_str()),
+        Some("1250000000000000000000")
+    );
 
     let parsed: CreateSubscriptionOutcome = serde_json::from_value(body).expect("parse outcome");
     assert!(matches!(
@@ -3913,6 +3940,10 @@ async fn test_cancel_subscription_house_of_stake_returns_wallet_intent_message()
         body.get("network_id").and_then(|x| x.as_str()),
         Some("mainnet")
     );
+    assert_eq!(
+        body.get("required_deposit_yocto").and_then(|x| x.as_str()),
+        Some("1")
+    );
 }
 
 #[tokio::test]
@@ -4000,6 +4031,10 @@ async fn test_resume_subscription_house_of_stake_returns_wallet_intent_message()
     assert_eq!(
         body.get("network_id").and_then(|x| x.as_str()),
         Some("mainnet")
+    );
+    assert_eq!(
+        body.get("required_deposit_yocto").and_then(|x| x.as_str()),
+        Some("1")
     );
 }
 

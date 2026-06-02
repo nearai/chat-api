@@ -51,6 +51,8 @@ pub struct CancelSubscriptionResponse {
     pub product_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub network_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required_deposit_yocto: Option<String>,
 }
 
 /// Response for subscription resume
@@ -65,6 +67,8 @@ pub struct ResumeSubscriptionResponse {
     pub product_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub network_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required_deposit_yocto: Option<String>,
 }
 
 /// Request to change subscription plan
@@ -312,17 +316,20 @@ pub async fn cancel_subscription(
             contract_id: None,
             product_id: None,
             network_id: None,
+            required_deposit_yocto: None,
         },
         CancelSubscriptionOutcome::NearStakingCancel {
             contract_id,
             product_id,
             network_id,
+            required_deposit_yocto,
         } => CancelSubscriptionResponse {
             message: "Complete cancellation in your NEAR wallet".to_string(),
             kind: Some("near_staking_cancel".to_string()),
             contract_id: Some(contract_id),
             product_id: Some(product_id),
             network_id: Some(network_id),
+            required_deposit_yocto: Some(required_deposit_yocto),
         },
     };
 
@@ -391,17 +398,20 @@ pub async fn resume_subscription(
             contract_id: None,
             product_id: None,
             network_id: None,
+            required_deposit_yocto: None,
         },
         ResumeSubscriptionOutcome::NearStakingResume {
             contract_id,
             product_id,
             network_id,
+            required_deposit_yocto,
         } => ResumeSubscriptionResponse {
             message: "Complete resume in your NEAR wallet".to_string(),
             kind: Some("near_staking_resume".to_string()),
             contract_id: Some(contract_id),
             product_id: Some(product_id),
             network_id: Some(network_id),
+            required_deposit_yocto: Some(required_deposit_yocto),
         },
     };
 
