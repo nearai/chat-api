@@ -2971,6 +2971,10 @@ impl SubscriptionService for SubscriptionServiceImpl {
             return Err(SubscriptionError::NoActiveSubscription);
         }
 
+        let active_subscription = self
+            .get_active_subscription_for_entitlement(user_id)
+            .await?;
+
         // 1. Get plan credits (monthly_credits) from the config. Cache 10 mins.
         let cached_limit = {
             let cache_guard = self.credit_limit_cache.read().await;
@@ -3004,11 +3008,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     .unwrap_or_default();
 
                 // Use monthly_credits when set (nano USD); else monthly_tokens → nano USD at 1.5 USD per M tokens. Never fail for missing config.
-                let (plan_credits, period_start, period_end) = match self
-                    .get_active_subscription_for_entitlement(user_id)
-                    .await?
-                {
-                    Some(ref sub) => {
+                let (plan_credits, period_start, period_end) = match active_subscription.as_ref() {
+                    Some(sub) => {
                         let effective_sub = if sub.provider == "stripe"
                             && Self::should_check_pending_downgrade(sub)
                         {
