@@ -207,6 +207,34 @@ impl SubscriptionServiceImpl {
         i64::try_from(v).ok()
     }
 
+    /// HoS one-off purchase confirmations must be tied to a recent wallet payment.
+    /// The contract has durable purchase history, so accepting arbitrary old purchase ids
+    /// would let historical payments be replayed into fresh chat-api credits.
+    const HOS_CREDIT_PURCHASE_CONFIRM_WINDOW_NS: u64 = 15 * 60 * 1_000_000_000;
+
+    fn validate_hos_credit_purchase_freshness(
+        created_ns: Option<u64>,
+    ) -> Result<(), SubscriptionError> {
+        let created_ns = created_ns.ok_or_else(|| {
+            SubscriptionError::InvalidCredits(
+                "House-of-Stake purchase is missing created_ns".to_string(),
+            )
+        })?;
+        let now_ns = Utc::now().timestamp_nanos_opt().ok_or_else(|| {
+            SubscriptionError::InternalError("current time is out of range".to_string())
+        })?;
+        let now_ns = u64::try_from(now_ns).map_err(|_| {
+            SubscriptionError::InternalError("current time is before Unix epoch".to_string())
+        })?;
+        let age_ns = now_ns.saturating_sub(created_ns);
+        if age_ns > Self::HOS_CREDIT_PURCHASE_CONFIRM_WINDOW_NS {
+            return Err(SubscriptionError::InvalidCredits(
+                "House-of-Stake purchase is outside the confirmation window".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Maximum number of retries when stopping instances after subscription cancel.
     const STOP_INSTANCE_MAX_RETRIES: u32 = 1;
 
@@ -3720,6 +3748,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .ok_or_else(|| {
                 SubscriptionError::InvalidCredits("House-of-Stake purchase not found".to_string())
             })?;
+        Self::validate_hos_credit_purchase_freshness(purchase.created_ns)?;
         let price = view_get_price(&self.near_rpc_url, &contract_id, &price_id)
             .await
             .map_err(Self::near_rpc_err)?

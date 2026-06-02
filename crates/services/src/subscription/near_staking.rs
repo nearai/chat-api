@@ -191,6 +191,8 @@ pub struct NearStakingPurchase {
     pub quantity: Option<u64>,
     #[serde(default, deserialize_with = "deserialize_optional_yocto_near")]
     pub amount_paid: Option<YoctoNear>,
+    #[serde(default, deserialize_with = "deserialize_optional_u64")]
+    pub created_ns: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

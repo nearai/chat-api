@@ -1,6 +1,7 @@
 mod common;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use common::{
     clear_credits_config, create_test_server, create_test_server_and_db, mock_login,
     set_credits_config, set_hos_credits_config, set_multi_provider_credits_config,
@@ -167,6 +168,21 @@ fn near_rpc_call_function_body(result_json: &serde_json::Value) -> serde_json::V
 }
 
 fn near_rpc_hos_credit_purchase_respond(req: &wiremock::Request) -> ResponseTemplate {
+    let created_ns = Utc::now()
+        .timestamp_nanos_opt()
+        .expect("current timestamp should fit nanoseconds")
+        .to_string();
+    near_rpc_hos_credit_purchase_respond_with_created_ns(req, &created_ns)
+}
+
+fn near_rpc_hos_stale_credit_purchase_respond(req: &wiremock::Request) -> ResponseTemplate {
+    near_rpc_hos_credit_purchase_respond_with_created_ns(req, "1")
+}
+
+fn near_rpc_hos_credit_purchase_respond_with_created_ns(
+    req: &wiremock::Request,
+    created_ns: &str,
+) -> ResponseTemplate {
     let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or(json!({}));
     match body
         .pointer("/params/method_name")
@@ -181,7 +197,7 @@ fn near_rpc_hos_credit_purchase_respond(req: &wiremock::Request) -> ResponseTemp
                 "price_id": "price_hos_credits",
                 "quantity": "10",
                 "amount_paid": "50",
-                "created_ns": "1"
+                "created_ns": created_ns
             })))
         }
         "get_price" => {
@@ -704,4 +720,45 @@ async fn test_confirm_house_of_stake_credit_purchase_is_idempotent() {
             Some(10_000_000_000)
         );
     }
+}
+
+#[tokio::test]
+#[serial(credits_tests)]
+async fn test_confirm_house_of_stake_credit_purchase_rejects_stale_purchase() {
+    clear_proxy_env_for_local_wiremock();
+    let near_mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(near_rpc_hos_stale_credit_purchase_respond)
+        .mount(&near_mock)
+        .await;
+
+    let (server, _) = create_test_server_and_db(TestServerConfig {
+        near_rpc_url: Some(near_mock.uri().to_string()),
+        near_staking_contract_id: Some("staking.testnet".to_string()),
+        near_network_id: Some("testnet".to_string()),
+        ..Default::default()
+    })
+    .await;
+    set_hos_credits_config(&server, "price_hos_credits").await;
+
+    let token = near_login_token(&server, "hos-credits.testnet").await;
+    let response = server
+        .post("/v1/credits/confirm")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&json!({
+            "purchase_id": "pay_test",
+            "expected_credits": 10
+        }))
+        .await;
+
+    assert_eq!(response.status_code(), 400, "{}", response.text());
+    assert!(response.text().contains("outside the confirmation window"));
 }
