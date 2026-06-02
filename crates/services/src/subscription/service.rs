@@ -2321,6 +2321,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
 
             return Ok(ChangePlanOutcome::NearStakingChangePlan {
                 contract_id: contract_id.to_string(),
+                network_id: self.near_network_id.clone(),
                 subscription_id: chain_subscription_id.to_string(),
                 target_price_id: price_id,
                 target_amount: target_amount.to_string(),

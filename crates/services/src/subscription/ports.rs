@@ -138,6 +138,7 @@ pub enum ChangePlanOutcome {
     /// HoS: call `update_subscription` in the wallet with this subscription id, price id, and stake amount.
     NearStakingChangePlan {
         contract_id: String,
+        network_id: String,
         subscription_id: String,
         target_price_id: String,
         target_amount: String,
@@ -171,15 +172,17 @@ impl Serialize for ChangePlanOutcome {
             | Self::DowngradeCancelled => serializer.serialize_str(self.kind()),
             Self::NearStakingChangePlan {
                 contract_id,
+                network_id,
                 subscription_id,
                 target_price_id,
                 target_amount,
                 required_deposit_yocto,
                 timing,
             } => {
-                let mut st = serializer.serialize_struct("NearStakingChangePlan", 7)?;
+                let mut st = serializer.serialize_struct("NearStakingChangePlan", 8)?;
                 st.serialize_field("kind", self.kind())?;
                 st.serialize_field("contract_id", contract_id)?;
+                st.serialize_field("network_id", network_id)?;
                 st.serialize_field("subscription_id", subscription_id)?;
                 st.serialize_field("target_price_id", target_price_id)?;
                 st.serialize_field("target_amount", target_amount)?;
@@ -227,6 +230,11 @@ impl<'de> Deserialize<'de> for ChangePlanOutcome {
                     .get("contract_id")
                     .and_then(|x| x.as_str())
                     .unwrap_or_default()
+                    .to_string(),
+                network_id: obj
+                    .get("network_id")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("mainnet")
                     .to_string(),
                 subscription_id: obj
                     .get("subscription_id")

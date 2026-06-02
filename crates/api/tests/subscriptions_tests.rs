@@ -3700,6 +3700,7 @@ fn near_rpc_wiremock_hos_subscription_by_price(
 fn test_change_plan_outcome_serde_uses_kind_discriminant() {
     let o = ChangePlanOutcome::NearStakingChangePlan {
         contract_id: "staking.testnet".to_string(),
+        network_id: "testnet".to_string(),
         subscription_id: "sub_hos_current".to_string(),
         target_price_id: "price_hos_pro".to_string(),
         target_amount: "2000000000000000000000000".to_string(),
@@ -3718,6 +3719,10 @@ fn test_change_plan_outcome_serde_uses_kind_discriminant() {
     assert_eq!(
         v.get("contract_id").and_then(|x| x.as_str()),
         Some("staking.testnet")
+    );
+    assert_eq!(
+        v.get("network_id").and_then(|x| x.as_str()),
+        Some("testnet")
     );
     assert_eq!(
         v.get("subscription_id").and_then(|x| x.as_str()),
@@ -3899,6 +3904,7 @@ async fn test_cancel_subscription_house_of_stake_returns_wallet_intent_message()
     let (server, db) = create_test_server_and_db(TestServerConfig {
         near_rpc_url: Some(mock.uri().to_string()),
         near_staking_contract_id: Some("staking.testnet".to_string()),
+        near_network_id: Some("testnet".to_string()),
         ..Default::default()
     })
     .await;
@@ -3961,7 +3967,7 @@ async fn test_cancel_subscription_house_of_stake_returns_wallet_intent_message()
     );
     assert_eq!(
         body.get("network_id").and_then(|x| x.as_str()),
-        Some("mainnet")
+        Some("testnet")
     );
     assert_eq!(
         body.get("required_deposit_yocto").and_then(|x| x.as_str()),
@@ -3991,6 +3997,7 @@ async fn test_resume_subscription_house_of_stake_returns_wallet_intent_message()
     let (server, db) = create_test_server_and_db(TestServerConfig {
         near_rpc_url: Some(mock.uri().to_string()),
         near_staking_contract_id: Some("staking.testnet".to_string()),
+        near_network_id: Some("testnet".to_string()),
         ..Default::default()
     })
     .await;
@@ -4053,7 +4060,7 @@ async fn test_resume_subscription_house_of_stake_returns_wallet_intent_message()
     );
     assert_eq!(
         body.get("network_id").and_then(|x| x.as_str()),
-        Some("mainnet")
+        Some("testnet")
     );
     assert_eq!(
         body.get("required_deposit_yocto").and_then(|x| x.as_str()),
@@ -4703,6 +4710,10 @@ async fn test_change_plan_house_of_stake_upgrade_allows_different_product_ids() 
         Some("staking.testnet")
     );
     assert_eq!(
+        result.get("network_id").and_then(|x| x.as_str()),
+        Some("testnet")
+    );
+    assert_eq!(
         result.get("target_price_id").and_then(|x| x.as_str()),
         Some("price_hos_pro")
     );
@@ -4755,6 +4766,7 @@ async fn test_change_plan_house_of_stake_downgrade_allows_different_product_ids(
     let (server, db) = create_test_server_and_db(TestServerConfig {
         near_rpc_url: Some(mock.uri().to_string()),
         near_staking_contract_id: Some("staking.testnet".to_string()),
+        near_network_id: Some("testnet".to_string()),
         ..Default::default()
     })
     .await;
@@ -4816,6 +4828,10 @@ async fn test_change_plan_house_of_stake_downgrade_allows_different_product_ids(
     assert_eq!(
         result.get("contract_id").and_then(|x| x.as_str()),
         Some("staking.testnet")
+    );
+    assert_eq!(
+        result.get("network_id").and_then(|x| x.as_str()),
+        Some("testnet")
     );
     assert_eq!(
         result.get("target_price_id").and_then(|x| x.as_str()),
