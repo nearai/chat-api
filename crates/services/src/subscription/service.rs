@@ -2189,19 +2189,22 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 return Err(SubscriptionError::HouseOfStakeNotConfigured);
             }
 
+            let requested_target_amount =
+                target_amount.as_deref().filter(|amount| !amount.is_empty());
+            let cancel_pending_downgrade = subscription.price_id == price_id
+                && requested_target_amount.is_none()
+                && subscription.pending_downgrade_status == Some(DowngradeIntentStatus::Pending);
+
             if subscription.price_id == price_id
-                && target_amount.as_deref().is_none_or(str::is_empty)
+                && requested_target_amount.is_none()
+                && !cancel_pending_downgrade
             {
-                if subscription.pending_downgrade_status == Some(DowngradeIntentStatus::Pending) {
-                    return Ok(ChangePlanOutcome::NearStakingCancelPendingDowngrade {
-                        contract_id: contract_id.to_string(),
-                        subscription_id: subscription.subscription_id,
-                    });
-                }
                 return Ok(ChangePlanOutcome::NoOp);
             }
 
-            let target_amount = parse_required_hos_target_amount_yocto(target_amount.as_deref())?;
+            let requested_target_amount = requested_target_amount
+                .map(|amount| parse_required_hos_target_amount_yocto(Some(amount)))
+                .transpose()?;
             let near_account = self.get_near_account_id(user_id).await?;
             let same_price = subscription.price_id == price_id;
 
@@ -2261,6 +2264,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 SubscriptionError::InternalError("HoS lock missing amount_near".into())
             })?;
 
+            let target_amount = requested_target_amount.unwrap_or(current_lock_amount);
+
             if !same_price {
                 let plans = self.get_subscription_plans().await?;
                 let target_limits = effective_limits(plans.get(&target_plan));
@@ -2276,12 +2281,16 @@ impl SubscriptionService for SubscriptionServiceImpl {
                         max: target_limits.instances_max,
                     });
                 }
-            } else if target_amount == current_lock_amount {
+            } else if target_amount == current_lock_amount && !cancel_pending_downgrade {
                 return Ok(ChangePlanOutcome::NoOp);
             }
 
             let required_deposit_yocto = target_amount.saturating_sub(current_lock_amount).max(1);
-            let timing = "contract_decides";
+            let timing = if cancel_pending_downgrade {
+                "cancel_pending_downgrade"
+            } else {
+                "contract_decides"
+            };
 
             return Ok(ChangePlanOutcome::NearStakingChangePlan {
                 contract_id: contract_id.to_string(),
