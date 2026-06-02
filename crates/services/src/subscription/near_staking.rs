@@ -172,13 +172,7 @@ pub fn subscription_row_from_chain_json(
         status = "canceled".to_string();
     }
 
-    let pending_down = v.get("pending_downgrade_price_id").and_then(|x| {
-        if x.is_null() {
-            None
-        } else {
-            x.as_str().map(|s| s.to_string())
-        }
-    });
+    let pending_down = pending_downgrade_price_id(v);
 
     let (pd_target, pd_from, pd_end, pd_status) = if let Some(ref tgt) = pending_down {
         (
@@ -208,6 +202,55 @@ pub fn subscription_row_from_chain_json(
         pending_downgrade_status: pd_status,
         pending_downgrade_updated_at: pd_status.map(|_| Utc::now()),
     })
+}
+
+fn pending_downgrade_price_id(v: &Value) -> Option<String> {
+    v.get("pending_update")
+        .and_then(pending_update_downgrade_price_id)
+        .or_else(|| v.get("pending_downgrade_price_id").and_then(json_string))
+}
+
+fn pending_update_downgrade_price_id(v: &Value) -> Option<String> {
+    match v {
+        Value::Null => None,
+        Value::String(s) => Some(s.clone()),
+        Value::Object(map) => {
+            for variant in [
+                "downgrade",
+                "Downgrade",
+                "pending_downgrade",
+                "PendingDowngrade",
+            ] {
+                if let Some(inner) = map.get(variant) {
+                    return json_string(inner).or_else(|| pending_update_downgrade_price_id(inner));
+                }
+            }
+
+            let kind = ["kind", "type", "update_type", "change"]
+                .iter()
+                .filter_map(|key| map.get(*key).and_then(|x| x.as_str()))
+                .next();
+            let is_downgrade = kind
+                .map(|s| s.to_ascii_lowercase().contains("downgrade"))
+                .unwrap_or(true);
+            if !is_downgrade {
+                return None;
+            }
+
+            ["price_id", "target_price_id", "new_price_id"]
+                .iter()
+                .find_map(|key| json_string(map.get(*key)?))
+        }
+        _ => None,
+    }
+}
+
+fn json_string(v: &Value) -> Option<String> {
+    if v.is_null() {
+        None
+    } else {
+        v.as_str().map(|s| s.to_string())
+    }
 }
 
 fn json_u64(v: &Value) -> Result<u64, String> {
@@ -324,5 +367,72 @@ mod tests {
 
         assert_eq!(row.status, "canceled");
         assert!(!row.cancel_at_period_end);
+    }
+
+    #[test]
+    fn subscription_row_reads_pending_update_downgrade_price_id() {
+        let future_end_ns = (Utc::now() + chrono::Duration::hours(1))
+            .timestamp_nanos_opt()
+            .expect("timestamp nanos")
+            .to_string();
+        let row = subscription_row_from_chain_json(
+            UserId(Uuid::new_v4()),
+            "alice.testnet",
+            &json!({
+                "subscription_id": "sub_hos_pending",
+                "price_id": "price_hos_pro",
+                "end_ns": future_end_ns,
+                "status": "Active",
+                "pending_update": {
+                    "kind": "downgrade",
+                    "price_id": "price_hos_basic"
+                }
+            }),
+        )
+        .expect("parse chain subscription");
+
+        assert_eq!(
+            row.pending_downgrade_target_price_id.as_deref(),
+            Some("price_hos_basic")
+        );
+        assert_eq!(
+            row.pending_downgrade_from_price_id.as_deref(),
+            Some("price_hos_pro")
+        );
+        assert_eq!(
+            row.pending_downgrade_status,
+            Some(DowngradeIntentStatus::Pending)
+        );
+        assert!(row.pending_downgrade_expected_period_end.is_some());
+        assert!(row.pending_downgrade_updated_at.is_some());
+    }
+
+    #[test]
+    fn subscription_row_reads_legacy_pending_downgrade_price_id() {
+        let future_end_ns = (Utc::now() + chrono::Duration::hours(1))
+            .timestamp_nanos_opt()
+            .expect("timestamp nanos")
+            .to_string();
+        let row = subscription_row_from_chain_json(
+            UserId(Uuid::new_v4()),
+            "alice.testnet",
+            &json!({
+                "subscription_id": "sub_hos_pending_legacy",
+                "price_id": "price_hos_pro",
+                "end_ns": future_end_ns,
+                "status": "Active",
+                "pending_downgrade_price_id": "price_hos_basic"
+            }),
+        )
+        .expect("parse chain subscription");
+
+        assert_eq!(
+            row.pending_downgrade_target_price_id.as_deref(),
+            Some("price_hos_basic")
+        );
+        assert_eq!(
+            row.pending_downgrade_status,
+            Some(DowngradeIntentStatus::Pending)
+        );
     }
 }
