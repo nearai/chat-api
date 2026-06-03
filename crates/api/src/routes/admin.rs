@@ -3371,9 +3371,7 @@ pub async fn admin_migrate_instance(
     let is_crabshack = app_state
         .agent_service
         .find_crabshack_manager()
-        .is_some_and(|m| {
-            agent_api_base_url.trim_end_matches('/') == m.url.trim_end_matches('/')
-        });
+        .is_some_and(|m| agent_api_base_url.trim_end_matches('/') == m.url.trim_end_matches('/'));
     if is_crabshack {
         return Ok(Json(MigrateInstanceResponse {
             status: "skipped".to_string(),
