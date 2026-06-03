@@ -621,7 +621,9 @@ pub trait AgentService: Send + Sync {
     /// Returns the manager config (URL + token) if found.
     fn find_manager_for_url(&self, agent_api_base_url: &str) -> Option<config::AgentManager>;
 
-    /// Find a CrabShack (non-legacy) manager suitable for import.
-    /// Returns the first manager whose URL does NOT match the legacy compose-api pattern.
+    /// Find a CrabShack manager by URL containing "crabshack".
     fn find_crabshack_manager(&self) -> Option<config::AgentManager>;
+
+    /// All configured manager URLs.
+    fn manager_urls(&self) -> Vec<String>;
 }

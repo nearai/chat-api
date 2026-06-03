@@ -3980,6 +3980,10 @@ impl AgentService for AgentServiceImpl {
             .find(|m| m.url.contains("crabshack"))
             .cloned()
     }
+
+    fn manager_urls(&self) -> Vec<String> {
+        self.managers.iter().map(|m| m.url.clone()).collect()
+    }
 }
 
 /// Response structure from crabshack /images endpoint

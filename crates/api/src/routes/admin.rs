@@ -3237,6 +3237,9 @@ pub async fn admin_patch_instance(
 
     // Encrypt instance_token if provided
     let encrypted_token = match request.instance_token {
+        Some(ref token) if token.is_empty() => {
+            return Err(ApiError::bad_request("instance_token must not be empty"));
+        }
         Some(ref token) => {
             let encrypted = database::encryption::encrypt(token).map_err(|e| {
                 tracing::error!("Failed to encrypt instance token: error={}", e);
@@ -3294,8 +3297,21 @@ pub async fn admin_migration_status(
 ) -> Result<Json<MigrationStatusResponse>, ApiError> {
     tracing::info!("Admin: Getting migration status");
 
-    let legacy_patterns = vec!["%claws%".to_string(), "%sare.dev%".to_string()];
-    let crabshack_pattern = "%agents.near.ai%".to_string();
+    // Derive patterns from configured managers — no hardcoded URL strings.
+    let crabshack_url = app_state
+        .agent_service
+        .find_crabshack_manager()
+        .map(|m| m.url);
+    let all_urls = app_state.agent_service.manager_urls();
+    let legacy_patterns: Vec<String> = all_urls
+        .iter()
+        .filter(|u| Some(u.as_str()) != crabshack_url.as_deref())
+        .map(|u| format!("%{}%", u.trim_end_matches('/')))
+        .collect();
+    let crabshack_pattern = crabshack_url
+        .as_deref()
+        .map(|u| format!("%{}%", u.trim_end_matches('/')))
+        .unwrap_or_default();
 
     let (total, migrated, pending, no_url, unknown) = app_state
         .agent_repository
@@ -3352,11 +3368,17 @@ pub async fn admin_migrate_instance(
         ApiError::bad_request("Instance has no agent_api_base_url, cannot determine if legacy")
     })?;
 
-    if !agent_api_base_url.contains("claws") && !agent_api_base_url.contains("sare.dev") {
+    let is_crabshack = app_state
+        .agent_service
+        .find_crabshack_manager()
+        .is_some_and(|m| {
+            agent_api_base_url.trim_end_matches('/') == m.url.trim_end_matches('/')
+        });
+    if is_crabshack {
         return Ok(Json(MigrateInstanceResponse {
             status: "skipped".to_string(),
             instance_name,
-            message: "Instance is not on a legacy compose-api".to_string(),
+            message: "Instance is already on CrabShack".to_string(),
         }));
     }
 
