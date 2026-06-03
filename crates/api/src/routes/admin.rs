@@ -3,7 +3,7 @@ use crate::{
     consts::LIST_USERS_LIMIT_MAX, error::ApiError, middleware::AuthenticatedUser, models::*,
     state::AppState,
 };
-use axum::routing::post;
+use axum::routing::{patch, post};
 use axum::{
     extract::{Extension, Path, Query, State},
     http::StatusCode,
@@ -1701,10 +1701,10 @@ pub async fn admin_list_all_instances(
 
     params.validate()?;
 
-    // Use DB (agent_instances) for correct user_id per instance
-    let (instances, total) = app_state
-        .agent_service
-        .list_all_instances(params.limit, params.offset)
+    // Use DB (agent_instances) with LEFT JOIN agent_balance for last_usage_at
+    let (instances, usage_map, total) = app_state
+        .agent_repository
+        .list_all_instances_with_usage(params.limit, params.offset)
         .await
         .map_err(|e| {
             tracing::error!("Failed to list all instances: error={}", e);
@@ -1713,7 +1713,10 @@ pub async fn admin_list_all_instances(
 
     let items: Vec<InstanceResponse> = instances
         .into_iter()
-        .map(crate::models::instance_response_for_admin)
+        .map(|inst| {
+            let last_usage = usage_map.get(&inst.id).copied();
+            crate::models::instance_response_for_admin_with_usage(inst, last_usage)
+        })
         .collect();
     Ok(Json(PaginatedResponse {
         items,
@@ -3208,6 +3211,817 @@ pub async fn admin_retry_account_deletion(
     }))
 }
 
+// ========== Migration Admin Endpoints ==========
+
+/// Request body for PATCH /v1/admin/agents/instances/{id}
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct PatchInstanceRequest {
+    pub agent_api_base_url: Option<String>,
+    pub instance_url: Option<String>,
+    /// Instance token — will be encrypted before storage
+    pub instance_token: Option<String>,
+    pub dashboard_url: Option<String>,
+}
+
+/// Admin endpoint: Patch an agent instance (migration fields)
+pub async fn admin_patch_instance(
+    State(app_state): State<AppState>,
+    Extension(_user): Extension<AuthenticatedUser>,
+    Path(instance_id): Path<String>,
+    Json(request): Json<PatchInstanceRequest>,
+) -> Result<Json<InstanceResponse>, ApiError> {
+    let id = Uuid::parse_str(&instance_id)
+        .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
+
+    tracing::info!("Admin: Patching instance id={}", id);
+
+    // Encrypt instance_token if provided
+    let encrypted_token = match request.instance_token {
+        Some(ref token) if token.is_empty() => {
+            return Err(ApiError::bad_request("instance_token must not be empty"));
+        }
+        Some(ref token) => {
+            let encrypted = database::encryption::encrypt(token).map_err(|e| {
+                tracing::error!("Failed to encrypt instance token: error={}", e);
+                ApiError::internal_server_error("Failed to encrypt instance token")
+            })?;
+            Some(encrypted)
+        }
+        None => None,
+    };
+
+    // Verify instance exists first
+    let _existing = app_state
+        .agent_repository
+        .get_instance(id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get instance: instance_id={}, error={}", id, e);
+            ApiError::internal_server_error("Failed to get instance")
+        })?
+        .ok_or_else(|| ApiError::not_found("Instance not found"))?;
+
+    let instance = app_state
+        .agent_repository
+        .admin_update_instance(
+            id,
+            request.agent_api_base_url,
+            request.instance_url,
+            encrypted_token,
+            request.dashboard_url,
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to patch instance: instance_id={}, error={}", id, e);
+            ApiError::internal_server_error("Failed to update instance")
+        })?;
+
+    Ok(Json(crate::models::instance_response_for_admin(instance)))
+}
+
+/// Migration status response
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct MigrationStatusResponse {
+    pub total: i64,
+    pub migrated: i64,
+    pub pending: i64,
+    pub no_url: i64,
+    pub unknown: i64,
+    pub failed: i64,
+}
+
+/// Admin endpoint: Get migration status counts
+pub async fn admin_migration_status(
+    State(app_state): State<AppState>,
+    Extension(_user): Extension<AuthenticatedUser>,
+) -> Result<Json<MigrationStatusResponse>, ApiError> {
+    tracing::info!("Admin: Getting migration status");
+
+    // Derive patterns from configured managers — no hardcoded URL strings.
+    let crabshack_url = app_state
+        .agent_service
+        .find_crabshack_manager()
+        .map(|m| m.url);
+    let all_urls = app_state.agent_service.manager_urls();
+    let legacy_patterns: Vec<String> = all_urls
+        .iter()
+        .filter(|u| Some(u.as_str()) != crabshack_url.as_deref())
+        .map(|u| format!("%{}%", u.trim_end_matches('/')))
+        .collect();
+    let crabshack_pattern = crabshack_url
+        .as_deref()
+        .map(|u| format!("%{}%", u.trim_end_matches('/')))
+        .unwrap_or_default();
+
+    let (total, migrated, pending, no_url, unknown) = app_state
+        .agent_repository
+        .get_migration_status_counts(legacy_patterns, crabshack_pattern)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get migration status: error={}", e);
+            ApiError::internal_server_error("Failed to get migration status")
+        })?;
+
+    Ok(Json(MigrationStatusResponse {
+        total,
+        migrated,
+        pending,
+        no_url,
+        unknown,
+        failed: 0,
+    }))
+}
+
+/// Response for migrate endpoint
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct MigrateInstanceResponse {
+    pub status: String,
+    pub instance_name: String,
+    pub message: String,
+}
+
+/// Admin endpoint: Migrate a single instance from legacy compose-api to CrabShack
+pub async fn admin_migrate_instance(
+    State(app_state): State<AppState>,
+    Extension(_user): Extension<AuthenticatedUser>,
+    Path(instance_id): Path<String>,
+) -> Result<Json<MigrateInstanceResponse>, ApiError> {
+    let id = Uuid::parse_str(&instance_id)
+        .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
+
+    tracing::info!("Admin: Starting migration for instance_id={}", id);
+
+    let instance = app_state
+        .agent_repository
+        .get_instance(id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get instance: instance_id={}, error={}", id, e);
+            ApiError::internal_server_error("Failed to get instance")
+        })?
+        .ok_or_else(|| ApiError::not_found("Instance not found"))?;
+
+    let instance_name = instance.name.clone();
+
+    // Verify this is a legacy instance (agent_api_base_url contains compose-api pattern)
+    let agent_api_base_url = instance.agent_api_base_url.as_deref().ok_or_else(|| {
+        ApiError::bad_request("Instance has no agent_api_base_url, cannot determine if legacy")
+    })?;
+
+    let is_crabshack = app_state
+        .agent_service
+        .find_crabshack_manager()
+        .is_some_and(|m| agent_api_base_url.trim_end_matches('/') == m.url.trim_end_matches('/'));
+    if is_crabshack {
+        return Ok(Json(MigrateInstanceResponse {
+            status: "skipped".to_string(),
+            instance_name,
+            message: "Instance is already on CrabShack".to_string(),
+        }));
+    }
+
+    // Look up backup_passphrase for the user
+    let creds = app_state
+        .agent_repository
+        .get_user_passkey_credentials(instance.user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to get passkey credentials: user_id={}, error={}",
+                instance.user_id,
+                e
+            );
+            ApiError::internal_server_error("Failed to get user credentials")
+        })?;
+
+    let backup_passphrase = match creds {
+        Some((_auth_secret, passphrase)) => passphrase,
+        None => {
+            // Generate and store a new passphrase
+            // Generate random 32-byte hex strings using two UUIDv4 (16 bytes each)
+            let passphrase = format!(
+                "{}{}",
+                Uuid::new_v4().as_simple(),
+                Uuid::new_v4().as_simple()
+            );
+            let auth_secret = format!(
+                "{}{}",
+                Uuid::new_v4().as_simple(),
+                Uuid::new_v4().as_simple()
+            );
+            app_state
+                .agent_repository
+                .upsert_user_passkey_credentials(instance.user_id, &auth_secret, &passphrase)
+                .await
+                .map_err(|e| {
+                    tracing::error!(
+                        "Failed to store passkey credentials: user_id={}, error={}",
+                        instance.user_id,
+                        e
+                    );
+                    ApiError::internal_server_error("Failed to store credentials")
+                })?;
+            passphrase
+        }
+    };
+
+    // Derive age recipient for the backup
+    let (age_recipient, _age_identity) =
+        services::agent::age_derivation::derive_age_keypair(&backup_passphrase, &instance.name);
+
+    // Decrypt and validate instance_token
+    let instance_token = instance
+        .instance_token
+        .as_deref()
+        .ok_or_else(|| ApiError::bad_request("Instance has no instance_token"))?;
+
+    // If the token can still be decrypted, it wasn't decrypted by the repository layer
+    if database::encryption::decrypt(instance_token).is_ok() {
+        return Err(ApiError::internal_server_error(
+            "Instance token appears to still be encrypted after decryption",
+        ));
+    }
+
+    // Step 5: GET instance metadata from compose-api
+    let compose_api_url = agent_api_base_url.trim_end_matches('/');
+    let encoded_name = urlencoding::encode(&instance.name);
+
+    // Find the manager token for the legacy compose-api
+    let manager = app_state
+        .agent_service
+        .find_manager_for_url(agent_api_base_url)
+        .ok_or_else(|| {
+            ApiError::bad_request("No manager configured for this instance's agent_api_base_url")
+        })?;
+
+    let compose_instance_url = format!("{}/instances/{}", compose_api_url, encoded_name);
+    let compose_resp = app_state
+        .http_client
+        .get(&compose_instance_url)
+        .bearer_auth(&manager.token)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to get instance from compose-api: instance_id={}, error={}",
+                id,
+                e
+            );
+            ApiError::internal_server_error("Failed to contact legacy compose-api")
+        })?;
+
+    if !compose_resp.status().is_success() {
+        let status = compose_resp.status();
+        tracing::error!(
+            "Compose-api GET /instances failed: instance_id={}, status={}",
+            id,
+            status
+        );
+        return Err(ApiError::internal_server_error(
+            "Failed to get instance metadata from legacy compose-api",
+        ));
+    }
+
+    let compose_data: serde_json::Value = compose_resp.json().await.map_err(|e| {
+        tracing::error!(
+            "Failed to parse compose-api response: instance_id={}, error={}",
+            id,
+            e
+        );
+        ApiError::internal_server_error("Failed to parse legacy instance metadata")
+    })?;
+
+    // Preflight: extract required fields before any side effects (start/backup/stop).
+    // CrabShack's import validator rejects null values for these.
+    let ssh_pubkey = compose_data
+        .get("ssh_pubkey")
+        .and_then(|v| v.as_str())
+        .or(instance.public_ssh_key.as_deref())
+        .ok_or_else(|| ApiError::bad_request("Instance has no ssh_pubkey — cannot migrate"))?;
+    let nearai_api_key = compose_data
+        .get("nearai_api_key")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ApiError::bad_request("Instance has no nearai_api_key — cannot migrate"))?;
+    let nearai_api_url = compose_data
+        .get("nearai_api_url")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ApiError::bad_request("Instance has no nearai_api_url — cannot migrate"))?;
+    // Fallbacks match create_instance_from_agent_api defaults (service.rs unwrap_or values)
+    let image = compose_data
+        .get("image")
+        .and_then(|v| v.as_str())
+        .unwrap_or("docker.io/nearaidev/ironclaw-dind:latest");
+    let mem_limit = compose_data
+        .get("mem_limit")
+        .and_then(|v| v.as_str())
+        .unwrap_or("4g");
+    let cpus = compose_data
+        .get("cpus")
+        .and_then(|v| v.as_str())
+        .unwrap_or("1");
+    let storage_size = compose_data
+        .get("storage_size")
+        .and_then(|v| v.as_str())
+        .unwrap_or("10G");
+
+    let compose_status = compose_data
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+
+    // If instance is stopped, start it first (backup requires running instance)
+    let was_running = compose_status != "stopped" && compose_status != "exited";
+    if !was_running {
+        tracing::info!(
+            "Instance is stopped, starting before backup: instance_id={}",
+            id
+        );
+        let start_url = format!("{}/instances/{}/start", compose_api_url, encoded_name);
+        let start_resp = app_state
+            .http_client
+            .post(&start_url)
+            .bearer_auth(&manager.token)
+            .timeout(std::time::Duration::from_secs(60))
+            .send()
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    "Failed to start instance on compose-api: instance_id={}, error={}",
+                    id,
+                    e
+                );
+                ApiError::internal_server_error("Failed to start legacy instance")
+            })?;
+
+        if !start_resp.status().is_success() {
+            tracing::error!(
+                "Compose-api start failed: instance_id={}, status={}",
+                id,
+                start_resp.status()
+            );
+            return Err(ApiError::internal_server_error(
+                "Failed to start legacy instance for backup",
+            ));
+        }
+    }
+
+    // Create backup on compose-api via SSE
+    let backup_url = format!("{}/instances/{}/backup", compose_api_url, encoded_name);
+    let backup_body = serde_json::json!({
+        "age_recipient": age_recipient,
+        "expiry_secs": 7200,
+        "full_export": true
+    });
+
+    let backup_resp = app_state
+        .http_client
+        .post(&backup_url)
+        .bearer_auth(&manager.token)
+        .json(&backup_body)
+        .timeout(std::time::Duration::from_secs(600))
+        .send()
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to create backup: instance_id={}, error={}", id, e);
+            restore_on_failure(
+                &app_state,
+                compose_api_url,
+                &encoded_name,
+                &manager.token,
+                was_running,
+                "stop",
+            );
+            ApiError::internal_server_error("Failed to initiate backup on legacy compose-api")
+        })?;
+
+    if !backup_resp.status().is_success() {
+        let status = backup_resp.status();
+        tracing::error!(
+            "Compose-api backup failed: instance_id={}, status={}",
+            id,
+            status
+        );
+        restore_on_failure(
+            &app_state,
+            compose_api_url,
+            &encoded_name,
+            &manager.token,
+            was_running,
+            "stop",
+        );
+        return Err(ApiError::internal_server_error(
+            "Failed to create backup on legacy compose-api",
+        ));
+    }
+
+    // Parse SSE stream to get backup presigned URL
+    let backup_presigned_url = match parse_sse_for_backup_url(backup_resp).await {
+        Ok(url) => url,
+        Err(e) => {
+            tracing::error!(
+                "Failed to parse backup SSE stream: instance_id={}, error={}",
+                id,
+                e
+            );
+            restore_on_failure(
+                &app_state,
+                compose_api_url,
+                &encoded_name,
+                &manager.token,
+                was_running,
+                "stop",
+            );
+            return Err(ApiError::internal_server_error(
+                "Failed to get backup URL from legacy compose-api",
+            ));
+        }
+    };
+
+    // Stop instance on compose-api
+    let stop_url = format!("{}/instances/{}/stop", compose_api_url, encoded_name);
+    let stop_resp = app_state
+        .http_client
+        .post(&stop_url)
+        .bearer_auth(&manager.token)
+        .timeout(std::time::Duration::from_secs(60))
+        .send()
+        .await;
+
+    let stop_failed = match &stop_resp {
+        Err(e) => {
+            tracing::error!(
+                "Failed to stop instance on compose-api: instance_id={}, error={}",
+                id,
+                e
+            );
+            true
+        }
+        Ok(resp) if !resp.status().is_success() => {
+            tracing::error!(
+                "Compose-api stop returned non-success: instance_id={}, status={}",
+                id,
+                resp.status()
+            );
+            true
+        }
+        _ => false,
+    };
+    if stop_failed {
+        restore_on_failure(
+            &app_state,
+            compose_api_url,
+            &encoded_name,
+            &manager.token,
+            was_running,
+            "stop",
+        );
+        return Err(ApiError::internal_server_error(
+            "Failed to stop legacy instance before import",
+        ));
+    }
+
+    // Import into CrabShack
+    let service_type = instance.service_type.as_deref().unwrap_or("openclaw");
+    let crabshack_service_type =
+        services::agent::service::service_type_for_crabshack(service_type, None);
+
+    // Store overwritten values in extra_env for rollback reference
+    let extra_env = serde_json::json!({
+        "LEGACY_API_BASE_URL": agent_api_base_url,
+        "LEGACY_INSTANCE_URL": instance.instance_url.as_deref().unwrap_or(""),
+    });
+
+    // Find a CrabShack (non-legacy) manager for import
+    let crabshack_manager = app_state
+        .agent_service
+        .find_crabshack_manager()
+        .ok_or_else(|| {
+            tracing::error!("No CrabShack manager configured for import");
+            restore_on_failure(
+                &app_state,
+                compose_api_url,
+                &encoded_name,
+                &manager.token,
+                was_running,
+                "start",
+            );
+            ApiError::internal_server_error("No CrabShack manager configured")
+        })?;
+
+    let import_url = format!("{}/instances/import", crabshack_manager.url);
+    let import_body = serde_json::json!({
+        "name": instance.name,
+        "token": instance_token,
+        "backup_url": backup_presigned_url,
+        "backup_passphrase": backup_passphrase,
+        "service_type": crabshack_service_type,
+        "image": image,
+        "ssh_pubkey": ssh_pubkey,
+        "nearai_api_key": nearai_api_key,
+        "nearai_api_url": nearai_api_url,
+        "mem_limit": mem_limit,
+        "cpus": cpus,
+        "storage_size": storage_size,
+        "extra_env": extra_env,
+    });
+
+    let import_resp = app_state
+        .http_client
+        .post(&import_url)
+        .bearer_auth(&crabshack_manager.token)
+        .json(&import_body)
+        .timeout(std::time::Duration::from_secs(600))
+        .send()
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to import into CrabShack: instance_id={}, error={}",
+                id,
+                e
+            );
+            restore_on_failure(
+                &app_state,
+                compose_api_url,
+                &encoded_name,
+                &manager.token,
+                was_running,
+                "start",
+            );
+            ApiError::internal_server_error("Failed to import into CrabShack")
+        })?;
+
+    if !import_resp.status().is_success() {
+        let status = import_resp.status();
+        tracing::error!(
+            "CrabShack import failed: instance_id={}, status={}",
+            id,
+            status
+        );
+        restore_on_failure(
+            &app_state,
+            compose_api_url,
+            &encoded_name,
+            &manager.token,
+            was_running,
+            "start",
+        );
+        return Err(ApiError::internal_server_error("CrabShack import failed"));
+    }
+
+    // Parse CrabShack import SSE to confirm completion (we don't use the data — URLs are constructed)
+    let _import_data = match parse_sse_for_import_result(import_resp).await {
+        Ok(data) => data,
+        Err(e) => {
+            tracing::error!(
+                "Failed to parse CrabShack import SSE: instance_id={}, error={}",
+                id,
+                e
+            );
+            restore_on_failure(
+                &app_state,
+                compose_api_url,
+                &encoded_name,
+                &manager.token,
+                was_running,
+                "start",
+            );
+            return Err(ApiError::internal_server_error(
+                "Failed to parse CrabShack import response",
+            ));
+        }
+    };
+
+    // Construct instance_url from CrabShack manager domain + instance name + token.
+    // CrabShack doesn't emit URLs — same pattern as the normal create flow (service.rs:1584-1597).
+    let new_instance_url = url::Url::parse(&crabshack_manager.url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_string()))
+        .map(|domain| {
+            format!(
+                "https://{}.{}/?token={}",
+                instance_name, domain, instance_token
+            )
+        });
+    let new_dashboard_url = new_instance_url.clone();
+
+    // Update chat-api DB to point to CrabShack
+    let db_update = app_state
+        .agent_repository
+        .admin_update_instance(
+            id,
+            Some(crabshack_manager.url.clone()),
+            new_instance_url,
+            None, // keep instance_token unchanged
+            new_dashboard_url,
+        )
+        .await;
+    if let Err(e) = db_update {
+        tracing::error!(
+            "Failed to update instance after migration: instance_id={}, crabshack_url={}, error={}. Restarting legacy instance.",
+            id, crabshack_manager.url, e
+        );
+        restore_on_failure(
+            &app_state,
+            compose_api_url,
+            &encoded_name,
+            &manager.token,
+            was_running,
+            "start",
+        );
+        return Err(ApiError::internal_server_error(
+            "Migration succeeded but failed to update DB — legacy instance restarted",
+        ));
+    }
+
+    tracing::info!(
+        "Migration completed: instance_id={}, instance_name={}",
+        id,
+        instance_name
+    );
+
+    Ok(Json(MigrateInstanceResponse {
+        status: "success".to_string(),
+        instance_name,
+        message: "Instance migrated to CrabShack".to_string(),
+    }))
+}
+
+/// Maximum buffer size for SSE parsing (1 MB).
+const SSE_BUFFER_LIMIT: usize = 1024 * 1024;
+/// Timeout for receiving each SSE chunk (30 seconds).
+const SSE_CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Parse an SSE response stream to extract the backup presigned URL from the "complete" event.
+async fn parse_sse_for_backup_url(response: reqwest::Response) -> anyhow::Result<String> {
+    use futures::stream::StreamExt;
+    let mut stream = response.bytes_stream();
+    let mut buffer = String::new();
+
+    loop {
+        let chunk = match tokio::time::timeout(SSE_CHUNK_TIMEOUT, stream.next()).await {
+            Ok(Some(chunk)) => chunk?,
+            Ok(None) => break,
+            Err(_) => anyhow::bail!(
+                "Timed out waiting for SSE chunk from backup stream ({}s)",
+                SSE_CHUNK_TIMEOUT.as_secs()
+            ),
+        };
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+        if buffer.len() > SSE_BUFFER_LIMIT {
+            anyhow::bail!(
+                "SSE buffer exceeded {} bytes limit in backup stream",
+                SSE_BUFFER_LIMIT
+            );
+        }
+
+        while let Some(newline_pos) = buffer.find('\n') {
+            let line = buffer[..newline_pos].trim_end_matches('\r').to_string();
+            buffer.drain(..=newline_pos);
+
+            if let Some(data) = line.strip_prefix("data: ") {
+                if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                    let stage = event.get("stage").and_then(|v| v.as_str()).unwrap_or("");
+                    if stage == "error" {
+                        let msg = event
+                            .get("message")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown error");
+                        anyhow::bail!("Backup failed: {}", msg);
+                    }
+                    if stage == "complete" || stage == "done" {
+                        if let Some(backup) = event.get("backup") {
+                            if let Some(url) = backup.get("download_url").and_then(|v| v.as_str()) {
+                                return Ok(url.to_string());
+                            }
+                        }
+                        if let Some(url) = event.get("download_url").and_then(|v| v.as_str()) {
+                            return Ok(url.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    anyhow::bail!("No backup URL found in SSE stream")
+}
+
+/// Parse an SSE response stream to extract the final import result from CrabShack.
+/// Returns only on "complete"/"done" event — fails if stream ends without one.
+async fn parse_sse_for_import_result(
+    response: reqwest::Response,
+) -> anyhow::Result<serde_json::Value> {
+    use futures::stream::StreamExt;
+    let mut stream = response.bytes_stream();
+    let mut buffer = String::new();
+
+    loop {
+        let chunk = match tokio::time::timeout(SSE_CHUNK_TIMEOUT, stream.next()).await {
+            Ok(Some(chunk)) => chunk?,
+            Ok(None) => break,
+            Err(_) => anyhow::bail!(
+                "Timed out waiting for SSE chunk from import stream ({}s)",
+                SSE_CHUNK_TIMEOUT.as_secs()
+            ),
+        };
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+        if buffer.len() > SSE_BUFFER_LIMIT {
+            anyhow::bail!(
+                "SSE buffer exceeded {} bytes limit in import stream",
+                SSE_BUFFER_LIMIT
+            );
+        }
+
+        while let Some(newline_pos) = buffer.find('\n') {
+            let line = buffer[..newline_pos].trim_end_matches('\r').to_string();
+            buffer.drain(..=newline_pos);
+
+            if let Some(data) = line.strip_prefix("data: ") {
+                if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                    let stage = event.get("stage").and_then(|v| v.as_str()).unwrap_or("");
+                    let event_type = event.get("event").and_then(|v| v.as_str()).unwrap_or("");
+                    if stage == "error" || event_type == "error" {
+                        let msg = event
+                            .get("message")
+                            .or_else(|| event.get("data").and_then(|d| d.get("message")))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown error");
+                        anyhow::bail!("CrabShack import failed: {}", msg);
+                    }
+                    if stage == "complete" || stage == "done" || event_type == "import_complete" {
+                        if let Some(inst) = event.get("instance") {
+                            return Ok(inst.clone());
+                        }
+                        if let Some(data) = event.get("data") {
+                            return Ok(data.clone());
+                        }
+                        return Ok(event);
+                    }
+                }
+            }
+        }
+    }
+
+    anyhow::bail!("CrabShack import stream ended without completion event")
+}
+
+/// Best-effort lifecycle call on compose-api to restore original instance state after failure.
+/// Fire-and-forget (tokio::spawn) — errors are logged, not propagated.
+fn restore_on_failure(
+    app_state: &AppState,
+    compose_api_url: &str,
+    encoded_name: &str,
+    token: &str,
+    was_running: bool,
+    action: &str,
+) {
+    let should_restore = match action {
+        "stop" => !was_running,
+        "start" => was_running,
+        _ => false,
+    };
+    if !should_restore {
+        return;
+    }
+    let url = format!("{}/instances/{}/{}", compose_api_url, encoded_name, action);
+    let client = app_state.http_client.clone();
+    let token = token.to_string();
+    let action = action.to_string();
+    tokio::spawn(async move {
+        match client
+            .post(&url)
+            .bearer_auth(&token)
+            .timeout(std::time::Duration::from_secs(60))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                tracing::info!(
+                    "Restored legacy instance after migration failure: action={}",
+                    action
+                );
+            }
+            Ok(resp) => {
+                tracing::warn!(
+                    "Failed to restore legacy instance: action={}, status={}",
+                    action,
+                    resp.status()
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to restore legacy instance: action={}, error={}",
+                    action,
+                    e
+                );
+            }
+        }
+    });
+}
+
 /// Create admin router with all admin routes (requires admin authentication)
 pub fn create_admin_router() -> Router<AppState> {
     Router::new()
@@ -3249,10 +4063,15 @@ pub fn create_admin_router() -> Router<AppState> {
                     get(admin_list_all_instances).post(admin_create_instance),
                 )
                 .route("/instances/sync-status", post(admin_sync_agent_status))
+                .route("/instances/migration-status", get(admin_migration_status))
+                .route(
+                    "/instances/{id}",
+                    patch(admin_patch_instance).delete(admin_delete_instance),
+                )
                 .route("/instances/{id}/start", post(admin_start_instance))
                 .route("/instances/{id}/stop", post(admin_stop_instance))
                 .route("/instances/{id}/restart", post(admin_restart_instance))
-                .route("/instances/{id}", delete(admin_delete_instance))
+                .route("/instances/{id}/migrate", post(admin_migrate_instance))
                 .route("/instances/{id}/backup", post(admin_create_backup))
                 .route("/instances/{id}/backups", get(admin_list_backups))
                 .route("/instances/{id}/backups/{backup_id}", get(admin_get_backup))

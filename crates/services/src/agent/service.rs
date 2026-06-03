@@ -3965,6 +3965,25 @@ impl AgentService for AgentServiceImpl {
 
         Ok(balance)
     }
+
+    fn find_manager_for_url(&self, agent_api_base_url: &str) -> Option<config::AgentManager> {
+        let normalized = agent_api_base_url.trim_end_matches('/');
+        self.managers
+            .iter()
+            .find(|m| m.url.trim_end_matches('/') == normalized)
+            .cloned()
+    }
+
+    fn find_crabshack_manager(&self) -> Option<config::AgentManager> {
+        self.managers
+            .iter()
+            .find(|m| m.url.contains("crabshack"))
+            .cloned()
+    }
+
+    fn manager_urls(&self) -> Vec<String> {
+        self.managers.iter().map(|m| m.url.clone()).collect()
+    }
 }
 
 /// Response structure from crabshack /images endpoint
