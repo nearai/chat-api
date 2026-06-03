@@ -1,19 +1,31 @@
+use super::near_staking::{
+    lock_amount_yocto, subscription_row_from_chain, view_get_lock, view_get_price,
+    view_get_purchase, view_get_subscription_for_price, view_storage_balance_bounds,
+    view_storage_balance_of, NearStakingStorageBalance, NearStakingStorageBalanceBounds,
+};
 use super::ports::{
-    BillingCycleAnchor, BillingPeriod, ChangePlanOutcome, CreditsRepository, CreditsSummary,
-    DowngradeIntentStatus, PaymentBehavior, PaymentWebhookRepository, ProrationBehavior,
-    StripeClientPort, StripeCreateCreditsCheckoutParams, StripeCreateSubscriptionCheckoutParams,
+    BillingCycleAnchor, BillingPeriod, CancelSubscriptionOutcome, ChangePlanOutcome,
+    CreateCreditPurchaseOutcome, CreateSubscriptionOutcome, CreditsRepository, CreditsSummary,
+    DowngradeIntentStatus, NearStakingStorageIntent, NearStakingSyncSummary, PaymentBehavior,
+    PaymentWebhookRepository, ProrationBehavior, ResumeSubscriptionOutcome, StripeClientPort,
+    StripeCreateCreditsCheckoutParams, StripeCreateSubscriptionCheckoutParams,
     StripeCustomerRepository, StripeSubscriptionSnapshot, StripeUpdateSubscriptionParams,
     Subscription, SubscriptionError, SubscriptionPlan, SubscriptionReplacement,
     SubscriptionRepository, SubscriptionService, SubscriptionWithPlan, DEFAULT_MONTHLY_TOKEN_LIMIT,
+    NEAR_STAKING_SYNC_SKIPPED_REASON_UPSERT_BLOCKED_NON_HOS,
 };
 use crate::agent::ports::AgentRepository;
 use crate::agent::ports::AgentService;
-use crate::system_configs::ports::{SubscriptionPlanConfig, SystemConfigs, SystemConfigsService};
+use crate::system_configs::ports::{
+    CreditsProviderConfig, SubscriptionPlanConfig, SystemConfigs, SystemConfigsService,
+};
+use crate::user::ports::OAuthProvider;
 use crate::user::ports::UserRepository;
 use crate::user_usage::ports::UserUsageRepository;
 use crate::UserId;
 use async_trait::async_trait;
 use chrono::{Datelike, Duration, NaiveTime, Utc};
+use futures::future::join_all;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -34,6 +46,12 @@ pub struct SubscriptionServiceConfig {
     pub agent_service: Arc<dyn AgentService>,
     pub stripe_secret_key: String,
     pub stripe_webhook_secret: String,
+    /// When set, enables `provider = house-of-stake` subscription intents (staking contract account id).
+    pub near_staking_contract_id: Option<String>,
+    /// NEAR JSON-RPC URL for staking contract view calls (same as `NEAR_RPC_URL`).
+    pub near_rpc_url: String,
+    /// Logical network id for clients (from `NEAR_NETWORK_ID` / `near.network_id`), included in HoS create-subscription JSON.
+    pub near_network_id: String,
 }
 
 /// Cached credit limit for a user. Invalid after TTL_CACHE_SECS (10 mins) or when plan/credits change.
@@ -41,6 +59,13 @@ struct CachedCreditLimit {
     plan_credits: u64,
     period_start: chrono::DateTime<Utc>,
     period_end: chrono::DateTime<Utc>,
+    cached_at: Instant,
+}
+
+/// Cached House-of-Stake stake source. Invalid after short TTL or when the user's credit-limit cache is invalidated.
+struct CachedHouseOfStakeStakeSource {
+    last_lock_id: String,
+    amount_yocto: u128,
     cached_at: Instant,
 }
 
@@ -52,8 +77,11 @@ struct CachedSystemConfigs {
 
 const TTL_CACHE_SECS: u64 = 600; // 10 minutes
 const SYSTEM_CONFIGS_TTL_CACHE_SECS: u64 = 60; // 1 minute
+/// Upper bound for cached HoS stake sources; invalidate_credit_limit_cache also clears this on subscription, credit, and sync changes.
+const HOUSE_OF_STAKE_STAKE_SOURCE_TTL_SECS: u64 = 60;
 /// Default monthly credits when plan has no monthly_credits config. 1 USD in nano-dollars ($1 = 1_000_000_000).
 const DEFAULT_MONTHLY_CREDITS_NANO_USD: u64 = 1_000_000_000;
+const YOCTO_PER_NEAR: u128 = 1_000_000_000_000_000_000_000_000;
 /// When falling back from monthly_tokens: 1.5 USD per M tokens. M = 1 million tokens.
 const TOKENS_TO_CREDITS_PER_M: u64 = 1_000_000;
 /// 1.5 USD in nano-USD. Used for monthly_tokens fallback: limit_nano_usd = (monthly_tokens / M) * this.
@@ -75,14 +103,34 @@ pub struct SubscriptionServiceImpl {
     agent_service: Arc<dyn AgentService>,
     stripe_secret_key: String,
     stripe_webhook_secret: String,
+    near_staking_contract_id: Option<String>,
+    near_rpc_url: String,
+    near_network_id: String,
     credit_limit_cache: Arc<RwLock<HashMap<UserId, CachedCreditLimit>>>,
+    house_of_stake_stake_source_cache:
+        Arc<RwLock<HashMap<(UserId, String), CachedHouseOfStakeStakeSource>>>,
     system_configs_cache: Arc<RwLock<Option<CachedSystemConfigs>>>,
 }
 
 impl SubscriptionServiceImpl {
-    /// Returns true when Stripe is configured well enough to perform API calls.
+    /// Returns true when Stripe is configured well enough to perform Stripe API calls.
     fn is_stripe_configured(&self) -> bool {
         !self.stripe_secret_key.is_empty() && !self.stripe_webhook_secret.is_empty()
+    }
+
+    #[inline]
+    fn hos_reconcile_summary(
+        skipped: bool,
+        deleted: u32,
+        upserted: bool,
+        skipped_reason: Option<&'static str>,
+    ) -> NearStakingSyncSummary {
+        NearStakingSyncSummary {
+            skipped,
+            deleted_house_of_stake_rows: deleted,
+            upserted_house_of_stake_row: upserted,
+            skipped_reason: skipped_reason.map(String::from),
+        }
     }
 
     pub fn new(config: SubscriptionServiceConfig) -> Self {
@@ -105,15 +153,22 @@ impl SubscriptionServiceImpl {
             agent_service: config.agent_service,
             stripe_secret_key: config.stripe_secret_key,
             stripe_webhook_secret: config.stripe_webhook_secret,
+            near_staking_contract_id: config.near_staking_contract_id,
+            near_rpc_url: config.near_rpc_url,
+            near_network_id: config.near_network_id,
             credit_limit_cache: Arc::new(RwLock::new(HashMap::new())),
+            house_of_stake_stake_source_cache: Arc::new(RwLock::new(HashMap::new())),
             system_configs_cache: Arc::new(RwLock::new(None)),
         }
     }
 
-    /// Invalidate credit limit cache for a user (e.g. when plan/credits change via webhook).
+    /// Invalidate cached credit-limit state for a user (e.g. when plan, credits, or HoS lock state changes via webhook/reconcile).
     async fn invalidate_credit_limit_cache(&self, user_id: UserId) {
-        let mut guard = self.credit_limit_cache.write().await;
-        guard.remove(&user_id);
+        self.credit_limit_cache.write().await.remove(&user_id);
+        self.house_of_stake_stake_source_cache
+            .write()
+            .await
+            .retain(|(cached_user_id, _), _| *cached_user_id != user_id);
         tracing::debug!("Invalidated credit limit cache for user_id={}", user_id);
     }
 
@@ -150,6 +205,34 @@ impl SubscriptionServiceImpl {
         }
         let v = (credits as i128) * 1_000_000_000_i128;
         i64::try_from(v).ok()
+    }
+
+    /// HoS one-off purchase confirmations must be tied to a recent wallet payment.
+    /// The contract has durable purchase history, so accepting arbitrary old purchase ids
+    /// would let historical payments be replayed into fresh chat-api credits.
+    const HOS_CREDIT_PURCHASE_CONFIRM_WINDOW_NS: u64 = 15 * 60 * 1_000_000_000;
+
+    fn validate_hos_credit_purchase_freshness(
+        created_ns: Option<u64>,
+    ) -> Result<(), SubscriptionError> {
+        let created_ns = created_ns.ok_or_else(|| {
+            SubscriptionError::InvalidCredits(
+                "House-of-Stake purchase is missing created_ns".to_string(),
+            )
+        })?;
+        let now_ns = Utc::now().timestamp_nanos_opt().ok_or_else(|| {
+            SubscriptionError::InternalError("current time is out of range".to_string())
+        })?;
+        let now_ns = u64::try_from(now_ns).map_err(|_| {
+            SubscriptionError::InternalError("current time is before Unix epoch".to_string())
+        })?;
+        let age_ns = now_ns.saturating_sub(created_ns);
+        if age_ns > Self::HOS_CREDIT_PURCHASE_CONFIRM_WINDOW_NS {
+            return Err(SubscriptionError::InvalidCredits(
+                "House-of-Stake purchase is outside the confirmation window".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     /// Maximum number of retries when stopping instances after subscription cancel.
@@ -236,14 +319,28 @@ impl SubscriptionServiceImpl {
             provider
         );
 
+        let provider_lc = provider.to_lowercase();
+
         // Treat missing/empty Stripe secrets as "not configured" when provider is stripe
-        if provider.to_lowercase() == "stripe" && !self.is_stripe_configured() {
+        if provider_lc == "stripe" && !self.is_stripe_configured() {
             tracing::debug!(
                 "Stripe secrets are not set (secret_key_empty={}, webhook_secret_empty={}), Stripe not configured",
                 self.stripe_secret_key.is_empty(),
                 self.stripe_webhook_secret.is_empty(),
             );
             return Err(SubscriptionError::NotConfigured);
+        }
+
+        if provider_lc == "house-of-stake" {
+            let has_contract = self
+                .near_staking_contract_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .is_some();
+            if !has_contract {
+                return Err(SubscriptionError::HouseOfStakeNotConfigured);
+            }
         }
 
         let configs = self
@@ -275,7 +372,7 @@ impl SubscriptionServiceImpl {
         // Extract plan_name -> price_id for the requested provider
         let mut plans = HashMap::new();
         for (plan_name, plan_config) in subscription_plans {
-            if let Some(provider_config) = plan_config.providers.get(provider) {
+            if let Some(provider_config) = plan_config.providers.get(provider_lc.as_str()) {
                 plans.insert(plan_name, provider_config.price_id.clone());
             }
         }
@@ -364,7 +461,7 @@ impl SubscriptionServiceImpl {
     }
 
     /// Supported payment providers
-    const SUPPORTED_PROVIDERS: &[&str] = &["stripe"];
+    const SUPPORTED_PROVIDERS: &[&str] = &["stripe", "house-of-stake"];
 
     /// Validate that the provider is supported
     fn validate_provider(provider: &str) -> Result<(), SubscriptionError> {
@@ -380,6 +477,115 @@ impl SubscriptionServiceImpl {
         }
     }
 
+    /// Linked NEAR account id from `oauth_accounts` (needed for house-of-stake / RPC reconcile).
+    async fn get_near_account_id(&self, user_id: UserId) -> Result<String, SubscriptionError> {
+        let accounts = self
+            .user_repository
+            .get_linked_accounts(user_id)
+            .await
+            .map_err(|e| SubscriptionError::InternalError(e.to_string()))?;
+        for a in accounts {
+            if a.provider == OAuthProvider::Near {
+                return Ok(a.provider_user_id);
+            }
+        }
+        Err(SubscriptionError::HouseOfStakeRequiresNearWallet)
+    }
+
+    async fn get_credits_provider_config(
+        &self,
+        requested_provider: Option<&str>,
+    ) -> Result<(String, CreditsProviderConfig), SubscriptionError> {
+        let requested_provider = requested_provider
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(str::to_string);
+        if let Some(provider) = requested_provider.as_deref() {
+            Self::validate_provider(provider)?;
+        }
+
+        let configs = self
+            .system_configs_service
+            .get_configs()
+            .await
+            .map_err(|e| SubscriptionError::InternalError(e.to_string()))?;
+        let credits_cfg = configs
+            .and_then(|c| c.credits)
+            .ok_or(SubscriptionError::CreditsNotConfigured)?;
+
+        let provider = requested_provider
+            .or_else(|| {
+                credits_cfg
+                    .default_provider
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|p| !p.is_empty())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| {
+                if !credits_cfg.providers.contains_key("stripe")
+                    && credits_cfg.providers.contains_key("house-of-stake")
+                {
+                    "house-of-stake".to_string()
+                } else {
+                    "stripe".to_string()
+                }
+            });
+        let provider_lc = provider.to_lowercase();
+        Self::validate_provider(&provider_lc)?;
+
+        let provider_config = credits_cfg
+            .providers
+            .get(provider_lc.as_str())
+            .cloned()
+            .ok_or(SubscriptionError::CreditsNotConfigured)?;
+
+        Ok((provider_lc, provider_config))
+    }
+
+    async fn get_hos_credits_price_id(&self) -> Result<String, SubscriptionError> {
+        let (_provider, provider_config) = self
+            .get_credits_provider_config(Some("house-of-stake"))
+            .await?;
+        provider_config
+            .price_id
+            .ok_or(SubscriptionError::CreditsNotConfigured)
+    }
+
+    fn hos_contract_id(&self) -> Result<String, SubscriptionError> {
+        self.near_staking_contract_id
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string)
+            .ok_or(SubscriptionError::HouseOfStakeNotConfigured)
+    }
+
+    fn near_staking_storage_intent_from_views(
+        near_account: &str,
+        bounds: NearStakingStorageBalanceBounds,
+        balance: Option<NearStakingStorageBalance>,
+    ) -> NearStakingStorageIntent {
+        let balance_total = balance.as_ref().map(|b| b.total.as_u128()).unwrap_or(0);
+        let balance_available = balance.as_ref().map(|b| b.available.as_u128()).unwrap_or(0);
+        let bounds_min = bounds.min.as_u128();
+        let required_deposit = bounds_min.saturating_sub(balance_total);
+
+        NearStakingStorageIntent {
+            method_name: "storage_deposit".to_string(),
+            account_id: near_account.to_string(),
+            required_deposit_yocto: required_deposit.to_string(),
+            balance_total_yocto: balance_total.to_string(),
+            balance_available_yocto: balance_available.to_string(),
+            bounds_min_yocto: bounds_min.to_string(),
+            bounds_max_yocto: bounds.max.map(|max| max.as_u128().to_string()),
+            args: serde_json::json!({
+                "account_id": near_account,
+                "registration_only": false,
+            }),
+        }
+    }
+
     async fn get_subscription_plans(
         &self,
     ) -> Result<HashMap<String, SubscriptionPlanConfig>, SubscriptionError> {
@@ -387,6 +593,60 @@ impl SubscriptionServiceImpl {
         Ok(configs
             .and_then(|c| c.subscription_plans.clone())
             .unwrap_or_default())
+    }
+
+    async fn get_active_subscription_for_entitlement(
+        &self,
+        user_id: UserId,
+    ) -> Result<Option<Subscription>, SubscriptionError> {
+        let active_subscriptions = self
+            .subscription_repo
+            .get_active_subscriptions(user_id)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        if active_subscriptions.is_empty() {
+            return Ok(None);
+        }
+
+        let now = Utc::now();
+        let expired_hos_ids: Vec<String> = active_subscriptions
+            .iter()
+            .filter(|s| s.provider == "house-of-stake" && s.current_period_end <= now)
+            .map(|s| s.subscription_id.clone())
+            .collect();
+
+        if !expired_hos_ids.is_empty() {
+            let mut db_client = self
+                .db_pool
+                .get()
+                .await
+                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+            let txn = db_client
+                .transaction()
+                .await
+                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+            for subscription_id in &expired_hos_ids {
+                self.subscription_repo
+                    .delete_subscription_txn(&txn, subscription_id)
+                    .await
+                    .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+            }
+            txn.commit()
+                .await
+                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+            self.invalidate_credit_limit_cache(user_id).await;
+            tracing::warn!(
+                user_id = %user_id.0,
+                deleted_house_of_stake_rows = expired_hos_ids.len(),
+                "expired stale local HoS subscriptions before entitlement check"
+            );
+        }
+
+        Ok(active_subscriptions
+            .into_iter()
+            .filter(|s| !(s.provider == "house-of-stake" && s.current_period_end <= now))
+            .max_by_key(|s| s.created_at))
     }
 
     /// Returns true only when the user has no linked OAuth accounts (email-only account)
@@ -408,10 +668,8 @@ impl SubscriptionServiceImpl {
         }
 
         let active_subscription = self
-            .subscription_repo
-            .get_active_subscription(user_id)
-            .await
-            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+            .get_active_subscription_for_entitlement(user_id)
+            .await?;
 
         Ok(active_subscription.is_none())
     }
@@ -457,19 +715,25 @@ impl SubscriptionServiceImpl {
             .unwrap_or_default();
 
         let (plan_credits, period_start, period_end) = match self
-            .subscription_repo
-            .get_active_subscription(user_id)
-            .await
-            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
+            .get_active_subscription_for_entitlement(user_id)
+            .await?
         {
             Some(ref sub) => {
-                let plan_name =
-                    resolve_plan_name_from_config("stripe", &sub.price_id, &subscription_plans);
-                let plan_credits = plan_name
-                    .as_ref()
-                    .and_then(|n| subscription_plans.get(n))
-                    .map(Self::plan_limit_max)
-                    .unwrap_or(DEFAULT_MONTHLY_CREDITS_NANO_USD);
+                let plan_name = resolve_plan_name_from_config(
+                    sub.provider.as_str(),
+                    &sub.price_id,
+                    &subscription_plans,
+                );
+                let plan_credits = match plan_name.as_deref() {
+                    Some(name) => match subscription_plans.get(name) {
+                        Some(plan_config) => self
+                            .stake_based_plan_limit_max(user_id, sub, plan_config)
+                            .await
+                            .unwrap_or_else(|| Self::plan_limit_max(plan_config)),
+                        None => DEFAULT_MONTHLY_CREDITS_NANO_USD,
+                    },
+                    None => DEFAULT_MONTHLY_CREDITS_NANO_USD,
+                };
                 let period_end = sub.current_period_end;
                 let period_start = sub_one_month_same_day(sub.current_period_end);
                 (plan_credits, period_start, period_end)
@@ -507,6 +771,192 @@ impl SubscriptionServiceImpl {
     /// Returns the plan's monthly credit limit in nano-USD (see `credits_max_nano_usd`).
     fn plan_limit_max(config: &SubscriptionPlanConfig) -> u64 {
         credits_max_nano_usd(Some(config))
+    }
+
+    fn stake_based_credits_for_lock(
+        plan_config: &SubscriptionPlanConfig,
+        lock_amount_yocto: u128,
+    ) -> Option<u64> {
+        let rate = plan_config
+            .stake_based_monthly_credits
+            .as_ref()
+            .and_then(|c| c.credits_per_staked_near_nano_usd)?;
+        let credits = lock_amount_yocto
+            .saturating_mul(rate as u128)
+            .saturating_div(YOCTO_PER_NEAR);
+        Some(credits.min(u64::MAX as u128) as u64)
+    }
+
+    async fn stake_based_plan_limit_max(
+        &self,
+        user_id: UserId,
+        subscription: &Subscription,
+        plan_config: &SubscriptionPlanConfig,
+    ) -> Option<u64> {
+        if subscription.provider != "house-of-stake" {
+            return None;
+        }
+        plan_config
+            .stake_based_monthly_credits
+            .as_ref()
+            .and_then(|c| c.credits_per_staked_near_nano_usd)?;
+
+        let cache_key = (user_id, subscription.subscription_id.clone());
+        if let Some(cached) = self
+            .house_of_stake_stake_source_cache
+            .read()
+            .await
+            .get(&cache_key)
+        {
+            if cached.cached_at.elapsed().as_secs() < HOUSE_OF_STAKE_STAKE_SOURCE_TTL_SECS {
+                tracing::debug!(
+                    user_id = %user_id.0,
+                    subscription_id = %subscription.subscription_id,
+                    last_lock_id = %cached.last_lock_id,
+                    "using cached HoS stake-based credit source"
+                );
+                return Self::stake_based_credits_for_lock(plan_config, cached.amount_yocto);
+            }
+        }
+
+        let Some(contract_id) = self.near_staking_contract_id.as_deref().map(str::trim) else {
+            tracing::warn!(
+                user_id = %user_id.0,
+                subscription_id = %subscription.subscription_id,
+                "cannot resolve HoS stake-based credits: staking contract is not configured"
+            );
+            return None;
+        };
+        if contract_id.is_empty() {
+            tracing::warn!(
+                user_id = %user_id.0,
+                subscription_id = %subscription.subscription_id,
+                "cannot resolve HoS stake-based credits: staking contract is empty"
+            );
+            return None;
+        }
+
+        let near_account = match self.get_near_account_id(user_id).await {
+            Ok(account) => account,
+            Err(err) => {
+                tracing::warn!(
+                    user_id = %user_id.0,
+                    subscription_id = %subscription.subscription_id,
+                    error = %err,
+                    "cannot resolve HoS stake-based credits: NEAR account unavailable"
+                );
+                return None;
+            }
+        };
+
+        let chain_sub = match view_get_subscription_for_price(
+            &self.near_rpc_url,
+            contract_id,
+            &near_account,
+            &subscription.price_id,
+        )
+        .await
+        {
+            Ok(Some(chain_sub)) => chain_sub,
+            Ok(None) => {
+                tracing::warn!(
+                    user_id = %user_id.0,
+                    subscription_id = %subscription.subscription_id,
+                    price_id = %subscription.price_id,
+                    "cannot resolve HoS stake-based credits: subscription missing on chain"
+                );
+                return None;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    user_id = %user_id.0,
+                    subscription_id = %subscription.subscription_id,
+                    price_id = %subscription.price_id,
+                    error = %err,
+                    "cannot resolve HoS stake-based credits: subscription RPC failed"
+                );
+                return None;
+            }
+        };
+
+        let status_lower = chain_sub
+            .status
+            .as_deref()
+            .unwrap_or("Active")
+            .to_ascii_lowercase();
+        let now_ns = Utc::now()
+            .timestamp_nanos_opt()
+            .and_then(|ns| u64::try_from(ns).ok())
+            .unwrap_or(u64::MAX);
+        if status_lower != "active" || chain_sub.end_ns <= now_ns {
+            tracing::warn!(
+                user_id = %user_id.0,
+                subscription_id = %subscription.subscription_id,
+                price_id = %subscription.price_id,
+                chain_status = %status_lower,
+                chain_end_ns = chain_sub.end_ns,
+                "cannot resolve HoS stake-based credits: chain subscription is not active"
+            );
+            return None;
+        }
+
+        let Some(last_lock_id) = chain_sub
+            .last_lock_id
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        else {
+            tracing::warn!(
+                user_id = %user_id.0,
+                subscription_id = %subscription.subscription_id,
+                price_id = %subscription.price_id,
+                "cannot resolve HoS stake-based credits: last_lock_id missing on chain subscription"
+            );
+            return None;
+        };
+
+        let lock = match view_get_lock(&self.near_rpc_url, contract_id, last_lock_id).await {
+            Ok(Some(lock)) => lock,
+            Ok(None) => {
+                tracing::warn!(
+                    user_id = %user_id.0,
+                    subscription_id = %subscription.subscription_id,
+                    last_lock_id,
+                    "cannot resolve HoS stake-based credits: lock missing on chain"
+                );
+                return None;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    user_id = %user_id.0,
+                    subscription_id = %subscription.subscription_id,
+                    last_lock_id,
+                    error = %err,
+                    "cannot resolve HoS stake-based credits: lock RPC failed"
+                );
+                return None;
+            }
+        };
+
+        let Some(lock_amount) = lock_amount_yocto(&lock) else {
+            tracing::warn!(
+                user_id = %user_id.0,
+                subscription_id = %subscription.subscription_id,
+                last_lock_id,
+                "cannot resolve HoS stake-based credits: lock amount missing or invalid"
+            );
+            return None;
+        };
+
+        self.house_of_stake_stake_source_cache.write().await.insert(
+            cache_key,
+            CachedHouseOfStakeStakeSource {
+                last_lock_id: last_lock_id.to_string(),
+                amount_yocto: lock_amount,
+                cached_at: Instant::now(),
+            },
+        );
+
+        Self::stake_based_credits_for_lock(plan_config, lock_amount)
     }
 
     fn should_check_pending_downgrade(subscription: &Subscription) -> bool {
@@ -721,7 +1171,7 @@ impl SubscriptionServiceImpl {
     }
 
     /// Billing window for users without an active paid subscription: calendar month by default,
-    /// or monthly periods aligned to `current_period_end` of the user’s latest **canceled** subscription row.
+    /// or monthly periods aligned to `current_period_end` of the user's latest **canceled** subscription row.
     async fn resolve_free_plan_period_for_user(
         &self,
         user_id: UserId,
@@ -732,6 +1182,353 @@ impl SubscriptionServiceImpl {
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
         Ok(free_plan_period_for_user(anchor, Utc::now()))
+    }
+
+    fn near_rpc_err(e: String) -> SubscriptionError {
+        SubscriptionError::NearRpcError(e)
+    }
+
+    fn configured_staking_contract_id(&self) -> Result<&str, SubscriptionError> {
+        self.near_staking_contract_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or(SubscriptionError::HouseOfStakeNotConfigured)
+    }
+
+    async fn hos_product_id_for_price(
+        &self,
+        contract_id: &str,
+        price_id: &str,
+    ) -> Result<String, SubscriptionError> {
+        let price_json = view_get_price(&self.near_rpc_url, contract_id, price_id)
+            .await
+            .map_err(Self::near_rpc_err)?
+            .ok_or_else(|| {
+                SubscriptionError::InternalError("HoS price not found on-chain".into())
+            })?;
+
+        price_json
+            .product_id
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                SubscriptionError::InternalError("HoS price missing or empty product_id".into())
+            })
+    }
+
+    /// Deterministic HoS catalog `price_id`s. `get_subscription_for_price` resolves through the
+    /// price's product, so first sync must probe every configured HoS product instead of assuming
+    /// any one price can discover all on-chain subscriptions.
+    fn hos_price_ids(subscription_plans: &HashMap<String, SubscriptionPlanConfig>) -> Vec<String> {
+        let mut candidates: Vec<(String, String)> = subscription_plans
+            .iter()
+            .filter_map(|(plan_name, cfg)| {
+                cfg.providers
+                    .get("house-of-stake")
+                    .map(|p| (plan_name.clone(), p.price_id.clone()))
+            })
+            .collect();
+        candidates.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut price_ids = Vec::new();
+        for (_, price_id) in candidates {
+            if !price_id.trim().is_empty() && !price_ids.iter().any(|p| p == &price_id) {
+                price_ids.push(price_id);
+            }
+        }
+        price_ids
+    }
+
+    /// Best-effort chain reconcile only when local DB shows HoS billing (avoids NEAR RPC on every
+    /// Stripe cancel/resume/change for users who only linked NEAR for sign-in).
+    async fn reconcile_near_staking_from_rpc_if_hos_context(
+        &self,
+        user_id: UserId,
+        context: &'static str,
+    ) {
+        let subs = match self.subscription_repo.get_user_subscriptions(user_id).await {
+            Ok(s) => s,
+            Err(err) => {
+                tracing::warn!(
+                    user_id = %user_id.0,
+                    context,
+                    error = %err,
+                    "could not load subscriptions for HoS reconcile gate; skipping NEAR reconcile"
+                );
+                return;
+            }
+        };
+        let has_hos = subs.iter().any(|s| {
+            s.provider == "house-of-stake" && (s.status == "active" || s.status == "trialing")
+        });
+        if !has_hos {
+            return;
+        }
+        if let Err(err) = self
+            .reconcile_near_staking_from_rpc_with_subs(user_id, subs)
+            .await
+        {
+            tracing::warn!(
+                user_id = %user_id.0,
+                context,
+                error = %err,
+                "NEAR staking reconcile from RPC failed; continuing with stored subscription state"
+            );
+        }
+    }
+
+    /// When HoS is configured, refresh the user's staking-backed subscription row from chain.
+    /// RPC failures are logged and ignored so callers (e.g. Stripe cancel) are not blocked.
+    async fn reconcile_near_staking_from_rpc_or_warn(
+        &self,
+        user_id: UserId,
+        context: &'static str,
+    ) {
+        if let Err(err) = self.reconcile_near_staking_from_rpc(user_id).await {
+            tracing::warn!(
+                user_id = %user_id.0,
+                context,
+                error = %err,
+                "NEAR staking reconcile from RPC failed; continuing with stored subscription state"
+            );
+        }
+    }
+
+    /// Refresh local `house-of-stake` subscription row from chain (no-op when HoS not configured or user has no NEAR link).
+    pub async fn reconcile_near_staking_from_rpc(
+        &self,
+        user_id: UserId,
+    ) -> Result<NearStakingSyncSummary, SubscriptionError> {
+        let subs = self
+            .subscription_repo
+            .get_user_subscriptions(user_id)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+        self.reconcile_near_staking_from_rpc_with_subs(user_id, subs)
+            .await
+    }
+
+    /// Same as `reconcile_near_staking_from_rpc` after loading subscriptions; pass `subs` when
+    /// already available (avoids a second `get_user_subscriptions` when the caller just read rows).
+    async fn reconcile_near_staking_from_rpc_with_subs(
+        &self,
+        user_id: UserId,
+        subs: Vec<Subscription>,
+    ) -> Result<NearStakingSyncSummary, SubscriptionError> {
+        let Some(contract_id) = self
+            .near_staking_contract_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            return Ok(Self::hos_reconcile_summary(true, 0, false, None));
+        };
+
+        let near_account = match self.get_near_account_id(user_id).await {
+            Ok(a) => a,
+            Err(_) => {
+                return Ok(Self::hos_reconcile_summary(true, 0, false, None));
+            }
+        };
+
+        let has_active_non_hos = subs.iter().any(|s| {
+            (s.status == "active" || s.status == "trialing") && s.provider != "house-of-stake"
+        });
+        let hos_subscription_ids: Vec<String> = subs
+            .iter()
+            .filter(|s| s.provider == "house-of-stake")
+            .map(|s| s.subscription_id.clone())
+            .collect();
+
+        if has_active_non_hos && hos_subscription_ids.is_empty() {
+            return Ok(Self::hos_reconcile_summary(
+                false,
+                0,
+                false,
+                Some(NEAR_STAKING_SYNC_SKIPPED_REASON_UPSERT_BLOCKED_NON_HOS),
+            ));
+        }
+
+        let configs = self
+            .system_configs_service
+            .get_configs()
+            .await
+            .map_err(|e| SubscriptionError::InternalError(e.to_string()))?;
+        let subscription_plans = configs
+            .and_then(|c| c.subscription_plans)
+            .unwrap_or_default();
+        let configured_hos_price_ids = Self::hos_price_ids(&subscription_plans);
+        if configured_hos_price_ids.is_empty() {
+            return Ok(Self::hos_reconcile_summary(true, 0, false, None));
+        }
+
+        // Prefer the user's stored HoS `price_id`, then fall back to every configured HoS price.
+        // This protects cross-product plan changes where the local row can still point at the old
+        // product until sync observes the new chain subscription.
+        let local_probe_price_id = subs
+            .iter()
+            .filter(|s| s.provider == "house-of-stake")
+            .find(|s| s.status == "active" || s.status == "trialing")
+            .or_else(|| subs.iter().find(|s| s.provider == "house-of-stake"))
+            .map(|s| s.price_id.as_str())
+            .filter(|p| !p.is_empty());
+
+        let mut probe_price_ids = Vec::new();
+        if let Some(price_id) = local_probe_price_id {
+            probe_price_ids.push(price_id.to_string());
+        }
+        for price_id in &configured_hos_price_ids {
+            if !probe_price_ids.iter().any(|p| p == price_id) {
+                probe_price_ids.push(price_id.clone());
+            }
+        }
+
+        let rpc_url = self.near_rpc_url.clone();
+        let contract_id = contract_id.to_string();
+        let probe_results = join_all(probe_price_ids.iter().map(|price_id| {
+            let rpc_url = rpc_url.clone();
+            let contract_id = contract_id.clone();
+            let near_account = near_account.clone();
+            let price_id = price_id.clone();
+            async move {
+                let result = view_get_subscription_for_price(
+                    &rpc_url,
+                    &contract_id,
+                    &near_account,
+                    &price_id,
+                )
+                .await;
+                (price_id, result)
+            }
+        }))
+        .await;
+
+        let mut raw = None;
+        let mut first_err = None;
+        for (_, result) in &probe_results {
+            match result {
+                Ok(Some(v)) => {
+                    raw = Some(v.clone());
+                    break;
+                }
+                Ok(None) => {}
+                Err(e) if first_err.is_none() => first_err = Some(e.clone()),
+                Err(_) => {}
+            }
+        }
+        if raw.is_none() {
+            if let Some(err) = first_err {
+                return Err(Self::near_rpc_err(err));
+            }
+        }
+
+        if raw.is_none() {
+            if hos_subscription_ids.is_empty() {
+                return Ok(Self::hos_reconcile_summary(false, 0, false, None));
+            }
+            let deleted = hos_subscription_ids.len() as u32;
+            let mut db_client = self
+                .db_pool
+                .get()
+                .await
+                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+            let txn = db_client
+                .transaction()
+                .await
+                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+            for sid in &hos_subscription_ids {
+                self.subscription_repo
+                    .delete_subscription_txn(&txn, sid)
+                    .await
+                    .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+            }
+            txn.commit()
+                .await
+                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+            self.invalidate_credit_limit_cache(user_id).await;
+            return Ok(Self::hos_reconcile_summary(false, deleted, false, None));
+        }
+
+        let chain_subscription = raw.as_ref().expect("checked is_some");
+        let row = subscription_row_from_chain(user_id, &near_account, chain_subscription)
+            .map_err(SubscriptionError::InternalError)?;
+
+        // Do not insert/update a HoS row while a non-HoS subscription is active/trialing locally:
+        // `get_active_subscription` picks newest `created_at`, so a fresh HoS upsert could wrongly
+        // become the "active" row for Stripe-primary users who also staked on-chain separately.
+        if has_active_non_hos {
+            let deleted = hos_subscription_ids.len() as u32;
+            if !hos_subscription_ids.is_empty() {
+                let mut db_client = self
+                    .db_pool
+                    .get()
+                    .await
+                    .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+                let txn = db_client
+                    .transaction()
+                    .await
+                    .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+                for sid in &hos_subscription_ids {
+                    self.subscription_repo
+                        .delete_subscription_txn(&txn, sid)
+                        .await
+                        .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+                }
+                txn.commit()
+                    .await
+                    .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+                self.invalidate_credit_limit_cache(user_id).await;
+            }
+
+            tracing::warn!(
+                user_id = %user_id.0,
+                deleted_house_of_stake_rows = deleted,
+                "Skipping HoS reconcile upsert: user has an active or trialing non-house-of-stake subscription row"
+            );
+            return Ok(Self::hos_reconcile_summary(
+                false,
+                deleted,
+                false,
+                Some(NEAR_STAKING_SYNC_SKIPPED_REASON_UPSERT_BLOCKED_NON_HOS),
+            ));
+        }
+
+        let mut db_client = self
+            .db_pool
+            .get()
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+        let txn = db_client
+            .transaction()
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        let chain_subscription_id = row.subscription_id.clone();
+        self.subscription_repo
+            .upsert_subscription_authoritative(&txn, row)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        let stale_subscription_ids: Vec<String> = hos_subscription_ids
+            .iter()
+            .filter(|sid| sid.as_str() != chain_subscription_id.as_str())
+            .cloned()
+            .collect();
+        let deleted = stale_subscription_ids.len() as u32;
+        for sid in &stale_subscription_ids {
+            self.subscription_repo
+                .delete_subscription_txn(&txn, sid)
+                .await
+                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+        }
+
+        txn.commit()
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        self.invalidate_credit_limit_cache(user_id).await;
+        Ok(Self::hos_reconcile_summary(false, deleted, true, None))
     }
 }
 
@@ -756,6 +1553,30 @@ fn sub_one_month_same_day(dt: chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
             })
     });
     chrono::DateTime::from_naive_utc_and_offset(new_d.and_time(dt.time()), Utc)
+}
+
+fn parse_required_hos_target_amount_yocto(
+    target_amount: Option<&str>,
+) -> Result<u128, SubscriptionError> {
+    let raw = target_amount
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            SubscriptionError::InvalidTargetAmount(
+                "target_amount is required for House-of-Stake plan changes".into(),
+            )
+        })?;
+    let parsed = raw.parse::<u128>().map_err(|_| {
+        SubscriptionError::InvalidTargetAmount(
+            "target_amount must be a positive integer yoctoNEAR string".into(),
+        )
+    })?;
+    if parsed == 0 {
+        return Err(SubscriptionError::InvalidTargetAmount(
+            "target_amount must be greater than zero".into(),
+        ));
+    }
+    Ok(parsed)
 }
 
 /// Add `months_to_add` whole calendar months to `anchor` in **one step** (same rules as
@@ -940,13 +1761,9 @@ fn generate_checkout_idempotency_key(user_id: &UserId, price_id: &str) -> String
     format!("{:x}", hasher.finalize())
 }
 
-/// Generate idempotency key for credit checkout session creation.
-/// Format: SHA-256(user_id:credits:success_url:cancel_url:time_window)
-/// Time window: current timestamp / 3600 (1 hour window). Within the same window and with
-/// identical inputs, Stripe will reuse the same session; changing URLs or credits yields
-/// a different key even within the same window.
 fn generate_credit_checkout_idempotency_key(
     user_id: &UserId,
+    price_id: &str,
     credits: u64,
     success_url: &str,
     cancel_url: &str,
@@ -958,8 +1775,8 @@ fn generate_credit_checkout_idempotency_key(
     let mut hasher = Sha256::new();
     hasher.update(
         format!(
-            "{}:{}:{}:{}:{}",
-            user_id.0, credits, success_url, cancel_url, time_window
+            "{}:{}:{}:{}:{}:{}",
+            user_id.0, price_id, credits, success_url, cancel_url, time_window
         )
         .as_bytes(),
     );
@@ -968,11 +1785,28 @@ fn generate_credit_checkout_idempotency_key(
 
 #[async_trait]
 impl SubscriptionService for SubscriptionServiceImpl {
-    async fn get_available_plans(&self) -> Result<Vec<SubscriptionPlan>, SubscriptionError> {
-        tracing::debug!("Getting available subscription plans");
+    async fn get_available_plans(
+        &self,
+        provider: Option<&str>,
+    ) -> Result<Vec<SubscriptionPlan>, SubscriptionError> {
+        tracing::debug!(
+            "Getting available subscription plans provider={:?}",
+            provider
+        );
 
-        // Return Stripe plans (primary provider for now) with limits from config
-        let stripe_plans = self.get_plans_for_provider("stripe").await?;
+        // Catalog keys for `provider_key` (stripe or house-of-stake), merged with subscription_plans limits
+        let provider_key = match provider.map(|p| p.to_lowercase()).as_deref() {
+            None | Some("stripe") => "stripe",
+            Some("house-of-stake") => "house-of-stake",
+            Some(other) => {
+                return Err(SubscriptionError::InvalidProvider(format!(
+                    "Unsupported provider filter: {}",
+                    other
+                )));
+            }
+        };
+
+        let filtered_plans = self.get_plans_for_provider(provider_key).await?;
 
         let configs = self
             .system_configs_service
@@ -983,23 +1817,27 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .and_then(|c| c.subscription_plans)
             .unwrap_or_default();
 
-        let plans: Vec<SubscriptionPlan> = stripe_plans
-            .into_keys()
-            .map(|name| {
+        let plans: Vec<SubscriptionPlan> = filtered_plans
+            .into_iter()
+            .map(|(name, price_id)| {
                 let plan_config = subscription_plans.get(&name);
                 let price = plan_config.and_then(|c| c.price);
                 let agent_instances = plan_config.and_then(|c| c.agent_instances.clone());
                 let monthly_tokens = plan_config.and_then(|c| c.monthly_tokens.clone());
                 let monthly_credits = plan_config.and_then(|c| c.monthly_credits.clone());
+                let stake_based_monthly_credits =
+                    plan_config.and_then(|c| c.stake_based_monthly_credits.clone());
                 let trial_period_days = plan_config.and_then(|c| c.trial_period_days);
                 let allowed_models = plan_config.and_then(|c| c.allowed_models.clone());
                 SubscriptionPlan {
                     name,
+                    price_id: Some(price_id),
                     price,
                     trial_period_days,
                     agent_instances,
                     monthly_tokens,
                     monthly_credits,
+                    stake_based_monthly_credits,
                     allowed_models,
                 }
             })
@@ -1016,7 +1854,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
         success_url: String,
         cancel_url: String,
         test_clock_id: Option<String>,
-    ) -> Result<String, SubscriptionError> {
+    ) -> Result<CreateSubscriptionOutcome, SubscriptionError> {
         tracing::info!(
             "Creating subscription checkout for user_id={}, provider={}, plan={}",
             user_id,
@@ -1024,11 +1862,17 @@ impl SubscriptionService for SubscriptionServiceImpl {
             plan
         );
 
-        // Validate provider (only stripe supported for now)
+        // Validate provider (must be in SUPPORTED_PROVIDERS, e.g. stripe or house-of-stake)
         Self::validate_provider(&provider)?;
 
         // Get plans for provider from system configs
-        let provider_plans = self.get_plans_for_provider(&provider).await?;
+        let provider_lc = provider.to_lowercase();
+        let provider_plans = self.get_plans_for_provider(&provider_lc).await?;
+
+        if provider_lc == "house-of-stake" {
+            self.reconcile_near_staking_from_rpc_or_warn(user_id, "create_subscription")
+                .await;
+        }
 
         // Check if user already has active subscription
         if self
@@ -1075,8 +1919,62 @@ impl SubscriptionService for SubscriptionServiceImpl {
             });
         }
 
+        // house-of-stake: linked NEAR wallet required; response carries catalog price_id for on-chain lock
+        if provider_lc == "house-of-stake" {
+            let near_account = self.get_near_account_id(user_id).await?;
+            let contract_id = self.hos_contract_id()?;
+            let (price, storage_bounds, storage_balance) = tokio::try_join!(
+                async {
+                    view_get_price(&self.near_rpc_url, &contract_id, &price_id)
+                        .await
+                        .map_err(Self::near_rpc_err)
+                },
+                async {
+                    view_storage_balance_bounds(&self.near_rpc_url, &contract_id)
+                        .await
+                        .map_err(Self::near_rpc_err)
+                },
+                async {
+                    view_storage_balance_of(&self.near_rpc_url, &contract_id, &near_account)
+                        .await
+                        .map_err(Self::near_rpc_err)
+                },
+            )?;
+            let price = price.ok_or_else(|| {
+                SubscriptionError::InvalidPlan("House-of-Stake subscription price not found".into())
+            })?;
+            let storage_bounds = storage_bounds.ok_or_else(|| {
+                SubscriptionError::NearRpcError(
+                    "House-of-Stake storage_balance_bounds returned no data".to_string(),
+                )
+            })?;
+            if !price.is_active() {
+                return Err(SubscriptionError::InvalidPlan(
+                    "House-of-Stake subscription price must be active".into(),
+                ));
+            }
+            let attached_deposit_yocto = price.amount_yocto().ok_or_else(|| {
+                SubscriptionError::InvalidPlan(
+                    "House-of-Stake subscription price is missing amount".into(),
+                )
+            })?;
+            let storage = Self::near_staking_storage_intent_from_views(
+                &near_account,
+                storage_bounds,
+                storage_balance,
+            );
+            return Ok(CreateSubscriptionOutcome::NearStakeLock {
+                contract_id,
+                price_id,
+                network_id: self.near_network_id.clone(),
+                attached_deposit_yocto: attached_deposit_yocto.to_string(),
+                storage: Box::new(storage),
+            });
+        }
+
         // Fetch trial_period_days from subscription plan config (reuse plan_config from instance check)
         let trial_period_days = plan_config
+            .as_ref()
             .and_then(|p| p.trial_period_days)
             // Stripe supports a maximum trial period of 730 days
             .filter(|&n| n > 0 && n <= 730);
@@ -1112,11 +2010,17 @@ impl SubscriptionService for SubscriptionServiceImpl {
             &idempotency_key.chars().take(16).collect::<String>()
         );
 
-        Ok(checkout_url)
+        Ok(CreateSubscriptionOutcome::StripeCheckout { checkout_url })
     }
 
-    async fn cancel_subscription(&self, user_id: UserId) -> Result<(), SubscriptionError> {
+    async fn cancel_subscription(
+        &self,
+        user_id: UserId,
+    ) -> Result<CancelSubscriptionOutcome, SubscriptionError> {
         tracing::info!("Canceling subscription for user_id={}", user_id);
+
+        self.reconcile_near_staking_from_rpc_if_hos_context(user_id, "cancel_subscription")
+            .await;
 
         // Get active subscription
         let subscription = self
@@ -1125,6 +2029,19 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
             .ok_or(SubscriptionError::NoActiveSubscription)?;
+
+        if subscription.provider == "house-of-stake" {
+            let contract_id = self.configured_staking_contract_id()?;
+            let product_id = self
+                .hos_product_id_for_price(contract_id, &subscription.price_id)
+                .await?;
+            return Ok(CancelSubscriptionOutcome::NearStakingCancel {
+                contract_id: contract_id.to_string(),
+                product_id,
+                network_id: self.near_network_id.clone(),
+                required_deposit_yocto: "1".to_string(),
+            });
+        }
 
         let updated_sub = self
             .stripe_client
@@ -1178,11 +2095,17 @@ impl SubscriptionService for SubscriptionServiceImpl {
             subscription.subscription_id
         );
 
-        Ok(())
+        Ok(CancelSubscriptionOutcome::Completed)
     }
 
-    async fn resume_subscription(&self, user_id: UserId) -> Result<(), SubscriptionError> {
+    async fn resume_subscription(
+        &self,
+        user_id: UserId,
+    ) -> Result<ResumeSubscriptionOutcome, SubscriptionError> {
         tracing::info!("Resuming subscription for user_id={}", user_id);
+
+        self.reconcile_near_staking_from_rpc_if_hos_context(user_id, "resume_subscription")
+            .await;
 
         // Get active subscription
         let subscription = self
@@ -1195,6 +2118,19 @@ impl SubscriptionService for SubscriptionServiceImpl {
         // Only allow resume when subscription is scheduled to cancel at period end
         if !subscription.cancel_at_period_end {
             return Err(SubscriptionError::SubscriptionNotScheduledForCancellation);
+        }
+
+        if subscription.provider == "house-of-stake" {
+            let contract_id = self.configured_staking_contract_id()?;
+            let product_id = self
+                .hos_product_id_for_price(contract_id, &subscription.price_id)
+                .await?;
+            return Ok(ResumeSubscriptionOutcome::NearStakingResume {
+                contract_id: contract_id.to_string(),
+                product_id,
+                network_id: self.near_network_id.clone(),
+                required_deposit_yocto: "1".to_string(),
+            });
         }
 
         let updated_sub = self
@@ -1249,13 +2185,21 @@ impl SubscriptionService for SubscriptionServiceImpl {
             subscription.subscription_id
         );
 
-        Ok(())
+        Ok(ResumeSubscriptionOutcome::Completed)
+    }
+
+    async fn sync_near_staking_subscription(
+        &self,
+        user_id: UserId,
+    ) -> Result<NearStakingSyncSummary, SubscriptionError> {
+        self.reconcile_near_staking_from_rpc(user_id).await
     }
 
     async fn change_plan(
         &self,
         user_id: UserId,
         target_plan: String,
+        target_amount: Option<String>,
     ) -> Result<ChangePlanOutcome, SubscriptionError> {
         tracing::info!(
             "Changing plan for user_id={} to plan={}",
@@ -1263,14 +2207,10 @@ impl SubscriptionService for SubscriptionServiceImpl {
             target_plan
         );
 
-        // Get provider plans (stripe)
-        let provider_plans = self.get_plans_for_provider("stripe").await?;
-        let price_id = provider_plans
-            .get(&target_plan)
-            .cloned()
-            .ok_or_else(|| SubscriptionError::InvalidPlan(target_plan.clone()))?;
+        self.reconcile_near_staking_from_rpc_if_hos_context(user_id, "change_plan")
+            .await;
 
-        // Get active subscription first (fail fast before instance count validation)
+        // Get active subscription first (fail fast before resolving target plan / downgrade rules)
         let subscription = self
             .subscription_repo
             .get_active_subscription(user_id)
@@ -1280,6 +2220,142 @@ impl SubscriptionService for SubscriptionServiceImpl {
 
         if subscription.cancel_at_period_end {
             return Err(SubscriptionError::SubscriptionScheduledForCancellation);
+        }
+
+        let provider_key = if subscription.provider == "house-of-stake" {
+            "house-of-stake"
+        } else {
+            "stripe"
+        };
+        // Resolve target plan's catalog price_id for this subscription's provider
+        let provider_plans = self.get_plans_for_provider(provider_key).await?;
+        let price_id = provider_plans
+            .get(&target_plan)
+            .cloned()
+            .ok_or_else(|| SubscriptionError::InvalidPlan(target_plan.clone()))?;
+
+        if subscription.provider == "house-of-stake" {
+            let contract_id = self
+                .near_staking_contract_id
+                .as_deref()
+                .ok_or(SubscriptionError::HouseOfStakeNotConfigured)?
+                .trim();
+            if contract_id.is_empty() {
+                return Err(SubscriptionError::HouseOfStakeNotConfigured);
+            }
+
+            let requested_target_amount =
+                target_amount.as_deref().filter(|amount| !amount.is_empty());
+            let cancel_pending_downgrade = subscription.price_id == price_id
+                && requested_target_amount.is_none()
+                && subscription.pending_downgrade_status == Some(DowngradeIntentStatus::Pending);
+
+            if subscription.price_id == price_id
+                && requested_target_amount.is_none()
+                && !cancel_pending_downgrade
+            {
+                return Ok(ChangePlanOutcome::NoOp);
+            }
+
+            let requested_target_amount = requested_target_amount
+                .map(|amount| parse_required_hos_target_amount_yocto(Some(amount)))
+                .transpose()?;
+            let near_account = self.get_near_account_id(user_id).await?;
+            let same_price = subscription.price_id == price_id;
+
+            let (cur_price_j, new_price_j, chain_sub_j) = tokio::try_join!(
+                async {
+                    view_get_price(&self.near_rpc_url, contract_id, &subscription.price_id)
+                        .await
+                        .map_err(Self::near_rpc_err)
+                },
+                async {
+                    view_get_price(&self.near_rpc_url, contract_id, &price_id)
+                        .await
+                        .map_err(Self::near_rpc_err)
+                },
+                async {
+                    view_get_subscription_for_price(
+                        &self.near_rpc_url,
+                        contract_id,
+                        &near_account,
+                        &subscription.price_id,
+                    )
+                    .await
+                    .map_err(Self::near_rpc_err)
+                },
+            )?;
+
+            let _cur_price_j = cur_price_j.ok_or_else(|| {
+                SubscriptionError::InternalError("HoS current price not found on-chain".into())
+            })?;
+            let _new_price_j = new_price_j.ok_or_else(|| {
+                SubscriptionError::InternalError("HoS target price not found on-chain".into())
+            })?;
+            let chain_sub_j = chain_sub_j.ok_or_else(|| {
+                SubscriptionError::InternalError("HoS subscription not found on-chain".into())
+            })?;
+
+            if chain_sub_j.subscription_id.trim().is_empty() {
+                return Err(SubscriptionError::InternalError(
+                    "HoS subscription missing subscription_id".into(),
+                ));
+            }
+            let chain_subscription_id = chain_sub_j.subscription_id.as_str();
+            let last_lock_id = chain_sub_j
+                .last_lock_id
+                .as_deref()
+                .filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| {
+                    SubscriptionError::InternalError("HoS subscription missing last_lock_id".into())
+                })?;
+            let lock_j = view_get_lock(&self.near_rpc_url, contract_id, last_lock_id)
+                .await
+                .map_err(Self::near_rpc_err)?
+                .ok_or_else(|| {
+                    SubscriptionError::InternalError("HoS subscription lock not found".into())
+                })?;
+            let current_lock_amount = lock_amount_yocto(&lock_j).ok_or_else(|| {
+                SubscriptionError::InternalError("HoS lock missing amount_near".into())
+            })?;
+
+            let target_amount = requested_target_amount.unwrap_or(current_lock_amount);
+
+            if !same_price {
+                let plans = self.get_subscription_plans().await?;
+                let target_limits = effective_limits(plans.get(&target_plan));
+                let instance_count = self
+                    .agent_repo
+                    .count_user_instances(user_id)
+                    .await
+                    .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
+                    as u64;
+                if instance_count > target_limits.instances_max {
+                    return Err(SubscriptionError::InstanceLimitExceeded {
+                        current: instance_count,
+                        max: target_limits.instances_max,
+                    });
+                }
+            } else if target_amount == current_lock_amount && !cancel_pending_downgrade {
+                return Ok(ChangePlanOutcome::NoOp);
+            }
+
+            let required_deposit_yocto = target_amount.saturating_sub(current_lock_amount).max(1);
+            let timing = if cancel_pending_downgrade {
+                "cancel_pending_downgrade"
+            } else {
+                "contract_decides"
+            };
+
+            return Ok(ChangePlanOutcome::NearStakingChangePlan {
+                contract_id: contract_id.to_string(),
+                network_id: self.near_network_id.clone(),
+                subscription_id: chain_subscription_id.to_string(),
+                target_price_id: price_id,
+                target_amount: target_amount.to_string(),
+                required_deposit_yocto: required_deposit_yocto.to_string(),
+                timing: timing.to_string(),
+            });
         }
 
         // Same plan requested: cancel pending downgrade if one exists, otherwise no-op
@@ -1422,8 +2498,12 @@ impl SubscriptionService for SubscriptionServiceImpl {
             active_only
         );
 
-        // Verify subscriptions are configured (at least Stripe provider has plans)
-        self.get_plans_for_provider("stripe").await?;
+        // Listing is DB-only; chain sync is POST /v1/subscriptions/near/sync (or reconcile on mutations).
+        let stripe_ok = self.get_plans_for_provider("stripe").await.is_ok();
+        let hos_ok = self.get_plans_for_provider("house-of-stake").await.is_ok();
+        if !stripe_ok && !hos_ok {
+            return Err(SubscriptionError::NotConfigured);
+        }
 
         // Get subscription_plans from config for plan name resolution across providers
         let configs = self
@@ -1469,6 +2549,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 subscription_id: sub.subscription_id,
                 user_id: sub.user_id.0.to_string(),
                 provider: sub.provider,
+                price_id: sub.price_id.clone(),
                 plan,
                 status: sub.status,
                 current_period_end: sub.current_period_end,
@@ -1934,10 +3015,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
 
     async fn has_paid_subscription(&self, user_id: UserId) -> Result<bool, SubscriptionError> {
         let sub = self
-            .subscription_repo
-            .get_active_subscription(user_id)
-            .await
-            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+            .get_active_subscription_for_entitlement(user_id)
+            .await?;
         let Some(ref sub) = sub else {
             return Ok(false);
         };
@@ -1976,17 +3055,37 @@ impl SubscriptionService for SubscriptionServiceImpl {
         &self,
         user_id: UserId,
     ) -> Result<(), SubscriptionError> {
-        // When Stripe is not configured, allow access (no subscription gating)
-        match self.get_plans_for_provider("stripe").await {
-            Err(SubscriptionError::NotConfigured) => {
-                tracing::debug!(
-                    "Subscription gating skipped: Stripe not configured, allowing user_id={}",
-                    user_id
-                );
-                return Ok(());
+        let stripe_res = self.get_plans_for_provider("stripe").await;
+        let hos_res = self.get_plans_for_provider("house-of-stake").await;
+
+        let stripe_missing = matches!(stripe_res, Err(SubscriptionError::NotConfigured));
+        let hos_missing = matches!(
+            hos_res,
+            Err(SubscriptionError::NotConfigured | SubscriptionError::HouseOfStakeNotConfigured)
+        );
+
+        if stripe_missing && hos_missing {
+            tracing::debug!(
+                "Subscription gating skipped: no Stripe or HoS billing catalog configured, allowing user_id={}",
+                user_id.0
+            );
+            return Ok(());
+        }
+
+        match stripe_res {
+            Err(e) if !matches!(e, SubscriptionError::NotConfigured) => return Err(e),
+            _ => {}
+        }
+        match hos_res {
+            Err(e)
+                if !matches!(
+                    e,
+                    SubscriptionError::NotConfigured | SubscriptionError::HouseOfStakeNotConfigured
+                ) =>
+            {
+                return Err(e);
             }
-            Err(e) => return Err(e),
-            Ok(_) => {}
+            _ => {}
         }
 
         if self
@@ -1999,6 +3098,10 @@ impl SubscriptionService for SubscriptionServiceImpl {
             );
             return Err(SubscriptionError::NoActiveSubscription);
         }
+
+        let active_subscription = self
+            .get_active_subscription_for_entitlement(user_id)
+            .await?;
 
         // 1. Get plan credits (monthly_credits) from the config. Cache 10 mins.
         let cached_limit = {
@@ -2033,14 +3136,11 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     .unwrap_or_default();
 
                 // Use monthly_credits when set (nano USD); else monthly_tokens → nano USD at 1.5 USD per M tokens. Never fail for missing config.
-                let (plan_credits, period_start, period_end) = match self
-                    .subscription_repo
-                    .get_active_subscription(user_id)
-                    .await
-                    .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
-                {
-                    Some(ref sub) => {
-                        let effective_sub = if Self::should_check_pending_downgrade(sub) {
+                let (plan_credits, period_start, period_end) = match active_subscription.as_ref() {
+                    Some(sub) => {
+                        let effective_sub = if sub.provider == "stripe"
+                            && Self::should_check_pending_downgrade(sub)
+                        {
                             match self.try_apply_pending_downgrade(&sub.subscription_id).await {
                                 Ok(Some(updated)) => updated,
                                 Ok(None) => sub.clone(),
@@ -2057,22 +3157,38 @@ impl SubscriptionService for SubscriptionServiceImpl {
                             sub.clone()
                         };
                         let plan_name = resolve_plan_name_from_config(
-                            "stripe",
+                            effective_sub.provider.as_str(),
                             &effective_sub.price_id,
                             &subscription_plans,
                         );
-                        let plan_credits = plan_name
-                            .as_deref()
-                            .and_then(|n| subscription_plans.get(n))
-                            .map(Self::plan_limit_max)
-                            .unwrap_or_else(|| {
+                        let plan_credits = match plan_name.as_deref() {
+                            Some(name) => match subscription_plans.get(name) {
+                                Some(plan_config) => self
+                                    .stake_based_plan_limit_max(
+                                        user_id,
+                                        &effective_sub,
+                                        plan_config,
+                                    )
+                                    .await
+                                    .unwrap_or_else(|| Self::plan_limit_max(plan_config)),
+                                None => {
+                                    tracing::warn!(
+                                        "Falling back to default monthly credits for unmatched plan '{:?}'; using {} nano-USD",
+                                        plan_name,
+                                        DEFAULT_MONTHLY_CREDITS_NANO_USD
+                                    );
+                                    DEFAULT_MONTHLY_CREDITS_NANO_USD
+                                }
+                            },
+                            None => {
                                 tracing::warn!(
                                     "Falling back to default monthly credits for unmatched plan '{:?}'; using {} nano-USD",
                                     plan_name,
                                     DEFAULT_MONTHLY_CREDITS_NANO_USD
                                 );
                                 DEFAULT_MONTHLY_CREDITS_NANO_USD
-                            });
+                            }
+                        };
                         let period_end = effective_sub.current_period_end;
                         let period_start = sub_one_month_same_day(effective_sub.current_period_end);
                         (plan_credits, period_start, period_end)
@@ -2169,10 +3285,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
 
         // Try to get user's active subscription
         let active_subscription = self
-            .subscription_repo
-            .get_active_subscription(user_id)
-            .await
-            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+            .get_active_subscription_for_entitlement(user_id)
+            .await?;
 
         // Determine which allowlist to use
         let allowed_models: Option<&Vec<String>> = match active_subscription {
@@ -2294,8 +3408,13 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .map(|s| s.subscription_id.clone())
             .unwrap_or_else(|| format!("admin_sub_{}", uuid::Uuid::new_v4()));
 
-        // Get or create a dummy customer ID for admin subscriptions
-        let customer_id = format!("admin_{}", user_id);
+        let provider_lc = provider.to_lowercase();
+        let customer_id = if provider_lc == "house-of-stake" {
+            let near = self.get_near_account_id(user_id).await?;
+            format!("near:{near}")
+        } else {
+            format!("admin_{}", user_id)
+        };
 
         let subscription = Subscription {
             subscription_id: subscription_id.clone(),
@@ -2350,6 +3469,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
             subscription_id: result.subscription_id,
             user_id: user_id.to_string(),
             provider: result.provider,
+            price_id: result.price_id,
             plan: plan_name,
             status: result.status,
             current_period_end: result.current_period_end,
@@ -2465,20 +3585,12 @@ impl SubscriptionService for SubscriptionServiceImpl {
         &self,
         user_id: UserId,
         credits: u64,
+        provider: Option<String>,
         success_url: String,
         cancel_url: String,
-    ) -> Result<String, SubscriptionError> {
+    ) -> Result<CreateCreditPurchaseOutcome, SubscriptionError> {
         const MAX_CREDITS_PER_PURCHASE: u64 = 1_000_000_000;
 
-        // When Stripe is not configured, credit purchase is not available.
-        if !self.is_stripe_configured() {
-            tracing::debug!(
-                "Credit purchase skipped: Stripe not configured (secret_key_empty={}, webhook_secret_empty={})",
-                self.stripe_secret_key.is_empty(),
-                self.stripe_webhook_secret.is_empty(),
-            );
-            return Err(SubscriptionError::CreditsNotConfigured);
-        }
         if credits == 0 {
             return Err(SubscriptionError::InvalidCredits(
                 "credits must be positive".to_string(),
@@ -2491,63 +3603,270 @@ impl SubscriptionService for SubscriptionServiceImpl {
             )));
         }
 
-        let configs = self
-            .system_configs_service
-            .get_configs()
-            .await
-            .map_err(|e| SubscriptionError::InternalError(e.to_string()))?;
-        let credits_cfg = configs
-            .and_then(|c| c.credits)
-            .ok_or(SubscriptionError::CreditsNotConfigured)?;
-        let provider = credits_cfg
-            .default_provider
-            .clone()
-            .unwrap_or_else(|| "stripe".to_string());
-        if provider != "stripe" {
-            tracing::warn!(
-                "Credit purchase requested for unsupported provider: {}",
-                provider
-            );
-            return Err(SubscriptionError::InvalidProvider(format!(
-                "Credits purchase is not supported for provider '{}'",
-                provider
-            )));
-        }
-        let credit_price_id = credits_cfg
-            .providers
-            .get(&provider)
-            .and_then(|p| p.price_id.clone())
-            .ok_or(SubscriptionError::CreditsNotConfigured)?;
-
-        let customer_id = self.get_or_create_stripe_customer(user_id, None).await?;
-
-        let idempotency_key =
-            generate_credit_checkout_idempotency_key(&user_id, credits, &success_url, &cancel_url);
-
-        let session = self
-            .stripe_client
-            .create_credits_checkout_session(StripeCreateCreditsCheckoutParams {
-                customer_id,
-                price_id: credit_price_id,
-                credits,
-                success_url,
-                cancel_url,
-                user_id: user_id.to_string(),
-                idempotency_key,
-            })
+        let (provider, provider_config) = self
+            .get_credits_provider_config(provider.as_deref())
             .await?;
+        let price_id = provider_config
+            .price_id
+            .ok_or(SubscriptionError::CreditsNotConfigured)?;
 
-        let checkout_url = session
-            .url
-            .ok_or_else(|| SubscriptionError::StripeError("No checkout URL returned".into()))?;
+        match provider.as_str() {
+            "house-of-stake" => {
+                let contract_id = self.hos_contract_id()?;
+                let near_account = self.get_near_account_id(user_id).await?;
+                let (price, storage_bounds, storage_balance) = tokio::try_join!(
+                    async {
+                        view_get_price(&self.near_rpc_url, &contract_id, &price_id)
+                            .await
+                            .map_err(Self::near_rpc_err)
+                    },
+                    async {
+                        view_storage_balance_bounds(&self.near_rpc_url, &contract_id)
+                            .await
+                            .map_err(Self::near_rpc_err)
+                    },
+                    async {
+                        view_storage_balance_of(&self.near_rpc_url, &contract_id, &near_account)
+                            .await
+                            .map_err(Self::near_rpc_err)
+                    },
+                )?;
+                let price = price.ok_or_else(|| {
+                    SubscriptionError::InvalidPlan("House-of-Stake credit price not found".into())
+                })?;
+                let storage_bounds = storage_bounds.ok_or_else(|| {
+                    SubscriptionError::NearRpcError(
+                        "House-of-Stake storage_balance_bounds returned no data".to_string(),
+                    )
+                })?;
+                if !price.is_active() || !price.is_one_off() {
+                    return Err(SubscriptionError::InvalidPlan(
+                        "House-of-Stake credit price must be active and one-off".into(),
+                    ));
+                }
 
-        tracing::info!(
-            "Credit checkout session created: user_id={}, credits={}",
-            user_id,
-            credits
-        );
+                let unit_amount_yocto = price.amount_yocto().ok_or_else(|| {
+                    SubscriptionError::InvalidPlan(
+                        "House-of-Stake credit price is missing amount".into(),
+                    )
+                })?;
+                let attached_deposit_yocto = unit_amount_yocto
+                    .checked_mul(u128::from(credits))
+                    .ok_or_else(|| {
+                        SubscriptionError::InvalidCredits(
+                            "credit purchase amount exceeds supported range".to_string(),
+                        )
+                    })?;
+                let storage = Self::near_staking_storage_intent_from_views(
+                    &near_account,
+                    storage_bounds,
+                    storage_balance,
+                );
 
-        Ok(checkout_url)
+                tracing::info!(
+                    "House-of-Stake credit payment intent created: user_id={}, credits={}, price_id={}",
+                    user_id,
+                    credits,
+                    price_id
+                );
+
+                Ok(CreateCreditPurchaseOutcome::HouseOfStake {
+                    price_id,
+                    network_id: self.near_network_id.clone(),
+                    contract_id,
+                    quantity: credits,
+                    attached_deposit_yocto: attached_deposit_yocto.to_string(),
+                    storage: Box::new(storage),
+                })
+            }
+            "stripe" => {
+                if !self.is_stripe_configured() {
+                    return Err(SubscriptionError::NotConfigured);
+                }
+
+                let customer_id = self.get_or_create_stripe_customer(user_id, None).await?;
+                let idempotency_key = generate_credit_checkout_idempotency_key(
+                    &user_id,
+                    &price_id,
+                    credits,
+                    &success_url,
+                    &cancel_url,
+                );
+                let session = self
+                    .stripe_client
+                    .create_credits_checkout_session(StripeCreateCreditsCheckoutParams {
+                        customer_id,
+                        price_id,
+                        credits,
+                        success_url,
+                        cancel_url,
+                        user_id: user_id.0.to_string(),
+                        idempotency_key: idempotency_key.clone(),
+                    })
+                    .await?;
+                let checkout_url = session.url.ok_or_else(|| {
+                    SubscriptionError::StripeError("No checkout URL returned".into())
+                })?;
+
+                tracing::info!(
+                    "Stripe credit checkout session created: user_id={}, credits={}, session_id={}, idempotency_key={}...",
+                    user_id,
+                    credits,
+                    session.id,
+                    &idempotency_key.chars().take(16).collect::<String>()
+                );
+
+                Ok(CreateCreditPurchaseOutcome::Stripe { checkout_url })
+            }
+            _ => Err(SubscriptionError::InvalidProvider(format!(
+                "Unsupported provider: '{}'. Supported: {}",
+                provider,
+                Self::SUPPORTED_PROVIDERS.join(", ")
+            ))),
+        }
+    }
+
+    async fn confirm_credit_purchase(
+        &self,
+        user_id: UserId,
+        purchase_id: String,
+        expected_credits: u64,
+    ) -> Result<CreditsSummary, SubscriptionError> {
+        if expected_credits == 0 {
+            return Err(SubscriptionError::InvalidCredits(
+                "credits must be positive".to_string(),
+            ));
+        }
+
+        let price_id = self.get_hos_credits_price_id().await?;
+        let contract_id = self.hos_contract_id()?;
+        let near_account = self.get_near_account_id(user_id).await?;
+
+        let purchase = view_get_purchase(&self.near_rpc_url, &contract_id, &purchase_id)
+            .await
+            .map_err(Self::near_rpc_err)?
+            .ok_or_else(|| {
+                SubscriptionError::InvalidCredits("House-of-Stake purchase not found".to_string())
+            })?;
+        Self::validate_hos_credit_purchase_freshness(purchase.created_ns)?;
+        let price = view_get_price(&self.near_rpc_url, &contract_id, &price_id)
+            .await
+            .map_err(Self::near_rpc_err)?
+            .ok_or_else(|| {
+                SubscriptionError::InvalidCredits(
+                    "House-of-Stake credit price not found".to_string(),
+                )
+            })?;
+
+        let purchase_account = purchase.account_id.as_deref().ok_or_else(|| {
+            SubscriptionError::InvalidCredits(
+                "House-of-Stake purchase is missing account_id".to_string(),
+            )
+        })?;
+        if purchase_account != near_account {
+            return Err(SubscriptionError::InvalidCredits(
+                "House-of-Stake purchase account does not match the linked NEAR wallet".to_string(),
+            ));
+        }
+
+        let purchase_price = purchase.price_id.as_deref().ok_or_else(|| {
+            SubscriptionError::InvalidCredits(
+                "House-of-Stake purchase is missing price_id".to_string(),
+            )
+        })?;
+        if purchase_price != price_id {
+            return Err(SubscriptionError::InvalidCredits(
+                "House-of-Stake purchase price does not match the configured credit price"
+                    .to_string(),
+            ));
+        }
+
+        let quantity = purchase.quantity.ok_or_else(|| {
+            SubscriptionError::InvalidCredits(
+                "House-of-Stake purchase is missing quantity".to_string(),
+            )
+        })?;
+        if quantity != expected_credits {
+            return Err(SubscriptionError::InvalidCredits(
+                "House-of-Stake purchase quantity does not match requested credits".to_string(),
+            ));
+        }
+
+        let unit_amount = price.amount_yocto().ok_or_else(|| {
+            SubscriptionError::InvalidCredits(
+                "Configured House-of-Stake credit price is missing amount".to_string(),
+            )
+        })?;
+        let amount_paid = purchase
+            .amount_paid
+            .map(|amount| amount.as_u128())
+            .ok_or_else(|| {
+                SubscriptionError::InvalidCredits(
+                    "House-of-Stake purchase is missing amount_paid".to_string(),
+                )
+            })?;
+        let expected_amount = unit_amount
+            .checked_mul(u128::from(quantity))
+            .ok_or_else(|| {
+                SubscriptionError::InvalidCredits(
+                    "House-of-Stake purchase amount overflow".to_string(),
+                )
+            })?;
+        if amount_paid != expected_amount {
+            return Err(SubscriptionError::InvalidCredits(
+                "House-of-Stake purchase amount does not match price times quantity".to_string(),
+            ));
+        }
+
+        let amount_nano_usd =
+            Self::credits_to_nano_usd(expected_credits as i64).ok_or_else(|| {
+                SubscriptionError::InvalidCredits(
+                    "credits amount is too large to convert to nano-USD".to_string(),
+                )
+            })?;
+
+        let mut client = self
+            .db_pool
+            .get()
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+        let txn = client
+            .transaction()
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+        let inserted = self
+            .credits_repo
+            .try_record_purchase(&txn, user_id, amount_nano_usd, &purchase_id)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+        if inserted {
+            self.credits_repo
+                .add_credits(&txn, user_id, amount_nano_usd)
+                .await
+                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+        }
+        txn.commit()
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        if inserted {
+            self.invalidate_credit_limit_cache(user_id).await;
+            tracing::info!(
+                "House-of-Stake credits added for user_id={}, amount_nano_usd={}, credits={}, purchase_id={}",
+                user_id,
+                amount_nano_usd,
+                expected_credits,
+                purchase_id
+            );
+        } else {
+            tracing::info!(
+                "House-of-Stake credit purchase already processed: user_id={}, purchase_id={}",
+                user_id,
+                purchase_id
+            );
+        }
+
+        self.get_credits(user_id).await
     }
 
     async fn reconcile_purchased_after_usage(
@@ -2565,19 +3884,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
     }
 
     async fn get_credits(&self, user_id: UserId) -> Result<CreditsSummary, SubscriptionError> {
-        // Refresh remaining balance from period usage vs plan before returning summary
-        if let Err(e) = self.reconcile_purchased_after_usage(user_id).await {
-            tracing::warn!(error = ?e, "Failed to reconcile purchased credits before get_credits");
-        }
-
         let (plan_credits, period_start, period_end) =
             self.resolve_plan_period_for_user(user_id).await?;
-
-        let (balance, total_purchased_nano_usd, spent_purchased_nano_usd) = self
-            .credits_repo
-            .get_purchased_breakdown(user_id)
-            .await
-            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
         let period_spent_credits = self
             .user_usage_repo
@@ -2586,6 +3894,25 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .map_err(|e| SubscriptionError::InternalError(e.to_string()))?
             .map(|s| s.cost_nano_usd)
             .unwrap_or(0);
+
+        if period_spent_credits > 0 {
+            if let Err(e) = self
+                .credits_repo
+                .reconcile_purchased_after_usage(user_id, plan_credits, period_start, period_end)
+                .await
+                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))
+            {
+                tracing::warn!(error = ?e, "Failed to reconcile purchased credits before get_credits");
+            } else {
+                self.invalidate_credit_limit_cache(user_id).await;
+            }
+        }
+
+        let (balance, total_purchased_nano_usd, spent_purchased_nano_usd) = self
+            .credits_repo
+            .get_purchased_breakdown(user_id)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
         Ok(CreditsSummary {
             balance,
@@ -2666,7 +3993,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::system_configs::ports::{PaymentProviderConfig, SubscriptionPlanConfig};
+    use crate::system_configs::ports::{
+        PaymentProviderConfig, StakeBasedMonthlyCreditsConfig, SubscriptionPlanConfig,
+    };
     use crate::UserId;
     use chrono::TimeZone;
     use std::collections::HashMap;
@@ -2684,8 +4013,63 @@ mod tests {
             agent_instances: Some(crate::system_configs::ports::PlanLimitConfig { max: instances }),
             monthly_tokens: Some(crate::system_configs::ports::PlanLimitConfig { max: tokens }),
             monthly_credits: None,
+            stake_based_monthly_credits: None,
             allowed_models: None,
         }
+    }
+
+    fn hos_plan_config(price_id: &str) -> SubscriptionPlanConfig {
+        SubscriptionPlanConfig {
+            providers: HashMap::from([(
+                "house-of-stake".to_string(),
+                PaymentProviderConfig {
+                    price_id: price_id.to_string(),
+                },
+            )]),
+            price: None,
+            trial_period_days: None,
+            agent_instances: None,
+            monthly_tokens: None,
+            monthly_credits: None,
+            stake_based_monthly_credits: None,
+            allowed_models: None,
+        }
+    }
+
+    #[test]
+    fn test_stake_based_credits_for_lock() {
+        let mut config = hos_plan_config("hos_basic");
+
+        assert_eq!(
+            SubscriptionServiceImpl::stake_based_credits_for_lock(&config, YOCTO_PER_NEAR),
+            None
+        );
+
+        config.stake_based_monthly_credits = Some(StakeBasedMonthlyCreditsConfig {
+            credits_per_staked_near_nano_usd: Some(10_000_000),
+        });
+
+        let cases = [
+            (0, 0),
+            (YOCTO_PER_NEAR, 10_000_000),
+            (YOCTO_PER_NEAR + YOCTO_PER_NEAR / 2, 15_000_000),
+            (500 * YOCTO_PER_NEAR, 5_000_000_000),
+        ];
+
+        for (lock_amount_yocto, expected_credits) in cases {
+            assert_eq!(
+                SubscriptionServiceImpl::stake_based_credits_for_lock(&config, lock_amount_yocto),
+                Some(expected_credits)
+            );
+        }
+
+        config.stake_based_monthly_credits = Some(StakeBasedMonthlyCreditsConfig {
+            credits_per_staked_near_nano_usd: Some(u64::MAX),
+        });
+        assert_eq!(
+            SubscriptionServiceImpl::stake_based_credits_for_lock(&config, u128::MAX),
+            Some((u128::MAX / YOCTO_PER_NEAR) as u64)
+        );
     }
 
     fn base_subscription() -> Subscription {
@@ -2906,6 +4290,23 @@ mod tests {
         assert_eq!(
             resolve_plan_name_from_config("stripe", "price_unknown", &plans),
             None
+        );
+    }
+
+    #[test]
+    fn test_hos_price_ids_are_deterministic_and_deduped() {
+        let mut plans = HashMap::new();
+        plans.insert("pro".to_string(), hos_plan_config("price_hos_pro"));
+        plans.insert("basic".to_string(), hos_plan_config("price_hos_basic"));
+        plans.insert("starter".to_string(), hos_plan_config("price_hos_basic"));
+        plans.insert(
+            "stripe_only".to_string(),
+            plan_config("price_stripe", 100, 1),
+        );
+
+        assert_eq!(
+            SubscriptionServiceImpl::hos_price_ids(&plans),
+            vec!["price_hos_basic".to_string(), "price_hos_pro".to_string()]
         );
     }
 

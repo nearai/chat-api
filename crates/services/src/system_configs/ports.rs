@@ -87,6 +87,20 @@ pub struct PlanLimitConfig {
     pub max: u64,
 }
 
+/// Stake-based monthly credit calculation for a subscription plan.
+///
+/// Fixed-credit plans should use the existing `monthly_credits.max` field.
+/// Variable-credit staking plans set `credits_per_staked_near_nano_usd`, and monthly credits are:
+/// `staked_near * credits_per_staked_near_nano_usd`.
+/// Example: `$0.01` credits per staked NEAR is `10_000_000` nano-USD, so staking
+/// 500 NEAR grants `$5` credits.
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StakeBasedMonthlyCreditsConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credits_per_staked_near_nano_usd: Option<u64>,
+}
+
 /// Subscription plan configuration with provider-specific pricing and limits
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,6 +124,10 @@ pub struct SubscriptionPlanConfig {
     /// When set, takes precedence over monthly_tokens.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub monthly_credits: Option<PlanLimitConfig>,
+    /// Optional stake-based monthly credit calculation. If omitted, staking subscriptions use
+    /// `monthly_credits` / `monthly_tokens` / default like other providers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stake_based_monthly_credits: Option<StakeBasedMonthlyCreditsConfig>,
     /// List of model IDs allowed for this plan (e.g. ["gpt-3.5-turbo", "gpt-4o"])
     /// None = allow all models (default); Some(vec) = only allow models in the list
     /// An empty list denies all models.
