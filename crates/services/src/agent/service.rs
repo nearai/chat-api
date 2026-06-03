@@ -3975,18 +3975,10 @@ impl AgentService for AgentServiceImpl {
     }
 
     fn find_crabshack_manager(&self) -> Option<config::AgentManager> {
-        // Find a manager that is NOT a legacy compose-api (not non-TEE)
         self.managers
             .iter()
-            .find(|m| !m.get_is_non_tee())
+            .find(|m| m.url.contains("crabshack"))
             .cloned()
-            .or_else(|| {
-                // Fallback: find any manager whose URL does not match the non-TEE pattern
-                self.managers
-                    .iter()
-                    .find(|m| !m.url.contains(&self.non_tee_agent_url_pattern))
-                    .cloned()
-            })
     }
 }
 

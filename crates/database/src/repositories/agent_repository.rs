@@ -1222,47 +1222,48 @@ impl AgentRepository for PostgresAgentRepository {
         &self,
         legacy_patterns: Vec<String>,
         crabshack_pattern: String,
-    ) -> anyhow::Result<(i64, i64, i64, i64)> {
+    ) -> anyhow::Result<(i64, i64, i64, i64, i64)> {
         let client = self.pool.get().await?;
 
-        // Build OR clauses for multiple legacy patterns
-        let mut pending_clauses = Vec::new();
         let mut params: Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>> = Vec::new();
-        let mut param_idx = 1u32;
+        let mut idx = 1u32;
 
-        for pattern in legacy_patterns {
-            pending_clauses.push(format!("agent_api_base_url LIKE ${}", param_idx));
-            params.push(Box::new(pattern.to_string()));
-            param_idx += 1;
-        }
-
-        let crabshack_param_idx = param_idx;
-        params.push(Box::new(crabshack_pattern.to_string()));
-
-        let pending_expr = if pending_clauses.is_empty() {
+        let pending_expr = if legacy_patterns.is_empty() {
             "FALSE".to_string()
         } else {
-            pending_clauses.join(" OR ")
+            let clauses: Vec<String> = legacy_patterns
+                .into_iter()
+                .map(|p| {
+                    let clause = format!("agent_api_base_url LIKE ${}", idx);
+                    params.push(Box::new(p));
+                    idx += 1;
+                    clause
+                })
+                .collect();
+            clauses.join(" OR ")
         };
 
+        params.push(Box::new(crabshack_pattern));
+        let crabshack_idx = idx;
+
         let query = format!(
-            "SELECT
-                COUNT(*) AS total,
-                COUNT(*) FILTER (WHERE agent_api_base_url LIKE ${}) AS migrated,
-                COUNT(*) FILTER (WHERE {}) AS pending,
-                COUNT(*) FILTER (WHERE agent_api_base_url IS NULL) AS unknown
-             FROM agent_instances
-             WHERE status != 'deleted'",
-            crabshack_param_idx, pending_expr
+            "SELECT COUNT(*) AS total, \
+                    COUNT(*) FILTER (WHERE agent_api_base_url LIKE ${crabshack_idx}) AS migrated, \
+                    COUNT(*) FILTER (WHERE {pending_expr}) AS pending, \
+                    COUNT(*) FILTER (WHERE agent_api_base_url IS NULL) AS no_url \
+             FROM agent_instances WHERE status != 'deleted'"
         );
 
-        let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = params
-            .iter()
-            .map(|p| p.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
-            .collect();
+        let refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+            params.iter().map(|p| p.as_ref() as _).collect();
+        let row = client.query_one(&query, &refs).await?;
 
-        let row = client.query_one(&query, &param_refs).await?;
+        let total: i64 = row.get(0);
+        let migrated: i64 = row.get(1);
+        let pending: i64 = row.get(2);
+        let no_url: i64 = row.get(3);
+        let unknown = total - migrated - pending - no_url;
 
-        Ok((row.get(0), row.get(1), row.get(2), row.get(3)))
+        Ok((total, migrated, pending, no_url, unknown))
     }
 }

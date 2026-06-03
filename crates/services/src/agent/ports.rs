@@ -383,13 +383,12 @@ pub trait AgentRepository: Send + Sync {
         dashboard_url: Option<String>,
     ) -> anyhow::Result<AgentInstance>;
 
-    /// Get migration status counts grouped by agent_api_base_url pattern.
-    /// Returns (total, migrated, pending, unknown).
+    /// Returns (total, migrated, pending, no_url, unknown).
     async fn get_migration_status_counts(
         &self,
         legacy_patterns: Vec<String>,
         crabshack_pattern: String,
-    ) -> anyhow::Result<(i64, i64, i64, i64)>;
+    ) -> anyhow::Result<(i64, i64, i64, i64, i64)>;
 }
 
 /// Service trait for agent business logic

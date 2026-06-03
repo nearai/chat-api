@@ -3277,6 +3277,7 @@ pub struct MigrationStatusResponse {
     pub total: i64,
     pub migrated: i64,
     pub pending: i64,
+    pub no_url: i64,
     pub unknown: i64,
     pub failed: i64,
 }
@@ -3288,11 +3289,10 @@ pub async fn admin_migration_status(
 ) -> Result<Json<MigrationStatusResponse>, ApiError> {
     tracing::info!("Admin: Getting migration status");
 
-    // Legacy compose-api URLs contain "claws" or "sare.dev"; CrabShack URLs contain "agents.near.ai"
     let legacy_patterns = vec!["%claws%".to_string(), "%sare.dev%".to_string()];
     let crabshack_pattern = "%agents.near.ai%".to_string();
 
-    let (total, migrated, pending, unknown) = app_state
+    let (total, migrated, pending, no_url, unknown) = app_state
         .agent_repository
         .get_migration_status_counts(legacy_patterns, crabshack_pattern)
         .await
@@ -3305,8 +3305,9 @@ pub async fn admin_migration_status(
         total,
         migrated,
         pending,
+        no_url,
         unknown,
-        failed: 0, // derived from instance status in future iterations
+        failed: 0,
     }))
 }
 
@@ -3409,8 +3410,8 @@ pub async fn admin_migrate_instance(
         .as_deref()
         .ok_or_else(|| ApiError::bad_request("Instance has no instance_token"))?;
 
-    // Validate decrypted token is not still in encrypted format
-    if is_encrypted_format(instance_token) {
+    // If the token can still be decrypted, it wasn't decrypted by the repository layer
+    if database::encryption::decrypt(instance_token).is_ok() {
         return Err(ApiError::internal_server_error(
             "Instance token appears to still be encrypted after decryption",
         ));
@@ -3466,14 +3467,47 @@ pub async fn admin_migrate_instance(
         ApiError::internal_server_error("Failed to parse legacy instance metadata")
     })?;
 
+    // Preflight: extract required fields before any side effects (start/backup/stop).
+    // CrabShack's import validator rejects null values for these.
+    let ssh_pubkey = compose_data
+        .get("ssh_pubkey")
+        .and_then(|v| v.as_str())
+        .or(instance.public_ssh_key.as_deref())
+        .ok_or_else(|| ApiError::bad_request("Instance has no ssh_pubkey — cannot migrate"))?;
+    let nearai_api_key = compose_data
+        .get("nearai_api_key")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ApiError::bad_request("Instance has no nearai_api_key — cannot migrate"))?;
+    let nearai_api_url = compose_data
+        .get("nearai_api_url")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ApiError::bad_request("Instance has no nearai_api_url — cannot migrate"))?;
+    // Fallbacks match create_instance_from_agent_api defaults (service.rs unwrap_or values)
+    let image = compose_data
+        .get("image")
+        .and_then(|v| v.as_str())
+        .unwrap_or("docker.io/nearaidev/ironclaw-dind:latest");
+    let mem_limit = compose_data
+        .get("mem_limit")
+        .and_then(|v| v.as_str())
+        .unwrap_or("4g");
+    let cpus = compose_data
+        .get("cpus")
+        .and_then(|v| v.as_str())
+        .unwrap_or("1");
+    let storage_size = compose_data
+        .get("storage_size")
+        .and_then(|v| v.as_str())
+        .unwrap_or("10G");
+
     let compose_status = compose_data
         .get("status")
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
 
     // If instance is stopped, start it first (backup requires running instance)
-    let was_stopped = compose_status == "stopped" || compose_status == "exited";
-    if was_stopped {
+    let was_running = compose_status != "stopped" && compose_status != "exited";
+    if !was_running {
         tracing::info!(
             "Instance is stopped, starting before backup: instance_id={}",
             id
@@ -3525,12 +3559,13 @@ pub async fn admin_migrate_instance(
         .await
         .map_err(|e| {
             tracing::error!("Failed to create backup: instance_id={}, error={}", id, e);
-            maybe_restart_on_failure(
+            restore_on_failure(
                 &app_state,
                 compose_api_url,
                 &encoded_name,
                 &manager.token,
-                was_stopped,
+                was_running,
+                "stop",
             );
             ApiError::internal_server_error("Failed to initiate backup on legacy compose-api")
         })?;
@@ -3542,12 +3577,13 @@ pub async fn admin_migrate_instance(
             id,
             status
         );
-        maybe_restart_on_failure(
+        restore_on_failure(
             &app_state,
             compose_api_url,
             &encoded_name,
             &manager.token,
-            was_stopped,
+            was_running,
+            "stop",
         );
         return Err(ApiError::internal_server_error(
             "Failed to create backup on legacy compose-api",
@@ -3563,12 +3599,13 @@ pub async fn admin_migrate_instance(
                 id,
                 e
             );
-            maybe_restart_on_failure(
+            restore_on_failure(
                 &app_state,
                 compose_api_url,
                 &encoded_name,
                 &manager.token,
-                was_stopped,
+                was_running,
+                "stop",
             );
             return Err(ApiError::internal_server_error(
                 "Failed to get backup URL from legacy compose-api",
@@ -3586,49 +3623,43 @@ pub async fn admin_migrate_instance(
         .send()
         .await;
 
-    if let Err(e) = &stop_resp {
-        tracing::warn!(
-            "Failed to stop instance on compose-api (continuing): instance_id={}, error={}",
-            id,
-            e
-        );
-    } else if let Ok(resp) = &stop_resp {
-        if !resp.status().is_success() {
-            tracing::warn!(
-                "Compose-api stop returned non-success (continuing): instance_id={}, status={}",
+    let stop_failed = match &stop_resp {
+        Err(e) => {
+            tracing::error!(
+                "Failed to stop instance on compose-api: instance_id={}, error={}",
+                id,
+                e
+            );
+            true
+        }
+        Ok(resp) if !resp.status().is_success() => {
+            tracing::error!(
+                "Compose-api stop returned non-success: instance_id={}, status={}",
                 id,
                 resp.status()
             );
+            true
         }
+        _ => false,
+    };
+    if stop_failed {
+        restore_on_failure(
+            &app_state,
+            compose_api_url,
+            &encoded_name,
+            &manager.token,
+            was_running,
+            "stop",
+        );
+        return Err(ApiError::internal_server_error(
+            "Failed to stop legacy instance before import",
+        ));
     }
 
     // Import into CrabShack
     let service_type = instance.service_type.as_deref().unwrap_or("openclaw");
     let crabshack_service_type =
         services::agent::service::service_type_for_crabshack(service_type, None);
-
-    let ssh_pubkey = compose_data
-        .get("ssh_pubkey")
-        .and_then(|v| v.as_str())
-        .or(instance.public_ssh_key.as_deref());
-    let nearai_api_key = compose_data.get("nearai_api_key").and_then(|v| v.as_str());
-    let nearai_api_url = compose_data.get("nearai_api_url").and_then(|v| v.as_str());
-    let image = compose_data
-        .get("image")
-        .and_then(|v| v.as_str())
-        .unwrap_or("docker.io/nearaidev/ironclaw-dind:latest");
-    let mem_limit = compose_data
-        .get("mem_limit")
-        .and_then(|v| v.as_str())
-        .unwrap_or("4g");
-    let cpus = compose_data
-        .get("cpus")
-        .and_then(|v| v.as_str())
-        .unwrap_or("1");
-    let storage_size = compose_data
-        .get("storage_size")
-        .and_then(|v| v.as_str())
-        .unwrap_or("10G");
 
     // Store overwritten values in extra_env for rollback reference
     let extra_env = serde_json::json!({
@@ -3642,12 +3673,13 @@ pub async fn admin_migrate_instance(
         .find_crabshack_manager()
         .ok_or_else(|| {
             tracing::error!("No CrabShack manager configured for import");
-            maybe_restart_on_failure(
+            restore_on_failure(
                 &app_state,
                 compose_api_url,
                 &encoded_name,
                 &manager.token,
-                was_stopped,
+                was_running,
+                "start",
             );
             ApiError::internal_server_error("No CrabShack manager configured")
         })?;
@@ -3683,12 +3715,13 @@ pub async fn admin_migrate_instance(
                 id,
                 e
             );
-            maybe_restart_on_failure(
+            restore_on_failure(
                 &app_state,
                 compose_api_url,
                 &encoded_name,
                 &manager.token,
-                was_stopped,
+                was_running,
+                "start",
             );
             ApiError::internal_server_error("Failed to import into CrabShack")
         })?;
@@ -3700,18 +3733,19 @@ pub async fn admin_migrate_instance(
             id,
             status
         );
-        maybe_restart_on_failure(
+        restore_on_failure(
             &app_state,
             compose_api_url,
             &encoded_name,
             &manager.token,
-            was_stopped,
+            was_running,
+            "start",
         );
         return Err(ApiError::internal_server_error("CrabShack import failed"));
     }
 
-    // Parse CrabShack import SSE response for the new instance details
-    let import_data = match parse_sse_for_import_result(import_resp).await {
+    // Parse CrabShack import SSE to confirm completion (we don't use the data — URLs are constructed)
+    let _import_data = match parse_sse_for_import_result(import_resp).await {
         Ok(data) => data,
         Err(e) => {
             tracing::error!(
@@ -3719,12 +3753,13 @@ pub async fn admin_migrate_instance(
                 id,
                 e
             );
-            maybe_restart_on_failure(
+            restore_on_failure(
                 &app_state,
                 compose_api_url,
                 &encoded_name,
                 &manager.token,
-                was_stopped,
+                was_running,
+                "start",
             );
             return Err(ApiError::internal_server_error(
                 "Failed to parse CrabShack import response",
@@ -3732,18 +3767,21 @@ pub async fn admin_migrate_instance(
         }
     };
 
-    // Extract new URLs from CrabShack response
-    let new_instance_url = import_data
-        .get("url")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let new_dashboard_url = import_data
-        .get("dashboard_url")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    // Construct instance_url from CrabShack manager domain + instance name + token.
+    // CrabShack doesn't emit URLs — same pattern as the normal create flow (service.rs:1584-1597).
+    let new_instance_url = url::Url::parse(&crabshack_manager.url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_string()))
+        .map(|domain| {
+            format!(
+                "https://{}.{}/?token={}",
+                instance_name, domain, instance_token
+            )
+        });
+    let new_dashboard_url = new_instance_url.clone();
 
     // Update chat-api DB to point to CrabShack
-    let _updated = app_state
+    let db_update = app_state
         .agent_repository
         .admin_update_instance(
             id,
@@ -3752,15 +3790,24 @@ pub async fn admin_migrate_instance(
             None, // keep instance_token unchanged
             new_dashboard_url,
         )
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                "Failed to update instance after migration: instance_id={}, error={}",
-                id,
-                e
-            );
-            ApiError::internal_server_error("Migration succeeded but failed to update DB")
-        })?;
+        .await;
+    if let Err(e) = db_update {
+        tracing::error!(
+            "Failed to update instance after migration: instance_id={}, crabshack_url={}, error={}. Restarting legacy instance.",
+            id, crabshack_manager.url, e
+        );
+        restore_on_failure(
+            &app_state,
+            compose_api_url,
+            &encoded_name,
+            &manager.token,
+            was_running,
+            "start",
+        );
+        return Err(ApiError::internal_server_error(
+            "Migration succeeded but failed to update DB — legacy instance restarted",
+        ));
+    }
 
     tracing::info!(
         "Migration completed: instance_id={}, instance_name={}",
@@ -3773,21 +3820,6 @@ pub async fn admin_migrate_instance(
         instance_name,
         message: "Instance migrated to CrabShack".to_string(),
     }))
-}
-
-/// Check if a string looks like AES-256-GCM encrypted format (nonce:ciphertext)
-fn is_encrypted_format(s: &str) -> bool {
-    let parts: Vec<&str> = s.split(':').collect();
-    if parts.len() != 2 {
-        return false;
-    }
-    // Nonce is 12 bytes = 24 hex chars
-    let nonce = parts[0];
-    let ciphertext = parts[1];
-    nonce.len() == 24
-        && !ciphertext.is_empty()
-        && nonce.chars().all(|c| c.is_ascii_hexdigit())
-        && ciphertext.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// Maximum buffer size for SSE parsing (1 MB).
@@ -3911,43 +3943,53 @@ async fn parse_sse_for_import_result(
     anyhow::bail!("CrabShack import stream ended without completion event")
 }
 
-/// Best-effort restart of an instance on compose-api if we stopped it for backup.
-/// Errors are logged but not propagated — this is cleanup after a failure.
-fn maybe_restart_on_failure(
+/// Best-effort lifecycle call on compose-api to restore original instance state after failure.
+/// Fire-and-forget (tokio::spawn) — errors are logged, not propagated.
+fn restore_on_failure(
     app_state: &AppState,
     compose_api_url: &str,
     encoded_name: &str,
     token: &str,
-    was_stopped: bool,
+    was_running: bool,
+    action: &str,
 ) {
-    // was_stopped=true means the instance was already stopped before migration,
-    // so we only need to restart it if it was RUNNING (i.e. we stopped it ourselves).
-    if was_stopped {
+    let should_restore = match action {
+        "stop" => !was_running,
+        "start" => was_running,
+        _ => false,
+    };
+    if !should_restore {
         return;
     }
-    let start_url = format!("{}/instances/{}/start", compose_api_url, encoded_name);
+    let url = format!("{}/instances/{}/{}", compose_api_url, encoded_name, action);
     let client = app_state.http_client.clone();
     let token = token.to_string();
+    let action = action.to_string();
     tokio::spawn(async move {
         match client
-            .post(&start_url)
+            .post(&url)
             .bearer_auth(&token)
             .timeout(std::time::Duration::from_secs(60))
             .send()
             .await
         {
             Ok(resp) if resp.status().is_success() => {
-                tracing::info!("Restarted legacy instance after migration failure");
+                tracing::info!(
+                    "Restored legacy instance after migration failure: action={}",
+                    action
+                );
             }
             Ok(resp) => {
                 tracing::warn!(
-                    "Failed to restart legacy instance after migration failure: status={}",
+                    "Failed to restore legacy instance: action={}, status={}",
+                    action,
                     resp.status()
                 );
             }
             Err(e) => {
                 tracing::warn!(
-                    "Failed to restart legacy instance after migration failure: error={}",
+                    "Failed to restore legacy instance: action={}, error={}",
+                    action,
                     e
                 );
             }
