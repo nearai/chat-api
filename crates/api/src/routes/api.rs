@@ -3336,13 +3336,28 @@ async fn enforce_model_access(
         .await
     {
         Ok(()) => Ok(()),
-        Err(SubscriptionError::ModelNotAllowedInPlan { model, plan }) => Err((
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse {
-                error: SubscriptionError::ModelNotAllowedInPlan { model, plan }.to_string(),
-            }),
-        )
-            .into_response()),
+        Err(SubscriptionError::ModelNotAllowedInPlan { model, plan }) => {
+            // Return a stable, machine-readable `code` alongside the message so
+            // clients can distinguish "model is gated behind a higher plan"
+            // from a generic upstream failure, and prompt the user to upgrade
+            // instead of showing a misleading "model failed to respond" error.
+            // `error` is kept byte-for-byte identical for backward compatibility.
+            let error = SubscriptionError::ModelNotAllowedInPlan {
+                model: model.clone(),
+                plan: plan.clone(),
+            }
+            .to_string();
+            Err((
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({
+                    "error": error,
+                    "code": "model_not_allowed_in_plan",
+                    "model": model,
+                    "plan": plan,
+                })),
+            )
+                .into_response())
+        }
         Err(err) => {
             tracing::error!(
                 "Failed to validate model access for user_id={}, model_id={}: {}",
