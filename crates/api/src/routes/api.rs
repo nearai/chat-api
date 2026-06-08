@@ -3336,7 +3336,12 @@ async fn enforce_model_access(
         .await
     {
         Ok(()) => Ok(()),
-        Err(ref err @ SubscriptionError::ModelNotAllowedInPlan { ref model, ref plan }) => {
+        Err(
+            ref err @ SubscriptionError::ModelNotAllowedInPlan {
+                ref model,
+                ref plan,
+            },
+        ) => {
             // Return a stable, machine-readable `code` alongside the message so
             // clients can distinguish "model is gated behind a higher plan"
             // from a generic upstream failure, and prompt the user to upgrade
