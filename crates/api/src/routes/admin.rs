@@ -3349,7 +3349,9 @@ pub async fn admin_migrate_instance(
     let id = Uuid::parse_str(&instance_id)
         .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
 
-    tracing::info!("Admin: Starting migration for instance_id={}", id);
+    let migrate_start = std::time::Instant::now();
+    let id_str = id.to_string();
+    tracing::info!("Migrate: starting, instance_id={}", id);
 
     let instance = app_state
         .agent_repository
@@ -3442,7 +3444,12 @@ pub async fn admin_migrate_instance(
         ));
     }
 
-    // Step 5: GET instance metadata from compose-api
+    tracing::info!(
+        "Migrate: preflight passed, fetching compose data, elapsed={:.1}s, instance_id={}, name={}",
+        migrate_start.elapsed().as_secs_f64(),
+        id,
+        instance.name,
+    );
     let compose_api_url = agent_api_base_url.trim_end_matches('/');
     let encoded_name = urlencoding::encode(&instance.name);
 
@@ -3530,12 +3537,12 @@ pub async fn admin_migrate_instance(
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
 
-    // If instance is stopped, start it first (backup requires running instance)
     let was_running = compose_status != "stopped" && compose_status != "exited";
     if !was_running {
         tracing::info!(
-            "Instance is stopped, starting before backup: instance_id={}",
-            id
+            "Migrate: instance stopped, starting before backup, elapsed={:.1}s, instance_id={}",
+            migrate_start.elapsed().as_secs_f64(),
+            id,
         );
         let start_url = format!("{}/instances/{}/start", compose_api_url, encoded_name);
         let start_resp = app_state
@@ -3566,7 +3573,12 @@ pub async fn admin_migrate_instance(
         }
     }
 
-    // Create backup on compose-api via SSE
+    tracing::info!(
+        "Migrate: requesting backup, was_running={}, elapsed={:.1}s, instance_id={}",
+        was_running,
+        migrate_start.elapsed().as_secs_f64(),
+        id,
+    );
     let backup_url = format!("{}/instances/{}/backup", compose_api_url, encoded_name);
     let backup_body = serde_json::json!({
         "age_recipient": age_recipient,
@@ -3616,7 +3628,7 @@ pub async fn admin_migrate_instance(
     }
 
     // Parse SSE stream to get backup presigned URL
-    let backup_presigned_url = match parse_sse_for_backup_url(backup_resp).await {
+    let backup_presigned_url = match parse_sse_for_backup_url(backup_resp, &id_str).await {
         Ok(url) => url,
         Err(e) => {
             tracing::error!(
@@ -3638,7 +3650,11 @@ pub async fn admin_migrate_instance(
         }
     };
 
-    // Stop instance on compose-api
+    tracing::info!(
+        "Migrate: backup complete, stopping legacy instance, elapsed={:.1}s, instance_id={}",
+        migrate_start.elapsed().as_secs_f64(),
+        id,
+    );
     let stop_url = format!("{}/instances/{}/stop", compose_api_url, encoded_name);
     let stop_resp = app_state
         .http_client
@@ -3681,7 +3697,11 @@ pub async fn admin_migrate_instance(
         ));
     }
 
-    // Import into CrabShack
+    tracing::info!(
+        "Migrate: legacy stopped, importing into CrabShack, elapsed={:.1}s, instance_id={}",
+        migrate_start.elapsed().as_secs_f64(),
+        id,
+    );
     let service_type = instance.service_type.as_deref().unwrap_or("openclaw");
     let crabshack_service_type =
         services::agent::service::service_type_for_crabshack(service_type, None);
@@ -3770,7 +3790,7 @@ pub async fn admin_migrate_instance(
     }
 
     // Parse CrabShack import SSE to confirm completion (we don't use the data — URLs are constructed)
-    let _import_data = match parse_sse_for_import_result(import_resp).await {
+    let _import_data = match parse_sse_for_import_result(import_resp, &id_str).await {
         Ok(data) => data,
         Err(e) => {
             tracing::error!(
@@ -3805,7 +3825,11 @@ pub async fn admin_migrate_instance(
         });
     let new_dashboard_url = new_instance_url.clone();
 
-    // Update chat-api DB to point to CrabShack
+    tracing::info!(
+        "Migrate: import complete, updating DB, elapsed={:.1}s, instance_id={}",
+        migrate_start.elapsed().as_secs_f64(),
+        id,
+    );
     let db_update = app_state
         .agent_repository
         .admin_update_instance(
@@ -3835,9 +3859,10 @@ pub async fn admin_migrate_instance(
     }
 
     tracing::info!(
-        "Migration completed: instance_id={}, instance_name={}",
+        "Migrate: completed successfully, elapsed={:.1}s, instance_id={}, name={}",
+        migrate_start.elapsed().as_secs_f64(),
         id,
-        instance_name
+        instance_name,
     );
 
     Ok(Json(MigrateInstanceResponse {
@@ -3849,24 +3874,40 @@ pub async fn admin_migrate_instance(
 
 /// Maximum buffer size for SSE parsing (1 MB).
 const SSE_BUFFER_LIMIT: usize = 1024 * 1024;
-/// Timeout for receiving each SSE chunk (30 seconds).
-const SSE_CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Timeout for receiving each SSE chunk during migration.
+/// Backup involves docker-exec tar + encrypt + S3 upload (can take minutes for large instances).
+/// Import involves image pull + backup download + decrypt + extract + container start.
+/// With compose-api keepalives every 5-15s, this timeout catches dead connections only.
+const SSE_MIGRATION_CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// Parse an SSE response stream to extract the backup presigned URL from the "complete" event.
-async fn parse_sse_for_backup_url(response: reqwest::Response) -> anyhow::Result<String> {
+async fn parse_sse_for_backup_url(
+    response: reqwest::Response,
+    instance_id: &str,
+) -> anyhow::Result<String> {
     use futures::stream::StreamExt;
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
+    let start = std::time::Instant::now();
+    let mut chunk_count: u64 = 0;
+
+    tracing::info!(
+        "Backup SSE: starting stream parse: instance_id={}",
+        instance_id,
+    );
 
     loop {
-        let chunk = match tokio::time::timeout(SSE_CHUNK_TIMEOUT, stream.next()).await {
+        let chunk = match tokio::time::timeout(SSE_MIGRATION_CHUNK_TIMEOUT, stream.next()).await {
             Ok(Some(chunk)) => chunk?,
             Ok(None) => break,
             Err(_) => anyhow::bail!(
-                "Timed out waiting for SSE chunk from backup stream ({}s)",
-                SSE_CHUNK_TIMEOUT.as_secs()
+                "Timed out waiting for SSE chunk from backup stream ({}s, received {} chunks in {:.1}s)",
+                SSE_MIGRATION_CHUNK_TIMEOUT.as_secs(),
+                chunk_count,
+                start.elapsed().as_secs_f64(),
             ),
         };
+        chunk_count += 1;
         buffer.push_str(&String::from_utf8_lossy(&chunk));
 
         if buffer.len() > SSE_BUFFER_LIMIT {
@@ -3883,6 +3924,12 @@ async fn parse_sse_for_backup_url(response: reqwest::Response) -> anyhow::Result
             if let Some(data) = line.strip_prefix("data: ") {
                 if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
                     let stage = event.get("stage").and_then(|v| v.as_str()).unwrap_or("");
+                    tracing::info!(
+                        "Backup SSE: stage={}, elapsed={:.1}s, instance_id={}",
+                        stage,
+                        start.elapsed().as_secs_f64(),
+                        instance_id,
+                    );
                     if stage == "error" {
                         let msg = event
                             .get("message")
@@ -3891,6 +3938,14 @@ async fn parse_sse_for_backup_url(response: reqwest::Response) -> anyhow::Result
                         anyhow::bail!("Backup failed: {}", msg);
                     }
                     if stage == "complete" || stage == "done" {
+                        let size_bytes =
+                            event.pointer("/backup/size_bytes").and_then(|v| v.as_u64());
+                        tracing::info!(
+                            "Backup SSE: complete, size_bytes={:?}, elapsed={:.1}s, instance_id={}",
+                            size_bytes,
+                            start.elapsed().as_secs_f64(),
+                            instance_id,
+                        );
                         if let Some(backup) = event.get("backup") {
                             if let Some(url) = backup.get("download_url").and_then(|v| v.as_str()) {
                                 return Ok(url.to_string());
@@ -3899,33 +3954,51 @@ async fn parse_sse_for_backup_url(response: reqwest::Response) -> anyhow::Result
                         if let Some(url) = event.get("download_url").and_then(|v| v.as_str()) {
                             return Ok(url.to_string());
                         }
+                        anyhow::bail!(
+                            "Backup SSE: stage=complete but no download_url found in event"
+                        );
                     }
                 }
             }
         }
     }
 
-    anyhow::bail!("No backup URL found in SSE stream")
+    anyhow::bail!(
+        "No backup URL found in SSE stream ({} chunks in {:.1}s)",
+        chunk_count,
+        start.elapsed().as_secs_f64(),
+    )
 }
 
 /// Parse an SSE response stream to extract the final import result from CrabShack.
 /// Returns only on "complete"/"done" event — fails if stream ends without one.
 async fn parse_sse_for_import_result(
     response: reqwest::Response,
+    instance_id: &str,
 ) -> anyhow::Result<serde_json::Value> {
     use futures::stream::StreamExt;
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
+    let start = std::time::Instant::now();
+    let mut chunk_count: u64 = 0;
+
+    tracing::info!(
+        "Import SSE: starting stream parse: instance_id={}",
+        instance_id,
+    );
 
     loop {
-        let chunk = match tokio::time::timeout(SSE_CHUNK_TIMEOUT, stream.next()).await {
+        let chunk = match tokio::time::timeout(SSE_MIGRATION_CHUNK_TIMEOUT, stream.next()).await {
             Ok(Some(chunk)) => chunk?,
             Ok(None) => break,
             Err(_) => anyhow::bail!(
-                "Timed out waiting for SSE chunk from import stream ({}s)",
-                SSE_CHUNK_TIMEOUT.as_secs()
+                "Timed out waiting for SSE chunk from import stream ({}s, received {} chunks in {:.1}s)",
+                SSE_MIGRATION_CHUNK_TIMEOUT.as_secs(),
+                chunk_count,
+                start.elapsed().as_secs_f64(),
             ),
         };
+        chunk_count += 1;
         buffer.push_str(&String::from_utf8_lossy(&chunk));
 
         if buffer.len() > SSE_BUFFER_LIMIT {
@@ -3943,6 +4016,13 @@ async fn parse_sse_for_import_result(
                 if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
                     let stage = event.get("stage").and_then(|v| v.as_str()).unwrap_or("");
                     let event_type = event.get("event").and_then(|v| v.as_str()).unwrap_or("");
+                    tracing::info!(
+                        "Import SSE: stage={}, event={}, elapsed={:.1}s, instance_id={}",
+                        stage,
+                        event_type,
+                        start.elapsed().as_secs_f64(),
+                        instance_id,
+                    );
                     if stage == "error" || event_type == "error" {
                         let msg = event
                             .get("message")
@@ -3952,6 +4032,11 @@ async fn parse_sse_for_import_result(
                         anyhow::bail!("CrabShack import failed: {}", msg);
                     }
                     if stage == "complete" || stage == "done" || event_type == "import_complete" {
+                        tracing::info!(
+                            "Import SSE: complete, elapsed={:.1}s, instance_id={}",
+                            start.elapsed().as_secs_f64(),
+                            instance_id,
+                        );
                         if let Some(inst) = event.get("instance") {
                             return Ok(inst.clone());
                         }
@@ -3965,7 +4050,11 @@ async fn parse_sse_for_import_result(
         }
     }
 
-    anyhow::bail!("CrabShack import stream ended without completion event")
+    anyhow::bail!(
+        "CrabShack import stream ended without completion event ({} chunks in {:.1}s)",
+        chunk_count,
+        start.elapsed().as_secs_f64(),
+    )
 }
 
 /// Best-effort lifecycle call on compose-api to restore original instance state after failure.
