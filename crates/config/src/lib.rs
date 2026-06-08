@@ -230,8 +230,10 @@ pub struct CorsConfig {
 
 impl Default for CorsConfig {
     fn default() -> Self {
-        let raw_origins = std::env::var("CORS_ALLOWED_ORIGINS")
-            .unwrap_or_else(|_| "http://localhost:3000,https://near.ai,*.near.ai".to_string());
+        let raw_origins = std::env::var("CORS_ALLOWED_ORIGINS").unwrap_or_else(|_| {
+            "http://localhost:3000,https://near.ai,*.near.ai,https://app.privatechat.com"
+                .to_string()
+        });
 
         let mut exact_matches = Vec::new();
         let mut wildcard_suffixes = Vec::new();
