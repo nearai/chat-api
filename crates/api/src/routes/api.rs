@@ -3336,17 +3336,13 @@ async fn enforce_model_access(
         .await
     {
         Ok(()) => Ok(()),
-        Err(SubscriptionError::ModelNotAllowedInPlan { model, plan }) => {
+        Err(ref err @ SubscriptionError::ModelNotAllowedInPlan { ref model, ref plan }) => {
             // Return a stable, machine-readable `code` alongside the message so
             // clients can distinguish "model is gated behind a higher plan"
             // from a generic upstream failure, and prompt the user to upgrade
             // instead of showing a misleading "model failed to respond" error.
             // `error` is kept byte-for-byte identical for backward compatibility.
-            let error = SubscriptionError::ModelNotAllowedInPlan {
-                model: model.clone(),
-                plan: plan.clone(),
-            }
-            .to_string();
+            let error = err.to_string();
             Err((
                 StatusCode::FORBIDDEN,
                 Json(serde_json::json!({
