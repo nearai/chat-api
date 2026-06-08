@@ -254,6 +254,23 @@ pub struct ModelNotAllowedErrorResponse {
     pub plan: String,
 }
 
+/// `403` body for the inference/proxy endpoints. It is one of two shapes:
+/// a plan-gated rejection ([`ModelNotAllowedErrorResponse`], carrying
+/// `code = "model_not_allowed_in_plan"`), or a generic forbidden error
+/// ([`ErrorResponse`], e.g. a banned user) that exposes only `error`.
+/// Modeled as a `oneOf` so generated clients accept both bodies.
+///
+/// Documentation-only: handlers return the concrete `ModelNotAllowedErrorResponse`
+/// / `ErrorResponse` directly, so the variants are never constructed in code —
+/// this type exists purely to shape the OpenAPI `403` response.
+#[derive(Serialize, ToSchema)]
+#[serde(untagged)]
+#[allow(dead_code)]
+pub enum ForbiddenErrorResponse {
+    ModelNotAllowed(ModelNotAllowedErrorResponse),
+    Generic(ErrorResponse),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct InvalidProxyPathSegment;
 
@@ -2305,7 +2322,7 @@ async fn get_file_content(
         (status = 200, description = "Response created successfully"),
         (status = 400, description = BAD_REQUEST, body = ErrorResponse),
         (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
-        (status = 403, description = "Forbidden - user banned, or model not available in the caller's plan (body carries code=model_not_allowed_in_plan)", body = ModelNotAllowedErrorResponse),
+        (status = 403, description = "Forbidden - user banned (body: error only), or model not available in the caller's plan (body adds code=model_not_allowed_in_plan, model, plan)", body = ForbiddenErrorResponse),
         (status = 502, description = OPENAI_API_ERROR, body = ErrorResponse)
     ),
     security(
@@ -3892,7 +3909,7 @@ async fn proxy_post_to_cloud_api(
         (status = 200, description = "Chat completion created successfully"),
         (status = 400, description = BAD_REQUEST, body = ErrorResponse),
         (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
-        (status = 403, description = "Forbidden - user banned, or model not available in the caller's plan (body carries code=model_not_allowed_in_plan)", body = ModelNotAllowedErrorResponse),
+        (status = 403, description = "Forbidden - user banned (body: error only), or model not available in the caller's plan (body adds code=model_not_allowed_in_plan, model, plan)", body = ForbiddenErrorResponse),
         (status = 502, description = "Cloud API error", body = ErrorResponse)
     ),
     security(
@@ -4044,7 +4061,7 @@ async fn proxy_chat_completions(
         (status = 200, description = "Image generation request processed successfully"),
         (status = 400, description = BAD_REQUEST, body = ErrorResponse),
         (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
-        (status = 403, description = "Forbidden - user banned, or model not available in the caller's plan (body carries code=model_not_allowed_in_plan)", body = ModelNotAllowedErrorResponse),
+        (status = 403, description = "Forbidden - user banned (body: error only), or model not available in the caller's plan (body adds code=model_not_allowed_in_plan, model, plan)", body = ForbiddenErrorResponse),
         (status = 502, description = "Cloud API error", body = ErrorResponse)
     ),
     security(
@@ -4239,7 +4256,7 @@ async fn proxy_image_generations(
         (status = 200, description = "Image edit request processed successfully"),
         (status = 400, description = BAD_REQUEST, body = ErrorResponse),
         (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
-        (status = 403, description = "Forbidden - user banned, or model not available in the caller's plan (body carries code=model_not_allowed_in_plan)", body = ModelNotAllowedErrorResponse),
+        (status = 403, description = "Forbidden - user banned (body: error only), or model not available in the caller's plan (body adds code=model_not_allowed_in_plan, model, plan)", body = ForbiddenErrorResponse),
         (status = 502, description = "Cloud API error", body = ErrorResponse)
     ),
     security(

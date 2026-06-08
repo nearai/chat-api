@@ -166,6 +166,7 @@ use utoipa::OpenApi;
         // Conversation share models
         crate::routes::api::ErrorResponse,
         crate::routes::api::ModelNotAllowedErrorResponse,
+        crate::routes::api::ForbiddenErrorResponse,
         crate::routes::api::ShareRecipientPayload,
         crate::routes::api::ShareTargetPayload,
         crate::routes::api::CreateConversationShareRequest,
