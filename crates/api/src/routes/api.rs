@@ -235,6 +235,25 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
+/// Error body for a plan-gated `403`: returned when the requested model is not
+/// in the caller's subscription plan `allowed_models`. A superset of
+/// [`ErrorResponse`] — `error` is identical, plus a stable machine-readable
+/// `code` and the requested `model` / current `plan`, so clients can prompt an
+/// upgrade instead of rendering a generic failure. Other `403`s on these
+/// endpoints (e.g. banned user) populate only `error`.
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct ModelNotAllowedErrorResponse {
+    /// Human-readable message (identical to [`ErrorResponse::error`]).
+    pub error: String,
+    /// Stable discriminator. Always `"model_not_allowed_in_plan"`.
+    #[schema(example = "model_not_allowed_in_plan")]
+    pub code: String,
+    /// The model id that was requested.
+    pub model: String,
+    /// The subscription plan the caller is currently on.
+    pub plan: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct InvalidProxyPathSegment;
 
@@ -2286,7 +2305,7 @@ async fn get_file_content(
         (status = 200, description = "Response created successfully"),
         (status = 400, description = BAD_REQUEST, body = ErrorResponse),
         (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
-        (status = 403, description = "Forbidden - user banned or model not available", body = ErrorResponse),
+        (status = 403, description = "Forbidden - user banned, or model not available in the caller's plan (body carries code=model_not_allowed_in_plan)", body = ModelNotAllowedErrorResponse),
         (status = 502, description = OPENAI_API_ERROR, body = ErrorResponse)
     ),
     security(
@@ -3347,15 +3366,15 @@ async fn enforce_model_access(
             // from a generic upstream failure, and prompt the user to upgrade
             // instead of showing a misleading "model failed to respond" error.
             // `error` is kept byte-for-byte identical for backward compatibility.
-            let error = err.to_string();
+            // Typed (not ad-hoc json!) so the shape is in the OpenAPI contract.
             Err((
                 StatusCode::FORBIDDEN,
-                Json(serde_json::json!({
-                    "error": error,
-                    "code": "model_not_allowed_in_plan",
-                    "model": model,
-                    "plan": plan,
-                })),
+                Json(ModelNotAllowedErrorResponse {
+                    error: err.to_string(),
+                    code: "model_not_allowed_in_plan".to_string(),
+                    model: model.clone(),
+                    plan: plan.clone(),
+                }),
             )
                 .into_response())
         }
@@ -3873,7 +3892,7 @@ async fn proxy_post_to_cloud_api(
         (status = 200, description = "Chat completion created successfully"),
         (status = 400, description = BAD_REQUEST, body = ErrorResponse),
         (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
-        (status = 403, description = "Forbidden - user banned or model not available", body = ErrorResponse),
+        (status = 403, description = "Forbidden - user banned, or model not available in the caller's plan (body carries code=model_not_allowed_in_plan)", body = ModelNotAllowedErrorResponse),
         (status = 502, description = "Cloud API error", body = ErrorResponse)
     ),
     security(
@@ -4025,7 +4044,7 @@ async fn proxy_chat_completions(
         (status = 200, description = "Image generation request processed successfully"),
         (status = 400, description = BAD_REQUEST, body = ErrorResponse),
         (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
-        (status = 403, description = "Forbidden - user banned", body = ErrorResponse),
+        (status = 403, description = "Forbidden - user banned, or model not available in the caller's plan (body carries code=model_not_allowed_in_plan)", body = ModelNotAllowedErrorResponse),
         (status = 502, description = "Cloud API error", body = ErrorResponse)
     ),
     security(
@@ -4220,7 +4239,7 @@ async fn proxy_image_generations(
         (status = 200, description = "Image edit request processed successfully"),
         (status = 400, description = BAD_REQUEST, body = ErrorResponse),
         (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
-        (status = 403, description = "Forbidden - user banned", body = ErrorResponse),
+        (status = 403, description = "Forbidden - user banned, or model not available in the caller's plan (body carries code=model_not_allowed_in_plan)", body = ModelNotAllowedErrorResponse),
         (status = 502, description = "Cloud API error", body = ErrorResponse)
     ),
     security(
