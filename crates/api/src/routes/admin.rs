@@ -3523,63 +3523,12 @@ pub async fn admin_migrate_instance(
         .get("nearai_api_url")
         .and_then(|v| v.as_str())
         .ok_or_else(|| ApiError::bad_request("Instance has no nearai_api_url — cannot migrate"))?;
-    // Image: use explicit override from request body, or query the running instance's
-    // app version and construct a matching ironclaw-dind/openclaw tag. Falls back to
-    // the configured default if the version query fails.
     let request = body.map(|b| b.0).unwrap_or_default();
     let service_type = instance.service_type.as_deref().unwrap_or("openclaw");
-    let image = if let Some(img) = request.image {
-        img
-    } else {
-        // Try to get the app version from the running legacy container
-        let version_url = format!("{}/instances/{}/version", compose_api_url, encoded_name);
-        let version = async {
-            let resp = app_state
-                .http_client
-                .get(&version_url)
-                .bearer_auth(&manager.token)
-                .timeout(std::time::Duration::from_secs(10))
-                .send()
-                .await
-                .ok()?;
-            if !resp.status().is_success() {
-                return None;
-            }
-            let body: serde_json::Value = resp.json().await.ok()?;
-            body.get("version")?.as_str().map(|s| s.to_string())
-        }
-        .await;
-
-        if let Some(ver) = version {
-            let is_ironclaw = service_type == "ironclaw" || service_type.starts_with("ironclaw-");
-            let image_name = if is_ironclaw {
-                "docker.io/nearaidev/ironclaw-dind"
-            } else {
-                "docker.io/nearaidev/openclaw-nearai-worker"
-            };
-            tracing::info!(
-                "Migrate: resolved app version={}, using image {}:{}, instance_id={}",
-                ver,
-                image_name,
-                ver,
-                id
-            );
-            format!("{}:{}", image_name, ver)
-        } else {
-            let is_ironclaw = service_type == "ironclaw" || service_type.starts_with("ironclaw-");
-            let fallback = if is_ironclaw {
-                "docker.io/nearaidev/ironclaw-dind:0.29.1".to_string()
-            } else {
-                "docker.io/nearaidev/openclaw-nearai-worker:latest".to_string()
-            };
-            tracing::info!(
-                "Migrate: version query failed, using default image={}, instance_id={}",
-                fallback,
-                id
-            );
-            fallback
-        }
-    };
+    // Image override from request body (validated non-empty). Actual resolution
+    // is deferred until after the "start if stopped" block so the version query
+    // can reach the running container.
+    let image_override = request.image.filter(|s| !s.is_empty());
     let mem_limit = compose_data
         .get("mem_limit")
         .and_then(|v| v.as_str())
@@ -3633,6 +3582,59 @@ pub async fn admin_migrate_instance(
             ));
         }
     }
+
+    // Resolve image now that the container is running and the version endpoint is reachable.
+    let image = if let Some(img) = image_override {
+        img
+    } else {
+        let version_url = format!("{}/instances/{}/version", compose_api_url, encoded_name);
+        let version = async {
+            let resp = app_state
+                .http_client
+                .get(&version_url)
+                .bearer_auth(&manager.token)
+                .timeout(std::time::Duration::from_secs(10))
+                .send()
+                .await
+                .ok()?;
+            if !resp.status().is_success() {
+                return None;
+            }
+            let body: serde_json::Value = resp.json().await.ok()?;
+            body.get("version")?.as_str().map(|s| s.to_string())
+        }
+        .await;
+
+        if let Some(ver) = version {
+            let img = format!(
+                "{}:{}",
+                services::agent::service::get_image_for_service_type(service_type, None)
+                    .rsplit_once(':')
+                    .map(|(base, _)| base)
+                    .unwrap_or("docker.io/nearaidev/ironclaw-dind"),
+                ver
+            );
+            tracing::info!("Migrate: resolved image={}, instance_id={}", img, id);
+            img
+        } else {
+            let mut fallback =
+                services::agent::service::get_image_for_service_type(service_type, None);
+            // For migration, prefer a known-good version over :latest
+            if fallback.ends_with(":latest") {
+                let is_ironclaw =
+                    service_type == "ironclaw" || service_type.starts_with("ironclaw-");
+                if is_ironclaw {
+                    fallback = fallback.replace(":latest", ":0.29.1");
+                }
+            }
+            tracing::info!(
+                "Migrate: version query failed, using default image={}, instance_id={}",
+                fallback,
+                id
+            );
+            fallback
+        }
+    };
 
     tracing::info!(
         "Migrate: requesting backup, was_running={}, elapsed={:.1}s, instance_id={}",
@@ -3775,7 +3777,9 @@ pub async fn admin_migrate_instance(
     let mut extra_env_map = serde_json::Map::new();
     if let Some(legacy_extra) = compose_data.get("extra_env").and_then(|v| v.as_object()) {
         for (k, v) in legacy_extra {
-            extra_env_map.insert(k.clone(), v.clone());
+            if v.is_string() {
+                extra_env_map.insert(k.clone(), v.clone());
+            }
         }
     }
     extra_env_map.insert(
