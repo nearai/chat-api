@@ -3332,6 +3332,14 @@ pub async fn admin_migration_status(
     }))
 }
 
+/// Optional request body for migrate endpoint
+#[derive(Deserialize, Default, utoipa::ToSchema)]
+pub struct MigrateInstanceRequest {
+    /// Override the Docker image for the CrabShack instance.
+    /// If not provided, uses the configured default for the service type.
+    pub image: Option<String>,
+}
+
 /// Response for migrate endpoint
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct MigrateInstanceResponse {
@@ -3345,6 +3353,7 @@ pub async fn admin_migrate_instance(
     State(app_state): State<AppState>,
     Extension(_user): Extension<AuthenticatedUser>,
     Path(instance_id): Path<String>,
+    body: Option<Json<MigrateInstanceRequest>>,
 ) -> Result<Json<MigrateInstanceResponse>, ApiError> {
     let id = Uuid::parse_str(&instance_id)
         .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
@@ -3514,11 +3523,25 @@ pub async fn admin_migrate_instance(
         .get("nearai_api_url")
         .and_then(|v| v.as_str())
         .ok_or_else(|| ApiError::bad_request("Instance has no nearai_api_url — cannot migrate"))?;
-    // Fallbacks match create_instance_from_agent_api defaults (service.rs unwrap_or values)
-    let image = compose_data
-        .get("image")
-        .and_then(|v| v.as_str())
-        .unwrap_or("docker.io/nearaidev/ironclaw-dind:latest");
+    // Image: use explicit override from request body, or fall back to the configured
+    // CrabShack image for this service type. Legacy image refs (e.g. ironclaw-nearai-worker)
+    // are rejected by CrabShack's allowlist, so we never pass them through.
+    let request = body.map(|b| b.0).unwrap_or_default();
+    let service_type = instance.service_type.as_deref().unwrap_or("openclaw");
+    let image = if let Some(img) = request.image {
+        img
+    } else {
+        let configs = app_state
+            .system_configs_service
+            .get_configs()
+            .await
+            .ok()
+            .flatten();
+        services::agent::service::get_image_for_service_type(
+            service_type,
+            configs.as_ref().and_then(|c| c.agent_hosting.as_ref()),
+        )
+    };
     let mem_limit = compose_data
         .get("mem_limit")
         .and_then(|v| v.as_str())
@@ -3603,6 +3626,7 @@ pub async fn admin_migrate_instance(
                 &manager.token,
                 was_running,
                 "stop",
+                &instance_name,
             );
             ApiError::internal_server_error("Failed to initiate backup on legacy compose-api")
         })?;
@@ -3621,6 +3645,7 @@ pub async fn admin_migrate_instance(
             &manager.token,
             was_running,
             "stop",
+            &instance_name,
         );
         return Err(ApiError::internal_server_error(
             "Failed to create backup on legacy compose-api",
@@ -3643,6 +3668,7 @@ pub async fn admin_migrate_instance(
                 &manager.token,
                 was_running,
                 "stop",
+                &instance_name,
             );
             return Err(ApiError::internal_server_error(
                 "Failed to get backup URL from legacy compose-api",
@@ -3691,6 +3717,7 @@ pub async fn admin_migrate_instance(
             &manager.token,
             was_running,
             "stop",
+            &instance_name,
         );
         return Err(ApiError::internal_server_error(
             "Failed to stop legacy instance before import",
@@ -3702,15 +3729,30 @@ pub async fn admin_migrate_instance(
         migrate_start.elapsed().as_secs_f64(),
         id,
     );
-    let service_type = instance.service_type.as_deref().unwrap_or("openclaw");
     let crabshack_service_type =
         services::agent::service::service_type_for_crabshack(service_type, None);
 
-    // Store overwritten values in extra_env for rollback reference
-    let extra_env = serde_json::json!({
-        "LEGACY_API_BASE_URL": agent_api_base_url,
-        "LEGACY_INSTANCE_URL": instance.instance_url.as_deref().unwrap_or(""),
-    });
+    // Build extra_env: start with legacy instance's extra env vars (includes
+    // SECRETS_MASTER_KEY, NEARAI_MODEL, etc.), then overlay migration-specific keys.
+    let mut extra_env_map = serde_json::Map::new();
+    if let Some(legacy_extra) = compose_data.get("extra_env").and_then(|v| v.as_object()) {
+        for (k, v) in legacy_extra {
+            extra_env_map.insert(k.clone(), v.clone());
+        }
+    }
+    extra_env_map.insert(
+        "LEGACY_API_BASE_URL".into(),
+        serde_json::Value::String(agent_api_base_url.to_string()),
+    );
+    extra_env_map.insert(
+        "LEGACY_INSTANCE_URL".into(),
+        serde_json::Value::String(instance.instance_url.as_deref().unwrap_or("").to_string()),
+    );
+    extra_env_map.insert(
+        "LEGACY_INSTANCE_NAME".into(),
+        serde_json::Value::String(instance.name.clone()),
+    );
+    let extra_env = serde_json::Value::Object(extra_env_map);
 
     // Find a CrabShack (non-legacy) manager for import
     let crabshack_manager = app_state
@@ -3725,6 +3767,7 @@ pub async fn admin_migrate_instance(
                 &manager.token,
                 was_running,
                 "start",
+                &instance_name,
             );
             ApiError::internal_server_error("No CrabShack manager configured")
         })?;
@@ -3767,6 +3810,7 @@ pub async fn admin_migrate_instance(
                 &manager.token,
                 was_running,
                 "start",
+                &instance_name,
             );
             ApiError::internal_server_error("Failed to import into CrabShack")
         })?;
@@ -3785,6 +3829,7 @@ pub async fn admin_migrate_instance(
             &manager.token,
             was_running,
             "start",
+            &instance_name,
         );
         return Err(ApiError::internal_server_error("CrabShack import failed"));
     }
@@ -3805,6 +3850,7 @@ pub async fn admin_migrate_instance(
                 &manager.token,
                 was_running,
                 "start",
+                &instance_name,
             );
             return Err(ApiError::internal_server_error(
                 "Failed to parse CrabShack import response",
@@ -3852,6 +3898,7 @@ pub async fn admin_migrate_instance(
             &manager.token,
             was_running,
             "start",
+            &instance_name,
         );
         return Err(ApiError::internal_server_error(
             "Migration succeeded but failed to update DB — legacy instance restarted",
@@ -4066,6 +4113,7 @@ fn restore_on_failure(
     token: &str,
     was_running: bool,
     action: &str,
+    instance_name: &str,
 ) {
     let should_restore = match action {
         "stop" => !was_running,
@@ -4079,6 +4127,7 @@ fn restore_on_failure(
     let client = app_state.http_client.clone();
     let token = token.to_string();
     let action = action.to_string();
+    let name = instance_name.to_string();
     tokio::spawn(async move {
         match client
             .post(&url)
@@ -4089,20 +4138,23 @@ fn restore_on_failure(
         {
             Ok(resp) if resp.status().is_success() => {
                 tracing::info!(
-                    "Restored legacy instance after migration failure: action={}",
+                    "Restored legacy instance after migration failure: name={}, action={}",
+                    name,
                     action
                 );
             }
             Ok(resp) => {
                 tracing::warn!(
-                    "Failed to restore legacy instance: action={}, status={}",
+                    "Failed to restore legacy instance: name={}, action={}, status={}",
+                    name,
                     action,
                     resp.status()
                 );
             }
             Err(e) => {
                 tracing::warn!(
-                    "Failed to restore legacy instance: action={}, error={}",
+                    "Failed to restore legacy instance: name={}, action={}, error={}",
+                    name,
                     action,
                     e
                 );

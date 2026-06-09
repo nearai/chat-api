@@ -188,7 +188,10 @@ fn compare_semantic_versions(a: &str, b: &str) -> std::cmp::Ordering {
 ///
 /// Does not apply crabshack `deploy_latest_version_tag` flags; use
 /// `AgentServiceImpl::resolve_non_tee_worker_image_ref` for non-TEE deploys.
-fn get_image_for_service_type(service_type: &str, hosting: Option<&AgentHostingConfig>) -> String {
+pub fn get_image_for_service_type(
+    service_type: &str,
+    hosting: Option<&AgentHostingConfig>,
+) -> String {
     match service_type {
         "ironclaw" => hosting
             .and_then(|h| h.crabshack.ironclaw_image.clone())
