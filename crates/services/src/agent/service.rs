@@ -211,7 +211,7 @@ pub fn service_type_for_crabshack(
     hosting_config: Option<&crate::system_configs::ports::AgentHostingConfig>,
 ) -> String {
     match canonical_type {
-        "ironclaw" => hosting_config
+        s if s == "ironclaw" || s.starts_with("ironclaw-") => hosting_config
             .and_then(|cfg| cfg.crabshack.ironclaw_service_type.clone())
             .unwrap_or_else(|| "ironclaw-dind".to_string()),
         "openclaw" => hosting_config
