@@ -3656,9 +3656,8 @@ pub async fn admin_migrate_instance(
             img
         } else {
             let mut fallback = default_image;
-            // For ironclaw migration, prefer a known-good version over :latest
-            if fallback.ends_with(":latest") && fallback.contains("ironclaw") {
-                fallback = fallback.replace(":latest", ":0.29.1");
+            if fallback == "docker.io/nearaidev/ironclaw-dind:latest" {
+                fallback = "docker.io/nearaidev/ironclaw-dind:0.29.1".to_string();
             }
             tracing::info!(
                 "Migrate: version query failed, using default image={}, instance_id={}",
