@@ -3583,6 +3583,15 @@ pub async fn admin_migrate_instance(
         }
     }
 
+    // Load system configs for image/service-type resolution (same source as normal create flow).
+    let hosting_config = app_state
+        .system_configs_service
+        .get_configs()
+        .await
+        .ok()
+        .flatten()
+        .and_then(|c| c.agent_hosting);
+
     // Resolve image now that the container is running and the version endpoint is reachable.
     let image = if let Some(img) = image_override {
         img
@@ -3608,17 +3617,22 @@ pub async fn admin_migrate_instance(
         if let Some(ver) = version {
             let img = format!(
                 "{}:{}",
-                services::agent::service::get_image_for_service_type(service_type, None)
-                    .rsplit_once(':')
-                    .map(|(base, _)| base)
-                    .unwrap_or("docker.io/nearaidev/ironclaw-dind"),
+                services::agent::service::get_image_for_service_type(
+                    service_type,
+                    hosting_config.as_ref(),
+                )
+                .rsplit_once(':')
+                .map(|(base, _)| base)
+                .unwrap_or("docker.io/nearaidev/ironclaw-dind"),
                 ver
             );
             tracing::info!("Migrate: resolved image={}, instance_id={}", img, id);
             img
         } else {
-            let mut fallback =
-                services::agent::service::get_image_for_service_type(service_type, None);
+            let mut fallback = services::agent::service::get_image_for_service_type(
+                service_type,
+                hosting_config.as_ref(),
+            );
             // For migration, prefer a known-good version over :latest
             if fallback.ends_with(":latest") {
                 let is_ironclaw =
@@ -3770,7 +3784,7 @@ pub async fn admin_migrate_instance(
         id,
     );
     let crabshack_service_type =
-        services::agent::service::service_type_for_crabshack(service_type, None);
+        services::agent::service::service_type_for_crabshack(service_type, hosting_config.as_ref());
 
     // Build extra_env: start with legacy instance's extra env vars (includes
     // SECRETS_MASTER_KEY, NEARAI_MODEL, etc.), then overlay migration-specific keys.
