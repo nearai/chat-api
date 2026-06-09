@@ -3564,16 +3564,10 @@ pub async fn admin_migrate_instance(
             );
             format!("{}:{}", image_name, ver)
         } else {
-            let configs = app_state
-                .system_configs_service
-                .get_configs()
-                .await
-                .ok()
-                .flatten();
-            let fallback = services::agent::service::get_image_for_service_type(
-                service_type,
-                configs.as_ref().and_then(|c| c.agent_hosting.as_ref()),
-            );
+            let fallback = match service_type {
+                "ironclaw" => "docker.io/nearaidev/ironclaw-dind:0.29.1".to_string(),
+                _ => "docker.io/nearaidev/openclaw-nearai-worker:latest".to_string(),
+            };
             tracing::info!(
                 "Migrate: version query failed, using default image={}, instance_id={}",
                 fallback,
