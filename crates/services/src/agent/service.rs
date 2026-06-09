@@ -193,7 +193,7 @@ pub fn get_image_for_service_type(
     hosting: Option<&AgentHostingConfig>,
 ) -> String {
     match service_type {
-        "ironclaw" => hosting
+        s if s == "ironclaw" || s.starts_with("ironclaw-") => hosting
             .and_then(|h| h.crabshack.ironclaw_image.clone())
             .unwrap_or_else(|| "docker.io/nearaidev/ironclaw-dind:latest".to_string()),
         _ => hosting

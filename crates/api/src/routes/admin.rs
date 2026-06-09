@@ -3551,9 +3551,11 @@ pub async fn admin_migrate_instance(
         .await;
 
         if let Some(ver) = version {
-            let image_name = match service_type {
-                "ironclaw" => "docker.io/nearaidev/ironclaw-dind",
-                _ => "docker.io/nearaidev/openclaw-nearai-worker",
+            let is_ironclaw = service_type == "ironclaw" || service_type.starts_with("ironclaw-");
+            let image_name = if is_ironclaw {
+                "docker.io/nearaidev/ironclaw-dind"
+            } else {
+                "docker.io/nearaidev/openclaw-nearai-worker"
             };
             tracing::info!(
                 "Migrate: resolved app version={}, using image {}:{}, instance_id={}",
@@ -3564,9 +3566,11 @@ pub async fn admin_migrate_instance(
             );
             format!("{}:{}", image_name, ver)
         } else {
-            let fallback = match service_type {
-                "ironclaw" => "docker.io/nearaidev/ironclaw-dind:0.29.1".to_string(),
-                _ => "docker.io/nearaidev/openclaw-nearai-worker:latest".to_string(),
+            let is_ironclaw = service_type == "ironclaw" || service_type.starts_with("ironclaw-");
+            let fallback = if is_ironclaw {
+                "docker.io/nearaidev/ironclaw-dind:0.29.1".to_string()
+            } else {
+                "docker.io/nearaidev/openclaw-nearai-worker:latest".to_string()
             };
             tracing::info!(
                 "Migrate: version query failed, using default image={}, instance_id={}",
