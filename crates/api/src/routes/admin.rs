@@ -3332,6 +3332,14 @@ pub async fn admin_migration_status(
     }))
 }
 
+/// Optional request body for migrate endpoint
+#[derive(Deserialize, Default, utoipa::ToSchema)]
+pub struct MigrateInstanceRequest {
+    /// Override the Docker image for the CrabShack instance.
+    /// If not provided, uses the configured default for the service type.
+    pub image: Option<String>,
+}
+
 /// Response for migrate endpoint
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct MigrateInstanceResponse {
@@ -3345,6 +3353,7 @@ pub async fn admin_migrate_instance(
     State(app_state): State<AppState>,
     Extension(_user): Extension<AuthenticatedUser>,
     Path(instance_id): Path<String>,
+    body: Option<Json<MigrateInstanceRequest>>,
 ) -> Result<Json<MigrateInstanceResponse>, ApiError> {
     let id = Uuid::parse_str(&instance_id)
         .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
@@ -3514,11 +3523,25 @@ pub async fn admin_migrate_instance(
         .get("nearai_api_url")
         .and_then(|v| v.as_str())
         .ok_or_else(|| ApiError::bad_request("Instance has no nearai_api_url — cannot migrate"))?;
-    // Fallbacks match create_instance_from_agent_api defaults (service.rs unwrap_or values)
-    let image = compose_data
-        .get("image")
-        .and_then(|v| v.as_str())
-        .unwrap_or("docker.io/nearaidev/ironclaw-dind:latest");
+    let request = body.map(|b| b.0).unwrap_or_default();
+    // Infer service type from compose-api image name when the DB value is null
+    // (all legacy instances have service_type=null).
+    let service_type = instance.service_type.as_deref().unwrap_or_else(|| {
+        let is_ironclaw = compose_data
+            .get("image")
+            .and_then(|v| v.as_str())
+            .map(|img| img.contains("ironclaw"))
+            .unwrap_or(false);
+        if is_ironclaw {
+            "ironclaw"
+        } else {
+            "openclaw"
+        }
+    });
+    // Image override from request body (validated non-empty). Actual resolution
+    // is deferred until after the "start if stopped" block so the version query
+    // can reach the running container.
+    let image_override = request.image.filter(|s| !s.is_empty());
     let mem_limit = compose_data
         .get("mem_limit")
         .and_then(|v| v.as_str())
@@ -3538,6 +3561,28 @@ pub async fn admin_migrate_instance(
         .unwrap_or("unknown");
 
     let was_running = compose_status != "stopped" && compose_status != "exited";
+
+    // Preflight: ironclaw instances must have SECRETS_MASTER_KEY available.
+    // compose-api reads it via docker exec at startup — stopped containers are
+    // unreachable so the key is missing. Fail early before any side effects.
+    let has_master_key = compose_data
+        .get("extra_env")
+        .and_then(|v| v.get("SECRETS_MASTER_KEY"))
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.is_empty());
+    if !has_master_key && (service_type == "ironclaw" || service_type.starts_with("ironclaw-")) {
+        tracing::error!(
+            "Migrate: SECRETS_MASTER_KEY not found — aborting before side effects. \
+             Start all instances and restart compose-api first. instance_id={}, name={}",
+            id,
+            instance_name
+        );
+        return Err(ApiError::bad_request(
+            "SECRETS_MASTER_KEY not available — start all instances and restart \
+             compose-api before migration",
+        ));
+    }
+
     if !was_running {
         tracing::info!(
             "Migrate: instance stopped, starting before backup, elapsed={:.1}s, instance_id={}",
@@ -3573,6 +3618,78 @@ pub async fn admin_migrate_instance(
         }
     }
 
+    // Load system configs for image/service-type resolution (same source as normal create flow).
+    let hosting_config = app_state
+        .system_configs_service
+        .get_configs()
+        .await
+        .ok()
+        .flatten()
+        .and_then(|c| c.agent_hosting);
+
+    // Resolve image now that the container is running and the version endpoint is reachable.
+    let image = if let Some(img) = image_override {
+        img
+    } else {
+        let version_url = format!("{}/instances/{}/version", compose_api_url, encoded_name);
+        let version = async {
+            let resp = match app_state
+                .http_client
+                .get(&version_url)
+                .bearer_auth(&manager.token)
+                .timeout(std::time::Duration::from_secs(10))
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::debug!(
+                        "Migrate: version query failed: instance_id={}, error={}",
+                        id,
+                        e
+                    );
+                    return None;
+                }
+            };
+            if !resp.status().is_success() {
+                tracing::debug!(
+                    "Migrate: version query returned status={}, instance_id={}",
+                    resp.status(),
+                    id
+                );
+                return None;
+            }
+            let body: serde_json::Value = resp.json().await.ok()?;
+            body.get("version")?.as_str().map(|s| s.to_string())
+        }
+        .await;
+
+        let default_image = services::agent::service::get_image_for_service_type(
+            service_type,
+            hosting_config.as_ref(),
+        );
+        if let Some(ver) = version {
+            let base = default_image
+                .rsplit_once(':')
+                .map(|(b, _)| b)
+                .unwrap_or(&default_image);
+            let img = format!("{}:{}", base, ver);
+            tracing::info!("Migrate: resolved image={}, instance_id={}", img, id);
+            img
+        } else {
+            let mut fallback = default_image;
+            if fallback == "docker.io/nearaidev/ironclaw-dind:latest" {
+                fallback = "docker.io/nearaidev/ironclaw-dind:0.29.1".to_string();
+            }
+            tracing::info!(
+                "Migrate: version query failed, using default image={}, instance_id={}",
+                fallback,
+                id
+            );
+            fallback
+        }
+    };
+
     tracing::info!(
         "Migrate: requesting backup, was_running={}, elapsed={:.1}s, instance_id={}",
         was_running,
@@ -3603,6 +3720,7 @@ pub async fn admin_migrate_instance(
                 &manager.token,
                 was_running,
                 "stop",
+                &instance_name,
             );
             ApiError::internal_server_error("Failed to initiate backup on legacy compose-api")
         })?;
@@ -3621,6 +3739,7 @@ pub async fn admin_migrate_instance(
             &manager.token,
             was_running,
             "stop",
+            &instance_name,
         );
         return Err(ApiError::internal_server_error(
             "Failed to create backup on legacy compose-api",
@@ -3643,6 +3762,7 @@ pub async fn admin_migrate_instance(
                 &manager.token,
                 was_running,
                 "stop",
+                &instance_name,
             );
             return Err(ApiError::internal_server_error(
                 "Failed to get backup URL from legacy compose-api",
@@ -3691,6 +3811,7 @@ pub async fn admin_migrate_instance(
             &manager.token,
             was_running,
             "stop",
+            &instance_name,
         );
         return Err(ApiError::internal_server_error(
             "Failed to stop legacy instance before import",
@@ -3702,15 +3823,32 @@ pub async fn admin_migrate_instance(
         migrate_start.elapsed().as_secs_f64(),
         id,
     );
-    let service_type = instance.service_type.as_deref().unwrap_or("openclaw");
     let crabshack_service_type =
-        services::agent::service::service_type_for_crabshack(service_type, None);
+        services::agent::service::service_type_for_crabshack(service_type, hosting_config.as_ref());
 
-    // Store overwritten values in extra_env for rollback reference
-    let extra_env = serde_json::json!({
-        "LEGACY_API_BASE_URL": agent_api_base_url,
-        "LEGACY_INSTANCE_URL": instance.instance_url.as_deref().unwrap_or(""),
-    });
+    // Build extra_env: start with legacy instance's extra env vars (includes
+    // SECRETS_MASTER_KEY, NEARAI_MODEL, etc.), then overlay migration-specific keys.
+    let mut extra_env_map = serde_json::Map::new();
+    if let Some(legacy_extra) = compose_data.get("extra_env").and_then(|v| v.as_object()) {
+        for (k, v) in legacy_extra {
+            if v.is_string() {
+                extra_env_map.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    extra_env_map.insert(
+        "LEGACY_API_BASE_URL".into(),
+        serde_json::Value::String(agent_api_base_url.to_string()),
+    );
+    extra_env_map.insert(
+        "LEGACY_INSTANCE_URL".into(),
+        serde_json::Value::String(instance.instance_url.as_deref().unwrap_or("").to_string()),
+    );
+    extra_env_map.insert(
+        "LEGACY_INSTANCE_NAME".into(),
+        serde_json::Value::String(instance.name.clone()),
+    );
+    let extra_env = serde_json::Value::Object(extra_env_map);
 
     // Find a CrabShack (non-legacy) manager for import
     let crabshack_manager = app_state
@@ -3725,6 +3863,7 @@ pub async fn admin_migrate_instance(
                 &manager.token,
                 was_running,
                 "start",
+                &instance_name,
             );
             ApiError::internal_server_error("No CrabShack manager configured")
         })?;
@@ -3767,6 +3906,7 @@ pub async fn admin_migrate_instance(
                 &manager.token,
                 was_running,
                 "start",
+                &instance_name,
             );
             ApiError::internal_server_error("Failed to import into CrabShack")
         })?;
@@ -3785,6 +3925,7 @@ pub async fn admin_migrate_instance(
             &manager.token,
             was_running,
             "start",
+            &instance_name,
         );
         return Err(ApiError::internal_server_error("CrabShack import failed"));
     }
@@ -3805,6 +3946,7 @@ pub async fn admin_migrate_instance(
                 &manager.token,
                 was_running,
                 "start",
+                &instance_name,
             );
             return Err(ApiError::internal_server_error(
                 "Failed to parse CrabShack import response",
@@ -3852,6 +3994,7 @@ pub async fn admin_migrate_instance(
             &manager.token,
             was_running,
             "start",
+            &instance_name,
         );
         return Err(ApiError::internal_server_error(
             "Migration succeeded but failed to update DB — legacy instance restarted",
@@ -4066,6 +4209,7 @@ fn restore_on_failure(
     token: &str,
     was_running: bool,
     action: &str,
+    instance_name: &str,
 ) {
     let should_restore = match action {
         "stop" => !was_running,
@@ -4079,6 +4223,7 @@ fn restore_on_failure(
     let client = app_state.http_client.clone();
     let token = token.to_string();
     let action = action.to_string();
+    let name = instance_name.to_string();
     tokio::spawn(async move {
         match client
             .post(&url)
@@ -4089,20 +4234,23 @@ fn restore_on_failure(
         {
             Ok(resp) if resp.status().is_success() => {
                 tracing::info!(
-                    "Restored legacy instance after migration failure: action={}",
+                    "Restored legacy instance after migration failure: name={}, action={}",
+                    name,
                     action
                 );
             }
             Ok(resp) => {
                 tracing::warn!(
-                    "Failed to restore legacy instance: action={}, status={}",
+                    "Failed to restore legacy instance: name={}, action={}, status={}",
+                    name,
                     action,
                     resp.status()
                 );
             }
             Err(e) => {
                 tracing::warn!(
-                    "Failed to restore legacy instance: action={}, error={}",
+                    "Failed to restore legacy instance: name={}, action={}, error={}",
+                    name,
                     action,
                     e
                 );

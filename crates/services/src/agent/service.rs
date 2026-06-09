@@ -188,9 +188,12 @@ fn compare_semantic_versions(a: &str, b: &str) -> std::cmp::Ordering {
 ///
 /// Does not apply crabshack `deploy_latest_version_tag` flags; use
 /// `AgentServiceImpl::resolve_non_tee_worker_image_ref` for non-TEE deploys.
-fn get_image_for_service_type(service_type: &str, hosting: Option<&AgentHostingConfig>) -> String {
+pub fn get_image_for_service_type(
+    service_type: &str,
+    hosting: Option<&AgentHostingConfig>,
+) -> String {
     match service_type {
-        "ironclaw" => hosting
+        s if s == "ironclaw" || s.starts_with("ironclaw-") => hosting
             .and_then(|h| h.crabshack.ironclaw_image.clone())
             .unwrap_or_else(|| "docker.io/nearaidev/ironclaw-dind:latest".to_string()),
         _ => hosting
@@ -208,7 +211,7 @@ pub fn service_type_for_crabshack(
     hosting_config: Option<&crate::system_configs::ports::AgentHostingConfig>,
 ) -> String {
     match canonical_type {
-        "ironclaw" => hosting_config
+        s if s == "ironclaw" || s.starts_with("ironclaw-") => hosting_config
             .and_then(|cfg| cfg.crabshack.ironclaw_service_type.clone())
             .unwrap_or_else(|| "ironclaw-dind".to_string()),
         "openclaw" => hosting_config
