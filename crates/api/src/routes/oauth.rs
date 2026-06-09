@@ -26,8 +26,7 @@ use utoipa::ToSchema;
 
 const FRONTEND_CALLBACK_ALLOWED_ORIGINS_ENV: &str = "FRONTEND_CALLBACK_ALLOWED_ORIGINS";
 const OAUTH_CALLBACK_PATH: &str = "/auth/callback";
-const PRIVATE_CHAT_UNIVERSAL_LINK_HOST: &str = "app.privatechat.com";
-const MOBILE_FRONTEND_CALLBACK_SCHEMES: &[&str] = &["nearprivatechat", "privatechat"];
+const MOBILE_FRONTEND_CALLBACK_SCHEMES: &[&str] = &["nearprivatechat"];
 const MOBILE_FRONTEND_CALLBACK_HOST: &str = "auth";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,7 +136,7 @@ fn validate_frontend_callback_url(
     let trimmed_url = raw_url.trim();
     let url = Url::parse(trimmed_url).map_err(|_| FrontendCallbackValidationError::Malformed)?;
 
-    if is_allowed_mobile_callback_url(&url)? || is_private_chat_universal_link_callback_url(&url)? {
+    if is_allowed_mobile_callback_url(&url)? {
         return Ok(normalize_validated_callback_url(url));
     }
 
@@ -165,7 +164,7 @@ fn build_oauth_frontend_redirect(
         .map(|(_, value)| value.into_owned())
         .collect();
 
-    if !is_mobile_callback_base(&url) && !is_private_chat_universal_link_callback_base(&url) {
+    if !is_mobile_callback_base(&url) {
         let base_path = url.path().trim_end_matches('/');
         let callback_path = if base_path.is_empty() {
             OAUTH_CALLBACK_PATH.to_string()
@@ -271,26 +270,6 @@ fn is_mobile_callback_base(url: &Url) -> bool {
         && url.password().is_none()
 }
 
-fn is_private_chat_universal_link_callback_url(
-    url: &Url,
-) -> Result<bool, FrontendCallbackValidationError> {
-    if !is_private_chat_universal_link_callback_base(url) {
-        return Ok(false);
-    }
-
-    validate_mobile_callback_query(url)?;
-    Ok(true)
-}
-
-fn is_private_chat_universal_link_callback_base(url: &Url) -> bool {
-    url.scheme() == "https"
-        && url.host_str() == Some(PRIVATE_CHAT_UNIVERSAL_LINK_HOST)
-        && url.path() == OAUTH_CALLBACK_PATH
-        && url.port().is_none()
-        && url.username().is_empty()
-        && url.password().is_none()
-}
-
 fn validate_mobile_callback_query(url: &Url) -> Result<(), FrontendCallbackValidationError> {
     if url.fragment().is_some() {
         return Err(FrontendCallbackValidationError::MobileCallbackQueryNotAllowed);
@@ -329,8 +308,18 @@ fn url_origin(url: &Url) -> String {
     url.origin().ascii_serialization()
 }
 
-fn normalize_validated_callback_url(url: Url) -> String {
-    trim_trailing_slash(url.as_str())
+fn normalize_validated_callback_url(mut url: Url) -> String {
+    let path = url.path();
+    if path == "/" && url.query().is_none() && url.fragment().is_none() {
+        return trim_trailing_slash(url.as_str());
+    }
+
+    if path.len() > 1 && path.ends_with('/') {
+        let trimmed_path = path.trim_end_matches('/').to_string();
+        url.set_path(&trimmed_path);
+    }
+
+    url.to_string()
 }
 
 fn trim_trailing_slash(value: &str) -> String {
@@ -1506,26 +1495,23 @@ mod tests {
         .unwrap();
         assert_eq!(near_callback, "nearprivatechat://auth?state=ios-state-1");
 
-        let private_chat_callback =
-            validate_frontend_callback_url("privatechat://auth?state=mobile-state-1", Some(&[]))
-                .unwrap();
-        assert_eq!(
-            private_chat_callback,
-            "privatechat://auth?state=mobile-state-1"
-        );
+        let err = validate_frontend_callback_url(
+            "privatechat://auth?state=mobile-state-1",
+            Some(&allowlist()),
+        )
+        .unwrap_err();
+        assert_eq!(err, FrontendCallbackValidationError::UnsupportedScheme);
     }
 
     #[test]
-    fn validates_exact_private_chat_universal_link_callback() {
+    fn preserves_mobile_callback_state_trailing_slash() {
         let callback = validate_frontend_callback_url(
-            "https://app.privatechat.com/auth/callback?state=universal-state-1",
-            Some(&[]),
+            "nearprivatechat://auth?state=state-with-slash/",
+            Some(&allowlist()),
         )
         .unwrap();
-        assert_eq!(
-            callback,
-            "https://app.privatechat.com/auth/callback?state=universal-state-1"
-        );
+
+        assert_eq!(callback, "nearprivatechat://auth?state=state-with-slash/");
     }
 
     #[test]
@@ -1541,8 +1527,6 @@ mod tests {
             "nearprivatechat://evil?state=s",
             "nearprivatechat://auth/other?state=s",
             "privatechat.evil://auth?state=s",
-            "https://app.privatechat.com.evil.example/auth/callback?state=s",
-            "https://app.privatechat.com/other?state=s",
         ];
 
         for callback in rejected {
@@ -1646,7 +1630,7 @@ mod tests {
     #[test]
     fn builds_oauth_redirect_for_mobile_callback_without_path_mutation() {
         let redirect = build_oauth_frontend_redirect(
-            "privatechat://auth?state=mobile-state-1",
+            "nearprivatechat://auth?state=mobile-state-1",
             "tok en",
             "session-1",
             "2026-05-27T00:00:00Z",
@@ -1656,24 +1640,7 @@ mod tests {
 
         assert_eq!(
             redirect,
-            "privatechat://auth?token=tok+en&session_id=session-1&expires_at=2026-05-27T00%3A00%3A00Z&state=mobile-state-1&is_new_user=true"
-        );
-    }
-
-    #[test]
-    fn builds_oauth_redirect_for_universal_link_without_double_callback_path() {
-        let redirect = build_oauth_frontend_redirect(
-            "https://app.privatechat.com/auth/callback?state=mobile-state-1",
-            "tok en",
-            "session-1",
-            "2026-05-27T00:00:00Z",
-            false,
-        )
-        .unwrap();
-
-        assert_eq!(
-            redirect,
-            "https://app.privatechat.com/auth/callback?token=tok+en&session_id=session-1&expires_at=2026-05-27T00%3A00%3A00Z&state=mobile-state-1"
+            "nearprivatechat://auth?token=tok+en&session_id=session-1&expires_at=2026-05-27T00%3A00%3A00Z&state=mobile-state-1&is_new_user=true"
         );
     }
 
