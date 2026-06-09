@@ -25,6 +25,13 @@ use url::{Host, Url};
 use utoipa::ToSchema;
 
 const FRONTEND_CALLBACK_ALLOWED_ORIGINS_ENV: &str = "FRONTEND_CALLBACK_ALLOWED_ORIGINS";
+const OAUTH_CALLBACK_PATH: &str = "/auth/callback";
+// Mobile app-scheme callbacks are not URL origins, so they cannot be validated
+// through FRONTEND_CALLBACK_ALLOWED_ORIGINS. Keep this list exact and short.
+// nearprivatechat is accepted temporarily for already-shipped mobile builds;
+// new mobile clients should send nearai://auth.
+const MOBILE_FRONTEND_CALLBACK_SCHEMES: &[&str] = &["nearai", "nearprivatechat"];
+const MOBILE_FRONTEND_CALLBACK_HOST: &str = "auth";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FrontendCallbackValidationError {
@@ -33,6 +40,7 @@ enum FrontendCallbackValidationError {
     MissingHost,
     CredentialsNotAllowed,
     QueryOrFragmentNotAllowed,
+    MobileCallbackQueryNotAllowed,
     Insecure,
     UntrustedOrigin,
 }
@@ -46,6 +54,9 @@ impl std::fmt::Display for FrontendCallbackValidationError {
             Self::CredentialsNotAllowed => "credentials are not allowed in callback URLs",
             Self::QueryOrFragmentNotAllowed => {
                 "query strings and fragments are not allowed in callback URLs"
+            }
+            Self::MobileCallbackQueryNotAllowed => {
+                "mobile callback URLs may only include a non-empty state query parameter and no fragment"
             }
             Self::Insecure => "callback URL must use HTTPS",
             Self::UntrustedOrigin => "callback URL origin is not allowlisted",
@@ -126,40 +137,65 @@ fn validate_frontend_callback_url(
     raw_url: &str,
     allowed_origins: Option<&[String]>,
 ) -> Result<String, FrontendCallbackValidationError> {
+    let trimmed_url = raw_url.trim();
+    let url = Url::parse(trimmed_url).map_err(|_| FrontendCallbackValidationError::Malformed)?;
+
+    if is_allowed_mobile_callback_url(&url)? {
+        return Ok(normalize_validated_callback_url(url));
+    }
+
     if let Some(origins) = allowed_origins {
         if origins.is_empty() {
             return Err(FrontendCallbackValidationError::UntrustedOrigin);
         }
     }
 
-    validate_frontend_url(raw_url, allowed_origins.unwrap_or(&[]))
-        .map(|url| trim_trailing_slash(url.as_str()))
+    validate_frontend_url(trimmed_url, allowed_origins.unwrap_or(&[]))
+        .map(normalize_validated_callback_url)
 }
 
 fn build_oauth_frontend_redirect(
-    frontend_base_url: &str,
+    frontend_callback_url: &str,
     token: &str,
     session_id: &str,
     expires_at: &str,
     is_new_user: bool,
 ) -> Result<String, url::ParseError> {
-    let mut url = Url::parse(frontend_base_url)?;
-    let base_path = url.path().trim_end_matches('/');
-    let callback_path = if base_path.is_empty() {
-        "/auth/callback".to_string()
-    } else {
-        format!("{base_path}/auth/callback")
-    };
+    let mut url = Url::parse(frontend_callback_url)?;
+    let existing_state_values: Vec<String> = url
+        .query_pairs()
+        .filter(|(name, _)| name == "state")
+        .map(|(_, value)| value.into_owned())
+        .collect();
 
-    url.set_path(&callback_path);
-    url.query_pairs_mut()
-        .clear()
-        .append_pair("token", token)
-        .append_pair("session_id", session_id)
-        .append_pair("expires_at", expires_at);
+    if !is_mobile_callback_base(&url) {
+        let base_path = url.path().trim_end_matches('/');
+        let callback_path = if base_path.is_empty() {
+            OAUTH_CALLBACK_PATH.to_string()
+        } else if base_path.ends_with(OAUTH_CALLBACK_PATH) {
+            base_path.to_string()
+        } else {
+            format!("{base_path}{OAUTH_CALLBACK_PATH}")
+        };
 
-    if is_new_user {
-        url.query_pairs_mut().append_pair("is_new_user", "true");
+        url.set_path(&callback_path);
+    }
+
+    {
+        let mut query = url.query_pairs_mut();
+        query
+            .clear()
+            .append_pair("token", token)
+            .append_pair("session_id", session_id)
+            .append_pair("expires_at", expires_at);
+
+        for state in existing_state_values {
+            query.append_pair("state", &state);
+        }
+
+        if is_new_user {
+            query.append_pair("is_new_user", "true");
+        }
     }
 
     Ok(url.to_string())
@@ -211,6 +247,47 @@ fn validate_frontend_url(
     Ok(url)
 }
 
+fn is_allowed_mobile_callback_url(url: &Url) -> Result<bool, FrontendCallbackValidationError> {
+    if !MOBILE_FRONTEND_CALLBACK_SCHEMES
+        .iter()
+        .any(|scheme| url.scheme().eq_ignore_ascii_case(scheme))
+    {
+        return Ok(false);
+    }
+
+    if !is_mobile_callback_base(url) {
+        return Err(FrontendCallbackValidationError::UntrustedOrigin);
+    }
+
+    validate_mobile_callback_query(url)?;
+    Ok(true)
+}
+
+fn is_mobile_callback_base(url: &Url) -> bool {
+    MOBILE_FRONTEND_CALLBACK_SCHEMES
+        .iter()
+        .any(|scheme| url.scheme().eq_ignore_ascii_case(scheme))
+        && url.host_str() == Some(MOBILE_FRONTEND_CALLBACK_HOST)
+        && url.path().is_empty()
+        && url.port().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
+}
+
+fn validate_mobile_callback_query(url: &Url) -> Result<(), FrontendCallbackValidationError> {
+    if url.fragment().is_some() {
+        return Err(FrontendCallbackValidationError::MobileCallbackQueryNotAllowed);
+    }
+
+    for (name, value) in url.query_pairs() {
+        if name != "state" || value.trim().is_empty() {
+            return Err(FrontendCallbackValidationError::MobileCallbackQueryNotAllowed);
+        }
+    }
+
+    Ok(())
+}
+
 fn is_loopback_http_url(url: &Url) -> bool {
     if url.scheme() != "http" {
         return false;
@@ -233,6 +310,20 @@ fn insert_origin(origins: &mut Vec<String>, seen: &mut HashSet<String>, url: &Ur
 
 fn url_origin(url: &Url) -> String {
     url.origin().ascii_serialization()
+}
+
+fn normalize_validated_callback_url(mut url: Url) -> String {
+    let path = url.path();
+    if path == "/" && url.query().is_none() && url.fragment().is_none() {
+        return trim_trailing_slash(url.as_str());
+    }
+
+    if path.len() > 1 && path.ends_with('/') {
+        let trimmed_path = path.trim_end_matches('/').to_string();
+        url.set_path(&trimmed_path);
+    }
+
+    url.to_string()
 }
 
 fn trim_trailing_slash(value: &str) -> String {
@@ -1400,10 +1491,82 @@ mod tests {
     }
 
     #[test]
+    fn validates_exact_mobile_callbacks_with_state() {
+        let near_callback =
+            validate_frontend_callback_url("nearai://auth?state=ios-state-1", Some(&allowlist()))
+                .unwrap();
+        assert_eq!(near_callback, "nearai://auth?state=ios-state-1");
+
+        let legacy_callback = validate_frontend_callback_url(
+            "nearprivatechat://auth?state=legacy-ios-state-1",
+            Some(&allowlist()),
+        )
+        .unwrap();
+        assert_eq!(
+            legacy_callback,
+            "nearprivatechat://auth?state=legacy-ios-state-1"
+        );
+
+        let err = validate_frontend_callback_url(
+            "privatechat://auth?state=mobile-state-1",
+            Some(&allowlist()),
+        )
+        .unwrap_err();
+        assert_eq!(err, FrontendCallbackValidationError::UnsupportedScheme);
+    }
+
+    #[test]
+    fn preserves_mobile_callback_state_trailing_slash() {
+        let callback = validate_frontend_callback_url(
+            "nearai://auth?state=state-with-slash/",
+            Some(&allowlist()),
+        )
+        .unwrap();
+
+        assert_eq!(callback, "nearai://auth?state=state-with-slash/");
+    }
+
+    #[test]
     fn rejects_untrusted_callback_origin() {
         let err = validate_frontend_callback_url("https://evil.example/auth", Some(&allowlist()))
             .unwrap_err();
         assert_eq!(err, FrontendCallbackValidationError::UntrustedOrigin);
+    }
+
+    #[test]
+    fn rejects_mobile_callback_lookalikes() {
+        let rejected = [
+            "nearai://evil?state=s",
+            "nearai://auth/other?state=s",
+            "nearprivatechat://evil?state=s",
+            "nearprivatechat://auth/other?state=s",
+            "privatechat.evil://auth?state=s",
+        ];
+
+        for callback in rejected {
+            assert!(
+                validate_frontend_callback_url(callback, Some(&allowlist())).is_err(),
+                "expected callback to be rejected: {callback}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_mobile_callback_extra_query_with_specific_error() {
+        assert_eq!(
+            validate_frontend_callback_url("nearai://auth?token=preseeded", Some(&allowlist()))
+                .unwrap_err(),
+            FrontendCallbackValidationError::MobileCallbackQueryNotAllowed
+        );
+        assert_eq!(
+            validate_frontend_callback_url("nearai://auth#state=s", Some(&allowlist()))
+                .unwrap_err(),
+            FrontendCallbackValidationError::MobileCallbackQueryNotAllowed
+        );
+        assert_eq!(
+            FrontendCallbackValidationError::MobileCallbackQueryNotAllowed.to_string(),
+            "mobile callback URLs may only include a non-empty state query parameter and no fragment"
+        );
     }
 
     #[test]
@@ -1473,6 +1636,25 @@ mod tests {
             redirect,
             "https://app.near.ai/app/auth/callback?token=tok+en&session_id=session-1&expires_at=2026-05-27T00%3A00%3A00Z&is_new_user=true"
         );
+    }
+
+    #[test]
+    fn builds_oauth_redirect_for_mobile_callback_without_path_mutation() {
+        for scheme in ["nearai", "nearprivatechat"] {
+            let redirect = build_oauth_frontend_redirect(
+                &format!("{scheme}://auth?state=mobile-state-1"),
+                "tok en",
+                "session-1",
+                "2026-05-27T00:00:00Z",
+                true,
+            )
+            .unwrap();
+
+            assert_eq!(
+                redirect,
+                format!("{scheme}://auth?token=tok+en&session_id=session-1&expires_at=2026-05-27T00%3A00%3A00Z&state=mobile-state-1&is_new_user=true")
+            );
+        }
     }
 
     #[test]
