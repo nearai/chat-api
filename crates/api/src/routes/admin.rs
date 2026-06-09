@@ -3524,7 +3524,20 @@ pub async fn admin_migrate_instance(
         .and_then(|v| v.as_str())
         .ok_or_else(|| ApiError::bad_request("Instance has no nearai_api_url — cannot migrate"))?;
     let request = body.map(|b| b.0).unwrap_or_default();
-    let service_type = instance.service_type.as_deref().unwrap_or("openclaw");
+    // Infer service type from compose-api image name when the DB value is null
+    // (all legacy instances have service_type=null).
+    let service_type = instance.service_type.as_deref().unwrap_or_else(|| {
+        let is_ironclaw = compose_data
+            .get("image")
+            .and_then(|v| v.as_str())
+            .map(|img| img.contains("ironclaw"))
+            .unwrap_or(false);
+        if is_ironclaw {
+            "ironclaw"
+        } else {
+            "openclaw"
+        }
+    });
     // Image override from request body (validated non-empty). Actual resolution
     // is deferred until after the "start if stopped" block so the version query
     // can reach the running container.
@@ -3801,6 +3814,20 @@ pub async fn admin_migrate_instance(
                 extra_env_map.insert(k.clone(), v.clone());
             }
         }
+    }
+    // compose-api populates SECRETS_MASTER_KEY via docker exec at startup.
+    // Instances that were stopped at that time won't have it — start all stopped
+    // instances and restart compose-api before running migrations.
+    if !extra_env_map.contains_key("SECRETS_MASTER_KEY")
+        && (service_type == "ironclaw" || service_type.starts_with("ironclaw-"))
+    {
+        tracing::warn!(
+            "Migrate: SECRETS_MASTER_KEY not found for ironclaw instance — \
+             channels may fail to decrypt. Ensure instance was running when \
+             compose-api started. instance_id={}, name={}",
+            id,
+            instance_name
+        );
     }
     extra_env_map.insert(
         "LEGACY_API_BASE_URL".into(),
