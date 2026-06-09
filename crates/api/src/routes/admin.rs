@@ -3561,6 +3561,28 @@ pub async fn admin_migrate_instance(
         .unwrap_or("unknown");
 
     let was_running = compose_status != "stopped" && compose_status != "exited";
+
+    // Preflight: ironclaw instances must have SECRETS_MASTER_KEY available.
+    // compose-api reads it via docker exec at startup — stopped containers are
+    // unreachable so the key is missing. Fail early before any side effects.
+    let has_master_key = compose_data
+        .get("extra_env")
+        .and_then(|v| v.get("SECRETS_MASTER_KEY"))
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.is_empty());
+    if !has_master_key && (service_type == "ironclaw" || service_type.starts_with("ironclaw-")) {
+        tracing::error!(
+            "Migrate: SECRETS_MASTER_KEY not found — aborting before side effects. \
+             Start all instances and restart compose-api first. instance_id={}, name={}",
+            id,
+            instance_name
+        );
+        return Err(ApiError::bad_request(
+            "SECRETS_MASTER_KEY not available — start all instances and restart \
+             compose-api before migration",
+        ));
+    }
+
     if !was_running {
         tracing::info!(
             "Migrate: instance stopped, starting before backup, elapsed={:.1}s, instance_id={}",
@@ -3813,20 +3835,6 @@ pub async fn admin_migrate_instance(
                 extra_env_map.insert(k.clone(), v.clone());
             }
         }
-    }
-    // compose-api populates SECRETS_MASTER_KEY via docker exec at startup.
-    // Instances that were stopped at that time won't have it — start all stopped
-    // instances and restart compose-api before running migrations.
-    if !extra_env_map.contains_key("SECRETS_MASTER_KEY")
-        && (service_type == "ironclaw" || service_type.starts_with("ironclaw-"))
-    {
-        tracing::warn!(
-            "Migrate: SECRETS_MASTER_KEY not found for ironclaw instance — \
-             channels may fail to decrypt. Ensure instance was running when \
-             compose-api started. instance_id={}, name={}",
-            id,
-            instance_name
-        );
     }
     extra_env_map.insert(
         "LEGACY_API_BASE_URL".into(),
