@@ -25,8 +25,8 @@ use url::{Host, Url};
 use utoipa::ToSchema;
 
 const FRONTEND_CALLBACK_ALLOWED_ORIGINS_ENV: &str = "FRONTEND_CALLBACK_ALLOWED_ORIGINS";
+const OAUTH_CALLBACK_PATH: &str = "/auth/callback";
 const PRIVATE_CHAT_UNIVERSAL_LINK_HOST: &str = "app.privatechat.com";
-const PRIVATE_CHAT_UNIVERSAL_LINK_PATH: &str = "/auth/callback";
 const MOBILE_FRONTEND_CALLBACK_SCHEMES: &[&str] = &["nearprivatechat", "privatechat"];
 const MOBILE_FRONTEND_CALLBACK_HOST: &str = "auth";
 
@@ -37,6 +37,7 @@ enum FrontendCallbackValidationError {
     MissingHost,
     CredentialsNotAllowed,
     QueryOrFragmentNotAllowed,
+    MobileCallbackQueryNotAllowed,
     Insecure,
     UntrustedOrigin,
 }
@@ -50,6 +51,9 @@ impl std::fmt::Display for FrontendCallbackValidationError {
             Self::CredentialsNotAllowed => "credentials are not allowed in callback URLs",
             Self::QueryOrFragmentNotAllowed => {
                 "query strings and fragments are not allowed in callback URLs"
+            }
+            Self::MobileCallbackQueryNotAllowed => {
+                "mobile callback URLs may only include a non-empty state query parameter and no fragment"
             }
             Self::Insecure => "callback URL must use HTTPS",
             Self::UntrustedOrigin => "callback URL origin is not allowlisted",
@@ -164,11 +168,11 @@ fn build_oauth_frontend_redirect(
     if !is_mobile_callback_base(&url) && !is_private_chat_universal_link_callback_base(&url) {
         let base_path = url.path().trim_end_matches('/');
         let callback_path = if base_path.is_empty() {
-            PRIVATE_CHAT_UNIVERSAL_LINK_PATH.to_string()
-        } else if base_path.ends_with(PRIVATE_CHAT_UNIVERSAL_LINK_PATH) {
+            OAUTH_CALLBACK_PATH.to_string()
+        } else if base_path.ends_with(OAUTH_CALLBACK_PATH) {
             base_path.to_string()
         } else {
-            format!("{base_path}{PRIVATE_CHAT_UNIVERSAL_LINK_PATH}")
+            format!("{base_path}{OAUTH_CALLBACK_PATH}")
         };
 
         url.set_path(&callback_path);
@@ -281,7 +285,7 @@ fn is_private_chat_universal_link_callback_url(
 fn is_private_chat_universal_link_callback_base(url: &Url) -> bool {
     url.scheme() == "https"
         && url.host_str() == Some(PRIVATE_CHAT_UNIVERSAL_LINK_HOST)
-        && url.path() == PRIVATE_CHAT_UNIVERSAL_LINK_PATH
+        && url.path() == OAUTH_CALLBACK_PATH
         && url.port().is_none()
         && url.username().is_empty()
         && url.password().is_none()
@@ -289,12 +293,12 @@ fn is_private_chat_universal_link_callback_base(url: &Url) -> bool {
 
 fn validate_mobile_callback_query(url: &Url) -> Result<(), FrontendCallbackValidationError> {
     if url.fragment().is_some() {
-        return Err(FrontendCallbackValidationError::QueryOrFragmentNotAllowed);
+        return Err(FrontendCallbackValidationError::MobileCallbackQueryNotAllowed);
     }
 
     for (name, value) in url.query_pairs() {
         if name != "state" || value.trim().is_empty() {
-            return Err(FrontendCallbackValidationError::QueryOrFragmentNotAllowed);
+            return Err(FrontendCallbackValidationError::MobileCallbackQueryNotAllowed);
         }
     }
 
@@ -1536,8 +1540,6 @@ mod tests {
         let rejected = [
             "nearprivatechat://evil?state=s",
             "nearprivatechat://auth/other?state=s",
-            "nearprivatechat://auth?token=preseeded",
-            "nearprivatechat://auth#state=s",
             "privatechat.evil://auth?state=s",
             "https://app.privatechat.com.evil.example/auth/callback?state=s",
             "https://app.privatechat.com/other?state=s",
@@ -1549,6 +1551,27 @@ mod tests {
                 "expected callback to be rejected: {callback}"
             );
         }
+    }
+
+    #[test]
+    fn rejects_mobile_callback_extra_query_with_specific_error() {
+        assert_eq!(
+            validate_frontend_callback_url(
+                "nearprivatechat://auth?token=preseeded",
+                Some(&allowlist())
+            )
+            .unwrap_err(),
+            FrontendCallbackValidationError::MobileCallbackQueryNotAllowed
+        );
+        assert_eq!(
+            validate_frontend_callback_url("nearprivatechat://auth#state=s", Some(&allowlist()))
+                .unwrap_err(),
+            FrontendCallbackValidationError::MobileCallbackQueryNotAllowed
+        );
+        assert_eq!(
+            FrontendCallbackValidationError::MobileCallbackQueryNotAllowed.to_string(),
+            "mobile callback URLs may only include a non-empty state query parameter and no fragment"
+        );
     }
 
     #[test]
