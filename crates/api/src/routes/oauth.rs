@@ -26,7 +26,11 @@ use utoipa::ToSchema;
 
 const FRONTEND_CALLBACK_ALLOWED_ORIGINS_ENV: &str = "FRONTEND_CALLBACK_ALLOWED_ORIGINS";
 const OAUTH_CALLBACK_PATH: &str = "/auth/callback";
-const MOBILE_FRONTEND_CALLBACK_SCHEMES: &[&str] = &["nearprivatechat"];
+// Mobile app-scheme callbacks are not URL origins, so they cannot be validated
+// through FRONTEND_CALLBACK_ALLOWED_ORIGINS. Keep this list exact and short.
+// nearprivatechat is accepted temporarily for already-shipped mobile builds;
+// new mobile clients should send nearai://auth.
+const MOBILE_FRONTEND_CALLBACK_SCHEMES: &[&str] = &["nearai", "nearprivatechat"];
 const MOBILE_FRONTEND_CALLBACK_HOST: &str = "auth";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1488,12 +1492,20 @@ mod tests {
 
     #[test]
     fn validates_exact_mobile_callbacks_with_state() {
-        let near_callback = validate_frontend_callback_url(
-            "nearprivatechat://auth?state=ios-state-1",
+        let near_callback =
+            validate_frontend_callback_url("nearai://auth?state=ios-state-1", Some(&allowlist()))
+                .unwrap();
+        assert_eq!(near_callback, "nearai://auth?state=ios-state-1");
+
+        let legacy_callback = validate_frontend_callback_url(
+            "nearprivatechat://auth?state=legacy-ios-state-1",
             Some(&allowlist()),
         )
         .unwrap();
-        assert_eq!(near_callback, "nearprivatechat://auth?state=ios-state-1");
+        assert_eq!(
+            legacy_callback,
+            "nearprivatechat://auth?state=legacy-ios-state-1"
+        );
 
         let err = validate_frontend_callback_url(
             "privatechat://auth?state=mobile-state-1",
@@ -1506,12 +1518,12 @@ mod tests {
     #[test]
     fn preserves_mobile_callback_state_trailing_slash() {
         let callback = validate_frontend_callback_url(
-            "nearprivatechat://auth?state=state-with-slash/",
+            "nearai://auth?state=state-with-slash/",
             Some(&allowlist()),
         )
         .unwrap();
 
-        assert_eq!(callback, "nearprivatechat://auth?state=state-with-slash/");
+        assert_eq!(callback, "nearai://auth?state=state-with-slash/");
     }
 
     #[test]
@@ -1524,6 +1536,8 @@ mod tests {
     #[test]
     fn rejects_mobile_callback_lookalikes() {
         let rejected = [
+            "nearai://evil?state=s",
+            "nearai://auth/other?state=s",
             "nearprivatechat://evil?state=s",
             "nearprivatechat://auth/other?state=s",
             "privatechat.evil://auth?state=s",
@@ -1540,15 +1554,12 @@ mod tests {
     #[test]
     fn rejects_mobile_callback_extra_query_with_specific_error() {
         assert_eq!(
-            validate_frontend_callback_url(
-                "nearprivatechat://auth?token=preseeded",
-                Some(&allowlist())
-            )
-            .unwrap_err(),
+            validate_frontend_callback_url("nearai://auth?token=preseeded", Some(&allowlist()))
+                .unwrap_err(),
             FrontendCallbackValidationError::MobileCallbackQueryNotAllowed
         );
         assert_eq!(
-            validate_frontend_callback_url("nearprivatechat://auth#state=s", Some(&allowlist()))
+            validate_frontend_callback_url("nearai://auth#state=s", Some(&allowlist()))
                 .unwrap_err(),
             FrontendCallbackValidationError::MobileCallbackQueryNotAllowed
         );
@@ -1629,19 +1640,21 @@ mod tests {
 
     #[test]
     fn builds_oauth_redirect_for_mobile_callback_without_path_mutation() {
-        let redirect = build_oauth_frontend_redirect(
-            "nearprivatechat://auth?state=mobile-state-1",
-            "tok en",
-            "session-1",
-            "2026-05-27T00:00:00Z",
-            true,
-        )
-        .unwrap();
+        for scheme in ["nearai", "nearprivatechat"] {
+            let redirect = build_oauth_frontend_redirect(
+                &format!("{scheme}://auth?state=mobile-state-1"),
+                "tok en",
+                "session-1",
+                "2026-05-27T00:00:00Z",
+                true,
+            )
+            .unwrap();
 
-        assert_eq!(
-            redirect,
-            "nearprivatechat://auth?token=tok+en&session_id=session-1&expires_at=2026-05-27T00%3A00%3A00Z&state=mobile-state-1&is_new_user=true"
-        );
+            assert_eq!(
+                redirect,
+                format!("{scheme}://auth?token=tok+en&session_id=session-1&expires_at=2026-05-27T00%3A00%3A00Z&state=mobile-state-1&is_new_user=true")
+            );
+        }
     }
 
     #[test]
