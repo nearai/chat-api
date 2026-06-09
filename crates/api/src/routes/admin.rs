@@ -3523,24 +3523,64 @@ pub async fn admin_migrate_instance(
         .get("nearai_api_url")
         .and_then(|v| v.as_str())
         .ok_or_else(|| ApiError::bad_request("Instance has no nearai_api_url — cannot migrate"))?;
-    // Image: use explicit override from request body, or fall back to the configured
-    // CrabShack image for this service type. Legacy image refs (e.g. ironclaw-nearai-worker)
-    // are rejected by CrabShack's allowlist, so we never pass them through.
+    // Image: use explicit override from request body, or query the running instance's
+    // app version and construct a matching ironclaw-dind/openclaw tag. Falls back to
+    // the configured default if the version query fails.
     let request = body.map(|b| b.0).unwrap_or_default();
     let service_type = instance.service_type.as_deref().unwrap_or("openclaw");
     let image = if let Some(img) = request.image {
         img
     } else {
-        let configs = app_state
-            .system_configs_service
-            .get_configs()
-            .await
-            .ok()
-            .flatten();
-        services::agent::service::get_image_for_service_type(
-            service_type,
-            configs.as_ref().and_then(|c| c.agent_hosting.as_ref()),
-        )
+        // Try to get the app version from the running legacy container
+        let version_url = format!("{}/instances/{}/version", compose_api_url, encoded_name);
+        let version = async {
+            let resp = app_state
+                .http_client
+                .get(&version_url)
+                .bearer_auth(&manager.token)
+                .timeout(std::time::Duration::from_secs(10))
+                .send()
+                .await
+                .ok()?;
+            if !resp.status().is_success() {
+                return None;
+            }
+            let body: serde_json::Value = resp.json().await.ok()?;
+            body.get("version")?.as_str().map(|s| s.to_string())
+        }
+        .await;
+
+        if let Some(ver) = version {
+            let image_name = match service_type {
+                "ironclaw" => "docker.io/nearaidev/ironclaw-dind",
+                _ => "docker.io/nearaidev/openclaw-nearai-worker",
+            };
+            tracing::info!(
+                "Migrate: resolved app version={}, using image {}:{}, instance_id={}",
+                ver,
+                image_name,
+                ver,
+                id
+            );
+            format!("{}:{}", image_name, ver)
+        } else {
+            let configs = app_state
+                .system_configs_service
+                .get_configs()
+                .await
+                .ok()
+                .flatten();
+            let fallback = services::agent::service::get_image_for_service_type(
+                service_type,
+                configs.as_ref().and_then(|c| c.agent_hosting.as_ref()),
+            );
+            tracing::info!(
+                "Migrate: version query failed, using default image={}, instance_id={}",
+                fallback,
+                id
+            );
+            fallback
+        }
     };
     let mem_limit = compose_data
         .get("mem_limit")
