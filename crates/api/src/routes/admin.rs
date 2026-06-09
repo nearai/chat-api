@@ -3598,15 +3598,30 @@ pub async fn admin_migrate_instance(
     } else {
         let version_url = format!("{}/instances/{}/version", compose_api_url, encoded_name);
         let version = async {
-            let resp = app_state
+            let resp = match app_state
                 .http_client
                 .get(&version_url)
                 .bearer_auth(&manager.token)
                 .timeout(std::time::Duration::from_secs(10))
                 .send()
                 .await
-                .ok()?;
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::debug!(
+                        "Migrate: version query failed: instance_id={}, error={}",
+                        id,
+                        e
+                    );
+                    return None;
+                }
+            };
             if !resp.status().is_success() {
+                tracing::debug!(
+                    "Migrate: version query returned status={}, instance_id={}",
+                    resp.status(),
+                    id
+                );
                 return None;
             }
             let body: serde_json::Value = resp.json().await.ok()?;
@@ -3614,32 +3629,23 @@ pub async fn admin_migrate_instance(
         }
         .await;
 
+        let default_image = services::agent::service::get_image_for_service_type(
+            service_type,
+            hosting_config.as_ref(),
+        );
         if let Some(ver) = version {
-            let img = format!(
-                "{}:{}",
-                services::agent::service::get_image_for_service_type(
-                    service_type,
-                    hosting_config.as_ref(),
-                )
+            let base = default_image
                 .rsplit_once(':')
-                .map(|(base, _)| base)
-                .unwrap_or("docker.io/nearaidev/ironclaw-dind"),
-                ver
-            );
+                .map(|(b, _)| b)
+                .unwrap_or(&default_image);
+            let img = format!("{}:{}", base, ver);
             tracing::info!("Migrate: resolved image={}, instance_id={}", img, id);
             img
         } else {
-            let mut fallback = services::agent::service::get_image_for_service_type(
-                service_type,
-                hosting_config.as_ref(),
-            );
-            // For migration, prefer a known-good version over :latest
-            if fallback.ends_with(":latest") {
-                let is_ironclaw =
-                    service_type == "ironclaw" || service_type.starts_with("ironclaw-");
-                if is_ironclaw {
-                    fallback = fallback.replace(":latest", ":0.29.1");
-                }
+            let mut fallback = default_image;
+            // For ironclaw migration, prefer a known-good version over :latest
+            if fallback.ends_with(":latest") && fallback.contains("ironclaw") {
+                fallback = fallback.replace(":latest", ":0.29.1");
             }
             tracing::info!(
                 "Migrate: version query failed, using default image={}, instance_id={}",
