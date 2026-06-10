@@ -3550,6 +3550,12 @@ pub async fn admin_migrate_instance(
     // can reach the running container.
     let image_override = request.image.filter(|s| !s.is_empty());
     let provided_backup_url = request.backup_url.filter(|s| !s.is_empty());
+    let has_backup_url = provided_backup_url.is_some();
+    if let Some(ref url) = provided_backup_url {
+        if !url.starts_with("https://") {
+            return Err(ApiError::bad_request("backup_url must use https scheme"));
+        }
+    }
     let mem_limit = compose_data
         .get("mem_limit")
         .and_then(|v| v.as_str())
@@ -3569,6 +3575,13 @@ pub async fn admin_migrate_instance(
         .unwrap_or("unknown");
 
     let was_running = compose_status != "stopped" && compose_status != "exited";
+
+    if has_backup_url && was_running {
+        return Err(ApiError::bad_request(
+            "backup_url requires the legacy instance to be stopped first — \
+             stop it before taking an external backup to avoid data loss",
+        ));
+    }
 
     // Preflight: ironclaw instances must have SECRETS_MASTER_KEY available.
     // compose-api reads it via docker exec at startup — stopped containers are
@@ -3594,7 +3607,7 @@ pub async fn admin_migrate_instance(
     // When backup_url is provided, skip starting the instance and querying /version —
     // the admin already obtained the backup externally (e.g. direct compose-api call)
     // and the instance should stay stopped to avoid accepting writes after the backup.
-    if provided_backup_url.is_none() && !was_running {
+    if !has_backup_url && !was_running {
         tracing::info!(
             "Migrate: instance stopped, starting before backup, elapsed={:.1}s, instance_id={}",
             migrate_start.elapsed().as_secs_f64(),
@@ -3642,7 +3655,7 @@ pub async fn admin_migrate_instance(
     // otherwise fall back to the configured default.
     let image = if let Some(img) = image_override {
         img
-    } else if provided_backup_url.is_some() {
+    } else if has_backup_url {
         let default_image = services::agent::service::get_image_for_service_type(
             service_type,
             hosting_config.as_ref(),
@@ -3806,52 +3819,55 @@ pub async fn admin_migrate_instance(
         }
     };
 
-    tracing::info!(
-        "Migrate: backup complete, stopping legacy instance, elapsed={:.1}s, instance_id={}",
-        migrate_start.elapsed().as_secs_f64(),
-        id,
-    );
-    let stop_url = format!("{}/instances/{}/stop", compose_api_url, encoded_name);
-    let stop_resp = app_state
-        .http_client
-        .post(&stop_url)
-        .bearer_auth(&manager.token)
-        .timeout(std::time::Duration::from_secs(60))
-        .send()
-        .await;
-
-    let stop_failed = match &stop_resp {
-        Err(e) => {
-            tracing::error!(
-                "Failed to stop instance on compose-api: instance_id={}, error={}",
-                id,
-                e
-            );
-            true
-        }
-        Ok(resp) if !resp.status().is_success() => {
-            tracing::error!(
-                "Compose-api stop returned non-success: instance_id={}, status={}",
-                id,
-                resp.status()
-            );
-            true
-        }
-        _ => false,
-    };
-    if stop_failed {
-        restore_on_failure(
-            &app_state,
-            compose_api_url,
-            &encoded_name,
-            &manager.token,
-            was_running,
-            "stop",
-            &instance_name,
+    // Skip stop when backup_url was provided — instance is already stopped (enforced above).
+    if !has_backup_url {
+        tracing::info!(
+            "Migrate: backup complete, stopping legacy instance, elapsed={:.1}s, instance_id={}",
+            migrate_start.elapsed().as_secs_f64(),
+            id,
         );
-        return Err(ApiError::internal_server_error(
-            "Failed to stop legacy instance before import",
-        ));
+        let stop_url = format!("{}/instances/{}/stop", compose_api_url, encoded_name);
+        let stop_resp = app_state
+            .http_client
+            .post(&stop_url)
+            .bearer_auth(&manager.token)
+            .timeout(std::time::Duration::from_secs(60))
+            .send()
+            .await;
+
+        let stop_failed = match &stop_resp {
+            Err(e) => {
+                tracing::error!(
+                    "Failed to stop instance on compose-api: instance_id={}, error={}",
+                    id,
+                    e
+                );
+                true
+            }
+            Ok(resp) if !resp.status().is_success() => {
+                tracing::error!(
+                    "Compose-api stop returned non-success: instance_id={}, status={}",
+                    id,
+                    resp.status()
+                );
+                true
+            }
+            _ => false,
+        };
+        if stop_failed {
+            restore_on_failure(
+                &app_state,
+                compose_api_url,
+                &encoded_name,
+                &manager.token,
+                was_running,
+                "stop",
+                &instance_name,
+            );
+            return Err(ApiError::internal_server_error(
+                "Failed to stop legacy instance before import",
+            ));
+        }
     }
 
     tracing::info!(
@@ -3904,6 +3920,8 @@ pub async fn admin_migrate_instance(
             ApiError::internal_server_error("No CrabShack manager configured")
         })?;
 
+    // Deploy ordering: node_policy requires CrabShack PR #327 to be deployed first.
+    // Without it, CrabShack ignores the field (pre-#327 import silently drops unknown fields).
     let import_url = format!("{}/instances/import", crabshack_manager.url);
     let import_body = serde_json::json!({
         "name": instance.name,
