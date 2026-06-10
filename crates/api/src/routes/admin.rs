@@ -3708,7 +3708,7 @@ pub async fn admin_migrate_instance(
         .post(&backup_url)
         .bearer_auth(&manager.token)
         .json(&backup_body)
-        .timeout(std::time::Duration::from_secs(600))
+        .timeout(SSE_MIGRATION_TOTAL_TIMEOUT)
         .send()
         .await
         .map_err(|e| {
@@ -3883,7 +3883,7 @@ pub async fn admin_migrate_instance(
         "cpus": cpus,
         "storage_size": storage_size,
         "extra_env": extra_env,
-        "node_policy": { "tee": "ANY_TEE" },
+        "node_policy": { "version": 1, "tee": "ANY_TEE" },
     });
 
     let import_resp = app_state
@@ -3891,7 +3891,7 @@ pub async fn admin_migrate_instance(
         .post(&import_url)
         .bearer_auth(&crabshack_manager.token)
         .json(&import_body)
-        .timeout(std::time::Duration::from_secs(600))
+        .timeout(SSE_MIGRATION_TOTAL_TIMEOUT)
         .send()
         .await
         .map_err(|e| {
@@ -4019,6 +4019,7 @@ pub async fn admin_migrate_instance(
 /// Maximum buffer size for SSE parsing (1 MB).
 const SSE_BUFFER_LIMIT: usize = 1024 * 1024;
 /// Total time budget for an SSE migration stream (backup or import).
+/// Applied as reqwest's per-request .timeout() on the backup/import POST calls.
 const SSE_MIGRATION_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 /// How long to wait for a single chunk before logging a stall warning.
 /// Compose-api sends keepalives every 15s, so 30s without any data means trouble.
@@ -4049,16 +4050,9 @@ async fn parse_sse_for_backup_url(
             }
             Ok(None) => break,
             Err(_) => {
-                let silent_secs = last_chunk_at.elapsed().as_secs_f64();
-                if start.elapsed() >= SSE_MIGRATION_TOTAL_TIMEOUT {
-                    anyhow::bail!(
-                        "Timed out waiting for backup SSE ({}s total, no data for {:.0}s, {} chunks received), instance_id={}",
-                        SSE_MIGRATION_TOTAL_TIMEOUT.as_secs(), silent_secs, chunk_count, instance_id,
-                    );
-                }
                 tracing::warn!(
                     "Backup SSE: no data for {:.0}s (total elapsed={:.1}s, chunks={}), instance_id={}",
-                    silent_secs, start.elapsed().as_secs_f64(), chunk_count, instance_id,
+                    last_chunk_at.elapsed().as_secs_f64(), start.elapsed().as_secs_f64(), chunk_count, instance_id,
                 );
                 continue;
             }
@@ -4162,16 +4156,9 @@ async fn parse_sse_for_import_result(
             }
             Ok(None) => break,
             Err(_) => {
-                let silent_secs = last_chunk_at.elapsed().as_secs_f64();
-                if start.elapsed() >= SSE_MIGRATION_TOTAL_TIMEOUT {
-                    anyhow::bail!(
-                        "Timed out waiting for import SSE ({}s total, no data for {:.0}s, {} chunks received), instance_id={}",
-                        SSE_MIGRATION_TOTAL_TIMEOUT.as_secs(), silent_secs, chunk_count, instance_id,
-                    );
-                }
                 tracing::warn!(
                     "Import SSE: no data for {:.0}s (total elapsed={:.1}s, chunks={}), instance_id={}",
-                    silent_secs, start.elapsed().as_secs_f64(), chunk_count, instance_id,
+                    last_chunk_at.elapsed().as_secs_f64(), start.elapsed().as_secs_f64(), chunk_count, instance_id,
                 );
                 continue;
             }
