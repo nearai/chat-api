@@ -3412,11 +3412,21 @@ pub async fn admin_migrate_instance(
             ApiError::internal_server_error("Failed to get user credentials")
         })?;
 
+    let request_has_backup_url = body
+        .as_ref()
+        .and_then(|b| b.backup_url.as_ref())
+        .is_some_and(|s| !s.is_empty());
+
     let backup_passphrase = match creds {
         Some((_auth_secret, passphrase)) => passphrase,
+        None if request_has_backup_url => {
+            return Err(ApiError::bad_request(
+                "backup_url requires existing passkey credentials — run a normal \
+                 migration first (without backup_url) to generate them, or use the \
+                 passkey enrollment endpoint",
+            ));
+        }
         None => {
-            // Generate and store a new passphrase
-            // Generate random 32-byte hex strings using two UUIDv4 (16 bytes each)
             let passphrase = format!(
                 "{}{}",
                 Uuid::new_v4().as_simple(),
@@ -4025,6 +4035,35 @@ pub async fn admin_migrate_instance(
             ));
         }
     };
+
+    // Verify TEE placement — query CrabShack for the created instance and check tee_platform.
+    let instance_check_url = format!(
+        "{}/instances/{}",
+        crabshack_manager.url.trim_end_matches('/'),
+        urlencoding::encode(&instance_name)
+    );
+    if let Ok(resp) = app_state
+        .http_client
+        .get(&instance_check_url)
+        .bearer_auth(&crabshack_manager.token)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+    {
+        if let Ok(body) = resp.json::<serde_json::Value>().await {
+            let tee = body
+                .pointer("/node_policy/tee")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            if tee == "NO_TEE" {
+                tracing::warn!(
+                    "Migrate: instance landed on non-TEE node, node_policy.tee={}, instance_id={}. \
+                     CrabShack may not support node_policy yet — check deploy ordering.",
+                    tee, id,
+                );
+            }
+        }
+    }
 
     // Construct instance_url from CrabShack manager domain + instance name + token.
     // CrabShack doesn't emit URLs — same pattern as the normal create flow (service.rs:1584-1597).
