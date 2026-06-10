@@ -4036,13 +4036,13 @@ pub async fn admin_migrate_instance(
         }
     };
 
-    // Verify TEE placement — query CrabShack for the created instance and check tee_platform.
+    // Best-effort TEE placement check — read actual node's tee_platform, not the echoed policy.
     let instance_check_url = format!(
         "{}/instances/{}",
         crabshack_manager.url.trim_end_matches('/'),
         urlencoding::encode(&instance_name)
     );
-    if let Ok(resp) = app_state
+    match app_state
         .http_client
         .get(&instance_check_url)
         .bearer_auth(&crabshack_manager.token)
@@ -4050,18 +4050,33 @@ pub async fn admin_migrate_instance(
         .send()
         .await
     {
-        if let Ok(body) = resp.json::<serde_json::Value>().await {
-            let tee = body
-                .pointer("/node_policy/tee")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            if tee == "NO_TEE" {
-                tracing::warn!(
-                    "Migrate: instance landed on non-TEE node, node_policy.tee={}, instance_id={}. \
-                     CrabShack may not support node_policy yet — check deploy ordering.",
-                    tee, id,
-                );
+        Ok(resp) if resp.status().is_success() => {
+            if let Ok(body) = resp.json::<serde_json::Value>().await {
+                let has_tee = body
+                    .pointer("/running_platform/tee_platform")
+                    .is_some_and(|v| !v.is_null());
+                if !has_tee {
+                    tracing::warn!(
+                        "Migrate: instance may not be on a TEE node (running_platform.tee_platform absent), \
+                         instance_id={}",
+                        id,
+                    );
+                }
             }
+        }
+        Ok(resp) => {
+            tracing::warn!(
+                "Migrate: TEE placement check failed: status={}, instance_id={}",
+                resp.status(),
+                id,
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Migrate: TEE placement check failed: error={}, instance_id={}",
+                e,
+                id,
+            );
         }
     }
 
