@@ -3341,6 +3341,9 @@ pub struct MigrateInstanceRequest {
     /// Skip the backup phase entirely and use this presigned URL instead.
     /// Useful when backup was obtained directly from compose-api (e.g. the
     /// SSE stream stalls through chat-api but works when called directly).
+    /// The backup must be age-encrypted with the recipient derived from the
+    /// user's stored passphrase + instance name. The legacy instance will NOT
+    /// be started — stop it before taking the external backup to avoid data loss.
     pub backup_url: Option<String>,
 }
 
@@ -3588,7 +3591,10 @@ pub async fn admin_migrate_instance(
         ));
     }
 
-    if !was_running {
+    // When backup_url is provided, skip starting the instance and querying /version —
+    // the admin already obtained the backup externally (e.g. direct compose-api call)
+    // and the instance should stay stopped to avoid accepting writes after the backup.
+    if provided_backup_url.is_none() && !was_running {
         tracing::info!(
             "Migrate: instance stopped, starting before backup, elapsed={:.1}s, instance_id={}",
             migrate_start.elapsed().as_secs_f64(),
@@ -3632,9 +3638,25 @@ pub async fn admin_migrate_instance(
         .flatten()
         .and_then(|c| c.agent_hosting);
 
-    // Resolve image now that the container is running and the version endpoint is reachable.
+    // Resolve image: use override if provided, query /version if instance is running,
+    // otherwise fall back to the configured default.
     let image = if let Some(img) = image_override {
         img
+    } else if provided_backup_url.is_some() {
+        let default_image = services::agent::service::get_image_for_service_type(
+            service_type,
+            hosting_config.as_ref(),
+        );
+        let mut fallback = default_image;
+        if fallback == "docker.io/nearaidev/ironclaw-dind:latest" {
+            fallback = "docker.io/nearaidev/ironclaw-dind:0.29.1".to_string();
+        }
+        tracing::info!(
+            "Migrate: backup_url provided, using default image={}, instance_id={}",
+            fallback,
+            id
+        );
+        fallback
     } else {
         let version_url = format!("{}/instances/{}/version", compose_api_url, encoded_name);
         let version = async {
