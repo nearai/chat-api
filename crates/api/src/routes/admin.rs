@@ -3338,6 +3338,13 @@ pub struct MigrateInstanceRequest {
     /// Override the Docker image for the CrabShack instance.
     /// If not provided, uses the configured default for the service type.
     pub image: Option<String>,
+    /// Skip the backup phase entirely and use this presigned URL instead.
+    /// Useful when backup was obtained directly from compose-api (e.g. the
+    /// SSE stream stalls through chat-api but works when called directly).
+    /// The backup must be age-encrypted with the recipient derived from the
+    /// user's stored passphrase + instance name. The legacy instance will NOT
+    /// be started — stop it before taking the external backup to avoid data loss.
+    pub backup_url: Option<String>,
 }
 
 /// Response for migrate endpoint
@@ -3405,11 +3412,21 @@ pub async fn admin_migrate_instance(
             ApiError::internal_server_error("Failed to get user credentials")
         })?;
 
+    let request_has_backup_url = body
+        .as_ref()
+        .and_then(|b| b.backup_url.as_ref())
+        .is_some_and(|s| !s.is_empty());
+
     let backup_passphrase = match creds {
         Some((_auth_secret, passphrase)) => passphrase,
+        None if request_has_backup_url => {
+            return Err(ApiError::bad_request(
+                "backup_url requires existing passkey credentials — run a normal \
+                 migration first (without backup_url) to generate them, or use the \
+                 passkey enrollment endpoint",
+            ));
+        }
         None => {
-            // Generate and store a new passphrase
-            // Generate random 32-byte hex strings using two UUIDv4 (16 bytes each)
             let passphrase = format!(
                 "{}{}",
                 Uuid::new_v4().as_simple(),
@@ -3542,6 +3559,13 @@ pub async fn admin_migrate_instance(
     // is deferred until after the "start if stopped" block so the version query
     // can reach the running container.
     let image_override = request.image.filter(|s| !s.is_empty());
+    let provided_backup_url = request.backup_url.filter(|s| !s.is_empty());
+    let has_backup_url = provided_backup_url.is_some();
+    if let Some(ref url) = provided_backup_url {
+        if !url.starts_with("https://") {
+            return Err(ApiError::bad_request("backup_url must use https scheme"));
+        }
+    }
     let mem_limit = compose_data
         .get("mem_limit")
         .and_then(|v| v.as_str())
@@ -3561,6 +3585,13 @@ pub async fn admin_migrate_instance(
         .unwrap_or("unknown");
 
     let was_running = compose_status != "stopped" && compose_status != "exited";
+
+    if has_backup_url && was_running {
+        return Err(ApiError::bad_request(
+            "backup_url requires the legacy instance to be stopped first — \
+             stop it before taking an external backup to avoid data loss",
+        ));
+    }
 
     // Preflight: ironclaw instances must have SECRETS_MASTER_KEY available.
     // compose-api reads it via docker exec at startup — stopped containers are
@@ -3583,7 +3614,10 @@ pub async fn admin_migrate_instance(
         ));
     }
 
-    if !was_running {
+    // When backup_url is provided, skip starting the instance and querying /version —
+    // the admin already obtained the backup externally (e.g. direct compose-api call)
+    // and the instance should stay stopped to avoid accepting writes after the backup.
+    if !has_backup_url && !was_running {
         tracing::info!(
             "Migrate: instance stopped, starting before backup, elapsed={:.1}s, instance_id={}",
             migrate_start.elapsed().as_secs_f64(),
@@ -3627,9 +3661,25 @@ pub async fn admin_migrate_instance(
         .flatten()
         .and_then(|c| c.agent_hosting);
 
-    // Resolve image now that the container is running and the version endpoint is reachable.
+    // Resolve image: use override if provided, query /version if instance is running,
+    // otherwise fall back to the configured default.
     let image = if let Some(img) = image_override {
         img
+    } else if has_backup_url {
+        let default_image = services::agent::service::get_image_for_service_type(
+            service_type,
+            hosting_config.as_ref(),
+        );
+        let mut fallback = default_image;
+        if fallback == "docker.io/nearaidev/ironclaw-dind:latest" {
+            fallback = "docker.io/nearaidev/ironclaw-dind:0.29.1".to_string();
+        }
+        tracing::info!(
+            "Migrate: backup_url provided, using default image={}, instance_id={}",
+            fallback,
+            id
+        );
+        fallback
     } else {
         let version_url = format!("{}/instances/{}/version", compose_api_url, encoded_name);
         let version = async {
@@ -3690,70 +3740,55 @@ pub async fn admin_migrate_instance(
         }
     };
 
-    tracing::info!(
-        "Migrate: requesting backup, was_running={}, elapsed={:.1}s, instance_id={}",
-        was_running,
-        migrate_start.elapsed().as_secs_f64(),
-        id,
-    );
-    let backup_url = format!("{}/instances/{}/backup", compose_api_url, encoded_name);
-    let backup_body = serde_json::json!({
-        "age_recipient": age_recipient,
-        "expiry_secs": 7200,
-        "full_export": true
-    });
-
-    let backup_resp = app_state
-        .http_client
-        .post(&backup_url)
-        .bearer_auth(&manager.token)
-        .json(&backup_body)
-        .timeout(std::time::Duration::from_secs(600))
-        .send()
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to create backup: instance_id={}, error={}", id, e);
-            restore_on_failure(
-                &app_state,
-                compose_api_url,
-                &encoded_name,
-                &manager.token,
-                was_running,
-                "stop",
-                &instance_name,
-            );
-            ApiError::internal_server_error("Failed to initiate backup on legacy compose-api")
-        })?;
-
-    if !backup_resp.status().is_success() {
-        let status = backup_resp.status();
-        tracing::error!(
-            "Compose-api backup failed: instance_id={}, status={}",
+    let backup_presigned_url = if let Some(url) = provided_backup_url {
+        tracing::info!(
+            "Migrate: using provided backup_url, skipping backup phase, elapsed={:.1}s, instance_id={}",
+            migrate_start.elapsed().as_secs_f64(),
             id,
-            status
         );
-        restore_on_failure(
-            &app_state,
-            compose_api_url,
-            &encoded_name,
-            &manager.token,
+        url
+    } else {
+        tracing::info!(
+            "Migrate: requesting backup, was_running={}, elapsed={:.1}s, instance_id={}",
             was_running,
-            "stop",
-            &instance_name,
+            migrate_start.elapsed().as_secs_f64(),
+            id,
         );
-        return Err(ApiError::internal_server_error(
-            "Failed to create backup on legacy compose-api",
-        ));
-    }
+        let backup_url = format!("{}/instances/{}/backup", compose_api_url, encoded_name);
+        let backup_body = serde_json::json!({
+            "age_recipient": age_recipient,
+            "expiry_secs": 7200,
+            "full_export": true
+        });
 
-    // Parse SSE stream to get backup presigned URL
-    let backup_presigned_url = match parse_sse_for_backup_url(backup_resp, &id_str).await {
-        Ok(url) => url,
-        Err(e) => {
+        let backup_resp = app_state
+            .http_client
+            .post(&backup_url)
+            .bearer_auth(&manager.token)
+            .json(&backup_body)
+            .timeout(SSE_MIGRATION_TOTAL_TIMEOUT)
+            .send()
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to create backup: instance_id={}, error={}", id, e);
+                restore_on_failure(
+                    &app_state,
+                    compose_api_url,
+                    &encoded_name,
+                    &manager.token,
+                    was_running,
+                    "stop",
+                    &instance_name,
+                );
+                ApiError::internal_server_error("Failed to initiate backup on legacy compose-api")
+            })?;
+
+        if !backup_resp.status().is_success() {
+            let status = backup_resp.status();
             tracing::error!(
-                "Failed to parse backup SSE stream: instance_id={}, error={}",
+                "Compose-api backup failed: instance_id={}, status={}",
                 id,
-                e
+                status
             );
             restore_on_failure(
                 &app_state,
@@ -3765,57 +3800,84 @@ pub async fn admin_migrate_instance(
                 &instance_name,
             );
             return Err(ApiError::internal_server_error(
-                "Failed to get backup URL from legacy compose-api",
+                "Failed to create backup on legacy compose-api",
             ));
         }
+
+        // Parse SSE stream to get backup presigned URL
+        match parse_sse_for_backup_url(backup_resp, &id_str).await {
+            Ok(url) => url,
+            Err(e) => {
+                tracing::error!(
+                    "Failed to parse backup SSE stream: instance_id={}, error={}",
+                    id,
+                    e
+                );
+                restore_on_failure(
+                    &app_state,
+                    compose_api_url,
+                    &encoded_name,
+                    &manager.token,
+                    was_running,
+                    "stop",
+                    &instance_name,
+                );
+                return Err(ApiError::internal_server_error(
+                    "Failed to get backup URL from legacy compose-api",
+                ));
+            }
+        }
     };
 
-    tracing::info!(
-        "Migrate: backup complete, stopping legacy instance, elapsed={:.1}s, instance_id={}",
-        migrate_start.elapsed().as_secs_f64(),
-        id,
-    );
-    let stop_url = format!("{}/instances/{}/stop", compose_api_url, encoded_name);
-    let stop_resp = app_state
-        .http_client
-        .post(&stop_url)
-        .bearer_auth(&manager.token)
-        .timeout(std::time::Duration::from_secs(60))
-        .send()
-        .await;
-
-    let stop_failed = match &stop_resp {
-        Err(e) => {
-            tracing::error!(
-                "Failed to stop instance on compose-api: instance_id={}, error={}",
-                id,
-                e
-            );
-            true
-        }
-        Ok(resp) if !resp.status().is_success() => {
-            tracing::error!(
-                "Compose-api stop returned non-success: instance_id={}, status={}",
-                id,
-                resp.status()
-            );
-            true
-        }
-        _ => false,
-    };
-    if stop_failed {
-        restore_on_failure(
-            &app_state,
-            compose_api_url,
-            &encoded_name,
-            &manager.token,
-            was_running,
-            "stop",
-            &instance_name,
+    // Skip stop when backup_url was provided — instance is already stopped (enforced above).
+    if !has_backup_url {
+        tracing::info!(
+            "Migrate: backup complete, stopping legacy instance, elapsed={:.1}s, instance_id={}",
+            migrate_start.elapsed().as_secs_f64(),
+            id,
         );
-        return Err(ApiError::internal_server_error(
-            "Failed to stop legacy instance before import",
-        ));
+        let stop_url = format!("{}/instances/{}/stop", compose_api_url, encoded_name);
+        let stop_resp = app_state
+            .http_client
+            .post(&stop_url)
+            .bearer_auth(&manager.token)
+            .timeout(std::time::Duration::from_secs(60))
+            .send()
+            .await;
+
+        let stop_failed = match &stop_resp {
+            Err(e) => {
+                tracing::error!(
+                    "Failed to stop instance on compose-api: instance_id={}, error={}",
+                    id,
+                    e
+                );
+                true
+            }
+            Ok(resp) if !resp.status().is_success() => {
+                tracing::error!(
+                    "Compose-api stop returned non-success: instance_id={}, status={}",
+                    id,
+                    resp.status()
+                );
+                true
+            }
+            _ => false,
+        };
+        if stop_failed {
+            restore_on_failure(
+                &app_state,
+                compose_api_url,
+                &encoded_name,
+                &manager.token,
+                was_running,
+                "stop",
+                &instance_name,
+            );
+            return Err(ApiError::internal_server_error(
+                "Failed to stop legacy instance before import",
+            ));
+        }
     }
 
     tracing::info!(
@@ -3868,6 +3930,8 @@ pub async fn admin_migrate_instance(
             ApiError::internal_server_error("No CrabShack manager configured")
         })?;
 
+    // Deploy ordering: node_policy requires CrabShack PR #327 to be deployed first.
+    // Without it, CrabShack ignores the field (pre-#327 import silently drops unknown fields).
     let import_url = format!("{}/instances/import", crabshack_manager.url);
     let import_body = serde_json::json!({
         "name": instance.name,
@@ -3883,6 +3947,7 @@ pub async fn admin_migrate_instance(
         "cpus": cpus,
         "storage_size": storage_size,
         "extra_env": extra_env,
+        "node_policy": { "version": 1, "tee": "ANY_TEE" },
     });
 
     let import_resp = app_state
@@ -3890,7 +3955,7 @@ pub async fn admin_migrate_instance(
         .post(&import_url)
         .bearer_auth(&crabshack_manager.token)
         .json(&import_body)
-        .timeout(std::time::Duration::from_secs(600))
+        .timeout(SSE_MIGRATION_TOTAL_TIMEOUT)
         .send()
         .await
         .map_err(|e| {
@@ -4017,11 +4082,12 @@ pub async fn admin_migrate_instance(
 
 /// Maximum buffer size for SSE parsing (1 MB).
 const SSE_BUFFER_LIMIT: usize = 1024 * 1024;
-/// Timeout for receiving each SSE chunk during migration.
-/// Backup involves docker-exec tar + encrypt + S3 upload (can take minutes for large instances).
-/// Import involves image pull + backup download + decrypt + extract + container start.
-/// With compose-api keepalives every 5-15s, this timeout catches dead connections only.
-const SSE_MIGRATION_CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+/// Total time budget for an SSE migration stream (backup or import).
+/// Applied as reqwest's per-request .timeout() on the backup/import POST calls.
+const SSE_MIGRATION_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+/// How long to wait for a single chunk before logging a stall warning.
+/// Compose-api sends keepalives every 15s, so 30s without any data means trouble.
+const SSE_STALL_DETECT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Parse an SSE response stream to extract the backup presigned URL from the "complete" event.
 async fn parse_sse_for_backup_url(
@@ -4033,6 +4099,7 @@ async fn parse_sse_for_backup_url(
     let mut buffer = String::new();
     let start = std::time::Instant::now();
     let mut chunk_count: u64 = 0;
+    let mut last_chunk_at = std::time::Instant::now();
 
     tracing::info!(
         "Backup SSE: starting stream parse: instance_id={}",
@@ -4040,15 +4107,19 @@ async fn parse_sse_for_backup_url(
     );
 
     loop {
-        let chunk = match tokio::time::timeout(SSE_MIGRATION_CHUNK_TIMEOUT, stream.next()).await {
-            Ok(Some(chunk)) => chunk?,
+        let chunk = match tokio::time::timeout(SSE_STALL_DETECT_INTERVAL, stream.next()).await {
+            Ok(Some(chunk)) => {
+                last_chunk_at = std::time::Instant::now();
+                chunk?
+            }
             Ok(None) => break,
-            Err(_) => anyhow::bail!(
-                "Timed out waiting for SSE chunk from backup stream ({}s, received {} chunks in {:.1}s)",
-                SSE_MIGRATION_CHUNK_TIMEOUT.as_secs(),
-                chunk_count,
-                start.elapsed().as_secs_f64(),
-            ),
+            Err(_) => {
+                tracing::warn!(
+                    "Backup SSE: no data for {:.0}s (total elapsed={:.1}s, chunks={}), instance_id={}",
+                    last_chunk_at.elapsed().as_secs_f64(), start.elapsed().as_secs_f64(), chunk_count, instance_id,
+                );
+                continue;
+            }
         };
         chunk_count += 1;
         buffer.push_str(&String::from_utf8_lossy(&chunk));
@@ -4063,6 +4134,16 @@ async fn parse_sse_for_backup_url(
         while let Some(newline_pos) = buffer.find('\n') {
             let line = buffer[..newline_pos].trim_end_matches('\r').to_string();
             buffer.drain(..=newline_pos);
+
+            if line.starts_with(':') {
+                tracing::info!(
+                    "Backup SSE: keepalive, elapsed={:.1}s, chunks={}, instance_id={}",
+                    start.elapsed().as_secs_f64(),
+                    chunk_count,
+                    instance_id,
+                );
+                continue;
+            }
 
             if let Some(data) = line.strip_prefix("data: ") {
                 if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
@@ -4124,6 +4205,7 @@ async fn parse_sse_for_import_result(
     let mut buffer = String::new();
     let start = std::time::Instant::now();
     let mut chunk_count: u64 = 0;
+    let mut last_chunk_at = std::time::Instant::now();
 
     tracing::info!(
         "Import SSE: starting stream parse: instance_id={}",
@@ -4131,15 +4213,19 @@ async fn parse_sse_for_import_result(
     );
 
     loop {
-        let chunk = match tokio::time::timeout(SSE_MIGRATION_CHUNK_TIMEOUT, stream.next()).await {
-            Ok(Some(chunk)) => chunk?,
+        let chunk = match tokio::time::timeout(SSE_STALL_DETECT_INTERVAL, stream.next()).await {
+            Ok(Some(chunk)) => {
+                last_chunk_at = std::time::Instant::now();
+                chunk?
+            }
             Ok(None) => break,
-            Err(_) => anyhow::bail!(
-                "Timed out waiting for SSE chunk from import stream ({}s, received {} chunks in {:.1}s)",
-                SSE_MIGRATION_CHUNK_TIMEOUT.as_secs(),
-                chunk_count,
-                start.elapsed().as_secs_f64(),
-            ),
+            Err(_) => {
+                tracing::warn!(
+                    "Import SSE: no data for {:.0}s (total elapsed={:.1}s, chunks={}), instance_id={}",
+                    last_chunk_at.elapsed().as_secs_f64(), start.elapsed().as_secs_f64(), chunk_count, instance_id,
+                );
+                continue;
+            }
         };
         chunk_count += 1;
         buffer.push_str(&String::from_utf8_lossy(&chunk));
@@ -4154,6 +4240,16 @@ async fn parse_sse_for_import_result(
         while let Some(newline_pos) = buffer.find('\n') {
             let line = buffer[..newline_pos].trim_end_matches('\r').to_string();
             buffer.drain(..=newline_pos);
+
+            if line.starts_with(':') {
+                tracing::info!(
+                    "Import SSE: keepalive, elapsed={:.1}s, chunks={}, instance_id={}",
+                    start.elapsed().as_secs_f64(),
+                    chunk_count,
+                    instance_id,
+                );
+                continue;
+            }
 
             if let Some(data) = line.strip_prefix("data: ") {
                 if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
