@@ -3656,16 +3656,33 @@ pub async fn admin_migrate_instance(
     let image = if let Some(img) = image_override {
         img
     } else if has_backup_url {
+        let compose_image = compose_data
+            .get("image")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         let default_image = services::agent::service::get_image_for_service_type(
             service_type,
             hosting_config.as_ref(),
         );
-        let mut fallback = default_image;
-        if fallback == "docker.io/nearaidev/ironclaw-dind:latest" {
-            fallback = "docker.io/nearaidev/ironclaw-dind:0.29.1".to_string();
-        }
+        let version_from_compose = compose_image
+            .rsplit_once(':')
+            .map(|(_, tag)| tag)
+            .filter(|t| !t.is_empty() && *t != "latest");
+        let fallback = if let Some(ver) = version_from_compose {
+            let base = default_image
+                .rsplit_once(':')
+                .map(|(b, _)| b)
+                .unwrap_or(&default_image);
+            format!("{}:{}", base, ver)
+        } else {
+            let mut img = default_image;
+            if img == "docker.io/nearaidev/ironclaw-dind:latest" {
+                img = "docker.io/nearaidev/ironclaw-dind:0.29.1".to_string();
+            }
+            img
+        };
         tracing::info!(
-            "Migrate: backup_url provided, using default image={}, instance_id={}",
+            "Migrate: backup_url provided, image derived from compose metadata={}, instance_id={}",
             fallback,
             id
         );
