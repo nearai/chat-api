@@ -3338,6 +3338,10 @@ pub struct MigrateInstanceRequest {
     /// Override the Docker image for the CrabShack instance.
     /// If not provided, uses the configured default for the service type.
     pub image: Option<String>,
+    /// Skip the backup phase entirely and use this presigned URL instead.
+    /// Useful when backup was obtained directly from compose-api (e.g. the
+    /// SSE stream stalls through chat-api but works when called directly).
+    pub backup_url: Option<String>,
 }
 
 /// Response for migrate endpoint
@@ -3542,6 +3546,7 @@ pub async fn admin_migrate_instance(
     // is deferred until after the "start if stopped" block so the version query
     // can reach the running container.
     let image_override = request.image.filter(|s| !s.is_empty());
+    let provided_backup_url = request.backup_url.filter(|s| !s.is_empty());
     let mem_limit = compose_data
         .get("mem_limit")
         .and_then(|v| v.as_str())
@@ -3690,70 +3695,55 @@ pub async fn admin_migrate_instance(
         }
     };
 
-    tracing::info!(
-        "Migrate: requesting backup, was_running={}, elapsed={:.1}s, instance_id={}",
-        was_running,
-        migrate_start.elapsed().as_secs_f64(),
-        id,
-    );
-    let backup_url = format!("{}/instances/{}/backup", compose_api_url, encoded_name);
-    let backup_body = serde_json::json!({
-        "age_recipient": age_recipient,
-        "expiry_secs": 7200,
-        "full_export": true
-    });
-
-    let backup_resp = app_state
-        .http_client
-        .post(&backup_url)
-        .bearer_auth(&manager.token)
-        .json(&backup_body)
-        .timeout(SSE_MIGRATION_TOTAL_TIMEOUT)
-        .send()
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to create backup: instance_id={}, error={}", id, e);
-            restore_on_failure(
-                &app_state,
-                compose_api_url,
-                &encoded_name,
-                &manager.token,
-                was_running,
-                "stop",
-                &instance_name,
-            );
-            ApiError::internal_server_error("Failed to initiate backup on legacy compose-api")
-        })?;
-
-    if !backup_resp.status().is_success() {
-        let status = backup_resp.status();
-        tracing::error!(
-            "Compose-api backup failed: instance_id={}, status={}",
+    let backup_presigned_url = if let Some(url) = provided_backup_url {
+        tracing::info!(
+            "Migrate: using provided backup_url, skipping backup phase, elapsed={:.1}s, instance_id={}",
+            migrate_start.elapsed().as_secs_f64(),
             id,
-            status
         );
-        restore_on_failure(
-            &app_state,
-            compose_api_url,
-            &encoded_name,
-            &manager.token,
+        url
+    } else {
+        tracing::info!(
+            "Migrate: requesting backup, was_running={}, elapsed={:.1}s, instance_id={}",
             was_running,
-            "stop",
-            &instance_name,
+            migrate_start.elapsed().as_secs_f64(),
+            id,
         );
-        return Err(ApiError::internal_server_error(
-            "Failed to create backup on legacy compose-api",
-        ));
-    }
+        let backup_url = format!("{}/instances/{}/backup", compose_api_url, encoded_name);
+        let backup_body = serde_json::json!({
+            "age_recipient": age_recipient,
+            "expiry_secs": 7200,
+            "full_export": true
+        });
 
-    // Parse SSE stream to get backup presigned URL
-    let backup_presigned_url = match parse_sse_for_backup_url(backup_resp, &id_str).await {
-        Ok(url) => url,
-        Err(e) => {
+        let backup_resp = app_state
+            .http_client
+            .post(&backup_url)
+            .bearer_auth(&manager.token)
+            .json(&backup_body)
+            .timeout(SSE_MIGRATION_TOTAL_TIMEOUT)
+            .send()
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to create backup: instance_id={}, error={}", id, e);
+                restore_on_failure(
+                    &app_state,
+                    compose_api_url,
+                    &encoded_name,
+                    &manager.token,
+                    was_running,
+                    "stop",
+                    &instance_name,
+                );
+                ApiError::internal_server_error("Failed to initiate backup on legacy compose-api")
+            })?;
+
+        if !backup_resp.status().is_success() {
+            let status = backup_resp.status();
             tracing::error!(
-                "Failed to parse backup SSE stream: instance_id={}, error={}",
+                "Compose-api backup failed: instance_id={}, status={}",
                 id,
-                e
+                status
             );
             restore_on_failure(
                 &app_state,
@@ -3765,8 +3755,32 @@ pub async fn admin_migrate_instance(
                 &instance_name,
             );
             return Err(ApiError::internal_server_error(
-                "Failed to get backup URL from legacy compose-api",
+                "Failed to create backup on legacy compose-api",
             ));
+        }
+
+        // Parse SSE stream to get backup presigned URL
+        match parse_sse_for_backup_url(backup_resp, &id_str).await {
+            Ok(url) => url,
+            Err(e) => {
+                tracing::error!(
+                    "Failed to parse backup SSE stream: instance_id={}, error={}",
+                    id,
+                    e
+                );
+                restore_on_failure(
+                    &app_state,
+                    compose_api_url,
+                    &encoded_name,
+                    &manager.token,
+                    was_running,
+                    "stop",
+                    &instance_name,
+                );
+                return Err(ApiError::internal_server_error(
+                    "Failed to get backup URL from legacy compose-api",
+                ));
+            }
         }
     };
 
