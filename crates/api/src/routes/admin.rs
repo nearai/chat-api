@@ -3883,6 +3883,7 @@ pub async fn admin_migrate_instance(
         "cpus": cpus,
         "storage_size": storage_size,
         "extra_env": extra_env,
+        "node_policy": { "tee": "ANY_TEE" },
     });
 
     let import_resp = app_state
@@ -4017,11 +4018,11 @@ pub async fn admin_migrate_instance(
 
 /// Maximum buffer size for SSE parsing (1 MB).
 const SSE_BUFFER_LIMIT: usize = 1024 * 1024;
-/// Timeout for receiving each SSE chunk during migration.
-/// Backup involves docker-exec tar + encrypt + S3 upload (can take minutes for large instances).
-/// Import involves image pull + backup download + decrypt + extract + container start.
-/// With compose-api keepalives every 5-15s, this timeout catches dead connections only.
-const SSE_MIGRATION_CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+/// Total time budget for an SSE migration stream (backup or import).
+const SSE_MIGRATION_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+/// How long to wait for a single chunk before logging a stall warning.
+/// Compose-api sends keepalives every 15s, so 30s without any data means trouble.
+const SSE_STALL_DETECT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Parse an SSE response stream to extract the backup presigned URL from the "complete" event.
 async fn parse_sse_for_backup_url(
@@ -4033,6 +4034,7 @@ async fn parse_sse_for_backup_url(
     let mut buffer = String::new();
     let start = std::time::Instant::now();
     let mut chunk_count: u64 = 0;
+    let mut last_chunk_at = std::time::Instant::now();
 
     tracing::info!(
         "Backup SSE: starting stream parse: instance_id={}",
@@ -4040,15 +4042,26 @@ async fn parse_sse_for_backup_url(
     );
 
     loop {
-        let chunk = match tokio::time::timeout(SSE_MIGRATION_CHUNK_TIMEOUT, stream.next()).await {
-            Ok(Some(chunk)) => chunk?,
+        let chunk = match tokio::time::timeout(SSE_STALL_DETECT_INTERVAL, stream.next()).await {
+            Ok(Some(chunk)) => {
+                last_chunk_at = std::time::Instant::now();
+                chunk?
+            }
             Ok(None) => break,
-            Err(_) => anyhow::bail!(
-                "Timed out waiting for SSE chunk from backup stream ({}s, received {} chunks in {:.1}s)",
-                SSE_MIGRATION_CHUNK_TIMEOUT.as_secs(),
-                chunk_count,
-                start.elapsed().as_secs_f64(),
-            ),
+            Err(_) => {
+                let silent_secs = last_chunk_at.elapsed().as_secs_f64();
+                if start.elapsed() >= SSE_MIGRATION_TOTAL_TIMEOUT {
+                    anyhow::bail!(
+                        "Timed out waiting for backup SSE ({}s total, no data for {:.0}s, {} chunks received), instance_id={}",
+                        SSE_MIGRATION_TOTAL_TIMEOUT.as_secs(), silent_secs, chunk_count, instance_id,
+                    );
+                }
+                tracing::warn!(
+                    "Backup SSE: no data for {:.0}s (total elapsed={:.1}s, chunks={}), instance_id={}",
+                    silent_secs, start.elapsed().as_secs_f64(), chunk_count, instance_id,
+                );
+                continue;
+            }
         };
         chunk_count += 1;
         buffer.push_str(&String::from_utf8_lossy(&chunk));
@@ -4063,6 +4076,16 @@ async fn parse_sse_for_backup_url(
         while let Some(newline_pos) = buffer.find('\n') {
             let line = buffer[..newline_pos].trim_end_matches('\r').to_string();
             buffer.drain(..=newline_pos);
+
+            if line.starts_with(':') {
+                tracing::info!(
+                    "Backup SSE: keepalive, elapsed={:.1}s, chunks={}, instance_id={}",
+                    start.elapsed().as_secs_f64(),
+                    chunk_count,
+                    instance_id,
+                );
+                continue;
+            }
 
             if let Some(data) = line.strip_prefix("data: ") {
                 if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
@@ -4124,6 +4147,7 @@ async fn parse_sse_for_import_result(
     let mut buffer = String::new();
     let start = std::time::Instant::now();
     let mut chunk_count: u64 = 0;
+    let mut last_chunk_at = std::time::Instant::now();
 
     tracing::info!(
         "Import SSE: starting stream parse: instance_id={}",
@@ -4131,15 +4155,26 @@ async fn parse_sse_for_import_result(
     );
 
     loop {
-        let chunk = match tokio::time::timeout(SSE_MIGRATION_CHUNK_TIMEOUT, stream.next()).await {
-            Ok(Some(chunk)) => chunk?,
+        let chunk = match tokio::time::timeout(SSE_STALL_DETECT_INTERVAL, stream.next()).await {
+            Ok(Some(chunk)) => {
+                last_chunk_at = std::time::Instant::now();
+                chunk?
+            }
             Ok(None) => break,
-            Err(_) => anyhow::bail!(
-                "Timed out waiting for SSE chunk from import stream ({}s, received {} chunks in {:.1}s)",
-                SSE_MIGRATION_CHUNK_TIMEOUT.as_secs(),
-                chunk_count,
-                start.elapsed().as_secs_f64(),
-            ),
+            Err(_) => {
+                let silent_secs = last_chunk_at.elapsed().as_secs_f64();
+                if start.elapsed() >= SSE_MIGRATION_TOTAL_TIMEOUT {
+                    anyhow::bail!(
+                        "Timed out waiting for import SSE ({}s total, no data for {:.0}s, {} chunks received), instance_id={}",
+                        SSE_MIGRATION_TOTAL_TIMEOUT.as_secs(), silent_secs, chunk_count, instance_id,
+                    );
+                }
+                tracing::warn!(
+                    "Import SSE: no data for {:.0}s (total elapsed={:.1}s, chunks={}), instance_id={}",
+                    silent_secs, start.elapsed().as_secs_f64(), chunk_count, instance_id,
+                );
+                continue;
+            }
         };
         chunk_count += 1;
         buffer.push_str(&String::from_utf8_lossy(&chunk));
@@ -4154,6 +4189,16 @@ async fn parse_sse_for_import_result(
         while let Some(newline_pos) = buffer.find('\n') {
             let line = buffer[..newline_pos].trim_end_matches('\r').to_string();
             buffer.drain(..=newline_pos);
+
+            if line.starts_with(':') {
+                tracing::info!(
+                    "Import SSE: keepalive, elapsed={:.1}s, chunks={}, instance_id={}",
+                    start.elapsed().as_secs_f64(),
+                    chunk_count,
+                    instance_id,
+                );
+                continue;
+            }
 
             if let Some(data) = line.strip_prefix("data: ") {
                 if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
