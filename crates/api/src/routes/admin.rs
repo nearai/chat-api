@@ -4036,50 +4036,6 @@ pub async fn admin_migrate_instance(
         }
     };
 
-    // Best-effort TEE placement check — read actual node's tee_platform, not the echoed policy.
-    let instance_check_url = format!(
-        "{}/instances/{}",
-        crabshack_manager.url.trim_end_matches('/'),
-        urlencoding::encode(&instance_name)
-    );
-    match app_state
-        .http_client
-        .get(&instance_check_url)
-        .bearer_auth(&crabshack_manager.token)
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
-        .await
-    {
-        Ok(resp) if resp.status().is_success() => {
-            if let Ok(body) = resp.json::<serde_json::Value>().await {
-                let has_tee = body
-                    .pointer("/running_platform/tee_platform")
-                    .is_some_and(|v| !v.is_null());
-                if !has_tee {
-                    tracing::warn!(
-                        "Migrate: instance may not be on a TEE node (running_platform.tee_platform absent), \
-                         instance_id={}",
-                        id,
-                    );
-                }
-            }
-        }
-        Ok(resp) => {
-            tracing::warn!(
-                "Migrate: TEE placement check failed: status={}, instance_id={}",
-                resp.status(),
-                id,
-            );
-        }
-        Err(e) => {
-            tracing::warn!(
-                "Migrate: TEE placement check failed: error={}, instance_id={}",
-                e,
-                id,
-            );
-        }
-    }
-
     // Construct instance_url from CrabShack manager domain + instance name + token.
     // CrabShack doesn't emit URLs — same pattern as the normal create flow (service.rs:1584-1597).
     let new_instance_url = url::Url::parse(&crabshack_manager.url)
