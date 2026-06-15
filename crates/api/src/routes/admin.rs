@@ -4082,12 +4082,17 @@ pub async fn admin_migrate_instance(
 }
 
 /// Response for the grant-owner endpoint.
+///
+/// Intentionally omits the derived owner user id. It is computed from the user's
+/// `auth_secret`, and chat-api does not surface credential-derived identity to API
+/// callers (even admins) — the caller can't obtain it any other way. When the granted
+/// owner needs verifying, read it from CrabShack's own access endpoint
+/// (`GET /instances/{name}/access`), which is the source of truth.
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct GrantInstanceOwnerResponse {
     pub status: String,
     pub instance_name: String,
-    /// The CrabShack user id (sha256 of the hex-decoded auth_secret) granted owner access.
-    pub owner_user_id: String,
+    pub message: String,
 }
 
 /// Admin endpoint: Grant CrabShack owner access for an already-migrated instance.
@@ -4224,7 +4229,7 @@ pub async fn admin_grant_instance_owner(
     Ok(Json(GrantInstanceOwnerResponse {
         status: "success".to_string(),
         instance_name,
-        owner_user_id,
+        message: "Owner access granted on CrabShack".to_string(),
     }))
 }
 
