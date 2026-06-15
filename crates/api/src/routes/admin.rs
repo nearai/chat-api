@@ -4111,6 +4111,23 @@ pub struct GrantInstanceOwnerResponse {
 /// which chat-api only sets after a fully successful migration. This prevents granting ownership
 /// to a half-migrated instance whose data restore may still be running (a backup of it would
 /// capture an incomplete volume).
+#[utoipa::path(
+    post,
+    path = "/v1/admin/agents/instances/{id}/grant-owner",
+    tag = "Admin",
+    params(
+        ("id" = String, Path, description = "Instance ID")
+    ),
+    responses(
+        (status = 200, description = "Owner access granted", body = GrantInstanceOwnerResponse),
+        (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - admin only", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "Instance not found", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(("session_token" = []))
+)]
 pub async fn admin_grant_instance_owner(
     State(app_state): State<AppState>,
     Extension(_user): Extension<AuthenticatedUser>,
