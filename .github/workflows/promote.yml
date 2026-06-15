@@ -92,22 +92,19 @@ jobs:
             --certificate-github-workflow-repository 'nearai/chat-api' \
             "${IMAGE}@${DIGEST}"
 
-      - name: Promote tag to :prod and :latest
+      - name: Promote tag to :prod
         run: |
           set -euo pipefail
           skopeo copy "docker://${IMAGE}@${DIGEST}" "docker://${IMAGE}:prod"
-          skopeo copy "docker://${IMAGE}@${DIGEST}" "docker://${IMAGE}:latest"
 
-      - name: Confirm :prod and :latest resolve to the promoted digest
+      - name: Confirm :prod resolves to the promoted digest
         run: |
           set -euo pipefail
-          for TAG in prod latest; do
-            RESOLVED=$(skopeo inspect "docker://${IMAGE}:${TAG}" | jq -r '.Digest')
-            if [ "$RESOLVED" != "$DIGEST" ]; then
-              echo "::error::${IMAGE}:${TAG} resolved to ${RESOLVED}, expected ${DIGEST}"
-              exit 1
-            fi
-          done
+          RESOLVED=$(skopeo inspect "docker://${IMAGE}:prod" | jq -r '.Digest')
+          if [ "$RESOLVED" != "$DIGEST" ]; then
+            echo "::error::${IMAGE}:prod resolved to ${RESOLVED}, expected ${DIGEST}"
+            exit 1
+          fi
 
       - name: Create GitHub release
         env:
@@ -120,7 +117,6 @@ jobs:
 
           - **Image**: \`${IMAGE}:prod\`
           - **Promoted from**: \`${IMAGE}:${DOCKER_TAG}\`
-          - **Compatibility alias**: \`${IMAGE}:latest\`
           - **Digest**: \`${DIGEST}\`
           - **Sigstore**: https://search.sigstore.dev/?hash=${DIGEST}
           EOF
@@ -137,7 +133,6 @@ jobs:
             echo "## Promotion: ${IMAGE}:${DOCKER_TAG} -> prod"
             echo ""
             echo "- prod: \`${IMAGE}:prod\`"
-            echo "- latest alias: \`${IMAGE}:latest\`"
             echo "- digest: \`${DIGEST}\`"
             echo "- release: \`${GIT_TAG}\`"
           } >> "$GITHUB_STEP_SUMMARY"
