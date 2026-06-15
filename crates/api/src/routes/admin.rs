@@ -4226,16 +4226,22 @@ pub async fn admin_grant_instance_owner(
             );
             ApiError::internal_server_error("Failed to call CrabShack access endpoint")
         })?;
-    if !resp.status().is_success() {
-        let status = resp.status();
+    let status = resp.status();
+    if !status.is_success() {
+        // Read the body for diagnosis and surface CrabShack's status to the caller, so a
+        // misconfigured-admin-token 401 or a CrabShack 5xx is distinguishable from a generic
+        // failure. (CrabShack's grant is idempotent and does not check instance existence, so it
+        // never returns 404/409 here — only 4xx for a malformed request or auth/transport errors.)
+        let body = resp.text().await.unwrap_or_default();
         tracing::error!(
-            "grant-owner: CrabShack access returned non-success: instance_id={}, status={}",
+            "grant-owner: CrabShack access grant failed: instance_id={}, status={}, body={}",
             id,
-            status
+            status,
+            body.chars().take(300).collect::<String>()
         );
-        return Err(ApiError::internal_server_error(
-            "CrabShack rejected the access grant",
-        ));
+        return Err(ApiError::internal_server_error(format!(
+            "CrabShack rejected the access grant (status {status})"
+        )));
     }
 
     tracing::info!(
