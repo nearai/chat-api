@@ -94,26 +94,23 @@ jobs:
             --certificate-github-workflow-repository 'nearai/chat-api' \
             "${{ steps.resolve.outputs.image }}@${{ steps.resolve.outputs.target_digest }}"
 
-      - name: Re-tag production aliases
+      - name: Re-tag :prod
         run: |
           set -euo pipefail
           IMAGE="${{ steps.resolve.outputs.image }}"
           DIGEST="${{ steps.resolve.outputs.target_digest }}"
           skopeo copy "docker://${IMAGE}@${DIGEST}" "docker://${IMAGE}:prod"
-          skopeo copy "docker://${IMAGE}@${DIGEST}" "docker://${IMAGE}:latest"
 
-      - name: Confirm :prod and :latest resolve to the target digest
+      - name: Confirm :prod resolves to the target digest
         run: |
           set -euo pipefail
           IMAGE="${{ steps.resolve.outputs.image }}"
           DIGEST="${{ steps.resolve.outputs.target_digest }}"
-          for TAG in prod latest; do
-            RESOLVED=$(skopeo inspect "docker://${IMAGE}:${TAG}" | jq -r '.Digest')
-            if [ "$RESOLVED" != "$DIGEST" ]; then
-              echo "::error::${IMAGE}:${TAG} resolved to ${RESOLVED}, expected ${DIGEST}"
-              exit 1
-            fi
-          done
+          RESOLVED=$(skopeo inspect "docker://${IMAGE}:prod" | jq -r '.Digest')
+          if [ "$RESOLVED" != "$DIGEST" ]; then
+            echo "::error::${IMAGE}:prod resolved to ${RESOLVED}, expected ${DIGEST}"
+            exit 1
+          fi
 
       - name: Summary
         run: |
