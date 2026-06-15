@@ -6,9 +6,14 @@ permissions:
 on:
   workflow_dispatch:
     inputs:
-      confirm:
-        description: 'Type "promote" to confirm promoting :staging to :prod and :latest'
+      tag:
+        description: 'Docker Hub tag to promote to :prod (e.g. "0.2.13" or "v0.2.13"). Must already exist on Docker Hub.'
         required: true
+        type: string
+      confirm:
+        description: 'Type "promote" to confirm'
+        required: true
+        type: string
 
 env:
   REGISTRY: docker.io
@@ -20,19 +25,24 @@ concurrency:
 
 jobs:
   promote:
-    name: Promote staging -> prod
+    name: Promote tag -> prod
     permissions:
       contents: write
       id-token: write
     runs-on: ubuntu-latest
     environment: production
     steps:
-      - name: Validate confirmation
+      - name: Validate inputs
         env:
           CONFIRM: ${{ inputs.confirm }}
+          TAG_INPUT: ${{ inputs.tag }}
         run: |
           if [ "$CONFIRM" != "promote" ]; then
-            echo "Confirmation input must be exactly 'promote'" >&2
+            echo "::error::Confirmation input must be exactly 'promote'" >&2
+            exit 1
+          fi
+          if [ -z "$TAG_INPUT" ]; then
+            echo "::error::tag input is required" >&2
             exit 1
           fi
 
@@ -51,70 +61,50 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
 
-      - name: Resolve staging digest and source SHA
+      - name: Resolve tag digest and validate it exists on Docker Hub
+        env:
+          TAG_INPUT: ${{ inputs.tag }}
         run: |
           set -euo pipefail
           IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_REPOSITORY }}"
-          REPO_NAME="${IMAGE_REPOSITORY##*/}"
 
-          DIGEST=$(skopeo inspect "docker://${IMAGE}:staging" | jq -r '.Digest')
+          # Accept both "v0.2.13" and "0.2.13"; Docker Hub uses the stripped form
+          DOCKER_TAG="${TAG_INPUT#v}"
+          GIT_TAG="v${DOCKER_TAG}"
+
+          DIGEST=$(skopeo inspect "docker://${IMAGE}:${DOCKER_TAG}" 2>/dev/null | jq -r '.Digest' || true)
           if [ -z "$DIGEST" ] || [ "$DIGEST" = "null" ]; then
-            echo "::error::Failed to resolve ${IMAGE}:staging"
+            echo "::error::Tag ${DOCKER_TAG} not found on Docker Hub for ${IMAGE}"
             exit 1
           fi
 
-          SHORT_SHA="unknown"
-          PAGE_URL="https://hub.docker.com/v2/namespaces/${{ vars.DOCKER_REGISTRY_USER }}/repositories/${REPO_NAME}/tags?page_size=100"
-          PAGE_COUNT=0
-          while [ -n "$PAGE_URL" ] && [ "$PAGE_URL" != "null" ] && [ "$PAGE_COUNT" -lt 50 ]; do
-            RESP=$(curl -fsS --max-time 30 --retry 2 --retry-delay 2 "$PAGE_URL")
-            MATCH=$(echo "$RESP" | jq -r --arg d "$DIGEST" '.results[] | select(.digest==$d) | select(.name | test("^staging-[0-9]{8}-[0-9a-f]{7}$")) | .name' | head -n1)
-            if [ -n "$MATCH" ]; then
-              SHORT_SHA=$(echo "$MATCH" | sed -E 's/^staging-[0-9]{8}-//')
-              break
-            fi
-            PAGE_URL=$(echo "$RESP" | jq -r '.next')
-            PAGE_COUNT=$((PAGE_COUNT + 1))
-          done
-          if [ "$SHORT_SHA" = "unknown" ]; then
-            SHORT_SHA=$(echo "$DIGEST" | sed 's/^sha256://' | cut -c1-7)
-            echo "No matching staging-* tag found; using digest-derived suffix ${SHORT_SHA}"
-          fi
-
           echo "IMAGE=${IMAGE}" >> "$GITHUB_ENV"
-          echo "STAGING_DIGEST=${DIGEST}" >> "$GITHUB_ENV"
-          echo "SHORT_SHA=${SHORT_SHA}" >> "$GITHUB_ENV"
+          echo "DOCKER_TAG=${DOCKER_TAG}" >> "$GITHUB_ENV"
+          echo "GIT_TAG=${GIT_TAG}" >> "$GITHUB_ENV"
+          echo "DIGEST=${DIGEST}" >> "$GITHUB_ENV"
 
-      - name: Verify staging image was built and signed by build.yml on main
+      - name: Verify image was built and signed by build.yml in this repo
         run: |
           set -euo pipefail
           cosign verify \
-            --certificate-identity-regexp '^https://github\.com/nearai/chat-api/\.github/workflows/build\.yml@refs/heads/main$' \
+            --certificate-identity-regexp '^https://github\.com/nearai/chat-api/\.github/workflows/build\.yml@refs/(heads/main|tags/v.*)$' \
             --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
             --certificate-github-workflow-repository 'nearai/chat-api' \
-            --certificate-github-workflow-ref 'refs/heads/main' \
-            "${IMAGE}@${STAGING_DIGEST}"
+            "${IMAGE}@${DIGEST}"
 
-      - name: Re-tag staging digest to prod aliases
+      - name: Promote tag to :prod and :latest
         run: |
           set -euo pipefail
-          STAMP=$(date -u +%Y%m%d)
-          PROD_STAMPED_TAG="prod-${STAMP}-${SHORT_SHA}"
+          skopeo copy "docker://${IMAGE}@${DIGEST}" "docker://${IMAGE}:prod"
+          skopeo copy "docker://${IMAGE}@${DIGEST}" "docker://${IMAGE}:latest"
 
-          skopeo copy "docker://${IMAGE}@${STAGING_DIGEST}" "docker://${IMAGE}:prod"
-          skopeo copy "docker://${IMAGE}@${STAGING_DIGEST}" "docker://${IMAGE}:${PROD_STAMPED_TAG}"
-          skopeo copy "docker://${IMAGE}@${STAGING_DIGEST}" "docker://${IMAGE}:latest"
-
-          echo "PROD_STAMPED_TAG=${PROD_STAMPED_TAG}" >> "$GITHUB_ENV"
-          echo "PROD_STAMPED_REF=${IMAGE}:${PROD_STAMPED_TAG}" >> "$GITHUB_ENV"
-
-      - name: Confirm prod tags resolve to the promoted digest
+      - name: Confirm :prod and :latest resolve to the promoted digest
         run: |
           set -euo pipefail
-          for TAG in prod "$PROD_STAMPED_TAG" latest; do
+          for TAG in prod latest; do
             RESOLVED=$(skopeo inspect "docker://${IMAGE}:${TAG}" | jq -r '.Digest')
-            if [ "$RESOLVED" != "$STAGING_DIGEST" ]; then
-              echo "::error::${IMAGE}:${TAG} resolved to ${RESOLVED}, expected ${STAGING_DIGEST}"
+            if [ "$RESOLVED" != "$DIGEST" ]; then
+              echo "::error::${IMAGE}:${TAG} resolved to ${RESOLVED}, expected ${DIGEST}"
               exit 1
             fi
           done
@@ -125,31 +115,29 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          RELEASE_TAG="${PROD_STAMPED_TAG}"
           NOTES=$(cat <<EOF
           ## Production Promotion
 
           - **Image**: \`${IMAGE}:prod\`
-          - **Stamped image**: \`${PROD_STAMPED_REF}\`
+          - **Promoted from**: \`${IMAGE}:${DOCKER_TAG}\`
           - **Compatibility alias**: \`${IMAGE}:latest\`
-          - **Digest**: \`${STAGING_DIGEST}\`
-          - **Source short-sha**: \`${SHORT_SHA}\`
-          - **Sigstore**: https://search.sigstore.dev/?hash=${STAGING_DIGEST}
+          - **Digest**: \`${DIGEST}\`
+          - **Sigstore**: https://search.sigstore.dev/?hash=${DIGEST}
           EOF
           )
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release edit "$RELEASE_TAG" --title "Production Release ${RELEASE_TAG}" --notes "$NOTES"
+          if gh release view "$GIT_TAG" >/dev/null 2>&1; then
+            gh release edit "$GIT_TAG" --title "Production Release ${GIT_TAG}" --notes "$NOTES" --latest
           else
-            gh release create "$RELEASE_TAG" --title "Production Release ${RELEASE_TAG}" --notes "$NOTES" --latest
+            gh release create "$GIT_TAG" --title "Production Release ${GIT_TAG}" --notes "$NOTES" --latest
           fi
 
       - name: Generate build summary
         run: |
           {
-            echo "## Promotion: staging -> prod"
+            echo "## Promotion: ${IMAGE}:${DOCKER_TAG} -> prod"
             echo ""
             echo "- prod: \`${IMAGE}:prod\`"
-            echo "- stamped tag: \`${PROD_STAMPED_REF}\`"
             echo "- latest alias: \`${IMAGE}:latest\`"
-            echo "- digest: \`${STAGING_DIGEST}\`"
+            echo "- digest: \`${DIGEST}\`"
+            echo "- release: \`${GIT_TAG}\`"
           } >> "$GITHUB_STEP_SUMMARY"
