@@ -424,7 +424,7 @@ fn default_nearai_api_url() -> String {
         .unwrap_or_else(|_| "https://private.near.ai/v1".to_string())
 }
 
-fn default_non_tee_agent_url() -> String {
+fn default_crabshack_agent_url() -> String {
     std::env::var("NON_TEE_AGENT_URL").unwrap_or_else(|_| "claws".to_string())
 }
 
@@ -433,16 +433,17 @@ fn default_non_tee_agent_url() -> String {
 pub struct AgentManager {
     pub url: String,
     pub token: String,
-    /// Whether this manager is non-TEE (true) or TEE (false)
-    /// Set at construction time based on infrastructure mode
+    /// Whether this manager is the crabshack (passkey/"claws") path (true) or the
+    /// legacy_tee (bearer) path (false). Set at construction time based on which
+    /// env var group the manager was loaded from.
     #[serde(default)]
-    pub is_non_tee: bool,
+    pub is_crabshack: bool,
 }
 
 impl AgentManager {
-    /// Get the effective is_non_tee value based on explicit configuration
-    pub fn get_is_non_tee(&self) -> bool {
-        self.is_non_tee
+    /// Get the effective is_crabshack value based on explicit configuration
+    pub fn get_is_crabshack(&self) -> bool {
+        self.is_crabshack
     }
 }
 
@@ -451,7 +452,7 @@ impl std::fmt::Debug for AgentManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AgentManager")
             .field("url", &self.url)
-            .field("is_non_tee", &self.get_is_non_tee())
+            .field("is_crabshack", &self.get_is_crabshack())
             .field("token", &"[REDACTED]")
             .finish()
     }
@@ -475,10 +476,10 @@ pub struct AgentConfig {
     /// signing secret instead of the former shared CHANNEL_RELAY_SIGNING_SECRET.
     #[serde(default)]
     pub channel_relay_url: Option<String>,
-    /// URL pattern to identify non-TEE compose-api endpoints for instance type detection
+    /// URL pattern to identify crabshack compose-api endpoints for instance type detection
     /// Configurable via NON_TEE_AGENT_URL environment variable (defaults to "claws")
-    #[serde(default = "default_non_tee_agent_url")]
-    pub non_tee_agent_url_pattern: String,
+    #[serde(default = "default_crabshack_agent_url")]
+    pub crabshack_agent_url_pattern: String,
 }
 
 /// Split a comma-separated env var value into non-empty trimmed entries.
@@ -492,12 +493,11 @@ fn split_csv(value: &str) -> Vec<String> {
 
 impl Default for AgentConfig {
     fn default() -> Self {
-        // Load managers from both TEE and non-TEE configurations
+        // Load managers from both the legacy_tee and crabshack env var groups
         // This supports mixed environments with both manager types available
-        // Manager type is determined dynamically from URL pattern, not from this setting
         let mut managers: Vec<AgentManager> = Vec::new();
 
-        // Load TEE managers from AGENT_MANAGER_URLS_TEE
+        // Load legacy_tee managers from AGENT_MANAGER_URLS_TEE
         if let Ok(urls_raw) = std::env::var("AGENT_MANAGER_URLS_TEE") {
             let urls = split_csv(&urls_raw);
             if !urls.is_empty() {
@@ -510,20 +510,20 @@ impl Default for AgentConfig {
                         tokens.len()
                     );
                 }
-                let tee_mgrs: Vec<AgentManager> = urls
+                let legacy_tee_mgrs: Vec<AgentManager> = urls
                     .into_iter()
                     .zip(tokens)
                     .map(|(url, token)| AgentManager {
                         url,
                         token,
-                        is_non_tee: false,
+                        is_crabshack: false,
                     })
                     .collect();
-                managers.extend(tee_mgrs);
+                managers.extend(legacy_tee_mgrs);
             }
         }
 
-        // Load non-TEE managers from AGENT_MANAGER_URLS
+        // Load crabshack (passkey/"claws") managers from AGENT_MANAGER_URLS
         if let Ok(urls_raw) = std::env::var("AGENT_MANAGER_URLS") {
             let urls = split_csv(&urls_raw);
             if !urls.is_empty() {
@@ -536,21 +536,21 @@ impl Default for AgentConfig {
                         tokens.len()
                     );
                 }
-                let non_tee_mgrs: Vec<AgentManager> = urls
+                let crabshack_mgrs: Vec<AgentManager> = urls
                     .into_iter()
                     .zip(tokens)
                     .map(|(url, token)| AgentManager {
                         url,
                         token,
-                        is_non_tee: true,
+                        is_crabshack: true,
                     })
                     .collect();
-                managers.extend(non_tee_mgrs);
+                managers.extend(crabshack_mgrs);
             }
         }
 
         // If no managers configured, fall back to legacy AGENT_API_BASE_URL
-        // This will be interpreted as TEE if no "claws" pattern in URL
+        // This is treated as a legacy_tee (bearer) manager
         if managers.is_empty() {
             let url = std::env::var("AGENT_API_BASE_URL")
                 .unwrap_or_else(|_| "https://api.agent.near.ai".to_string());
@@ -558,7 +558,7 @@ impl Default for AgentConfig {
             managers.push(AgentManager {
                 url,
                 token,
-                is_non_tee: false,
+                is_crabshack: false,
             });
         }
 
@@ -571,7 +571,7 @@ impl Default for AgentConfig {
                 .map(|url| url.trim_end_matches('/').to_string() + "/v1")
                 .unwrap_or_else(|_| "https://private.near.ai/v1".to_string()),
             channel_relay_url: std::env::var("CHANNEL_RELAY_URL").ok(),
-            non_tee_agent_url_pattern: default_non_tee_agent_url(),
+            crabshack_agent_url_pattern: default_crabshack_agent_url(),
         }
     }
 }
@@ -962,7 +962,7 @@ mod tests {
         let mgr = AgentManager {
             url: "https://test.com".to_string(),
             token: "super-secret".to_string(),
-            is_non_tee: false,
+            is_crabshack: false,
         };
         let debug_output = format!("{:?}", mgr);
         assert!(debug_output.contains("https://test.com"));
@@ -1200,39 +1200,39 @@ mod tests {
     #[test]
     #[serial]
     fn test_agent_manager_type_detection_from_url() {
-        // Test that manager type uses explicit is_non_tee field (not URL pattern detection)
+        // Test that manager type uses the explicit is_crabshack field (not URL pattern detection)
 
-        // Manager with is_non_tee=true should be detected as non-TEE
-        let non_tee_mgr = AgentManager {
+        // Manager with is_crabshack=true should be detected as crabshack
+        let crabshack_mgr = AgentManager {
             url: "https://api.openclaw-dev.near.ai".to_string(),
             token: "token1".to_string(),
-            is_non_tee: true,
+            is_crabshack: true,
         };
         assert!(
-            non_tee_mgr.get_is_non_tee(),
-            "Manager with is_non_tee=true should be non-TEE"
+            crabshack_mgr.get_is_crabshack(),
+            "Manager with is_crabshack=true should be crabshack"
         );
 
-        // Manager with is_non_tee=false should be detected as TEE
-        let tee_mgr = AgentManager {
+        // Manager with is_crabshack=false should be detected as legacy_tee
+        let legacy_tee_mgr = AgentManager {
             url: "https://agents.example.com/api/crabshack".to_string(),
             token: "token2".to_string(),
-            is_non_tee: false,
+            is_crabshack: false,
         };
         assert!(
-            !tee_mgr.get_is_non_tee(),
-            "Manager with is_non_tee=false should be TEE"
+            !legacy_tee_mgr.get_is_crabshack(),
+            "Manager with is_crabshack=false should be legacy_tee"
         );
 
-        // Test that is_non_tee field is respected regardless of URL
+        // Test that is_crabshack field is respected regardless of URL
         let compose_mgr = AgentManager {
             url: "https://compose.example.com".to_string(),
             token: "token3".to_string(),
-            is_non_tee: true,
+            is_crabshack: true,
         };
         assert!(
-            compose_mgr.get_is_non_tee(),
-            "Manager with is_non_tee=true should be non-TEE even with generic URL"
+            compose_mgr.get_is_crabshack(),
+            "Manager with is_crabshack=true should be crabshack even with generic URL"
         );
     }
 

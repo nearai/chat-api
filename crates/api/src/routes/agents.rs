@@ -114,9 +114,9 @@ async fn get_instance_limit(
 /// - Subscribed users: plan limit from subscription_plans config
 /// - Unsubscribed users: no instances allowed (active subscription required)
 ///
-/// In non-TEE mode, the user authenticates to compose-api with passkey credentials (`auth_secret` /
+/// In crabshack mode, the user authenticates to compose-api with passkey credentials (`auth_secret` /
 /// `backup_passphrase`) stored once per user (created on first use) and reused for later instances.
-/// Those credentials are registered via non-TEE compose-api `/auth/register` and `/auth/login`.
+/// Those credentials are registered via crabshack compose-api `/auth/register` and `/auth/login`.
 ///
 /// Supports two response modes via content negotiation:
 /// - Accept: text/event-stream → Returns SSE stream of lifecycle events
@@ -199,15 +199,15 @@ pub async fn create_instance(
         .ok()
         .flatten()
         .unwrap_or_default();
-    let non_tee_infra = configs
+    let crabshack_infra = configs
         .agent_hosting
         .as_ref()
         .and_then(|cfg| cfg.new_agent_with_non_tee_infra)
         .unwrap_or(false);
 
-    // Refresh gateway cookie for non-TEE users (or users with existing non-TEE instances).
-    // Only refresh when non-TEE infrastructure is enabled to avoid redundant config/database work.
-    let gateway_cookie = if non_tee_infra {
+    // Refresh gateway cookie for crabshack users (or users with existing crabshack instances).
+    // Only refresh when crabshack infrastructure is enabled to avoid redundant config/database work.
+    let gateway_cookie = if crabshack_infra {
         app_state
             .agent_service
             .setup_gateway_session_for_user(user.user_id)
@@ -226,8 +226,8 @@ pub async fn create_instance(
 
     if wants_stream {
         // SSE streaming response
-        let rx = if non_tee_infra {
-            // Non-TEE mode: passkey flow against non-TEE compose-api
+        let rx = if crabshack_infra {
+            // crabshack mode: passkey flow against crabshack compose-api
             app_state
                 .agent_service
                 .create_passkey_instance_streaming(
@@ -251,7 +251,7 @@ pub async fn create_instance(
                     ApiError::internal_server_error("Failed to start instance creation")
                 })?
         } else {
-            // TEE mode: streaming flow against TEE compose-api
+            // legacy_tee mode: streaming flow against legacy_tee compose-api
             app_state
                 .agent_service
                 .create_instance_from_agent_api_streaming(
@@ -320,8 +320,8 @@ pub async fn create_instance(
     } else {
         // Non-streaming fallback: Collect stream and return final instance as JSON
         // Note: This blocks the request until instance creation completes
-        let instance = if non_tee_infra {
-            // Non-TEE mode: passkey flow against non-TEE compose-api
+        let instance = if crabshack_infra {
+            // crabshack mode: passkey flow against crabshack compose-api
             let mut rx = app_state
                 .agent_service
                 .create_passkey_instance_streaming(
@@ -387,7 +387,7 @@ pub async fn create_instance(
                     ApiError::internal_server_error("Created instance not found in database")
                 })?
         } else {
-            // TEE mode: TEE compose-api streaming flow; collect events
+            // legacy_tee mode: legacy_tee compose-api streaming flow; collect events
             let mut rx = app_state
                 .agent_service
                 .create_instance_from_agent_api_streaming(
