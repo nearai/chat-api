@@ -424,7 +424,7 @@ fn default_nearai_api_url() -> String {
         .unwrap_or_else(|_| "https://private.near.ai/v1".to_string())
 }
 
-fn default_crabshack_agent_url() -> String {
+fn default_crabshack_agent_url_pattern() -> String {
     std::env::var("NON_TEE_AGENT_URL").unwrap_or_else(|_| "claws".to_string())
 }
 
@@ -478,7 +478,7 @@ pub struct AgentConfig {
     pub channel_relay_url: Option<String>,
     /// URL pattern to identify crabshack compose-api endpoints for instance type detection
     /// Configurable via NON_TEE_AGENT_URL environment variable (defaults to "claws")
-    #[serde(default = "default_crabshack_agent_url")]
+    #[serde(default = "default_crabshack_agent_url_pattern")]
     pub crabshack_agent_url_pattern: String,
 }
 
@@ -571,7 +571,7 @@ impl Default for AgentConfig {
                 .map(|url| url.trim_end_matches('/').to_string() + "/v1")
                 .unwrap_or_else(|_| "https://private.near.ai/v1".to_string()),
             channel_relay_url: std::env::var("CHANNEL_RELAY_URL").ok(),
-            crabshack_agent_url_pattern: default_crabshack_agent_url(),
+            crabshack_agent_url_pattern: default_crabshack_agent_url_pattern(),
         }
     }
 }

@@ -220,13 +220,13 @@ pub struct AgentHostingCrabshackConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openclaw_image: Option<String>,
 
-    /// When `true`, non-TEE deploys for canonical `ironclaw` use the latest versioned image ref
+    /// When `true`, crabshack deploys for canonical `ironclaw` use the latest versioned image ref
     /// from the agent manager (crabshack) `/images` allowlist—same source as upgrade checks—and
     /// ignore `ironclaw_image`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ironclaw_deploy_latest_version_tag: Option<bool>,
 
-    /// When `true`, non-TEE deploys for canonical `openclaw` use the latest versioned image ref
+    /// When `true`, crabshack deploys for canonical `openclaw` use the latest versioned image ref
     /// from the agent manager `/images` allowlist, and ignore `openclaw_image`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openclaw_deploy_latest_version_tag: Option<bool>,

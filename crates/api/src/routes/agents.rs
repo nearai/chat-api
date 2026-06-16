@@ -205,8 +205,9 @@ pub async fn create_instance(
         .and_then(|cfg| cfg.new_agent_with_non_tee_infra)
         .unwrap_or(false);
 
-    // Refresh gateway cookie for crabshack users (or users with existing crabshack instances).
-    // Only refresh when crabshack infrastructure is enabled to avoid redundant config/database work.
+    // Refresh the gateway cookie only when crabshack infrastructure is enabled, to avoid redundant
+    // config/database work on the legacy_tee path. (setup_gateway_session_for_user itself no-ops
+    // when the user has no crabshack session to refresh.)
     let gateway_cookie = if crabshack_infra {
         app_state
             .agent_service
