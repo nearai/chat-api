@@ -1,0 +1,3 @@
+# Required reviewers. The @nearai/agent-hosting team must have WRITE access to this repo
+# for CODEOWNERS to take effect (GitHub requirement for code owners).
+*       @nearai/agent-hosting
