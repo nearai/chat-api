@@ -1,0 +1,29 @@
+name: Security Audit
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 9 * * 1"   # weekly Mon 09:00 UTC
+permissions:
+  contents: read
+jobs:
+  audit:
+    name: cargo audit (RustSec advisories)
+    runs-on: ubuntu-latest
+    continue-on-error: true   # report-only initially; remove to make blocking after baseline triage
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    continue-on-error: true   # report-only initially; remove to make blocking after baseline triage
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories bans sources
