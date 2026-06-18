@@ -8,22 +8,29 @@ on:
     - cron: "0 9 * * 1"   # weekly Mon 09:00 UTC
 permissions:
   contents: read
+  checks: write    # rustsec/audit-check publishes a Check run
+  issues: write    # rustsec/audit-check opens/updates advisory issues on push/schedule runs
 jobs:
   audit:
     name: cargo audit (RustSec advisories)
     runs-on: ubuntu-latest
-    continue-on-error: true   # report-only initially; remove to make blocking after baseline triage
     steps:
       - uses: actions/checkout@v4
       - uses: rustsec/audit-check@v2.0.0
+        # Step-level (not job-level) so a genuine setup/action failure still surfaces;
+        # report-only for advisories initially. Remove to make blocking after baseline triage.
+        continue-on-error: true
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
   deny:
-    name: cargo deny
+    name: cargo deny (bans + sources)
     runs-on: ubuntu-latest
-    continue-on-error: true   # report-only initially; remove to make blocking after baseline triage
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
+        # Step-level continue-on-error: report-only initially; remove to make blocking after triage.
+        continue-on-error: true
         with:
-          command: check advisories bans sources
+          rust-version: "1.91.1"   # match rust-toolchain.toml so cargo-deny reads Cargo.lock v4
+          # Advisories are covered by `cargo audit` above; cargo-deny handles supply-chain (bans/sources).
+          command: check bans sources

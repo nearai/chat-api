@@ -1,9 +1,7 @@
-# cargo-deny config - security-focused subset (advisories / bans / sources).
-# Add a [licenses] allow-list and re-enable `licenses` in the workflow `command:` once the
-# dependency tree has been license-reviewed (left out initially to avoid blocking on legit deps).
-[advisories]
-version = 2
-
+# cargo-deny config - supply-chain checks (bans / sources).
+# RustSec advisories are covered separately by `cargo audit` (rustsec/audit-check) in the
+# security-audit workflow, so they are intentionally not duplicated here. Add a [licenses]
+# allow-list and `licenses` to the workflow `command:` once the dependency tree is license-reviewed.
 [bans]
 multiple-versions = "warn"
 
