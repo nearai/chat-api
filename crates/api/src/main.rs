@@ -224,7 +224,7 @@ async fn main() -> anyhow::Result<()> {
         system_configs_service.clone()
             as Arc<dyn services::system_configs::ports::SystemConfigsService>,
         config.agent.channel_relay_url.clone(),
-        config.agent.non_tee_agent_url_pattern.clone(),
+        config.agent.crabshack_agent_url_pattern.clone(),
     ));
 
     // Initialize agent proxy service

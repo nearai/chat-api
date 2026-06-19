@@ -972,8 +972,8 @@ pub async fn oauth_callback(
 
     tracing::debug!("Session token generated, length: {}", token.len());
 
-    // For non-TEE mode: set up gateway session (authenticate with compose-api)
-    // This allows users with existing non-TEE instances to access them immediately upon login
+    // For crabshack mode: set up gateway session (authenticate with compose-api)
+    // This lets users with existing crabshack instances access them immediately upon login
     let gateway_cookie = app_state
         .agent_service
         .setup_gateway_session_for_user(session.user_id)
@@ -1297,8 +1297,8 @@ pub async fn mock_login(
         session.session_id
     );
 
-    // For non-TEE mode: set up gateway session (authenticate with compose-api)
-    // This allows users with existing non-TEE instances to access them immediately upon login
+    // For crabshack mode: set up gateway session (authenticate with compose-api)
+    // This lets users with existing crabshack instances access them immediately upon login
     let gateway_cookie = app_state
         .agent_service
         .setup_gateway_session_for_user(user.id)
@@ -1418,8 +1418,8 @@ pub async fn near_auth(
         is_new_user
     );
 
-    // For non-TEE mode: set up gateway session (authenticate with compose-api)
-    // This allows users with existing non-TEE instances to access them immediately upon login
+    // For crabshack mode: set up gateway session (authenticate with compose-api)
+    // This lets users with existing crabshack instances access them immediately upon login
     let gateway_cookie = app_state
         .agent_service
         .setup_gateway_session_for_user(session.user_id)

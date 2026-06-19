@@ -220,13 +220,13 @@ pub struct AgentHostingCrabshackConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openclaw_image: Option<String>,
 
-    /// When `true`, non-TEE deploys for canonical `ironclaw` use the latest versioned image ref
+    /// When `true`, crabshack deploys for canonical `ironclaw` use the latest versioned image ref
     /// from the agent manager (crabshack) `/images` allowlist—same source as upgrade checks—and
     /// ignore `ironclaw_image`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ironclaw_deploy_latest_version_tag: Option<bool>,
 
-    /// When `true`, non-TEE deploys for canonical `openclaw` use the latest versioned image ref
+    /// When `true`, crabshack deploys for canonical `openclaw` use the latest versioned image ref
     /// from the agent manager `/images` allowlist, and ignore `openclaw_image`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openclaw_deploy_latest_version_tag: Option<bool>,
@@ -272,8 +272,9 @@ impl AgentHostingCrabshackConfig {
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentHostingConfig {
-    /// Use non-TEE infrastructure (true = non-TEE, false = TEE/default)
-    /// When true, only non-TEE managers are used for instance creation
+    /// Route new agents to the crabshack (passkey/"claws") path (true) instead of the
+    /// legacy_tee (bearer) path (false/default). When true, only crabshack managers are
+    /// used for instance creation. Field name kept for the DB + admin-API JSON contract.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new_agent_with_non_tee_infra: Option<bool>,
 
