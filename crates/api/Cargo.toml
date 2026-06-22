@@ -25,7 +25,7 @@ multer = "3"
 
 # Authentication dependencies
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.6", features = ["cors", "fs"] }
+tower-http = { version = "0.7", features = ["cors", "fs"] }
 uuid = { version = "1.5", features = ["v4"] }
 url = "2.5"
 urlencoding = "2.1"
