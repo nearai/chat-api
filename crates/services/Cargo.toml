@@ -59,4 +59,4 @@ async-trait = "0.1"
 futures = "0.3"
 wiremock = "0.6"
 tokio = { version = "1", features = ["full"] }
-mockall = "0.13"
+mockall = "0.14"
