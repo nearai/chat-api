@@ -24,7 +24,7 @@ tokio-postgres-rustls = "0.13"
 rustls = { version = "0.23", features = ["ring"] }
 # Platform-native certificate verifier with OS integration and revocation support
 # Documentation: https://docs.rs/rustls-platform-verifier/latest/rustls_platform_verifier/
-rustls-platform-verifier = "0.6"
+rustls-platform-verifier = "0.7"
 # PEM file parsing for custom certificates
 rustls-pemfile = "2.0"
 
