@@ -36,10 +36,9 @@ impl UserService for UserServiceImpl {
             })?;
 
         tracing::debug!(
-            "User data retrieved: user_id={}, email={}, name={:?}",
+            "User data retrieved: user_id={}, has_name={}",
             user.id,
-            user.email,
-            user.name
+            user.name.is_some()
         );
 
         // Get linked accounts
@@ -73,10 +72,10 @@ impl UserService for UserServiceImpl {
         avatar_url: Option<String>,
     ) -> anyhow::Result<User> {
         tracing::info!(
-            "Updating user profile: user_id={}, name={:?}, avatar_url={:?}",
+            "Updating user profile: user_id={}, name_present={}, avatar_url_present={}",
             user_id,
-            name,
-            avatar_url
+            name.is_some(),
+            avatar_url.is_some()
         );
 
         let user = self
@@ -84,11 +83,7 @@ impl UserService for UserServiceImpl {
             .update_user(user_id, name.clone(), avatar_url.clone())
             .await?;
 
-        tracing::info!(
-            "User profile updated successfully: user_id={}, email={}",
-            user.id,
-            user.email
-        );
+        tracing::info!("User profile updated successfully: user_id={}", user.id);
 
         Ok(user)
     }

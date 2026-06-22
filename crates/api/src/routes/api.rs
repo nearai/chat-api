@@ -508,9 +508,10 @@ async fn create_conversation(
         user.user_id
     );
 
-    if let Ok(body_str) = std::str::from_utf8(&body_bytes) {
-        tracing::debug!("Request body: {}", body_str);
-    }
+    tracing::debug!(
+        "Request body content redacted; body_size={} bytes",
+        body_bytes.len()
+    );
 
     tracing::debug!(
         "Forwarding conversation creation request to OpenAI for user_id={}",
@@ -598,9 +599,10 @@ async fn update_conversation(
         user.user_id
     );
 
-    if let Ok(body_str) = std::str::from_utf8(&body_bytes) {
-        tracing::debug!("Request body: {}", body_str);
-    }
+    tracing::debug!(
+        "Request body content redacted; body_size={} bytes",
+        body_bytes.len()
+    );
 
     tracing::debug!(
         "Forwarding conversation update request to OpenAI for user_id={}",
@@ -2331,9 +2333,10 @@ async fn proxy_responses(
     );
 
     if !body_bytes.is_empty() {
-        if let Ok(body_str) = std::str::from_utf8(&body_bytes) {
-            tracing::debug!("Request body content: {}", body_str);
-        }
+        tracing::debug!(
+            "Request body content redacted; body_size={} bytes",
+            body_bytes.len()
+        );
 
         // Try to parse JSON body once for further processing (model visibility + system prompt)
         match serde_json::from_slice::<serde_json::Value>(&body_bytes) {
@@ -3155,6 +3158,8 @@ async fn proxy_mcp(
     forward_headers.remove("authorization");
     forward_headers.remove("host");
     forward_headers.remove("content-length");
+    forward_headers.remove("x-org-id");
+    forward_headers.remove("x-workspace-id");
 
     let mut request_builder = state
         .http_client
@@ -4538,7 +4543,18 @@ async fn handle_trackable_response(
     let status = proxy_response.status;
     let response_headers = proxy_response.headers;
 
-    tracing::debug!("Response headers: {:?}", response_headers);
+    let request_id_header = crate::middleware::request_id_header_name();
+    let upstream_request_id_len = response_headers
+        .get(&request_id_header)
+        .and_then(|value| value.to_str().ok())
+        .map(str::len);
+    tracing::debug!(
+        "Response metadata: status={} header_count={} has_x_request_id={} x_request_id_len={}",
+        status,
+        response_headers.len(),
+        upstream_request_id_len.is_some(),
+        upstream_request_id_len.unwrap_or(0)
+    );
 
     // Buffer the response to extract the resource ID
     let proxy_body = Body::from_stream(proxy_response.body);

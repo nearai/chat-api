@@ -864,9 +864,9 @@ impl AgentServiceImpl {
         };
 
         tracing::info!(
-            "Calling compose-api /auth/proxy-session: url={}, session_token_len={}",
+            "Calling compose-api /auth/proxy-session: url={}, user_id={}",
             url,
-            session_token.len()
+            user_id
         );
 
         let response = self
@@ -888,17 +888,18 @@ impl AgentServiceImpl {
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
 
-        // Capture response body for debug logging only (do not include in errors per CLAUDE.md)
-        let response_text = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "(unable to read response body)".to_string());
+        let response_body_len = response.text().await.map(|body| body.len()).unwrap_or(0);
 
         if !status.is_success() {
-            tracing::warn!("compose-api /auth/proxy-session failed: status={}", status);
             tracing::debug!(
-                "compose-api /auth/proxy-session response body (debug only): {}",
-                response_text
+                "compose-api /auth/proxy-session response body redacted: status={}, body_len={}",
+                status,
+                response_body_len
+            );
+            tracing::warn!(
+                "compose-api /auth/proxy-session failed: status={}, body_len={}",
+                status,
+                response_body_len
             );
             return Err(anyhow!(
                 "compose-api /auth/proxy-session error: status {}",
@@ -1120,11 +1121,11 @@ impl AgentServiceImpl {
                 .text()
                 .await
                 .unwrap_or_else(|_| "(unable to read response)".to_string());
-            // Log full error for debugging, but don't expose to clients
+            let error_body_len = error_body.len();
             tracing::warn!(
-                "Agent API create instance failed: status={}, body={}",
+                "Agent API create instance failed: status={}, body_len={}",
                 status,
-                error_body
+                error_body_len
             );
             return Err(anyhow!("Agent API error: {}", status));
         }
@@ -1390,12 +1391,13 @@ impl AgentServiceImpl {
                 .text()
                 .await
                 .unwrap_or_else(|_| "(unable to read response)".to_string());
+            let error_body_len = error_body.len();
             tracing::warn!(
-                "Agent API create instance failed: status={}, body={}",
+                "Agent API create instance failed: status={}, body_len={}",
                 status,
-                error_body
+                error_body_len
             );
-            return Err(anyhow!("Agent API error: {} - {}", status, error_body));
+            return Err(anyhow!("Agent API error: {}", status));
         }
 
         tracing::info!(
@@ -3015,10 +3017,10 @@ impl AgentService for AgentServiceImpl {
                 .await
                 .unwrap_or_else(|_| "unable to read body".to_string());
             tracing::error!(
-                "Agent API restart failed: status={}, url={}, body={}, instance_id={}",
+                "Agent API restart failed: status={}, url={}, body_len={}, instance_id={}",
                 status,
                 restart_url,
-                body,
+                body.len(),
                 instance_id
             );
             return Err(anyhow!(
@@ -3182,10 +3184,10 @@ impl AgentService for AgentServiceImpl {
                 .await
                 .unwrap_or_else(|_| "unable to read body".to_string());
             tracing::error!(
-                "Agent API stop failed: status={}, url={}, body={}, instance_id={}",
+                "Agent API stop failed: status={}, url={}, body_len={}, instance_id={}",
                 status,
                 stop_url,
-                body,
+                body.len(),
                 instance_id
             );
             return Err(anyhow!(
@@ -3270,10 +3272,10 @@ impl AgentService for AgentServiceImpl {
                 .await
                 .unwrap_or_else(|_| "unable to read body".to_string());
             tracing::error!(
-                "Agent API start failed: status={}, url={}, body={}, instance_id={}",
+                "Agent API start failed: status={}, url={}, body_len={}, instance_id={}",
                 status,
                 start_url,
-                body,
+                body.len(),
                 instance_id
             );
             return Err(anyhow!(
@@ -4057,7 +4059,12 @@ impl AgentServiceImpl {
             .await
             .map_err(|e| anyhow!("Failed to parse compose-api version response: {}", e))?;
 
-        tracing::debug!("TEE: /version response body: {:?}", version);
+        tracing::debug!(
+            "TEE: /version response parsed: image_count={} has_worker_image={} has_ironclaw_image={}",
+            version.images.len(),
+            version.images.contains_key("worker"),
+            version.images.contains_key("ironclaw")
+        );
 
         // Map service_type to image key in the version response
         let service_type = instance.service_type_str();
