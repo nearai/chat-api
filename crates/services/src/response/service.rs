@@ -118,6 +118,7 @@ impl OpenAIProxyService for OpenAIProxy {
         // Forward all headers from the client (except Authorization which we set above)
         headers.remove("authorization");
         headers.remove("host"); // Don't forward host header
+        headers.remove("cookie");
         headers.remove("x-org-id");
         headers.remove("x-workspace-id");
 

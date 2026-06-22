@@ -36,18 +36,6 @@ fn is_origin_allowed(origin_str: &str, cors_config: &config::CorsConfig) -> bool
         return true;
     }
 
-    if let Some(remainder) = origin_str.strip_prefix("http://localhost") {
-        if remainder.is_empty() || remainder.starts_with(':') {
-            return true;
-        }
-    }
-
-    if let Some(remainder) = origin_str.strip_prefix("http://127.0.0.1") {
-        if remainder.is_empty() || remainder.starts_with(':') {
-            return true;
-        }
-    }
-
     origin_str.starts_with("https://")
         && cors_config
             .wildcard_suffixes
@@ -64,6 +52,12 @@ mod tests {
             exact_matches: vec![
                 "https://example.com".to_string(),
                 "http://test.com".to_string(),
+                "http://localhost".to_string(),
+                "http://localhost:3000".to_string(),
+                "http://localhost:8080".to_string(),
+                "http://127.0.0.1".to_string(),
+                "http://127.0.0.1:3000".to_string(),
+                "http://127.0.0.1:8080".to_string(),
             ],
             wildcard_suffixes: vec![".near.ai".to_string(), "-example.com".to_string()],
         }
@@ -113,6 +107,19 @@ mod tests {
     fn test_127_0_0_1_subdomain_denied() {
         let config = test_cors_config();
         assert!(!is_origin_allowed("http://127.0.0.1.evil.com", &config));
+    }
+
+    #[test]
+    fn test_local_development_origins_denied_when_not_configured() {
+        let config = config::CorsConfig {
+            exact_matches: vec![],
+            wildcard_suffixes: vec![],
+        };
+
+        assert!(!is_origin_allowed("http://localhost", &config));
+        assert!(!is_origin_allowed("http://localhost:3000", &config));
+        assert!(!is_origin_allowed("http://127.0.0.1", &config));
+        assert!(!is_origin_allowed("http://127.0.0.1:3000", &config));
     }
 
     #[test]

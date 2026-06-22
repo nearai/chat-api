@@ -3158,6 +3158,7 @@ async fn proxy_mcp(
     forward_headers.remove("authorization");
     forward_headers.remove("host");
     forward_headers.remove("content-length");
+    forward_headers.remove("cookie");
     forward_headers.remove("x-org-id");
     forward_headers.remove("x-workspace-id");
 
