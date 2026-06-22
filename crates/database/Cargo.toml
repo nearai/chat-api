@@ -57,6 +57,6 @@ aes-gcm = "0.10"
 hex = "0.4"
 
 reqwest = { version = "0.12.24", features = ["json", "rustls-tls"] }
-deadpool = "0.12.3"
+deadpool = "0.13.0"
 native-tls = "0.2.14"
 postgres-native-tls = "0.5.2"
