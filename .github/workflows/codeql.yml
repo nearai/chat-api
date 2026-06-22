@@ -10,10 +10,16 @@ permissions:
   contents: read
   security-events: write   # CodeQL uploads results to GitHub code scanning
   actions: read
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   analyze:
     name: CodeQL (${{ matrix.language }})
     runs-on: ubuntu-latest
+    # Skip on fork PRs: their GITHUB_TOKEN is read-only, so the SARIF upload would fail and
+    # leave a noisy failing check. push + schedule (and same-repo PRs) still run.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     strategy:
       fail-fast: false
       matrix:
@@ -23,7 +29,9 @@ jobs:
       - uses: github/codeql-action/init@8aad20d150bbac5944a9f9d289da16a4b0d87c1e  # v4.36.2
         with:
           languages: ${{ matrix.language }}
+      # autobuild only applies to compiled languages; skip it for the `actions` analysis (no-op there).
       - uses: github/codeql-action/autobuild@8aad20d150bbac5944a9f9d289da16a4b0d87c1e  # v4.36.2
+        if: matrix.language == 'rust'
       - uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e  # v4.36.2
         with:
           category: "/language:${{ matrix.language }}"
