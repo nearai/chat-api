@@ -38,7 +38,7 @@ rmcp = { version = "0.6", features = [
 ] }
 hex = "0.4"
 hmac = "0.12"
-sha2 = "0.10"
+sha2 = "0.11"
 # X25519 key derivation for age encryption (backup keypair derivation)
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 dstack-sdk = "0.1"
