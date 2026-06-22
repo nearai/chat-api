@@ -167,9 +167,10 @@ impl UserRepository for PostgresUserRepository {
         avatar_url: Option<String>,
     ) -> anyhow::Result<User> {
         tracing::info!(
-            "Repository: Creating user with email={}, name={:?}",
-            email,
-            name
+            "Repository: Creating user with email_present={} name_present={} avatar_url_present={}",
+            !email.is_empty(),
+            name.is_some(),
+            avatar_url.is_some()
         );
 
         let client = self.pool.get().await?;
@@ -193,9 +194,8 @@ impl UserRepository for PostgresUserRepository {
         };
 
         tracing::info!(
-            "Repository: User created successfully with user_id={}, email={}",
-            user.id,
-            user.email
+            "Repository: User created successfully with user_id={}",
+            user.id
         );
 
         Ok(user)

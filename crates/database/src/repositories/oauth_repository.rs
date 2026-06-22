@@ -19,10 +19,13 @@ impl PostgresOAuthRepository {
 #[async_trait]
 impl OAuthRepository for PostgresOAuthRepository {
     async fn store_oauth_state(&self, state: &OAuthState) -> anyhow::Result<()> {
+        let state_present = !state.state.is_empty();
+        let state_len = state.state.len();
         tracing::debug!(
-            "Repository: Storing OAuth state - state={}, provider={:?}",
-            state.state,
-            state.provider
+            state_present,
+            state_len,
+            provider = ?state.provider,
+            "Repository: Storing OAuth state"
         );
 
         let client = self.pool.get().await?;
@@ -48,15 +51,22 @@ impl OAuthRepository for PostgresOAuthRepository {
             .await?;
 
         tracing::debug!(
-            "Repository: OAuth state stored successfully - state={}",
-            state.state
+            state_present,
+            state_len,
+            "Repository: OAuth state stored successfully"
         );
 
         Ok(())
     }
 
     async fn consume_oauth_state(&self, state: &str) -> anyhow::Result<Option<OAuthState>> {
-        tracing::debug!("Repository: Consuming OAuth state - state={}", state);
+        let state_present = !state.is_empty();
+        let state_len = state.len();
+        tracing::debug!(
+            state_present,
+            state_len,
+            "Repository: Consuming OAuth state"
+        );
 
         let mut client = self.pool.get().await?;
 
@@ -95,13 +105,15 @@ impl OAuthRepository for PostgresOAuthRepository {
 
         if result.is_some() {
             tracing::debug!(
-                "Repository: OAuth state consumed successfully - state={}",
-                state
+                state_present,
+                state_len,
+                "Repository: OAuth state consumed successfully"
             );
         } else {
             tracing::warn!(
-                "Repository: OAuth state not found or already consumed - state={}",
-                state
+                state_present,
+                state_len,
+                "Repository: OAuth state not found or already consumed"
             );
         }
 
