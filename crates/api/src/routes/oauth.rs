@@ -478,13 +478,14 @@ fn extract_client_ip(
         ));
 
     tracing::info!(
-        resolved_client_ip = %resolved_ip,
+        resolved_client_ip_present = true,
         client_ip_source = source.as_str(),
         trusted_proxy_count,
-        peer_addr = %peer_addr.map(|addr| addr.to_string()).unwrap_or_default(),
-        x_forwarded_for = x_forwarded_for.unwrap_or(""),
-        x_real_ip = x_real_ip.unwrap_or(""),
-        forwarded = forwarded.unwrap_or(""),
+        peer_addr_present = peer_addr.is_some(),
+        x_forwarded_for_present = x_forwarded_for.is_some(),
+        x_forwarded_for_len = x_forwarded_for.map(str::len).unwrap_or(0),
+        x_real_ip_present = x_real_ip.is_some(),
+        forwarded_present = forwarded.is_some(),
         "Resolved client IP for email auth request"
     );
 
@@ -845,8 +846,11 @@ pub async fn google_login(
     Query(params): Query<OAuthInitQuery>,
 ) -> Result<Redirect, ApiError> {
     tracing::info!(
-        "Google OAuth login initiated - redirect_uri: {:?}, frontend_callback_provided=true",
-        params.redirect_uri,
+        provider = "google",
+        redirect_uri_present = params.redirect_uri.is_some(),
+        frontend_callback_present = true,
+        action = "initiate_oauth_login",
+        "OAuth login initiated"
     );
 
     let redirect_uri = params
@@ -856,7 +860,12 @@ pub async fn google_login(
     let frontend_callback =
         validate_oauth_frontend_callback(&params.frontend_callback, &app_state)?;
 
-    tracing::debug!("Using OAuth redirect_uri: {}", redirect_uri);
+    tracing::debug!(
+        provider = "google",
+        redirect_uri_len = redirect_uri.len(),
+        action = "prepare_provider_redirect",
+        "OAuth redirect URI selected"
+    );
 
     let auth_url = app_state
         .oauth_service
@@ -871,8 +880,12 @@ pub async fn google_login(
             ApiError::oauth_provider_error("Google")
         })?;
 
-    tracing::info!("Google OAuth URL generated successfully, redirecting to Google");
-    tracing::debug!("Google OAuth URL: {}", auth_url);
+    tracing::info!(
+        provider = "google",
+        auth_url_len = auth_url.len(),
+        action = "redirect_to_provider",
+        "OAuth authorization URL generated"
+    );
 
     Ok(Redirect::temporary(&auth_url))
 }
@@ -896,10 +909,13 @@ pub async fn oauth_callback(
     State(app_state): State<AppState>,
     Query(params): Query<OAuthCallbackQuery>,
 ) -> Result<(StatusCode, HeaderMap), ApiError> {
+    let state_present = !params.state.is_empty();
+    let state_len = params.state.len();
     tracing::info!(
-        "OAuth callback received - code length: {}, state: {}",
-        params.code.len(),
-        params.state
+        code_len = params.code.len(),
+        state_present,
+        state_len,
+        "OAuth callback received"
     );
 
     // The provider is determined from the state stored in the database
@@ -909,7 +925,7 @@ pub async fn oauth_callback(
         .handle_callback_unified(params.code.clone(), params.state.clone())
         .await
         .map_err(|e| {
-            tracing::error!("OAuth callback failed for state {}: {}", params.state, e);
+            tracing::error!(state_present, state_len, error = %e, "OAuth callback failed");
             ApiError::oauth_failed()
         })?;
 
@@ -1058,8 +1074,11 @@ pub async fn github_login(
     Query(params): Query<OAuthInitQuery>,
 ) -> Result<Redirect, ApiError> {
     tracing::info!(
-        "Github OAuth login initiated - redirect_uri: {:?}, frontend_callback_provided=true",
-        params.redirect_uri,
+        provider = "github",
+        redirect_uri_present = params.redirect_uri.is_some(),
+        frontend_callback_present = true,
+        action = "initiate_oauth_login",
+        "OAuth login initiated"
     );
 
     let redirect_uri = params
@@ -1069,7 +1088,12 @@ pub async fn github_login(
     let frontend_callback =
         validate_oauth_frontend_callback(&params.frontend_callback, &app_state)?;
 
-    tracing::debug!("Using OAuth redirect_uri: {}", redirect_uri);
+    tracing::debug!(
+        provider = "github",
+        redirect_uri_len = redirect_uri.len(),
+        action = "prepare_provider_redirect",
+        "OAuth redirect URI selected"
+    );
 
     let auth_url = app_state
         .oauth_service
@@ -1084,8 +1108,12 @@ pub async fn github_login(
             ApiError::oauth_provider_error("Github")
         })?;
 
-    tracing::info!("Github OAuth URL generated successfully, redirecting to Github");
-    tracing::debug!("Github OAuth URL: {}", auth_url);
+    tracing::info!(
+        provider = "github",
+        auth_url_len = auth_url.len(),
+        action = "redirect_to_provider",
+        "OAuth authorization URL generated"
+    );
 
     Ok(Redirect::temporary(&auth_url))
 }
@@ -1172,7 +1200,10 @@ pub async fn mock_login(
     State(app_state): State<AppState>,
     axum::Json(request): axum::Json<MockLoginRequest>,
 ) -> Result<(HeaderMap, axum::Json<crate::models::AuthResponse>), ApiError> {
-    tracing::info!("Mock login requested for email: {}", request.email);
+    tracing::info!(
+        "Mock login requested: email_present={}",
+        !request.email.is_empty()
+    );
 
     // Check if user already exists
     let user = match app_state
@@ -1189,7 +1220,10 @@ pub async fn mock_login(
         }
         None => {
             // Create new user
-            tracing::info!("Creating new user with email: {}", request.email);
+            tracing::info!(
+                "Creating new user from mock login: email_present={}",
+                !request.email.is_empty()
+            );
             match app_state
                 .user_repository
                 .create_user(

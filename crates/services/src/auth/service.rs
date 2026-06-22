@@ -340,9 +340,11 @@ impl OAuthServiceImpl {
         oauth_state: OAuthState,
     ) -> anyhow::Result<(UserSession, Option<String>, bool, OAuthProvider)> {
         tracing::info!(
-            "Processing OAuth callback: provider={:?}, redirect_uri={}",
-            provider,
-            oauth_state.redirect_uri
+            provider = ?provider,
+            redirect_uri_len = oauth_state.redirect_uri.len(),
+            frontend_callback_present = oauth_state.frontend_callback.is_some(),
+            action = "process_oauth_callback",
+            "Processing OAuth callback"
         );
 
         let (client_id, client_secret, auth_url, token_url) = match provider {
@@ -632,7 +634,8 @@ impl EmailAuthServiceImpl {
         if !body.success {
             tracing::warn!(
                 email_hash = %email_hash,
-                client_ip = %client_ip,
+                client_ip_present = !client_ip.is_empty(),
+                client_ip_len = client_ip.len(),
                 error_codes = ?body.error_codes,
                 "Turnstile verification rejected request"
             );
@@ -673,7 +676,8 @@ impl EmailAuthService for EmailAuthServiceImpl {
         {
             tracing::warn!(
                 email_hash = %email_hash,
-                client_ip = %client_ip,
+                client_ip_present = !client_ip.is_empty(),
+                client_ip_len = client_ip.len(),
                 "Email OTP request rate-limited by email threshold"
             );
             return Err(RequestEmailCodeError::RateLimited);
@@ -687,7 +691,8 @@ impl EmailAuthService for EmailAuthServiceImpl {
         {
             tracing::warn!(
                 email_hash = %email_hash,
-                client_ip = %client_ip,
+                client_ip_present = !client_ip.is_empty(),
+                client_ip_len = client_ip.len(),
                 "Email OTP request rate-limited by IP threshold"
             );
             return Err(RequestEmailCodeError::RateLimited);
@@ -745,7 +750,8 @@ impl EmailAuthService for EmailAuthServiceImpl {
         {
             tracing::warn!(
                 email_hash = %email_hash,
-                client_ip = %client_ip,
+                client_ip_present = !client_ip.is_empty(),
+                client_ip_len = client_ip.len(),
                 "Email OTP verify rate-limited by email failure threshold"
             );
             return Err(VerifyEmailCodeError::RateLimited);
@@ -760,7 +766,8 @@ impl EmailAuthService for EmailAuthServiceImpl {
         {
             tracing::warn!(
                 email_hash = %email_hash,
-                client_ip = %client_ip,
+                client_ip_present = !client_ip.is_empty(),
+                client_ip_len = client_ip.len(),
                 "Email OTP verify rate-limited by IP failure threshold"
             );
             return Err(VerifyEmailCodeError::RateLimited);
@@ -808,10 +815,12 @@ impl OAuthService for OAuthServiceImpl {
         frontend_callback: Option<String>,
     ) -> anyhow::Result<String> {
         tracing::info!(
-            "Generating authorization URL for provider={:?}, redirect_uri={}, frontend_callback={:?}",
-            provider,
-            redirect_uri,
-            frontend_callback
+            provider = ?provider,
+            redirect_uri_len = redirect_uri.len(),
+            frontend_callback_present = frontend_callback.is_some(),
+            frontend_callback_len = frontend_callback.as_ref().map_or(0, String::len),
+            action = "generate_oauth_authorization_url",
+            "Generating OAuth authorization URL"
         );
 
         let (client_id, client_secret, auth_url, token_url, scopes) = match provider {
@@ -935,7 +944,9 @@ impl OAuthService for OAuthServiceImpl {
         code: String,
         state: String,
     ) -> anyhow::Result<(UserSession, Option<String>, bool, OAuthProvider)> {
-        tracing::info!("Handling unified OAuth callback with state: {}", state);
+        let state_present = !state.is_empty();
+        let state_len = state.len();
+        tracing::info!(state_present, state_len, "Handling unified OAuth callback");
 
         let oauth_state = self
             .oauth_repository

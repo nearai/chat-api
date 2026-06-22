@@ -39,9 +39,13 @@ impl UserSettingsService for UserSettingsServiceImpl {
         content: UserSettingsContent,
     ) -> anyhow::Result<UserSettingsContent> {
         tracing::info!(
-            "Upserting user settings: user_id={}, content={:?}",
-            user_id,
-            content
+            user_id = %user_id,
+            notification = content.notification,
+            web_search = content.web_search,
+            appearance = ?content.appearance,
+            has_system_prompt = content.system_prompt.is_some(),
+            system_prompt_len = content.system_prompt.as_ref().map_or(0, |system_prompt| system_prompt.len()),
+            "Upserting user settings"
         );
 
         let settings = self
