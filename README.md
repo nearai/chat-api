@@ -1,5 +1,7 @@
 # NEAR AI Private Chat API
 
+[![Security Audit](https://github.com/nearai/chat-api/actions/workflows/security-audit.yml/badge.svg)](https://github.com/nearai/chat-api/actions/workflows/security-audit.yml)
+
 A Rust backend service that proxies requests to **NEAR AI Cloud API** (using OpenAI-compatible API format) while tracking user conversations in PostgreSQL. Provides OAuth authentication (Google/GitHub), user session management, and serves a frontend as static files. Designed to run in a Trusted Execution Environment (TEE) for enhanced security and privacy.
 
 ## Features
