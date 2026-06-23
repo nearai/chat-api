@@ -1,0 +1,13 @@
+# cargo-deny config - advisories + supply-chain (bans / sources). Run report-only in CI (continue-on-error);
+# advisory findings surface in the job log and are triaged via the Vulnerability Management procedure. Add a
+# [licenses] allow-list and `licenses` to the workflow command once the dependency tree is license-reviewed.
+[advisories]
+# Defaults apply (vulnerabilities + unmaintained/unsound are surfaced). Report-only is enforced by the
+# workflow's continue-on-error, not by downgrading severities here.
+
+[bans]
+multiple-versions = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

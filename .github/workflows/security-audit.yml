@@ -1,0 +1,26 @@
+name: Security Audit
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 9 * * 1"   # weekly Mon 09:00 UTC
+permissions:
+  contents: read
+jobs:
+  deny:
+    name: cargo deny (advisories + bans + sources)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      # cargo-deny scans RustSec advisories + supply-chain (bans/sources) and surfaces findings in the job log.
+      # Report-only via continue-on-error: the check stays green, and cargo-deny (unlike rustsec/audit-check)
+      # does NOT publish a separate failing check-run or open issues - so no red check and no public-issue spam
+      # on this PUBLIC repo. Advisories are tracked/triaged via the Vulnerability Management procedure; remove
+      # continue-on-error to gate merges once the backlog is triaged to a baseline.
+      - uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe  # v2.0.20
+        continue-on-error: true
+        with:
+          rust-version: "1.91.1"   # match rust-toolchain.toml so cargo-deny reads Cargo.lock v4
+          command: check advisories bans sources

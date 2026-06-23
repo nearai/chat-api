@@ -989,6 +989,12 @@ pub struct InstanceResponse {
     /// Service type selected when creating the instance (e.g. "openclaw", "ironclaw")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service_type: Option<String>,
+    /// Agent manager URL that owns this instance
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_api_base_url: Option<String>,
+    /// Last usage timestamp (from agent_balance table), RFC3339 format
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_usage_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -1005,6 +1011,8 @@ impl From<services::agent::ports::AgentInstance> for InstanceResponse {
             status,
             ssh_command: None,
             service_type: inst.service_type,
+            agent_api_base_url: None,
+            last_usage_at: None,
             created_at: inst.created_at.to_rfc3339(),
             updated_at: inst.updated_at.to_rfc3339(),
         }
@@ -1029,16 +1037,26 @@ fn sanitize_dashboard_url(url: Option<String>) -> Option<String> {
 pub fn instance_response_for_admin(
     inst: services::agent::ports::AgentInstance,
 ) -> InstanceResponse {
+    instance_response_for_admin_with_usage(inst, None)
+}
+
+/// Build InstanceResponse for admin list endpoint with optional last_usage_at from agent_balance.
+pub fn instance_response_for_admin_with_usage(
+    inst: services::agent::ports::AgentInstance,
+    last_usage_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> InstanceResponse {
     let status = status_from_db(&inst.status);
     InstanceResponse {
         id: inst.id.to_string(),
         instance_id: inst.instance_id,
+        agent_api_base_url: inst.agent_api_base_url,
         name: inst.name,
         public_ssh_key: inst.public_ssh_key,
         dashboard_url: sanitize_dashboard_url(inst.dashboard_url),
         status,
         ssh_command: None,
         service_type: inst.service_type,
+        last_usage_at: last_usage_at.map(|t| t.to_rfc3339()),
         created_at: inst.created_at.to_rfc3339(),
         updated_at: inst.updated_at.to_rfc3339(),
     }
@@ -1063,6 +1081,8 @@ pub fn instance_response_with_enrichment(
         status,
         ssh_command,
         service_type: inst.service_type,
+        agent_api_base_url: None,
+        last_usage_at: None,
         created_at: inst.created_at.to_rfc3339(),
         updated_at: inst.updated_at.to_rfc3339(),
     }

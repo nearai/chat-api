@@ -188,9 +188,12 @@ fn compare_semantic_versions(a: &str, b: &str) -> std::cmp::Ordering {
 ///
 /// Does not apply crabshack `deploy_latest_version_tag` flags; use
 /// `AgentServiceImpl::resolve_non_tee_worker_image_ref` for non-TEE deploys.
-fn get_image_for_service_type(service_type: &str, hosting: Option<&AgentHostingConfig>) -> String {
+pub fn get_image_for_service_type(
+    service_type: &str,
+    hosting: Option<&AgentHostingConfig>,
+) -> String {
     match service_type {
-        "ironclaw" => hosting
+        s if s == "ironclaw" || s.starts_with("ironclaw-") => hosting
             .and_then(|h| h.crabshack.ironclaw_image.clone())
             .unwrap_or_else(|| "docker.io/nearaidev/ironclaw-dind:latest".to_string()),
         _ => hosting
@@ -208,7 +211,7 @@ pub fn service_type_for_crabshack(
     hosting_config: Option<&crate::system_configs::ports::AgentHostingConfig>,
 ) -> String {
     match canonical_type {
-        "ironclaw" => hosting_config
+        s if s == "ironclaw" || s.starts_with("ironclaw-") => hosting_config
             .and_then(|cfg| cfg.crabshack.ironclaw_service_type.clone())
             .unwrap_or_else(|| "ironclaw-dind".to_string()),
         "openclaw" => hosting_config
@@ -861,9 +864,9 @@ impl AgentServiceImpl {
         };
 
         tracing::info!(
-            "Calling compose-api /auth/proxy-session: url={}, session_token_len={}",
+            "Calling compose-api /auth/proxy-session: url={}, user_id={}",
             url,
-            session_token.len()
+            user_id
         );
 
         let response = self
@@ -885,17 +888,18 @@ impl AgentServiceImpl {
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
 
-        // Capture response body for debug logging only (do not include in errors per CLAUDE.md)
-        let response_text = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "(unable to read response body)".to_string());
+        let response_body_len = response.text().await.map(|body| body.len()).unwrap_or(0);
 
         if !status.is_success() {
-            tracing::warn!("compose-api /auth/proxy-session failed: status={}", status);
             tracing::debug!(
-                "compose-api /auth/proxy-session response body (debug only): {}",
-                response_text
+                "compose-api /auth/proxy-session response body redacted: status={}, body_len={}",
+                status,
+                response_body_len
+            );
+            tracing::warn!(
+                "compose-api /auth/proxy-session failed: status={}, body_len={}",
+                status,
+                response_body_len
             );
             return Err(anyhow!(
                 "compose-api /auth/proxy-session error: status {}",
@@ -1117,11 +1121,11 @@ impl AgentServiceImpl {
                 .text()
                 .await
                 .unwrap_or_else(|_| "(unable to read response)".to_string());
-            // Log full error for debugging, but don't expose to clients
+            let error_body_len = error_body.len();
             tracing::warn!(
-                "Agent API create instance failed: status={}, body={}",
+                "Agent API create instance failed: status={}, body_len={}",
                 status,
-                error_body
+                error_body_len
             );
             return Err(anyhow!("Agent API error: {}", status));
         }
@@ -1387,12 +1391,13 @@ impl AgentServiceImpl {
                 .text()
                 .await
                 .unwrap_or_else(|_| "(unable to read response)".to_string());
+            let error_body_len = error_body.len();
             tracing::warn!(
-                "Agent API create instance failed: status={}, body={}",
+                "Agent API create instance failed: status={}, body_len={}",
                 status,
-                error_body
+                error_body_len
             );
-            return Err(anyhow!("Agent API error: {} - {}", status, error_body));
+            return Err(anyhow!("Agent API error: {}", status));
         }
 
         tracing::info!(
@@ -3012,10 +3017,10 @@ impl AgentService for AgentServiceImpl {
                 .await
                 .unwrap_or_else(|_| "unable to read body".to_string());
             tracing::error!(
-                "Agent API restart failed: status={}, url={}, body={}, instance_id={}",
+                "Agent API restart failed: status={}, url={}, body_len={}, instance_id={}",
                 status,
                 restart_url,
-                body,
+                body.len(),
                 instance_id
             );
             return Err(anyhow!(
@@ -3179,10 +3184,10 @@ impl AgentService for AgentServiceImpl {
                 .await
                 .unwrap_or_else(|_| "unable to read body".to_string());
             tracing::error!(
-                "Agent API stop failed: status={}, url={}, body={}, instance_id={}",
+                "Agent API stop failed: status={}, url={}, body_len={}, instance_id={}",
                 status,
                 stop_url,
-                body,
+                body.len(),
                 instance_id
             );
             return Err(anyhow!(
@@ -3267,10 +3272,10 @@ impl AgentService for AgentServiceImpl {
                 .await
                 .unwrap_or_else(|_| "unable to read body".to_string());
             tracing::error!(
-                "Agent API start failed: status={}, url={}, body={}, instance_id={}",
+                "Agent API start failed: status={}, url={}, body_len={}, instance_id={}",
                 status,
                 start_url,
-                body,
+                body.len(),
                 instance_id
             );
             return Err(anyhow!(
@@ -3965,6 +3970,25 @@ impl AgentService for AgentServiceImpl {
 
         Ok(balance)
     }
+
+    fn find_manager_for_url(&self, agent_api_base_url: &str) -> Option<config::AgentManager> {
+        let normalized = agent_api_base_url.trim_end_matches('/');
+        self.managers
+            .iter()
+            .find(|m| m.url.trim_end_matches('/') == normalized)
+            .cloned()
+    }
+
+    fn find_crabshack_manager(&self) -> Option<config::AgentManager> {
+        self.managers
+            .iter()
+            .find(|m| m.url.contains("crabshack"))
+            .cloned()
+    }
+
+    fn manager_urls(&self) -> Vec<String> {
+        self.managers.iter().map(|m| m.url.clone()).collect()
+    }
 }
 
 /// Response structure from crabshack /images endpoint
@@ -4035,7 +4059,12 @@ impl AgentServiceImpl {
             .await
             .map_err(|e| anyhow!("Failed to parse compose-api version response: {}", e))?;
 
-        tracing::debug!("TEE: /version response body: {:?}", version);
+        tracing::debug!(
+            "TEE: /version response parsed: image_count={} has_worker_image={} has_ironclaw_image={}",
+            version.images.len(),
+            version.images.contains_key("worker"),
+            version.images.contains_key("ironclaw")
+        );
 
         // Map service_type to image key in the version response
         let service_type = instance.service_type_str();

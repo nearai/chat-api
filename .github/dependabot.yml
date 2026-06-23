@@ -1,0 +1,34 @@
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    # Let releases bake ~1 week so a compromised release can be flagged before it reaches the
+    # lockfile. Security updates are exempt from cooldown and are never delayed.
+    cooldown:
+      default-days: 7
+    groups:
+      # Batch minor + patch bumps into one reviewable PR; majors stay individual for human review.
+      cargo-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    # Let releases bake ~1 week so a compromised release can be flagged before it reaches the
+    # lockfile. Security updates are exempt from cooldown and are never delayed.
+    cooldown:
+      default-days: 7
+    groups:
+      # Batch minor + patch bumps into one reviewable PR; majors stay individual for human review.
+      actions-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"

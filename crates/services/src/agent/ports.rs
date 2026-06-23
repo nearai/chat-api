@@ -358,6 +358,37 @@ pub trait AgentRepository: Send + Sync {
     ) -> anyhow::Result<()>;
 
     async fn get_user_total_spending(&self, user_id: UserId) -> anyhow::Result<i64>;
+
+    /// List all instances with last_usage_at from agent_balance (admin only).
+    /// Returns (instances, last_usage_at_map, total_count).
+    #[allow(clippy::type_complexity)]
+    async fn list_all_instances_with_usage(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> anyhow::Result<(
+        Vec<AgentInstance>,
+        std::collections::HashMap<Uuid, DateTime<Utc>>,
+        i64,
+    )>;
+
+    /// Admin update instance fields for migration (agent_api_base_url, instance_url, instance_token, dashboard_url).
+    /// Only updates fields that are Some. instance_token is stored already-encrypted.
+    async fn admin_update_instance(
+        &self,
+        instance_id: Uuid,
+        agent_api_base_url: Option<String>,
+        instance_url: Option<String>,
+        encrypted_instance_token: Option<String>,
+        dashboard_url: Option<String>,
+    ) -> anyhow::Result<AgentInstance>;
+
+    /// Returns (total, migrated, pending, no_url, unknown).
+    async fn get_migration_status_counts(
+        &self,
+        legacy_patterns: Vec<String>,
+        crabshack_pattern: String,
+    ) -> anyhow::Result<(i64, i64, i64, i64, i64)>;
 }
 
 /// Service trait for agent business logic
@@ -585,4 +616,14 @@ pub trait AgentService: Send + Sync {
         instance_id: Uuid,
         user_id: UserId,
     ) -> anyhow::Result<Option<InstanceBalance>>;
+
+    /// Find the configured manager whose URL matches a given agent_api_base_url.
+    /// Returns the manager config (URL + token) if found.
+    fn find_manager_for_url(&self, agent_api_base_url: &str) -> Option<config::AgentManager>;
+
+    /// Find a CrabShack manager by URL containing "crabshack".
+    fn find_crabshack_manager(&self) -> Option<config::AgentManager>;
+
+    /// All configured manager URLs.
+    fn manager_urls(&self) -> Vec<String>;
 }

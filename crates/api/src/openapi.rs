@@ -102,6 +102,7 @@ use utoipa::OpenApi;
         crate::routes::admin::admin_start_instance,
         crate::routes::admin::admin_stop_instance,
         crate::routes::admin::admin_restart_instance,
+        crate::routes::admin::admin_grant_instance_owner,
         crate::routes::admin::admin_sync_agent_status,
         crate::routes::admin::bi_list_users,
         crate::routes::admin::bi_users_summary,
@@ -141,6 +142,7 @@ use utoipa::OpenApi;
         services::user::ports::AccountDeletion,
         services::user::ports::AccountDeletionStatus,
         crate::routes::admin::AdminRetryAccountDeletionResponse,
+        crate::routes::admin::GrantInstanceOwnerResponse,
         crate::models::AuthResponse,
         crate::error::ApiErrorResponse,
         // Auth request models
