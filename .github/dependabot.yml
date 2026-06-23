@@ -15,7 +15,8 @@ updates:
     cooldown:
       default-days: 7
     groups:
-      # Batch minor + patch bumps into one reviewable PR; majors stay individual for human review.
+      # Batch minor + patch version-updates into one reviewable PR. Major version-updates are ignored
+      # (see the `ignore` rule above), not opened individually; security updates are unaffected.
       cargo-minor-patch:
         applies-to: version-updates
         update-types:
@@ -36,7 +37,8 @@ updates:
     cooldown:
       default-days: 7
     groups:
-      # Batch minor + patch bumps into one reviewable PR; majors stay individual for human review.
+      # Batch minor + patch version-updates into one reviewable PR. Major version-updates are ignored
+      # (see the `ignore` rule above), not opened individually; security updates are unaffected.
       actions-minor-patch:
         applies-to: version-updates
         update-types:
