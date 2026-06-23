@@ -4,13 +4,19 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 5
+    # Major version bumps are noisy and usually need manual review; ignore them for VERSION updates.
+    # Security updates are unaffected: the `version-update:` prefix scopes this to version updates only.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
     # Let releases bake ~1 week so a compromised release can be flagged before it reaches the
     # lockfile. Security updates are exempt from cooldown and are never delayed.
     cooldown:
       default-days: 7
     groups:
-      # Batch minor + patch bumps into one reviewable PR; majors stay individual for human review.
+      # Batch minor + patch version-updates into one reviewable PR. Major version-updates are ignored
+      # (see the `ignore` rule above), not opened individually; security updates are unaffected.
       cargo-minor-patch:
         applies-to: version-updates
         update-types:
@@ -20,13 +26,19 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 5
+    # Major version bumps are noisy and usually need manual review; ignore them for VERSION updates.
+    # Security updates are unaffected: the `version-update:` prefix scopes this to version updates only.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
     # Let releases bake ~1 week so a compromised release can be flagged before it reaches the
     # lockfile. Security updates are exempt from cooldown and are never delayed.
     cooldown:
       default-days: 7
     groups:
-      # Batch minor + patch bumps into one reviewable PR; majors stay individual for human review.
+      # Batch minor + patch version-updates into one reviewable PR. Major version-updates are ignored
+      # (see the `ignore` rule above), not opened individually; security updates are unaffected.
       actions-minor-patch:
         applies-to: version-updates
         update-types:
