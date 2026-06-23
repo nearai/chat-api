@@ -4,7 +4,12 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 5
+    # Major version bumps are noisy and usually need manual review; ignore them for VERSION updates.
+    # Security updates are unaffected: the `version-update:` prefix scopes this to version updates only.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
     # Let releases bake ~1 week so a compromised release can be flagged before it reaches the
     # lockfile. Security updates are exempt from cooldown and are never delayed.
     cooldown:
@@ -20,7 +25,12 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 5
+    # Major version bumps are noisy and usually need manual review; ignore them for VERSION updates.
+    # Security updates are unaffected: the `version-update:` prefix scopes this to version updates only.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
     # Let releases bake ~1 week so a compromised release can be flagged before it reaches the
     # lockfile. Security updates are exempt from cooldown and are never delayed.
     cooldown:
