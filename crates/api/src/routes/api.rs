@@ -235,6 +235,42 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
+/// Error body for a plan-gated `403`: returned when the requested model is not
+/// in the caller's subscription plan `allowed_models`. A superset of
+/// [`ErrorResponse`] — `error` is identical, plus a stable machine-readable
+/// `code` and the requested `model` / current `plan`, so clients can prompt an
+/// upgrade instead of rendering a generic failure. Other `403`s on these
+/// endpoints (e.g. banned user) populate only `error`.
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct ModelNotAllowedErrorResponse {
+    /// Human-readable message (identical to [`ErrorResponse::error`]).
+    pub error: String,
+    /// Stable discriminator. Always `"model_not_allowed_in_plan"`.
+    #[schema(example = "model_not_allowed_in_plan")]
+    pub code: String,
+    /// The model id that was requested.
+    pub model: String,
+    /// The subscription plan the caller is currently on.
+    pub plan: String,
+}
+
+/// `403` body for the inference/proxy endpoints. It is one of two shapes:
+/// a plan-gated rejection ([`ModelNotAllowedErrorResponse`], carrying
+/// `code = "model_not_allowed_in_plan"`), or a generic forbidden error
+/// ([`ErrorResponse`], e.g. a banned user) that exposes only `error`.
+/// Modeled as a `oneOf` so generated clients accept both bodies.
+///
+/// Documentation-only: handlers return the concrete `ModelNotAllowedErrorResponse`
+/// / `ErrorResponse` directly, so the variants are never constructed in code —
+/// this type exists purely to shape the OpenAPI `403` response.
+#[derive(Serialize, ToSchema)]
+#[serde(untagged)]
+#[allow(dead_code)]
+pub enum ForbiddenErrorResponse {
+    ModelNotAllowed(ModelNotAllowedErrorResponse),
+    Generic(ErrorResponse),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct InvalidProxyPathSegment;
 
@@ -2288,7 +2324,7 @@ async fn get_file_content(
         (status = 200, description = "Response created successfully"),
         (status = 400, description = BAD_REQUEST, body = ErrorResponse),
         (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
-        (status = 403, description = "Forbidden - user banned or model not available", body = ErrorResponse),
+        (status = 403, description = "Forbidden - user banned (body: error only), or model not available in the caller's plan (body adds code=model_not_allowed_in_plan, model, plan)", body = ForbiddenErrorResponse),
         (status = 502, description = OPENAI_API_ERROR, body = ErrorResponse)
     ),
     security(
@@ -3342,13 +3378,29 @@ async fn enforce_model_access(
         .await
     {
         Ok(()) => Ok(()),
-        Err(SubscriptionError::ModelNotAllowedInPlan { model, plan }) => Err((
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse {
-                error: SubscriptionError::ModelNotAllowedInPlan { model, plan }.to_string(),
-            }),
-        )
-            .into_response()),
+        Err(
+            ref err @ SubscriptionError::ModelNotAllowedInPlan {
+                ref model,
+                ref plan,
+            },
+        ) => {
+            // Return a stable, machine-readable `code` alongside the message so
+            // clients can distinguish "model is gated behind a higher plan"
+            // from a generic upstream failure, and prompt the user to upgrade
+            // instead of showing a misleading "model failed to respond" error.
+            // `error` is kept byte-for-byte identical for backward compatibility.
+            // Typed (not ad-hoc json!) so the shape is in the OpenAPI contract.
+            Err((
+                StatusCode::FORBIDDEN,
+                Json(ModelNotAllowedErrorResponse {
+                    error: err.to_string(),
+                    code: "model_not_allowed_in_plan".to_string(),
+                    model: model.clone(),
+                    plan: plan.clone(),
+                }),
+            )
+                .into_response())
+        }
         Err(err) => {
             tracing::error!(
                 "Failed to validate model access for user_id={}, model_id={}: {}",
@@ -3863,7 +3915,7 @@ async fn proxy_post_to_cloud_api(
         (status = 200, description = "Chat completion created successfully"),
         (status = 400, description = BAD_REQUEST, body = ErrorResponse),
         (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
-        (status = 403, description = "Forbidden - user banned or model not available", body = ErrorResponse),
+        (status = 403, description = "Forbidden - user banned (body: error only), or model not available in the caller's plan (body adds code=model_not_allowed_in_plan, model, plan)", body = ForbiddenErrorResponse),
         (status = 502, description = "Cloud API error", body = ErrorResponse)
     ),
     security(
@@ -4015,7 +4067,7 @@ async fn proxy_chat_completions(
         (status = 200, description = "Image generation request processed successfully"),
         (status = 400, description = BAD_REQUEST, body = ErrorResponse),
         (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
-        (status = 403, description = "Forbidden - user banned", body = ErrorResponse),
+        (status = 403, description = "Forbidden - user banned (body: error only), or model not available in the caller's plan (body adds code=model_not_allowed_in_plan, model, plan)", body = ForbiddenErrorResponse),
         (status = 502, description = "Cloud API error", body = ErrorResponse)
     ),
     security(
@@ -4210,7 +4262,7 @@ async fn proxy_image_generations(
         (status = 200, description = "Image edit request processed successfully"),
         (status = 400, description = BAD_REQUEST, body = ErrorResponse),
         (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
-        (status = 403, description = "Forbidden - user banned", body = ErrorResponse),
+        (status = 403, description = "Forbidden - user banned (body: error only), or model not available in the caller's plan (body adds code=model_not_allowed_in_plan, model, plan)", body = ForbiddenErrorResponse),
         (status = 502, description = "Cloud API error", body = ErrorResponse)
     ),
     security(
