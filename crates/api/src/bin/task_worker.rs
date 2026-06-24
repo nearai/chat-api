@@ -504,7 +504,6 @@ async fn main() -> anyhow::Result<()> {
         config.agent.nearai_api_url.clone(),
         system_configs_service as Arc<dyn services::system_configs::ports::SystemConfigsService>,
         config.agent.channel_relay_url.clone(),
-        config.agent.non_tee_agent_url_pattern.clone(),
     ));
 
     let vpc_auth_config = if config.vpc_auth.is_configured() {
