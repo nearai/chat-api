@@ -48,11 +48,17 @@ impl StripeWebhookVerifier {
             return Err(StripeWebhookError::SignatureMismatch);
         }
 
-        let timestamp_age = now
+        // Reject timestamps outside the tolerance in *both* directions. Comparing the
+        // absolute skew ensures a validly signed but future-dated timestamp (excessive
+        // clock skew or a replayed event) beyond tolerance is rejected, not just stale
+        // ones. `checked_abs` maps the `i64::MIN` edge case to the same overflow error
+        // already produced by `checked_sub`.
+        let timestamp_skew = now
             .timestamp()
             .checked_sub(header.timestamp)
+            .and_then(i64::checked_abs)
             .ok_or(StripeWebhookError::TimestampOutsideTolerance)?;
-        if self.tolerance_seconds > 0 && timestamp_age > self.tolerance_seconds {
+        if self.tolerance_seconds > 0 && timestamp_skew > self.tolerance_seconds {
             return Err(StripeWebhookError::TimestampOutsideTolerance);
         }
 
@@ -184,13 +190,31 @@ mod tests {
     }
 
     #[test]
-    fn does_not_use_absolute_timestamp_difference() {
+    fn rejects_future_timestamp_beyond_tolerance() {
         let verifier = StripeWebhookVerifier::default();
         let payload = br#"{"id":"evt_1"}"#;
         let ts = 1_700_000_000;
         let sig = sign("whsec_test", ts, payload);
         let header = format!("t={ts},v1={sig}");
+        // Webhook timestamp is 301s in the future relative to `now`, which is beyond
+        // the 300s tolerance and must be rejected.
         let now = Utc.timestamp_opt(ts - 301, 0).unwrap();
+
+        let err = verifier
+            .verify(payload, &header, "whsec_test", now)
+            .unwrap_err();
+        assert!(matches!(err, StripeWebhookError::TimestampOutsideTolerance));
+    }
+
+    #[test]
+    fn accepts_future_timestamp_within_tolerance() {
+        let verifier = StripeWebhookVerifier::default();
+        let payload = br#"{"id":"evt_1"}"#;
+        let ts = 1_700_000_000;
+        let sig = sign("whsec_test", ts, payload);
+        let header = format!("t={ts},v1={sig}");
+        // Webhook timestamp is 300s in the future: exactly at the tolerance boundary.
+        let now = Utc.timestamp_opt(ts - 300, 0).unwrap();
 
         assert!(verifier.verify(payload, &header, "whsec_test", now).is_ok());
     }
