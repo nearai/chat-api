@@ -852,12 +852,18 @@ pub async fn get_instance_usage(
         )
         .await
         .map_err(|e| {
-            tracing::error!(
-                "Failed to get usage: instance_id={}, error={}",
-                instance_uuid,
-                e
-            );
-            ApiError::internal_server_error("Failed to get usage")
+            // The service returns `anyhow!("Instance not found")` when the instance
+            // has been deleted; surface that as 404 rather than a generic 500.
+            if e.to_string().to_lowercase().contains("not found") {
+                ApiError::not_found("Instance not found")
+            } else {
+                tracing::error!(
+                    "Failed to get usage: instance_id={}, error={}",
+                    instance_uuid,
+                    e
+                );
+                ApiError::internal_server_error("Failed to get usage")
+            }
         })?;
 
     Ok(Json(PaginatedResponse {

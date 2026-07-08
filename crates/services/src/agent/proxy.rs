@@ -42,9 +42,13 @@ pub struct AgentProxy {
 
 impl AgentProxy {
     pub fn new() -> Self {
-        // Create HTTP client with timeout to prevent indefinite hanging on unresponsive instances
+        // Bound connection setup and stalled reads without a total request timeout.
+        // A total `.timeout()` truncates legitimate long-lived streamed responses at
+        // 30s; the read timeout resets after each successful read, so it only fires
+        // when an unresponsive instance actually stalls.
         let http_client = Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .read_timeout(std::time::Duration::from_secs(60))
             .build()
             .unwrap_or_else(|_| Client::new());
 

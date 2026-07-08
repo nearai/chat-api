@@ -15,10 +15,19 @@ pub struct OpenAIProxy {
 
 impl OpenAIProxy {
     pub fn new(vpc_service: Arc<dyn VpcCredentialsService>) -> Self {
+        // Bound connection setup and stalled reads without a total request timeout.
+        // A total `.timeout()` would truncate legitimate long-lived SSE streams; the
+        // read timeout resets after each successful read, so it only fires on a hung
+        // upstream, not on a slow-but-progressing stream.
+        let http_client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .read_timeout(std::time::Duration::from_secs(60))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         Self {
             vpc_service,
             base_url: "https://api.openai.com/v1".to_string(),
-            http_client: reqwest::Client::new(),
+            http_client,
         }
     }
 
