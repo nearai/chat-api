@@ -16,6 +16,7 @@ use super::ports::{
 };
 use crate::agent::ports::AgentRepository;
 use crate::agent::ports::AgentService;
+use crate::kyt::{KytCheckResult, KytRiskService};
 use crate::system_configs::ports::{
     CreditsProviderConfig, SubscriptionPlanConfig, SystemConfigs, SystemConfigsService,
 };
@@ -44,6 +45,7 @@ pub struct SubscriptionServiceConfig {
     pub user_usage_repo: Arc<dyn UserUsageRepository>,
     pub agent_repo: Arc<dyn AgentRepository>,
     pub agent_service: Arc<dyn AgentService>,
+    pub kyt_service: Arc<dyn KytRiskService>,
     pub stripe_secret_key: String,
     pub stripe_webhook_secret: String,
     /// When set, enables `provider = house-of-stake` subscription intents (staking contract account id).
@@ -101,6 +103,7 @@ pub struct SubscriptionServiceImpl {
     user_usage_repo: Arc<dyn UserUsageRepository>,
     agent_repo: Arc<dyn AgentRepository>,
     agent_service: Arc<dyn AgentService>,
+    kyt_service: Arc<dyn KytRiskService>,
     stripe_secret_key: String,
     stripe_webhook_secret: String,
     near_staking_contract_id: Option<String>,
@@ -151,6 +154,7 @@ impl SubscriptionServiceImpl {
             user_usage_repo: config.user_usage_repo,
             agent_repo: config.agent_repo,
             agent_service: config.agent_service,
+            kyt_service: config.kyt_service,
             stripe_secret_key: config.stripe_secret_key,
             stripe_webhook_secret: config.stripe_webhook_secret,
             near_staking_contract_id: config.near_staking_contract_id,
@@ -195,6 +199,26 @@ impl SubscriptionServiceImpl {
         });
 
         Ok(configs)
+    }
+
+    async fn check_near_kyt(&self, near_account: &str, flow: &str) -> KytCheckResult {
+        let result = self.kyt_service.check_near_account(near_account).await;
+        if result.is_high_risk() {
+            tracing::warn!(
+                near_account = %near_account,
+                flow = %flow,
+                report_id = ?result.report_id,
+                "High-risk KYT result for NEAR wallet flow"
+            );
+        } else {
+            tracing::debug!(
+                near_account = %near_account,
+                flow = %flow,
+                risk_level = ?result.risk_level,
+                "KYT result for NEAR wallet flow"
+            );
+        }
+        result
     }
 
     /// Convert a whole-number credit count into nano-USD (1 credit == $1 == 1_000_000_000 nano-USD).
@@ -1963,12 +1987,16 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 storage_bounds,
                 storage_balance,
             );
+            let kyt = self
+                .check_near_kyt(&near_account, "create_subscription")
+                .await;
             return Ok(CreateSubscriptionOutcome::NearStakeLock {
                 contract_id,
                 price_id,
                 network_id: self.near_network_id.clone(),
                 attached_deposit_yocto: attached_deposit_yocto.to_string(),
                 storage: Box::new(storage),
+                kyt,
             });
         }
 
@@ -2035,11 +2063,16 @@ impl SubscriptionService for SubscriptionServiceImpl {
             let product_id = self
                 .hos_product_id_for_price(contract_id, &subscription.price_id)
                 .await?;
+            let near_account = self.get_near_account_id(user_id).await?;
+            let kyt = self
+                .check_near_kyt(&near_account, "cancel_subscription")
+                .await;
             return Ok(CancelSubscriptionOutcome::NearStakingCancel {
                 contract_id: contract_id.to_string(),
                 product_id,
                 network_id: self.near_network_id.clone(),
                 required_deposit_yocto: "1".to_string(),
+                kyt,
             });
         }
 
@@ -2125,11 +2158,16 @@ impl SubscriptionService for SubscriptionServiceImpl {
             let product_id = self
                 .hos_product_id_for_price(contract_id, &subscription.price_id)
                 .await?;
+            let near_account = self.get_near_account_id(user_id).await?;
+            let kyt = self
+                .check_near_kyt(&near_account, "resume_subscription")
+                .await;
             return Ok(ResumeSubscriptionOutcome::NearStakingResume {
                 contract_id: contract_id.to_string(),
                 product_id,
                 network_id: self.near_network_id.clone(),
                 required_deposit_yocto: "1".to_string(),
+                kyt,
             });
         }
 
@@ -2355,6 +2393,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 target_amount: target_amount.to_string(),
                 required_deposit_yocto: required_deposit_yocto.to_string(),
                 timing: timing.to_string(),
+                kyt: self.check_near_kyt(&near_account, "change_plan").await,
             });
         }
 
@@ -3662,6 +3701,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     storage_bounds,
                     storage_balance,
                 );
+                let kyt = self
+                    .check_near_kyt(&near_account, "create_credit_purchase_checkout")
+                    .await;
 
                 tracing::info!(
                     "House-of-Stake credit payment intent created: user_id={}, credits={}, price_id={}",
@@ -3677,6 +3719,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     quantity: credits,
                     attached_deposit_yocto: attached_deposit_yocto.to_string(),
                     storage: Box::new(storage),
+                    kyt,
                 })
             }
             "stripe" => {

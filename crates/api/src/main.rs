@@ -258,6 +258,9 @@ async fn main() -> anyhow::Result<()> {
     // Initialize subscription service
     tracing::info!("Initializing subscription service...");
     let stripe_client = Arc::new(StripeClientAdapter::new(config.stripe.secret_key.clone()));
+    let kyt_service: Arc<dyn services::kyt::KytRiskService> = Arc::new(
+        services::kyt::LukkaKytService::new(config.lukka_kyt.clone()),
+    );
     let subscription_service = Arc::new(services::subscription::SubscriptionServiceImpl::new(
         services::subscription::SubscriptionServiceConfig {
             db_pool: db.pool().clone(),
@@ -280,6 +283,7 @@ async fn main() -> anyhow::Result<()> {
             stripe_secret_key: config.stripe.secret_key.clone(),
             stripe_webhook_secret: config.stripe.webhook_secret.clone(),
             agent_service: agent_service.clone() as Arc<dyn services::agent::ports::AgentService>,
+            kyt_service,
             near_rpc_url: config.near.rpc_url.to_string(),
             near_staking_contract_id: config.near.staking_contract_id.clone(),
             near_network_id: config.near.network_id.clone(),

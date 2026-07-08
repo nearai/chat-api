@@ -12,6 +12,7 @@ use common::{
 use hmac::Mac;
 use serde_json::json;
 use serial_test::serial;
+use services::kyt::KytCheckResult;
 use services::subscription::ports::{
     ChangePlanOutcome, CreateSubscriptionOutcome,
     NEAR_STAKING_SYNC_SKIPPED_REASON_UPSERT_BLOCKED_NON_HOS,
@@ -3706,6 +3707,7 @@ fn test_change_plan_outcome_serde_uses_kind_discriminant() {
         target_amount: "2000000000000000000000000".to_string(),
         required_deposit_yocto: "1000000000000000000000000".to_string(),
         timing: "contract_decides".to_string(),
+        kyt: KytCheckResult::unknown("gregoshes.near", "provider_timeout"),
     };
     let v = serde_json::to_value(&o).expect("serialize");
     assert_eq!(
@@ -3727,6 +3729,10 @@ fn test_change_plan_outcome_serde_uses_kind_discriminant() {
     assert_eq!(
         v.get("subscription_id").and_then(|x| x.as_str()),
         Some("sub_hos_current")
+    );
+    assert_eq!(
+        v.pointer("/kyt/risk_level").and_then(|x| x.as_str()),
+        Some("UNKNOWN")
     );
     let back: ChangePlanOutcome = serde_json::from_value(v).expect("deserialize");
     assert!(matches!(

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 
+use crate::kyt::KytCheckResult;
 use crate::system_configs::ports::{PlanLimitConfig, StakeBasedMonthlyCreditsConfig};
 use crate::UserId;
 
@@ -144,6 +145,7 @@ pub enum ChangePlanOutcome {
         target_amount: String,
         required_deposit_yocto: String,
         timing: String,
+        kyt: KytCheckResult,
     },
 }
 
@@ -178,8 +180,9 @@ impl Serialize for ChangePlanOutcome {
                 target_amount,
                 required_deposit_yocto,
                 timing,
+                kyt,
             } => {
-                let mut st = serializer.serialize_struct("NearStakingChangePlan", 8)?;
+                let mut st = serializer.serialize_struct("NearStakingChangePlan", 9)?;
                 st.serialize_field("kind", self.kind())?;
                 st.serialize_field("contract_id", contract_id)?;
                 st.serialize_field("network_id", network_id)?;
@@ -188,6 +191,7 @@ impl Serialize for ChangePlanOutcome {
                 st.serialize_field("target_amount", target_amount)?;
                 st.serialize_field("required_deposit_yocto", required_deposit_yocto)?;
                 st.serialize_field("timing", timing)?;
+                st.serialize_field("kyt", kyt)?;
                 st.end()
             }
         }
@@ -261,6 +265,13 @@ impl<'de> Deserialize<'de> for ChangePlanOutcome {
                     .and_then(|x| x.as_str())
                     .ok_or_else(|| D::Error::custom("missing timing"))?
                     .to_string(),
+                kyt: obj
+                    .get("kyt")
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(D::Error::custom)?
+                    .unwrap_or_default(),
             }),
             other => Err(D::Error::custom(format!(
                 "unknown change plan outcome kind: {other}"
@@ -280,6 +291,7 @@ pub enum CancelSubscriptionOutcome {
         product_id: String,
         network_id: String,
         required_deposit_yocto: String,
+        kyt: KytCheckResult,
     },
 }
 
@@ -293,6 +305,7 @@ pub enum ResumeSubscriptionOutcome {
         product_id: String,
         network_id: String,
         required_deposit_yocto: String,
+        kyt: KytCheckResult,
     },
 }
 
@@ -926,6 +939,8 @@ pub enum CreateSubscriptionOutcome {
         attached_deposit_yocto: String,
         /// NEP-145 storage preflight/top-up intent.
         storage: Box<NearStakingStorageIntent>,
+        /// Normalized KYT result for the NEAR account that will sign the wallet transaction.
+        kyt: KytCheckResult,
     },
 }
 
@@ -947,14 +962,16 @@ impl Serialize for CreateSubscriptionOutcome {
                 network_id,
                 attached_deposit_yocto,
                 storage,
+                kyt,
             } => {
-                let mut st = serializer.serialize_struct("NearStakeLock", 6)?;
+                let mut st = serializer.serialize_struct("NearStakeLock", 7)?;
                 st.serialize_field("kind", &"house_of_stake")?;
                 st.serialize_field("contract_id", contract_id)?;
                 st.serialize_field("price_id", price_id)?;
                 st.serialize_field("network_id", network_id)?;
                 st.serialize_field("attached_deposit_yocto", attached_deposit_yocto)?;
                 st.serialize_field("storage", storage)?;
+                st.serialize_field("kyt", kyt)?;
                 st.end()
             }
         }
@@ -1018,12 +1035,20 @@ impl<'de> Deserialize<'de> for CreateSubscriptionOutcome {
                     .transpose()
                     .map_err(D::Error::custom)?
                     .unwrap_or_else(default_near_staking_storage_intent);
+                let kyt = obj
+                    .get("kyt")
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(D::Error::custom)?
+                    .unwrap_or_default();
                 return Ok(CreateSubscriptionOutcome::NearStakeLock {
                     contract_id,
                     price_id,
                     network_id,
                     attached_deposit_yocto,
                     storage: Box::new(storage),
+                    kyt,
                 });
             }
         }
@@ -1040,6 +1065,13 @@ impl<'de> Deserialize<'de> for CreateSubscriptionOutcome {
                 .transpose()
                 .map_err(D::Error::custom)?
                 .unwrap_or_else(default_near_staking_storage_intent);
+            let kyt = obj
+                .get("kyt")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(D::Error::custom)?
+                .unwrap_or_default();
             return Ok(CreateSubscriptionOutcome::NearStakeLock {
                 contract_id: obj
                     .get("contract_id")
@@ -1054,6 +1086,7 @@ impl<'de> Deserialize<'de> for CreateSubscriptionOutcome {
                     .to_string(),
                 attached_deposit_yocto,
                 storage: Box::new(storage),
+                kyt,
             });
         }
         Err(D::Error::custom(
@@ -1077,6 +1110,7 @@ pub enum CreateCreditPurchaseOutcome {
         quantity: u64,
         attached_deposit_yocto: String,
         storage: Box<NearStakingStorageIntent>,
+        kyt: KytCheckResult,
     },
     Stripe {
         checkout_url: String,

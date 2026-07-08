@@ -249,6 +249,7 @@ async fn create_test_server_and_db_inner(
                 agent_repo: agent_repo.clone() as Arc<dyn services::agent::ports::AgentRepository>,
                 agent_service: agent_service.clone()
                     as Arc<dyn services::agent::ports::AgentService>,
+                kyt_service: Arc::new(services::kyt::NoopKytRiskService),
                 stripe_secret_key: config.stripe.secret_key.clone(),
                 stripe_webhook_secret: config.stripe.webhook_secret.clone(),
                 near_rpc_url,

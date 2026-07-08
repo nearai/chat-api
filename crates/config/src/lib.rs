@@ -1,5 +1,6 @@
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::fmt;
 use url::Url;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -183,6 +184,63 @@ impl Default for OpenAIConfig {
                 std::env::var("OPENAI_API_KEY").unwrap_or_default()
             },
             base_url: std::env::var("OPENAI_BASE_URL").ok(),
+        }
+    }
+}
+
+#[derive(Clone, Deserialize)]
+pub struct LukkaKytConfig {
+    pub enabled: bool,
+    pub base_url: String,
+    pub bearer_token: String,
+    pub api_key: String,
+    pub api_secret: String,
+    pub timeout_ms: u64,
+    pub max_retries: u32,
+    pub cache_ttl_secs: u64,
+}
+
+impl fmt::Debug for LukkaKytConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LukkaKytConfig")
+            .field("enabled", &self.enabled)
+            .field("base_url", &self.base_url)
+            .field("bearer_token", &"<redacted>")
+            .field("api_key", &"<redacted>")
+            .field("api_secret", &"<redacted>")
+            .field("timeout_ms", &self.timeout_ms)
+            .field("max_retries", &self.max_retries)
+            .field("cache_ttl_secs", &self.cache_ttl_secs)
+            .finish()
+    }
+}
+
+impl Default for LukkaKytConfig {
+    fn default() -> Self {
+        let bearer_token = std::env::var("LUKKA_BEARER_TOKEN").unwrap_or_default();
+        let api_key = std::env::var("LUKKA_API_KEY").unwrap_or_default();
+        Self {
+            enabled: std::env::var("LUKKA_KYT_ENABLED")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(false),
+            base_url: std::env::var("LUKKA_BASE_URL")
+                .unwrap_or_else(|_| "https://api.blockchain-analytics.lukka.tech".to_string()),
+            bearer_token,
+            api_key,
+            api_secret: std::env::var("LUKKA_API_SECRET").unwrap_or_default(),
+            timeout_ms: std::env::var("LUKKA_TIMEOUT_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(3_000),
+            max_retries: std::env::var("LUKKA_MAX_RETRIES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1),
+            cache_ttl_secs: std::env::var("LUKKA_CACHE_TTL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(300),
         }
     }
 }
@@ -730,6 +788,7 @@ pub struct Config {
     pub email_auth: EmailAuthConfig,
     pub server: ServerConfig,
     pub openai: OpenAIConfig,
+    pub lukka_kyt: LukkaKytConfig,
     /// NEAR-related configuration
     pub near: NearConfig,
     /// Stripe payment configuration
@@ -753,6 +812,7 @@ impl Config {
             email_auth: EmailAuthConfig::default(),
             server: ServerConfig::default(),
             openai: OpenAIConfig::default(),
+            lukka_kyt: LukkaKytConfig::default(),
             near: NearConfig::default(),
             stripe: StripeConfig::default(),
             cors: CorsConfig::default(),
