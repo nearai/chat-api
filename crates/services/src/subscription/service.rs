@@ -88,6 +88,9 @@ const TOKENS_TO_CREDITS_PER_M: u64 = 1_000_000;
 const NANO_USD_PER_1_5_USD: u64 = 1_500_000_000;
 const DOWNGRADE_CHECK_WINDOW_HOURS: i64 = 24;
 const TX_LOCK_TIMEOUT_MS: i64 = 1500;
+const SUBSCRIPTION_STATUS_ACTIVE: &str = "active";
+const SUBSCRIPTION_STATUS_TRIALING: &str = "trialing";
+const SUBSCRIPTION_STATUS_CANCELED: &str = "canceled";
 
 pub struct SubscriptionServiceImpl {
     db_pool: deadpool_postgres::Pool,
@@ -136,14 +139,14 @@ impl SubscriptionServiceImpl {
     }
 
     fn is_active_or_trialing(status: &str) -> bool {
-        status == "active" || status == "trialing"
+        status == SUBSCRIPTION_STATUS_ACTIVE || status == SUBSCRIPTION_STATUS_TRIALING
     }
 
     fn canceled_house_of_stake_history_row(
         mut sub: Subscription,
         now: DateTime<Utc>,
     ) -> Subscription {
-        sub.status = "canceled".to_string();
+        sub.status = SUBSCRIPTION_STATUS_CANCELED.to_string();
         if sub.current_period_end > now {
             sub.current_period_end = now;
         }
@@ -633,7 +636,7 @@ impl SubscriptionServiceImpl {
         }
 
         let now = Utc::now();
-        let mut expired_hos_subscriptions: Vec<Subscription> = active_subscriptions
+        let expired_hos_subscriptions: Vec<Subscription> = active_subscriptions
             .iter()
             .filter(|s| s.provider == "house-of-stake" && s.current_period_end <= now)
             .cloned()
@@ -650,17 +653,12 @@ impl SubscriptionServiceImpl {
                 .await
                 .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
-            for sub in &mut expired_hos_subscriptions {
-                sub.status = "canceled".to_string();
-                sub.cancel_at_period_end = false;
-                sub.pending_downgrade_target_price_id = None;
-                sub.pending_downgrade_from_price_id = None;
-                sub.pending_downgrade_expected_period_end = None;
-                sub.pending_downgrade_status = None;
-                sub.pending_downgrade_updated_at = None;
-
+            for sub in &expired_hos_subscriptions {
                 self.subscription_repo
-                    .upsert_subscription_authoritative(&txn, sub.clone())
+                    .upsert_subscription_authoritative(
+                        &txn,
+                        Self::canceled_house_of_stake_history_row(sub.clone(), now),
+                    )
                     .await
                     .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
             }
@@ -1291,9 +1289,9 @@ impl SubscriptionServiceImpl {
                 return;
             }
         };
-        let has_hos = subs.iter().any(|s| {
-            s.provider == "house-of-stake" && (s.status == "active" || s.status == "trialing")
-        });
+        let has_hos = subs
+            .iter()
+            .any(|s| s.provider == "house-of-stake" && Self::is_active_or_trialing(&s.status));
         if !has_hos {
             return;
         }
@@ -1364,9 +1362,9 @@ impl SubscriptionServiceImpl {
             }
         };
 
-        let has_active_non_hos = subs.iter().any(|s| {
-            (s.status == "active" || s.status == "trialing") && s.provider != "house-of-stake"
-        });
+        let has_active_non_hos = subs
+            .iter()
+            .any(|s| Self::is_active_or_trialing(&s.status) && s.provider != "house-of-stake");
         let hos_subscription_ids: Vec<String> = subs
             .iter()
             .filter(|s| s.provider == "house-of-stake")
@@ -1402,7 +1400,7 @@ impl SubscriptionServiceImpl {
         let local_probe_price_id = subs
             .iter()
             .filter(|s| s.provider == "house-of-stake")
-            .find(|s| s.status == "active" || s.status == "trialing")
+            .find(|s| Self::is_active_or_trialing(&s.status))
             .or_else(|| subs.iter().find(|s| s.provider == "house-of-stake"))
             .map(|s| s.price_id.as_str())
             .filter(|p| !p.is_empty());
@@ -2952,7 +2950,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
             // Detect first transition to canceled: trigger async instance kill
-            if old_status.as_deref() != Some("canceled") && new_sub.status == "canceled" {
+            if old_status.as_deref() != Some(SUBSCRIPTION_STATUS_CANCELED)
+                && new_sub.status == SUBSCRIPTION_STATUS_CANCELED
+            {
                 user_id_to_kill_instances = Some(user_id);
                 // Subscription is canceled — clear any stale pending downgrade intent
                 self.subscription_repo

@@ -4392,6 +4392,15 @@ async fn test_near_staking_sync_marks_local_hos_canceled_when_chain_returns_null
         )
         .await
         .expect("seed stable canceled updated_at");
+    let updated_at_before_repeat_sync: chrono::DateTime<Utc> = client
+        .query_one(
+            "SELECT updated_at FROM subscriptions
+             WHERE user_id = $1 AND provider = 'house-of-stake'",
+            &[&user.id],
+        )
+        .await
+        .unwrap()
+        .get("updated_at");
 
     let response = server
         .post("/v1/subscriptions/near/sync")
@@ -4420,7 +4429,7 @@ async fn test_near_staking_sync_marks_local_hos_canceled_when_chain_returns_null
         .unwrap()
         .get("updated_at");
     assert_eq!(
-        updated_at, preserved_updated_at,
+        updated_at, updated_at_before_repeat_sync,
         "repeat sync must not bump updated_at for already-canceled HoS history"
     );
     assert!(
