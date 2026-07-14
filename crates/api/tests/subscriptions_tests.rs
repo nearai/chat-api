@@ -3707,7 +3707,10 @@ fn test_change_plan_outcome_serde_uses_kind_discriminant() {
         target_amount: "2000000000000000000000000".to_string(),
         required_deposit_yocto: "1000000000000000000000000".to_string(),
         timing: "contract_decides".to_string(),
-        kyt: KytCheckResult::unknown("gregoshes.near", "provider_timeout"),
+        kyt: Box::new(KytCheckResult::unknown(
+            "gregoshes.near",
+            "provider_timeout",
+        )),
     };
     let v = serde_json::to_value(&o).expect("serialize");
     assert_eq!(

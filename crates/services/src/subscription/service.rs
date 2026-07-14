@@ -1996,7 +1996,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 network_id: self.near_network_id.clone(),
                 attached_deposit_yocto: attached_deposit_yocto.to_string(),
                 storage: Box::new(storage),
-                kyt,
+                kyt: Box::new(kyt),
             });
         }
 
@@ -2072,7 +2072,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 product_id,
                 network_id: self.near_network_id.clone(),
                 required_deposit_yocto: "1".to_string(),
-                kyt,
+                kyt: Box::new(kyt),
             });
         }
 
@@ -2167,7 +2167,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 product_id,
                 network_id: self.near_network_id.clone(),
                 required_deposit_yocto: "1".to_string(),
-                kyt,
+                kyt: Box::new(kyt),
             });
         }
 
@@ -2393,7 +2393,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 target_amount: target_amount.to_string(),
                 required_deposit_yocto: required_deposit_yocto.to_string(),
                 timing: timing.to_string(),
-                kyt: self.check_near_kyt(&near_account, "change_plan").await,
+                kyt: Box::new(self.check_near_kyt(&near_account, "change_plan").await),
             });
         }
 
@@ -3719,7 +3719,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     quantity: credits,
                     attached_deposit_yocto: attached_deposit_yocto.to_string(),
                     storage: Box::new(storage),
-                    kyt,
+                    kyt: Box::new(kyt),
                 })
             }
             "stripe" => {

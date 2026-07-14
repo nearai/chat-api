@@ -145,7 +145,7 @@ pub enum ChangePlanOutcome {
         target_amount: String,
         required_deposit_yocto: String,
         timing: String,
-        kyt: KytCheckResult,
+        kyt: Box<KytCheckResult>,
     },
 }
 
@@ -271,6 +271,7 @@ impl<'de> Deserialize<'de> for ChangePlanOutcome {
                     .map(serde_json::from_value)
                     .transpose()
                     .map_err(D::Error::custom)?
+                    .map(Box::new)
                     .unwrap_or_default(),
             }),
             other => Err(D::Error::custom(format!(
@@ -291,7 +292,7 @@ pub enum CancelSubscriptionOutcome {
         product_id: String,
         network_id: String,
         required_deposit_yocto: String,
-        kyt: KytCheckResult,
+        kyt: Box<KytCheckResult>,
     },
 }
 
@@ -305,7 +306,7 @@ pub enum ResumeSubscriptionOutcome {
         product_id: String,
         network_id: String,
         required_deposit_yocto: String,
-        kyt: KytCheckResult,
+        kyt: Box<KytCheckResult>,
     },
 }
 
@@ -940,7 +941,7 @@ pub enum CreateSubscriptionOutcome {
         /// NEP-145 storage preflight/top-up intent.
         storage: Box<NearStakingStorageIntent>,
         /// Normalized KYT result for the NEAR account that will sign the wallet transaction.
-        kyt: KytCheckResult,
+        kyt: Box<KytCheckResult>,
     },
 }
 
@@ -1048,7 +1049,7 @@ impl<'de> Deserialize<'de> for CreateSubscriptionOutcome {
                     network_id,
                     attached_deposit_yocto,
                     storage: Box::new(storage),
-                    kyt,
+                    kyt: Box::new(kyt),
                 });
             }
         }
@@ -1086,7 +1087,7 @@ impl<'de> Deserialize<'de> for CreateSubscriptionOutcome {
                     .to_string(),
                 attached_deposit_yocto,
                 storage: Box::new(storage),
-                kyt,
+                kyt: Box::new(kyt),
             });
         }
         Err(D::Error::custom(
@@ -1110,7 +1111,7 @@ pub enum CreateCreditPurchaseOutcome {
         quantity: u64,
         attached_deposit_yocto: String,
         storage: Box<NearStakingStorageIntent>,
-        kyt: KytCheckResult,
+        kyt: Box<KytCheckResult>,
     },
     Stripe {
         checkout_url: String,

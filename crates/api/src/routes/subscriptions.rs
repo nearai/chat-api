@@ -337,7 +337,7 @@ pub async fn cancel_subscription(
             product_id: Some(product_id),
             network_id: Some(network_id),
             required_deposit_yocto: Some(required_deposit_yocto),
-            kyt: Some(kyt),
+            kyt: Some(*kyt),
         },
     };
 
@@ -422,7 +422,7 @@ pub async fn resume_subscription(
             product_id: Some(product_id),
             network_id: Some(network_id),
             required_deposit_yocto: Some(required_deposit_yocto),
-            kyt: Some(kyt),
+            kyt: Some(*kyt),
         },
     };
 
