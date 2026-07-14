@@ -2060,6 +2060,131 @@ async fn test_proxy_allows_over_plan_with_purchased_credits() {
 
 #[tokio::test]
 #[serial(subscription_tests)]
+async fn test_expired_house_of_stake_uses_free_credits_before_purchased_credits() {
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        near_staking_contract_id: Some("staking.testnet".to_string()),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "free": {
+                "providers": {},
+                "agent_instances": {"max": 1},
+                "monthly_credits": {"max": 100}
+            },
+            "basic": {
+                "providers": {"house-of-stake": {"price_id": "price_hos_basic"}},
+                "agent_instances": {"max": 1},
+                "monthly_credits": {"max": 1000}
+            }
+        }),
+    )
+    .await;
+
+    let run_id = Uuid::new_v4();
+    let user_email = format!("test-expired-hos-free-before-purchased-{run_id}@near");
+
+    cleanup_user_subscription_credits(&db, &user_email).await;
+    cleanup_user_usage(&db, &user_email).await;
+    cleanup_user_subscriptions(&db, &user_email).await;
+
+    let user_token = mock_login(&server, &user_email).await;
+    insert_test_subscription_with_provider_and_price(
+        &server,
+        &db,
+        &user_email,
+        "house-of-stake",
+        "price_hos_basic",
+        true,
+    )
+    .await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(&user_email)
+        .await
+        .expect("get user")
+        .expect("user exists");
+
+    let expired_period_end = Utc::now() - Duration::minutes(1);
+    let client = db.pool().get().await.expect("get pool client");
+    client
+        .execute(
+            "UPDATE subscriptions
+             SET current_period_end = $2,
+                 status = 'active',
+                 cancel_at_period_end = true
+             WHERE user_id = $1 AND provider = 'house-of-stake'",
+            &[&user.id, &expired_period_end],
+        )
+        .await
+        .expect("expire HoS subscription");
+
+    let admin_token = mock_login(&server, "test_expired_hos_credits_admin@admin.org").await;
+    let grant_response = server
+        .post("/v1/admin/credits")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+        .add_header(
+            http::HeaderName::from_static("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        )
+        .json(&json!({
+            "user_id": user.id,
+            "amount_nano_usd": 100,
+            "reason": "test expired HoS free credits before purchased credits"
+        }))
+        .await;
+    assert_eq!(
+        grant_response.status_code(),
+        200,
+        "Admin grant credits should succeed"
+    );
+
+    db.user_usage_repository()
+        .record_usage_event(user.id, METRIC_KEY_LLM_TOKENS, 40, Some(40), None)
+        .await
+        .expect("record post-expiry usage under free plan");
+
+    let credits_response = server
+        .get("/v1/credits")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .await;
+    assert_eq!(
+        credits_response.status_code(),
+        200,
+        "{}",
+        credits_response.text()
+    );
+
+    let body: serde_json::Value = credits_response.json();
+    assert_eq!(body["plan_credits"], json!(100));
+    assert_eq!(body["period_spent_credits"], json!(40));
+    assert_eq!(body["balance"], json!(100));
+    assert_eq!(body["spent_purchased_nano_usd"], json!(0));
+
+    let status: String = client
+        .query_one(
+            "SELECT status FROM subscriptions
+             WHERE user_id = $1 AND provider = 'house-of-stake'",
+            &[&user.id],
+        )
+        .await
+        .expect("load HoS subscription")
+        .get("status");
+    assert_eq!(status, "canceled");
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
 async fn test_proxy_blocks_when_all_credits_used_up() {
     ensure_stripe_env_for_gating();
     let (server, db) = create_test_server_and_db(TestServerConfig {
