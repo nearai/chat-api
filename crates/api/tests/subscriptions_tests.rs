@@ -48,6 +48,39 @@ fn permissive_rate_limit_config() -> RateLimitConfig {
     }
 }
 
+async fn insert_house_of_stake_subscription_for_existing_user(
+    db: &database::Database,
+    user_email: &str,
+    price_id: &str,
+    cancel_at_period_end: bool,
+) {
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .unwrap()
+        .unwrap();
+    let client = db.pool().get().await.unwrap();
+    let period_end = Utc::now() + Duration::days(1);
+    let sub_id = format!("sub_test_{}", Uuid::new_v4());
+    client
+        .execute(
+            "INSERT INTO subscriptions (
+                subscription_id, user_id, provider, customer_id, price_id, status,
+                current_period_end, cancel_at_period_end
+            ) VALUES ($1, $2, 'house-of-stake', 'cus_test', $3, 'active', $4, $5)",
+            &[
+                &sub_id,
+                &user.id,
+                &price_id,
+                &period_end,
+                &cancel_at_period_end,
+            ],
+        )
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 #[serial(subscription_tests)]
 async fn test_list_subscriptions_requires_auth() {
@@ -3929,15 +3962,9 @@ async fn test_cancel_subscription_house_of_stake_returns_wallet_intent_message()
         .unwrap()
         .to_string();
 
-    insert_test_subscription_with_provider_and_price(
-        &server,
-        &db,
-        near_email,
-        "house-of-stake",
-        "price_hos_basic",
-        false,
-    )
-    .await;
+    cleanup_user_subscriptions(&db, near_email).await;
+    insert_house_of_stake_subscription_for_existing_user(&db, near_email, "price_hos_basic", false)
+        .await;
 
     let response = server
         .post("/v1/subscriptions/cancel")
@@ -4227,7 +4254,7 @@ async fn test_near_staking_sync_skipped_reason_when_upsert_blocked_by_active_str
 
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn test_near_staking_sync_deletes_local_hos_when_chain_returns_null() {
+async fn test_near_staking_sync_marks_local_hos_canceled_when_chain_returns_null() {
     clear_proxy_env_for_local_wiremock();
     let mock = MockServer::start().await;
     Mock::given(method("POST"))
@@ -4254,10 +4281,10 @@ async fn test_near_staking_sync_deletes_local_hos_when_chain_returns_null() {
     )
     .await;
 
-    let near_email = "hos_sync_delete.testnet@near";
+    let near_email = "hos_sync_cancel.testnet@near";
     let login = json!({
         "email": near_email,
-        "name": "HoS Sync Delete",
+        "name": "HoS Sync Cancel",
         "oauth_provider": "near"
     });
     let response = server.post("/v1/auth/mock-login").json(&login).await;
@@ -4266,15 +4293,17 @@ async fn test_near_staking_sync_deletes_local_hos_when_chain_returns_null() {
         .unwrap()
         .to_string();
 
-    insert_test_subscription_with_provider_and_price(
-        &server,
-        &db,
-        near_email,
-        "house-of-stake",
-        "price_hos_basic",
-        false,
-    )
-    .await;
+    cleanup_user_subscriptions(&db, near_email).await;
+    insert_house_of_stake_subscription_for_existing_user(&db, near_email, "price_hos_basic", false)
+        .await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(near_email)
+        .await
+        .unwrap()
+        .unwrap();
+    let client = db.pool().get().await.unwrap();
 
     let response = server
         .post("/v1/subscriptions/near/sync")
@@ -4290,33 +4319,44 @@ async fn test_near_staking_sync_deletes_local_hos_when_chain_returns_null() {
     assert_eq!(
         body.get("deleted_house_of_stake_rows")
             .and_then(|x| x.as_u64()),
-        Some(1)
+        Some(0)
     );
 
-    let user = db
-        .user_repository()
-        .get_user_by_email(near_email)
-        .await
-        .unwrap()
-        .unwrap();
-    let client = db.pool().get().await.unwrap();
-    let cnt: i64 = client
+    let row = client
         .query_one(
-            "SELECT COUNT(*)::bigint FROM subscriptions WHERE user_id = $1 AND provider = 'house-of-stake'",
+            "SELECT COUNT(*)::bigint, MAX(status)
+             FROM subscriptions
+             WHERE user_id = $1 AND provider = 'house-of-stake'",
             &[&user.id],
         )
         .await
-        .unwrap()
-        .get(0);
-    assert_eq!(
-        cnt, 0,
-        "HoS rows should be removed after chain reports null"
-    );
+        .unwrap();
+    let cnt: i64 = row.get(0);
+    let status: Option<String> = row.get(1);
+    assert_eq!(cnt, 1, "HoS row should be preserved as history");
+    assert_eq!(status.as_deref(), Some("canceled"));
+
+    let response = server
+        .get("/v1/subscriptions?include_inactive=true")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 200, "{}", response.text());
+    let body: serde_json::Value = response.json();
+    let subscriptions = body["subscriptions"]
+        .as_array()
+        .expect("subscriptions should be an array");
+    assert_eq!(subscriptions.len(), 1);
+    assert_eq!(subscriptions[0]["provider"], "house-of-stake");
+    assert_eq!(subscriptions[0]["status"], "canceled");
 }
 
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn test_near_staking_sync_falls_back_to_configured_prices_before_delete() {
+async fn test_near_staking_sync_falls_back_to_configured_prices_before_canceling_local_row() {
     clear_proxy_env_for_local_wiremock();
     let chain_sub = json!({
         "subscription_id": "sub_chain_hos_fallback",
@@ -4363,15 +4403,9 @@ async fn test_near_staking_sync_falls_back_to_configured_prices_before_delete() 
         .unwrap()
         .to_string();
 
-    insert_test_subscription_with_provider_and_price(
-        &server,
-        &db,
-        near_email,
-        "house-of-stake",
-        "price_hos_basic",
-        false,
-    )
-    .await;
+    cleanup_user_subscriptions(&db, near_email).await;
+    insert_house_of_stake_subscription_for_existing_user(&db, near_email, "price_hos_basic", false)
+        .await;
 
     let user = db
         .user_repository()

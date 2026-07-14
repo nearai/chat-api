@@ -1118,7 +1118,7 @@ pub trait SubscriptionService: Send + Sync {
         user_id: UserId,
     ) -> Result<ResumeSubscriptionOutcome, SubscriptionError>;
 
-    /// Re-fetch staking subscription from RPC and upsert/delete the local `house-of-stake` row.
+    /// Re-fetch staking subscription from RPC and upsert or cancel the local `house-of-stake` row.
     async fn sync_near_staking_subscription(
         &self,
         user_id: UserId,

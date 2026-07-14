@@ -610,13 +610,13 @@ impl SubscriptionServiceImpl {
         }
 
         let now = Utc::now();
-        let expired_hos_ids: Vec<String> = active_subscriptions
+        let mut expired_hos_subscriptions: Vec<Subscription> = active_subscriptions
             .iter()
             .filter(|s| s.provider == "house-of-stake" && s.current_period_end <= now)
-            .map(|s| s.subscription_id.clone())
+            .cloned()
             .collect();
 
-        if !expired_hos_ids.is_empty() {
+        if !expired_hos_subscriptions.is_empty() {
             let mut db_client = self
                 .db_pool
                 .get()
@@ -626,9 +626,18 @@ impl SubscriptionServiceImpl {
                 .transaction()
                 .await
                 .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-            for subscription_id in &expired_hos_ids {
+
+            for sub in &mut expired_hos_subscriptions {
+                sub.status = "canceled".to_string();
+                sub.cancel_at_period_end = false;
+                sub.pending_downgrade_target_price_id = None;
+                sub.pending_downgrade_from_price_id = None;
+                sub.pending_downgrade_expected_period_end = None;
+                sub.pending_downgrade_status = None;
+                sub.pending_downgrade_updated_at = None;
+
                 self.subscription_repo
-                    .delete_subscription_txn(&txn, subscription_id)
+                    .upsert_subscription_authoritative(&txn, sub.clone())
                     .await
                     .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
             }
@@ -638,8 +647,8 @@ impl SubscriptionServiceImpl {
             self.invalidate_credit_limit_cache(user_id).await;
             tracing::warn!(
                 user_id = %user_id.0,
-                deleted_house_of_stake_rows = expired_hos_ids.len(),
-                "expired stale local HoS subscriptions before entitlement check"
+                canceled_house_of_stake_rows = expired_hos_subscriptions.len(),
+                "marked expired local HoS subscriptions canceled before entitlement check"
             );
         }
 
@@ -1424,10 +1433,15 @@ impl SubscriptionServiceImpl {
         }
 
         if raw.is_none() {
-            if hos_subscription_ids.is_empty() {
+            let mut local_hos_subscriptions: Vec<Subscription> = subs
+                .iter()
+                .filter(|s| s.provider == "house-of-stake")
+                .cloned()
+                .collect();
+            if local_hos_subscriptions.is_empty() {
                 return Ok(Self::hos_reconcile_summary(false, 0, false, None));
             }
-            let deleted = hos_subscription_ids.len() as u32;
+            let now = Utc::now();
             let mut db_client = self
                 .db_pool
                 .get()
@@ -1437,9 +1451,21 @@ impl SubscriptionServiceImpl {
                 .transaction()
                 .await
                 .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-            for sid in &hos_subscription_ids {
+
+            for sub in &mut local_hos_subscriptions {
+                sub.status = "canceled".to_string();
+                if sub.current_period_end > now {
+                    sub.current_period_end = now;
+                }
+                sub.cancel_at_period_end = false;
+                sub.pending_downgrade_target_price_id = None;
+                sub.pending_downgrade_from_price_id = None;
+                sub.pending_downgrade_expected_period_end = None;
+                sub.pending_downgrade_status = None;
+                sub.pending_downgrade_updated_at = None;
+
                 self.subscription_repo
-                    .delete_subscription_txn(&txn, sid)
+                    .upsert_subscription_authoritative(&txn, sub.clone())
                     .await
                     .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
             }
@@ -1447,7 +1473,7 @@ impl SubscriptionServiceImpl {
                 .await
                 .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
             self.invalidate_credit_limit_cache(user_id).await;
-            return Ok(Self::hos_reconcile_summary(false, deleted, false, None));
+            return Ok(Self::hos_reconcile_summary(false, 0, false, None));
         }
 
         let chain_subscription = raw.as_ref().expect("checked is_some");
