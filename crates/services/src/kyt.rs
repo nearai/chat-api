@@ -128,7 +128,6 @@ impl LukkaKytService {
         let timeout = Duration::from_millis(config.timeout_ms.max(1));
         let http_client = reqwest::Client::builder()
             .timeout(timeout)
-            .no_proxy()
             .build()
             .unwrap_or_else(|err| {
                 tracing::warn!(
@@ -153,10 +152,18 @@ impl LukkaKytService {
 
         let api_key = self.config.api_key.trim();
         let api_secret = self.config.api_secret.trim();
-        if api_key.is_empty() {
+        if api_key.is_empty() && api_secret.is_empty() {
             LukkaAuthMode::Missing
         } else if api_secret.is_empty() {
-            LukkaAuthMode::Bearer(api_key)
+            tracing::warn!(
+                "Lukka KYT API key is configured without API secret; key/secret auth disabled"
+            );
+            LukkaAuthMode::Missing
+        } else if api_key.is_empty() {
+            tracing::warn!(
+                "Lukka KYT API secret is configured without API key; key/secret auth disabled"
+            );
+            LukkaAuthMode::Missing
         } else {
             LukkaAuthMode::KeySecret {
                 api_key,
@@ -187,7 +194,14 @@ impl LukkaKytService {
 
     async fn store_cache(&self, account_id: &str, result: KytCheckResult) -> KytCheckResult {
         if self.config.cache_ttl_secs > 0 {
-            self.cache.write().await.insert(
+            if result.risk_level == KytRiskLevel::Unknown {
+                return result;
+            }
+
+            let mut cache = self.cache.write().await;
+            let ttl = self.config.cache_ttl_secs;
+            cache.retain(|_, entry| entry.cached_at.elapsed().as_secs() < ttl);
+            cache.insert(
                 account_id.to_string(),
                 CachedKytResult {
                     result: result.clone(),
@@ -229,9 +243,7 @@ impl LukkaKytService {
                     return match parsed {
                         Ok(body) => {
                             let result = normalize_lukka_response(account_id, body);
-                            tracing::info!(
-                                account_id = %result.account_id,
-                                risk_level = ?result.risk_level,
+                            tracing::debug!(
                                 elapsed_ms = started.elapsed().as_millis() as u64,
                                 "Lukka KYT check completed"
                             );
@@ -292,6 +304,7 @@ impl LukkaKytService {
     }
 }
 
+#[derive(Clone, Copy)]
 enum LukkaAuthMode<'a> {
     Missing,
     Bearer(&'a str),
@@ -403,6 +416,19 @@ mod tests {
         })
     }
 
+    fn kyt_result(account_id: &str, risk_level: KytRiskLevel) -> KytCheckResult {
+        KytCheckResult {
+            provider: PROVIDER_LUKKA.to_string(),
+            account_id: account_id.to_string(),
+            address_type: NEAR_ADDRESS_TYPE.to_string(),
+            risk_level,
+            score: Some(1),
+            report_id: Some("report".to_string()),
+            checked_at: Utc::now(),
+            reason: None,
+        }
+    }
+
     #[tokio::test]
     async fn lukka_request_uses_near_score_endpoint() {
         let server = MockServer::start().await;
@@ -465,6 +491,61 @@ mod tests {
 
         assert_eq!(result.risk_level, KytRiskLevel::Unknown);
         assert_eq!(result.reason.as_deref(), Some("provider_http_503"));
+    }
+
+    #[tokio::test]
+    async fn provider_error_is_not_cached() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(503))
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let service = LukkaKytService::new(test_config(server.uri()));
+        let first = service.check_near_account("alice.near").await;
+        let second = service.check_near_account("alice.near").await;
+
+        assert_eq!(first.reason.as_deref(), Some("provider_http_503"));
+        assert_eq!(second.reason.as_deref(), Some("provider_http_503"));
+    }
+
+    #[tokio::test]
+    async fn store_cache_evicts_expired_entries() {
+        let mut cfg = test_config("http://127.0.0.1:1".to_string());
+        cfg.cache_ttl_secs = 1;
+        let service = LukkaKytService::new(cfg);
+
+        service.cache.write().await.insert(
+            "expired.near".to_string(),
+            CachedKytResult {
+                result: kyt_result("expired.near", KytRiskLevel::Low),
+                cached_at: Instant::now() - Duration::from_secs(2),
+            },
+        );
+
+        service
+            .store_cache("fresh.near", kyt_result("fresh.near", KytRiskLevel::Low))
+            .await;
+
+        let cache = service.cache.read().await;
+        assert!(!cache.contains_key("expired.near"));
+        assert!(cache.contains_key("fresh.near"));
+    }
+
+    #[tokio::test]
+    async fn api_key_without_secret_is_not_used_as_bearer_token() {
+        let server = MockServer::start().await;
+        let mut cfg = test_config(server.uri());
+        cfg.bearer_token = String::new();
+        cfg.api_key = "api-key-only".to_string();
+        cfg.api_secret = String::new();
+        let service = LukkaKytService::new(cfg);
+
+        let result = service.check_near_account("alice.near").await;
+
+        assert_eq!(result.risk_level, KytRiskLevel::Unknown);
+        assert_eq!(result.reason.as_deref(), Some("not_configured"));
     }
 
     #[tokio::test]
