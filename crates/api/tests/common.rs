@@ -250,6 +250,8 @@ async fn create_test_server_and_db_inner(
                 agent_service: agent_service.clone()
                     as Arc<dyn services::agent::ports::AgentService>,
                 kyt_service: Arc::new(services::kyt::NoopKytRiskService),
+                kyt_audit_repo: Arc::new(services::kyt::NoopKytAuditRepository),
+                kyt_high_risk_slack_webhook_url: String::new(),
                 stripe_secret_key: config.stripe.secret_key.clone(),
                 stripe_webhook_secret: config.stripe.webhook_secret.clone(),
                 near_rpc_url,

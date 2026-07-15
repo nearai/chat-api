@@ -81,12 +81,33 @@ pub trait KytRiskService: Send + Sync {
     async fn check_near_account(&self, account_id: &str) -> KytCheckResult;
 }
 
+#[derive(Debug, Clone)]
+pub struct KytHighRiskAuditEvent {
+    pub user_id: crate::UserId,
+    pub flow: String,
+    pub result: KytCheckResult,
+}
+
+#[async_trait]
+pub trait KytAuditRepository: Send + Sync {
+    async fn record_high_risk(&self, event: KytHighRiskAuditEvent) -> anyhow::Result<()>;
+}
+
 pub struct NoopKytRiskService;
 
 #[async_trait]
 impl KytRiskService for NoopKytRiskService {
     async fn check_near_account(&self, account_id: &str) -> KytCheckResult {
         KytCheckResult::unknown(account_id.trim(), "disabled")
+    }
+}
+
+pub struct NoopKytAuditRepository;
+
+#[async_trait]
+impl KytAuditRepository for NoopKytAuditRepository {
+    async fn record_high_risk(&self, _event: KytHighRiskAuditEvent) -> anyhow::Result<()> {
+        Ok(())
     }
 }
 
@@ -386,6 +407,7 @@ mod tests {
             bearer_token: "test-token".to_string(),
             api_key: String::new(),
             api_secret: String::new(),
+            high_risk_slack_webhook_url: String::new(),
             timeout_ms: 1_000,
             max_retries: 0,
             cache_ttl_secs: 300,

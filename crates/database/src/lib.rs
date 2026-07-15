@@ -10,9 +10,10 @@ pub use repositories::{
     PostgresAgentRepository, PostgresAnalyticsRepository, PostgresAppConfigRepository,
     PostgresBiMetricsRepository, PostgresConversationRepository,
     PostgresConversationShareRepository, PostgresCreditsRepository,
-    PostgresEmailVerificationChallengeRepository, PostgresFileRepository, PostgresModelRepository,
-    PostgresNearNonceRepository, PostgresOAuthRepository, PostgresPaymentWebhookRepository,
-    PostgresSessionRepository, PostgresStripeCustomerRepository, PostgresSubscriptionRepository,
+    PostgresEmailVerificationChallengeRepository, PostgresFileRepository,
+    PostgresKytAuditRepository, PostgresModelRepository, PostgresNearNonceRepository,
+    PostgresOAuthRepository, PostgresPaymentWebhookRepository, PostgresSessionRepository,
+    PostgresStripeCustomerRepository, PostgresSubscriptionRepository,
     PostgresSystemConfigsRepository, PostgresUserRepository, PostgresUserSettingsRepository,
     PostgresUserUsageRepository,
 };
@@ -48,6 +49,7 @@ pub struct Database {
     payment_webhook_repository: Arc<PostgresPaymentWebhookRepository>,
     agent_repository: Arc<PostgresAgentRepository>,
     bi_metrics_repository: Arc<PostgresBiMetricsRepository>,
+    kyt_audit_repository: Arc<PostgresKytAuditRepository>,
     cluster_manager: Option<Arc<ClusterManager>>,
 }
 
@@ -80,6 +82,7 @@ impl Database {
             Arc::new(PostgresPaymentWebhookRepository::new(pool.clone()));
         let agent_repository = Arc::new(PostgresAgentRepository::new(pool.clone()));
         let bi_metrics_repository = Arc::new(PostgresBiMetricsRepository::new(pool.clone()));
+        let kyt_audit_repository = Arc::new(PostgresKytAuditRepository::new(pool.clone()));
 
         Self {
             pool,
@@ -103,6 +106,7 @@ impl Database {
             payment_webhook_repository,
             agent_repository,
             bi_metrics_repository,
+            kyt_audit_repository,
             cluster_manager: None,
         }
     }
@@ -327,5 +331,10 @@ impl Database {
     /// Get the BI metrics repository
     pub fn bi_metrics_repository(&self) -> Arc<PostgresBiMetricsRepository> {
         self.bi_metrics_repository.clone()
+    }
+
+    /// Get the KYT audit repository
+    pub fn kyt_audit_repository(&self) -> Arc<PostgresKytAuditRepository> {
+        self.kyt_audit_repository.clone()
     }
 }

@@ -16,7 +16,7 @@ use super::ports::{
 };
 use crate::agent::ports::AgentRepository;
 use crate::agent::ports::AgentService;
-use crate::kyt::{KytCheckResult, KytRiskService};
+use crate::kyt::{KytAuditRepository, KytCheckResult, KytHighRiskAuditEvent, KytRiskService};
 use crate::system_configs::ports::{
     CreditsProviderConfig, SubscriptionPlanConfig, SystemConfigs, SystemConfigsService,
 };
@@ -46,6 +46,8 @@ pub struct SubscriptionServiceConfig {
     pub agent_repo: Arc<dyn AgentRepository>,
     pub agent_service: Arc<dyn AgentService>,
     pub kyt_service: Arc<dyn KytRiskService>,
+    pub kyt_audit_repo: Arc<dyn KytAuditRepository>,
+    pub kyt_high_risk_slack_webhook_url: String,
     pub stripe_secret_key: String,
     pub stripe_webhook_secret: String,
     /// When set, enables `provider = house-of-stake` subscription intents (staking contract account id).
@@ -104,6 +106,9 @@ pub struct SubscriptionServiceImpl {
     agent_repo: Arc<dyn AgentRepository>,
     agent_service: Arc<dyn AgentService>,
     kyt_service: Arc<dyn KytRiskService>,
+    kyt_audit_repo: Arc<dyn KytAuditRepository>,
+    kyt_high_risk_slack_webhook_url: String,
+    http_client: reqwest::Client,
     stripe_secret_key: String,
     stripe_webhook_secret: String,
     near_staking_contract_id: Option<String>,
@@ -155,6 +160,9 @@ impl SubscriptionServiceImpl {
             agent_repo: config.agent_repo,
             agent_service: config.agent_service,
             kyt_service: config.kyt_service,
+            kyt_audit_repo: config.kyt_audit_repo,
+            kyt_high_risk_slack_webhook_url: config.kyt_high_risk_slack_webhook_url,
+            http_client: reqwest::Client::new(),
             stripe_secret_key: config.stripe_secret_key,
             stripe_webhook_secret: config.stripe_webhook_secret,
             near_staking_contract_id: config.near_staking_contract_id,
@@ -201,17 +209,25 @@ impl SubscriptionServiceImpl {
         Ok(configs)
     }
 
-    async fn check_near_kyt(&self, near_account: &str, flow: &str) -> KytCheckResult {
+    async fn check_near_kyt(
+        &self,
+        user_id: UserId,
+        near_account: &str,
+        flow: &str,
+    ) -> KytCheckResult {
         let result = self.kyt_service.check_near_account(near_account).await;
         if result.is_high_risk() {
             tracing::warn!(
+                user_id = %user_id,
                 near_account = %near_account,
                 flow = %flow,
                 report_id = ?result.report_id,
                 "High-risk KYT result for NEAR wallet flow"
             );
+            self.record_high_risk_kyt(user_id, flow, &result).await;
         } else {
             tracing::debug!(
+                user_id = %user_id,
                 near_account = %near_account,
                 flow = %flow,
                 risk_level = ?result.risk_level,
@@ -219,6 +235,78 @@ impl SubscriptionServiceImpl {
             );
         }
         result
+    }
+
+    async fn record_high_risk_kyt(&self, user_id: UserId, flow: &str, result: &KytCheckResult) {
+        let event = KytHighRiskAuditEvent {
+            user_id,
+            flow: flow.to_string(),
+            result: result.clone(),
+        };
+
+        if let Err(err) = self.kyt_audit_repo.record_high_risk(event).await {
+            tracing::error!(
+                user_id = %user_id,
+                account_id = %result.account_id,
+                flow = %flow,
+                error = %err,
+                "Failed to record high-risk KYT audit event"
+            );
+        }
+
+        self.send_high_risk_kyt_slack_alert(user_id, flow, result)
+            .await;
+    }
+
+    async fn send_high_risk_kyt_slack_alert(
+        &self,
+        user_id: UserId,
+        flow: &str,
+        result: &KytCheckResult,
+    ) {
+        let webhook_url = self.kyt_high_risk_slack_webhook_url.trim();
+        if webhook_url.is_empty() {
+            return;
+        }
+
+        let payload = serde_json::json!({
+            "text": format!(
+                "High-risk KYT detection: account={} user_id={} flow={} provider={} report_id={}",
+                result.account_id,
+                user_id,
+                flow,
+                result.provider,
+                result.report_id.as_deref().unwrap_or("n/a")
+            ),
+        });
+
+        match self
+            .http_client
+            .post(webhook_url)
+            .json(&payload)
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => {}
+            Ok(response) => {
+                tracing::error!(
+                    user_id = %user_id,
+                    account_id = %result.account_id,
+                    flow = %flow,
+                    status = response.status().as_u16(),
+                    "Slack webhook returned non-success status for high-risk KYT alert"
+                );
+            }
+            Err(err) => {
+                tracing::error!(
+                    user_id = %user_id,
+                    account_id = %result.account_id,
+                    flow = %flow,
+                    error = %err,
+                    "Failed to send high-risk KYT Slack alert"
+                );
+            }
+        }
     }
 
     /// Convert a whole-number credit count into nano-USD (1 credit == $1 == 1_000_000_000 nano-USD).
@@ -1988,7 +2076,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 storage_balance,
             );
             let kyt = self
-                .check_near_kyt(&near_account, "create_subscription")
+                .check_near_kyt(user_id, &near_account, "create_subscription")
                 .await;
             return Ok(CreateSubscriptionOutcome::NearStakeLock {
                 contract_id,
@@ -2065,7 +2153,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 .await?;
             let near_account = self.get_near_account_id(user_id).await?;
             let kyt = self
-                .check_near_kyt(&near_account, "cancel_subscription")
+                .check_near_kyt(user_id, &near_account, "cancel_subscription")
                 .await;
             return Ok(CancelSubscriptionOutcome::NearStakingCancel {
                 contract_id: contract_id.to_string(),
@@ -2160,7 +2248,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 .await?;
             let near_account = self.get_near_account_id(user_id).await?;
             let kyt = self
-                .check_near_kyt(&near_account, "resume_subscription")
+                .check_near_kyt(user_id, &near_account, "resume_subscription")
                 .await;
             return Ok(ResumeSubscriptionOutcome::NearStakingResume {
                 contract_id: contract_id.to_string(),
@@ -2393,7 +2481,10 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 target_amount: target_amount.to_string(),
                 required_deposit_yocto: required_deposit_yocto.to_string(),
                 timing: timing.to_string(),
-                kyt: Box::new(self.check_near_kyt(&near_account, "change_plan").await),
+                kyt: Box::new(
+                    self.check_near_kyt(user_id, &near_account, "change_plan")
+                        .await,
+                ),
             });
         }
 
@@ -3702,7 +3793,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     storage_balance,
                 );
                 let kyt = self
-                    .check_near_kyt(&near_account, "create_credit_purchase_checkout")
+                    .check_near_kyt(user_id, &near_account, "create_credit_purchase_checkout")
                     .await;
 
                 tracing::info!(

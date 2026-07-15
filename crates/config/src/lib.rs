@@ -195,6 +195,7 @@ pub struct LukkaKytConfig {
     pub bearer_token: String,
     pub api_key: String,
     pub api_secret: String,
+    pub high_risk_slack_webhook_url: String,
     pub timeout_ms: u64,
     pub max_retries: u32,
     pub cache_ttl_secs: u64,
@@ -208,6 +209,7 @@ impl fmt::Debug for LukkaKytConfig {
             .field("bearer_token", &"<redacted>")
             .field("api_key", &"<redacted>")
             .field("api_secret", &"<redacted>")
+            .field("high_risk_slack_webhook_url", &"<redacted>")
             .field("timeout_ms", &self.timeout_ms)
             .field("max_retries", &self.max_retries)
             .field("cache_ttl_secs", &self.cache_ttl_secs)
@@ -229,6 +231,8 @@ impl Default for LukkaKytConfig {
             bearer_token,
             api_key,
             api_secret: std::env::var("LUKKA_API_SECRET").unwrap_or_default(),
+            high_risk_slack_webhook_url: std::env::var("LUKKA_KYT_HIGH_RISK_SLACK_WEBHOOK_URL")
+                .unwrap_or_default(),
             timeout_ms: std::env::var("LUKKA_TIMEOUT_MS")
                 .ok()
                 .and_then(|v| v.parse().ok())
