@@ -8,13 +8,20 @@ use axum::{
     Extension, Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use services::kyt::KytCheckResult;
+use services::aml::AmlCheckResult;
 use services::subscription::ports::{
     CancelSubscriptionOutcome, ChangePlanOutcome, CreateSubscriptionOutcome,
     NearStakingSyncSummary, ResumeSubscriptionOutcome, SubscriptionError, SubscriptionPlan,
     SubscriptionWithPlan,
 };
 use utoipa::ToSchema;
+
+pub(crate) fn aml_blocked_error(account_id: String) -> ApiError {
+    ApiError::forbidden(format!(
+        "AML report blocks NEAR account '{}' from billing operations",
+        account_id
+    ))
+}
 
 /// Request to create a new subscription
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -55,7 +62,7 @@ pub struct CancelSubscriptionResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub required_deposit_yocto: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub kyt: Option<KytCheckResult>,
+    pub aml: Option<AmlCheckResult>,
 }
 
 /// Response for subscription resume
@@ -73,7 +80,7 @@ pub struct ResumeSubscriptionResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub required_deposit_yocto: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub kyt: Option<KytCheckResult>,
+    pub aml: Option<AmlCheckResult>,
 }
 
 /// Request to change subscription plan
@@ -254,6 +261,7 @@ pub async fn create_subscription(
             SubscriptionError::HouseOfStakeRequiresNearWallet => ApiError::forbidden(
                 "House-of-Stake subscription requires signing in with a NEAR wallet",
             ),
+            SubscriptionError::AmlHighRiskBlocked { account_id } => aml_blocked_error(account_id),
             unexpected => {
                 tracing::error!(error = ?unexpected, "Unexpected subscription error in create");
                 ApiError::internal_server_error("Failed to create subscription")
@@ -296,6 +304,7 @@ pub async fn cancel_subscription(
             SubscriptionError::HouseOfStakeNotConfigured => {
                 ApiError::service_unavailable("House-of-Stake billing is not configured")
             }
+            SubscriptionError::AmlHighRiskBlocked { account_id } => aml_blocked_error(account_id),
             SubscriptionError::NearRpcError(msg) => {
                 tracing::error!(error = ?msg, "NEAR RPC error canceling subscription");
                 ApiError::service_unavailable("Failed to reach NEAR RPC for subscription sync")
@@ -322,14 +331,14 @@ pub async fn cancel_subscription(
             product_id: None,
             network_id: None,
             required_deposit_yocto: None,
-            kyt: None,
+            aml: None,
         },
         CancelSubscriptionOutcome::NearStakingCancel {
             contract_id,
             product_id,
             network_id,
             required_deposit_yocto,
-            kyt,
+            aml,
         } => CancelSubscriptionResponse {
             message: "Complete cancellation in your NEAR wallet".to_string(),
             kind: Some("near_staking_cancel".to_string()),
@@ -337,7 +346,7 @@ pub async fn cancel_subscription(
             product_id: Some(product_id),
             network_id: Some(network_id),
             required_deposit_yocto: Some(required_deposit_yocto),
-            kyt: Some(*kyt),
+            aml: Some(*aml),
         },
     };
 
@@ -381,6 +390,7 @@ pub async fn resume_subscription(
             SubscriptionError::HouseOfStakeNotConfigured => {
                 ApiError::service_unavailable("House-of-Stake billing is not configured")
             }
+            SubscriptionError::AmlHighRiskBlocked { account_id } => aml_blocked_error(account_id),
             SubscriptionError::NearRpcError(msg) => {
                 tracing::error!(error = ?msg, "NEAR RPC error resuming subscription");
                 ApiError::service_unavailable("Failed to reach NEAR RPC for subscription sync")
@@ -407,14 +417,14 @@ pub async fn resume_subscription(
             product_id: None,
             network_id: None,
             required_deposit_yocto: None,
-            kyt: None,
+            aml: None,
         },
         ResumeSubscriptionOutcome::NearStakingResume {
             contract_id,
             product_id,
             network_id,
             required_deposit_yocto,
-            kyt,
+            aml,
         } => ResumeSubscriptionResponse {
             message: "Complete resume in your NEAR wallet".to_string(),
             kind: Some("near_staking_resume".to_string()),
@@ -422,7 +432,7 @@ pub async fn resume_subscription(
             product_id: Some(product_id),
             network_id: Some(network_id),
             required_deposit_yocto: Some(required_deposit_yocto),
-            kyt: Some(*kyt),
+            aml: Some(*aml),
         },
     };
 
@@ -502,6 +512,7 @@ pub async fn change_plan(
             SubscriptionError::HouseOfStakeRequiresNearWallet => {
                 ApiError::forbidden("House-of-Stake plan changes require NEAR wallet authentication")
             }
+            SubscriptionError::AmlHighRiskBlocked { account_id } => aml_blocked_error(account_id),
             SubscriptionError::NearRpcError(msg) => {
                 tracing::error!(error = ?msg, "NEAR RPC error changing plan");
                 ApiError::service_unavailable("Failed to reach NEAR RPC for staking catalog")

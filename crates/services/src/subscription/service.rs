@@ -16,7 +16,7 @@ use super::ports::{
 };
 use crate::agent::ports::AgentRepository;
 use crate::agent::ports::AgentService;
-use crate::kyt::{KytAuditRepository, KytCheckResult, KytHighRiskAuditEvent, KytRiskService};
+use crate::aml::{AmlCheckResult, AmlReportEvent, AmlReportRepository, AmlRiskService};
 use crate::system_configs::ports::{
     CreditsProviderConfig, SubscriptionPlanConfig, SystemConfigs, SystemConfigsService,
 };
@@ -45,9 +45,9 @@ pub struct SubscriptionServiceConfig {
     pub user_usage_repo: Arc<dyn UserUsageRepository>,
     pub agent_repo: Arc<dyn AgentRepository>,
     pub agent_service: Arc<dyn AgentService>,
-    pub kyt_service: Arc<dyn KytRiskService>,
-    pub kyt_audit_repo: Arc<dyn KytAuditRepository>,
-    pub kyt_high_risk_slack_webhook_url: String,
+    pub aml_service: Arc<dyn AmlRiskService>,
+    pub aml_report_repo: Arc<dyn AmlReportRepository>,
+    pub aml_high_risk_slack_webhook_url: String,
     pub stripe_secret_key: String,
     pub stripe_webhook_secret: String,
     /// When set, enables `provider = house-of-stake` subscription intents (staking contract account id).
@@ -83,6 +83,7 @@ const TTL_CACHE_SECS: u64 = 600; // 10 minutes
 const SYSTEM_CONFIGS_TTL_CACHE_SECS: u64 = 60; // 1 minute
 /// Upper bound for cached HoS stake sources; invalidate_credit_limit_cache also clears this on subscription, credit, and sync changes.
 const HOUSE_OF_STAKE_STAKE_SOURCE_TTL_SECS: u64 = 60;
+const AML_REPORT_REFRESH_DAYS: i64 = 30;
 /// Default monthly credits when plan has no monthly_credits config. 1 USD in nano-dollars ($1 = 1_000_000_000).
 const DEFAULT_MONTHLY_CREDITS_NANO_USD: u64 = 1_000_000_000;
 const YOCTO_PER_NEAR: u128 = 1_000_000_000_000_000_000_000_000;
@@ -105,9 +106,9 @@ pub struct SubscriptionServiceImpl {
     user_usage_repo: Arc<dyn UserUsageRepository>,
     agent_repo: Arc<dyn AgentRepository>,
     agent_service: Arc<dyn AgentService>,
-    kyt_service: Arc<dyn KytRiskService>,
-    kyt_audit_repo: Arc<dyn KytAuditRepository>,
-    kyt_high_risk_slack_webhook_url: String,
+    aml_service: Arc<dyn AmlRiskService>,
+    aml_report_repo: Arc<dyn AmlReportRepository>,
+    aml_high_risk_slack_webhook_url: String,
     http_client: reqwest::Client,
     stripe_secret_key: String,
     stripe_webhook_secret: String,
@@ -159,9 +160,9 @@ impl SubscriptionServiceImpl {
             user_usage_repo: config.user_usage_repo,
             agent_repo: config.agent_repo,
             agent_service: config.agent_service,
-            kyt_service: config.kyt_service,
-            kyt_audit_repo: config.kyt_audit_repo,
-            kyt_high_risk_slack_webhook_url: config.kyt_high_risk_slack_webhook_url,
+            aml_service: config.aml_service,
+            aml_report_repo: config.aml_report_repo,
+            aml_high_risk_slack_webhook_url: config.aml_high_risk_slack_webhook_url,
             http_client: reqwest::Client::new(),
             stripe_secret_key: config.stripe_secret_key,
             stripe_webhook_secret: config.stripe_webhook_secret,
@@ -209,69 +210,98 @@ impl SubscriptionServiceImpl {
         Ok(configs)
     }
 
-    async fn check_near_kyt(
+    async fn check_near_aml(
         &self,
         user_id: UserId,
         near_account: &str,
         flow: &str,
-    ) -> KytCheckResult {
-        let result = self.kyt_service.check_near_account(near_account).await;
-        if result.is_high_risk() {
-            tracing::warn!(
-                user_id = %user_id,
-                near_account = %near_account,
-                flow = %flow,
-                report_id = ?result.report_id,
-                "High-risk KYT result for NEAR wallet flow"
-            );
-            self.record_high_risk_kyt(user_id, flow, &result).await;
-        } else {
-            tracing::debug!(
-                user_id = %user_id,
-                near_account = %near_account,
-                flow = %flow,
-                risk_level = ?result.risk_level,
-                "KYT result for NEAR wallet flow"
-            );
+    ) -> Result<AmlCheckResult, SubscriptionError> {
+        let normalized_account = crate::aml::normalize_account_id(near_account);
+        if let Some(report) = self
+            .aml_report_repo
+            .latest_active_report(&normalized_account)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
+        {
+            let age = Utc::now().signed_duration_since(report.checked_at);
+            if age < Duration::days(AML_REPORT_REFRESH_DAYS) {
+                self.enforce_aml_result(user_id, flow, &report.result)
+                    .await?;
+                return Ok(report.result);
+            }
         }
-        result
-    }
 
-    async fn record_high_risk_kyt(&self, user_id: UserId, flow: &str, result: &KytCheckResult) {
-        let event = KytHighRiskAuditEvent {
+        let result = self
+            .aml_service
+            .check_near_account(&normalized_account)
+            .await;
+        let event = AmlReportEvent {
             user_id,
             flow: flow.to_string(),
             result: result.clone(),
         };
+        self.aml_report_repo
+            .record_report(event)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
-        if let Err(err) = self.kyt_audit_repo.record_high_risk(event).await {
-            tracing::error!(
-                user_id = %user_id,
-                account_id = %result.account_id,
-                flow = %flow,
-                error = %err,
-                "Failed to record high-risk KYT audit event"
-            );
-        }
-
-        self.send_high_risk_kyt_slack_alert(user_id, flow, result)
-            .await;
+        self.enforce_aml_result(user_id, flow, &result).await?;
+        Ok(result)
     }
 
-    async fn send_high_risk_kyt_slack_alert(
+    async fn enforce_aml_result(
         &self,
         user_id: UserId,
         flow: &str,
-        result: &KytCheckResult,
+        result: &AmlCheckResult,
+    ) -> Result<(), SubscriptionError> {
+        if result.is_high_risk() {
+            tracing::warn!(
+                user_id = %user_id,
+                near_account = %result.account_id,
+                flow = %flow,
+                report_id = ?result.report_id,
+                "High-risk AML result for NEAR wallet flow"
+            );
+            self.send_high_risk_aml_slack_alert(user_id, flow, result)
+                .await;
+
+            let allowlisted = self
+                .aml_report_repo
+                .is_account_allowlisted(&result.account_id)
+                .await
+                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+            if !allowlisted {
+                return Err(SubscriptionError::AmlHighRiskBlocked {
+                    account_id: result.account_id.clone(),
+                });
+            }
+        } else {
+            tracing::debug!(
+                user_id = %user_id,
+                near_account = %result.account_id,
+                flow = %flow,
+                risk_level = ?result.risk_level,
+                "AML result for NEAR wallet flow"
+            );
+        }
+        Ok(())
+    }
+
+    async fn send_high_risk_aml_slack_alert(
+        &self,
+        user_id: UserId,
+        flow: &str,
+        result: &AmlCheckResult,
     ) {
-        let webhook_url = self.kyt_high_risk_slack_webhook_url.trim();
+        let webhook_url = self.aml_high_risk_slack_webhook_url.trim();
         if webhook_url.is_empty() {
             return;
         }
 
         let payload = serde_json::json!({
             "text": format!(
-                "High-risk KYT detection: account={} user_id={} flow={} provider={} report_id={}",
+                "High-risk AML detection: account={} user_id={} flow={} provider={} report_id={}",
                 result.account_id,
                 user_id,
                 flow,
@@ -294,7 +324,7 @@ impl SubscriptionServiceImpl {
                     account_id = %result.account_id,
                     flow = %flow,
                     status = response.status().as_u16(),
-                    "Slack webhook returned non-success status for high-risk KYT alert"
+                    "Slack webhook returned non-success status for high-risk AML alert"
                 );
             }
             Err(err) => {
@@ -303,7 +333,7 @@ impl SubscriptionServiceImpl {
                     account_id = %result.account_id,
                     flow = %flow,
                     error = %err,
-                    "Failed to send high-risk KYT Slack alert"
+                    "Failed to send high-risk AML Slack alert"
                 );
             }
         }
@@ -2075,16 +2105,16 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 storage_bounds,
                 storage_balance,
             );
-            let kyt = self
-                .check_near_kyt(user_id, &near_account, "create_subscription")
-                .await;
+            let aml = self
+                .check_near_aml(user_id, &near_account, "create_subscription")
+                .await?;
             return Ok(CreateSubscriptionOutcome::NearStakeLock {
                 contract_id,
                 price_id,
                 network_id: self.near_network_id.clone(),
                 attached_deposit_yocto: attached_deposit_yocto.to_string(),
                 storage: Box::new(storage),
-                kyt: Box::new(kyt),
+                aml: Box::new(aml),
             });
         }
 
@@ -2152,15 +2182,15 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 .hos_product_id_for_price(contract_id, &subscription.price_id)
                 .await?;
             let near_account = self.get_near_account_id(user_id).await?;
-            let kyt = self
-                .check_near_kyt(user_id, &near_account, "cancel_subscription")
-                .await;
+            let aml = self
+                .check_near_aml(user_id, &near_account, "cancel_subscription")
+                .await?;
             return Ok(CancelSubscriptionOutcome::NearStakingCancel {
                 contract_id: contract_id.to_string(),
                 product_id,
                 network_id: self.near_network_id.clone(),
                 required_deposit_yocto: "1".to_string(),
-                kyt: Box::new(kyt),
+                aml: Box::new(aml),
             });
         }
 
@@ -2247,15 +2277,15 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 .hos_product_id_for_price(contract_id, &subscription.price_id)
                 .await?;
             let near_account = self.get_near_account_id(user_id).await?;
-            let kyt = self
-                .check_near_kyt(user_id, &near_account, "resume_subscription")
-                .await;
+            let aml = self
+                .check_near_aml(user_id, &near_account, "resume_subscription")
+                .await?;
             return Ok(ResumeSubscriptionOutcome::NearStakingResume {
                 contract_id: contract_id.to_string(),
                 product_id,
                 network_id: self.near_network_id.clone(),
                 required_deposit_yocto: "1".to_string(),
-                kyt: Box::new(kyt),
+                aml: Box::new(aml),
             });
         }
 
@@ -2481,9 +2511,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 target_amount: target_amount.to_string(),
                 required_deposit_yocto: required_deposit_yocto.to_string(),
                 timing: timing.to_string(),
-                kyt: Box::new(
-                    self.check_near_kyt(user_id, &near_account, "change_plan")
-                        .await,
+                aml: Box::new(
+                    self.check_near_aml(user_id, &near_account, "change_plan")
+                        .await?,
                 ),
             });
         }
@@ -3792,9 +3822,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     storage_bounds,
                     storage_balance,
                 );
-                let kyt = self
-                    .check_near_kyt(user_id, &near_account, "create_credit_purchase_checkout")
-                    .await;
+                let aml = self
+                    .check_near_aml(user_id, &near_account, "create_credit_purchase_checkout")
+                    .await?;
 
                 tracing::info!(
                     "House-of-Stake credit payment intent created: user_id={}, credits={}, price_id={}",
@@ -3810,7 +3840,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     quantity: credits,
                     attached_deposit_yocto: attached_deposit_yocto.to_string(),
                     storage: Box::new(storage),
-                    kyt: Box::new(kyt),
+                    aml: Box::new(aml),
                 })
             }
             "stripe" => {
@@ -3875,6 +3905,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
         let price_id = self.get_hos_credits_price_id().await?;
         let contract_id = self.hos_contract_id()?;
         let near_account = self.get_near_account_id(user_id).await?;
+        self.check_near_aml(user_id, &near_account, "confirm_credit_purchase")
+            .await?;
 
         let purchase = view_get_purchase(&self.near_rpc_url, &contract_id, &purchase_id)
             .await
@@ -4121,6 +4153,60 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .list_transactions(user_id, limit, offset)
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))
+    }
+
+    async fn admin_list_aml_reports(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<(Vec<crate::aml::AmlReportRecord>, i64), SubscriptionError> {
+        self.aml_report_repo
+            .list_reports(limit.clamp(1, 100), offset.max(0))
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))
+    }
+
+    async fn admin_list_aml_allowlist(
+        &self,
+    ) -> Result<Vec<crate::aml::AmlAccountAllowlistEntry>, SubscriptionError> {
+        self.aml_report_repo
+            .list_allowlist()
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))
+    }
+
+    async fn admin_add_aml_allowlist_entry(
+        &self,
+        account_id: String,
+        reason: Option<String>,
+        created_by: Option<UserId>,
+    ) -> Result<crate::aml::AmlAccountAllowlistEntry, SubscriptionError> {
+        self.aml_report_repo
+            .add_allowlist_entry(&account_id, reason, created_by)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))
+    }
+
+    async fn admin_remove_aml_allowlist_entry(
+        &self,
+        account_id: String,
+    ) -> Result<bool, SubscriptionError> {
+        self.aml_report_repo
+            .remove_allowlist_entry(&account_id)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))
+    }
+
+    async fn admin_set_aml_report_active(
+        &self,
+        id: uuid::Uuid,
+        active: bool,
+    ) -> Result<crate::aml::AmlReportRecord, SubscriptionError> {
+        self.aml_report_repo
+            .set_report_active(id, active)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
+            .ok_or(SubscriptionError::SubscriptionNotFound)
     }
 }
 

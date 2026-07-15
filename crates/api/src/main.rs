@@ -258,8 +258,8 @@ async fn main() -> anyhow::Result<()> {
     // Initialize subscription service
     tracing::info!("Initializing subscription service...");
     let stripe_client = Arc::new(StripeClientAdapter::new(config.stripe.secret_key.clone()));
-    let kyt_service: Arc<dyn services::kyt::KytRiskService> = Arc::new(
-        services::kyt::LukkaKytService::new(config.lukka_kyt.clone()),
+    let aml_service: Arc<dyn services::aml::AmlRiskService> = Arc::new(
+        services::aml::LukkaAmlService::new(config.lukka_aml.clone()),
     );
     let subscription_service = Arc::new(services::subscription::SubscriptionServiceImpl::new(
         services::subscription::SubscriptionServiceConfig {
@@ -283,9 +283,10 @@ async fn main() -> anyhow::Result<()> {
             stripe_secret_key: config.stripe.secret_key.clone(),
             stripe_webhook_secret: config.stripe.webhook_secret.clone(),
             agent_service: agent_service.clone() as Arc<dyn services::agent::ports::AgentService>,
-            kyt_service,
-            kyt_audit_repo: db.kyt_audit_repository() as Arc<dyn services::kyt::KytAuditRepository>,
-            kyt_high_risk_slack_webhook_url: config.lukka_kyt.high_risk_slack_webhook_url.clone(),
+            aml_service,
+            aml_report_repo: db.aml_report_repository()
+                as Arc<dyn services::aml::AmlReportRepository>,
+            aml_high_risk_slack_webhook_url: config.lukka_aml.high_risk_slack_webhook_url.clone(),
             near_rpc_url: config.near.rpc_url.to_string(),
             near_staking_contract_id: config.near.staking_contract_id.clone(),
             near_network_id: config.near.network_id.clone(),

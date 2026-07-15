@@ -7,13 +7,12 @@ pub mod repositories;
 
 pub use pool::DbPool;
 pub use repositories::{
-    PostgresAgentRepository, PostgresAnalyticsRepository, PostgresAppConfigRepository,
-    PostgresBiMetricsRepository, PostgresConversationRepository,
+    PostgresAgentRepository, PostgresAmlReportRepository, PostgresAnalyticsRepository,
+    PostgresAppConfigRepository, PostgresBiMetricsRepository, PostgresConversationRepository,
     PostgresConversationShareRepository, PostgresCreditsRepository,
-    PostgresEmailVerificationChallengeRepository, PostgresFileRepository,
-    PostgresKytAuditRepository, PostgresModelRepository, PostgresNearNonceRepository,
-    PostgresOAuthRepository, PostgresPaymentWebhookRepository, PostgresSessionRepository,
-    PostgresStripeCustomerRepository, PostgresSubscriptionRepository,
+    PostgresEmailVerificationChallengeRepository, PostgresFileRepository, PostgresModelRepository,
+    PostgresNearNonceRepository, PostgresOAuthRepository, PostgresPaymentWebhookRepository,
+    PostgresSessionRepository, PostgresStripeCustomerRepository, PostgresSubscriptionRepository,
     PostgresSystemConfigsRepository, PostgresUserRepository, PostgresUserSettingsRepository,
     PostgresUserUsageRepository,
 };
@@ -49,7 +48,7 @@ pub struct Database {
     payment_webhook_repository: Arc<PostgresPaymentWebhookRepository>,
     agent_repository: Arc<PostgresAgentRepository>,
     bi_metrics_repository: Arc<PostgresBiMetricsRepository>,
-    kyt_audit_repository: Arc<PostgresKytAuditRepository>,
+    aml_report_repository: Arc<PostgresAmlReportRepository>,
     cluster_manager: Option<Arc<ClusterManager>>,
 }
 
@@ -82,7 +81,7 @@ impl Database {
             Arc::new(PostgresPaymentWebhookRepository::new(pool.clone()));
         let agent_repository = Arc::new(PostgresAgentRepository::new(pool.clone()));
         let bi_metrics_repository = Arc::new(PostgresBiMetricsRepository::new(pool.clone()));
-        let kyt_audit_repository = Arc::new(PostgresKytAuditRepository::new(pool.clone()));
+        let aml_report_repository = Arc::new(PostgresAmlReportRepository::new(pool.clone()));
 
         Self {
             pool,
@@ -106,7 +105,7 @@ impl Database {
             payment_webhook_repository,
             agent_repository,
             bi_metrics_repository,
-            kyt_audit_repository,
+            aml_report_repository,
             cluster_manager: None,
         }
     }
@@ -333,8 +332,8 @@ impl Database {
         self.bi_metrics_repository.clone()
     }
 
-    /// Get the KYT audit repository
-    pub fn kyt_audit_repository(&self) -> Arc<PostgresKytAuditRepository> {
-        self.kyt_audit_repository.clone()
+    /// Get the AML audit repository
+    pub fn aml_report_repository(&self) -> Arc<PostgresAmlReportRepository> {
+        self.aml_report_repository.clone()
     }
 }

@@ -81,13 +81,13 @@ services:
       # OpenAI/Cloud API proxy configuration
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://cloud-api.near.ai/v1}
       OPENAI_API_KEY: ${OPENAI_API_KEY}
-      # Lukka KYT checks for NEAR wallet billing flows
-      LUKKA_KYT_ENABLED: ${LUKKA_KYT_ENABLED:-false}
+      # Lukka AML checks for NEAR wallet billing flows
+      LUKKA_AML_ENABLED: ${LUKKA_AML_ENABLED:-false}
       LUKKA_BASE_URL: ${LUKKA_BASE_URL:-https://api.blockchain-analytics.lukka.tech}
       LUKKA_BEARER_TOKEN: ${LUKKA_BEARER_TOKEN:-}
       LUKKA_API_KEY: ${LUKKA_API_KEY:-}
       LUKKA_API_SECRET: ${LUKKA_API_SECRET:-}
-      LUKKA_KYT_HIGH_RISK_SLACK_WEBHOOK_URL: ${LUKKA_KYT_HIGH_RISK_SLACK_WEBHOOK_URL:-}
+      LUKKA_AML_HIGH_RISK_SLACK_WEBHOOK_URL: ${LUKKA_AML_HIGH_RISK_SLACK_WEBHOOK_URL:-}
       LUKKA_TIMEOUT_MS: ${LUKKA_TIMEOUT_MS:-3000}
       LUKKA_MAX_RETRIES: ${LUKKA_MAX_RETRIES:-1}
       LUKKA_CACHE_TTL_SECS: ${LUKKA_CACHE_TTL_SECS:-300}

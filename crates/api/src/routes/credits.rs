@@ -118,6 +118,9 @@ pub async fn create_credit_checkout(
             SubscriptionError::HouseOfStakeRequiresNearWallet => {
                 ApiError::forbidden("Credit purchase requires signing in with a NEAR wallet")
             }
+            SubscriptionError::AmlHighRiskBlocked { account_id } => {
+                crate::routes::subscriptions::aml_blocked_error(account_id)
+            }
             SubscriptionError::InvalidCredits(msg) => ApiError::bad_request(msg),
             SubscriptionError::StripeError(msg) => {
                 tracing::error!(error = ?msg, "Stripe error creating credit checkout");
@@ -170,6 +173,9 @@ pub async fn confirm_credit_purchase(
             }
             SubscriptionError::HouseOfStakeRequiresNearWallet => {
                 ApiError::forbidden("Credit purchase requires signing in with a NEAR wallet")
+            }
+            SubscriptionError::AmlHighRiskBlocked { account_id } => {
+                crate::routes::subscriptions::aml_blocked_error(account_id)
             }
             SubscriptionError::InvalidCredits(msg) => ApiError::bad_request(msg),
             SubscriptionError::NearRpcError(msg) => {

@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
+use uuid::Uuid;
 
 const PROVIDER_LUKKA: &str = "lukka";
 const NEAR_ADDRESS_TYPE: &str = "NEAR";
@@ -12,14 +13,14 @@ const NEAR_ADDRESS_TYPE: &str = "NEAR";
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
-pub enum KytRiskLevel {
+pub enum AmlRiskLevel {
     Low,
     Medium,
     High,
     Unknown,
 }
 
-impl KytRiskLevel {
+impl AmlRiskLevel {
     fn from_provider(value: Option<&str>) -> Self {
         match value
             .unwrap_or_default()
@@ -37,11 +38,11 @@ impl KytRiskLevel {
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct KytCheckResult {
+pub struct AmlCheckResult {
     pub provider: String,
     pub account_id: String,
     pub address_type: String,
-    pub risk_level: KytRiskLevel,
+    pub risk_level: AmlRiskLevel,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub score: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -51,19 +52,19 @@ pub struct KytCheckResult {
     pub reason: Option<String>,
 }
 
-impl Default for KytCheckResult {
+impl Default for AmlCheckResult {
     fn default() -> Self {
         Self::unknown("", "not_checked")
     }
 }
 
-impl KytCheckResult {
+impl AmlCheckResult {
     pub fn unknown(account_id: impl Into<String>, reason: impl Into<String>) -> Self {
         Self {
             provider: PROVIDER_LUKKA.to_string(),
             account_id: account_id.into(),
             address_type: NEAR_ADDRESS_TYPE.to_string(),
-            risk_level: KytRiskLevel::Unknown,
+            risk_level: AmlRiskLevel::Unknown,
             score: None,
             report_id: None,
             checked_at: Utc::now(),
@@ -72,55 +73,175 @@ impl KytCheckResult {
     }
 
     pub fn is_high_risk(&self) -> bool {
-        self.risk_level == KytRiskLevel::High
+        self.risk_level == AmlRiskLevel::High
     }
 }
 
 #[async_trait]
-pub trait KytRiskService: Send + Sync {
-    async fn check_near_account(&self, account_id: &str) -> KytCheckResult;
+pub trait AmlRiskService: Send + Sync {
+    async fn check_near_account(&self, account_id: &str) -> AmlCheckResult;
 }
 
 #[derive(Debug, Clone)]
-pub struct KytHighRiskAuditEvent {
+pub struct AmlReportRecord {
+    pub id: Uuid,
+    pub user_id: Option<crate::UserId>,
+    pub flow: String,
+    pub provider: String,
+    pub account_id: String,
+    pub address_type: String,
+    pub risk_level: AmlRiskLevel,
+    pub score: Option<i64>,
+    pub report_id: Option<String>,
+    pub checked_at: DateTime<Utc>,
+    pub reason: Option<String>,
+    pub result: AmlCheckResult,
+    pub active: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AmlAccountAllowlistEntry {
+    pub account_id: String,
+    pub reason: Option<String>,
+    pub created_by: Option<crate::UserId>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AmlReportEvent {
     pub user_id: crate::UserId,
     pub flow: String,
-    pub result: KytCheckResult,
+    pub result: AmlCheckResult,
 }
 
 #[async_trait]
-pub trait KytAuditRepository: Send + Sync {
-    async fn record_high_risk(&self, event: KytHighRiskAuditEvent) -> anyhow::Result<()>;
+pub trait AmlReportRepository: Send + Sync {
+    async fn record_report(&self, event: AmlReportEvent) -> anyhow::Result<AmlReportRecord>;
+    async fn latest_active_report(
+        &self,
+        account_id: &str,
+    ) -> anyhow::Result<Option<AmlReportRecord>>;
+    async fn is_account_allowlisted(&self, account_id: &str) -> anyhow::Result<bool>;
+    async fn list_reports(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> anyhow::Result<(Vec<AmlReportRecord>, i64)>;
+    async fn list_allowlist(&self) -> anyhow::Result<Vec<AmlAccountAllowlistEntry>>;
+    async fn add_allowlist_entry(
+        &self,
+        account_id: &str,
+        reason: Option<String>,
+        created_by: Option<crate::UserId>,
+    ) -> anyhow::Result<AmlAccountAllowlistEntry>;
+    async fn remove_allowlist_entry(&self, account_id: &str) -> anyhow::Result<bool>;
+    async fn set_report_active(
+        &self,
+        id: Uuid,
+        active: bool,
+    ) -> anyhow::Result<Option<AmlReportRecord>>;
 }
 
-pub struct NoopKytRiskService;
+pub struct NoopAmlRiskService;
 
 #[async_trait]
-impl KytRiskService for NoopKytRiskService {
-    async fn check_near_account(&self, account_id: &str) -> KytCheckResult {
-        KytCheckResult::unknown(account_id.trim(), "disabled")
+impl AmlRiskService for NoopAmlRiskService {
+    async fn check_near_account(&self, account_id: &str) -> AmlCheckResult {
+        AmlCheckResult::unknown(account_id.trim(), "disabled")
     }
 }
 
-pub struct NoopKytAuditRepository;
+pub struct NoopAmlReportRepository;
 
 #[async_trait]
-impl KytAuditRepository for NoopKytAuditRepository {
-    async fn record_high_risk(&self, _event: KytHighRiskAuditEvent) -> anyhow::Result<()> {
-        Ok(())
+impl AmlReportRepository for NoopAmlReportRepository {
+    async fn record_report(&self, event: AmlReportEvent) -> anyhow::Result<AmlReportRecord> {
+        let now = Utc::now();
+        Ok(AmlReportRecord {
+            id: Uuid::new_v4(),
+            user_id: Some(event.user_id),
+            flow: event.flow,
+            provider: event.result.provider.clone(),
+            account_id: event.result.account_id.clone(),
+            address_type: event.result.address_type.clone(),
+            risk_level: event.result.risk_level,
+            score: event.result.score,
+            report_id: event.result.report_id.clone(),
+            checked_at: event.result.checked_at,
+            reason: event.result.reason.clone(),
+            result: event.result,
+            active: true,
+            created_at: now,
+            updated_at: now,
+        })
     }
+
+    async fn latest_active_report(
+        &self,
+        _account_id: &str,
+    ) -> anyhow::Result<Option<AmlReportRecord>> {
+        Ok(None)
+    }
+
+    async fn is_account_allowlisted(&self, _account_id: &str) -> anyhow::Result<bool> {
+        Ok(false)
+    }
+
+    async fn list_reports(
+        &self,
+        _limit: i64,
+        _offset: i64,
+    ) -> anyhow::Result<(Vec<AmlReportRecord>, i64)> {
+        Ok((Vec::new(), 0))
+    }
+
+    async fn list_allowlist(&self) -> anyhow::Result<Vec<AmlAccountAllowlistEntry>> {
+        Ok(Vec::new())
+    }
+
+    async fn add_allowlist_entry(
+        &self,
+        account_id: &str,
+        reason: Option<String>,
+        created_by: Option<crate::UserId>,
+    ) -> anyhow::Result<AmlAccountAllowlistEntry> {
+        Ok(AmlAccountAllowlistEntry {
+            account_id: normalize_account_id(account_id),
+            reason,
+            created_by,
+            created_at: Utc::now(),
+        })
+    }
+
+    async fn remove_allowlist_entry(&self, _account_id: &str) -> anyhow::Result<bool> {
+        Ok(false)
+    }
+
+    async fn set_report_active(
+        &self,
+        _id: Uuid,
+        _active: bool,
+    ) -> anyhow::Result<Option<AmlReportRecord>> {
+        Ok(None)
+    }
+}
+
+pub fn normalize_account_id(account_id: &str) -> String {
+    account_id.trim().to_ascii_lowercase()
 }
 
 #[derive(Clone)]
-pub struct LukkaKytService {
-    config: config::LukkaKytConfig,
+pub struct LukkaAmlService {
+    config: config::LukkaAmlConfig,
     http_client: reqwest::Client,
-    cache: Arc<RwLock<HashMap<String, CachedKytResult>>>,
+    cache: Arc<RwLock<HashMap<String, CachedAmlResult>>>,
 }
 
 #[derive(Clone)]
-struct CachedKytResult {
-    result: KytCheckResult,
+struct CachedAmlResult {
+    result: AmlCheckResult,
     cached_at: Instant,
 }
 
@@ -144,8 +265,8 @@ struct LukkaCscoreSection {
     risk_level: Option<String>,
 }
 
-impl LukkaKytService {
-    pub fn new(config: config::LukkaKytConfig) -> Self {
+impl LukkaAmlService {
+    pub fn new(config: config::LukkaAmlConfig) -> Self {
         let timeout = Duration::from_millis(config.timeout_ms.max(1));
         let http_client = reqwest::Client::builder()
             .timeout(timeout)
@@ -153,7 +274,7 @@ impl LukkaKytService {
             .unwrap_or_else(|err| {
                 tracing::warn!(
                     error = %err,
-                    "Failed to build Lukka KYT HTTP client with configured timeout; using default client"
+                    "Failed to build Lukka AML HTTP client with configured timeout; using default client"
                 );
                 reqwest::Client::new()
             });
@@ -177,12 +298,12 @@ impl LukkaKytService {
             LukkaAuthMode::Missing
         } else if api_secret.is_empty() {
             tracing::warn!(
-                "Lukka KYT API key is configured without API secret; key/secret auth disabled"
+                "Lukka AML API key is configured without API secret; key/secret auth disabled"
             );
             LukkaAuthMode::Missing
         } else if api_key.is_empty() {
             tracing::warn!(
-                "Lukka KYT API secret is configured without API key; key/secret auth disabled"
+                "Lukka AML API secret is configured without API key; key/secret auth disabled"
             );
             LukkaAuthMode::Missing
         } else {
@@ -199,7 +320,7 @@ impl LukkaKytService {
         format!("{base}/v3/reports/aml/score/{encoded}?address_type={NEAR_ADDRESS_TYPE}")
     }
 
-    async fn cached_result(&self, account_id: &str) -> Option<KytCheckResult> {
+    async fn cached_result(&self, account_id: &str) -> Option<AmlCheckResult> {
         let ttl = self.config.cache_ttl_secs;
         if ttl == 0 {
             return None;
@@ -213,9 +334,9 @@ impl LukkaKytService {
             .map(|entry| entry.result.clone())
     }
 
-    async fn store_cache(&self, account_id: &str, result: KytCheckResult) -> KytCheckResult {
+    async fn store_cache(&self, account_id: &str, result: AmlCheckResult) -> AmlCheckResult {
         if self.config.cache_ttl_secs > 0 {
-            if result.risk_level == KytRiskLevel::Unknown {
+            if result.risk_level == AmlRiskLevel::Unknown {
                 return result;
             }
 
@@ -224,7 +345,7 @@ impl LukkaKytService {
             cache.retain(|_, entry| entry.cached_at.elapsed().as_secs() < ttl);
             cache.insert(
                 account_id.to_string(),
-                CachedKytResult {
+                CachedAmlResult {
                     result: result.clone(),
                     cached_at: Instant::now(),
                 },
@@ -233,11 +354,11 @@ impl LukkaKytService {
         result
     }
 
-    async fn fetch_near_score(&self, account_id: &str) -> KytCheckResult {
+    async fn fetch_near_score(&self, account_id: &str) -> AmlCheckResult {
         let auth_mode = self.auth_mode();
         if matches!(auth_mode, LukkaAuthMode::Missing) {
-            tracing::warn!("Lukka KYT enabled but credentials are not configured");
-            return KytCheckResult::unknown(account_id, "not_configured");
+            tracing::warn!("Lukka AML enabled but credentials are not configured");
+            return AmlCheckResult::unknown(account_id, "not_configured");
         }
 
         let url = self.score_url(account_id);
@@ -266,13 +387,13 @@ impl LukkaKytService {
                             let result = normalize_lukka_response(account_id, body);
                             tracing::debug!(
                                 elapsed_ms = started.elapsed().as_millis() as u64,
-                                "Lukka KYT check completed"
+                                "Lukka AML check completed"
                             );
                             if result.is_high_risk() {
                                 tracing::warn!(
                                     account_id = %result.account_id,
                                     report_id = ?result.report_id,
-                                    "Lukka KYT high risk NEAR account detected"
+                                    "Lukka AML high risk NEAR account detected"
                                 );
                             }
                             result
@@ -281,9 +402,9 @@ impl LukkaKytService {
                             tracing::warn!(
                                 account_id = %account_id,
                                 error = %err,
-                                "Failed to decode Lukka KYT response"
+                                "Failed to decode Lukka AML response"
                             );
-                            KytCheckResult::unknown(account_id, "provider_decode_error")
+                            AmlCheckResult::unknown(account_id, "provider_decode_error")
                         }
                     };
                 }
@@ -295,7 +416,7 @@ impl LukkaKytService {
                         status = status.as_u16(),
                         attempt = attempt + 1,
                         attempts,
-                        "Lukka KYT provider returned non-success status"
+                        "Lukka AML provider returned non-success status"
                     );
                     if !status.is_server_error() || attempt + 1 >= attempts {
                         break;
@@ -312,7 +433,7 @@ impl LukkaKytService {
                         error = %err,
                         attempt = attempt + 1,
                         attempts,
-                        "Lukka KYT provider request failed"
+                        "Lukka AML provider request failed"
                     );
                     if attempt + 1 >= attempts {
                         break;
@@ -321,7 +442,7 @@ impl LukkaKytService {
             }
         }
 
-        KytCheckResult::unknown(account_id, last_reason)
+        AmlCheckResult::unknown(account_id, last_reason)
     }
 }
 
@@ -335,7 +456,7 @@ enum LukkaAuthMode<'a> {
     },
 }
 
-fn normalize_lukka_response(account_id: &str, body: LukkaAmlScoreResponse) -> KytCheckResult {
+fn normalize_lukka_response(account_id: &str, body: LukkaAmlScoreResponse) -> AmlCheckResult {
     let report = body.report_info_section;
     let cscore = body.cscore_section;
 
@@ -346,7 +467,7 @@ fn normalize_lukka_response(account_id: &str, body: LukkaAmlScoreResponse) -> Ky
         .map(|dt| dt.with_timezone(&Utc))
         .unwrap_or_else(Utc::now);
 
-    KytCheckResult {
+    AmlCheckResult {
         provider: PROVIDER_LUKKA.to_string(),
         account_id: report
             .as_ref()
@@ -358,7 +479,7 @@ fn normalize_lukka_response(account_id: &str, body: LukkaAmlScoreResponse) -> Ky
             .and_then(|r| r.address_type.clone())
             .filter(|address_type| !address_type.trim().is_empty())
             .unwrap_or_else(|| NEAR_ADDRESS_TYPE.to_string()),
-        risk_level: KytRiskLevel::from_provider(
+        risk_level: AmlRiskLevel::from_provider(
             cscore
                 .as_ref()
                 .and_then(|section| section.risk_level.as_deref()),
@@ -371,20 +492,20 @@ fn normalize_lukka_response(account_id: &str, body: LukkaAmlScoreResponse) -> Ky
 }
 
 #[async_trait]
-impl KytRiskService for LukkaKytService {
-    async fn check_near_account(&self, account_id: &str) -> KytCheckResult {
+impl AmlRiskService for LukkaAmlService {
+    async fn check_near_account(&self, account_id: &str) -> AmlCheckResult {
         let account_id = account_id.trim();
         if account_id.is_empty() {
-            return KytCheckResult::unknown("", "invalid_account");
+            return AmlCheckResult::unknown("", "invalid_account");
         }
         if !self.config.enabled {
-            return KytCheckResult::unknown(account_id, "disabled");
+            return AmlCheckResult::unknown(account_id, "disabled");
         }
         if let Some(result) = self.cached_result(account_id).await {
             tracing::debug!(
                 account_id = %account_id,
                 risk_level = ?result.risk_level,
-                "Lukka KYT cache hit"
+                "Lukka AML cache hit"
             );
             return result;
         }
@@ -400,8 +521,8 @@ mod tests {
     use wiremock::matchers::{header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    fn test_config(base_url: String) -> config::LukkaKytConfig {
-        config::LukkaKytConfig {
+    fn test_config(base_url: String) -> config::LukkaAmlConfig {
+        config::LukkaAmlConfig {
             enabled: true,
             base_url,
             bearer_token: "test-token".to_string(),
@@ -438,8 +559,8 @@ mod tests {
         })
     }
 
-    fn kyt_result(account_id: &str, risk_level: KytRiskLevel) -> KytCheckResult {
-        KytCheckResult {
+    fn aml_result(account_id: &str, risk_level: AmlRiskLevel) -> AmlCheckResult {
+        AmlCheckResult {
             provider: PROVIDER_LUKKA.to_string(),
             account_id: account_id.to_string(),
             address_type: NEAR_ADDRESS_TYPE.to_string(),
@@ -463,12 +584,12 @@ mod tests {
             .mount(&server)
             .await;
 
-        let service = LukkaKytService::new(test_config(server.uri()));
+        let service = LukkaAmlService::new(test_config(server.uri()));
         let result = service.check_near_account("gregoshes.near").await;
 
         assert_eq!(result.account_id, "gregoshes.near");
         assert_eq!(result.address_type, "NEAR");
-        assert_eq!(result.risk_level, KytRiskLevel::High);
+        assert_eq!(result.risk_level, AmlRiskLevel::High);
         assert_eq!(result.score, Some(99));
         assert_eq!(
             result.report_id.as_deref(),
@@ -480,10 +601,10 @@ mod tests {
     #[test]
     fn maps_provider_risk_levels() {
         for (provider_value, expected) in [
-            ("LOW", KytRiskLevel::Low),
-            ("MEDIUM", KytRiskLevel::Medium),
-            ("HIGH", KytRiskLevel::High),
-            ("unexpected", KytRiskLevel::Unknown),
+            ("LOW", AmlRiskLevel::Low),
+            ("MEDIUM", AmlRiskLevel::Medium),
+            ("HIGH", AmlRiskLevel::High),
+            ("unexpected", AmlRiskLevel::Unknown),
         ] {
             let body = LukkaAmlScoreResponse {
                 report_info_section: None,
@@ -508,10 +629,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let service = LukkaKytService::new(test_config(server.uri()));
+        let service = LukkaAmlService::new(test_config(server.uri()));
         let result = service.check_near_account("alice.near").await;
 
-        assert_eq!(result.risk_level, KytRiskLevel::Unknown);
+        assert_eq!(result.risk_level, AmlRiskLevel::Unknown);
         assert_eq!(result.reason.as_deref(), Some("provider_http_503"));
     }
 
@@ -524,7 +645,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let service = LukkaKytService::new(test_config(server.uri()));
+        let service = LukkaAmlService::new(test_config(server.uri()));
         let first = service.check_near_account("alice.near").await;
         let second = service.check_near_account("alice.near").await;
 
@@ -536,18 +657,18 @@ mod tests {
     async fn store_cache_evicts_expired_entries() {
         let mut cfg = test_config("http://127.0.0.1:1".to_string());
         cfg.cache_ttl_secs = 1;
-        let service = LukkaKytService::new(cfg);
+        let service = LukkaAmlService::new(cfg);
 
         service.cache.write().await.insert(
             "expired.near".to_string(),
-            CachedKytResult {
-                result: kyt_result("expired.near", KytRiskLevel::Low),
+            CachedAmlResult {
+                result: aml_result("expired.near", AmlRiskLevel::Low),
                 cached_at: Instant::now() - Duration::from_secs(2),
             },
         );
 
         service
-            .store_cache("fresh.near", kyt_result("fresh.near", KytRiskLevel::Low))
+            .store_cache("fresh.near", aml_result("fresh.near", AmlRiskLevel::Low))
             .await;
 
         let cache = service.cache.read().await;
@@ -562,11 +683,11 @@ mod tests {
         cfg.bearer_token = String::new();
         cfg.api_key = "api-key-only".to_string();
         cfg.api_secret = String::new();
-        let service = LukkaKytService::new(cfg);
+        let service = LukkaAmlService::new(cfg);
 
         let result = service.check_near_account("alice.near").await;
 
-        assert_eq!(result.risk_level, KytRiskLevel::Unknown);
+        assert_eq!(result.risk_level, AmlRiskLevel::Unknown);
         assert_eq!(result.reason.as_deref(), Some("not_configured"));
     }
 
@@ -580,23 +701,23 @@ mod tests {
             .mount(&server)
             .await;
 
-        let service = LukkaKytService::new(test_config(server.uri()));
+        let service = LukkaAmlService::new(test_config(server.uri()));
         let first = service.check_near_account("gregoshes.near").await;
         let second = service.check_near_account("gregoshes.near").await;
 
-        assert_eq!(first.risk_level, KytRiskLevel::High);
-        assert_eq!(second.risk_level, KytRiskLevel::High);
+        assert_eq!(first.risk_level, AmlRiskLevel::High);
+        assert_eq!(second.risk_level, AmlRiskLevel::High);
     }
 
     #[tokio::test]
     async fn disabled_service_returns_unknown() {
         let mut cfg = test_config("http://127.0.0.1:1".to_string());
         cfg.enabled = false;
-        let service = LukkaKytService::new(cfg);
+        let service = LukkaAmlService::new(cfg);
 
         let result = service.check_near_account("alice.near").await;
 
-        assert_eq!(result.risk_level, KytRiskLevel::Unknown);
+        assert_eq!(result.risk_level, AmlRiskLevel::Unknown);
         assert_eq!(result.reason.as_deref(), Some("disabled"));
     }
 }

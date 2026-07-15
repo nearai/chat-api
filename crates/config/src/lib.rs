@@ -189,7 +189,7 @@ impl Default for OpenAIConfig {
 }
 
 #[derive(Clone, Deserialize)]
-pub struct LukkaKytConfig {
+pub struct LukkaAmlConfig {
     pub enabled: bool,
     pub base_url: String,
     pub bearer_token: String,
@@ -201,9 +201,9 @@ pub struct LukkaKytConfig {
     pub cache_ttl_secs: u64,
 }
 
-impl fmt::Debug for LukkaKytConfig {
+impl fmt::Debug for LukkaAmlConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("LukkaKytConfig")
+        f.debug_struct("LukkaAmlConfig")
             .field("enabled", &self.enabled)
             .field("base_url", &self.base_url)
             .field("bearer_token", &"<redacted>")
@@ -217,12 +217,12 @@ impl fmt::Debug for LukkaKytConfig {
     }
 }
 
-impl Default for LukkaKytConfig {
+impl Default for LukkaAmlConfig {
     fn default() -> Self {
         let bearer_token = std::env::var("LUKKA_BEARER_TOKEN").unwrap_or_default();
         let api_key = std::env::var("LUKKA_API_KEY").unwrap_or_default();
         Self {
-            enabled: std::env::var("LUKKA_KYT_ENABLED")
+            enabled: std::env::var("LUKKA_AML_ENABLED")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(false),
@@ -231,7 +231,7 @@ impl Default for LukkaKytConfig {
             bearer_token,
             api_key,
             api_secret: std::env::var("LUKKA_API_SECRET").unwrap_or_default(),
-            high_risk_slack_webhook_url: std::env::var("LUKKA_KYT_HIGH_RISK_SLACK_WEBHOOK_URL")
+            high_risk_slack_webhook_url: std::env::var("LUKKA_AML_HIGH_RISK_SLACK_WEBHOOK_URL")
                 .unwrap_or_default(),
             timeout_ms: std::env::var("LUKKA_TIMEOUT_MS")
                 .ok()
@@ -792,7 +792,7 @@ pub struct Config {
     pub email_auth: EmailAuthConfig,
     pub server: ServerConfig,
     pub openai: OpenAIConfig,
-    pub lukka_kyt: LukkaKytConfig,
+    pub lukka_aml: LukkaAmlConfig,
     /// NEAR-related configuration
     pub near: NearConfig,
     /// Stripe payment configuration
@@ -816,7 +816,7 @@ impl Config {
             email_auth: EmailAuthConfig::default(),
             server: ServerConfig::default(),
             openai: OpenAIConfig::default(),
-            lukka_kyt: LukkaKytConfig::default(),
+            lukka_aml: LukkaAmlConfig::default(),
             near: NearConfig::default(),
             stripe: StripeConfig::default(),
             cors: CorsConfig::default(),
