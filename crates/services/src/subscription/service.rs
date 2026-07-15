@@ -29,7 +29,7 @@ use chrono::{Datelike, Duration, NaiveTime, Utc};
 use futures::future::join_all;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration as StdDuration, Instant};
 use tokio::sync::RwLock;
 
 /// Configuration for SubscriptionServiceImpl
@@ -48,6 +48,8 @@ pub struct SubscriptionServiceConfig {
     pub aml_service: Arc<dyn AmlRiskService>,
     pub aml_report_repo: Arc<dyn AmlReportRepository>,
     pub aml_high_risk_slack_webhook_url: String,
+    pub aml_high_risk_slack_timeout_ms: u64,
+    pub aml_report_refresh_days: i64,
     pub stripe_secret_key: String,
     pub stripe_webhook_secret: String,
     /// When set, enables `provider = house-of-stake` subscription intents (staking contract account id).
@@ -83,7 +85,6 @@ const TTL_CACHE_SECS: u64 = 600; // 10 minutes
 const SYSTEM_CONFIGS_TTL_CACHE_SECS: u64 = 60; // 1 minute
 /// Upper bound for cached HoS stake sources; invalidate_credit_limit_cache also clears this on subscription, credit, and sync changes.
 const HOUSE_OF_STAKE_STAKE_SOURCE_TTL_SECS: u64 = 60;
-const AML_REPORT_REFRESH_DAYS: i64 = 30;
 /// Default monthly credits when plan has no monthly_credits config. 1 USD in nano-dollars ($1 = 1_000_000_000).
 const DEFAULT_MONTHLY_CREDITS_NANO_USD: u64 = 1_000_000_000;
 const YOCTO_PER_NEAR: u128 = 1_000_000_000_000_000_000_000_000;
@@ -109,7 +110,8 @@ pub struct SubscriptionServiceImpl {
     aml_service: Arc<dyn AmlRiskService>,
     aml_report_repo: Arc<dyn AmlReportRepository>,
     aml_high_risk_slack_webhook_url: String,
-    http_client: reqwest::Client,
+    aml_high_risk_slack_http_client: reqwest::Client,
+    aml_report_refresh_days: i64,
     stripe_secret_key: String,
     stripe_webhook_secret: String,
     near_staking_contract_id: Option<String>,
@@ -163,7 +165,19 @@ impl SubscriptionServiceImpl {
             aml_service: config.aml_service,
             aml_report_repo: config.aml_report_repo,
             aml_high_risk_slack_webhook_url: config.aml_high_risk_slack_webhook_url,
-            http_client: reqwest::Client::new(),
+            aml_high_risk_slack_http_client: reqwest::Client::builder()
+                .timeout(StdDuration::from_millis(
+                    config.aml_high_risk_slack_timeout_ms.max(1),
+                ))
+                .build()
+                .unwrap_or_else(|err| {
+                    tracing::warn!(
+                        error = %err,
+                        "Failed to build AML Slack HTTP client with configured timeout; using default client"
+                    );
+                    reqwest::Client::new()
+                }),
+            aml_report_refresh_days: config.aml_report_refresh_days.max(1),
             stripe_secret_key: config.stripe_secret_key,
             stripe_webhook_secret: config.stripe_webhook_secret,
             near_staking_contract_id: config.near_staking_contract_id,
@@ -217,17 +231,32 @@ impl SubscriptionServiceImpl {
         flow: &str,
     ) -> Result<AmlCheckResult, SubscriptionError> {
         let normalized_account = crate::aml::normalize_account_id(near_account);
-        if let Some(report) = self
+        if !self.aml_service.is_enabled() {
+            return Ok(AmlCheckResult::unknown(normalized_account, "disabled"));
+        }
+
+        match self
             .aml_report_repo
             .latest_active_report(&normalized_account)
             .await
-            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
         {
-            let age = Utc::now().signed_duration_since(report.checked_at);
-            if age < Duration::days(AML_REPORT_REFRESH_DAYS) {
-                self.enforce_aml_result(user_id, flow, &report.result)
-                    .await?;
-                return Ok(report.result);
+            Ok(Some(report)) => {
+                let age = Utc::now().signed_duration_since(report.checked_at);
+                if age < Duration::days(self.aml_report_refresh_days) {
+                    self.enforce_aml_result(user_id, flow, &report.result)
+                        .await?;
+                    return Ok(report.result);
+                }
+            }
+            Ok(None) => {}
+            Err(err) => {
+                tracing::error!(
+                    user_id = %user_id,
+                    near_account = %normalized_account,
+                    flow = %flow,
+                    error = ?err,
+                    "Failed to read AML report cache; continuing with provider check"
+                );
             }
         }
 
@@ -240,10 +269,15 @@ impl SubscriptionServiceImpl {
             flow: flow.to_string(),
             result: result.clone(),
         };
-        self.aml_report_repo
-            .record_report(event)
-            .await
-            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+        if let Err(err) = self.aml_report_repo.record_report(event).await {
+            tracing::error!(
+                user_id = %user_id,
+                near_account = %normalized_account,
+                flow = %flow,
+                error = ?err,
+                "Failed to record AML report; continuing with provider result"
+            );
+        }
 
         self.enforce_aml_result(user_id, flow, &result).await?;
         Ok(result)
@@ -263,15 +297,13 @@ impl SubscriptionServiceImpl {
                 report_id = ?result.report_id,
                 "High-risk AML result for NEAR wallet flow"
             );
-            self.send_high_risk_aml_slack_alert(user_id, flow, result)
-                .await;
-
             let allowlisted = self
                 .aml_report_repo
                 .is_account_allowlisted(&result.account_id)
                 .await
                 .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
             if !allowlisted {
+                self.send_high_risk_aml_slack_alert(user_id, flow, result);
                 return Err(SubscriptionError::AmlHighRiskBlocked {
                     account_id: result.account_id.clone(),
                 });
@@ -288,55 +320,52 @@ impl SubscriptionServiceImpl {
         Ok(())
     }
 
-    async fn send_high_risk_aml_slack_alert(
-        &self,
-        user_id: UserId,
-        flow: &str,
-        result: &AmlCheckResult,
-    ) {
+    fn send_high_risk_aml_slack_alert(&self, user_id: UserId, flow: &str, result: &AmlCheckResult) {
         let webhook_url = self.aml_high_risk_slack_webhook_url.trim();
         if webhook_url.is_empty() {
             return;
         }
 
+        let client = self.aml_high_risk_slack_http_client.clone();
+        let webhook_url = webhook_url.to_string();
+        let account_id = result.account_id.clone();
+        let provider = result.provider.clone();
+        let report_id = result.report_id.clone();
+        let flow = flow.to_string();
         let payload = serde_json::json!({
             "text": format!(
                 "High-risk AML detection: account={} user_id={} flow={} provider={} report_id={}",
-                result.account_id,
+                account_id,
                 user_id,
                 flow,
-                result.provider,
-                result.report_id.as_deref().unwrap_or("n/a")
+                provider,
+                report_id.as_deref().unwrap_or("n/a")
             ),
         });
 
-        match self
-            .http_client
-            .post(webhook_url)
-            .json(&payload)
-            .send()
-            .await
-        {
-            Ok(response) if response.status().is_success() => {}
-            Ok(response) => {
-                tracing::error!(
-                    user_id = %user_id,
-                    account_id = %result.account_id,
-                    flow = %flow,
-                    status = response.status().as_u16(),
-                    "Slack webhook returned non-success status for high-risk AML alert"
-                );
+        tokio::spawn(async move {
+            match client.post(&webhook_url).json(&payload).send().await {
+                Ok(response) if response.status().is_success() => {}
+                Ok(response) => {
+                    tracing::error!(
+                        user_id = %user_id,
+                        account_id = %account_id,
+                        flow = %flow,
+                        status = response.status().as_u16(),
+                        "Slack webhook returned non-success status for high-risk AML alert"
+                    );
+                }
+                Err(err) => {
+                    tracing::error!(
+                        user_id = %user_id,
+                        account_id = %account_id,
+                        flow = %flow,
+                        error = %err,
+                        "Failed to send high-risk AML Slack alert"
+                    );
+                }
             }
-            Err(err) => {
-                tracing::error!(
-                    user_id = %user_id,
-                    account_id = %result.account_id,
-                    flow = %flow,
-                    error = %err,
-                    "Failed to send high-risk AML Slack alert"
-                );
-            }
-        }
+        });
     }
 
     /// Convert a whole-number credit count into nano-USD (1 credit == $1 == 1_000_000_000 nano-USD).

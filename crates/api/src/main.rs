@@ -291,6 +291,8 @@ async fn main() -> anyhow::Result<()> {
             aml_service,
             aml_report_repo,
             aml_high_risk_slack_webhook_url: config.lukka_aml.high_risk_slack_webhook_url.clone(),
+            aml_high_risk_slack_timeout_ms: config.lukka_aml.high_risk_slack_timeout_ms,
+            aml_report_refresh_days: config.lukka_aml.report_refresh_days,
             near_rpc_url: config.near.rpc_url.to_string(),
             near_staking_contract_id: config.near.staking_contract_id.clone(),
             near_network_id: config.near.network_id.clone(),

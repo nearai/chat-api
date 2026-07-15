@@ -213,6 +213,10 @@ impl UserService for UserServiceImpl {
     }
 
     async fn check_user_status(&self, user_id: UserId) -> Result<(), UserStatusError> {
+        if !self.aml_service.is_enabled() {
+            return Ok(());
+        }
+
         let accounts = self.user_repository.get_linked_accounts(user_id).await?;
         let Some(near_account) = accounts
             .into_iter()
@@ -223,22 +227,37 @@ impl UserService for UserServiceImpl {
         };
 
         let account_id = normalize_account_id(&near_account);
-        let result = if let Some(report) = self
-            .aml_report_repo
-            .latest_active_report(&account_id)
-            .await?
-        {
-            report.result
-        } else {
-            let result = self.aml_service.check_near_account(&account_id).await;
-            self.aml_report_repo
-                .record_report(AmlReportEvent {
-                    user_id,
-                    flow: "user_status".to_string(),
-                    result: result.clone(),
-                })
-                .await?;
-            result
+        let result = match self.aml_report_repo.latest_active_report(&account_id).await {
+            Ok(Some(report)) => report.result,
+            Ok(None) => {
+                let result = self.aml_service.check_near_account(&account_id).await;
+                if let Err(err) = self
+                    .aml_report_repo
+                    .record_report(AmlReportEvent {
+                        user_id,
+                        flow: "user_status".to_string(),
+                        result: result.clone(),
+                    })
+                    .await
+                {
+                    tracing::error!(
+                        user_id = %user_id,
+                        account_id = %account_id,
+                        error = ?err,
+                        "Failed to record AML report during user status check; continuing with provider result"
+                    );
+                }
+                result
+            }
+            Err(err) => {
+                tracing::error!(
+                    user_id = %user_id,
+                    account_id = %account_id,
+                    error = ?err,
+                    "Failed to read AML report during user status check; continuing with provider check"
+                );
+                self.aml_service.check_near_account(&account_id).await
+            }
         };
 
         if result.is_high_risk()

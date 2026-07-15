@@ -2418,9 +2418,11 @@ pub async fn admin_list_aml_reports(
     Query(query): Query<PaginationQuery>,
 ) -> Result<Json<AdminAmlReportsResponse>, ApiError> {
     query.validate()?;
+    let limit = query.limit.clamp(1, 100);
+    let offset = query.offset.max(0);
     let (reports, total) = app_state
         .subscription_service
-        .admin_list_aml_reports(query.limit, query.offset)
+        .admin_list_aml_reports(limit, offset)
         .await
         .map_err(|e| {
             tracing::error!(error = ?e, "Failed to list AML reports");
@@ -2430,8 +2432,8 @@ pub async fn admin_list_aml_reports(
     Ok(Json(AdminAmlReportsResponse {
         reports: reports.into_iter().map(Into::into).collect(),
         total,
-        limit: query.limit,
-        offset: query.offset,
+        limit,
+        offset,
     }))
 }
 

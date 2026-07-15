@@ -79,6 +79,7 @@ impl AmlCheckResult {
 
 #[async_trait]
 pub trait AmlRiskService: Send + Sync {
+    fn is_enabled(&self) -> bool;
     async fn check_near_account(&self, account_id: &str) -> AmlCheckResult;
 }
 
@@ -148,6 +149,10 @@ pub struct NoopAmlRiskService;
 
 #[async_trait]
 impl AmlRiskService for NoopAmlRiskService {
+    fn is_enabled(&self) -> bool {
+        false
+    }
+
     async fn check_near_account(&self, account_id: &str) -> AmlCheckResult {
         AmlCheckResult::unknown(account_id.trim(), "disabled")
     }
@@ -159,6 +164,7 @@ pub struct NoopAmlReportRepository;
 impl AmlReportRepository for NoopAmlReportRepository {
     async fn record_report(&self, event: AmlReportEvent) -> anyhow::Result<AmlReportRecord> {
         let now = Utc::now();
+        let active = event.result.risk_level != AmlRiskLevel::Unknown;
         Ok(AmlReportRecord {
             id: Uuid::new_v4(),
             user_id: Some(event.user_id),
@@ -172,7 +178,7 @@ impl AmlReportRepository for NoopAmlReportRepository {
             checked_at: event.result.checked_at,
             reason: event.result.reason.clone(),
             result: event.result,
-            active: true,
+            active,
             created_at: now,
             updated_at: now,
         })
@@ -493,6 +499,10 @@ fn normalize_lukka_response(account_id: &str, body: LukkaAmlScoreResponse) -> Am
 
 #[async_trait]
 impl AmlRiskService for LukkaAmlService {
+    fn is_enabled(&self) -> bool {
+        self.config.enabled
+    }
+
     async fn check_near_account(&self, account_id: &str) -> AmlCheckResult {
         let account_id = account_id.trim();
         if account_id.is_empty() {
@@ -529,6 +539,8 @@ mod tests {
             api_key: String::new(),
             api_secret: String::new(),
             high_risk_slack_webhook_url: String::new(),
+            high_risk_slack_timeout_ms: 1_000,
+            report_refresh_days: 30,
             timeout_ms: 1_000,
             max_retries: 0,
             cache_ttl_secs: 300,

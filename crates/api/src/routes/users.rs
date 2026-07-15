@@ -41,7 +41,7 @@ pub async fn get_user_status(
         .check_user_status(user.user_id)
         .await
         .map_err(|e| match e {
-            UserStatusError::AmlHighRiskBlocked { .. } => ApiError::forbidden("Account blocked"),
+            UserStatusError::AmlHighRiskBlocked { .. } => ApiError::forbidden("Account error"),
             UserStatusError::Internal(err) => {
                 tracing::error!(
                     user_id = %user.user_id,
