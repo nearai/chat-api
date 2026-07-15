@@ -115,6 +115,10 @@ async fn main() -> anyhow::Result<()> {
     let system_configs_repo = db.system_configs_repository();
     let model_repo = db.model_repository();
     let email_challenge_repo = db.email_verification_challenge_repository();
+    let aml_service: Arc<dyn services::aml::AmlRiskService> = Arc::new(
+        services::aml::LukkaAmlService::new(config.lukka_aml.clone()),
+    );
+    let aml_report_repo = db.aml_report_repository() as Arc<dyn services::aml::AmlReportRepository>;
 
     // Create services
     tracing::info!("Initializing services...");
@@ -142,7 +146,11 @@ async fn main() -> anyhow::Result<()> {
         config.email_auth.clone(),
     ));
 
-    let user_service = Arc::new(UserServiceImpl::new(user_repo.clone()));
+    let user_service = Arc::new(UserServiceImpl::new_with_aml(
+        user_repo.clone(),
+        aml_service.clone(),
+        aml_report_repo.clone(),
+    ));
 
     let user_settings_service = Arc::new(UserSettingsServiceImpl::new(user_settings_repo));
 
@@ -258,9 +266,6 @@ async fn main() -> anyhow::Result<()> {
     // Initialize subscription service
     tracing::info!("Initializing subscription service...");
     let stripe_client = Arc::new(StripeClientAdapter::new(config.stripe.secret_key.clone()));
-    let aml_service: Arc<dyn services::aml::AmlRiskService> = Arc::new(
-        services::aml::LukkaAmlService::new(config.lukka_aml.clone()),
-    );
     let subscription_service = Arc::new(services::subscription::SubscriptionServiceImpl::new(
         services::subscription::SubscriptionServiceConfig {
             db_pool: db.pool().clone(),
@@ -284,8 +289,7 @@ async fn main() -> anyhow::Result<()> {
             stripe_webhook_secret: config.stripe.webhook_secret.clone(),
             agent_service: agent_service.clone() as Arc<dyn services::agent::ports::AgentService>,
             aml_service,
-            aml_report_repo: db.aml_report_repository()
-                as Arc<dyn services::aml::AmlReportRepository>,
+            aml_report_repo,
             aml_high_risk_slack_webhook_url: config.lukka_aml.high_risk_slack_webhook_url.clone(),
             near_rpc_url: config.near.rpc_url.to_string(),
             near_staking_contract_id: config.near.staking_contract_id.clone(),

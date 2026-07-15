@@ -180,7 +180,16 @@ async fn create_test_server_and_db_inner(
             ))
         };
 
-    let user_service = Arc::new(services::user::UserServiceImpl::new(user_repo.clone()));
+    let aml_service: Arc<dyn services::aml::AmlRiskService> =
+        Arc::new(services::aml::NoopAmlRiskService);
+    let aml_report_repo: Arc<dyn services::aml::AmlReportRepository> =
+        Arc::new(services::aml::NoopAmlReportRepository);
+
+    let user_service = Arc::new(services::user::UserServiceImpl::new_with_aml(
+        user_repo.clone(),
+        aml_service.clone(),
+        aml_report_repo.clone(),
+    ));
 
     let user_settings_service = Arc::new(services::user::UserSettingsServiceImpl::new(
         user_settings_repo,
@@ -249,8 +258,8 @@ async fn create_test_server_and_db_inner(
                 agent_repo: agent_repo.clone() as Arc<dyn services::agent::ports::AgentRepository>,
                 agent_service: agent_service.clone()
                     as Arc<dyn services::agent::ports::AgentService>,
-                aml_service: Arc::new(services::aml::NoopAmlRiskService),
-                aml_report_repo: Arc::new(services::aml::NoopAmlReportRepository),
+                aml_service,
+                aml_report_repo,
                 aml_high_risk_slack_webhook_url: String::new(),
                 stripe_secret_key: config.stripe.secret_key.clone(),
                 stripe_webhook_secret: config.stripe.webhook_secret.clone(),

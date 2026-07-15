@@ -6,9 +6,55 @@ use axum::{
     Json, Router,
 };
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use services::tasks::{AccountDeletionTaskPayload, TaskId, TaskMessage, TaskPayload};
-use services::user::ports::AccountDeletionError;
+use services::user::ports::{AccountDeletionError, UserStatusError};
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct UserStatusResponse {
+    pub status: &'static str,
+}
+
+/// Get current user's access status.
+///
+/// Checks the current user's linked NEAR account against AML status when needed.
+#[utoipa::path(
+    get,
+    path = "/v1/users/status",
+    tag = "Users",
+    responses(
+        (status = 200, description = "Current user status is OK", body = UserStatusResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Current user is blocked", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn get_user_status(
+    State(app_state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+) -> Result<Json<UserStatusResponse>, ApiError> {
+    app_state
+        .user_service
+        .check_user_status(user.user_id)
+        .await
+        .map_err(|e| match e {
+            UserStatusError::AmlHighRiskBlocked { .. } => ApiError::forbidden("Account blocked"),
+            UserStatusError::Internal(err) => {
+                tracing::error!(
+                    user_id = %user.user_id,
+                    error = ?err,
+                    "Failed to check user status"
+                );
+                ApiError::internal_server_error("Failed to check user status")
+            }
+        })?;
+
+    Ok(Json(UserStatusResponse { status: "ok" }))
+}
+
 /// Get current user
 ///
 /// Returns the profile of the currently authenticated user, including their linked OAuth accounts.
@@ -375,6 +421,7 @@ pub async fn update_user_settings_partially(
 /// Create user router with all routes (requires authentication)
 pub fn create_user_router() -> Router<AppState> {
     Router::new()
+        .route("/status", get(get_user_status))
         .route("/me", get(get_current_user).delete(delete_current_user))
         .route("/me/usage", get(get_my_usage))
         .route("/me/settings", get(get_user_settings))
