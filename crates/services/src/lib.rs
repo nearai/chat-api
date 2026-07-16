@@ -4,6 +4,7 @@ pub mod auth;
 pub mod bi_metrics;
 pub mod consts;
 pub mod conversation;
+pub mod db_pool;
 pub mod file;
 pub mod metrics;
 pub mod model;

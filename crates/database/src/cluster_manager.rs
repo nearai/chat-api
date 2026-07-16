@@ -1,5 +1,5 @@
 use crate::patroni_discovery::{ClusterMember, PatroniDiscovery};
-use crate::pool::create_pool_with_native_tls;
+use crate::pool::{create_pool_with_native_tls, DbPool};
 use anyhow::{anyhow, Result};
 use deadpool::managed::QueueMode;
 use deadpool_postgres::{Config, Object as PooledConnection, Pool, Runtime};
@@ -10,6 +10,12 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::time;
 use tracing::{debug, error, info, warn};
+
+/// Upper bound on verifying a candidate leader before installing its pool.
+/// Generous next to the 5s pool create/wait timeouts it wraps, but bounded so
+/// a member that accepts connections and then hangs cannot stall the
+/// reconcile loop.
+const WRITE_POOL_VERIFY_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Read preference strategy
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,7 +41,13 @@ impl From<&str> for ReadPreference {
 
 pub struct ClusterManager {
     discovery: Arc<PatroniDiscovery>,
-    write_pool: Arc<RwLock<Option<Pool>>>,
+    /// Shared handle the repositories clone at startup. Installing a new pool
+    /// here repoints every clone; see [`DbPool`].
+    write_pool: DbPool,
+    /// `host:port` the write pool currently targets. Recorded only after a
+    /// pool was successfully built and verified against that member, so a
+    /// failed rebuild leaves it unchanged and the next reconcile tick retries.
+    write_pool_target: Arc<RwLock<Option<String>>>,
     read_pools: Arc<RwLock<HashMap<String, Pool>>>,
     database_config: DatabaseConfig,
     read_preference: ReadPreference,
@@ -63,13 +75,19 @@ impl ClusterManager {
     ) -> Self {
         Self {
             discovery,
-            write_pool: Arc::new(RwLock::new(None)),
+            write_pool: DbPool::uninitialized(),
+            write_pool_target: Arc::new(RwLock::new(None)),
             read_pools: Arc::new(RwLock::new(HashMap::new())),
             database_config,
             read_preference,
             max_replica_lag_ms,
             round_robin_counter: AtomicUsize::new(0),
         }
+    }
+
+    /// `host:port` connection target for a cluster member.
+    fn member_target(member: &ClusterMember) -> String {
+        format!("{}:{}", member.host, member.port)
     }
 
     /// Initialize the cluster manager and create initial pools
@@ -106,24 +124,47 @@ impl ClusterManager {
             self.database_config.max_write_connections,
         )?;
 
-        // Test the connection
-        let conn = pool.get().await?;
-        conn.simple_query("SELECT 1").await?;
+        // The deadpool timeouts only bound connection establishment; a member
+        // that accepts connections but then hangs would otherwise block the
+        // reconcile loop indefinitely and freeze all failover handling, so the
+        // whole verification is bounded.
+        let verification = async {
+            // Test the connection
+            let conn = pool.get().await?;
+            conn.simple_query("SELECT 1").await?;
 
-        // Verify this is actually the leader
-        let rows = conn.query("SELECT pg_is_in_recovery()", &[]).await?;
-        let is_replica: bool = rows[0].get(0);
-        if is_replica {
-            warn!(
-                "Node {} claims to be leader but is in recovery mode",
-                leader.name
-            );
-        }
+            // Verify this is actually the leader. Patroni can report a member
+            // as leader while Postgres is still completing promotion;
+            // installing it would pin every write to a read-only node with no
+            // retry, so fail and let the next reconcile tick try again.
+            let rows = conn.query("SELECT pg_is_in_recovery()", &[]).await?;
+            let is_replica: bool = rows
+                .first()
+                .ok_or_else(|| anyhow!("Empty response to pg_is_in_recovery()"))?
+                .try_get(0)?;
+            if is_replica {
+                return Err(anyhow!(
+                    "Node {} claims to be leader but is still in recovery",
+                    leader.name
+                ));
+            }
+            Ok(())
+        };
+        time::timeout(WRITE_POOL_VERIFY_TIMEOUT, verification)
+            .await
+            .map_err(|_| {
+                anyhow!(
+                    "Timed out verifying leader {} after {:?}",
+                    leader.name,
+                    WRITE_POOL_VERIFY_TIMEOUT
+                )
+            })??;
 
-        let mut write_pool = self.write_pool.write().await;
-        *write_pool = Some(pool);
+        self.write_pool.replace(pool);
+        let target = Self::member_target(leader);
+        *self.write_pool_target.write().await = Some(target.clone());
 
-        debug!("Write pool created successfully for leader {}", leader.name);
+        info!("Write pool now targets leader {} ({})", leader.name, target);
         Ok(())
     }
 
@@ -194,12 +235,8 @@ impl ClusterManager {
 
     /// Get a connection for write operations (always uses leader)
     pub async fn get_write_connection(&self) -> Result<PooledConnection> {
-        let write_pool = self.write_pool.read().await;
-        let pool = write_pool
-            .as_ref()
-            .ok_or_else(|| anyhow!("No write pool available"))?;
-
-        pool.get()
+        self.write_pool
+            .get()
             .await
             .map_err(|e| anyhow!("Failed to get write connection: {e}"))
     }
@@ -215,18 +252,18 @@ impl ClusterManager {
 
     /// Get read connection using round-robin selection
     async fn get_read_connection_round_robin(&self) -> Result<PooledConnection> {
-        let read_pools = self.read_pools.read().await;
-
-        if read_pools.is_empty() {
+        let replicas = self.discovery.get_replicas().await;
+        if replicas.is_empty() {
             debug!("No read replicas available, falling back to leader");
             return self.get_write_connection().await;
         }
 
         let index = self.round_robin_counter.fetch_add(1, Ordering::Relaxed);
-        let replicas = self.discovery.get_replicas().await;
-
         if let Some(replica) = replicas.get(index % replicas.len()) {
-            if let Some(pool) = read_pools.get(&replica.host) {
+            // Clone the pool out of the map so the lock is not held across the
+            // acquisition await.
+            let pool = self.read_pools.read().await.get(&replica.host).cloned();
+            if let Some(pool) = pool {
                 match pool.get().await {
                     Ok(conn) => return Ok(conn),
                     Err(_) => {
@@ -243,20 +280,16 @@ impl ClusterManager {
 
     /// Get read connection from replica with least lag
     async fn get_read_connection_least_lag(&self) -> Result<PooledConnection> {
-        let read_pools = self.read_pools.read().await;
-
-        if read_pools.is_empty() {
-            debug!("No read replicas available, falling back to leader");
-            return self.get_write_connection().await;
-        }
-
         // Get replica with least lag
         if let Some(replica) = self
             .discovery
             .get_least_lag_replica(self.max_replica_lag_ms)
             .await
         {
-            if let Some(pool) = read_pools.get(&replica.host) {
+            // Clone the pool out of the map so the lock is not held across the
+            // acquisition await.
+            let pool = self.read_pools.read().await.get(&replica.host).cloned();
+            if let Some(pool) = pool {
                 match pool.get().await {
                     Ok(conn) => {
                         debug!(
@@ -277,25 +310,43 @@ impl ClusterManager {
         self.get_write_connection().await
     }
 
-    /// Handle leader change event
-    pub async fn handle_leader_change(&self) -> Result<()> {
-        warn!("Handling leader change");
+    /// Converge the pools on the current cluster topology: rebuild the write
+    /// pool whenever it does not target the discovered leader, and refresh the
+    /// read pools. Safe to call repeatedly — the installed target is only
+    /// recorded on a successful rebuild, so a failure (e.g. the new leader not
+    /// accepting connections yet) is retried on the next tick instead of being
+    /// dropped.
+    pub async fn reconcile(&self) {
+        if self.discovery.is_state_stale().await {
+            warn!(
+                "Patroni cluster state is stale (age: {:?}s); leader changes may go undetected",
+                self.discovery.get_state_age_secs().await
+            );
+        }
 
-        // Get new leader
-        let leader = self
-            .discovery
-            .get_leader()
-            .await
-            .ok_or_else(|| anyhow!("No leader available after failover"))?;
+        match self.discovery.get_leader().await {
+            Some(leader) => {
+                let target = Self::member_target(&leader);
+                let installed = self.write_pool_target.read().await.clone();
+                if installed.as_deref() != Some(target.as_str()) {
+                    warn!(
+                        "Write pool targets {installed:?} but cluster leader is {target}; rebuilding write pool"
+                    );
+                    if let Err(e) = self.create_write_pool(&leader).await {
+                        error!(
+                            "Failed to rebuild write pool for leader {target} (will retry): {e:#}"
+                        );
+                    }
+                }
+            }
+            None => {
+                warn!("No cluster leader known; keeping current write pool");
+            }
+        }
 
-        // Recreate write pool
-        self.create_write_pool(&leader).await?;
-
-        // Update read pools
-        self.update_read_pools().await?;
-
-        info!("Leader change handled successfully");
-        Ok(())
+        if let Err(e) = self.update_read_pools().await {
+            error!("Failed to update read pools: {e:#}");
+        }
     }
 
     /// Start background tasks for cluster management
@@ -303,37 +354,18 @@ impl ClusterManager {
         let manager = self.clone();
         tokio::spawn(async move {
             let mut interval = time::interval(Duration::from_secs(30));
-            let mut last_leader: Option<String> = None;
+            interval.tick().await; // skip the immediate first tick
 
             loop {
                 interval.tick().await;
-
-                // Check for leader changes
-                if let Some(leader) = manager.discovery.get_leader().await {
-                    let current_leader = Some(leader.host.clone());
-                    if last_leader != current_leader {
-                        if last_leader.is_some() {
-                            // Leader changed
-                            info!("Leader change detected");
-                            if manager.handle_leader_change().await.is_err() {
-                                error!("Failed to handle leader change");
-                            }
-                        }
-                        last_leader = current_leader;
-                    }
-                }
-
-                // Update read pools periodically
-                if manager.update_read_pools().await.is_err() {
-                    error!("Failed to update read pools");
-                }
+                manager.reconcile().await;
             }
         });
     }
 
     /// Get statistics about the cluster
     pub async fn get_stats(&self) -> ClusterStats {
-        let write_available = self.write_pool.read().await.is_some();
+        let write_available = self.write_pool.current().is_some();
         let read_pool_count = self.read_pools.read().await.len();
         let leader = self.discovery.get_leader().await;
         let replicas = self.discovery.get_replicas().await;
@@ -347,13 +379,10 @@ impl ClusterManager {
         }
     }
 
-    /// Get a clone of the write pool for direct access
-    pub async fn get_write_pool(&self) -> Result<Pool> {
-        let pool_guard = self.write_pool.read().await;
-        pool_guard
-            .as_ref()
-            .ok_or_else(|| anyhow!("Write pool not initialized"))
-            .cloned()
+    /// Get the shared write-pool handle. Clones of this handle stay pointed at
+    /// the current leader across failovers.
+    pub fn write_pool(&self) -> DbPool {
+        self.write_pool.clone()
     }
 }
 
@@ -369,6 +398,157 @@ pub struct ClusterStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::net::TcpListener;
+
+    fn leader_member(name: &str, host: &str, port: u16) -> ClusterMember {
+        ClusterMember {
+            name: name.to_string(),
+            host: host.to_string(),
+            port,
+            role: "leader".to_string(),
+            state: "running".to_string(),
+            lag: None,
+            timeline: None,
+        }
+    }
+
+    fn test_db_config() -> DatabaseConfig {
+        DatabaseConfig {
+            database: std::env::var("DATABASE_NAME").unwrap_or_else(|_| "postgres".to_string()),
+            username: std::env::var("DATABASE_USER").unwrap_or_else(|_| "postgres".to_string()),
+            password: std::env::var("DATABASE_PASSWORD").unwrap_or_else(|_| "postgres".to_string()),
+            max_write_connections: 2,
+            max_read_connections: 2,
+            tls_enabled: false,
+            tls_ca_cert_path: None,
+        }
+    }
+
+    /// A discovery whose refresh interval is long enough that the injected
+    /// state never counts as stale during a test.
+    fn test_discovery() -> Arc<PatroniDiscovery> {
+        Arc::new(PatroniDiscovery::new(
+            "test-app".to_string(),
+            "gateway.invalid".to_string(),
+            3600,
+        ))
+    }
+
+    /// Listener that accepts TCP connections and immediately closes them, so
+    /// the Postgres handshake fails. Returns the port and an attempt counter.
+    async fn dead_postgres() -> (u16, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counter = attempts.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Ok((socket, _)) = listener.accept().await {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    drop(socket);
+                }
+            }
+        });
+        (port, attempts)
+    }
+
+    /// Regression test for the 2026-07-12 outage follow-up: a failed write-pool
+    /// rebuild (new leader not accepting connections yet) must be retried on
+    /// the next reconcile tick, not dropped. The old loop recorded the new
+    /// leader as handled even when the rebuild failed, wedging the write pool
+    /// on the previous leader until a redeploy.
+    #[tokio::test]
+    async fn failed_write_pool_rebuild_is_retried_on_next_reconcile() {
+        let (port, attempts) = dead_postgres().await;
+        let discovery = test_discovery();
+        discovery
+            .set_cluster_state_for_test(Some(leader_member("n1", "127.0.0.1", port)), vec![])
+            .await;
+
+        let manager = ClusterManager::new(
+            discovery.clone(),
+            test_db_config(),
+            ReadPreference::LeaderOnly,
+            None,
+        );
+
+        manager.reconcile().await;
+        let first_attempts = attempts.load(Ordering::SeqCst);
+        assert!(first_attempts >= 1, "reconcile must attempt a connection");
+        assert!(
+            manager.write_pool_target.read().await.is_none(),
+            "a failed rebuild must not record the leader as installed"
+        );
+
+        manager.reconcile().await;
+        assert!(
+            attempts.load(Ordering::SeqCst) > first_attempts,
+            "the next reconcile must retry the failed rebuild"
+        );
+    }
+
+    /// Regression test for the 2026-07-12 outage root cause: pool handles
+    /// cloned at startup (as `Database::new` hands to every repository) must
+    /// observe the pool installed for a new leader — previously they kept
+    /// dialing the host captured at startup forever.
+    ///
+    /// Needs a reachable Postgres (the CI test job provides one; locally run
+    /// the docker-compose Postgres).
+    #[tokio::test]
+    async fn reconcile_repoints_startup_pool_clones_to_new_leader() {
+        let pg_host = std::env::var("DATABASE_HOST").unwrap_or_else(|_| "localhost".to_string());
+        let pg_port: u16 = std::env::var("DATABASE_PORT")
+            .unwrap_or_else(|_| "5432".to_string())
+            .parse()
+            .unwrap();
+
+        // "Old leader": up at the TCP level but unusable, like a failed member.
+        let (dead_port, _attempts) = dead_postgres().await;
+        let discovery = test_discovery();
+        discovery
+            .set_cluster_state_for_test(
+                Some(leader_member("old-leader", "127.0.0.1", dead_port)),
+                vec![],
+            )
+            .await;
+
+        let manager = ClusterManager::new(
+            discovery.clone(),
+            test_db_config(),
+            ReadPreference::LeaderOnly,
+            None,
+        );
+
+        // What Database::new does at startup: take a handle and clone it into
+        // the repositories.
+        let repository_handle = manager.write_pool();
+
+        manager.reconcile().await;
+        assert!(
+            repository_handle.get().await.is_err(),
+            "no pool must be installed while the leader is unusable"
+        );
+
+        // Failover: discovery now reports a reachable leader.
+        discovery
+            .set_cluster_state_for_test(
+                Some(leader_member("new-leader", &pg_host, pg_port)),
+                vec![],
+            )
+            .await;
+        manager.reconcile().await;
+
+        let conn = repository_handle
+            .get()
+            .await
+            .expect("startup handle must serve connections to the new leader");
+        let row = conn.query_one("SELECT 1", &[]).await.unwrap();
+        assert_eq!(row.get::<_, i32>(0), 1);
+        assert_eq!(
+            manager.write_pool_target.read().await.as_deref(),
+            Some(format!("{pg_host}:{pg_port}").as_str())
+        );
+    }
 
     #[test]
     fn test_read_preference_from_str() {
