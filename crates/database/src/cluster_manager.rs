@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tokio::time;
 use tracing::{debug, error, info, warn};
 
@@ -48,6 +48,10 @@ pub struct ClusterManager {
     /// pool was successfully built and verified against that member, so a
     /// failed rebuild leaves it unchanged and the next reconcile tick retries.
     write_pool_target: Arc<RwLock<Option<String>>>,
+    /// Serializes reconciliation so concurrent callers cannot interleave
+    /// verify/install sequences and roll the write pool back to an older
+    /// leader (last-writer-wins).
+    reconcile_lock: Mutex<()>,
     read_pools: Arc<RwLock<HashMap<String, Pool>>>,
     database_config: DatabaseConfig,
     read_preference: ReadPreference,
@@ -77,6 +81,7 @@ impl ClusterManager {
             discovery,
             write_pool: DbPool::uninitialized(),
             write_pool_target: Arc::new(RwLock::new(None)),
+            reconcile_lock: Mutex::new(()),
             read_pools: Arc::new(RwLock::new(HashMap::new())),
             database_config,
             read_preference,
@@ -157,8 +162,20 @@ impl ClusterManager {
                 )
             })??;
 
-        self.write_pool.replace(pool);
+        // Discovery may have advanced while this candidate was being verified
+        // (up to WRITE_POOL_VERIFY_TIMEOUT). Installing a stale leader would
+        // repoint every holder to a demoted node until the next reconcile
+        // tick, so confirm the candidate is still the current leader.
         let target = Self::member_target(leader);
+        let current = self.discovery.get_leader().await;
+        if current.as_ref().map(Self::member_target).as_deref() != Some(target.as_str()) {
+            return Err(anyhow!(
+                "Cluster leader changed to {:?} while verifying {target}; discarding this pool",
+                current.map(|m| Self::member_target(&m))
+            ));
+        }
+
+        self.write_pool.replace(pool);
         *self.write_pool_target.write().await = Some(target.clone());
 
         info!("Write pool now targets leader {} ({})", leader.name, target);
@@ -314,6 +331,10 @@ impl ClusterManager {
     /// accepting connections yet) is retried on the next tick instead of being
     /// dropped.
     pub async fn reconcile(&self) {
+        // One reconciliation at a time: interleaved verify/install sequences
+        // could install pools out of order and roll back to an older leader.
+        let _guard = self.reconcile_lock.lock().await;
+
         if self.discovery.is_state_stale().await {
             let age = self
                 .discovery
@@ -487,29 +508,87 @@ mod tests {
         );
     }
 
-    /// Regression test for the 2026-07-12 outage root cause: pool handles
-    /// cloned at startup (as `Database::new` hands to every repository) must
-    /// observe the pool installed for a new leader — previously they kept
-    /// dialing the host captured at startup forever.
-    ///
-    /// Needs a reachable Postgres (the CI test job provides one; locally run
-    /// the docker-compose Postgres).
-    #[tokio::test]
-    async fn reconcile_repoints_startup_pool_clones_to_new_leader() {
-        let pg_host = std::env::var("DATABASE_HOST").unwrap_or_else(|_| "localhost".to_string());
-        let pg_port: u16 = std::env::var("DATABASE_PORT")
-            .unwrap_or_else(|_| "5432".to_string())
-            .parse()
-            .unwrap();
+    fn postgres_upstream() -> String {
+        let host = std::env::var("DATABASE_HOST").unwrap_or_else(|_| "localhost".to_string());
+        let port = std::env::var("DATABASE_PORT").unwrap_or_else(|_| "5432".to_string());
+        format!("{host}:{port}")
+    }
 
-        // "Old leader": up at the TCP level but unusable, like a failed member.
-        let (dead_port, _attempts) = dead_postgres().await;
+    /// TCP proxy in front of Postgres standing in for one cluster member.
+    /// Counts accepted connections, optionally delays each connection before
+    /// it reaches Postgres (to widen verification windows), and can be shut
+    /// down hard — killing established connections — like a leader going down.
+    struct TcpProxy {
+        port: u16,
+        connections: Arc<AtomicUsize>,
+        tasks: Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    }
+
+    impl TcpProxy {
+        async fn start(upstream: String, pre_connect_delay: Duration) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let connections = Arc::new(AtomicUsize::new(0));
+            let tasks: Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>> = Arc::default();
+
+            let accept_task = {
+                let connections = connections.clone();
+                let tasks = tasks.clone();
+                tokio::spawn(async move {
+                    loop {
+                        if let Ok((mut client, _)) = listener.accept().await {
+                            connections.fetch_add(1, Ordering::SeqCst);
+                            let upstream = upstream.clone();
+                            let conn_task = tokio::spawn(async move {
+                                tokio::time::sleep(pre_connect_delay).await;
+                                if let Ok(mut server) =
+                                    tokio::net::TcpStream::connect(&upstream).await
+                                {
+                                    let _ = tokio::io::copy_bidirectional(&mut client, &mut server)
+                                        .await;
+                                }
+                            });
+                            tasks.lock().unwrap().push(conn_task);
+                        }
+                    }
+                })
+            };
+            tasks.lock().unwrap().push(accept_task);
+
+            Self {
+                port,
+                connections,
+                tasks,
+            }
+        }
+
+        fn target(&self) -> ClusterMember {
+            leader_member(&format!("member-{}", self.port), "127.0.0.1", self.port)
+        }
+
+        /// Stop accepting and kill every established connection — the member
+        /// is hard-down.
+        fn shutdown(&self) {
+            for task in self.tasks.lock().unwrap().drain(..) {
+                task.abort();
+            }
+        }
+    }
+
+    /// The outage invariant (2026-07-12): a handle clone already serving
+    /// traffic through the old leader's pool must observe the failover
+    /// install and route subsequent acquisitions through the new leader —
+    /// even once the old leader is gone. Needs a reachable Postgres (the CI
+    /// test job provides one; locally run the docker-compose Postgres).
+    #[tokio::test]
+    async fn startup_pool_clones_follow_leader_across_failover() {
+        let upstream = postgres_upstream();
+        let leader_a = TcpProxy::start(upstream.clone(), Duration::ZERO).await;
+        let leader_b = TcpProxy::start(upstream, Duration::ZERO).await;
+
         let discovery = test_discovery();
         discovery
-            .set_cluster_state_for_test(
-                Some(leader_member("old-leader", "127.0.0.1", dead_port)),
-                vec![],
-            )
+            .set_cluster_state_for_test(Some(leader_a.target()), vec![])
             .await;
 
         let manager = ClusterManager::new(
@@ -518,36 +597,101 @@ mod tests {
             ReadPreference::LeaderOnly,
             None,
         );
-
-        // What Database::new does at startup: take a handle and clone it into
-        // the repositories.
-        let repository_handle = manager.write_pool();
-
         manager.reconcile().await;
+
+        // What Database::new does at startup: clone the handle into the
+        // repositories.
+        let repository_handle = manager.write_pool();
+        let conn = repository_handle
+            .get()
+            .await
+            .expect("must serve through leader A before the failover");
+        let row = conn.query_one("SELECT 1", &[]).await.unwrap();
+        assert_eq!(row.get::<_, i32>(0), 1);
+        drop(conn);
         assert!(
-            repository_handle.get().await.is_err(),
-            "no pool must be installed while the leader is unusable"
+            leader_a.connections.load(Ordering::SeqCst) >= 1,
+            "pre-failover traffic must flow through leader A"
         );
 
-        // Failover: discovery now reports a reachable leader.
+        // Failover: discovery reports B as leader; reconcile installs it,
+        // then A goes hard-down. With the outage bug, the clone stayed pinned
+        // to A and wedged right here.
         discovery
-            .set_cluster_state_for_test(
-                Some(leader_member("new-leader", &pg_host, pg_port)),
-                vec![],
-            )
+            .set_cluster_state_for_test(Some(leader_b.target()), vec![])
             .await;
         manager.reconcile().await;
+        leader_a.shutdown();
 
         let conn = repository_handle
             .get()
             .await
-            .expect("startup handle must serve connections to the new leader");
+            .expect("startup clone must route through leader B after the failover");
         let row = conn.query_one("SELECT 1", &[]).await.unwrap();
         assert_eq!(row.get::<_, i32>(0), 1);
+        assert!(
+            leader_b.connections.load(Ordering::SeqCst) >= 1,
+            "post-failover traffic must flow through leader B"
+        );
         assert_eq!(
             manager.write_pool_target.read().await.as_deref(),
-            Some(format!("{pg_host}:{pg_port}").as_str())
+            Some(format!("127.0.0.1:{}", leader_b.port).as_str())
         );
+    }
+
+    /// If discovery advances to a new leader while a candidate is still being
+    /// verified, the stale candidate must be discarded, not installed.
+    #[tokio::test]
+    async fn stale_candidate_is_discarded_when_leader_changes_during_verification() {
+        let upstream = postgres_upstream();
+        // Candidate A delays every connection, holding reconcile inside
+        // verification long enough to flip the leader underneath it.
+        let leader_a = TcpProxy::start(upstream.clone(), Duration::from_millis(750)).await;
+        let leader_b = TcpProxy::start(upstream, Duration::ZERO).await;
+
+        let discovery = test_discovery();
+        discovery
+            .set_cluster_state_for_test(Some(leader_a.target()), vec![])
+            .await;
+
+        let manager = Arc::new(ClusterManager::new(
+            discovery.clone(),
+            test_db_config(),
+            ReadPreference::LeaderOnly,
+            None,
+        ));
+        let repository_handle = manager.write_pool();
+
+        let reconcile_task = tokio::spawn({
+            let manager = manager.clone();
+            async move { manager.reconcile().await }
+        });
+        // Wait until reconcile is inside A's delayed verification, then fail
+        // over.
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        discovery
+            .set_cluster_state_for_test(Some(leader_b.target()), vec![])
+            .await;
+        reconcile_task.await.unwrap();
+
+        assert!(
+            manager.write_pool_target.read().await.is_none(),
+            "the stale candidate must not be recorded as installed"
+        );
+        assert!(
+            repository_handle.get().await.is_err(),
+            "the stale candidate must not be installed as the write pool"
+        );
+
+        // The next tick converges on the current leader.
+        manager.reconcile().await;
+        let conn = repository_handle
+            .get()
+            .await
+            .expect("reconcile must install the current leader");
+        let row = conn.query_one("SELECT 1", &[]).await.unwrap();
+        assert_eq!(row.get::<_, i32>(0), 1);
+        assert!(leader_b.connections.load(Ordering::SeqCst) >= 1);
     }
 
     #[test]
