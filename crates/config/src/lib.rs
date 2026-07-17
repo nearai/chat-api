@@ -193,8 +193,6 @@ pub struct LukkaAmlConfig {
     pub enabled: bool,
     pub base_url: String,
     pub bearer_token: String,
-    pub api_key: String,
-    pub api_secret: String,
     pub high_risk_slack_webhook_url: String,
     pub high_risk_slack_timeout_ms: u64,
     pub report_refresh_days: i64,
@@ -209,8 +207,6 @@ impl fmt::Debug for LukkaAmlConfig {
             .field("enabled", &self.enabled)
             .field("base_url", &self.base_url)
             .field("bearer_token", &"<redacted>")
-            .field("api_key", &"<redacted>")
-            .field("api_secret", &"<redacted>")
             .field("high_risk_slack_webhook_url", &"<redacted>")
             .field(
                 "high_risk_slack_timeout_ms",
@@ -226,8 +222,6 @@ impl fmt::Debug for LukkaAmlConfig {
 
 impl Default for LukkaAmlConfig {
     fn default() -> Self {
-        let bearer_token = std::env::var("LUKKA_BEARER_TOKEN").unwrap_or_default();
-        let api_key = std::env::var("LUKKA_API_KEY").unwrap_or_default();
         Self {
             enabled: std::env::var("LUKKA_AML_ENABLED")
                 .ok()
@@ -235,9 +229,7 @@ impl Default for LukkaAmlConfig {
                 .unwrap_or(false),
             base_url: std::env::var("LUKKA_BASE_URL")
                 .unwrap_or_else(|_| "https://api.blockchain-analytics.lukka.tech".to_string()),
-            bearer_token,
-            api_key,
-            api_secret: std::env::var("LUKKA_API_SECRET").unwrap_or_default(),
+            bearer_token: std::env::var("LUKKA_BEARER_TOKEN").unwrap_or_default(),
             high_risk_slack_webhook_url: std::env::var("LUKKA_AML_HIGH_RISK_SLACK_WEBHOOK_URL")
                 .unwrap_or_default(),
             high_risk_slack_timeout_ms: std::env::var("LUKKA_AML_HIGH_RISK_SLACK_TIMEOUT_MS")

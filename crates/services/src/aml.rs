@@ -298,26 +298,7 @@ impl LukkaAmlService {
             return LukkaAuthMode::Bearer(bearer);
         }
 
-        let api_key = self.config.api_key.trim();
-        let api_secret = self.config.api_secret.trim();
-        if api_key.is_empty() && api_secret.is_empty() {
-            LukkaAuthMode::Missing
-        } else if api_secret.is_empty() {
-            tracing::warn!(
-                "Lukka AML API key is configured without API secret; key/secret auth disabled"
-            );
-            LukkaAuthMode::Missing
-        } else if api_key.is_empty() {
-            tracing::warn!(
-                "Lukka AML API secret is configured without API key; key/secret auth disabled"
-            );
-            LukkaAuthMode::Missing
-        } else {
-            LukkaAuthMode::KeySecret {
-                api_key,
-                api_secret,
-            }
-        }
+        LukkaAuthMode::Missing
     }
 
     fn score_url(&self, account_id: &str) -> String {
@@ -376,12 +357,6 @@ impl LukkaAmlService {
             let mut request = self.http_client.get(&url);
             request = match auth_mode {
                 LukkaAuthMode::Bearer(token) => request.bearer_auth(token),
-                LukkaAuthMode::KeySecret {
-                    api_key,
-                    api_secret,
-                } => request
-                    .header("x-api-key", api_key)
-                    .header("x-api-secret", api_secret),
                 LukkaAuthMode::Missing => request,
             };
 
@@ -456,10 +431,6 @@ impl LukkaAmlService {
 enum LukkaAuthMode<'a> {
     Missing,
     Bearer(&'a str),
-    KeySecret {
-        api_key: &'a str,
-        api_secret: &'a str,
-    },
 }
 
 fn normalize_lukka_response(account_id: &str, body: LukkaAmlScoreResponse) -> AmlCheckResult {
@@ -536,8 +507,6 @@ mod tests {
             enabled: true,
             base_url,
             bearer_token: "test-token".to_string(),
-            api_key: String::new(),
-            api_secret: String::new(),
             high_risk_slack_webhook_url: String::new(),
             high_risk_slack_timeout_ms: 1_000,
             report_refresh_days: 30,
@@ -686,21 +655,6 @@ mod tests {
         let cache = service.cache.read().await;
         assert!(!cache.contains_key("expired.near"));
         assert!(cache.contains_key("fresh.near"));
-    }
-
-    #[tokio::test]
-    async fn api_key_without_secret_is_not_used_as_bearer_token() {
-        let server = MockServer::start().await;
-        let mut cfg = test_config(server.uri());
-        cfg.bearer_token = String::new();
-        cfg.api_key = "api-key-only".to_string();
-        cfg.api_secret = String::new();
-        let service = LukkaAmlService::new(cfg);
-
-        let result = service.check_near_account("alice.near").await;
-
-        assert_eq!(result.risk_level, AmlRiskLevel::Unknown);
-        assert_eq!(result.reason.as_deref(), Some("not_configured"));
     }
 
     #[tokio::test]
