@@ -4067,6 +4067,34 @@ pub async fn admin_migrate_instance(
         ));
     }
 
+    // Best-effort: grant the owning user CrabShack access so scheduled backups include the instance
+    // and it appears in their portal. Non-fatal — migration already succeeded; on failure the admin
+    // can retry via the grant-owner endpoint.
+    match grant_crabshack_owner(
+        &app_state,
+        instance.user_id,
+        &instance_name,
+        &crabshack_manager.url,
+        &crabshack_manager.token,
+    )
+    .await
+    {
+        Ok(Some(owner_user_id)) => tracing::info!(
+            "Migrate: granted CrabShack owner: instance_id={}, owner_user_id={}",
+            id,
+            owner_user_id
+        ),
+        Ok(None) => tracing::warn!(
+            "Migrate: skipped owner grant, user has no passkey credentials: instance_id={}",
+            id
+        ),
+        Err(e) => tracing::warn!(
+            "Migrate: owner grant failed (non-fatal, retry via grant-owner): instance_id={}, error={}",
+            id,
+            e
+        ),
+    }
+
     tracing::info!(
         "Migrate: completed successfully, elapsed={:.1}s, instance_id={}, name={}",
         migrate_start.elapsed().as_secs_f64(),
@@ -4079,6 +4107,57 @@ pub async fn admin_migrate_instance(
         instance_name,
         message: "Instance migrated to CrabShack".to_string(),
     }))
+}
+
+/// Derive the owning user's CrabShack id and grant them owner access on `instance_name`.
+///
+/// CrabShack user id = hex(sha256(hex_decode(auth_secret))), mirroring orchestrator-api's
+/// userIdFromAuthSecret. Never mints credentials — a fresh secret would derive a different identity
+/// and backup key than the migrated backup was encrypted with. Idempotent on CrabShack
+/// (last-write-wins), so re-running is safe. Returns Ok(None) when the user has no passkey
+/// credentials, Ok(Some(owner_id)) on a successful grant.
+async fn grant_crabshack_owner(
+    app_state: &AppState,
+    user_id: UserId,
+    instance_name: &str,
+    crabshack_url: &str,
+    crabshack_token: &str,
+) -> anyhow::Result<Option<String>> {
+    let auth_secret = match app_state
+        .agent_repository
+        .get_user_passkey_credentials(user_id)
+        .await?
+    {
+        Some((auth_secret, _backup_passphrase)) => auth_secret,
+        None => return Ok(None),
+    };
+
+    let auth_secret_bytes = hex::decode(auth_secret.trim())
+        .map_err(|e| anyhow::anyhow!("stored auth_secret is not valid hex: {e}"))?;
+    let owner_user_id = hex::encode(Sha256::digest(&auth_secret_bytes));
+
+    let grant_url = format!(
+        "{}/instances/{}/access",
+        crabshack_url.trim_end_matches('/'),
+        encode(instance_name)
+    );
+    let resp = app_state
+        .http_client
+        .post(&grant_url)
+        .bearer_auth(crabshack_token)
+        .json(&serde_json::json!({ "user_id": owner_user_id, "role": "owner" }))
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!(
+            "CrabShack rejected the access grant (status {status}): {}",
+            body.chars().take(200).collect::<String>()
+        );
+    }
+    Ok(Some(owner_user_id))
 }
 
 /// Response for the grant-owner endpoint.
@@ -4169,80 +4248,34 @@ pub async fn admin_grant_instance_owner(
         ));
     }
 
-    // Look up the owning user's passkey credentials. The auth_secret is the root of the CrabShack
-    // user identity. Never mint new credentials here: fresh creds would derive a different identity
-    // and backup key than the migrated backup was encrypted with.
-    let auth_secret = match app_state
-        .agent_repository
-        .get_user_passkey_credentials(instance.user_id)
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                "grant-owner: failed to get passkey credentials: user_id={}, error={}",
-                instance.user_id,
-                e
-            );
-            ApiError::internal_server_error("Failed to get user credentials")
-        })? {
-        Some((auth_secret, _backup_passphrase)) => auth_secret,
-        None => {
+    // Derive the owner id and grant access. Shared with the migrate handler, which performs the
+    // same grant automatically after a successful import.
+    let owner_user_id = match grant_crabshack_owner(
+        &app_state,
+        instance.user_id,
+        &instance.name,
+        &crabshack_manager.url,
+        &crabshack_manager.token,
+    )
+    .await
+    {
+        Ok(Some(owner_user_id)) => owner_user_id,
+        Ok(None) => {
             return Err(ApiError::bad_request(
                 "User has no passkey credentials — cannot derive CrabShack owner id",
             ));
         }
-    };
-
-    // CrabShack user id = hex(sha256(hex_decode(auth_secret))).
-    // Mirrors CrabShack's userIdFromAuthSecret (orchestrator-api/src/auth/user-queries.ts).
-    let auth_secret_bytes = hex::decode(auth_secret.trim()).map_err(|e| {
-        tracing::error!(
-            "grant-owner: stored auth_secret is not valid hex: instance_id={}, error={}",
-            id,
-            e
-        );
-        ApiError::internal_server_error("Stored auth_secret is not valid hex")
-    })?;
-    let owner_user_id = hex::encode(Sha256::digest(&auth_secret_bytes));
-
-    // Grant owner access on CrabShack (admin endpoint). Idempotent: last-write-wins.
-    let grant_url = format!(
-        "{}/instances/{}/access",
-        crabshack_manager.url.trim_end_matches('/'),
-        encode(&instance.name)
-    );
-    let resp = app_state
-        .http_client
-        .post(&grant_url)
-        .bearer_auth(&crabshack_manager.token)
-        .json(&serde_json::json!({ "user_id": owner_user_id, "role": "owner" }))
-        .timeout(std::time::Duration::from_secs(30))
-        .send()
-        .await
-        .map_err(|e| {
+        Err(e) => {
             tracing::error!(
-                "grant-owner: CrabShack access call failed: instance_id={}, error={}",
+                "grant-owner: failed to grant CrabShack owner: instance_id={}, error={}",
                 id,
                 e
             );
-            ApiError::internal_server_error("Failed to call CrabShack access endpoint")
-        })?;
-    let status = resp.status();
-    if !status.is_success() {
-        // Read the body for diagnosis and surface CrabShack's status to the caller, so a
-        // misconfigured-admin-token 401 or a CrabShack 5xx is distinguishable from a generic
-        // failure. (CrabShack's grant is idempotent and does not check instance existence, so it
-        // never returns 404/409 here — only 4xx for a malformed request or auth/transport errors.)
-        let body = resp.text().await.unwrap_or_default();
-        tracing::error!(
-            "grant-owner: CrabShack access grant failed: instance_id={}, status={}, body={}",
-            id,
-            status,
-            body.chars().take(300).collect::<String>()
-        );
-        return Err(ApiError::internal_server_error(format!(
-            "CrabShack rejected the access grant (status {status})"
-        )));
-    }
+            return Err(ApiError::internal_server_error(
+                "Failed to grant CrabShack owner access",
+            ));
+        }
+    };
 
     tracing::info!(
         "grant-owner: granted CrabShack owner: instance_id={}, owner_user_id={}",
@@ -4445,6 +4478,16 @@ async fn parse_sse_for_import_result(
                             .and_then(|v| v.as_str())
                             .unwrap_or("unknown error");
                         anyhow::bail!("CrabShack import failed: {}", msg);
+                    }
+                    // CrabShack emits event:"cancelled" when a force-delete aborts the deploy
+                    // mid-import; surface it clearly instead of the generic stream-ended error.
+                    if stage == "cancelled" || event_type == "cancelled" {
+                        let msg = event
+                            .get("message")
+                            .or_else(|| event.get("data").and_then(|d| d.get("message")))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("import was cancelled");
+                        anyhow::bail!("CrabShack import cancelled: {}", msg);
                     }
                     if stage == "complete" || stage == "done" || event_type == "import_complete" {
                         tracing::info!(
