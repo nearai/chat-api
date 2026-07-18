@@ -16,11 +16,8 @@ use services::subscription::ports::{
 };
 use utoipa::ToSchema;
 
-pub(crate) fn aml_blocked_error(account_id: String) -> ApiError {
-    ApiError::forbidden(format!(
-        "AML report blocks NEAR account '{}' from billing operations",
-        account_id
-    ))
+pub(crate) fn aml_blocked_error(_account_id: String) -> ApiError {
+    ApiError::forbidden("Invalid NEAR account")
 }
 
 /// Request to create a new subscription
