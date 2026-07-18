@@ -7,12 +7,13 @@ use axum::{
     routing::{get, post},
     Extension, Json, Router,
 };
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use services::aml::AmlCheckResult;
+use services::aml::{AmlCheckResult, AmlRiskLevel};
 use services::subscription::ports::{
     CancelSubscriptionOutcome, ChangePlanOutcome, CreateSubscriptionOutcome,
-    NearStakingSyncSummary, ResumeSubscriptionOutcome, SubscriptionError, SubscriptionPlan,
-    SubscriptionWithPlan,
+    NearStakingStorageIntent, NearStakingSyncSummary, ResumeSubscriptionOutcome, SubscriptionError,
+    SubscriptionPlan, SubscriptionWithPlan,
 };
 use utoipa::ToSchema;
 
@@ -42,7 +43,107 @@ fn default_provider() -> String {
 }
 
 /// Subscription checkout: Stripe redirect URL or HoS catalog `price_id` for client-side locking.
-pub type CreateSubscriptionResponse = CreateSubscriptionOutcome;
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(untagged)]
+pub enum CreateSubscriptionResponse {
+    StripeCheckout {
+        checkout_url: String,
+    },
+    HouseOfStake {
+        kind: String,
+        contract_id: String,
+        price_id: String,
+        network_id: String,
+        attached_deposit_yocto: String,
+        storage: Box<NearStakingStorageIntent>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        aml: Option<PublicAmlCheckResult>,
+    },
+}
+
+impl From<CreateSubscriptionOutcome> for CreateSubscriptionResponse {
+    fn from(outcome: CreateSubscriptionOutcome) -> Self {
+        match outcome {
+            CreateSubscriptionOutcome::StripeCheckout { checkout_url } => {
+                Self::StripeCheckout { checkout_url }
+            }
+            CreateSubscriptionOutcome::NearStakeLock {
+                contract_id,
+                price_id,
+                network_id,
+                attached_deposit_yocto,
+                storage,
+                aml,
+            } => Self::HouseOfStake {
+                kind: "house_of_stake".to_string(),
+                contract_id,
+                price_id,
+                network_id,
+                attached_deposit_yocto,
+                storage,
+                aml: public_aml_result(*aml),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PublicAmlCheckResult {
+    pub risk_level: AmlRiskLevel,
+    pub checked_at: DateTime<Utc>,
+}
+
+impl From<&AmlCheckResult> for PublicAmlCheckResult {
+    fn from(result: &AmlCheckResult) -> Self {
+        Self {
+            risk_level: result.risk_level,
+            checked_at: result.checked_at,
+        }
+    }
+}
+
+pub(crate) fn public_aml_result(result: AmlCheckResult) -> Option<PublicAmlCheckResult> {
+    if result.is_high_risk() {
+        None
+    } else {
+        Some(PublicAmlCheckResult::from(&result))
+    }
+}
+
+fn public_change_plan_result(outcome: ChangePlanOutcome) -> serde_json::Value {
+    match outcome {
+        ChangePlanOutcome::ChangedImmediately => serde_json::json!("changed_immediately"),
+        ChangePlanOutcome::ScheduledForPeriodEnd => serde_json::json!("scheduled_for_period_end"),
+        ChangePlanOutcome::NoOp => serde_json::json!("no_op"),
+        ChangePlanOutcome::DowngradeCancelled => serde_json::json!("downgrade_cancelled"),
+        ChangePlanOutcome::NearStakingChangePlan {
+            contract_id,
+            network_id,
+            subscription_id,
+            target_price_id,
+            target_amount,
+            required_deposit_yocto,
+            timing,
+            aml,
+        } => {
+            let mut value = serde_json::json!({
+                "kind": "near_staking_change_plan",
+                "contract_id": contract_id,
+                "network_id": network_id,
+                "subscription_id": subscription_id,
+                "target_price_id": target_price_id,
+                "target_amount": target_amount,
+                "required_deposit_yocto": required_deposit_yocto,
+                "timing": timing,
+            });
+            if let Some(public_aml) = public_aml_result(*aml) {
+                value["aml"] = serde_json::to_value(public_aml)
+                    .expect("PublicAmlCheckResult serializes to JSON");
+            }
+            value
+        }
+    }
+}
 
 /// Response for subscription cancellation
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -59,7 +160,7 @@ pub struct CancelSubscriptionResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub required_deposit_yocto: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub aml: Option<AmlCheckResult>,
+    pub aml: Option<PublicAmlCheckResult>,
 }
 
 /// Response for subscription resume
@@ -77,7 +178,7 @@ pub struct ResumeSubscriptionResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub required_deposit_yocto: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub aml: Option<AmlCheckResult>,
+    pub aml: Option<PublicAmlCheckResult>,
 }
 
 /// Request to change subscription plan
@@ -96,7 +197,7 @@ pub struct ChangePlanResponse {
     /// Success message
     pub message: String,
     /// Change result type
-    pub result: ChangePlanOutcome,
+    pub result: serde_json::Value,
 }
 
 /// Response containing user's subscriptions
@@ -265,7 +366,7 @@ pub async fn create_subscription(
             }
         })?;
 
-    Ok(Json(outcome))
+    Ok(Json(CreateSubscriptionResponse::from(outcome)))
 }
 
 /// Cancel user's active subscription
@@ -343,7 +444,7 @@ pub async fn cancel_subscription(
             product_id: Some(product_id),
             network_id: Some(network_id),
             required_deposit_yocto: Some(required_deposit_yocto),
-            aml: Some(*aml),
+            aml: public_aml_result(*aml),
         },
     };
 
@@ -429,7 +530,7 @@ pub async fn resume_subscription(
             product_id: Some(product_id),
             network_id: Some(network_id),
             required_deposit_yocto: Some(required_deposit_yocto),
-            aml: Some(*aml),
+            aml: public_aml_result(*aml),
         },
     };
 
@@ -520,24 +621,24 @@ pub async fn change_plan(
             }
         })?;
 
-    Ok(Json(ChangePlanResponse {
-        message: match &outcome {
-            ChangePlanOutcome::ChangedImmediately => "Plan changed successfully".to_string(),
-            ChangePlanOutcome::ScheduledForPeriodEnd => {
-                "Downgrade scheduled and will be checked near period end".to_string()
+    let message = match &outcome {
+        ChangePlanOutcome::ChangedImmediately => "Plan changed successfully".to_string(),
+        ChangePlanOutcome::ScheduledForPeriodEnd => {
+            "Downgrade scheduled and will be checked near period end".to_string()
+        }
+        ChangePlanOutcome::NoOp => "User is already on the target plan".to_string(),
+        ChangePlanOutcome::DowngradeCancelled => "Pending downgrade cancelled".to_string(),
+        ChangePlanOutcome::NearStakingChangePlan { timing, .. } => {
+            if timing == "cancel_pending_downgrade" {
+                "Complete pending downgrade cancellation in your NEAR wallet".to_string()
+            } else {
+                "Complete plan change in your NEAR wallet".to_string()
             }
-            ChangePlanOutcome::NoOp => "User is already on the target plan".to_string(),
-            ChangePlanOutcome::DowngradeCancelled => "Pending downgrade cancelled".to_string(),
-            ChangePlanOutcome::NearStakingChangePlan { timing, .. } => {
-                if timing == "cancel_pending_downgrade" {
-                    "Complete pending downgrade cancellation in your NEAR wallet".to_string()
-                } else {
-                    "Complete plan change in your NEAR wallet".to_string()
-                }
-            }
-        },
-        result: outcome,
-    }))
+        }
+    };
+    let result = public_change_plan_result(outcome);
+
+    Ok(Json(ChangePlanResponse { message, result }))
 }
 
 /// Get available subscription plans
@@ -791,4 +892,65 @@ pub fn create_public_subscriptions_router() -> Router<AppState> {
             post(handle_stripe_webhook),
         )
         .route("/v1/subscriptions/plans", get(list_plans))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use services::aml::AmlRiskLevel;
+
+    fn storage_intent() -> Box<NearStakingStorageIntent> {
+        Box::new(NearStakingStorageIntent {
+            method_name: "storage_deposit".to_string(),
+            account_id: "staking.testnet".to_string(),
+            required_deposit_yocto: "0".to_string(),
+            balance_total_yocto: "0".to_string(),
+            balance_available_yocto: "0".to_string(),
+            bounds_min_yocto: "0".to_string(),
+            bounds_max_yocto: None,
+            args: serde_json::json!({}),
+        })
+    }
+
+    fn aml_result(risk_level: AmlRiskLevel) -> AmlCheckResult {
+        AmlCheckResult {
+            provider: "lukka".to_string(),
+            account_id: "alice.testnet".to_string(),
+            address_type: "NEAR".to_string(),
+            risk_level,
+            score: Some(42),
+            report_id: Some("provider-report-id".to_string()),
+            checked_at: Utc::now(),
+            reason: Some("provider_reason".to_string()),
+        }
+    }
+
+    #[test]
+    fn public_subscription_response_omits_raw_aml_fields() {
+        let response = CreateSubscriptionResponse::from(CreateSubscriptionOutcome::NearStakeLock {
+            contract_id: "staking.testnet".to_string(),
+            price_id: "price_hos_basic".to_string(),
+            network_id: "testnet".to_string(),
+            attached_deposit_yocto: "1".to_string(),
+            storage: storage_intent(),
+            aml: Box::new(aml_result(AmlRiskLevel::Low)),
+        });
+
+        let value = serde_json::to_value(response).expect("serialize response");
+        assert_eq!(
+            value.pointer("/aml/risk_level").and_then(|x| x.as_str()),
+            Some("LOW")
+        );
+        assert!(value.pointer("/aml/score").is_none());
+        assert!(value.pointer("/aml/report_id").is_none());
+        assert!(value.pointer("/aml/reason").is_none());
+        assert!(value.pointer("/aml/account_id").is_none());
+        assert!(value.pointer("/aml/provider").is_none());
+        assert!(value.pointer("/aml/address_type").is_none());
+    }
+
+    #[test]
+    fn public_aml_result_omits_high_risk() {
+        assert!(public_aml_result(aml_result(AmlRiskLevel::High)).is_none());
+    }
 }

@@ -1,3 +1,4 @@
+use crate::routes::subscriptions::{public_aml_result, PublicAmlCheckResult};
 use crate::{error::ApiError, middleware::AuthenticatedUser, state::AppState, validation};
 use axum::{
     extract::State,
@@ -25,7 +26,48 @@ pub struct CreateCreditCheckoutRequest {
 }
 
 /// Response containing either a Stripe Checkout redirect or House-of-Stake payment intent.
-pub type CreateCreditCheckoutResponse = CreateCreditPurchaseOutcome;
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CreateCreditCheckoutResponse {
+    HouseOfStake {
+        price_id: String,
+        network_id: String,
+        contract_id: String,
+        quantity: u64,
+        attached_deposit_yocto: String,
+        storage: Box<services::subscription::ports::NearStakingStorageIntent>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        aml: Option<PublicAmlCheckResult>,
+    },
+    Stripe {
+        checkout_url: String,
+    },
+}
+
+impl From<CreateCreditPurchaseOutcome> for CreateCreditCheckoutResponse {
+    fn from(outcome: CreateCreditPurchaseOutcome) -> Self {
+        match outcome {
+            CreateCreditPurchaseOutcome::HouseOfStake {
+                price_id,
+                network_id,
+                contract_id,
+                quantity,
+                attached_deposit_yocto,
+                storage,
+                aml,
+            } => Self::HouseOfStake {
+                price_id,
+                network_id,
+                contract_id,
+                quantity,
+                attached_deposit_yocto,
+                storage,
+                aml: public_aml_result(*aml),
+            },
+            CreateCreditPurchaseOutcome::Stripe { checkout_url } => Self::Stripe { checkout_url },
+        }
+    }
+}
 
 /// Request to confirm a House-of-Stake credit purchase after wallet signing.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -133,7 +175,7 @@ pub async fn create_credit_checkout(
             _ => ApiError::internal_server_error("Failed to create checkout"),
         })?;
 
-    Ok(Json(outcome))
+    Ok(Json(CreateCreditCheckoutResponse::from(outcome)))
 }
 
 /// POST /v1/credits/confirm - Confirm a House-of-Stake purchase and grant credits
