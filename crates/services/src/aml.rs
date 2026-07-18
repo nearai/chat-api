@@ -10,6 +10,7 @@ use uuid::Uuid;
 const PROVIDER_LUKKA: &str = "lukka";
 const NEAR_ADDRESS_TYPE: &str = "NEAR";
 const PROVIDER_FAILURE_CACHE_TTL_SECS: u64 = 60;
+const PROVIDER_FAILURE_ALERT_TTL_SECS: u64 = 300;
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -405,6 +406,7 @@ pub struct LukkaAmlService {
     http_client: reqwest::Client,
     slack_http_client: reqwest::Client,
     cache: Arc<RwLock<HashMap<String, CachedAmlResult>>>,
+    provider_failure_alert_cache: Arc<RwLock<HashMap<String, Instant>>>,
 }
 
 #[derive(Clone)]
@@ -464,6 +466,7 @@ impl LukkaAmlService {
             http_client,
             slack_http_client,
             cache: Arc::new(RwLock::new(HashMap::new())),
+            provider_failure_alert_cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -480,6 +483,45 @@ impl LukkaAmlService {
         let base = self.config.base_url.trim_end_matches('/');
         let encoded = urlencoding::encode(account_id);
         format!("{base}/v3/reports/aml/score/{encoded}?address_type={NEAR_ADDRESS_TYPE}")
+    }
+
+    fn provider_failure_alert_key(
+        user_id: crate::UserId,
+        flow: &str,
+        result: &AmlCheckResult,
+    ) -> String {
+        format!(
+            "{}:{}:{}:{}",
+            user_id,
+            flow,
+            result.account_id,
+            result.reason.as_deref().unwrap_or("unknown")
+        )
+    }
+
+    fn should_send_provider_failure_alert(
+        &self,
+        user_id: crate::UserId,
+        flow: &str,
+        result: &AmlCheckResult,
+    ) -> bool {
+        if !result.is_provider_failure() {
+            return false;
+        }
+
+        let key = Self::provider_failure_alert_key(user_id, flow, result);
+        let Ok(mut cache) = self.provider_failure_alert_cache.try_write() else {
+            return false;
+        };
+        cache.retain(|_, sent_at| sent_at.elapsed().as_secs() < PROVIDER_FAILURE_ALERT_TTL_SECS);
+        if cache
+            .get(&key)
+            .is_some_and(|sent_at| sent_at.elapsed().as_secs() < PROVIDER_FAILURE_ALERT_TTL_SECS)
+        {
+            return false;
+        }
+        cache.insert(key, Instant::now());
+        true
     }
 
     async fn cached_result(&self, account_id: &str) -> Option<AmlCheckResult> {
@@ -686,6 +728,9 @@ impl AmlRiskService for LukkaAmlService {
         flow: &str,
         result: &AmlCheckResult,
     ) {
+        if !self.should_send_provider_failure_alert(user_id, flow, result) {
+            return;
+        }
         send_aml_provider_failure_slack_alert(
             self.slack_http_client.clone(),
             &self.config.high_risk_slack_webhook_url,
@@ -831,6 +876,17 @@ mod tests {
         assert!(!aml_result("alice.near", AmlRiskLevel::High).is_provider_failure());
     }
 
+    #[test]
+    fn provider_failure_alerts_are_throttled() {
+        let service = LukkaAmlService::new(test_config("http://127.0.0.1:1".to_string()));
+        let user_id = crate::UserId::new();
+        let result = AmlCheckResult::unknown("alice.near", "provider_timeout");
+
+        assert!(service.should_send_provider_failure_alert(user_id, "user_status", &result));
+        assert!(!service.should_send_provider_failure_alert(user_id, "user_status", &result));
+        assert!(service.should_send_provider_failure_alert(user_id, "change_plan", &result));
+    }
+
     #[tokio::test]
     async fn provider_error_returns_unknown_without_crashing() {
         let server = MockServer::start().await;
@@ -848,11 +904,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_error_is_not_cached() {
+    async fn provider_error_is_negative_cached() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(503))
-            .expect(2)
+            .expect(1)
             .mount(&server)
             .await;
 
@@ -860,8 +916,8 @@ mod tests {
         let first = service.check_near_account("alice.near").await;
         let second = service.check_near_account("alice.near").await;
 
-        assert_eq!(first.reason.as_deref(), Some("provider_http_503"));
-        assert_eq!(second.reason.as_deref(), Some("provider_http_503"));
+        assert!(first.is_provider_failure());
+        assert_eq!(second, first);
     }
 
     #[tokio::test]

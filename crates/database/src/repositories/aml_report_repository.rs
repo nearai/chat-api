@@ -183,6 +183,10 @@ impl AmlReportRepository for PostgresAmlReportRepository {
         offset: i64,
     ) -> anyhow::Result<(Vec<AmlReportRecord>, i64)> {
         let client = self.pool.get().await?;
+        let total = client
+            .query_one("SELECT COUNT(*) FROM aml_risk_reports", &[])
+            .await?
+            .get::<_, i64>(0);
         let rows = client
             .query(
                 r#"
@@ -198,21 +202,6 @@ impl AmlReportRepository for PostgresAmlReportRepository {
             .into_iter()
             .map(Self::report_from_row)
             .collect::<Result<Vec<_>, _>>()?;
-        let minimum_total = offset.saturating_add(reports.len() as i64);
-        let total = client
-            .query_one(
-                r#"
-                SELECT GREATEST(
-                    COALESCE(NULLIF(reltuples, -1::real)::bigint, 0),
-                    $1::bigint
-                )
-                FROM pg_class
-                WHERE oid = 'aml_risk_reports'::regclass
-                "#,
-                &[&minimum_total],
-            )
-            .await?
-            .get::<_, i64>(0);
         Ok((reports, total))
     }
 

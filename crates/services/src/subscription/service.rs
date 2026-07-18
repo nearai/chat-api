@@ -236,6 +236,27 @@ impl SubscriptionServiceImpl {
         near_account: &str,
         flow: &str,
     ) -> Result<AmlCheckResult, SubscriptionError> {
+        self.check_near_aml_with_policy(user_id, near_account, flow, true)
+            .await
+    }
+
+    async fn check_near_aml_for_visibility(
+        &self,
+        user_id: UserId,
+        near_account: &str,
+        flow: &str,
+    ) -> Result<AmlCheckResult, SubscriptionError> {
+        self.check_near_aml_with_policy(user_id, near_account, flow, false)
+            .await
+    }
+
+    async fn check_near_aml_with_policy(
+        &self,
+        user_id: UserId,
+        near_account: &str,
+        flow: &str,
+        block_high_risk: bool,
+    ) -> Result<AmlCheckResult, SubscriptionError> {
         let normalized_account = crate::aml::normalize_account_id(near_account);
         if !self.aml_service.is_enabled() {
             return Ok(AmlCheckResult::unknown(normalized_account, "disabled"));
@@ -250,13 +271,15 @@ impl SubscriptionServiceImpl {
             Ok(Some(report)) => {
                 let age = Utc::now().signed_duration_since(report.created_at);
                 if age < Duration::days(self.aml_service.report_refresh_days()) {
-                    self.enforce_aml_result(
-                        user_id,
-                        flow,
-                        &report.result,
-                        self.aml_service.alert_on_cached_reports(),
-                    )
-                    .await?;
+                    if block_high_risk {
+                        self.enforce_aml_result(
+                            user_id,
+                            flow,
+                            &report.result,
+                            self.aml_service.alert_on_cached_reports(),
+                        )
+                        .await?;
+                    }
                     return Ok(report.result);
                 }
                 stale_active_report = Some(report);
@@ -294,13 +317,17 @@ impl SubscriptionServiceImpl {
         if result.is_provider_failure() {
             if let Some(report) = stale_active_report.filter(|report| report.result.is_high_risk())
             {
-                self.enforce_aml_result(user_id, flow, &report.result, true)
-                    .await?;
+                if block_high_risk {
+                    self.enforce_aml_result(user_id, flow, &report.result, true)
+                        .await?;
+                }
                 return Ok(report.result);
             }
         }
-        self.enforce_aml_result(user_id, flow, &result, true)
-            .await?;
+        if block_high_risk {
+            self.enforce_aml_result(user_id, flow, &result, true)
+                .await?;
+        }
         Ok(result)
     }
 
@@ -2231,7 +2258,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 .await?;
             let near_account = self.get_near_account_id(user_id).await?;
             let aml = self
-                .check_near_aml(user_id, &near_account, "cancel_subscription")
+                .check_near_aml_for_visibility(user_id, &near_account, "cancel_subscription")
                 .await?;
             return Ok(CancelSubscriptionOutcome::NearStakingCancel {
                 contract_id: contract_id.to_string(),
@@ -2326,7 +2353,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 .await?;
             let near_account = self.get_near_account_id(user_id).await?;
             let aml = self
-                .check_near_aml(user_id, &near_account, "resume_subscription")
+                .check_near_aml_for_visibility(user_id, &near_account, "resume_subscription")
                 .await?;
             return Ok(ResumeSubscriptionOutcome::NearStakingResume {
                 contract_id: contract_id.to_string(),
