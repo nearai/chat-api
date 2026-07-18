@@ -49,6 +49,39 @@ fn permissive_rate_limit_config() -> RateLimitConfig {
     }
 }
 
+async fn insert_house_of_stake_subscription_for_existing_user(
+    db: &database::Database,
+    user_email: &str,
+    price_id: &str,
+    cancel_at_period_end: bool,
+) {
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .unwrap()
+        .unwrap();
+    let client = db.pool().get().await.unwrap();
+    let period_end = Utc::now() + Duration::days(1);
+    let sub_id = format!("sub_test_{}", Uuid::new_v4());
+    client
+        .execute(
+            "INSERT INTO subscriptions (
+                subscription_id, user_id, provider, customer_id, price_id, status,
+                current_period_end, cancel_at_period_end
+            ) VALUES ($1, $2, 'house-of-stake', 'cus_test', $3, 'active', $4, $5)",
+            &[
+                &sub_id,
+                &user.id,
+                &price_id,
+                &period_end,
+                &cancel_at_period_end,
+            ],
+        )
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 #[serial(subscription_tests)]
 async fn test_list_subscriptions_requires_auth() {
@@ -3938,15 +3971,9 @@ async fn test_cancel_subscription_house_of_stake_returns_wallet_intent_message()
         .unwrap()
         .to_string();
 
-    insert_test_subscription_with_provider_and_price(
-        &server,
-        &db,
-        near_email,
-        "house-of-stake",
-        "price_hos_basic",
-        false,
-    )
-    .await;
+    cleanup_user_subscriptions(&db, near_email).await;
+    insert_house_of_stake_subscription_for_existing_user(&db, near_email, "price_hos_basic", false)
+        .await;
 
     let response = server
         .post("/v1/subscriptions/cancel")
@@ -4206,6 +4233,8 @@ async fn test_near_staking_sync_skipped_reason_when_upsert_blocked_by_active_str
         .to_string();
 
     insert_test_subscription(&server, &db, near_email, false).await;
+    insert_house_of_stake_subscription_for_existing_user(&db, near_email, "price_hos_basic", false)
+        .await;
 
     let response = server
         .post("/v1/subscriptions/near/sync")
@@ -4224,6 +4253,11 @@ async fn test_near_staking_sync_skipped_reason_when_upsert_blocked_by_active_str
         Some(0)
     );
     assert_eq!(
+        body.get("canceled_house_of_stake_rows")
+            .and_then(|x| x.as_u64()),
+        Some(1)
+    );
+    assert_eq!(
         body.get("upserted_house_of_stake_row")
             .and_then(|x| x.as_bool()),
         Some(false)
@@ -4232,11 +4266,28 @@ async fn test_near_staking_sync_skipped_reason_when_upsert_blocked_by_active_str
         body.get("skipped_reason").and_then(|x| x.as_str()),
         Some(NEAR_STAKING_SYNC_SKIPPED_REASON_UPSERT_BLOCKED_NON_HOS)
     );
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(near_email)
+        .await
+        .unwrap()
+        .unwrap();
+    let client = db.pool().get().await.unwrap();
+    let row = client
+        .query_one(
+            "SELECT status FROM subscriptions
+             WHERE user_id = $1 AND provider = 'house-of-stake'",
+            &[&user.id],
+        )
+        .await
+        .expect("HoS row should be preserved");
+    assert_eq!(row.get::<_, String>("status"), "canceled");
 }
 
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn test_near_staking_sync_deletes_local_hos_when_chain_returns_null() {
+async fn test_near_staking_sync_marks_local_hos_canceled_when_chain_returns_null() {
     clear_proxy_env_for_local_wiremock();
     let mock = MockServer::start().await;
     Mock::given(method("POST"))
@@ -4263,10 +4314,10 @@ async fn test_near_staking_sync_deletes_local_hos_when_chain_returns_null() {
     )
     .await;
 
-    let near_email = "hos_sync_delete.testnet@near";
+    let near_email = "hos_sync_cancel.testnet@near";
     let login = json!({
         "email": near_email,
-        "name": "HoS Sync Delete",
+        "name": "HoS Sync Cancel",
         "oauth_provider": "near"
     });
     let response = server.post("/v1/auth/mock-login").json(&login).await;
@@ -4275,15 +4326,17 @@ async fn test_near_staking_sync_deletes_local_hos_when_chain_returns_null() {
         .unwrap()
         .to_string();
 
-    insert_test_subscription_with_provider_and_price(
-        &server,
-        &db,
-        near_email,
-        "house-of-stake",
-        "price_hos_basic",
-        false,
-    )
-    .await;
+    cleanup_user_subscriptions(&db, near_email).await;
+    insert_house_of_stake_subscription_for_existing_user(&db, near_email, "price_hos_basic", false)
+        .await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(near_email)
+        .await
+        .unwrap()
+        .unwrap();
+    let client = db.pool().get().await.unwrap();
 
     let response = server
         .post("/v1/subscriptions/near/sync")
@@ -4299,33 +4352,104 @@ async fn test_near_staking_sync_deletes_local_hos_when_chain_returns_null() {
     assert_eq!(
         body.get("deleted_house_of_stake_rows")
             .and_then(|x| x.as_u64()),
+        Some(0)
+    );
+    assert_eq!(
+        body.get("canceled_house_of_stake_rows")
+            .and_then(|x| x.as_u64()),
         Some(1)
     );
 
-    let user = db
-        .user_repository()
-        .get_user_by_email(near_email)
-        .await
-        .unwrap()
-        .unwrap();
-    let client = db.pool().get().await.unwrap();
-    let cnt: i64 = client
+    let row = client
         .query_one(
-            "SELECT COUNT(*)::bigint FROM subscriptions WHERE user_id = $1 AND provider = 'house-of-stake'",
+            "SELECT COUNT(*)::bigint, MAX(status), MAX(updated_at)
+             FROM subscriptions
+             WHERE user_id = $1 AND provider = 'house-of-stake'",
+            &[&user.id],
+        )
+        .await
+        .unwrap();
+    let cnt: i64 = row.get(0);
+    let status: Option<String> = row.get(1);
+    let canceled_updated_at: Option<chrono::DateTime<Utc>> = row.get(2);
+    assert_eq!(cnt, 1, "HoS row should be preserved as history");
+    assert_eq!(status.as_deref(), Some("canceled"));
+
+    let response = server
+        .get("/v1/subscriptions?include_inactive=true")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 200, "{}", response.text());
+    let body: serde_json::Value = response.json();
+    let subscriptions = body["subscriptions"]
+        .as_array()
+        .expect("subscriptions should be an array");
+    assert_eq!(subscriptions.len(), 1);
+    assert_eq!(subscriptions[0]["provider"], "house-of-stake");
+    assert_eq!(subscriptions[0]["status"], "canceled");
+
+    let preserved_updated_at = Utc.with_ymd_and_hms(2026, 1, 3, 0, 0, 0).unwrap();
+    client
+        .execute(
+            "UPDATE subscriptions SET updated_at = $1
+             WHERE user_id = $2 AND provider = 'house-of-stake'",
+            &[&preserved_updated_at, &user.id],
+        )
+        .await
+        .expect("seed stable canceled updated_at");
+    let updated_at_before_repeat_sync: chrono::DateTime<Utc> = client
+        .query_one(
+            "SELECT updated_at FROM subscriptions
+             WHERE user_id = $1 AND provider = 'house-of-stake'",
             &[&user.id],
         )
         .await
         .unwrap()
-        .get(0);
+        .get("updated_at");
+
+    let response = server
+        .post("/v1/subscriptions/near/sync")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 200, "{}", response.text());
+    let body: serde_json::Value = response.json();
     assert_eq!(
-        cnt, 0,
-        "HoS rows should be removed after chain reports null"
+        body.get("canceled_house_of_stake_rows")
+            .and_then(|x| x.as_u64()),
+        Some(0),
+        "already-canceled HoS history should not be re-upserted"
+    );
+
+    let updated_at: chrono::DateTime<Utc> = client
+        .query_one(
+            "SELECT updated_at FROM subscriptions
+             WHERE user_id = $1 AND provider = 'house-of-stake'",
+            &[&user.id],
+        )
+        .await
+        .unwrap()
+        .get("updated_at");
+    assert_eq!(
+        updated_at, updated_at_before_repeat_sync,
+        "repeat sync must not bump updated_at for already-canceled HoS history"
+    );
+    assert!(
+        canceled_updated_at.is_some(),
+        "first sync should have written the canceled history row"
     );
 }
 
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn test_near_staking_sync_falls_back_to_configured_prices_before_delete() {
+async fn test_near_staking_sync_falls_back_to_configured_prices_before_canceling_local_row() {
     clear_proxy_env_for_local_wiremock();
     let chain_sub = json!({
         "subscription_id": "sub_chain_hos_fallback",
@@ -4372,15 +4496,9 @@ async fn test_near_staking_sync_falls_back_to_configured_prices_before_delete() 
         .unwrap()
         .to_string();
 
-    insert_test_subscription_with_provider_and_price(
-        &server,
-        &db,
-        near_email,
-        "house-of-stake",
-        "price_hos_basic",
-        false,
-    )
-    .await;
+    cleanup_user_subscriptions(&db, near_email).await;
+    insert_house_of_stake_subscription_for_existing_user(&db, near_email, "price_hos_basic", false)
+        .await;
 
     let user = db
         .user_repository()
@@ -4415,6 +4533,11 @@ async fn test_near_staking_sync_falls_back_to_configured_prices_before_delete() 
         Some(0)
     );
     assert_eq!(
+        body.get("canceled_house_of_stake_rows")
+            .and_then(|x| x.as_u64()),
+        Some(0)
+    );
+    assert_eq!(
         body.get("upserted_house_of_stake_row")
             .and_then(|x| x.as_bool()),
         Some(true)
@@ -4432,6 +4555,153 @@ async fn test_near_staking_sync_falls_back_to_configured_prices_before_delete() 
     let price_id: Option<String> = row.get(1);
     assert_eq!(cnt, 1, "sync should update the existing HoS row");
     assert_eq!(price_id.as_deref(), Some("price_hos_pro"));
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_near_staking_sync_cancels_active_stale_hos_and_preserves_canceled_history() {
+    clear_proxy_env_for_local_wiremock();
+    let chain_sub = json!({
+        "subscription_id": "sub_chain_hos_new_history",
+        "price_id": "price_hos_basic",
+        "end_ns": "2000000000000000000",
+        "status": "Active",
+        "cancel_at_period_end": false
+    });
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(near_rpc_wiremock_hos_subscription_probe_only(chain_sub))
+        .mount(&mock)
+        .await;
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        near_rpc_url: Some(mock.uri().to_string()),
+        near_staking_contract_id: Some("staking.testnet".to_string()),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": { "providers": { "house-of-stake": { "price_id": "price_hos_basic" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } }
+        }),
+    )
+    .await;
+
+    let near_email = "hos_sync_preserve_history.testnet@near";
+    let login = json!({
+        "email": near_email,
+        "name": "HoS Preserve History",
+        "oauth_provider": "near"
+    });
+    let response = server.post("/v1/auth/mock-login").json(&login).await;
+    let token = response.json::<serde_json::Value>()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    cleanup_user_subscriptions(&db, near_email).await;
+    insert_house_of_stake_subscription_for_existing_user(&db, near_email, "price_hos_basic", false)
+        .await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(near_email)
+        .await
+        .unwrap()
+        .unwrap();
+    let client = db.pool().get().await.unwrap();
+    let preserved_updated_at = Utc.with_ymd_and_hms(2026, 1, 4, 0, 0, 0).unwrap();
+    let period_end = Utc::now() + Duration::days(1);
+    client
+        .execute(
+            "UPDATE subscriptions
+             SET subscription_id = 'sub_local_hos_stale_active'
+             WHERE user_id = $1 AND provider = 'house-of-stake'",
+            &[&user.id],
+        )
+        .await
+        .expect("seed stale active HoS row");
+    client
+        .execute(
+            "INSERT INTO subscriptions (
+                subscription_id, user_id, provider, customer_id, price_id, status,
+                current_period_end, cancel_at_period_end, created_at, updated_at
+            ) VALUES (
+                'sub_local_hos_preserved_canceled', $1, 'house-of-stake', 'cus_test',
+                'price_hos_basic', 'canceled', $2, false, $3, $3
+            )",
+            &[&user.id, &period_end, &preserved_updated_at],
+        )
+        .await
+        .expect("seed preserved canceled HoS history");
+
+    let response = server
+        .post("/v1/subscriptions/near/sync")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 200, "{}", response.text());
+    let body: serde_json::Value = response.json();
+    assert_eq!(
+        body.get("deleted_house_of_stake_rows")
+            .and_then(|x| x.as_u64()),
+        Some(0)
+    );
+    assert_eq!(
+        body.get("canceled_house_of_stake_rows")
+            .and_then(|x| x.as_u64()),
+        Some(1)
+    );
+    assert_eq!(
+        body.get("upserted_house_of_stake_row")
+            .and_then(|x| x.as_bool()),
+        Some(true)
+    );
+
+    let rows = client
+        .query(
+            "SELECT subscription_id, status, updated_at
+             FROM subscriptions
+             WHERE user_id = $1 AND provider = 'house-of-stake'
+             ORDER BY subscription_id",
+            &[&user.id],
+        )
+        .await
+        .expect("load HoS rows after sync");
+    assert_eq!(rows.len(), 3, "sync should preserve HoS history rows");
+
+    let statuses: Vec<(String, String)> = rows
+        .iter()
+        .map(|row| (row.get("subscription_id"), row.get("status")))
+        .collect();
+    assert!(statuses.contains(&(
+        "sub_chain_hos_new_history".to_string(),
+        "active".to_string()
+    )));
+    assert!(statuses.contains(&(
+        "sub_local_hos_stale_active".to_string(),
+        "canceled".to_string()
+    )));
+    assert!(statuses.contains(&(
+        "sub_local_hos_preserved_canceled".to_string(),
+        "canceled".to_string()
+    )));
+
+    let preserved_row = rows
+        .iter()
+        .find(|row| row.get::<_, String>("subscription_id") == "sub_local_hos_preserved_canceled")
+        .expect("preserved canceled HoS row should remain");
+    assert_eq!(
+        preserved_row.get::<_, chrono::DateTime<Utc>>("updated_at"),
+        preserved_updated_at,
+        "sync must not re-touch already-canceled HoS history"
+    );
 }
 #[tokio::test]
 #[serial(subscription_tests)]

@@ -28,7 +28,7 @@ use crate::user::ports::UserRepository;
 use crate::user_usage::ports::UserUsageRepository;
 use crate::UserId;
 use async_trait::async_trait;
-use chrono::{Datelike, Duration, NaiveTime, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveTime, Utc};
 use futures::future::join_all;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -98,6 +98,9 @@ const TOKENS_TO_CREDITS_PER_M: u64 = 1_000_000;
 const NANO_USD_PER_1_5_USD: u64 = 1_500_000_000;
 const DOWNGRADE_CHECK_WINDOW_HOURS: i64 = 24;
 const TX_LOCK_TIMEOUT_MS: i64 = 1500;
+const SUBSCRIPTION_STATUS_ACTIVE: &str = "active";
+const SUBSCRIPTION_STATUS_TRIALING: &str = "trialing";
+const SUBSCRIPTION_STATUS_CANCELED: &str = "canceled";
 
 pub struct SubscriptionServiceImpl {
     db_pool: deadpool_postgres::Pool,
@@ -138,15 +141,38 @@ impl SubscriptionServiceImpl {
     fn hos_reconcile_summary(
         skipped: bool,
         deleted: u32,
+        canceled: u32,
         upserted: bool,
         skipped_reason: Option<&'static str>,
     ) -> NearStakingSyncSummary {
         NearStakingSyncSummary {
             skipped,
             deleted_house_of_stake_rows: deleted,
+            canceled_house_of_stake_rows: canceled,
             upserted_house_of_stake_row: upserted,
             skipped_reason: skipped_reason.map(String::from),
         }
+    }
+
+    fn is_active_or_trialing(status: &str) -> bool {
+        status == SUBSCRIPTION_STATUS_ACTIVE || status == SUBSCRIPTION_STATUS_TRIALING
+    }
+
+    fn canceled_house_of_stake_history_row(
+        mut sub: Subscription,
+        now: DateTime<Utc>,
+    ) -> Subscription {
+        sub.status = SUBSCRIPTION_STATUS_CANCELED.to_string();
+        if sub.current_period_end > now {
+            sub.current_period_end = now;
+        }
+        sub.cancel_at_period_end = false;
+        sub.pending_downgrade_target_price_id = None;
+        sub.pending_downgrade_from_price_id = None;
+        sub.pending_downgrade_expected_period_end = None;
+        sub.pending_downgrade_status = None;
+        sub.pending_downgrade_updated_at = None;
+        sub
     }
 
     pub fn new(config: SubscriptionServiceConfig) -> Self {
@@ -768,13 +794,13 @@ impl SubscriptionServiceImpl {
         }
 
         let now = Utc::now();
-        let expired_hos_ids: Vec<String> = active_subscriptions
+        let expired_hos_subscriptions: Vec<Subscription> = active_subscriptions
             .iter()
             .filter(|s| s.provider == "house-of-stake" && s.current_period_end <= now)
-            .map(|s| s.subscription_id.clone())
+            .cloned()
             .collect();
 
-        if !expired_hos_ids.is_empty() {
+        if !expired_hos_subscriptions.is_empty() {
             let mut db_client = self
                 .db_pool
                 .get()
@@ -784,9 +810,13 @@ impl SubscriptionServiceImpl {
                 .transaction()
                 .await
                 .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-            for subscription_id in &expired_hos_ids {
+
+            for sub in &expired_hos_subscriptions {
                 self.subscription_repo
-                    .delete_subscription_txn(&txn, subscription_id)
+                    .upsert_subscription_authoritative(
+                        &txn,
+                        Self::canceled_house_of_stake_history_row(sub.clone(), now),
+                    )
                     .await
                     .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
             }
@@ -796,8 +826,8 @@ impl SubscriptionServiceImpl {
             self.invalidate_credit_limit_cache(user_id).await;
             tracing::warn!(
                 user_id = %user_id.0,
-                deleted_house_of_stake_rows = expired_hos_ids.len(),
-                "expired stale local HoS subscriptions before entitlement check"
+                canceled_house_of_stake_rows = expired_hos_subscriptions.len(),
+                "marked expired local HoS subscriptions canceled before entitlement check"
             );
         }
 
@@ -1417,9 +1447,9 @@ impl SubscriptionServiceImpl {
                 return;
             }
         };
-        let has_hos = subs.iter().any(|s| {
-            s.provider == "house-of-stake" && (s.status == "active" || s.status == "trialing")
-        });
+        let has_hos = subs
+            .iter()
+            .any(|s| s.provider == "house-of-stake" && Self::is_active_or_trialing(&s.status));
         if !has_hos {
             return;
         }
@@ -1480,19 +1510,19 @@ impl SubscriptionServiceImpl {
             .map(str::trim)
             .filter(|s| !s.is_empty())
         else {
-            return Ok(Self::hos_reconcile_summary(true, 0, false, None));
+            return Ok(Self::hos_reconcile_summary(true, 0, 0, false, None));
         };
 
         let near_account = match self.get_near_account_id(user_id).await {
             Ok(a) => a,
             Err(_) => {
-                return Ok(Self::hos_reconcile_summary(true, 0, false, None));
+                return Ok(Self::hos_reconcile_summary(true, 0, 0, false, None));
             }
         };
 
-        let has_active_non_hos = subs.iter().any(|s| {
-            (s.status == "active" || s.status == "trialing") && s.provider != "house-of-stake"
-        });
+        let has_active_non_hos = subs
+            .iter()
+            .any(|s| Self::is_active_or_trialing(&s.status) && s.provider != "house-of-stake");
         let hos_subscription_ids: Vec<String> = subs
             .iter()
             .filter(|s| s.provider == "house-of-stake")
@@ -1502,6 +1532,7 @@ impl SubscriptionServiceImpl {
         if has_active_non_hos && hos_subscription_ids.is_empty() {
             return Ok(Self::hos_reconcile_summary(
                 false,
+                0,
                 0,
                 false,
                 Some(NEAR_STAKING_SYNC_SKIPPED_REASON_UPSERT_BLOCKED_NON_HOS),
@@ -1518,7 +1549,7 @@ impl SubscriptionServiceImpl {
             .unwrap_or_default();
         let configured_hos_price_ids = Self::hos_price_ids(&subscription_plans);
         if configured_hos_price_ids.is_empty() {
-            return Ok(Self::hos_reconcile_summary(true, 0, false, None));
+            return Ok(Self::hos_reconcile_summary(true, 0, 0, false, None));
         }
 
         // Prefer the user's stored HoS `price_id`, then fall back to every configured HoS price.
@@ -1527,7 +1558,7 @@ impl SubscriptionServiceImpl {
         let local_probe_price_id = subs
             .iter()
             .filter(|s| s.provider == "house-of-stake")
-            .find(|s| s.status == "active" || s.status == "trialing")
+            .find(|s| Self::is_active_or_trialing(&s.status))
             .or_else(|| subs.iter().find(|s| s.provider == "house-of-stake"))
             .map(|s| s.price_id.as_str())
             .filter(|p| !p.is_empty());
@@ -1582,10 +1613,18 @@ impl SubscriptionServiceImpl {
         }
 
         if raw.is_none() {
-            if hos_subscription_ids.is_empty() {
-                return Ok(Self::hos_reconcile_summary(false, 0, false, None));
+            let mut local_hos_subscriptions: Vec<Subscription> = subs
+                .iter()
+                .filter(|s| {
+                    s.provider == "house-of-stake" && Self::is_active_or_trialing(&s.status)
+                })
+                .cloned()
+                .collect();
+            if local_hos_subscriptions.is_empty() {
+                return Ok(Self::hos_reconcile_summary(false, 0, 0, false, None));
             }
-            let deleted = hos_subscription_ids.len() as u32;
+            let now = Utc::now();
+            let canceled = local_hos_subscriptions.len() as u32;
             let mut db_client = self
                 .db_pool
                 .get()
@@ -1595,9 +1634,12 @@ impl SubscriptionServiceImpl {
                 .transaction()
                 .await
                 .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-            for sid in &hos_subscription_ids {
+
+            for sub in &mut local_hos_subscriptions {
+                let canceled_sub = Self::canceled_house_of_stake_history_row(sub.clone(), now);
+
                 self.subscription_repo
-                    .delete_subscription_txn(&txn, sid)
+                    .upsert_subscription_authoritative(&txn, canceled_sub)
                     .await
                     .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
             }
@@ -1605,7 +1647,7 @@ impl SubscriptionServiceImpl {
                 .await
                 .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
             self.invalidate_credit_limit_cache(user_id).await;
-            return Ok(Self::hos_reconcile_summary(false, deleted, false, None));
+            return Ok(Self::hos_reconcile_summary(false, 0, canceled, false, None));
         }
 
         let chain_subscription = raw.as_ref().expect("checked is_some");
@@ -1616,8 +1658,16 @@ impl SubscriptionServiceImpl {
         // `get_active_subscription` picks newest `created_at`, so a fresh HoS upsert could wrongly
         // become the "active" row for Stripe-primary users who also staked on-chain separately.
         if has_active_non_hos {
-            let deleted = hos_subscription_ids.len() as u32;
-            if !hos_subscription_ids.is_empty() {
+            let active_hos_subscriptions: Vec<Subscription> = subs
+                .iter()
+                .filter(|s| {
+                    s.provider == "house-of-stake" && Self::is_active_or_trialing(&s.status)
+                })
+                .cloned()
+                .collect();
+            let canceled = active_hos_subscriptions.len() as u32;
+            if !active_hos_subscriptions.is_empty() {
+                let now = Utc::now();
                 let mut db_client = self
                     .db_pool
                     .get()
@@ -1627,9 +1677,12 @@ impl SubscriptionServiceImpl {
                     .transaction()
                     .await
                     .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-                for sid in &hos_subscription_ids {
+                for sub in active_hos_subscriptions {
                     self.subscription_repo
-                        .delete_subscription_txn(&txn, sid)
+                        .upsert_subscription_authoritative(
+                            &txn,
+                            Self::canceled_house_of_stake_history_row(sub, now),
+                        )
                         .await
                         .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
                 }
@@ -1641,12 +1694,13 @@ impl SubscriptionServiceImpl {
 
             tracing::warn!(
                 user_id = %user_id.0,
-                deleted_house_of_stake_rows = deleted,
+                canceled_house_of_stake_rows = canceled,
                 "Skipping HoS reconcile upsert: user has an active or trialing non-house-of-stake subscription row"
             );
             return Ok(Self::hos_reconcile_summary(
                 false,
-                deleted,
+                0,
+                canceled,
                 false,
                 Some(NEAR_STAKING_SYNC_SKIPPED_REASON_UPSERT_BLOCKED_NON_HOS),
             ));
@@ -1668,15 +1722,23 @@ impl SubscriptionServiceImpl {
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
-        let stale_subscription_ids: Vec<String> = hos_subscription_ids
+        let stale_hos_subscriptions: Vec<Subscription> = subs
             .iter()
-            .filter(|sid| sid.as_str() != chain_subscription_id.as_str())
+            .filter(|s| {
+                s.provider == "house-of-stake"
+                    && s.subscription_id.as_str() != chain_subscription_id.as_str()
+                    && Self::is_active_or_trialing(&s.status)
+            })
             .cloned()
             .collect();
-        let deleted = stale_subscription_ids.len() as u32;
-        for sid in &stale_subscription_ids {
+        let canceled = stale_hos_subscriptions.len() as u32;
+        let now = Utc::now();
+        for sub in stale_hos_subscriptions {
             self.subscription_repo
-                .delete_subscription_txn(&txn, sid)
+                .upsert_subscription_authoritative(
+                    &txn,
+                    Self::canceled_house_of_stake_history_row(sub, now),
+                )
                 .await
                 .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
         }
@@ -1686,7 +1748,7 @@ impl SubscriptionServiceImpl {
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
         self.invalidate_credit_limit_cache(user_id).await;
-        Ok(Self::hos_reconcile_summary(false, deleted, true, None))
+        Ok(Self::hos_reconcile_summary(false, 0, canceled, true, None))
     }
 }
 
@@ -3064,7 +3126,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
             // Detect first transition to canceled: trigger async instance kill
-            if old_status.as_deref() != Some("canceled") && new_sub.status == "canceled" {
+            if old_status.as_deref() != Some(SUBSCRIPTION_STATUS_CANCELED)
+                && new_sub.status == SUBSCRIPTION_STATUS_CANCELED
+            {
                 user_id_to_kill_instances = Some(user_id);
                 // Subscription is canceled — clear any stale pending downgrade intent
                 self.subscription_repo

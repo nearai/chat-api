@@ -323,8 +323,11 @@ pub const NEAR_STAKING_SYNC_SKIPPED_REASON_UPSERT_BLOCKED_NON_HOS: &str =
 pub struct NearStakingSyncSummary {
     /// True when reconcile exited early (no HoS contract configured, user has no linked NEAR account, or no HoS anchor price in catalog). No RPC or DB mutation was attempted.
     pub skipped: bool,
-    /// Local `house-of-stake` rows removed after chain reported no subscription for the probed price.
+    /// Local `house-of-stake` rows removed during reconcile. Preserved history rows are not counted here.
     pub deleted_house_of_stake_rows: u32,
+    /// Local active/trialing `house-of-stake` rows transitioned to `canceled` during reconcile.
+    #[serde(default)]
+    pub canceled_house_of_stake_rows: u32,
     /// True when a local row was upserted from chain JSON.
     pub upserted_house_of_stake_row: bool,
     /// When reconcile ran but did not upsert or delete, optionally explains a no-op (e.g. blocked
@@ -1163,7 +1166,7 @@ pub trait SubscriptionService: Send + Sync {
         user_id: UserId,
     ) -> Result<ResumeSubscriptionOutcome, SubscriptionError>;
 
-    /// Re-fetch staking subscription from RPC and upsert/delete the local `house-of-stake` row.
+    /// Re-fetch staking subscription from RPC and upsert or cancel the local `house-of-stake` row.
     async fn sync_near_staking_subscription(
         &self,
         user_id: UserId,
