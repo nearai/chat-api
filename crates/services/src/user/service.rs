@@ -1,7 +1,6 @@
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use std::sync::Arc;
-use std::time::Duration as StdDuration;
 use uuid::Uuid;
 
 use super::ports::{
@@ -9,8 +8,7 @@ use super::ports::{
     BanType, OAuthProvider, User, UserProfile, UserRepository, UserService, UserStatusError,
 };
 use crate::aml::{
-    normalize_account_id, send_aml_provider_failure_slack_alert, send_high_risk_aml_slack_alert,
-    AmlCheckResult, AmlReportEvent, AmlReportRepository, AmlRiskService,
+    normalize_account_id, AmlCheckResult, AmlReportEvent, AmlReportRepository, AmlRiskService,
 };
 use crate::types::UserId;
 
@@ -18,10 +16,6 @@ pub struct UserServiceImpl {
     user_repository: Arc<dyn UserRepository>,
     aml_service: Arc<dyn AmlRiskService>,
     aml_report_repo: Arc<dyn AmlReportRepository>,
-    aml_high_risk_slack_webhook_url: String,
-    aml_high_risk_slack_http_client: reqwest::Client,
-    aml_high_risk_slack_alert_on_cached_reports: bool,
-    aml_report_refresh_days: i64,
 }
 
 impl UserServiceImpl {
@@ -38,45 +32,10 @@ impl UserServiceImpl {
         aml_service: Arc<dyn AmlRiskService>,
         aml_report_repo: Arc<dyn AmlReportRepository>,
     ) -> Self {
-        Self::new_with_aml_alerts(
-            user_repository,
-            aml_service,
-            aml_report_repo,
-            String::new(),
-            1_000,
-            30,
-            false,
-        )
-    }
-
-    pub fn new_with_aml_alerts(
-        user_repository: Arc<dyn UserRepository>,
-        aml_service: Arc<dyn AmlRiskService>,
-        aml_report_repo: Arc<dyn AmlReportRepository>,
-        aml_high_risk_slack_webhook_url: String,
-        aml_high_risk_slack_timeout_ms: u64,
-        aml_report_refresh_days: i64,
-        aml_high_risk_slack_alert_on_cached_reports: bool,
-    ) -> Self {
         Self {
             user_repository,
             aml_service,
             aml_report_repo,
-            aml_high_risk_slack_webhook_url,
-            aml_high_risk_slack_http_client: reqwest::Client::builder()
-                .timeout(StdDuration::from_millis(
-                    aml_high_risk_slack_timeout_ms.max(1),
-                ))
-                .build()
-                .unwrap_or_else(|err| {
-                    tracing::warn!(
-                        error = %err,
-                        "Failed to build AML Slack HTTP client with configured timeout; using default client"
-                    );
-                    reqwest::Client::new()
-                }),
-            aml_high_risk_slack_alert_on_cached_reports,
-            aml_report_refresh_days: aml_report_refresh_days.max(1),
         }
     }
 
@@ -94,13 +53,8 @@ impl UserServiceImpl {
                 .await?
         {
             if alert_high_risk {
-                send_high_risk_aml_slack_alert(
-                    self.aml_high_risk_slack_http_client.clone(),
-                    &self.aml_high_risk_slack_webhook_url,
-                    user_id,
-                    flow,
-                    result,
-                );
+                self.aml_service
+                    .send_high_risk_slack_alert(user_id, flow, result);
             }
             return Err(UserStatusError::AmlHighRiskBlocked {
                 account_id: result.account_id.clone(),
@@ -112,13 +66,8 @@ impl UserServiceImpl {
 
     fn alert_aml_provider_failure(&self, user_id: UserId, flow: &str, result: &AmlCheckResult) {
         if result.is_provider_failure() {
-            send_aml_provider_failure_slack_alert(
-                self.aml_high_risk_slack_http_client.clone(),
-                &self.aml_high_risk_slack_webhook_url,
-                user_id,
-                flow,
-                result,
-            );
+            self.aml_service
+                .send_provider_failure_slack_alert(user_id, flow, result);
         }
     }
 }
@@ -316,12 +265,12 @@ impl UserService for UserServiceImpl {
         match self.aml_report_repo.latest_active_report(&account_id).await {
             Ok(Some(report)) => {
                 let age = Utc::now().signed_duration_since(report.created_at);
-                if age < Duration::days(self.aml_report_refresh_days) {
+                if age < Duration::days(self.aml_service.report_refresh_days()) {
                     self.enforce_user_aml_result(
                         user_id,
                         flow,
                         &report.result,
-                        self.aml_high_risk_slack_alert_on_cached_reports,
+                        self.aml_service.alert_on_cached_reports(),
                     )
                     .await?;
                     return Ok(());

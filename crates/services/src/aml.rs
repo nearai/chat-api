@@ -85,7 +85,7 @@ impl AmlCheckResult {
     }
 }
 
-pub fn send_high_risk_aml_slack_alert(
+fn send_high_risk_aml_slack_alert(
     http_client: reqwest::Client,
     webhook_url: &str,
     user_id: crate::UserId,
@@ -149,7 +149,7 @@ pub fn send_high_risk_aml_slack_alert(
     });
 }
 
-pub fn send_aml_provider_failure_slack_alert(
+fn send_aml_provider_failure_slack_alert(
     http_client: reqwest::Client,
     webhook_url: &str,
     user_id: crate::UserId,
@@ -224,6 +224,26 @@ pub fn send_aml_provider_failure_slack_alert(
 #[async_trait]
 pub trait AmlRiskService: Send + Sync {
     fn is_enabled(&self) -> bool;
+    fn report_refresh_days(&self) -> i64 {
+        30
+    }
+    fn alert_on_cached_reports(&self) -> bool {
+        false
+    }
+    fn send_high_risk_slack_alert(
+        &self,
+        _user_id: crate::UserId,
+        _flow: &str,
+        _result: &AmlCheckResult,
+    ) {
+    }
+    fn send_provider_failure_slack_alert(
+        &self,
+        _user_id: crate::UserId,
+        _flow: &str,
+        _result: &AmlCheckResult,
+    ) {
+    }
     async fn check_near_account(&self, account_id: &str) -> AmlCheckResult;
 }
 
@@ -386,6 +406,7 @@ pub fn normalize_account_id(account_id: &str) -> String {
 pub struct LukkaAmlService {
     config: config::LukkaAmlConfig,
     http_client: reqwest::Client,
+    slack_http_client: reqwest::Client,
     cache: Arc<RwLock<HashMap<String, CachedAmlResult>>>,
 }
 
@@ -428,10 +449,23 @@ impl LukkaAmlService {
                 );
                 reqwest::Client::new()
             });
+        let slack_http_client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(
+                config.high_risk_slack_timeout_ms.max(1),
+            ))
+            .build()
+            .unwrap_or_else(|err| {
+                tracing::warn!(
+                    error = %err,
+                    "Failed to build AML Slack HTTP client with configured timeout; using default client"
+                );
+                reqwest::Client::new()
+            });
 
         Self {
             config,
             http_client,
+            slack_http_client,
             cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -616,6 +650,44 @@ fn normalize_lukka_response(account_id: &str, body: LukkaAmlScoreResponse) -> Am
 impl AmlRiskService for LukkaAmlService {
     fn is_enabled(&self) -> bool {
         self.config.enabled
+    }
+
+    fn report_refresh_days(&self) -> i64 {
+        self.config.report_refresh_days.max(1)
+    }
+
+    fn alert_on_cached_reports(&self) -> bool {
+        self.config.high_risk_slack_alert_on_cached_reports
+    }
+
+    fn send_high_risk_slack_alert(
+        &self,
+        user_id: crate::UserId,
+        flow: &str,
+        result: &AmlCheckResult,
+    ) {
+        send_high_risk_aml_slack_alert(
+            self.slack_http_client.clone(),
+            &self.config.high_risk_slack_webhook_url,
+            user_id,
+            flow,
+            result,
+        );
+    }
+
+    fn send_provider_failure_slack_alert(
+        &self,
+        user_id: crate::UserId,
+        flow: &str,
+        result: &AmlCheckResult,
+    ) {
+        send_aml_provider_failure_slack_alert(
+            self.slack_http_client.clone(),
+            &self.config.high_risk_slack_webhook_url,
+            user_id,
+            flow,
+            result,
+        );
     }
 
     async fn check_near_account(&self, account_id: &str) -> AmlCheckResult {

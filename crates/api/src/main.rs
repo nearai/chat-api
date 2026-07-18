@@ -146,14 +146,10 @@ async fn main() -> anyhow::Result<()> {
         config.email_auth.clone(),
     ));
 
-    let user_service = Arc::new(UserServiceImpl::new_with_aml_alerts(
+    let user_service = Arc::new(UserServiceImpl::new_with_aml(
         user_repo.clone(),
         aml_service.clone(),
         aml_report_repo.clone(),
-        config.lukka_aml.high_risk_slack_webhook_url.clone(),
-        config.lukka_aml.high_risk_slack_timeout_ms,
-        config.lukka_aml.report_refresh_days,
-        config.lukka_aml.high_risk_slack_alert_on_cached_reports,
     ));
 
     let user_settings_service = Arc::new(UserSettingsServiceImpl::new(user_settings_repo));
@@ -294,12 +290,6 @@ async fn main() -> anyhow::Result<()> {
             agent_service: agent_service.clone() as Arc<dyn services::agent::ports::AgentService>,
             aml_service,
             aml_report_repo,
-            aml_high_risk_slack_webhook_url: config.lukka_aml.high_risk_slack_webhook_url.clone(),
-            aml_high_risk_slack_timeout_ms: config.lukka_aml.high_risk_slack_timeout_ms,
-            aml_high_risk_slack_alert_on_cached_reports: config
-                .lukka_aml
-                .high_risk_slack_alert_on_cached_reports,
-            aml_report_refresh_days: config.lukka_aml.report_refresh_days,
             near_rpc_url: config.near.rpc_url.to_string(),
             near_staking_contract_id: config.near.staking_contract_id.clone(),
             near_network_id: config.near.network_id.clone(),

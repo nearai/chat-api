@@ -16,10 +16,7 @@ use super::ports::{
 };
 use crate::agent::ports::AgentRepository;
 use crate::agent::ports::AgentService;
-use crate::aml::{
-    send_aml_provider_failure_slack_alert, send_high_risk_aml_slack_alert, AmlCheckResult,
-    AmlReportEvent, AmlReportRepository, AmlRiskService,
-};
+use crate::aml::{AmlCheckResult, AmlReportEvent, AmlReportRepository, AmlRiskService};
 use crate::system_configs::ports::{
     CreditsProviderConfig, SubscriptionPlanConfig, SystemConfigs, SystemConfigsService,
 };
@@ -32,7 +29,7 @@ use chrono::{DateTime, Datelike, Duration, NaiveTime, Utc};
 use futures::future::join_all;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration as StdDuration, Instant};
+use std::time::Instant;
 use tokio::sync::RwLock;
 
 /// Configuration for SubscriptionServiceImpl
@@ -50,10 +47,6 @@ pub struct SubscriptionServiceConfig {
     pub agent_service: Arc<dyn AgentService>,
     pub aml_service: Arc<dyn AmlRiskService>,
     pub aml_report_repo: Arc<dyn AmlReportRepository>,
-    pub aml_high_risk_slack_webhook_url: String,
-    pub aml_high_risk_slack_timeout_ms: u64,
-    pub aml_high_risk_slack_alert_on_cached_reports: bool,
-    pub aml_report_refresh_days: i64,
     pub stripe_secret_key: String,
     pub stripe_webhook_secret: String,
     /// When set, enables `provider = house-of-stake` subscription intents (staking contract account id).
@@ -116,10 +109,6 @@ pub struct SubscriptionServiceImpl {
     agent_service: Arc<dyn AgentService>,
     aml_service: Arc<dyn AmlRiskService>,
     aml_report_repo: Arc<dyn AmlReportRepository>,
-    aml_high_risk_slack_webhook_url: String,
-    aml_high_risk_slack_http_client: reqwest::Client,
-    aml_high_risk_slack_alert_on_cached_reports: bool,
-    aml_report_refresh_days: i64,
     stripe_secret_key: String,
     stripe_webhook_secret: String,
     near_staking_contract_id: Option<String>,
@@ -195,22 +184,6 @@ impl SubscriptionServiceImpl {
             agent_service: config.agent_service,
             aml_service: config.aml_service,
             aml_report_repo: config.aml_report_repo,
-            aml_high_risk_slack_webhook_url: config.aml_high_risk_slack_webhook_url,
-            aml_high_risk_slack_http_client: reqwest::Client::builder()
-                .timeout(StdDuration::from_millis(
-                    config.aml_high_risk_slack_timeout_ms.max(1),
-                ))
-                .build()
-                .unwrap_or_else(|err| {
-                    tracing::warn!(
-                        error = %err,
-                        "Failed to build AML Slack HTTP client with configured timeout; using default client"
-                    );
-                    reqwest::Client::new()
-                }),
-            aml_high_risk_slack_alert_on_cached_reports: config
-                .aml_high_risk_slack_alert_on_cached_reports,
-            aml_report_refresh_days: config.aml_report_refresh_days.max(1),
             stripe_secret_key: config.stripe_secret_key,
             stripe_webhook_secret: config.stripe_webhook_secret,
             near_staking_contract_id: config.near_staking_contract_id,
@@ -275,12 +248,12 @@ impl SubscriptionServiceImpl {
         {
             Ok(Some(report)) => {
                 let age = Utc::now().signed_duration_since(report.created_at);
-                if age < Duration::days(self.aml_report_refresh_days) {
+                if age < Duration::days(self.aml_service.report_refresh_days()) {
                     self.enforce_aml_result(
                         user_id,
                         flow,
                         &report.result,
-                        self.aml_high_risk_slack_alert_on_cached_reports,
+                        self.aml_service.alert_on_cached_reports(),
                     )
                     .await?;
                     return Ok(report.result);
@@ -325,13 +298,8 @@ impl SubscriptionServiceImpl {
 
     fn alert_aml_provider_failure(&self, user_id: UserId, flow: &str, result: &AmlCheckResult) {
         if result.is_provider_failure() {
-            send_aml_provider_failure_slack_alert(
-                self.aml_high_risk_slack_http_client.clone(),
-                &self.aml_high_risk_slack_webhook_url,
-                user_id,
-                flow,
-                result,
-            );
+            self.aml_service
+                .send_provider_failure_slack_alert(user_id, flow, result);
         }
     }
 
@@ -357,13 +325,8 @@ impl SubscriptionServiceImpl {
                 .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
             if !allowlisted {
                 if alert_high_risk {
-                    send_high_risk_aml_slack_alert(
-                        self.aml_high_risk_slack_http_client.clone(),
-                        &self.aml_high_risk_slack_webhook_url,
-                        user_id,
-                        flow,
-                        result,
-                    );
+                    self.aml_service
+                        .send_high_risk_slack_alert(user_id, flow, result);
                 }
                 return Err(SubscriptionError::AmlHighRiskBlocked {
                     account_id: result.account_id.clone(),
