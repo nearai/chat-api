@@ -123,7 +123,7 @@ impl AmlReportRepository for PostgresAmlReportRepository {
                 SELECT *
                 FROM aml_risk_reports
                 WHERE account_id = $1 AND active = TRUE AND risk_level <> 'UNKNOWN'
-                ORDER BY checked_at DESC, created_at DESC
+                ORDER BY created_at DESC, checked_at DESC
                 LIMIT 1
                 "#,
                 &[&account_id],
@@ -161,7 +161,7 @@ impl AmlReportRepository for PostgresAmlReportRepository {
                 r#"
                 SELECT *
                 FROM aml_risk_reports
-                ORDER BY checked_at DESC, created_at DESC
+                ORDER BY created_at DESC, checked_at DESC
                 LIMIT $1 OFFSET $2
                 "#,
                 &[&limit, &offset],

@@ -9,8 +9,8 @@ use super::ports::{
     BanType, OAuthProvider, User, UserProfile, UserRepository, UserService, UserStatusError,
 };
 use crate::aml::{
-    normalize_account_id, send_high_risk_aml_slack_alert, AmlCheckResult, AmlReportEvent,
-    AmlReportRepository, AmlRiskService,
+    normalize_account_id, send_aml_provider_failure_slack_alert, send_high_risk_aml_slack_alert,
+    AmlCheckResult, AmlReportEvent, AmlReportRepository, AmlRiskService,
 };
 use crate::types::UserId;
 
@@ -108,6 +108,18 @@ impl UserServiceImpl {
         }
 
         Ok(())
+    }
+
+    fn alert_aml_provider_failure(&self, user_id: UserId, flow: &str, result: &AmlCheckResult) {
+        if result.is_provider_failure() {
+            send_aml_provider_failure_slack_alert(
+                self.aml_high_risk_slack_http_client.clone(),
+                &self.aml_high_risk_slack_webhook_url,
+                user_id,
+                flow,
+                result,
+            );
+        }
     }
 }
 
@@ -303,7 +315,7 @@ impl UserService for UserServiceImpl {
         let account_id = normalize_account_id(&near_account);
         match self.aml_report_repo.latest_active_report(&account_id).await {
             Ok(Some(report)) => {
-                let age = Utc::now().signed_duration_since(report.checked_at);
+                let age = Utc::now().signed_duration_since(report.created_at);
                 if age < Duration::days(self.aml_report_refresh_days) {
                     self.enforce_user_aml_result(
                         user_id,
@@ -344,6 +356,7 @@ impl UserService for UserServiceImpl {
             );
         }
 
+        self.alert_aml_provider_failure(user_id, flow, &result);
         self.enforce_user_aml_result(user_id, flow, &result, true)
             .await?;
 

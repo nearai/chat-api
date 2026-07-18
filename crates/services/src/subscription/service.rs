@@ -17,8 +17,8 @@ use super::ports::{
 use crate::agent::ports::AgentRepository;
 use crate::agent::ports::AgentService;
 use crate::aml::{
-    send_high_risk_aml_slack_alert, AmlCheckResult, AmlReportEvent, AmlReportRepository,
-    AmlRiskService,
+    send_aml_provider_failure_slack_alert, send_high_risk_aml_slack_alert, AmlCheckResult,
+    AmlReportEvent, AmlReportRepository, AmlRiskService,
 };
 use crate::system_configs::ports::{
     CreditsProviderConfig, SubscriptionPlanConfig, SystemConfigs, SystemConfigsService,
@@ -248,7 +248,7 @@ impl SubscriptionServiceImpl {
             .await
         {
             Ok(Some(report)) => {
-                let age = Utc::now().signed_duration_since(report.checked_at);
+                let age = Utc::now().signed_duration_since(report.created_at);
                 if age < Duration::days(self.aml_report_refresh_days) {
                     self.enforce_aml_result(
                         user_id,
@@ -291,9 +291,22 @@ impl SubscriptionServiceImpl {
             );
         }
 
+        self.alert_aml_provider_failure(user_id, flow, &result);
         self.enforce_aml_result(user_id, flow, &result, true)
             .await?;
         Ok(result)
+    }
+
+    fn alert_aml_provider_failure(&self, user_id: UserId, flow: &str, result: &AmlCheckResult) {
+        if result.is_provider_failure() {
+            send_aml_provider_failure_slack_alert(
+                self.aml_high_risk_slack_http_client.clone(),
+                &self.aml_high_risk_slack_webhook_url,
+                user_id,
+                flow,
+                result,
+            );
+        }
     }
 
     async fn enforce_aml_result(

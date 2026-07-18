@@ -75,6 +75,14 @@ impl AmlCheckResult {
     pub fn is_high_risk(&self) -> bool {
         self.risk_level == AmlRiskLevel::High
     }
+
+    pub fn is_provider_failure(&self) -> bool {
+        self.risk_level == AmlRiskLevel::Unknown
+            && self
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.starts_with("provider_"))
+    }
 }
 
 pub fn send_high_risk_aml_slack_alert(
@@ -93,20 +101,26 @@ pub fn send_high_risk_aml_slack_alert(
     let account_id = result.account_id.clone();
     let provider = result.provider.clone();
     let report_id = result.report_id.clone();
+    let reason = result.reason.clone();
     let score = result
         .score
         .map(|score| score.to_string())
         .unwrap_or_else(|| "n/a".to_string());
+    let checked_at = result.checked_at.to_rfc3339();
     let flow = flow.to_string();
     let payload = serde_json::json!({
         "text": format!(
-            "High-risk AML detection: account={} user_id={} flow={} provider={} score={} report_id={}",
+            "High-risk AML detection: account={} user_id={} flow={} provider={} address_type={} risk_level={:?} score={} report_id={} reason={} checked_at={}",
             account_id,
             user_id,
             flow,
             provider,
+            result.address_type,
+            result.risk_level,
             score,
-            report_id.as_deref().unwrap_or("n/a")
+            report_id.as_deref().unwrap_or("n/a"),
+            reason.as_deref().unwrap_or("n/a"),
+            checked_at
         ),
     });
 
@@ -129,6 +143,78 @@ pub fn send_high_risk_aml_slack_alert(
                     flow = %flow,
                     error = %err,
                     "Failed to send high-risk AML Slack alert"
+                );
+            }
+        }
+    });
+}
+
+pub fn send_aml_provider_failure_slack_alert(
+    http_client: reqwest::Client,
+    webhook_url: &str,
+    user_id: crate::UserId,
+    flow: &str,
+    result: &AmlCheckResult,
+) {
+    let webhook_url = webhook_url.trim();
+    if webhook_url.is_empty() {
+        return;
+    }
+
+    let webhook_url = webhook_url.to_string();
+    let account_id = result.account_id.clone();
+    let provider = result.provider.clone();
+    let address_type = result.address_type.clone();
+    let risk_level = result.risk_level;
+    let reason = result
+        .reason
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    let report_id = result
+        .report_id
+        .clone()
+        .unwrap_or_else(|| "n/a".to_string());
+    let score = result
+        .score
+        .map(|score| score.to_string())
+        .unwrap_or_else(|| "n/a".to_string());
+    let checked_at = result.checked_at.to_rfc3339();
+    let flow = flow.to_string();
+    let payload = serde_json::json!({
+        "text": format!(
+            "AML provider failure: account={} user_id={} flow={} provider={} address_type={} risk_level={:?} score={} report_id={} reason={} checked_at={} action=fail_open",
+            account_id,
+            user_id,
+            flow,
+            provider,
+            address_type,
+            risk_level,
+            score,
+            report_id,
+            reason,
+            checked_at
+        ),
+    });
+
+    tokio::spawn(async move {
+        match http_client.post(&webhook_url).json(&payload).send().await {
+            Ok(response) if response.status().is_success() => {}
+            Ok(response) => {
+                tracing::error!(
+                    user_id = %user_id,
+                    account_id = %account_id,
+                    flow = %flow,
+                    status = response.status().as_u16(),
+                    "Slack webhook returned non-success status for AML provider failure alert"
+                );
+            }
+            Err(err) => {
+                tracing::error!(
+                    user_id = %user_id,
+                    account_id = %account_id,
+                    flow = %flow,
+                    error = %err,
+                    "Failed to send AML provider failure Slack alert"
                 );
             }
         }
@@ -658,6 +744,14 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn provider_failure_detection_only_matches_unknown_provider_reasons() {
+        assert!(AmlCheckResult::unknown("alice.near", "provider_timeout").is_provider_failure());
+        assert!(AmlCheckResult::unknown("alice.near", "provider_http_503").is_provider_failure());
+        assert!(!AmlCheckResult::unknown("alice.near", "disabled").is_provider_failure());
+        assert!(!aml_result("alice.near", AmlRiskLevel::High).is_provider_failure());
     }
 
     #[tokio::test]
