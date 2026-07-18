@@ -14,8 +14,7 @@ use serde_json::json;
 use serial_test::serial;
 use services::aml::AmlCheckResult;
 use services::subscription::ports::{
-    ChangePlanOutcome, CreateSubscriptionOutcome,
-    NEAR_STAKING_SYNC_SKIPPED_REASON_UPSERT_BLOCKED_NON_HOS,
+    ChangePlanOutcome, NEAR_STAKING_SYNC_SKIPPED_REASON_UPSERT_BLOCKED_NON_HOS,
 };
 use services::subscription::SubscriptionRepository;
 use services::system_configs::ports::RateLimitConfig;
@@ -3875,12 +3874,17 @@ async fn test_create_subscription_house_of_stake_returns_flat_json() {
             .and_then(|x| x.as_str()),
         Some("1250000000000000000000")
     );
-
-    let parsed: CreateSubscriptionOutcome = serde_json::from_value(body).expect("parse outcome");
-    assert!(matches!(
-        parsed,
-        CreateSubscriptionOutcome::NearStakeLock { .. }
-    ));
+    assert_eq!(
+        body.pointer("/aml/risk_level").and_then(|x| x.as_str()),
+        Some("UNKNOWN")
+    );
+    assert!(body.pointer("/aml/checked_at").is_some());
+    assert!(body.pointer("/aml/score").is_none());
+    assert!(body.pointer("/aml/report_id").is_none());
+    assert!(body.pointer("/aml/reason").is_none());
+    assert!(body.pointer("/aml/provider").is_none());
+    assert!(body.pointer("/aml/account_id").is_none());
+    assert!(body.pointer("/aml/address_type").is_none());
 }
 
 #[tokio::test]
