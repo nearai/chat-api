@@ -7,6 +7,8 @@ use services::aml::{
 use tokio_postgres::Row;
 use uuid::Uuid;
 
+const UNKNOWN_REPORT_DEDUPE_WINDOW: &str = "5 minutes";
+
 pub struct PostgresAmlReportRepository {
     pool: DbPool,
 }
@@ -70,6 +72,35 @@ impl AmlReportRepository for PostgresAmlReportRepository {
         let account_id = normalize_account_id(&event.result.account_id);
         let risk_level = Self::risk_level_to_db(event.result.risk_level);
         let active = event.result.risk_level != AmlRiskLevel::Unknown;
+
+        if event.result.risk_level == AmlRiskLevel::Unknown {
+            let row = client
+                .query_opt(
+                    r#"
+                    SELECT *
+                    FROM aml_risk_reports
+                    WHERE account_id = $1
+                      AND flow = $2
+                      AND provider = $3
+                      AND risk_level = 'UNKNOWN'
+                      AND reason IS NOT DISTINCT FROM $4
+                      AND created_at > NOW() - $5::interval
+                    ORDER BY created_at DESC, checked_at DESC
+                    LIMIT 1
+                    "#,
+                    &[
+                        &account_id,
+                        &event.flow,
+                        &event.result.provider,
+                        &event.result.reason,
+                        &UNKNOWN_REPORT_DEDUPE_WINDOW,
+                    ],
+                )
+                .await?;
+            if let Some(row) = row {
+                return Self::report_from_row(row);
+            }
+        }
 
         let row = client
             .query_one(
@@ -152,10 +183,6 @@ impl AmlReportRepository for PostgresAmlReportRepository {
         offset: i64,
     ) -> anyhow::Result<(Vec<AmlReportRecord>, i64)> {
         let client = self.pool.get().await?;
-        let total = client
-            .query_one("SELECT COUNT(*) FROM aml_risk_reports", &[])
-            .await?
-            .get::<_, i64>(0);
         let rows = client
             .query(
                 r#"
@@ -171,6 +198,21 @@ impl AmlReportRepository for PostgresAmlReportRepository {
             .into_iter()
             .map(Self::report_from_row)
             .collect::<Result<Vec<_>, _>>()?;
+        let minimum_total = offset.saturating_add(reports.len() as i64);
+        let total = client
+            .query_one(
+                r#"
+                SELECT GREATEST(
+                    COALESCE(NULLIF(reltuples, -1::real)::bigint, 0),
+                    $1::bigint
+                )
+                FROM pg_class
+                WHERE oid = 'aml_risk_reports'::regclass
+                "#,
+                &[&minimum_total],
+            )
+            .await?
+            .get::<_, i64>(0);
         Ok((reports, total))
     }
 

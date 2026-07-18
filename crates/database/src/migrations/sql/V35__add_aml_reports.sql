@@ -17,11 +17,13 @@ CREATE TABLE aml_risk_reports (
 );
 
 CREATE INDEX idx_aml_risk_reports_user_id ON aml_risk_reports(user_id);
-CREATE INDEX idx_aml_risk_reports_account_id ON aml_risk_reports(account_id);
+CREATE INDEX idx_aml_risk_reports_account_id ON aml_risk_reports(account_id, created_at DESC, checked_at DESC);
 CREATE INDEX idx_aml_risk_reports_checked_at ON aml_risk_reports(checked_at DESC);
 CREATE INDEX idx_aml_risk_reports_created_at ON aml_risk_reports(created_at DESC);
 CREATE INDEX idx_aml_risk_reports_active_account_id ON aml_risk_reports(account_id, created_at DESC, checked_at DESC)
     WHERE active;
+CREATE INDEX idx_aml_risk_reports_unknown_dedupe ON aml_risk_reports(account_id, flow, provider, reason, created_at DESC)
+    WHERE risk_level = 'UNKNOWN';
 
 CREATE TRIGGER update_aml_risk_reports_updated_at
     BEFORE UPDATE ON aml_risk_reports

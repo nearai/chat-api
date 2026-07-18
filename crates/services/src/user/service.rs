@@ -262,6 +262,7 @@ impl UserService for UserServiceImpl {
 
         let flow = "user_status";
         let account_id = normalize_account_id(&near_account);
+        let mut stale_active_report = None;
         match self.aml_report_repo.latest_active_report(&account_id).await {
             Ok(Some(report)) => {
                 let age = Utc::now().signed_duration_since(report.created_at);
@@ -275,12 +276,12 @@ impl UserService for UserServiceImpl {
                     .await?;
                     return Ok(());
                 }
+                stale_active_report = Some(report);
             }
             Ok(None) => {}
             Err(err) => {
                 tracing::error!(
                     user_id = %user_id,
-                    account_id = %account_id,
                     error = ?err,
                     "Failed to read AML report during user status check; continuing with provider check"
                 );
@@ -299,13 +300,20 @@ impl UserService for UserServiceImpl {
         {
             tracing::error!(
                 user_id = %user_id,
-                account_id = %account_id,
                 error = ?err,
                 "Failed to record AML report during user status check; continuing with provider result"
             );
         }
 
         self.alert_aml_provider_failure(user_id, flow, &result);
+        if result.is_provider_failure() {
+            if let Some(report) = stale_active_report.filter(|report| report.result.is_high_risk())
+            {
+                self.enforce_user_aml_result(user_id, flow, &report.result, true)
+                    .await?;
+                return Ok(());
+            }
+        }
         self.enforce_user_aml_result(user_id, flow, &result, true)
             .await?;
 

@@ -2563,7 +2563,7 @@ pub async fn admin_set_aml_report_active(
         .admin_set_aml_report_active(report_id, request.active)
         .await
         .map_err(|e| match e {
-            services::subscription::ports::SubscriptionError::SubscriptionNotFound => {
+            services::subscription::ports::SubscriptionError::AmlReportNotFound => {
                 ApiError::not_found("AML report not found")
             }
             other => {

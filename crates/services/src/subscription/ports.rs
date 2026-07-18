@@ -408,6 +408,8 @@ pub enum SubscriptionError {
     NoPendingDowngrade,
     /// No subscription row found for the requested subscription_id.
     SubscriptionNotFound,
+    /// No AML report row found for the requested report id.
+    AmlReportNotFound,
     /// House-of-Stake contract id is not configured
     HouseOfStakeNotConfigured,
     /// House-of-Stake requires the user to authenticate with a NEAR wallet
@@ -479,6 +481,9 @@ impl fmt::Display for SubscriptionError {
             }
             Self::SubscriptionNotFound => {
                 write!(f, "Subscription not found")
+            }
+            Self::AmlReportNotFound => {
+                write!(f, "AML report not found")
             }
             Self::HouseOfStakeNotConfigured => {
                 write!(f, "House-of-Stake billing is not configured")

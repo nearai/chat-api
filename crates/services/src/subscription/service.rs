@@ -241,6 +241,7 @@ impl SubscriptionServiceImpl {
             return Ok(AmlCheckResult::unknown(normalized_account, "disabled"));
         }
 
+        let mut stale_active_report = None;
         match self
             .aml_report_repo
             .latest_active_report(&normalized_account)
@@ -258,12 +259,12 @@ impl SubscriptionServiceImpl {
                     .await?;
                     return Ok(report.result);
                 }
+                stale_active_report = Some(report);
             }
             Ok(None) => {}
             Err(err) => {
                 tracing::error!(
                     user_id = %user_id,
-                    near_account = %normalized_account,
                     flow = %flow,
                     error = ?err,
                     "Failed to read AML report cache; continuing with provider check"
@@ -283,7 +284,6 @@ impl SubscriptionServiceImpl {
         if let Err(err) = self.aml_report_repo.record_report(event).await {
             tracing::error!(
                 user_id = %user_id,
-                near_account = %normalized_account,
                 flow = %flow,
                 error = ?err,
                 "Failed to record AML report; continuing with provider result"
@@ -291,6 +291,14 @@ impl SubscriptionServiceImpl {
         }
 
         self.alert_aml_provider_failure(user_id, flow, &result);
+        if result.is_provider_failure() {
+            if let Some(report) = stale_active_report.filter(|report| report.result.is_high_risk())
+            {
+                self.enforce_aml_result(user_id, flow, &report.result, true)
+                    .await?;
+                return Ok(report.result);
+            }
+        }
         self.enforce_aml_result(user_id, flow, &result, true)
             .await?;
         Ok(result)
@@ -313,7 +321,6 @@ impl SubscriptionServiceImpl {
         if result.is_high_risk() {
             tracing::warn!(
                 user_id = %user_id,
-                near_account = %result.account_id,
                 flow = %flow,
                 report_id = ?result.report_id,
                 "High-risk AML result for NEAR wallet flow"
@@ -4249,7 +4256,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .set_report_active(id, active)
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
-            .ok_or(SubscriptionError::SubscriptionNotFound)
+            .ok_or(SubscriptionError::AmlReportNotFound)
     }
 }
 

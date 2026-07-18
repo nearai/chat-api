@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 const PROVIDER_LUKKA: &str = "lukka";
 const NEAR_ADDRESS_TYPE: &str = "NEAR";
+const PROVIDER_FAILURE_CACHE_TTL_SECS: u64 = 60;
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,7 +131,6 @@ fn send_high_risk_aml_slack_alert(
             Ok(response) => {
                 tracing::error!(
                     user_id = %user_id,
-                    account_id = %account_id,
                     flow = %flow,
                     status = response.status().as_u16(),
                     "Slack webhook returned non-success status for high-risk AML alert"
@@ -139,7 +139,6 @@ fn send_high_risk_aml_slack_alert(
             Err(err) => {
                 tracing::error!(
                     user_id = %user_id,
-                    account_id = %account_id,
                     flow = %flow,
                     error = %err,
                     "Failed to send high-risk AML Slack alert"
@@ -202,7 +201,6 @@ fn send_aml_provider_failure_slack_alert(
             Ok(response) => {
                 tracing::error!(
                     user_id = %user_id,
-                    account_id = %account_id,
                     flow = %flow,
                     status = response.status().as_u16(),
                     "Slack webhook returned non-success status for AML provider failure alert"
@@ -211,7 +209,6 @@ fn send_aml_provider_failure_slack_alert(
             Err(err) => {
                 tracing::error!(
                     user_id = %user_id,
-                    account_id = %account_id,
                     flow = %flow,
                     error = %err,
                     "Failed to send AML provider failure Slack alert"
@@ -486,8 +483,7 @@ impl LukkaAmlService {
     }
 
     async fn cached_result(&self, account_id: &str) -> Option<AmlCheckResult> {
-        let ttl = self.config.cache_ttl_secs;
-        if ttl == 0 {
+        if self.config.cache_ttl_secs == 0 {
             return None;
         }
 
@@ -495,19 +491,32 @@ impl LukkaAmlService {
             .read()
             .await
             .get(account_id)
-            .filter(|entry| entry.cached_at.elapsed().as_secs() < ttl)
+            .filter(|entry| {
+                entry.cached_at.elapsed().as_secs() < self.cache_ttl_secs(&entry.result)
+            })
             .map(|entry| entry.result.clone())
+    }
+
+    fn cache_ttl_secs(&self, result: &AmlCheckResult) -> u64 {
+        if result.is_provider_failure() {
+            return self
+                .config
+                .cache_ttl_secs
+                .min(PROVIDER_FAILURE_CACHE_TTL_SECS);
+        }
+        self.config.cache_ttl_secs
     }
 
     async fn store_cache(&self, account_id: &str, result: AmlCheckResult) -> AmlCheckResult {
         if self.config.cache_ttl_secs > 0 {
-            if result.risk_level == AmlRiskLevel::Unknown {
+            if result.risk_level == AmlRiskLevel::Unknown && !result.is_provider_failure() {
                 return result;
             }
 
             let mut cache = self.cache.write().await;
-            let ttl = self.config.cache_ttl_secs;
-            cache.retain(|_, entry| entry.cached_at.elapsed().as_secs() < ttl);
+            cache.retain(|_, entry| {
+                entry.cached_at.elapsed().as_secs() < self.cache_ttl_secs(&entry.result)
+            });
             cache.insert(
                 account_id.to_string(),
                 CachedAmlResult {
@@ -550,7 +559,6 @@ impl LukkaAmlService {
                             );
                             if result.is_high_risk() {
                                 tracing::warn!(
-                                    account_id = %result.account_id,
                                     report_id = ?result.report_id,
                                     "Lukka AML high risk NEAR account detected"
                                 );
@@ -559,7 +567,6 @@ impl LukkaAmlService {
                         }
                         Err(err) => {
                             tracing::warn!(
-                                account_id = %account_id,
                                 error = %err,
                                 "Failed to decode Lukka AML response"
                             );
@@ -571,7 +578,6 @@ impl LukkaAmlService {
                     let status = response.status();
                     last_reason = format!("provider_http_{}", status.as_u16());
                     tracing::warn!(
-                        account_id = %account_id,
                         status = status.as_u16(),
                         attempt = attempt + 1,
                         attempts,
@@ -588,7 +594,6 @@ impl LukkaAmlService {
                         "provider_error".to_string()
                     };
                     tracing::warn!(
-                        account_id = %account_id,
                         error = %err,
                         attempt = attempt + 1,
                         attempts,
