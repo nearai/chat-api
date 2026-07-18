@@ -262,6 +262,7 @@ async fn create_test_server_and_db_inner(
                 aml_report_repo,
                 aml_high_risk_slack_webhook_url: String::new(),
                 aml_high_risk_slack_timeout_ms: 1,
+                aml_high_risk_slack_alert_on_cached_reports: false,
                 aml_report_refresh_days: 30,
                 stripe_secret_key: config.stripe.secret_key.clone(),
                 stripe_webhook_secret: config.stripe.webhook_secret.clone(),

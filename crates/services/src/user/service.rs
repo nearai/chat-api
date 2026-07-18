@@ -1,19 +1,27 @@
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use std::sync::Arc;
+use std::time::Duration as StdDuration;
 use uuid::Uuid;
 
 use super::ports::{
     AccountDeletion, AccountDeletionError, AccountDeletionRequestResult, AccountDeletionStatus,
     BanType, OAuthProvider, User, UserProfile, UserRepository, UserService, UserStatusError,
 };
-use crate::aml::{normalize_account_id, AmlReportEvent, AmlReportRepository, AmlRiskService};
+use crate::aml::{
+    normalize_account_id, send_high_risk_aml_slack_alert, AmlCheckResult, AmlReportEvent,
+    AmlReportRepository, AmlRiskService,
+};
 use crate::types::UserId;
 
 pub struct UserServiceImpl {
     user_repository: Arc<dyn UserRepository>,
     aml_service: Arc<dyn AmlRiskService>,
     aml_report_repo: Arc<dyn AmlReportRepository>,
+    aml_high_risk_slack_webhook_url: String,
+    aml_high_risk_slack_http_client: reqwest::Client,
+    aml_high_risk_slack_alert_on_cached_reports: bool,
+    aml_report_refresh_days: i64,
 }
 
 impl UserServiceImpl {
@@ -30,11 +38,76 @@ impl UserServiceImpl {
         aml_service: Arc<dyn AmlRiskService>,
         aml_report_repo: Arc<dyn AmlReportRepository>,
     ) -> Self {
+        Self::new_with_aml_alerts(
+            user_repository,
+            aml_service,
+            aml_report_repo,
+            String::new(),
+            1_000,
+            30,
+            false,
+        )
+    }
+
+    pub fn new_with_aml_alerts(
+        user_repository: Arc<dyn UserRepository>,
+        aml_service: Arc<dyn AmlRiskService>,
+        aml_report_repo: Arc<dyn AmlReportRepository>,
+        aml_high_risk_slack_webhook_url: String,
+        aml_high_risk_slack_timeout_ms: u64,
+        aml_report_refresh_days: i64,
+        aml_high_risk_slack_alert_on_cached_reports: bool,
+    ) -> Self {
         Self {
             user_repository,
             aml_service,
             aml_report_repo,
+            aml_high_risk_slack_webhook_url,
+            aml_high_risk_slack_http_client: reqwest::Client::builder()
+                .timeout(StdDuration::from_millis(
+                    aml_high_risk_slack_timeout_ms.max(1),
+                ))
+                .build()
+                .unwrap_or_else(|err| {
+                    tracing::warn!(
+                        error = %err,
+                        "Failed to build AML Slack HTTP client with configured timeout; using default client"
+                    );
+                    reqwest::Client::new()
+                }),
+            aml_high_risk_slack_alert_on_cached_reports,
+            aml_report_refresh_days: aml_report_refresh_days.max(1),
         }
+    }
+
+    async fn enforce_user_aml_result(
+        &self,
+        user_id: UserId,
+        flow: &str,
+        result: &AmlCheckResult,
+        alert_high_risk: bool,
+    ) -> Result<(), UserStatusError> {
+        if result.is_high_risk()
+            && !self
+                .aml_report_repo
+                .is_account_allowlisted(&result.account_id)
+                .await?
+        {
+            if alert_high_risk {
+                send_high_risk_aml_slack_alert(
+                    self.aml_high_risk_slack_http_client.clone(),
+                    &self.aml_high_risk_slack_webhook_url,
+                    user_id,
+                    flow,
+                    result,
+                );
+            }
+            return Err(UserStatusError::AmlHighRiskBlocked {
+                account_id: result.account_id.clone(),
+            });
+        }
+
+        Ok(())
     }
 }
 
@@ -226,29 +299,23 @@ impl UserService for UserServiceImpl {
             return Ok(());
         };
 
+        let flow = "user_status";
         let account_id = normalize_account_id(&near_account);
-        let result = match self.aml_report_repo.latest_active_report(&account_id).await {
-            Ok(Some(report)) => report.result,
-            Ok(None) => {
-                let result = self.aml_service.check_near_account(&account_id).await;
-                if let Err(err) = self
-                    .aml_report_repo
-                    .record_report(AmlReportEvent {
+        match self.aml_report_repo.latest_active_report(&account_id).await {
+            Ok(Some(report)) => {
+                let age = Utc::now().signed_duration_since(report.checked_at);
+                if age < Duration::days(self.aml_report_refresh_days) {
+                    self.enforce_user_aml_result(
                         user_id,
-                        flow: "user_status".to_string(),
-                        result: result.clone(),
-                    })
-                    .await
-                {
-                    tracing::error!(
-                        user_id = %user_id,
-                        account_id = %account_id,
-                        error = ?err,
-                        "Failed to record AML report during user status check; continuing with provider result"
-                    );
+                        flow,
+                        &report.result,
+                        self.aml_high_risk_slack_alert_on_cached_reports,
+                    )
+                    .await?;
+                    return Ok(());
                 }
-                result
             }
+            Ok(None) => {}
             Err(err) => {
                 tracing::error!(
                     user_id = %user_id,
@@ -256,20 +323,29 @@ impl UserService for UserServiceImpl {
                     error = ?err,
                     "Failed to read AML report during user status check; continuing with provider check"
                 );
-                self.aml_service.check_near_account(&account_id).await
             }
         };
 
-        if result.is_high_risk()
-            && !self
-                .aml_report_repo
-                .is_account_allowlisted(&result.account_id)
-                .await?
+        let result = self.aml_service.check_near_account(&account_id).await;
+        if let Err(err) = self
+            .aml_report_repo
+            .record_report(AmlReportEvent {
+                user_id,
+                flow: flow.to_string(),
+                result: result.clone(),
+            })
+            .await
         {
-            return Err(UserStatusError::AmlHighRiskBlocked {
-                account_id: result.account_id,
-            });
+            tracing::error!(
+                user_id = %user_id,
+                account_id = %account_id,
+                error = ?err,
+                "Failed to record AML report during user status check; continuing with provider result"
+            );
         }
+
+        self.enforce_user_aml_result(user_id, flow, &result, true)
+            .await?;
 
         Ok(())
     }

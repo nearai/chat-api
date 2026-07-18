@@ -195,6 +195,7 @@ pub struct LukkaAmlConfig {
     pub bearer_token: String,
     pub high_risk_slack_webhook_url: String,
     pub high_risk_slack_timeout_ms: u64,
+    pub high_risk_slack_alert_on_cached_reports: bool,
     pub report_refresh_days: i64,
     pub timeout_ms: u64,
     pub max_retries: u32,
@@ -211,6 +212,10 @@ impl fmt::Debug for LukkaAmlConfig {
             .field(
                 "high_risk_slack_timeout_ms",
                 &self.high_risk_slack_timeout_ms,
+            )
+            .field(
+                "high_risk_slack_alert_on_cached_reports",
+                &self.high_risk_slack_alert_on_cached_reports,
             )
             .field("report_refresh_days", &self.report_refresh_days)
             .field("timeout_ms", &self.timeout_ms)
@@ -236,6 +241,12 @@ impl Default for LukkaAmlConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1_000),
+            high_risk_slack_alert_on_cached_reports: std::env::var(
+                "LUKKA_AML_HIGH_RISK_SLACK_ALERT_ON_CACHED_REPORTS",
+            )
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(false),
             report_refresh_days: std::env::var("LUKKA_AML_REPORT_REFRESH_DAYS")
                 .ok()
                 .and_then(|v| v.parse().ok())

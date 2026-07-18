@@ -77,6 +77,64 @@ impl AmlCheckResult {
     }
 }
 
+pub fn send_high_risk_aml_slack_alert(
+    http_client: reqwest::Client,
+    webhook_url: &str,
+    user_id: crate::UserId,
+    flow: &str,
+    result: &AmlCheckResult,
+) {
+    let webhook_url = webhook_url.trim();
+    if webhook_url.is_empty() {
+        return;
+    }
+
+    let webhook_url = webhook_url.to_string();
+    let account_id = result.account_id.clone();
+    let provider = result.provider.clone();
+    let report_id = result.report_id.clone();
+    let score = result
+        .score
+        .map(|score| score.to_string())
+        .unwrap_or_else(|| "n/a".to_string());
+    let flow = flow.to_string();
+    let payload = serde_json::json!({
+        "text": format!(
+            "High-risk AML detection: account={} user_id={} flow={} provider={} score={} report_id={}",
+            account_id,
+            user_id,
+            flow,
+            provider,
+            score,
+            report_id.as_deref().unwrap_or("n/a")
+        ),
+    });
+
+    tokio::spawn(async move {
+        match http_client.post(&webhook_url).json(&payload).send().await {
+            Ok(response) if response.status().is_success() => {}
+            Ok(response) => {
+                tracing::error!(
+                    user_id = %user_id,
+                    account_id = %account_id,
+                    flow = %flow,
+                    status = response.status().as_u16(),
+                    "Slack webhook returned non-success status for high-risk AML alert"
+                );
+            }
+            Err(err) => {
+                tracing::error!(
+                    user_id = %user_id,
+                    account_id = %account_id,
+                    flow = %flow,
+                    error = %err,
+                    "Failed to send high-risk AML Slack alert"
+                );
+            }
+        }
+    });
+}
+
 #[async_trait]
 pub trait AmlRiskService: Send + Sync {
     fn is_enabled(&self) -> bool;
@@ -509,6 +567,7 @@ mod tests {
             bearer_token: "test-token".to_string(),
             high_risk_slack_webhook_url: String::new(),
             high_risk_slack_timeout_ms: 1_000,
+            high_risk_slack_alert_on_cached_reports: false,
             report_refresh_days: 30,
             timeout_ms: 1_000,
             max_retries: 0,
