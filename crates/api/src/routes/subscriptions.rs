@@ -48,7 +48,7 @@ pub struct CancelSubscriptionResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub contract_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub product_id: Option<String>,
+    pub subscription_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub network_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -64,7 +64,7 @@ pub struct ResumeSubscriptionResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub contract_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub product_id: Option<String>,
+    pub subscription_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub network_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -314,20 +314,20 @@ pub async fn cancel_subscription(
             message: "Subscription will be canceled at period end".to_string(),
             kind: None,
             contract_id: None,
-            product_id: None,
+            subscription_id: None,
             network_id: None,
             required_deposit_yocto: None,
         },
         CancelSubscriptionOutcome::NearStakingCancel {
             contract_id,
-            product_id,
+            subscription_id,
             network_id,
             required_deposit_yocto,
         } => CancelSubscriptionResponse {
             message: "Complete cancellation in your NEAR wallet".to_string(),
             kind: Some("near_staking_cancel".to_string()),
             contract_id: Some(contract_id),
-            product_id: Some(product_id),
+            subscription_id: Some(subscription_id),
             network_id: Some(network_id),
             required_deposit_yocto: Some(required_deposit_yocto),
         },
@@ -396,20 +396,20 @@ pub async fn resume_subscription(
             message: "Subscription resumed successfully".to_string(),
             kind: None,
             contract_id: None,
-            product_id: None,
+            subscription_id: None,
             network_id: None,
             required_deposit_yocto: None,
         },
         ResumeSubscriptionOutcome::NearStakingResume {
             contract_id,
-            product_id,
+            subscription_id,
             network_id,
             required_deposit_yocto,
         } => ResumeSubscriptionResponse {
             message: "Complete resume in your NEAR wallet".to_string(),
             kind: Some("near_staking_resume".to_string()),
             contract_id: Some(contract_id),
-            product_id: Some(product_id),
+            subscription_id: Some(subscription_id),
             network_id: Some(network_id),
             required_deposit_yocto: Some(required_deposit_yocto),
         },
