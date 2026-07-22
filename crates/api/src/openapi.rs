@@ -22,6 +22,7 @@ use utoipa::OpenApi;
         crate::routes::oauth::logout,
         // User endpoints
         crate::routes::users::get_current_user,
+        crate::routes::users::get_user_status,
         crate::routes::users::delete_current_user,
         crate::routes::users::get_my_usage,
         // Conversation endpoints
@@ -85,6 +86,11 @@ use utoipa::OpenApi;
         crate::routes::admin::get_top_usage,
         crate::routes::admin::admin_set_user_subscription,
         crate::routes::admin::admin_cancel_user_subscriptions,
+        crate::routes::admin::admin_list_aml_reports,
+        crate::routes::admin::admin_list_aml_allowlist,
+        crate::routes::admin::admin_add_aml_allowlist_entry,
+        crate::routes::admin::admin_remove_aml_allowlist_entry,
+        crate::routes::admin::admin_set_aml_report_active,
         // Configs endpoints
         crate::routes::configs::get_system_configs,
         crate::routes::users::get_user_settings,
@@ -139,6 +145,7 @@ use utoipa::OpenApi;
         crate::models::LinkedAccountResponse,
         crate::models::UserProfileResponse,
         crate::models::UserAccountDeletionResponse,
+        crate::routes::users::UserStatusResponse,
         services::user::ports::AccountDeletion,
         services::user::ports::AccountDeletionStatus,
         crate::routes::admin::AdminRetryAccountDeletionResponse,
@@ -203,6 +210,14 @@ use utoipa::OpenApi;
         services::subscription::ports::NearStakingSyncSummary,
         services::subscription::ports::SubscriptionWithPlan,
         services::subscription::ports::SubscriptionPlan,
+        services::aml::AmlCheckResult,
+        services::aml::AmlRiskLevel,
+        crate::routes::admin::AdminAmlReportResponse,
+        crate::routes::admin::AdminAmlReportsResponse,
+        crate::routes::admin::AdminAmlAllowlistEntryResponse,
+        crate::routes::admin::AdminAmlAllowlistResponse,
+        crate::routes::admin::AdminAmlAllowlistRequest,
+        crate::routes::admin::AdminAmlReportStatusRequest,
         // Attestation models
         crate::models::ApiGatewayAttestation,
         crate::models::ModelAttestation,

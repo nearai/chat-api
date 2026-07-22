@@ -2315,6 +2315,266 @@ pub struct SyncAgentStatusResponse {
     pub errors: Vec<String>,
 }
 
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct AdminAmlReportResponse {
+    pub id: Uuid,
+    pub user_id: Option<UserId>,
+    pub flow: String,
+    pub provider: String,
+    pub account_id: String,
+    pub address_type: String,
+    pub risk_level: services::aml::AmlRiskLevel,
+    pub score: Option<i64>,
+    pub report_id: Option<String>,
+    pub checked_at: DateTime<Utc>,
+    pub reason: Option<String>,
+    pub result: services::aml::AmlCheckResult,
+    pub active: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl From<services::aml::AmlReportRecord> for AdminAmlReportResponse {
+    fn from(report: services::aml::AmlReportRecord) -> Self {
+        Self {
+            id: report.id,
+            user_id: report.user_id,
+            flow: report.flow,
+            provider: report.provider,
+            account_id: report.account_id,
+            address_type: report.address_type,
+            risk_level: report.risk_level,
+            score: report.score,
+            report_id: report.report_id,
+            checked_at: report.checked_at,
+            reason: report.reason,
+            result: report.result,
+            active: report.active,
+            created_at: report.created_at,
+            updated_at: report.updated_at,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct AdminAmlReportsResponse {
+    pub reports: Vec<AdminAmlReportResponse>,
+    pub total: i64,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct AdminAmlAllowlistEntryResponse {
+    pub account_id: String,
+    pub reason: Option<String>,
+    pub created_by: Option<UserId>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl From<services::aml::AmlAccountAllowlistEntry> for AdminAmlAllowlistEntryResponse {
+    fn from(entry: services::aml::AmlAccountAllowlistEntry) -> Self {
+        Self {
+            account_id: entry.account_id,
+            reason: entry.reason,
+            created_by: entry.created_by,
+            created_at: entry.created_at,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct AdminAmlAllowlistResponse {
+    pub accounts: Vec<AdminAmlAllowlistEntryResponse>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct AdminAmlAllowlistRequest {
+    pub account_id: String,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct AdminAmlReportStatusRequest {
+    pub active: bool,
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/admin/aml/reports",
+    tag = "Admin",
+    params(PaginationQuery),
+    responses(
+        (status = 200, description = "AML reports retrieved", body = AdminAmlReportsResponse),
+        (status = 400, description = "Invalid request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(("session_token" = []))
+)]
+pub async fn admin_list_aml_reports(
+    State(app_state): State<AppState>,
+    Query(query): Query<PaginationQuery>,
+) -> Result<Json<AdminAmlReportsResponse>, ApiError> {
+    query.validate()?;
+    let limit = query.limit.clamp(1, 100);
+    let offset = query.offset.max(0);
+    let (reports, total) = app_state
+        .subscription_service
+        .admin_list_aml_reports(limit, offset)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = ?e, "Failed to list AML reports");
+            ApiError::internal_server_error("Failed to list AML reports")
+        })?;
+
+    Ok(Json(AdminAmlReportsResponse {
+        reports: reports.into_iter().map(Into::into).collect(),
+        total,
+        limit,
+        offset,
+    }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/admin/aml/allowlist",
+    tag = "Admin",
+    responses(
+        (status = 200, description = "AML allowlist retrieved", body = AdminAmlAllowlistResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(("session_token" = []))
+)]
+pub async fn admin_list_aml_allowlist(
+    State(app_state): State<AppState>,
+) -> Result<Json<AdminAmlAllowlistResponse>, ApiError> {
+    let accounts = app_state
+        .subscription_service
+        .admin_list_aml_allowlist()
+        .await
+        .map_err(|e| {
+            tracing::error!(error = ?e, "Failed to list AML allowlist");
+            ApiError::internal_server_error("Failed to list AML allowlist")
+        })?;
+
+    Ok(Json(AdminAmlAllowlistResponse {
+        accounts: accounts.into_iter().map(Into::into).collect(),
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/admin/aml/allowlist",
+    tag = "Admin",
+    request_body = AdminAmlAllowlistRequest,
+    responses(
+        (status = 200, description = "AML allowlist entry added", body = AdminAmlAllowlistEntryResponse),
+        (status = 400, description = "Invalid request", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(("session_token" = []))
+)]
+pub async fn admin_add_aml_allowlist_entry(
+    State(app_state): State<AppState>,
+    Extension(admin): Extension<AuthenticatedUser>,
+    Json(request): Json<AdminAmlAllowlistRequest>,
+) -> Result<Json<AdminAmlAllowlistEntryResponse>, ApiError> {
+    if request.account_id.trim().is_empty() {
+        return Err(ApiError::bad_request("account_id is required"));
+    }
+
+    let entry = app_state
+        .subscription_service
+        .admin_add_aml_allowlist_entry(request.account_id, request.reason, Some(admin.user_id))
+        .await
+        .map_err(|e| {
+            tracing::error!(error = ?e, "Failed to add AML allowlist entry");
+            ApiError::internal_server_error("Failed to add AML allowlist entry")
+        })?;
+
+    Ok(Json(entry.into()))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/v1/admin/aml/allowlist/{account_id}",
+    tag = "Admin",
+    params(
+        ("account_id" = String, Path, description = "NEAR account id to remove from the AML allowlist")
+    ),
+    responses(
+        (status = 204, description = "AML allowlist entry removed"),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "AML allowlist entry not found", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(("session_token" = []))
+)]
+pub async fn admin_remove_aml_allowlist_entry(
+    State(app_state): State<AppState>,
+    Path(account_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let removed = app_state
+        .subscription_service
+        .admin_remove_aml_allowlist_entry(account_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = ?e, "Failed to remove AML allowlist entry");
+            ApiError::internal_server_error("Failed to remove AML allowlist entry")
+        })?;
+    if removed {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::not_found("AML allowlist entry not found"))
+    }
+}
+
+#[utoipa::path(
+    patch,
+    path = "/v1/admin/aml/reports/{report_id}/status",
+    tag = "Admin",
+    params(
+        ("report_id" = Uuid, Path, description = "AML report id")
+    ),
+    request_body = AdminAmlReportStatusRequest,
+    responses(
+        (status = 200, description = "AML report status updated", body = AdminAmlReportResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 403, description = "Forbidden - Admin access required", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "AML report not found", body = crate::error::ApiErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
+    ),
+    security(("session_token" = []))
+)]
+pub async fn admin_set_aml_report_active(
+    State(app_state): State<AppState>,
+    Path(report_id): Path<Uuid>,
+    Json(request): Json<AdminAmlReportStatusRequest>,
+) -> Result<Json<AdminAmlReportResponse>, ApiError> {
+    let report = app_state
+        .subscription_service
+        .admin_set_aml_report_active(report_id, request.active)
+        .await
+        .map_err(|e| match e {
+            services::subscription::ports::SubscriptionError::AmlReportNotFound => {
+                ApiError::not_found("AML report not found")
+            }
+            other => {
+                tracing::error!(error = ?other, "Failed to update AML report status");
+                ApiError::internal_server_error("Failed to update AML report status")
+            }
+        })?;
+
+    Ok(Json(report.into()))
+}
+
 /// Create a backup of an agent instance
 #[utoipa::path(
     post,
@@ -4550,6 +4810,19 @@ pub fn create_admin_router() -> Router<AppState> {
         .route("/vpc/revoke", post(revoke_vpc_credentials))
         .route("/credits", post(admin_grant_credits))
         .route("/credits/history", get(admin_credit_history))
+        .route("/aml/reports", get(admin_list_aml_reports))
+        .route(
+            "/aml/reports/{report_id}/status",
+            patch(admin_set_aml_report_active),
+        )
+        .route(
+            "/aml/allowlist",
+            get(admin_list_aml_allowlist).post(admin_add_aml_allowlist_entry),
+        )
+        .route(
+            "/aml/allowlist/{account_id}",
+            delete(admin_remove_aml_allowlist_entry),
+        )
         .route(
             "/configs",
             get(get_system_configs_admin).patch(upsert_system_configs),

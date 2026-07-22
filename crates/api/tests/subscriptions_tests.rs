@@ -1,6 +1,7 @@
 mod common;
 
 use api::routes::api::SUBSCRIPTION_REQUIRED_ERROR_MESSAGE;
+use async_trait::async_trait;
 use chrono::{Duration, TimeZone, Timelike, Utc};
 use common::{
     cleanup_user_agent_instances, cleanup_user_subscription_credits, cleanup_user_subscriptions,
@@ -12,14 +13,19 @@ use common::{
 use hmac::Mac;
 use serde_json::json;
 use serial_test::serial;
+use services::aml::{
+    AmlAccountAllowlistEntry, AmlCheckResult, AmlReportEvent, AmlReportRecord, AmlReportRepository,
+    AmlRiskLevel, AmlRiskService,
+};
 use services::subscription::ports::{
-    ChangePlanOutcome, CreateSubscriptionOutcome,
-    NEAR_STAKING_SYNC_SKIPPED_REASON_UPSERT_BLOCKED_NON_HOS,
+    ChangePlanOutcome, NEAR_STAKING_SYNC_SKIPPED_REASON_UPSERT_BLOCKED_NON_HOS,
 };
 use services::subscription::SubscriptionRepository;
 use services::system_configs::ports::RateLimitConfig;
 use services::user::ports::UserRepository;
 use services::user_usage::{UserUsageRepository, METRIC_KEY_LLM_TOKENS};
+use services::UserId;
+use std::sync::Arc;
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -45,6 +51,133 @@ fn permissive_rate_limit_config() -> RateLimitConfig {
         window_limits: vec![],
         token_window_limits: vec![],
         cost_window_limits: vec![],
+    }
+}
+
+struct StaticAmlRiskService {
+    result: AmlCheckResult,
+}
+
+#[async_trait]
+impl AmlRiskService for StaticAmlRiskService {
+    fn is_enabled(&self) -> bool {
+        true
+    }
+
+    async fn check_near_account(&self, account_id: &str) -> AmlCheckResult {
+        let mut result = self.result.clone();
+        result.account_id = account_id.to_string();
+        result
+    }
+}
+
+struct StaticAmlReportRepository {
+    latest: Option<AmlReportRecord>,
+}
+
+#[async_trait]
+impl AmlReportRepository for StaticAmlReportRepository {
+    async fn record_report(&self, event: AmlReportEvent) -> anyhow::Result<AmlReportRecord> {
+        let now = Utc::now();
+        Ok(AmlReportRecord {
+            id: Uuid::new_v4(),
+            user_id: Some(event.user_id),
+            flow: event.flow,
+            provider: event.result.provider.clone(),
+            account_id: event.result.account_id.clone(),
+            address_type: event.result.address_type.clone(),
+            risk_level: event.result.risk_level,
+            score: event.result.score,
+            report_id: event.result.report_id.clone(),
+            checked_at: event.result.checked_at,
+            reason: event.result.reason.clone(),
+            result: event.result,
+            active: false,
+            created_at: now,
+            updated_at: now,
+        })
+    }
+
+    async fn latest_active_report(
+        &self,
+        _account_id: &str,
+    ) -> anyhow::Result<Option<AmlReportRecord>> {
+        Ok(self.latest.clone())
+    }
+
+    async fn is_account_allowlisted(&self, _account_id: &str) -> anyhow::Result<bool> {
+        Ok(false)
+    }
+
+    async fn list_reports(
+        &self,
+        _limit: i64,
+        _offset: i64,
+    ) -> anyhow::Result<(Vec<AmlReportRecord>, i64)> {
+        Ok((Vec::new(), 0))
+    }
+
+    async fn list_allowlist(&self) -> anyhow::Result<Vec<AmlAccountAllowlistEntry>> {
+        Ok(Vec::new())
+    }
+
+    async fn add_allowlist_entry(
+        &self,
+        account_id: &str,
+        reason: Option<String>,
+        created_by: Option<UserId>,
+    ) -> anyhow::Result<AmlAccountAllowlistEntry> {
+        Ok(AmlAccountAllowlistEntry {
+            account_id: account_id.to_string(),
+            reason,
+            created_by,
+            created_at: Utc::now(),
+        })
+    }
+
+    async fn remove_allowlist_entry(&self, _account_id: &str) -> anyhow::Result<bool> {
+        Ok(false)
+    }
+
+    async fn set_report_active(
+        &self,
+        _id: Uuid,
+        _active: bool,
+    ) -> anyhow::Result<Option<AmlReportRecord>> {
+        Ok(None)
+    }
+}
+
+fn aml_result(account_id: &str, risk_level: AmlRiskLevel, reason: Option<&str>) -> AmlCheckResult {
+    AmlCheckResult {
+        provider: "lukka".to_string(),
+        account_id: account_id.to_string(),
+        address_type: "NEAR".to_string(),
+        risk_level,
+        score: Some(99),
+        report_id: Some("report".to_string()),
+        checked_at: Utc::now(),
+        reason: reason.map(str::to_string),
+    }
+}
+
+fn aml_report(result: AmlCheckResult, created_at: chrono::DateTime<Utc>) -> AmlReportRecord {
+    AmlReportRecord {
+        id: Uuid::new_v4(),
+        user_id: None,
+        flow: "resume_subscription".to_string(),
+        provider: result.provider.clone(),
+        account_id: result.account_id.clone(),
+        address_type: result.address_type.clone(),
+        risk_level: result.risk_level,
+        score: result.score,
+        report_id: result.report_id.clone(),
+        checked_at: result.checked_at,
+        reason: result.reason.clone(),
+        result,
+        active: true,
+        created_at,
+        updated_at: created_at,
     }
 }
 
@@ -3739,6 +3872,10 @@ fn test_change_plan_outcome_serde_uses_kind_discriminant() {
         target_amount: "2000000000000000000000000".to_string(),
         required_deposit_yocto: "1000000000000000000000000".to_string(),
         timing: "contract_decides".to_string(),
+        aml: Box::new(AmlCheckResult::unknown(
+            "gregoshes.near",
+            "provider_timeout",
+        )),
     };
     let v = serde_json::to_value(&o).expect("serialize");
     assert_eq!(
@@ -3760,6 +3897,10 @@ fn test_change_plan_outcome_serde_uses_kind_discriminant() {
     assert_eq!(
         v.get("subscription_id").and_then(|x| x.as_str()),
         Some("sub_hos_current")
+    );
+    assert_eq!(
+        v.pointer("/aml/risk_level").and_then(|x| x.as_str()),
+        Some("UNKNOWN")
     );
     let back: ChangePlanOutcome = serde_json::from_value(v).expect("deserialize");
     assert!(matches!(
@@ -3866,12 +4007,17 @@ async fn test_create_subscription_house_of_stake_returns_flat_json() {
             .and_then(|x| x.as_str()),
         Some("1250000000000000000000")
     );
-
-    let parsed: CreateSubscriptionOutcome = serde_json::from_value(body).expect("parse outcome");
-    assert!(matches!(
-        parsed,
-        CreateSubscriptionOutcome::NearStakeLock { .. }
-    ));
+    assert_eq!(
+        body.pointer("/aml/risk_level").and_then(|x| x.as_str()),
+        Some("UNKNOWN")
+    );
+    assert!(body.pointer("/aml/checked_at").is_some());
+    assert!(body.pointer("/aml/score").is_none());
+    assert!(body.pointer("/aml/report_id").is_none());
+    assert!(body.pointer("/aml/reason").is_none());
+    assert!(body.pointer("/aml/provider").is_none());
+    assert!(body.pointer("/aml/account_id").is_none());
+    assert!(body.pointer("/aml/address_type").is_none());
 }
 
 #[tokio::test]
@@ -4093,6 +4239,173 @@ async fn test_resume_subscription_house_of_stake_returns_wallet_intent_message()
         body.get("required_deposit_yocto").and_then(|x| x.as_str()),
         Some("1")
     );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_resume_subscription_house_of_stake_blocks_high_risk_aml() {
+    clear_proxy_env_for_local_wiremock();
+    let chain_sub = json!({
+        "subscription_id": "sub_on_chain_hos_resume_high_risk",
+        "price_id": "price_hos_basic",
+        "end_ns": "2000000000000000000",
+        "status": "Active",
+        "cancel_at_period_end": true
+    });
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(near_rpc_wiremock_hos_subscription_probe_only(chain_sub))
+        .mount(&mock)
+        .await;
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        near_rpc_url: Some(mock.uri().to_string()),
+        near_staking_contract_id: Some("staking.testnet".to_string()),
+        near_network_id: Some("testnet".to_string()),
+        aml_service: Some(Arc::new(StaticAmlRiskService {
+            result: aml_result("hos_resume_high_risk.testnet", AmlRiskLevel::High, None),
+        })),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": { "providers": { "house-of-stake": { "price_id": "price_hos_basic" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } }
+        }),
+    )
+    .await;
+
+    let near_email = "hos_resume_high_risk.testnet@near";
+    let login = json!({
+        "email": near_email,
+        "name": "HoS Resume High Risk",
+        "oauth_provider": "near"
+    });
+    let response = server.post("/v1/auth/mock-login").json(&login).await;
+    let token = response.json::<serde_json::Value>()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    insert_test_subscription_with_provider_and_price(
+        &server,
+        &db,
+        near_email,
+        "house-of-stake",
+        "price_hos_basic",
+        true,
+    )
+    .await;
+
+    let response = server
+        .post("/v1/subscriptions/resume")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 403, "{}", response.text());
+    let body: serde_json::Value = response.json();
+    assert_eq!(body.get("code").and_then(|x| x.as_str()), Some("forbidden"));
+    assert_eq!(
+        body.get("message").and_then(|x| x.as_str()),
+        Some("Invalid NEAR account")
+    );
+    assert!(body.get("aml").is_none());
+    assert!(body.get("kind").is_none());
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_resume_subscription_malformed_aml_response_uses_stale_high_risk_report() {
+    clear_proxy_env_for_local_wiremock();
+    let chain_sub = json!({
+        "subscription_id": "sub_on_chain_hos_resume_stale_high",
+        "price_id": "price_hos_basic",
+        "end_ns": "2000000000000000000",
+        "status": "Active",
+        "cancel_at_period_end": true
+    });
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(near_rpc_wiremock_hos_subscription_probe_only(chain_sub))
+        .mount(&mock)
+        .await;
+
+    let stale_high = aml_report(
+        aml_result("hos_resume_stale_high.testnet", AmlRiskLevel::High, None),
+        Utc::now() - Duration::days(31),
+    );
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        near_rpc_url: Some(mock.uri().to_string()),
+        near_staking_contract_id: Some("staking.testnet".to_string()),
+        near_network_id: Some("testnet".to_string()),
+        aml_service: Some(Arc::new(StaticAmlRiskService {
+            result: aml_result(
+                "hos_resume_stale_high.testnet",
+                AmlRiskLevel::Unknown,
+                Some("provider_invalid_response"),
+            ),
+        })),
+        aml_report_repo: Some(Arc::new(StaticAmlReportRepository {
+            latest: Some(stale_high),
+        })),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": { "providers": { "house-of-stake": { "price_id": "price_hos_basic" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } }
+        }),
+    )
+    .await;
+
+    let near_email = "hos_resume_stale_high.testnet@near";
+    let login = json!({
+        "email": near_email,
+        "name": "HoS Resume Stale High",
+        "oauth_provider": "near"
+    });
+    let response = server.post("/v1/auth/mock-login").json(&login).await;
+    let token = response.json::<serde_json::Value>()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    insert_test_subscription_with_provider_and_price(
+        &server,
+        &db,
+        near_email,
+        "house-of-stake",
+        "price_hos_basic",
+        true,
+    )
+    .await;
+
+    let response = server
+        .post("/v1/subscriptions/resume")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 403, "{}", response.text());
+    let body: serde_json::Value = response.json();
+    assert_eq!(body.get("code").and_then(|x| x.as_str()), Some("forbidden"));
+    assert_eq!(
+        body.get("message").and_then(|x| x.as_str()),
+        Some("Invalid NEAR account")
+    );
+    assert!(body.get("aml").is_none());
+    assert!(body.get("kind").is_none());
 }
 
 #[tokio::test]

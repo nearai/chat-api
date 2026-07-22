@@ -1,5 +1,6 @@
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::fmt;
 use url::Url;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -183,6 +184,85 @@ impl Default for OpenAIConfig {
                 std::env::var("OPENAI_API_KEY").unwrap_or_default()
             },
             base_url: std::env::var("OPENAI_BASE_URL").ok(),
+        }
+    }
+}
+
+#[derive(Clone, Deserialize)]
+pub struct LukkaAmlConfig {
+    pub enabled: bool,
+    pub base_url: String,
+    pub bearer_token: String,
+    pub high_risk_slack_webhook_url: String,
+    pub high_risk_slack_timeout_ms: u64,
+    pub high_risk_slack_alert_on_cached_reports: bool,
+    pub report_refresh_days: i64,
+    pub timeout_ms: u64,
+    pub max_retries: u32,
+    pub cache_ttl_secs: u64,
+}
+
+impl fmt::Debug for LukkaAmlConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LukkaAmlConfig")
+            .field("enabled", &self.enabled)
+            .field("base_url", &self.base_url)
+            .field("bearer_token", &"<redacted>")
+            .field("high_risk_slack_webhook_url", &"<redacted>")
+            .field(
+                "high_risk_slack_timeout_ms",
+                &self.high_risk_slack_timeout_ms,
+            )
+            .field(
+                "high_risk_slack_alert_on_cached_reports",
+                &self.high_risk_slack_alert_on_cached_reports,
+            )
+            .field("report_refresh_days", &self.report_refresh_days)
+            .field("timeout_ms", &self.timeout_ms)
+            .field("max_retries", &self.max_retries)
+            .field("cache_ttl_secs", &self.cache_ttl_secs)
+            .finish()
+    }
+}
+
+impl Default for LukkaAmlConfig {
+    fn default() -> Self {
+        Self {
+            enabled: std::env::var("LUKKA_AML_ENABLED")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(false),
+            base_url: std::env::var("LUKKA_BASE_URL")
+                .unwrap_or_else(|_| "https://api.blockchain-analytics.lukka.tech".to_string()),
+            bearer_token: std::env::var("LUKKA_BEARER_TOKEN").unwrap_or_default(),
+            high_risk_slack_webhook_url: std::env::var("LUKKA_AML_HIGH_RISK_SLACK_WEBHOOK_URL")
+                .unwrap_or_default(),
+            high_risk_slack_timeout_ms: std::env::var("LUKKA_AML_HIGH_RISK_SLACK_TIMEOUT_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1_000),
+            high_risk_slack_alert_on_cached_reports: std::env::var(
+                "LUKKA_AML_HIGH_RISK_SLACK_ALERT_ON_CACHED_REPORTS",
+            )
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(false),
+            report_refresh_days: std::env::var("LUKKA_AML_REPORT_REFRESH_DAYS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(30),
+            timeout_ms: std::env::var("LUKKA_TIMEOUT_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(3_000),
+            max_retries: std::env::var("LUKKA_MAX_RETRIES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1),
+            cache_ttl_secs: std::env::var("LUKKA_CACHE_TTL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(300),
         }
     }
 }
@@ -730,6 +810,7 @@ pub struct Config {
     pub email_auth: EmailAuthConfig,
     pub server: ServerConfig,
     pub openai: OpenAIConfig,
+    pub lukka_aml: LukkaAmlConfig,
     /// NEAR-related configuration
     pub near: NearConfig,
     /// Stripe payment configuration
@@ -753,6 +834,7 @@ impl Config {
             email_auth: EmailAuthConfig::default(),
             server: ServerConfig::default(),
             openai: OpenAIConfig::default(),
+            lukka_aml: LukkaAmlConfig::default(),
             near: NearConfig::default(),
             stripe: StripeConfig::default(),
             cors: CorsConfig::default(),

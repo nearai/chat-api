@@ -1,4 +1,5 @@
 pub mod agent_repository;
+pub mod aml_report_repository;
 pub mod analytics_repository;
 pub mod app_config_repository;
 pub mod bi_metrics_repository;
@@ -20,6 +21,7 @@ pub mod user_settings_repository;
 pub mod user_usage_repository;
 
 pub use agent_repository::PostgresAgentRepository;
+pub use aml_report_repository::PostgresAmlReportRepository;
 pub use analytics_repository::PostgresAnalyticsRepository;
 pub use app_config_repository::PostgresAppConfigRepository;
 pub use bi_metrics_repository::PostgresBiMetricsRepository;

@@ -5,17 +5,70 @@ use uuid::Uuid;
 
 use super::ports::{
     AccountDeletion, AccountDeletionError, AccountDeletionRequestResult, AccountDeletionStatus,
-    BanType, User, UserProfile, UserRepository, UserService,
+    BanType, OAuthProvider, User, UserProfile, UserRepository, UserService, UserStatusError,
+};
+use crate::aml::{
+    normalize_account_id, AmlCheckResult, AmlReportEvent, AmlReportRepository, AmlRiskService,
 };
 use crate::types::UserId;
 
 pub struct UserServiceImpl {
     user_repository: Arc<dyn UserRepository>,
+    aml_service: Arc<dyn AmlRiskService>,
+    aml_report_repo: Arc<dyn AmlReportRepository>,
 }
 
 impl UserServiceImpl {
     pub fn new(user_repository: Arc<dyn UserRepository>) -> Self {
-        Self { user_repository }
+        Self::new_with_aml(
+            user_repository,
+            Arc::new(crate::aml::NoopAmlRiskService),
+            Arc::new(crate::aml::NoopAmlReportRepository),
+        )
+    }
+
+    pub fn new_with_aml(
+        user_repository: Arc<dyn UserRepository>,
+        aml_service: Arc<dyn AmlRiskService>,
+        aml_report_repo: Arc<dyn AmlReportRepository>,
+    ) -> Self {
+        Self {
+            user_repository,
+            aml_service,
+            aml_report_repo,
+        }
+    }
+
+    async fn enforce_user_aml_result(
+        &self,
+        user_id: UserId,
+        flow: &str,
+        result: &AmlCheckResult,
+        alert_high_risk: bool,
+    ) -> Result<(), UserStatusError> {
+        if result.is_high_risk()
+            && !self
+                .aml_report_repo
+                .is_account_allowlisted(&result.account_id)
+                .await?
+        {
+            if alert_high_risk {
+                self.aml_service
+                    .send_high_risk_slack_alert(user_id, flow, result);
+            }
+            return Err(UserStatusError::AmlHighRiskBlocked {
+                account_id: result.account_id.clone(),
+            });
+        }
+
+        Ok(())
+    }
+
+    fn alert_aml_provider_failure(&self, user_id: UserId, flow: &str, result: &AmlCheckResult) {
+        if result.is_provider_failure() {
+            self.aml_service
+                .send_provider_failure_slack_alert(user_id, flow, result);
+        }
     }
 }
 
@@ -191,6 +244,80 @@ impl UserService for UserServiceImpl {
         self.user_repository
             .validate_account_deletion_preconditions(user_id)
             .await
+    }
+
+    async fn check_user_status(&self, user_id: UserId) -> Result<(), UserStatusError> {
+        if !self.aml_service.is_enabled() {
+            return Ok(());
+        }
+
+        let accounts = self.user_repository.get_linked_accounts(user_id).await?;
+        let Some(near_account) = accounts
+            .into_iter()
+            .find(|account| account.provider == OAuthProvider::Near)
+            .map(|account| account.provider_user_id)
+        else {
+            return Ok(());
+        };
+
+        let flow = "user_status";
+        let account_id = normalize_account_id(&near_account);
+        let mut stale_active_report = None;
+        match self.aml_report_repo.latest_active_report(&account_id).await {
+            Ok(Some(report)) => {
+                let age = Utc::now().signed_duration_since(report.created_at);
+                if age < Duration::days(self.aml_service.report_refresh_days()) {
+                    self.enforce_user_aml_result(
+                        user_id,
+                        flow,
+                        &report.result,
+                        self.aml_service.alert_on_cached_reports(),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                stale_active_report = Some(report);
+            }
+            Ok(None) => {}
+            Err(err) => {
+                tracing::error!(
+                    user_id = %user_id,
+                    error = ?err,
+                    "Failed to read AML report during user status check; continuing with provider check"
+                );
+            }
+        };
+
+        let result = self.aml_service.check_near_account(&account_id).await;
+        if let Err(err) = self
+            .aml_report_repo
+            .record_report(AmlReportEvent {
+                user_id,
+                flow: flow.to_string(),
+                result: result.clone(),
+            })
+            .await
+        {
+            tracing::error!(
+                user_id = %user_id,
+                error = ?err,
+                "Failed to record AML report during user status check; continuing with provider result"
+            );
+        }
+
+        self.alert_aml_provider_failure(user_id, flow, &result);
+        if result.is_provider_failure() {
+            if let Some(report) = stale_active_report.filter(|report| report.result.is_high_risk())
+            {
+                self.enforce_user_aml_result(user_id, flow, &report.result, true)
+                    .await?;
+                return Ok(());
+            }
+        }
+        self.enforce_user_aml_result(user_id, flow, &result, true)
+            .await?;
+
+        Ok(())
     }
 
     async fn list_users(&self, limit: i64, offset: i64) -> anyhow::Result<(Vec<User>, u64)> {

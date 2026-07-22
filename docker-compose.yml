@@ -81,6 +81,16 @@ services:
       # OpenAI/Cloud API proxy configuration
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://cloud-api.near.ai/v1}
       OPENAI_API_KEY: ${OPENAI_API_KEY}
+      # Lukka AML checks for NEAR wallet billing flows
+      LUKKA_AML_ENABLED: ${LUKKA_AML_ENABLED:-false}
+      LUKKA_BASE_URL: ${LUKKA_BASE_URL:-https://api.blockchain-analytics.lukka.tech}
+      LUKKA_BEARER_TOKEN: ${LUKKA_BEARER_TOKEN:-}
+      LUKKA_AML_HIGH_RISK_SLACK_WEBHOOK_URL: ${LUKKA_AML_HIGH_RISK_SLACK_WEBHOOK_URL:-}
+      LUKKA_AML_HIGH_RISK_SLACK_TIMEOUT_MS: ${LUKKA_AML_HIGH_RISK_SLACK_TIMEOUT_MS:-1000}
+      LUKKA_AML_REPORT_REFRESH_DAYS: ${LUKKA_AML_REPORT_REFRESH_DAYS:-30}
+      LUKKA_TIMEOUT_MS: ${LUKKA_TIMEOUT_MS:-3000}
+      LUKKA_MAX_RETRIES: ${LUKKA_MAX_RETRIES:-1}
+      LUKKA_CACHE_TTL_SECS: ${LUKKA_CACHE_TTL_SECS:-300}
       # Logging
       RUST_LOG: info,api=debug,services=debug,database=debug
       RUST_BACKTRACE: "1"

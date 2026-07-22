@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 
+use crate::aml::AmlCheckResult;
+use crate::aml::{AmlAccountAllowlistEntry, AmlReportRecord};
 use crate::system_configs::ports::{PlanLimitConfig, StakeBasedMonthlyCreditsConfig};
 use crate::UserId;
 
@@ -144,6 +146,7 @@ pub enum ChangePlanOutcome {
         target_amount: String,
         required_deposit_yocto: String,
         timing: String,
+        aml: Box<AmlCheckResult>,
     },
 }
 
@@ -178,8 +181,9 @@ impl Serialize for ChangePlanOutcome {
                 target_amount,
                 required_deposit_yocto,
                 timing,
+                aml,
             } => {
-                let mut st = serializer.serialize_struct("NearStakingChangePlan", 8)?;
+                let mut st = serializer.serialize_struct("NearStakingChangePlan", 9)?;
                 st.serialize_field("kind", self.kind())?;
                 st.serialize_field("contract_id", contract_id)?;
                 st.serialize_field("network_id", network_id)?;
@@ -188,6 +192,7 @@ impl Serialize for ChangePlanOutcome {
                 st.serialize_field("target_amount", target_amount)?;
                 st.serialize_field("required_deposit_yocto", required_deposit_yocto)?;
                 st.serialize_field("timing", timing)?;
+                st.serialize_field("aml", aml)?;
                 st.end()
             }
         }
@@ -261,6 +266,14 @@ impl<'de> Deserialize<'de> for ChangePlanOutcome {
                     .and_then(|x| x.as_str())
                     .ok_or_else(|| D::Error::custom("missing timing"))?
                     .to_string(),
+                aml: obj
+                    .get("aml")
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(D::Error::custom)?
+                    .map(Box::new)
+                    .unwrap_or_default(),
             }),
             other => Err(D::Error::custom(format!(
                 "unknown change plan outcome kind: {other}"
@@ -280,6 +293,7 @@ pub enum CancelSubscriptionOutcome {
         subscription_id: String,
         network_id: String,
         required_deposit_yocto: String,
+        aml: Box<AmlCheckResult>,
     },
 }
 
@@ -293,6 +307,7 @@ pub enum ResumeSubscriptionOutcome {
         subscription_id: String,
         network_id: String,
         required_deposit_yocto: String,
+        aml: Box<AmlCheckResult>,
     },
 }
 
@@ -393,10 +408,14 @@ pub enum SubscriptionError {
     NoPendingDowngrade,
     /// No subscription row found for the requested subscription_id.
     SubscriptionNotFound,
+    /// No AML report row found for the requested report id.
+    AmlReportNotFound,
     /// House-of-Stake contract id is not configured
     HouseOfStakeNotConfigured,
     /// House-of-Stake requires the user to authenticate with a NEAR wallet
     HouseOfStakeRequiresNearWallet,
+    /// AML report blocks this NEAR account from billing operations
+    AmlHighRiskBlocked { account_id: String },
     /// NEAR JSON-RPC view call failed
     NearRpcError(String),
 }
@@ -463,6 +482,9 @@ impl fmt::Display for SubscriptionError {
             Self::SubscriptionNotFound => {
                 write!(f, "Subscription not found")
             }
+            Self::AmlReportNotFound => {
+                write!(f, "AML report not found")
+            }
             Self::HouseOfStakeNotConfigured => {
                 write!(f, "House-of-Stake billing is not configured")
             }
@@ -470,6 +492,13 @@ impl fmt::Display for SubscriptionError {
                 write!(
                     f,
                     "House-of-Stake subscription requires signing in with a NEAR wallet"
+                )
+            }
+            Self::AmlHighRiskBlocked { account_id } => {
+                write!(
+                    f,
+                    "AML report blocks account '{}' from billing operations",
+                    account_id
                 )
             }
             Self::NearRpcError(msg) => write!(f, "NEAR RPC error: {}", msg),
@@ -929,6 +958,8 @@ pub enum CreateSubscriptionOutcome {
         attached_deposit_yocto: String,
         /// NEP-145 storage preflight/top-up intent.
         storage: Box<NearStakingStorageIntent>,
+        /// Normalized AML result for the NEAR account that will sign the wallet transaction.
+        aml: Box<AmlCheckResult>,
     },
 }
 
@@ -950,14 +981,16 @@ impl Serialize for CreateSubscriptionOutcome {
                 network_id,
                 attached_deposit_yocto,
                 storage,
+                aml,
             } => {
-                let mut st = serializer.serialize_struct("NearStakeLock", 6)?;
+                let mut st = serializer.serialize_struct("NearStakeLock", 7)?;
                 st.serialize_field("kind", &"house_of_stake")?;
                 st.serialize_field("contract_id", contract_id)?;
                 st.serialize_field("price_id", price_id)?;
                 st.serialize_field("network_id", network_id)?;
                 st.serialize_field("attached_deposit_yocto", attached_deposit_yocto)?;
                 st.serialize_field("storage", storage)?;
+                st.serialize_field("aml", aml)?;
                 st.end()
             }
         }
@@ -1021,12 +1054,20 @@ impl<'de> Deserialize<'de> for CreateSubscriptionOutcome {
                     .transpose()
                     .map_err(D::Error::custom)?
                     .unwrap_or_else(default_near_staking_storage_intent);
+                let aml = obj
+                    .get("aml")
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(D::Error::custom)?
+                    .unwrap_or_default();
                 return Ok(CreateSubscriptionOutcome::NearStakeLock {
                     contract_id,
                     price_id,
                     network_id,
                     attached_deposit_yocto,
                     storage: Box::new(storage),
+                    aml: Box::new(aml),
                 });
             }
         }
@@ -1043,6 +1084,13 @@ impl<'de> Deserialize<'de> for CreateSubscriptionOutcome {
                 .transpose()
                 .map_err(D::Error::custom)?
                 .unwrap_or_else(default_near_staking_storage_intent);
+            let aml = obj
+                .get("aml")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(D::Error::custom)?
+                .unwrap_or_default();
             return Ok(CreateSubscriptionOutcome::NearStakeLock {
                 contract_id: obj
                     .get("contract_id")
@@ -1057,6 +1105,7 @@ impl<'de> Deserialize<'de> for CreateSubscriptionOutcome {
                     .to_string(),
                 attached_deposit_yocto,
                 storage: Box::new(storage),
+                aml: Box::new(aml),
             });
         }
         Err(D::Error::custom(
@@ -1080,6 +1129,7 @@ pub enum CreateCreditPurchaseOutcome {
         quantity: u64,
         attached_deposit_yocto: String,
         storage: Box<NearStakingStorageIntent>,
+        aml: Box<AmlCheckResult>,
     },
     Stripe {
         checkout_url: String,
@@ -1264,6 +1314,39 @@ pub trait SubscriptionService: Send + Sync {
         limit: i64,
         offset: i64,
     ) -> Result<(Vec<CreditTransaction>, i64), SubscriptionError>;
+
+    /// Admin-only: list tracked AML reports.
+    async fn admin_list_aml_reports(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<(Vec<AmlReportRecord>, i64), SubscriptionError>;
+
+    /// Admin-only: list NEAR accounts allowed despite high-risk AML reports.
+    async fn admin_list_aml_allowlist(
+        &self,
+    ) -> Result<Vec<AmlAccountAllowlistEntry>, SubscriptionError>;
+
+    /// Admin-only: add or update an AML high-risk account allowlist entry.
+    async fn admin_add_aml_allowlist_entry(
+        &self,
+        account_id: String,
+        reason: Option<String>,
+        created_by: Option<UserId>,
+    ) -> Result<AmlAccountAllowlistEntry, SubscriptionError>;
+
+    /// Admin-only: remove an AML high-risk account allowlist entry.
+    async fn admin_remove_aml_allowlist_entry(
+        &self,
+        account_id: String,
+    ) -> Result<bool, SubscriptionError>;
+
+    /// Admin-only: mark an AML risk report active or outdated.
+    async fn admin_set_aml_report_active(
+        &self,
+        id: uuid::Uuid,
+        active: bool,
+    ) -> Result<AmlReportRecord, SubscriptionError>;
 }
 
 /// Summary of user's credits (balance, used, effective limit).

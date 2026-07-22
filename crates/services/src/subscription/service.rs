@@ -16,6 +16,7 @@ use super::ports::{
 };
 use crate::agent::ports::AgentRepository;
 use crate::agent::ports::AgentService;
+use crate::aml::{AmlCheckResult, AmlReportEvent, AmlReportRepository, AmlRiskService};
 use crate::system_configs::ports::{
     CreditsProviderConfig, SubscriptionPlanConfig, SystemConfigs, SystemConfigsService,
 };
@@ -44,6 +45,8 @@ pub struct SubscriptionServiceConfig {
     pub user_usage_repo: Arc<dyn UserUsageRepository>,
     pub agent_repo: Arc<dyn AgentRepository>,
     pub agent_service: Arc<dyn AgentService>,
+    pub aml_service: Arc<dyn AmlRiskService>,
+    pub aml_report_repo: Arc<dyn AmlReportRepository>,
     pub stripe_secret_key: String,
     pub stripe_webhook_secret: String,
     /// When set, enables `provider = house-of-stake` subscription intents (staking contract account id).
@@ -104,6 +107,8 @@ pub struct SubscriptionServiceImpl {
     user_usage_repo: Arc<dyn UserUsageRepository>,
     agent_repo: Arc<dyn AgentRepository>,
     agent_service: Arc<dyn AgentService>,
+    aml_service: Arc<dyn AmlRiskService>,
+    aml_report_repo: Arc<dyn AmlReportRepository>,
     stripe_secret_key: String,
     stripe_webhook_secret: String,
     near_staking_contract_id: Option<String>,
@@ -177,6 +182,8 @@ impl SubscriptionServiceImpl {
             user_usage_repo: config.user_usage_repo,
             agent_repo: config.agent_repo,
             agent_service: config.agent_service,
+            aml_service: config.aml_service,
+            aml_report_repo: config.aml_report_repo,
             stripe_secret_key: config.stripe_secret_key,
             stripe_webhook_secret: config.stripe_webhook_secret,
             near_staking_contract_id: config.near_staking_contract_id,
@@ -221,6 +228,158 @@ impl SubscriptionServiceImpl {
         });
 
         Ok(configs)
+    }
+
+    async fn check_near_aml(
+        &self,
+        user_id: UserId,
+        near_account: &str,
+        flow: &str,
+    ) -> Result<AmlCheckResult, SubscriptionError> {
+        self.check_near_aml_with_policy(user_id, near_account, flow, true)
+            .await
+    }
+
+    async fn check_near_aml_for_visibility(
+        &self,
+        user_id: UserId,
+        near_account: &str,
+        flow: &str,
+    ) -> Result<AmlCheckResult, SubscriptionError> {
+        self.check_near_aml_with_policy(user_id, near_account, flow, false)
+            .await
+    }
+
+    async fn check_near_aml_with_policy(
+        &self,
+        user_id: UserId,
+        near_account: &str,
+        flow: &str,
+        block_high_risk: bool,
+    ) -> Result<AmlCheckResult, SubscriptionError> {
+        let normalized_account = crate::aml::normalize_account_id(near_account);
+        if !self.aml_service.is_enabled() {
+            return Ok(AmlCheckResult::unknown(normalized_account, "disabled"));
+        }
+
+        let mut stale_active_report = None;
+        match self
+            .aml_report_repo
+            .latest_active_report(&normalized_account)
+            .await
+        {
+            Ok(Some(report)) => {
+                let age = Utc::now().signed_duration_since(report.created_at);
+                if age < Duration::days(self.aml_service.report_refresh_days()) {
+                    if block_high_risk {
+                        self.enforce_aml_result(
+                            user_id,
+                            flow,
+                            &report.result,
+                            self.aml_service.alert_on_cached_reports(),
+                        )
+                        .await?;
+                    }
+                    return Ok(report.result);
+                }
+                stale_active_report = Some(report);
+            }
+            Ok(None) => {}
+            Err(err) => {
+                tracing::error!(
+                    user_id = %user_id,
+                    flow = %flow,
+                    error = ?err,
+                    "Failed to read AML report cache; continuing with provider check"
+                );
+            }
+        }
+
+        let result = self
+            .aml_service
+            .check_near_account(&normalized_account)
+            .await;
+        let event = AmlReportEvent {
+            user_id,
+            flow: flow.to_string(),
+            result: result.clone(),
+        };
+        if let Err(err) = self.aml_report_repo.record_report(event).await {
+            tracing::error!(
+                user_id = %user_id,
+                flow = %flow,
+                error = ?err,
+                "Failed to record AML report; continuing with provider result"
+            );
+        }
+
+        self.alert_aml_provider_failure(user_id, flow, &result);
+        if result.is_provider_failure() {
+            // Compliance decision (2026-07-18): Lukka provider outages fail open for
+            // user-initiated HoS billing flows unless a stale active HIGH report is
+            // already known for the NEAR account. Provider failures are recorded and
+            // alerted so compliance can review outage-period activity.
+            if let Some(report) = stale_active_report.filter(|report| report.result.is_high_risk())
+            {
+                if block_high_risk {
+                    self.enforce_aml_result(user_id, flow, &report.result, true)
+                        .await?;
+                }
+                return Ok(report.result);
+            }
+        }
+        if block_high_risk {
+            self.enforce_aml_result(user_id, flow, &result, true)
+                .await?;
+        }
+        Ok(result)
+    }
+
+    fn alert_aml_provider_failure(&self, user_id: UserId, flow: &str, result: &AmlCheckResult) {
+        if result.is_provider_failure() {
+            self.aml_service
+                .send_provider_failure_slack_alert(user_id, flow, result);
+        }
+    }
+
+    async fn enforce_aml_result(
+        &self,
+        user_id: UserId,
+        flow: &str,
+        result: &AmlCheckResult,
+        alert_high_risk: bool,
+    ) -> Result<(), SubscriptionError> {
+        if result.is_high_risk() {
+            tracing::warn!(
+                user_id = %user_id,
+                flow = %flow,
+                report_id = ?result.report_id,
+                "High-risk AML result for NEAR wallet flow"
+            );
+            let allowlisted = self
+                .aml_report_repo
+                .is_account_allowlisted(&result.account_id)
+                .await
+                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+            if !allowlisted {
+                if alert_high_risk {
+                    self.aml_service
+                        .send_high_risk_slack_alert(user_id, flow, result);
+                }
+                return Err(SubscriptionError::AmlHighRiskBlocked {
+                    account_id: result.account_id.clone(),
+                });
+            }
+        } else {
+            tracing::debug!(
+                user_id = %user_id,
+                near_account = %result.account_id,
+                flow = %flow,
+                risk_level = ?result.risk_level,
+                "AML result for NEAR wallet flow"
+            );
+        }
+        Ok(())
     }
 
     /// Convert a whole-number credit count into nano-USD (1 credit == $1 == 1_000_000_000 nano-USD).
@@ -2003,12 +2162,16 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 storage_bounds,
                 storage_balance,
             );
+            let aml = self
+                .check_near_aml(user_id, &near_account, "create_subscription")
+                .await?;
             return Ok(CreateSubscriptionOutcome::NearStakeLock {
                 contract_id,
                 price_id,
                 network_id: self.near_network_id.clone(),
                 attached_deposit_yocto: attached_deposit_yocto.to_string(),
                 storage: Box::new(storage),
+                aml: Box::new(aml),
             });
         }
 
@@ -2072,11 +2235,16 @@ impl SubscriptionService for SubscriptionServiceImpl {
 
         if subscription.provider == "house-of-stake" {
             let contract_id = self.configured_staking_contract_id()?;
+            let near_account = self.get_near_account_id(user_id).await?;
+            let aml = self
+                .check_near_aml_for_visibility(user_id, &near_account, "cancel_subscription")
+                .await?;
             return Ok(CancelSubscriptionOutcome::NearStakingCancel {
                 contract_id: contract_id.to_string(),
                 subscription_id: subscription.subscription_id,
                 network_id: self.near_network_id.clone(),
                 required_deposit_yocto: "1".to_string(),
+                aml: Box::new(aml),
             });
         }
 
@@ -2159,11 +2327,16 @@ impl SubscriptionService for SubscriptionServiceImpl {
 
         if subscription.provider == "house-of-stake" {
             let contract_id = self.configured_staking_contract_id()?;
+            let near_account = self.get_near_account_id(user_id).await?;
+            let aml = self
+                .check_near_aml(user_id, &near_account, "resume_subscription")
+                .await?;
             return Ok(ResumeSubscriptionOutcome::NearStakingResume {
                 contract_id: contract_id.to_string(),
                 subscription_id: subscription.subscription_id,
                 network_id: self.near_network_id.clone(),
                 required_deposit_yocto: "1".to_string(),
+                aml: Box::new(aml),
             });
         }
 
@@ -2389,6 +2562,10 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 target_amount: target_amount.to_string(),
                 required_deposit_yocto: required_deposit_yocto.to_string(),
                 timing: timing.to_string(),
+                aml: Box::new(
+                    self.check_near_aml(user_id, &near_account, "change_plan")
+                        .await?,
+                ),
             });
         }
 
@@ -3698,6 +3875,9 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     storage_bounds,
                     storage_balance,
                 );
+                let aml = self
+                    .check_near_aml(user_id, &near_account, "create_credit_purchase_checkout")
+                    .await?;
 
                 tracing::info!(
                     "House-of-Stake credit payment intent created: user_id={}, credits={}, price_id={}",
@@ -3713,6 +3893,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     quantity: credits,
                     attached_deposit_yocto: attached_deposit_yocto.to_string(),
                     storage: Box::new(storage),
+                    aml: Box::new(aml),
                 })
             }
             "stripe" => {
@@ -3777,6 +3958,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
         let price_id = self.get_hos_credits_price_id().await?;
         let contract_id = self.hos_contract_id()?;
         let near_account = self.get_near_account_id(user_id).await?;
+        self.check_near_aml(user_id, &near_account, "confirm_credit_purchase")
+            .await?;
 
         let purchase = view_get_purchase(&self.near_rpc_url, &contract_id, &purchase_id)
             .await
@@ -4023,6 +4206,60 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .list_transactions(user_id, limit, offset)
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))
+    }
+
+    async fn admin_list_aml_reports(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<(Vec<crate::aml::AmlReportRecord>, i64), SubscriptionError> {
+        self.aml_report_repo
+            .list_reports(limit.clamp(1, 100), offset.max(0))
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))
+    }
+
+    async fn admin_list_aml_allowlist(
+        &self,
+    ) -> Result<Vec<crate::aml::AmlAccountAllowlistEntry>, SubscriptionError> {
+        self.aml_report_repo
+            .list_allowlist()
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))
+    }
+
+    async fn admin_add_aml_allowlist_entry(
+        &self,
+        account_id: String,
+        reason: Option<String>,
+        created_by: Option<UserId>,
+    ) -> Result<crate::aml::AmlAccountAllowlistEntry, SubscriptionError> {
+        self.aml_report_repo
+            .add_allowlist_entry(&account_id, reason, created_by)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))
+    }
+
+    async fn admin_remove_aml_allowlist_entry(
+        &self,
+        account_id: String,
+    ) -> Result<bool, SubscriptionError> {
+        self.aml_report_repo
+            .remove_allowlist_entry(&account_id)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))
+    }
+
+    async fn admin_set_aml_report_active(
+        &self,
+        id: uuid::Uuid,
+        active: bool,
+    ) -> Result<crate::aml::AmlReportRecord, SubscriptionError> {
+        self.aml_report_repo
+            .set_report_active(id, active)
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
+            .ok_or(SubscriptionError::AmlReportNotFound)
     }
 }
 

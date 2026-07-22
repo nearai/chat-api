@@ -1209,6 +1209,13 @@ mod tests {
             Ok(())
         }
 
+        async fn check_user_status(
+            &self,
+            _user_id: UserId,
+        ) -> Result<(), crate::user::ports::UserStatusError> {
+            Ok(())
+        }
+
         async fn list_users(&self, _limit: i64, _offset: i64) -> anyhow::Result<(Vec<User>, u64)> {
             Ok((Vec::new(), 0))
         }

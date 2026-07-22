@@ -145,6 +145,14 @@ pub enum AccountDeletionError {
     Internal(#[from] anyhow::Error),
 }
 
+#[derive(Debug, Error)]
+pub enum UserStatusError {
+    #[error("AML high-risk account blocked")]
+    AmlHighRiskBlocked { account_id: String },
+    #[error(transparent)]
+    Internal(#[from] anyhow::Error),
+}
+
 /// Repository trait for user-related data operations
 #[async_trait]
 pub trait UserRepository: Send + Sync {
@@ -363,6 +371,9 @@ pub trait UserService: Send + Sync {
         &self,
         user_id: UserId,
     ) -> Result<(), AccountDeletionError>;
+
+    /// Check the authenticated user's current status for user-facing access.
+    async fn check_user_status(&self, user_id: UserId) -> Result<(), UserStatusError>;
 
     /// List users with pagination
     async fn list_users(&self, limit: i64, offset: i64) -> anyhow::Result<(Vec<User>, u64)>;

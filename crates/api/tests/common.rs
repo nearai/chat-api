@@ -56,6 +56,10 @@ pub struct TestServerConfig {
     pub admin_emails: Option<Vec<String>>,
     /// Optional Stripe client override for tests that need deterministic Stripe responses.
     pub stripe_client: Option<Arc<dyn StripeClientPort>>,
+    /// Optional AML service override for tests that need deterministic AML decisions.
+    pub aml_service: Option<Arc<dyn services::aml::AmlRiskService>>,
+    /// Optional AML report repository override for tests that need deterministic AML cache/allowlist state.
+    pub aml_report_repo: Option<Arc<dyn services::aml::AmlReportRepository>>,
 }
 
 /// Restrictive rate limit config for rate limit tests.
@@ -180,7 +184,20 @@ async fn create_test_server_and_db_inner(
             ))
         };
 
-    let user_service = Arc::new(services::user::UserServiceImpl::new(user_repo.clone()));
+    let aml_service: Arc<dyn services::aml::AmlRiskService> = test_config
+        .aml_service
+        .clone()
+        .unwrap_or_else(|| Arc::new(services::aml::NoopAmlRiskService));
+    let aml_report_repo: Arc<dyn services::aml::AmlReportRepository> = test_config
+        .aml_report_repo
+        .clone()
+        .unwrap_or_else(|| Arc::new(services::aml::NoopAmlReportRepository));
+
+    let user_service = Arc::new(services::user::UserServiceImpl::new_with_aml(
+        user_repo.clone(),
+        aml_service.clone(),
+        aml_report_repo.clone(),
+    ));
 
     let user_settings_service = Arc::new(services::user::UserSettingsServiceImpl::new(
         user_settings_repo,
@@ -249,6 +266,8 @@ async fn create_test_server_and_db_inner(
                 agent_repo: agent_repo.clone() as Arc<dyn services::agent::ports::AgentRepository>,
                 agent_service: agent_service.clone()
                     as Arc<dyn services::agent::ports::AgentService>,
+                aml_service,
+                aml_report_repo,
                 stripe_secret_key: config.stripe.secret_key.clone(),
                 stripe_webhook_secret: config.stripe.webhook_secret.clone(),
                 near_rpc_url,
