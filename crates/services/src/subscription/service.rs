@@ -1385,28 +1385,6 @@ impl SubscriptionServiceImpl {
             .ok_or(SubscriptionError::HouseOfStakeNotConfigured)
     }
 
-    async fn hos_product_id_for_price(
-        &self,
-        contract_id: &str,
-        price_id: &str,
-    ) -> Result<String, SubscriptionError> {
-        let price_json = view_get_price(&self.near_rpc_url, contract_id, price_id)
-            .await
-            .map_err(Self::near_rpc_err)?
-            .ok_or_else(|| {
-                SubscriptionError::InternalError("HoS price not found on-chain".into())
-            })?;
-
-        price_json
-            .product_id
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .ok_or_else(|| {
-                SubscriptionError::InternalError("HoS price missing or empty product_id".into())
-            })
-    }
-
     /// Deterministic HoS catalog `price_id`s. `get_subscription_for_price` resolves through the
     /// price's product, so first sync must probe every configured HoS product instead of assuming
     /// any one price can discover all on-chain subscriptions.
@@ -2257,16 +2235,13 @@ impl SubscriptionService for SubscriptionServiceImpl {
 
         if subscription.provider == "house-of-stake" {
             let contract_id = self.configured_staking_contract_id()?;
-            let product_id = self
-                .hos_product_id_for_price(contract_id, &subscription.price_id)
-                .await?;
             let near_account = self.get_near_account_id(user_id).await?;
             let aml = self
                 .check_near_aml_for_visibility(user_id, &near_account, "cancel_subscription")
                 .await?;
             return Ok(CancelSubscriptionOutcome::NearStakingCancel {
                 contract_id: contract_id.to_string(),
-                product_id,
+                subscription_id: subscription.subscription_id,
                 network_id: self.near_network_id.clone(),
                 required_deposit_yocto: "1".to_string(),
                 aml: Box::new(aml),
@@ -2352,16 +2327,13 @@ impl SubscriptionService for SubscriptionServiceImpl {
 
         if subscription.provider == "house-of-stake" {
             let contract_id = self.configured_staking_contract_id()?;
-            let product_id = self
-                .hos_product_id_for_price(contract_id, &subscription.price_id)
-                .await?;
             let near_account = self.get_near_account_id(user_id).await?;
             let aml = self
                 .check_near_aml(user_id, &near_account, "resume_subscription")
                 .await?;
             return Ok(ResumeSubscriptionOutcome::NearStakingResume {
                 contract_id: contract_id.to_string(),
-                product_id,
+                subscription_id: subscription.subscription_id,
                 network_id: self.near_network_id.clone(),
                 required_deposit_yocto: "1".to_string(),
                 aml: Box::new(aml),

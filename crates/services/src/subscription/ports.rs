@@ -290,7 +290,7 @@ pub enum CancelSubscriptionOutcome {
     Completed,
     NearStakingCancel {
         contract_id: String,
-        product_id: String,
+        subscription_id: String,
         network_id: String,
         required_deposit_yocto: String,
         aml: Box<AmlCheckResult>,
@@ -304,7 +304,7 @@ pub enum ResumeSubscriptionOutcome {
     Completed,
     NearStakingResume {
         contract_id: String,
-        product_id: String,
+        subscription_id: String,
         network_id: String,
         required_deposit_yocto: String,
         aml: Box<AmlCheckResult>,

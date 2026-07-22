@@ -4131,8 +4131,8 @@ async fn test_cancel_subscription_house_of_stake_returns_wallet_intent_message()
         Some("near_staking_cancel")
     );
     assert_eq!(
-        body.get("product_id").and_then(|x| x.as_str()),
-        Some("nearai|prod_cat")
+        body.get("subscription_id").and_then(|x| x.as_str()),
+        Some("sub_on_chain_hos_cancel_msg")
     );
     assert_eq!(
         body.get("contract_id").and_then(|x| x.as_str()),
@@ -4224,8 +4224,8 @@ async fn test_resume_subscription_house_of_stake_returns_wallet_intent_message()
         Some("near_staking_resume")
     );
     assert_eq!(
-        body.get("product_id").and_then(|x| x.as_str()),
-        Some("nearai|prod_cat")
+        body.get("subscription_id").and_then(|x| x.as_str()),
+        Some("sub_on_chain_hos_resume_msg")
     );
     assert_eq!(
         body.get("contract_id").and_then(|x| x.as_str()),
