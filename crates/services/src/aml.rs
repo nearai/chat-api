@@ -23,18 +23,13 @@ pub enum AmlRiskLevel {
 }
 
 impl AmlRiskLevel {
-    fn from_provider(value: Option<&str>) -> Self {
-        match value
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_uppercase()
-            .as_str()
-        {
+    fn from_provider(value: Option<&str>) -> Option<Self> {
+        Some(match value?.trim().to_ascii_uppercase().as_str() {
             "LOW" => Self::Low,
             "MEDIUM" => Self::Medium,
             "HIGH" => Self::High,
-            _ => Self::Unknown,
-        }
+            _ => return None,
+        })
     }
 }
 
@@ -661,6 +656,37 @@ enum LukkaAuthMode<'a> {
 fn normalize_lukka_response(account_id: &str, body: LukkaAmlScoreResponse) -> AmlCheckResult {
     let report = body.report_info_section;
     let cscore = body.cscore_section;
+    let risk_level = AmlRiskLevel::from_provider(
+        cscore
+            .as_ref()
+            .and_then(|section| section.risk_level.as_deref()),
+    );
+
+    let Some(risk_level) = risk_level else {
+        let mut result = AmlCheckResult::unknown(account_id, "provider_invalid_response");
+        if let Some(report) = report {
+            if let Some(address) = report.address.filter(|address| !address.trim().is_empty()) {
+                result.account_id = address;
+            }
+            if let Some(address_type) = report
+                .address_type
+                .filter(|address_type| !address_type.trim().is_empty())
+            {
+                result.address_type = address_type;
+            }
+            result.report_id = report.report_id;
+            result.checked_at = report
+                .report_time
+                .as_deref()
+                .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or(result.checked_at);
+        }
+        if let Some(cscore) = cscore.and_then(|section| section.cscore) {
+            result.score = Some(cscore);
+        }
+        return result;
+    };
 
     let checked_at = report
         .as_ref()
@@ -681,11 +707,7 @@ fn normalize_lukka_response(account_id: &str, body: LukkaAmlScoreResponse) -> Am
             .and_then(|r| r.address_type.clone())
             .filter(|address_type| !address_type.trim().is_empty())
             .unwrap_or_else(|| NEAR_ADDRESS_TYPE.to_string()),
-        risk_level: AmlRiskLevel::from_provider(
-            cscore
-                .as_ref()
-                .and_then(|section| section.risk_level.as_deref()),
-        ),
+        risk_level,
         score: cscore.and_then(|section| section.cscore),
         report_id: report.and_then(|r| r.report_id),
         checked_at,
@@ -852,7 +874,6 @@ mod tests {
             ("LOW", AmlRiskLevel::Low),
             ("MEDIUM", AmlRiskLevel::Medium),
             ("HIGH", AmlRiskLevel::High),
-            ("unexpected", AmlRiskLevel::Unknown),
         ] {
             let body = LukkaAmlScoreResponse {
                 report_info_section: None,
@@ -862,10 +883,48 @@ mod tests {
                 }),
             };
             assert_eq!(
-                normalize_lukka_response("alice.near", body).risk_level,
-                expected
+                AmlRiskLevel::from_provider(
+                    body.cscore_section
+                        .as_ref()
+                        .and_then(|section| section.risk_level.as_deref())
+                ),
+                Some(expected)
             );
         }
+    }
+
+    #[test]
+    fn incomplete_success_response_is_provider_failure() {
+        let result = normalize_lukka_response(
+            "alice.near",
+            LukkaAmlScoreResponse {
+                report_info_section: None,
+                cscore_section: None,
+            },
+        );
+
+        assert_eq!(result.risk_level, AmlRiskLevel::Unknown);
+        assert_eq!(result.reason.as_deref(), Some("provider_invalid_response"));
+        assert!(result.is_provider_failure());
+    }
+
+    #[test]
+    fn unsupported_provider_risk_level_is_provider_failure() {
+        let result = normalize_lukka_response(
+            "alice.near",
+            LukkaAmlScoreResponse {
+                report_info_section: None,
+                cscore_section: Some(LukkaCscoreSection {
+                    cscore: Some(7),
+                    risk_level: Some("unexpected".to_string()),
+                }),
+            },
+        );
+
+        assert_eq!(result.risk_level, AmlRiskLevel::Unknown);
+        assert_eq!(result.reason.as_deref(), Some("provider_invalid_response"));
+        assert!(result.is_provider_failure());
+        assert_eq!(result.score, Some(7));
     }
 
     #[test]

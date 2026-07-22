@@ -2357,7 +2357,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 .await?;
             let near_account = self.get_near_account_id(user_id).await?;
             let aml = self
-                .check_near_aml_for_visibility(user_id, &near_account, "resume_subscription")
+                .check_near_aml(user_id, &near_account, "resume_subscription")
                 .await?;
             return Ok(ResumeSubscriptionOutcome::NearStakingResume {
                 contract_id: contract_id.to_string(),
