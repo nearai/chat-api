@@ -90,8 +90,12 @@ pub fn create_pool_with_native_tls(
         .map_err(|e| anyhow::anyhow!("Failed to create TLS pool: {e}"))
 }
 
-/// Connection pool type alias
-pub type DbPool = Pool;
+/// Shared, swappable pool handle; see [`services::db_pool::DbPool`].
+///
+/// The type lives in the services crate (which the subscription service and
+/// this crate both depend on) and is re-exported here so repository code keeps
+/// its `crate::pool::DbPool` imports.
+pub use services::db_pool::DbPool;
 
 #[cfg(test)]
 mod tests {

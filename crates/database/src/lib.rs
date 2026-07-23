@@ -180,8 +180,10 @@ impl Database {
         info!("Starting cluster manager background tasks");
         cluster_manager.clone().start_background_tasks();
 
-        // Get write pool to use for repositories
-        let pool = cluster_manager.get_write_pool().await?;
+        // Shared write-pool handle for the repositories; clones of it follow
+        // the leader across failovers because ClusterManager installs new
+        // pools into this same handle.
+        let pool = cluster_manager.write_pool();
 
         info!("Database initialization with Patroni discovery complete");
 
@@ -212,7 +214,7 @@ impl Database {
             pg_config.create_pool(Some(Runtime::Tokio1), NoTls)?
         };
 
-        Ok(Self::new(pool))
+        Ok(Self::new(DbPool::new(pool)))
     }
 
     /// Run database migrations

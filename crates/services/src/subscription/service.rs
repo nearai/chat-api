@@ -34,7 +34,7 @@ use tokio::sync::RwLock;
 
 /// Configuration for SubscriptionServiceImpl
 pub struct SubscriptionServiceConfig {
-    pub db_pool: deadpool_postgres::Pool,
+    pub db_pool: crate::db_pool::DbPool,
     pub stripe_customer_repo: Arc<dyn StripeCustomerRepository>,
     pub stripe_client: Arc<dyn StripeClientPort>,
     pub subscription_repo: Arc<dyn SubscriptionRepository>,
@@ -96,7 +96,7 @@ const SUBSCRIPTION_STATUS_TRIALING: &str = "trialing";
 const SUBSCRIPTION_STATUS_CANCELED: &str = "canceled";
 
 pub struct SubscriptionServiceImpl {
-    db_pool: deadpool_postgres::Pool,
+    db_pool: crate::db_pool::DbPool,
     stripe_customer_repo: Arc<dyn StripeCustomerRepository>,
     stripe_client: Arc<dyn StripeClientPort>,
     subscription_repo: Arc<dyn SubscriptionRepository>,
