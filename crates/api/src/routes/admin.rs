@@ -3606,6 +3606,11 @@ pub struct MigrateInstanceRequest {
     /// user's stored passphrase + instance name. The legacy instance will NOT
     /// be started — stop it before taking the external backup to avoid data loss.
     pub backup_url: Option<String>,
+    /// Override the CrabShack service_type, bypassing the config-derived
+    /// ironclaw_service_type/openclaw_service_type mapping (e.g. "ironclaw-dind"
+    /// to force the dind runtime regardless of the current hosting policy).
+    /// When absent, uses the configured default. Pair with `image`.
+    pub service_type: Option<String>,
 }
 
 /// Response for migrate endpoint
@@ -4146,8 +4151,16 @@ pub async fn admin_migrate_instance(
         migrate_start.elapsed().as_secs_f64(),
         id,
     );
-    let crabshack_service_type =
-        services::agent::service::service_type_for_crabshack(service_type, hosting_config.as_ref());
+    let crabshack_service_type = request
+        .service_type
+        .clone()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            services::agent::service::service_type_for_crabshack(
+                service_type,
+                hosting_config.as_ref(),
+            )
+        });
 
     // Build extra_env: start with legacy instance's extra env vars (includes
     // SECRETS_MASTER_KEY, NEARAI_MODEL, etc.), then overlay migration-specific keys.
