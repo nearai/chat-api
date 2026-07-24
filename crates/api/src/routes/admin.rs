@@ -3596,9 +3596,20 @@ pub async fn admin_migration_status(
 /// Optional request body for migrate endpoint
 #[derive(Deserialize, Default, utoipa::ToSchema)]
 pub struct MigrateInstanceRequest {
-    /// Override the Docker image for the CrabShack instance.
+    /// Override the Docker image for the CrabShack instance, verbatim.
+    /// Highest precedence: when set, version deduction and
+    /// `crabshack_ironclaw_image` are skipped and this ref is used as-is.
     /// If not provided, uses the configured default for the service type.
     pub image: Option<String>,
+    /// Override only the base image for version deduction, replacing the
+    /// config-derived `ironclaw_image` (get_image_for_service_type result).
+    /// The version is still deduced from the running instance's /version and
+    /// appended, so `docker.io/nearaidev/ironclaw-dind` yields
+    /// `docker.io/nearaidev/ironclaw-dind:<deduced-version>`. Any tag on this
+    /// value is replaced by the deduced version. Ignored when `image` is set.
+    /// Use this to migrate legacy ironclaw workers to ironclaw-dind without
+    /// touching the shared `ironclaw_image` config (e.g. reborn on staging).
+    pub crabshack_ironclaw_image: Option<String>,
     /// Skip the backup phase entirely and use this presigned URL instead.
     /// Useful when backup was obtained directly from compose-api (e.g. the
     /// SSE stream stalls through chat-api but works when called directly).
@@ -3833,6 +3844,13 @@ pub async fn admin_migrate_instance(
     // is deferred until after the "start if stopped" block so the version query
     // can reach the running container.
     let image_override = request.image.filter(|s| !s.is_empty());
+    // Base-image override for version deduction (below). Replaces the
+    // config-derived base so a legacy ironclaw worker can target ironclaw-dind
+    // without touching the shared ironclaw_image config.
+    let base_image_override = request
+        .crabshack_ironclaw_image
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     let provided_backup_url = request.backup_url.filter(|s| !s.is_empty());
     let has_backup_url = provided_backup_url.is_some();
     if let Some(ref url) = provided_backup_url {
@@ -3940,10 +3958,12 @@ pub async fn admin_migrate_instance(
     let image = if let Some(img) = image_override {
         img
     } else if has_backup_url {
-        let default_image = services::agent::service::get_image_for_service_type(
-            service_type,
-            hosting_config.as_ref(),
-        );
+        let default_image = base_image_override.clone().unwrap_or_else(|| {
+            services::agent::service::get_image_for_service_type(
+                service_type,
+                hosting_config.as_ref(),
+            )
+        });
         let mut fallback = default_image;
         if fallback == "docker.io/nearaidev/ironclaw-dind:latest" {
             fallback = "docker.io/nearaidev/ironclaw-dind:0.29.1".to_string();
@@ -3988,10 +4008,12 @@ pub async fn admin_migrate_instance(
         }
         .await;
 
-        let default_image = services::agent::service::get_image_for_service_type(
-            service_type,
-            hosting_config.as_ref(),
-        );
+        let default_image = base_image_override.clone().unwrap_or_else(|| {
+            services::agent::service::get_image_for_service_type(
+                service_type,
+                hosting_config.as_ref(),
+            )
+        });
         if let Some(ver) = version {
             let base = default_image
                 .rsplit_once(':')
