@@ -4161,7 +4161,7 @@ pub async fn admin_migrate_instance(
     );
     let crabshack_service_type = request
         .service_type
-        .clone()
+        .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| {
             services::agent::service::service_type_for_crabshack(
