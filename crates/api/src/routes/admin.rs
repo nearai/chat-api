@@ -3606,6 +3606,19 @@ pub struct MigrateInstanceRequest {
     /// user's stored passphrase + instance name. The legacy instance will NOT
     /// be started — stop it before taking the external backup to avoid data loss.
     pub backup_url: Option<String>,
+    /// Override the CrabShack service_type, bypassing the config-derived
+    /// ironclaw_service_type/openclaw_service_type mapping (e.g. "ironclaw-dind"
+    /// to force the dind runtime regardless of the current hosting policy).
+    /// When absent, uses the configured default. Pair with `image`.
+    pub service_type: Option<String>,
+    /// Override node placement policy, passed through to CrabShack's import.
+    /// Defaults to {"version":1,"tee":"ANY_TEE"} (require a TEE node) when absent.
+    /// Accepts the orchestrator's node_policy shape, e.g.
+    /// {"version":1,"tee":"NO_TEE"|"ANY"|"ANY_TEE"}.
+    pub node_policy: Option<serde_json::Value>,
+    /// Pin the migrated instance to a specific CrabShack node id. When set,
+    /// CrabShack places it on that node and cross-checks it against node_policy.
+    pub node_id: Option<String>,
 }
 
 /// Response for migrate endpoint
@@ -4146,8 +4159,16 @@ pub async fn admin_migrate_instance(
         migrate_start.elapsed().as_secs_f64(),
         id,
     );
-    let crabshack_service_type =
-        services::agent::service::service_type_for_crabshack(service_type, hosting_config.as_ref());
+    let crabshack_service_type = request
+        .service_type
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            services::agent::service::service_type_for_crabshack(
+                service_type,
+                hosting_config.as_ref(),
+            )
+        });
 
     // Build extra_env: start with legacy instance's extra env vars (includes
     // SECRETS_MASTER_KEY, NEARAI_MODEL, etc.), then overlay migration-specific keys.
@@ -4193,8 +4214,13 @@ pub async fn admin_migrate_instance(
 
     // Deploy ordering: node_policy requires CrabShack PR #327 to be deployed first.
     // Without it, CrabShack ignores the field (pre-#327 import silently drops unknown fields).
+    // node_id pinning needs the import-side node_id support (crabshack-terraform follow-up).
+    let node_policy = request
+        .node_policy
+        .unwrap_or_else(|| serde_json::json!({ "version": 1, "tee": "ANY_TEE" }));
+    let node_id = request.node_id;
     let import_url = format!("{}/instances/import", crabshack_manager.url);
-    let import_body = serde_json::json!({
+    let mut import_body = serde_json::json!({
         "name": instance.name,
         "token": instance_token,
         "backup_url": backup_presigned_url,
@@ -4208,8 +4234,11 @@ pub async fn admin_migrate_instance(
         "cpus": cpus,
         "storage_size": storage_size,
         "extra_env": extra_env,
-        "node_policy": { "version": 1, "tee": "ANY_TEE" },
+        "node_policy": node_policy,
     });
+    if let Some(node_id) = node_id {
+        import_body["node_id"] = serde_json::Value::String(node_id);
+    }
 
     let import_resp = app_state
         .http_client
