@@ -3843,7 +3843,10 @@ pub async fn admin_migrate_instance(
     // Image override from request body (validated non-empty). Actual resolution
     // is deferred until after the "start if stopped" block so the version query
     // can reach the running container.
-    let image_override = request.image.filter(|s| !s.is_empty());
+    let image_override = request
+        .image
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     // Base-image override for version deduction (below). Replaces the
     // config-derived base so a legacy ironclaw worker can target ironclaw-dind
     // without touching the shared ironclaw_image config.
@@ -3958,12 +3961,12 @@ pub async fn admin_migrate_instance(
     let image = if let Some(img) = image_override {
         img
     } else if has_backup_url {
-        let default_image = base_image_override.clone().unwrap_or_else(|| {
-            services::agent::service::get_image_for_service_type(
-                service_type,
-                hosting_config.as_ref(),
-            )
-        });
+        // No /version to deduce against here (instance stays stopped), so the
+        // base-image override does not apply — use the configured default.
+        let default_image = services::agent::service::get_image_for_service_type(
+            service_type,
+            hosting_config.as_ref(),
+        );
         let mut fallback = default_image;
         if fallback == "docker.io/nearaidev/ironclaw-dind:latest" {
             fallback = "docker.io/nearaidev/ironclaw-dind:0.29.1".to_string();
@@ -4008,17 +4011,20 @@ pub async fn admin_migrate_instance(
         }
         .await;
 
-        let default_image = base_image_override.clone().unwrap_or_else(|| {
+        let default_image = base_image_override.unwrap_or_else(|| {
             services::agent::service::get_image_for_service_type(
                 service_type,
                 hosting_config.as_ref(),
             )
         });
         if let Some(ver) = version {
-            let base = default_image
-                .rsplit_once(':')
-                .map(|(b, _)| b)
-                .unwrap_or(&default_image);
+            // Strip an existing tag before appending the deduced version, but
+            // only when the last ':' is a tag separator (after the last '/') —
+            // not a registry port like host:5000/img.
+            let base = match default_image.rsplit_once(':') {
+                Some((b, tag)) if !tag.contains('/') => b,
+                _ => &default_image,
+            };
             let img = format!("{}:{}", base, ver);
             tracing::info!("Migrate: resolved image={}, instance_id={}", img, id);
             img
