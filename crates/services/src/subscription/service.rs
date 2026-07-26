@@ -132,7 +132,6 @@ impl SubscriptionServiceImpl {
         deleted: u32,
         canceled: u32,
         upserted: bool,
-        retryable: bool,
         skipped_reason: Option<&'static str>,
     ) -> NearStakingSyncSummary {
         NearStakingSyncSummary {
@@ -140,7 +139,6 @@ impl SubscriptionServiceImpl {
             deleted_house_of_stake_rows: deleted,
             canceled_house_of_stake_rows: canceled,
             upserted_house_of_stake_row: upserted,
-            retryable,
             skipped_reason: skipped_reason.map(String::from),
         }
     }
@@ -1511,13 +1509,13 @@ impl SubscriptionServiceImpl {
             .map(str::trim)
             .filter(|s| !s.is_empty())
         else {
-            return Ok(Self::hos_reconcile_summary(true, 0, 0, false, false, None));
+            return Ok(Self::hos_reconcile_summary(true, 0, 0, false, None));
         };
 
         let near_account = match self.get_near_account_id(user_id).await {
             Ok(a) => a,
             Err(_) => {
-                return Ok(Self::hos_reconcile_summary(true, 0, 0, false, false, None));
+                return Ok(Self::hos_reconcile_summary(true, 0, 0, false, None));
             }
         };
 
@@ -1534,7 +1532,7 @@ impl SubscriptionServiceImpl {
             .unwrap_or_default();
         let configured_hos_price_ids = Self::hos_price_ids(&subscription_plans);
         if configured_hos_price_ids.is_empty() {
-            return Ok(Self::hos_reconcile_summary(true, 0, 0, false, false, None));
+            return Ok(Self::hos_reconcile_summary(true, 0, 0, false, None));
         }
 
         // Prefer the user's stored HoS `price_id`, then fall back to every configured HoS price.
@@ -1627,7 +1625,7 @@ impl SubscriptionServiceImpl {
                 return Err(Self::near_rpc_err(err));
             }
             if let Some(err) = first_parse_err {
-                return Err(Self::near_rpc_err(err));
+                return Err(SubscriptionError::InternalError(err));
             }
         }
 
@@ -1640,7 +1638,7 @@ impl SubscriptionServiceImpl {
                 .cloned()
                 .collect();
             if local_hos_subscriptions.is_empty() {
-                return Ok(Self::hos_reconcile_summary(false, 0, 0, false, false, None));
+                return Ok(Self::hos_reconcile_summary(false, 0, 0, false, None));
             }
             let now = Utc::now();
             let canceled = local_hos_subscriptions.len() as u32;
@@ -1666,9 +1664,7 @@ impl SubscriptionServiceImpl {
                 .await
                 .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
             self.invalidate_credit_limit_cache(user_id).await;
-            return Ok(Self::hos_reconcile_summary(
-                false, 0, canceled, false, false, None,
-            ));
+            return Ok(Self::hos_reconcile_summary(false, 0, canceled, false, None));
         }
 
         let mut row = selected_chain_row.expect("checked is_some");
@@ -1734,7 +1730,6 @@ impl SubscriptionServiceImpl {
                 0,
                 canceled,
                 false,
-                false,
                 Some(NEAR_STAKING_SYNC_SKIPPED_REASON_UPSERT_BLOCKED_NON_HOS),
             ));
         }
@@ -1781,9 +1776,7 @@ impl SubscriptionServiceImpl {
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
         self.invalidate_credit_limit_cache(user_id).await;
-        Ok(Self::hos_reconcile_summary(
-            false, 0, canceled, true, false, None,
-        ))
+        Ok(Self::hos_reconcile_summary(false, 0, canceled, true, None))
     }
 }
 

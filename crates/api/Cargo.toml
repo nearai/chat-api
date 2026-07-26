@@ -72,6 +72,7 @@ axum-test = "18"
 dotenvy = "0.15"
 wiremock = "0.6"
 serial_test = "3.0"
+tokio-postgres = "0.7"
 
 [features]
 default = []

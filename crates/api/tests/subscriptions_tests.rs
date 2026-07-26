@@ -10,6 +10,7 @@ use common::{
     insert_test_subscription_with_provider_and_price, mock_login, set_subscription_plans,
     TestServerConfig,
 };
+use database::repositories::subscription_repository::CLEANUP_CANCELED_INSTANCE_USERS_SQL;
 use hmac::Mac;
 use serde_json::json;
 use serial_test::serial;
@@ -3470,6 +3471,123 @@ async fn last_cancelled_period_uses_genuine_hos_lapse() {
         got,
         Some(hos_period_end),
         "genuine HoS lapses should still anchor free-plan usage windows"
+    );
+}
+
+async fn cleanup_candidate_user_ids(
+    client: &tokio_postgres::Client,
+    cutoff: chrono::DateTime<Utc>,
+) -> Vec<UserId> {
+    let limit = 200_i64;
+    let offset = 0_i64;
+    client
+        .query(
+            CLEANUP_CANCELED_INSTANCE_USERS_SQL,
+            &[
+                &cutoff as &(dyn tokio_postgres::types::ToSql + Sync),
+                &limit,
+                &offset,
+            ],
+        )
+        .await
+        .expect("query cleanup candidates")
+        .into_iter()
+        .map(|row| row.get::<_, UserId>("user_id"))
+        .collect()
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn cleanup_candidates_use_latest_canceled_period_for_grace() {
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    let blocked_email = "test_cleanup_latest_cancel_blocked@example.com";
+    let eligible_email = "test_cleanup_latest_cancel_eligible@example.com";
+    cleanup_user_subscriptions(&db, blocked_email).await;
+    cleanup_user_subscriptions(&db, eligible_email).await;
+    let _ = mock_login(&server, blocked_email).await;
+    let _ = mock_login(&server, eligible_email).await;
+    let blocked_user = db
+        .user_repository()
+        .get_user_by_email(blocked_email)
+        .await
+        .unwrap()
+        .expect("blocked user should exist");
+    let eligible_user = db
+        .user_repository()
+        .get_user_by_email(eligible_email)
+        .await
+        .unwrap()
+        .expect("eligible user should exist");
+
+    let client = db.pool().get().await.unwrap();
+    let cutoff = Utc.with_ymd_and_hms(2026, 7, 16, 0, 0, 0).unwrap();
+    let old_period_end = cutoff - Duration::days(30);
+    let recent_period_end = cutoff + Duration::days(1);
+    let updated_at = cutoff - Duration::days(1);
+
+    client
+        .execute(
+            "INSERT INTO subscriptions (
+                subscription_id, user_id, provider, customer_id, price_id, status,
+                current_period_end, cancel_at_period_end, created_at, updated_at, canceled_at
+            ) VALUES
+                ('sub_cleanup_blocked_old', $1, 'stripe', 'cus_cleanup', 'price_test_basic', 'canceled', $3, false, $5, $5, $5),
+                ('sub_cleanup_blocked_recent', $1, 'stripe', 'cus_cleanup', 'price_test_basic', 'canceled', $4, false, $5, $5, $5),
+                ('sub_cleanup_eligible_old', $2, 'stripe', 'cus_cleanup', 'price_test_basic', 'canceled', $3, false, $5, $5, $5)",
+            &[&blocked_user.id, &eligible_user.id, &old_period_end, &recent_period_end, &updated_at],
+        )
+        .await
+        .unwrap();
+
+    let candidates = cleanup_candidate_user_ids(&client, cutoff).await;
+    assert!(
+        !candidates.contains(&blocked_user.id),
+        "a recent canceled row should preserve cleanup grace despite older canceled rows"
+    );
+    assert!(
+        candidates.contains(&eligible_user.id),
+        "users whose latest canceled period is past the cutoff should be cleanup candidates"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn cleanup_candidates_ignore_restored_hos_only_history() {
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    let user_email = "test_cleanup_restored_hos_only@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+    let _ = mock_login(&server, user_email).await;
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .unwrap()
+        .expect("user should exist");
+
+    let client = db.pool().get().await.unwrap();
+    let cutoff = Utc.with_ymd_and_hms(2026, 7, 16, 0, 0, 0).unwrap();
+    let restored_period_end = Utc.with_ymd_and_hms(2024, 5, 1, 0, 0, 0).unwrap();
+    let restored_at = cutoff + Duration::days(1);
+    client
+        .execute(
+            "INSERT INTO subscriptions (
+                subscription_id, user_id, provider, customer_id, price_id, status,
+                current_period_end, cancel_at_period_end, created_at, updated_at, canceled_at
+            ) VALUES (
+                'sub_cleanup_restored_hos_only', $1, 'house-of-stake', 'cus_cleanup',
+                'price_hos_basic', 'canceled', $2, false, $3, $3, $2
+            )",
+            &[&user.id, &restored_period_end, &restored_at],
+        )
+        .await
+        .unwrap();
+
+    let candidates = cleanup_candidate_user_ids(&client, cutoff).await;
+    assert!(
+        !candidates.contains(&user.id),
+        "back-dated restored HoS history should not make cleanup delete agent instances"
     );
 }
 

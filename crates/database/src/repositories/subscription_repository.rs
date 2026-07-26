@@ -36,6 +36,25 @@ const SUBSCRIPTION_COLUMNS: &str =
        pending_downgrade_expected_period_end, pending_downgrade_status,
        pending_downgrade_updated_at";
 
+pub const CLEANUP_CANCELED_INSTANCE_USERS_SQL: &str = "SELECT s.user_id
+     FROM subscriptions s
+     WHERE s.status = 'canceled'
+       AND NOT EXISTS (
+           SELECT 1
+           FROM subscriptions active_sub
+           WHERE active_sub.user_id = s.user_id
+             AND active_sub.status IN ('active', 'trialing')
+       )
+       AND NOT (
+           s.provider = 'house-of-stake'
+           AND s.canceled_at IS NOT NULL
+           AND s.canceled_at < s.created_at
+       )
+     GROUP BY s.user_id
+     HAVING MAX(s.current_period_end) <= $1
+     ORDER BY s.user_id
+     LIMIT $2 OFFSET $3";
+
 pub struct PostgresSubscriptionRepository {
     pool: DbPool,
 }

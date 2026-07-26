@@ -538,6 +538,7 @@ dependencies = [
  "sha2 0.10.9",
  "stripe_client",
  "tokio",
+ "tokio-postgres",
  "tokio-stream",
  "tower",
  "tower-http",

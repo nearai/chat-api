@@ -2,6 +2,7 @@ use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use axum::{routing::get, Json, Router};
 use chrono::{Duration, Utc};
+use database::repositories::subscription_repository::CLEANUP_CANCELED_INSTANCE_USERS_SQL;
 use serde::Serialize;
 use services::conversation::ports::ConversationService;
 use services::response::service::OpenAIProxy;
@@ -102,24 +103,7 @@ impl TaskExecutor for DefaultTaskExecutor {
                 .context("failed to get DB client")?;
             let rows = client
                 .query(
-                    "SELECT s.user_id
-                     FROM subscriptions s
-                     WHERE s.status = 'canceled'
-                       AND NOT EXISTS (
-                           SELECT 1
-                           FROM subscriptions active_sub
-                           WHERE active_sub.user_id = s.user_id
-                             AND active_sub.status IN ('active', 'trialing')
-                       )
-                       AND NOT (
-                           s.provider = 'house-of-stake'
-                           AND s.canceled_at IS NOT NULL
-                           AND s.canceled_at < s.created_at
-                       )
-                     GROUP BY s.user_id
-                     HAVING MAX(s.current_period_end) <= $1
-                     ORDER BY s.user_id
-                     LIMIT $2 OFFSET $3",
+                    CLEANUP_CANCELED_INSTANCE_USERS_SQL,
                     &[&cutoff, &batch_size, &offset],
                 )
                 .await
