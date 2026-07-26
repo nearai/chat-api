@@ -1583,19 +1583,27 @@ impl SubscriptionServiceImpl {
         }))
         .await;
 
-        let mut raw = None;
+        let mut selected_chain_row = None;
         let mut first_err = None;
+        let mut first_parse_err = None;
         for (_, result) in &probe_results {
             match result {
                 Ok(Some(v)) => {
-                    let row = subscription_row_from_chain(user_id, &near_account, v)
-                        .map_err(SubscriptionError::InternalError)?;
+                    let row = match subscription_row_from_chain(user_id, &near_account, v) {
+                        Ok(row) => row,
+                        Err(err) => {
+                            if first_parse_err.is_none() {
+                                first_parse_err = Some(err);
+                            }
+                            continue;
+                        }
+                    };
                     if Self::is_active_or_trialing(&row.status) {
-                        raw = Some(v.clone());
+                        selected_chain_row = Some(row);
                         break;
                     }
-                    if raw.is_none() {
-                        raw = Some(v.clone());
+                    if selected_chain_row.is_none() {
+                        selected_chain_row = Some(row);
                     }
                 }
                 Ok(None) => {}
@@ -1603,7 +1611,7 @@ impl SubscriptionServiceImpl {
                 Err(_) => {}
             }
         }
-        if raw.is_none() {
+        if selected_chain_row.is_none() {
             if let Some(err) = first_err {
                 if has_active_non_hos && !has_active_local_hos {
                     let error_category = if err == NEAR_VIEW_RPC_TIMEOUT_MSG {
@@ -1627,9 +1635,12 @@ impl SubscriptionServiceImpl {
                 }
                 return Err(Self::near_rpc_err(err));
             }
+            if let Some(err) = first_parse_err {
+                return Err(SubscriptionError::InternalError(err));
+            }
         }
 
-        if raw.is_none() {
+        if selected_chain_row.is_none() {
             let mut local_hos_subscriptions: Vec<Subscription> = subs
                 .iter()
                 .filter(|s| {
@@ -1669,10 +1680,10 @@ impl SubscriptionServiceImpl {
             ));
         }
 
-        let chain_subscription = raw.as_ref().expect("checked is_some");
-        let mut row = subscription_row_from_chain(user_id, &near_account, chain_subscription)
-            .map_err(SubscriptionError::InternalError)?;
+        let mut row = selected_chain_row.expect("checked is_some");
         if row.status == SUBSCRIPTION_STATUS_CANCELED {
+            // Chain terminal rows are history, whether restored for Stripe-primary users or refreshed
+            // for HoS-primary users. Keep their shape consistent with local canceled HoS history.
             row = Self::canceled_house_of_stake_chain_history_row(row);
         }
 

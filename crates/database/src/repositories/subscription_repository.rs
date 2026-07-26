@@ -271,6 +271,7 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
         let client = self.pool.get().await?;
         // Preserve historical canceled ordering while keeping restored HoS history from winning
         // solely because sync refreshed `updated_at` or carried a future terminal chain boundary.
+        // A future terminal HoS row becomes eligible only after that paid period boundary passes.
         let row = client
             .query_opt(
                 "SELECT current_period_end FROM subscriptions \
