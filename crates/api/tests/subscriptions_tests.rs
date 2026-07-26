@@ -5460,8 +5460,8 @@ async fn test_near_staking_sync_marks_expired_cancel_at_period_end_row_canceled(
     let status: String = row.get("status");
     let cancel_at_period_end: bool = row.get("cancel_at_period_end");
     assert!(
-        cancel_at_period_end,
-        "row should stay marked cancel_at_period_end"
+        !cancel_at_period_end,
+        "canceled HoS history should clear cancel_at_period_end"
     );
     assert_eq!(
         status, "canceled",
