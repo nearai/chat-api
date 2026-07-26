@@ -1633,7 +1633,13 @@ impl SubscriptionServiceImpl {
         let mut row = subscription_row_from_chain(user_id, &near_account, chain_subscription)
             .map_err(SubscriptionError::InternalError)?;
         if row.status == SUBSCRIPTION_STATUS_CANCELED {
-            row = Self::canceled_house_of_stake_history_row(row, Utc::now());
+            let now = Utc::now();
+            let clamp_at = subs
+                .iter()
+                .find(|sub| sub.subscription_id == row.subscription_id)
+                .map(|sub| sub.current_period_end.min(now))
+                .unwrap_or(now);
+            row = Self::canceled_house_of_stake_history_row(row, clamp_at);
         }
 
         // Do not insert/update an active HoS row while a non-HoS subscription is active/trialing locally:

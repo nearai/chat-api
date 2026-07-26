@@ -4799,6 +4799,31 @@ async fn test_near_staking_sync_normalizes_canceled_chain_history() {
         before_sync <= period_end && period_end <= after_sync,
         "future canceled HoS period end should be clamped to sync time, got {period_end}"
     );
+
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    let response = server
+        .post("/v1/subscriptions/near/sync")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 200, "{}", response.text());
+    let row = client
+        .query_one(
+            "SELECT current_period_end
+             FROM subscriptions
+             WHERE user_id = $1 AND subscription_id = 'sub_chain_future_canceled_hos'",
+            &[&user.id],
+        )
+        .await
+        .expect("canceled HoS history should still be present");
+    assert_eq!(
+        row.get::<_, chrono::DateTime<Utc>>("current_period_end"),
+        period_end,
+        "re-syncing the same future terminal chain row should not move current_period_end"
+    );
 }
 
 #[tokio::test]
