@@ -60,6 +60,8 @@ pub struct Subscription {
     pub cancel_at_period_end: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Timestamp when this row first entered `canceled`; used for free-plan anchor ordering.
+    pub canceled_at: Option<DateTime<Utc>>,
     /// Target price_id for a deferred downgrade intent.
     pub pending_downgrade_target_price_id: Option<String>,
     /// Snapshot of current price_id when the downgrade intent was created.
@@ -741,7 +743,8 @@ pub trait SubscriptionRepository: Send + Sync {
     ) -> anyhow::Result<Option<Subscription>>;
 
     /// `current_period_end` of the most recently canceled subscription row for this user
-    /// (ordered by `updated_at`; canceled status is stored as the string `canceled`). Used to align free-plan billing months with the boundary
+    /// (ordered by `canceled_at`, falling back to `updated_at` for legacy rows; canceled status is
+    /// stored as the string `canceled`). Used to align free-plan billing months with the boundary
     /// where the latest cancellation period ended; if none exist, callers fall back to a calendar month.
     async fn last_cancelled_subscription_period_end_for_user(
         &self,

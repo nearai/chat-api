@@ -390,6 +390,7 @@ pub fn subscription_row_from_chain(
         cancel_at_period_end,
         created_at: Utc::now(),
         updated_at: Utc::now(),
+        canceled_at: None,
         pending_downgrade_target_price_id: pd_target,
         pending_downgrade_from_price_id: pd_from,
         pending_downgrade_expected_period_end: pd_end,

@@ -17,6 +17,7 @@ fn row_to_subscription(row: &tokio_postgres::Row) -> Subscription {
         cancel_at_period_end: row.get("cancel_at_period_end"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
+        canceled_at: row.get("canceled_at"),
         pending_downgrade_target_price_id: row.get("pending_downgrade_target_price_id"),
         pending_downgrade_from_price_id: row.get("pending_downgrade_from_price_id"),
         pending_downgrade_expected_period_end: row.get("pending_downgrade_expected_period_end"),
@@ -30,6 +31,7 @@ fn row_to_subscription(row: &tokio_postgres::Row) -> Subscription {
 const SUBSCRIPTION_COLUMNS: &str =
     "subscription_id, user_id, provider, customer_id, price_id, status,
        current_period_end, cancel_at_period_end, created_at, updated_at,
+       canceled_at,
        pending_downgrade_target_price_id, pending_downgrade_from_price_id,
        pending_downgrade_expected_period_end, pending_downgrade_status,
        pending_downgrade_updated_at";
@@ -124,9 +126,9 @@ impl PostgresSubscriptionRepository {
                     status, current_period_end, cancel_at_period_end,
                     pending_downgrade_target_price_id, pending_downgrade_from_price_id,
                     pending_downgrade_expected_period_end, pending_downgrade_status,
-                    pending_downgrade_updated_at
+                    pending_downgrade_updated_at, canceled_at
                  )
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                  ON CONFLICT (subscription_id)
                  DO UPDATE SET
                     user_id = EXCLUDED.user_id,
@@ -136,10 +138,18 @@ impl PostgresSubscriptionRepository {
                     status = EXCLUDED.status,
                     current_period_end = EXCLUDED.current_period_end,
                     cancel_at_period_end = EXCLUDED.cancel_at_period_end,
+                    canceled_at = CASE
+                        WHEN EXCLUDED.status = 'canceled' AND subscriptions.status = 'canceled'
+                            THEN COALESCE(subscriptions.canceled_at, EXCLUDED.canceled_at, NOW())
+                        WHEN EXCLUDED.status = 'canceled'
+                            THEN COALESCE(EXCLUDED.canceled_at, NOW())
+                        ELSE NULL
+                    END,
                     {}
                     updated_at = NOW()
                  RETURNING subscription_id, user_id, provider, customer_id, price_id, status,
                            current_period_end, cancel_at_period_end, created_at, updated_at,
+                           canceled_at,
                            pending_downgrade_target_price_id, pending_downgrade_from_price_id,
                            pending_downgrade_expected_period_end, pending_downgrade_status,
                            pending_downgrade_updated_at",
@@ -163,6 +173,7 @@ impl PostgresSubscriptionRepository {
                     &subscription.pending_downgrade_expected_period_end,
                     &pending_downgrade_status,
                     &pending_downgrade_updated_at,
+                    &subscription.canceled_at,
                 ],
             )
             .await
@@ -258,20 +269,14 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
         user_id: UserId,
     ) -> anyhow::Result<Option<chrono::DateTime<chrono::Utc>>> {
         let client = self.pool.get().await?;
-        // Preserve the historical updated_at ordering for non-HoS cancellations, but do not let a
-        // freshly-restored HoS history row win solely because sync refreshed its updated_at or
-        // carries a future terminal chain boundary.
+        // Preserve historical canceled ordering while keeping restored HoS history from winning
+        // solely because sync refreshed `updated_at` or carried a future terminal chain boundary.
         let row = client
             .query_opt(
                 "SELECT current_period_end FROM subscriptions \
                  WHERE user_id = $1 AND status = 'canceled' \
                    AND (provider != 'house-of-stake' OR current_period_end <= NOW()) \
-                 ORDER BY \
-                    CASE \
-                        WHEN provider = 'house-of-stake' THEN LEAST(updated_at, current_period_end) \
-                        ELSE updated_at \
-                    END DESC, \
-                    created_at DESC, subscription_id DESC \
+                 ORDER BY COALESCE(canceled_at, updated_at) DESC, created_at DESC, subscription_id DESC \
                  LIMIT 1",
                 &[&user_id],
             )
@@ -476,10 +481,12 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
                      pending_downgrade_expected_period_end = $12,
                      pending_downgrade_status = $13,
                      pending_downgrade_updated_at = $14,
+                     canceled_at = CASE WHEN $6 = 'canceled' THEN NOW() ELSE NULL END,
                      updated_at = NOW()
                  WHERE subscription_id = $1
                  RETURNING subscription_id, user_id, provider, customer_id, price_id, status,
                            current_period_end, cancel_at_period_end, created_at, updated_at,
+                           canceled_at,
                            pending_downgrade_target_price_id, pending_downgrade_from_price_id,
                            pending_downgrade_expected_period_end, pending_downgrade_status,
                            pending_downgrade_updated_at",

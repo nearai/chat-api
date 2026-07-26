@@ -164,10 +164,12 @@ impl SubscriptionServiceImpl {
         sub.pending_downgrade_expected_period_end = None;
         sub.pending_downgrade_status = None;
         sub.pending_downgrade_updated_at = None;
+        sub.canceled_at = Some(now);
         sub
     }
 
     fn canceled_house_of_stake_chain_history_row(mut sub: Subscription) -> Subscription {
+        let now = Utc::now();
         sub.status = SUBSCRIPTION_STATUS_CANCELED.to_string();
         sub.cancel_at_period_end = false;
         sub.pending_downgrade_target_price_id = None;
@@ -175,6 +177,11 @@ impl SubscriptionServiceImpl {
         sub.pending_downgrade_expected_period_end = None;
         sub.pending_downgrade_status = None;
         sub.pending_downgrade_updated_at = None;
+        sub.canceled_at = Some(if sub.current_period_end <= now {
+            sub.current_period_end
+        } else {
+            now
+        });
         sub
     }
 
@@ -884,6 +891,7 @@ impl SubscriptionServiceImpl {
         user_id: UserId,
         provider: &str,
     ) -> Result<Subscription, SubscriptionError> {
+        let now = chrono::Utc::now();
         Ok(Subscription {
             subscription_id: stripe_sub.id.clone(),
             user_id,
@@ -893,8 +901,9 @@ impl SubscriptionServiceImpl {
             status: stripe_sub.status.clone(),
             current_period_end: stripe_sub.current_period_end,
             cancel_at_period_end: stripe_sub.cancel_at_period_end,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            created_at: now,
+            updated_at: now,
+            canceled_at: (stripe_sub.status == SUBSCRIPTION_STATUS_CANCELED).then_some(now),
             pending_downgrade_target_price_id: None,
             pending_downgrade_from_price_id: None,
             pending_downgrade_expected_period_end: None,
@@ -3668,6 +3677,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
             cancel_at_period_end: false,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
+            canceled_at: None,
             pending_downgrade_target_price_id: None,
             pending_downgrade_from_price_id: None,
             pending_downgrade_expected_period_end: None,
@@ -4386,6 +4396,7 @@ mod tests {
             cancel_at_period_end: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            canceled_at: None,
             pending_downgrade_target_price_id: None,
             pending_downgrade_from_price_id: None,
             pending_downgrade_expected_period_end: None,
