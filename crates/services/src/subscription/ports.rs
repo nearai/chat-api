@@ -320,17 +320,16 @@ pub const NEAR_STAKING_SYNC_SKIPPED_REASON_UPSERT_BLOCKED_NON_HOS: &str =
     "upsert_blocked_active_non_house_of_stake_subscription";
 
 /// Machine-readable [`NearStakingSyncSummary::skipped_reason`] when reconcile could not probe
-/// NEAR RPC for a Stripe-primary user with no local HoS context. This is reported as a skipped
-/// retryable sync instead of a 503 to preserve the historical no-op behavior for Stripe users.
+/// NEAR RPC for a Stripe-primary user with no local HoS context. This is reported as a retryable
+/// sync no-op instead of a 503 to preserve the historical no-op behavior for Stripe users.
 pub const NEAR_STAKING_SYNC_SKIPPED_REASON_RPC_UNAVAILABLE: &str = "near_rpc_unavailable";
 
 /// Summary from `POST /v1/subscriptions/near/sync` / internal HoS reconcile.
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NearStakingSyncSummary {
-    /// True when reconcile did not mutate DB because it exited before useful chain data was
-    /// available (no HoS contract configured, user has no linked NEAR account, no HoS anchor price
-    /// in catalog, or retryable RPC unavailability for a Stripe-primary user with no local HoS context).
+    /// True when reconcile did not mutate DB because it exited before attempting RPC or DB work
+    /// (no HoS contract configured, user has no linked NEAR account, or no HoS anchor price in catalog).
     pub skipped: bool,
     /// Local `house-of-stake` rows removed during reconcile. Preserved history rows are not counted here.
     pub deleted_house_of_stake_rows: u32,
@@ -339,7 +338,8 @@ pub struct NearStakingSyncSummary {
     pub canceled_house_of_stake_rows: u32,
     /// True when a local row was upserted from chain JSON.
     pub upserted_house_of_stake_row: bool,
-    /// True when the no-op is retryable, such as transient NEAR RPC unavailability.
+    /// True when the no-op is retryable, such as transient NEAR RPC unavailability. Retryable no-ops
+    /// can have `skipped=false` so older clients do not treat the response as terminal.
     #[serde(default)]
     pub retryable: bool,
     /// When reconcile did not upsert or delete, optionally explains a no-op (e.g. blocked upsert
