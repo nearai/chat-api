@@ -4591,6 +4591,120 @@ async fn test_near_staking_sync_skipped_reason_when_upsert_blocked_by_active_str
 
 #[tokio::test]
 #[serial(subscription_tests)]
+async fn test_near_staking_sync_restores_expired_hos_history_when_active_stripe_exists() {
+    clear_proxy_env_for_local_wiremock();
+    let chain_sub = json!({
+        "subscription_id": "sub_legacy_expired_hos",
+        "price_id": "price_hos_basic",
+        "end_ns": "1783039174474808018",
+        "status": "Expired",
+        "cancel_at_period_end": true
+    });
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(near_rpc_wiremock_hos_subscription_probe_only(chain_sub))
+        .mount(&mock)
+        .await;
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        near_rpc_url: Some(mock.uri().to_string()),
+        near_staking_contract_id: Some("staking.testnet".to_string()),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": { "providers": { "house-of-stake": { "price_id": "price_hos_basic" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } }
+        }),
+    )
+    .await;
+
+    let near_email = "hos_sync_legacy_expired_with_stripe.testnet@near";
+    let login = json!({
+        "email": near_email,
+        "name": "HoS Legacy Expired With Stripe",
+        "oauth_provider": "near"
+    });
+    let response = server.post("/v1/auth/mock-login").json(&login).await;
+    let token = response.json::<serde_json::Value>()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    cleanup_user_subscriptions(&db, near_email).await;
+    insert_test_subscription(&server, &db, near_email, false).await;
+
+    let response = server
+        .post("/v1/subscriptions/near/sync")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 200, "{}", response.text());
+    let body: serde_json::Value = response.json();
+    assert_eq!(body.get("skipped").and_then(|x| x.as_bool()), Some(false));
+    assert_eq!(
+        body.get("upserted_house_of_stake_row")
+            .and_then(|x| x.as_bool()),
+        Some(true)
+    );
+    assert_eq!(body.get("skipped_reason"), None);
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(near_email)
+        .await
+        .unwrap()
+        .unwrap();
+    let client = db.pool().get().await.unwrap();
+    let row = client
+        .query_one(
+            "SELECT provider, price_id, status, current_period_end, cancel_at_period_end
+             FROM subscriptions
+             WHERE user_id = $1 AND subscription_id = 'sub_legacy_expired_hos'",
+            &[&user.id],
+        )
+        .await
+        .expect("expired HoS history should be restored");
+    assert_eq!(row.get::<_, String>("provider"), "house-of-stake");
+    assert_eq!(row.get::<_, String>("price_id"), "price_hos_basic");
+    assert_eq!(row.get::<_, String>("status"), "canceled");
+    assert!(row.get::<_, bool>("cancel_at_period_end"));
+    assert_eq!(
+        row.get::<_, chrono::DateTime<Utc>>("current_period_end"),
+        Utc.with_ymd_and_hms(2026, 7, 3, 0, 39, 34).unwrap() + Duration::microseconds(474_808)
+    );
+
+    let response = server
+        .get("/v1/subscriptions?include_inactive=true")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 200, "{}", response.text());
+    let body: serde_json::Value = response.json();
+    let subscriptions = body["subscriptions"]
+        .as_array()
+        .expect("subscriptions should be an array");
+    assert!(
+        subscriptions.iter().any(|sub| {
+            sub["subscription_id"] == "sub_legacy_expired_hos"
+                && sub["provider"] == "house-of-stake"
+                && sub["status"] == "canceled"
+        }),
+        "include_inactive=true should return restored HoS history: {subscriptions:?}"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
 async fn test_near_staking_sync_marks_local_hos_canceled_when_chain_returns_null() {
     clear_proxy_env_for_local_wiremock();
     let mock = MockServer::start().await;
