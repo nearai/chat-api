@@ -18,8 +18,7 @@ use services::aml::{
     AmlRiskLevel, AmlRiskService,
 };
 use services::subscription::ports::{
-    ChangePlanOutcome, NEAR_STAKING_SYNC_SKIPPED_REASON_RPC_UNAVAILABLE,
-    NEAR_STAKING_SYNC_SKIPPED_REASON_UPSERT_BLOCKED_NON_HOS,
+    ChangePlanOutcome, NEAR_STAKING_SYNC_SKIPPED_REASON_UPSERT_BLOCKED_NON_HOS,
 };
 use services::subscription::SubscriptionRepository;
 use services::system_configs::ports::RateLimitConfig;
@@ -3434,6 +3433,48 @@ async fn last_cancelled_period_ignores_hos_only_history() {
 
 #[tokio::test]
 #[serial(subscription_tests)]
+async fn last_cancelled_period_uses_genuine_hos_lapse() {
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    let user_email = "test_free_anchor_genuine_hos_lapse@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+    let _ = mock_login(&server, user_email).await;
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .unwrap()
+        .expect("user should exist");
+
+    let client = db.pool().get().await.unwrap();
+    let created_at = Utc.with_ymd_and_hms(2026, 7, 1, 0, 0, 0).unwrap();
+    let hos_period_end = Utc.with_ymd_and_hms(2026, 7, 20, 0, 0, 0).unwrap();
+    let canceled_at = Utc.with_ymd_and_hms(2026, 7, 26, 0, 0, 0).unwrap();
+    client
+        .execute(
+            "INSERT INTO subscriptions (
+                subscription_id, user_id, provider, customer_id, price_id, status,
+                current_period_end, cancel_at_period_end, created_at, updated_at, canceled_at
+            ) VALUES ($1, $2, 'house-of-stake', 'cus_anchor', 'price_hos_basic', 'canceled', $3, false, $4, $5, $5)",
+            &[&"sub_free_anchor_genuine_hos_lapse", &user.id, &hos_period_end, &created_at, &canceled_at],
+        )
+        .await
+        .unwrap();
+
+    let got = db
+        .subscription_repository()
+        .last_cancelled_subscription_period_end_for_user(user.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        got,
+        Some(hos_period_end),
+        "genuine HoS lapses should still anchor free-plan usage windows"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
 async fn last_cancelled_period_ignores_non_canceled_statuses_and_future_hos_periods() {
     let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
 
@@ -5521,7 +5562,7 @@ async fn test_near_staking_sync_noops_when_active_stripe_and_chain_returns_null(
 
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn test_near_staking_sync_reports_retryable_skip_for_stripe_only_when_near_rpc_errors() {
+async fn test_near_staking_sync_returns_503_for_stripe_only_when_near_rpc_errors() {
     clear_proxy_env_for_local_wiremock();
     let mock = MockServer::start().await;
     Mock::given(method("POST"))
@@ -5577,19 +5618,12 @@ async fn test_near_staking_sync_reports_retryable_skip_for_stripe_only_when_near
         )
         .await;
 
-    assert_eq!(response.status_code(), 200, "{}", response.text());
-    let body: serde_json::Value = response.json();
-    assert_eq!(body.get("skipped").and_then(|x| x.as_bool()), Some(false));
     assert_eq!(
-        body.get("upserted_house_of_stake_row")
-            .and_then(|x| x.as_bool()),
-        Some(false)
+        response.status_code(),
+        503,
+        "RPC failure should stay visible to existing clients: {}",
+        response.text()
     );
-    assert_eq!(
-        body.get("skipped_reason").and_then(|x| x.as_str()),
-        Some(NEAR_STAKING_SYNC_SKIPPED_REASON_RPC_UNAVAILABLE)
-    );
-    assert_eq!(body.get("retryable").and_then(|x| x.as_bool()), Some(true));
 
     let user = db
         .user_repository()

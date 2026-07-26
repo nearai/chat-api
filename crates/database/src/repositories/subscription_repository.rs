@@ -275,15 +275,19 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
         user_id: UserId,
     ) -> anyhow::Result<Option<chrono::DateTime<chrono::Utc>>> {
         let client = self.pool.get().await?;
-        // Preserve historical non-HoS canceled ordering while keeping restored HoS history from
-        // moving free-plan usage windows. HoS rows are restored for inactive-history display only.
+        // Preserve historical non-HoS canceled ordering while keeping restored back-dated HoS
+        // history from moving free-plan usage windows. Genuine HoS lapses still anchor after the
+        // paid period ends.
         // Non-HoS rows keep their legacy ordering semantics; changing Stripe future-period anchors
         // would be a separate billing-policy migration.
         let row = client
             .query_opt(
                 "SELECT current_period_end FROM subscriptions \
                  WHERE user_id = $1 AND status = 'canceled' \
-                   AND provider != 'house-of-stake' \
+                   AND (provider != 'house-of-stake' OR ( \
+                       current_period_end <= NOW() \
+                       AND NOT (canceled_at IS NOT NULL AND canceled_at < created_at) \
+                   )) \
                  ORDER BY COALESCE(canceled_at, updated_at) DESC, created_at DESC, subscription_id DESC \
                  LIMIT 1",
                 &[&user_id],

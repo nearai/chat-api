@@ -2,7 +2,6 @@ use super::near_staking::{
     lock_amount_yocto, subscription_row_from_chain, view_get_lock, view_get_price,
     view_get_purchase, view_get_subscription_for_price, view_storage_balance_bounds,
     view_storage_balance_of, NearStakingStorageBalance, NearStakingStorageBalanceBounds,
-    NEAR_VIEW_RPC_TIMEOUT_MSG,
 };
 use super::ports::{
     BillingCycleAnchor, BillingPeriod, CancelSubscriptionOutcome, ChangePlanOutcome,
@@ -13,7 +12,6 @@ use super::ports::{
     StripeCustomerRepository, StripeSubscriptionSnapshot, StripeUpdateSubscriptionParams,
     Subscription, SubscriptionError, SubscriptionPlan, SubscriptionReplacement,
     SubscriptionRepository, SubscriptionService, SubscriptionWithPlan, DEFAULT_MONTHLY_TOKEN_LIMIT,
-    NEAR_STAKING_SYNC_SKIPPED_REASON_RPC_UNAVAILABLE,
     NEAR_STAKING_SYNC_SKIPPED_REASON_UPSERT_BLOCKED_NON_HOS, UNKNOWN_SUBSCRIPTION_PLAN_NAME,
 };
 use crate::agent::ports::AgentRepository;
@@ -1526,7 +1524,6 @@ impl SubscriptionServiceImpl {
         let has_active_non_hos = subs
             .iter()
             .any(|s| Self::is_active_or_trialing(&s.status) && s.provider != "house-of-stake");
-        let has_any_local_hos = subs.iter().any(|s| s.provider == "house-of-stake");
         let configs = self
             .system_configs_service
             .get_configs()
@@ -1627,45 +1624,10 @@ impl SubscriptionServiceImpl {
         }
         if selected_chain_row.is_none() {
             if let Some(err) = first_err {
-                if has_active_non_hos && !has_any_local_hos {
-                    let error_category = if err == NEAR_VIEW_RPC_TIMEOUT_MSG {
-                        "timeout"
-                    } else {
-                        "rpc_error"
-                    };
-                    tracing::warn!(
-                        user_id = %user_id.0,
-                        error_category = error_category,
-                        "NEAR RPC unavailable during HoS sync; no local HoS context, reporting retryable sync no-op"
-                    );
-                    return Ok(Self::hos_reconcile_summary(
-                        false,
-                        0,
-                        0,
-                        false,
-                        true,
-                        Some(NEAR_STAKING_SYNC_SKIPPED_REASON_RPC_UNAVAILABLE),
-                    ));
-                }
                 return Err(Self::near_rpc_err(err));
             }
             if let Some(err) = first_parse_err {
-                if has_active_non_hos && !has_any_local_hos {
-                    tracing::warn!(
-                        user_id = %user_id.0,
-                        error_category = "parse_error",
-                        "NEAR RPC returned unparseable HoS sync data; no local HoS context, reporting retryable sync no-op"
-                    );
-                    return Ok(Self::hos_reconcile_summary(
-                        false,
-                        0,
-                        0,
-                        false,
-                        true,
-                        Some(NEAR_STAKING_SYNC_SKIPPED_REASON_RPC_UNAVAILABLE),
-                    ));
-                }
-                return Err(SubscriptionError::InternalError(err));
+                return Err(Self::near_rpc_err(err));
             }
         }
 

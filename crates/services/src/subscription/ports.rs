@@ -60,7 +60,8 @@ pub struct Subscription {
     pub cancel_at_period_end: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-    /// Timestamp when this row first entered `canceled`; used for free-plan anchor ordering.
+    /// Stable terminal timestamp for canceled rows; normally when the row first entered `canceled`,
+    /// or the chain-authored expiry time for restored HoS history.
     pub canceled_at: Option<DateTime<Utc>>,
     /// Target price_id for a deferred downgrade intent.
     pub pending_downgrade_target_price_id: Option<String>,
@@ -324,11 +325,6 @@ pub enum ResumeSubscriptionOutcome {
 pub const NEAR_STAKING_SYNC_SKIPPED_REASON_UPSERT_BLOCKED_NON_HOS: &str =
     "upsert_blocked_active_non_house_of_stake_subscription";
 
-/// Machine-readable [`NearStakingSyncSummary::skipped_reason`] when reconcile could not probe
-/// NEAR RPC for a Stripe-primary user with no local HoS context. This is reported as a retryable
-/// sync no-op instead of a 503 to preserve the historical no-op behavior for Stripe users.
-pub const NEAR_STAKING_SYNC_SKIPPED_REASON_RPC_UNAVAILABLE: &str = "near_rpc_unavailable";
-
 /// Summary from `POST /v1/subscriptions/near/sync` / internal HoS reconcile.
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -343,12 +339,10 @@ pub struct NearStakingSyncSummary {
     pub canceled_house_of_stake_rows: u32,
     /// True when a local row was upserted from chain JSON.
     pub upserted_house_of_stake_row: bool,
-    /// True when the no-op is retryable, such as transient NEAR RPC unavailability. Retryable no-ops
-    /// can have `skipped=false` so older clients do not treat the response as terminal.
+    /// True when a future no-op reason is retryable.
     #[serde(default)]
     pub retryable: bool,
-    /// When reconcile did not upsert or delete, optionally explains a no-op (e.g. blocked upsert
-    /// or retryable RPC unavailability). Omitted from JSON when `None`.
+    /// When reconcile did not upsert or delete, optionally explains a no-op. Omitted from JSON when `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skipped_reason: Option<String>,
 }
