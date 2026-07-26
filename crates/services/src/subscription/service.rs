@@ -1502,6 +1502,7 @@ impl SubscriptionServiceImpl {
         let has_active_non_hos = subs
             .iter()
             .any(|s| Self::is_active_or_trialing(&s.status) && s.provider != "house-of-stake");
+        let has_local_hos = subs.iter().any(|s| s.provider == "house-of-stake");
         let configs = self
             .system_configs_service
             .get_configs()
@@ -1571,6 +1572,14 @@ impl SubscriptionServiceImpl {
         }
         if raw.is_none() {
             if let Some(err) = first_err {
+                if has_active_non_hos && !has_local_hos {
+                    tracing::warn!(
+                        user_id = %user_id.0,
+                        error = %err,
+                        "NEAR RPC unavailable during HoS sync; no local HoS context, reporting no-op"
+                    );
+                    return Ok(Self::hos_reconcile_summary(false, 0, 0, false, None));
+                }
                 return Err(Self::near_rpc_err(err));
             }
         }
@@ -1584,18 +1593,7 @@ impl SubscriptionServiceImpl {
                 .cloned()
                 .collect();
             if local_hos_subscriptions.is_empty() {
-                let skipped_reason = if has_active_non_hos {
-                    Some(NEAR_STAKING_SYNC_SKIPPED_REASON_UPSERT_BLOCKED_NON_HOS)
-                } else {
-                    None
-                };
-                return Ok(Self::hos_reconcile_summary(
-                    false,
-                    0,
-                    0,
-                    false,
-                    skipped_reason,
-                ));
+                return Ok(Self::hos_reconcile_summary(false, 0, 0, false, None));
             }
             let now = Utc::now();
             let canceled = local_hos_subscriptions.len() as u32;
