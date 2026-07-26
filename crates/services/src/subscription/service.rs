@@ -1502,22 +1502,6 @@ impl SubscriptionServiceImpl {
         let has_active_non_hos = subs
             .iter()
             .any(|s| Self::is_active_or_trialing(&s.status) && s.provider != "house-of-stake");
-        let hos_subscription_ids: Vec<String> = subs
-            .iter()
-            .filter(|s| s.provider == "house-of-stake")
-            .map(|s| s.subscription_id.clone())
-            .collect();
-
-        if has_active_non_hos && hos_subscription_ids.is_empty() {
-            return Ok(Self::hos_reconcile_summary(
-                false,
-                0,
-                0,
-                false,
-                Some(NEAR_STAKING_SYNC_SKIPPED_REASON_UPSERT_BLOCKED_NON_HOS),
-            ));
-        }
-
         let configs = self
             .system_configs_service
             .get_configs()
@@ -1633,10 +1617,12 @@ impl SubscriptionServiceImpl {
         let row = subscription_row_from_chain(user_id, &near_account, chain_subscription)
             .map_err(SubscriptionError::InternalError)?;
 
-        // Do not insert/update a HoS row while a non-HoS subscription is active/trialing locally:
+        // Do not insert/update an active HoS row while a non-HoS subscription is active/trialing locally:
         // `get_active_subscription` picks newest `created_at`, so a fresh HoS upsert could wrongly
         // become the "active" row for Stripe-primary users who also staked on-chain separately.
-        if has_active_non_hos {
+        // Canceled/expired chain rows are safe to upsert as history and allow restoring HoS rows
+        // that were deleted before canceled history was preserved locally.
+        if has_active_non_hos && Self::is_active_or_trialing(&row.status) {
             let active_hos_subscriptions: Vec<Subscription> = subs
                 .iter()
                 .filter(|s| {
