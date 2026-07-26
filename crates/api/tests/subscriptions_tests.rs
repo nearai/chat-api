@@ -3503,10 +3503,13 @@ async fn cleanup_candidates_use_latest_canceled_period_for_grace() {
 
     let blocked_email = "test_cleanup_latest_cancel_blocked@example.com";
     let eligible_email = "test_cleanup_latest_cancel_eligible@example.com";
+    let stale_future_email = "test_cleanup_stale_future_not_permanent@example.com";
     cleanup_user_subscriptions(&db, blocked_email).await;
     cleanup_user_subscriptions(&db, eligible_email).await;
+    cleanup_user_subscriptions(&db, stale_future_email).await;
     let _ = mock_login(&server, blocked_email).await;
     let _ = mock_login(&server, eligible_email).await;
+    let _ = mock_login(&server, stale_future_email).await;
     let blocked_user = db
         .user_repository()
         .get_user_by_email(blocked_email)
@@ -3519,12 +3522,21 @@ async fn cleanup_candidates_use_latest_canceled_period_for_grace() {
         .await
         .unwrap()
         .expect("eligible user should exist");
+    let stale_future_user = db
+        .user_repository()
+        .get_user_by_email(stale_future_email)
+        .await
+        .unwrap()
+        .expect("stale future user should exist");
 
     let client = db.pool().get().await.unwrap();
     let cutoff = Utc.with_ymd_and_hms(2026, 7, 16, 0, 0, 0).unwrap();
     let old_period_end = cutoff - Duration::days(30);
     let recent_period_end = cutoff + Duration::days(1);
-    let updated_at = cutoff - Duration::days(1);
+    let far_future_period_end = Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap();
+    let stale_future_canceled_at = cutoff - Duration::days(10);
+    let old_canceled_at = cutoff - Duration::days(2);
+    let recent_canceled_at = cutoff - Duration::days(1);
 
     client
         .execute(
@@ -3533,9 +3545,21 @@ async fn cleanup_candidates_use_latest_canceled_period_for_grace() {
                 current_period_end, cancel_at_period_end, created_at, updated_at, canceled_at
             ) VALUES
                 ('sub_cleanup_blocked_old', $1, 'stripe', 'cus_cleanup', 'price_test_basic', 'canceled', $3, false, $5, $5, $5),
-                ('sub_cleanup_blocked_recent', $1, 'stripe', 'cus_cleanup', 'price_test_basic', 'canceled', $4, false, $5, $5, $5),
-                ('sub_cleanup_eligible_old', $2, 'stripe', 'cus_cleanup', 'price_test_basic', 'canceled', $3, false, $5, $5, $5)",
-            &[&blocked_user.id, &eligible_user.id, &old_period_end, &recent_period_end, &updated_at],
+                ('sub_cleanup_blocked_recent', $1, 'stripe', 'cus_cleanup', 'price_test_basic', 'canceled', $4, false, $6, $6, $6),
+                ('sub_cleanup_eligible_old', $2, 'stripe', 'cus_cleanup', 'price_test_basic', 'canceled', $3, false, $5, $5, $5),
+                ('sub_cleanup_stale_future', $7, 'stripe', 'cus_cleanup', 'price_test_basic', 'canceled', $8, false, $9, $9, $9),
+                ('sub_cleanup_stale_future_later_cancel', $7, 'stripe', 'cus_cleanup', 'price_test_basic', 'canceled', $3, false, $6, $6, $6)",
+            &[
+                &blocked_user.id,
+                &eligible_user.id,
+                &old_period_end,
+                &recent_period_end,
+                &old_canceled_at,
+                &recent_canceled_at,
+                &stale_future_user.id,
+                &far_future_period_end,
+                &stale_future_canceled_at,
+            ],
         )
         .await
         .unwrap();
@@ -3548,6 +3572,10 @@ async fn cleanup_candidates_use_latest_canceled_period_for_grace() {
     assert!(
         candidates.contains(&eligible_user.id),
         "users whose latest canceled period is past the cutoff should be cleanup candidates"
+    );
+    assert!(
+        candidates.contains(&stale_future_user.id),
+        "a stale far-future canceled row should not permanently block cleanup after a later eligible cancellation"
     );
 }
 

@@ -480,6 +480,10 @@ async fn main() -> anyhow::Result<()> {
     let db = database::Database::from_config(&config.database)
         .await
         .context("failed to connect database for task worker")?;
+    tracing::info!("Running migrations for task worker...");
+    db.run_migrations()
+        .await
+        .context("failed to run database migrations for task worker")?;
 
     let system_configs_service = Arc::new(
         services::system_configs::service::SystemConfigsServiceImpl::new(

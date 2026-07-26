@@ -36,23 +36,26 @@ const SUBSCRIPTION_COLUMNS: &str =
        pending_downgrade_expected_period_end, pending_downgrade_status,
        pending_downgrade_updated_at";
 
-pub const CLEANUP_CANCELED_INSTANCE_USERS_SQL: &str = "SELECT s.user_id
-     FROM subscriptions s
-     WHERE s.status = 'canceled'
-       AND NOT EXISTS (
-           SELECT 1
-           FROM subscriptions active_sub
-           WHERE active_sub.user_id = s.user_id
-             AND active_sub.status IN ('active', 'trialing')
-       )
-       AND NOT (
-           s.provider = 'house-of-stake'
-           AND s.canceled_at IS NOT NULL
-           AND s.canceled_at < s.created_at
-       )
-     GROUP BY s.user_id
-     HAVING MAX(s.current_period_end) <= $1
-     ORDER BY s.user_id
+pub const CLEANUP_CANCELED_INSTANCE_USERS_SQL: &str = "SELECT latest.user_id
+     FROM (
+         SELECT DISTINCT ON (s.user_id) s.user_id, s.current_period_end
+         FROM subscriptions s
+         WHERE s.status = 'canceled'
+           AND NOT EXISTS (
+               SELECT 1
+               FROM subscriptions active_sub
+               WHERE active_sub.user_id = s.user_id
+                 AND active_sub.status IN ('active', 'trialing')
+           )
+           AND NOT (
+               s.provider = 'house-of-stake'
+               AND s.canceled_at IS NOT NULL
+               AND s.canceled_at <= s.current_period_end
+           )
+         ORDER BY s.user_id, COALESCE(s.canceled_at, s.updated_at) DESC, s.created_at DESC, s.subscription_id DESC
+     ) latest
+     WHERE latest.current_period_end <= $1
+     ORDER BY latest.user_id
      LIMIT $2 OFFSET $3";
 
 pub struct PostgresSubscriptionRepository {
@@ -294,9 +297,9 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
         user_id: UserId,
     ) -> anyhow::Result<Option<chrono::DateTime<chrono::Utc>>> {
         let client = self.pool.get().await?;
-        // Preserve historical non-HoS canceled ordering while keeping restored back-dated HoS
-        // history from moving free-plan usage windows. Genuine HoS lapses still anchor after the
-        // paid period ends.
+        // Preserve historical non-HoS canceled ordering while keeping restored/backfilled HoS
+        // history from moving free-plan usage windows. Genuine HoS lapses still anchor after
+        // cancellation because their `canceled_at` is later than the paid period end.
         // Non-HoS rows keep their legacy ordering semantics; changing Stripe future-period anchors
         // would be a separate billing-policy migration.
         let row = client
@@ -305,7 +308,7 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
                  WHERE user_id = $1 AND status = 'canceled' \
                    AND (provider != 'house-of-stake' OR ( \
                        current_period_end <= NOW() \
-                       AND NOT (canceled_at IS NOT NULL AND canceled_at < created_at) \
+                       AND NOT (canceled_at IS NOT NULL AND canceled_at <= current_period_end) \
                    )) \
                  ORDER BY COALESCE(canceled_at, updated_at) DESC, created_at DESC, subscription_id DESC \
                  LIMIT 1",
