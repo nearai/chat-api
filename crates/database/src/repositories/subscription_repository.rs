@@ -385,7 +385,9 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
     ) -> anyhow::Result<()> {
         let n = txn
             .execute(
-                "UPDATE subscriptions SET status = 'canceled', updated_at = NOW() WHERE user_id = $1 AND status IN ('active', 'trialing')",
+                "UPDATE subscriptions
+                 SET status = 'canceled', canceled_at = COALESCE(canceled_at, NOW()), updated_at = NOW()
+                 WHERE user_id = $1 AND status IN ('active', 'trialing')",
                 &[&user_id],
             )
             .await?;
@@ -481,7 +483,10 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
                      pending_downgrade_expected_period_end = $12,
                      pending_downgrade_status = $13,
                      pending_downgrade_updated_at = $14,
-                     canceled_at = CASE WHEN $6::text = 'canceled' THEN NOW() ELSE NULL END,
+                     canceled_at = CASE
+                         WHEN $6::text = 'canceled' THEN COALESCE(canceled_at, NOW())
+                         ELSE NULL
+                     END,
                      updated_at = NOW()
                  WHERE subscription_id = $1
                  RETURNING subscription_id, user_id, provider, customer_id, price_id, status,

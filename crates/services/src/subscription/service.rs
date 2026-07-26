@@ -1588,8 +1588,15 @@ impl SubscriptionServiceImpl {
         for (_, result) in &probe_results {
             match result {
                 Ok(Some(v)) => {
-                    raw = Some(v.clone());
-                    break;
+                    let row = subscription_row_from_chain(user_id, &near_account, v)
+                        .map_err(SubscriptionError::InternalError)?;
+                    if Self::is_active_or_trialing(&row.status) {
+                        raw = Some(v.clone());
+                        break;
+                    }
+                    if raw.is_none() {
+                        raw = Some(v.clone());
+                    }
                 }
                 Ok(None) => {}
                 Err(e) if first_err.is_none() => first_err = Some(e.clone()),
@@ -2784,17 +2791,28 @@ impl SubscriptionService for SubscriptionServiceImpl {
         // Map to API response model with plan names resolved
         let mut result: Vec<SubscriptionWithPlan> = Vec::new();
         for sub in subscriptions {
-            let plan =
-                resolve_plan_name_from_config(&sub.provider, &sub.price_id, &subscription_plans)
-                    .unwrap_or_else(|| {
-                        tracing::warn!(
-                            user_id = %user_id.0,
-                            provider = %sub.provider,
-                            price_id = %sub.price_id,
-                            "Subscription row has no matching catalog plan; reporting unknown plan"
-                        );
-                        "unknown".to_string()
-                    });
+            let plan = match resolve_plan_name_from_config(
+                &sub.provider,
+                &sub.price_id,
+                &subscription_plans,
+            ) {
+                Some(plan) => plan,
+                None if !Self::is_active_or_trialing(&sub.status) => {
+                    tracing::warn!(
+                        user_id = %user_id.0,
+                        provider = %sub.provider,
+                        price_id = %sub.price_id,
+                        "Subscription row has no matching catalog plan; reporting unknown plan"
+                    );
+                    "unknown".to_string()
+                }
+                None => {
+                    return Err(SubscriptionError::InternalError(format!(
+                        "Cannot resolve plan for price_id={}, provider={}",
+                        sub.price_id, sub.provider
+                    )));
+                }
+            };
             let pending_downgrade_plan =
                 sub.pending_downgrade_target_price_id
                     .as_deref()
