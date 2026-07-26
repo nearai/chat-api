@@ -481,7 +481,7 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
                      pending_downgrade_expected_period_end = $12,
                      pending_downgrade_status = $13,
                      pending_downgrade_updated_at = $14,
-                     canceled_at = CASE WHEN $6 = 'canceled' THEN NOW() ELSE NULL END,
+                     canceled_at = CASE WHEN $6::text = 'canceled' THEN NOW() ELSE NULL END,
                      updated_at = NOW()
                  WHERE subscription_id = $1
                  RETURNING subscription_id, user_id, provider, customer_id, price_id, status,
