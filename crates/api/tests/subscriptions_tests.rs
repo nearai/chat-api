@@ -5581,14 +5581,12 @@ async fn test_near_staking_sync_reports_retryable_skip_for_stripe_only_when_near
         )
         .await;
 
-    assert_eq!(response.status_code(), 200, "{}", response.text());
-    let body: serde_json::Value = response.json();
-    assert_eq!(body.get("skipped").and_then(|x| x.as_bool()), Some(false));
     assert_eq!(
-        body.get("skipped_reason").and_then(|x| x.as_str()),
-        Some(NEAR_STAKING_SYNC_SKIPPED_REASON_RPC_UNAVAILABLE)
+        response.status_code(),
+        503,
+        "inactive local HoS context should keep the existing RPC failure contract: {}",
+        response.text()
     );
-    assert_eq!(body.get("retryable").and_then(|x| x.as_bool()), Some(true));
 }
 
 #[tokio::test]
@@ -6009,6 +6007,103 @@ async fn test_near_staking_sync_cancels_active_stale_hos_and_preserves_canceled_
         "sync must not re-touch already-canceled HoS history"
     );
 }
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_near_staking_sync_preserves_cancel_at_period_end_for_existing_active_hos_expiry() {
+    clear_proxy_env_for_local_wiremock();
+    let past_ns = (Utc::now() - Duration::hours(1))
+        .timestamp_nanos_opt()
+        .expect("nanoseconds timestamp should be representable")
+        .to_string();
+    let chain_sub = json!({
+        "subscription_id": "sub_existing_hos_expired",
+        "price_id": "price_hos_basic",
+        "end_ns": past_ns,
+        "status": "Active",
+        "cancel_at_period_end": true
+    });
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(near_rpc_wiremock_hos_subscription_probe_only(chain_sub))
+        .mount(&mock)
+        .await;
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        near_rpc_url: Some(mock.uri().to_string()),
+        near_staking_contract_id: Some("staking.testnet".to_string()),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": { "providers": { "house-of-stake": { "price_id": "price_hos_basic" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } }
+        }),
+    )
+    .await;
+
+    let near_email = "hos_sync_existing_active_expired.testnet@near";
+    let login = json!({
+        "email": near_email,
+        "name": "Existing HoS Active Expired",
+        "oauth_provider": "near"
+    });
+    let response = server.post("/v1/auth/mock-login").json(&login).await;
+    let token = response.json::<serde_json::Value>()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    cleanup_user_subscriptions(&db, near_email).await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(near_email)
+        .await
+        .unwrap()
+        .unwrap();
+    let client = db.pool().get().await.unwrap();
+    let local_period_end = Utc::now() + Duration::days(1);
+    client
+        .execute(
+            "INSERT INTO subscriptions (
+                subscription_id, user_id, provider, customer_id, price_id, status,
+                current_period_end, cancel_at_period_end
+            ) VALUES (
+                'sub_existing_hos_expired', $1, 'house-of-stake', 'cus_test',
+                'price_hos_basic', 'active', $2, true
+            )",
+            &[&user.id, &local_period_end],
+        )
+        .await
+        .expect("seed active HoS row");
+
+    let response = server
+        .post("/v1/subscriptions/near/sync")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 200, "{}", response.text());
+
+    let row = client
+        .query_one(
+            "SELECT status, cancel_at_period_end FROM subscriptions
+             WHERE user_id = $1 AND subscription_id = 'sub_existing_hos_expired'",
+            &[&user.id],
+        )
+        .await
+        .expect("load synced existing HoS row");
+    assert_eq!(row.get::<_, String>("status"), "canceled");
+    assert!(
+        row.get::<_, bool>("cancel_at_period_end"),
+        "existing active HoS expiry keeps chain cancel_at_period_end"
+    );
+}
+
 #[tokio::test]
 #[serial(subscription_tests)]
 async fn test_near_staking_sync_marks_expired_cancel_at_period_end_row_canceled() {

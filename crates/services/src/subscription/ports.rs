@@ -92,6 +92,10 @@ pub struct SubscriptionReplacement {
     pub pending_downgrade_updated_at: Option<DateTime<Utc>>,
 }
 
+/// Sentinel plan name used only for inactive subscription history whose original
+/// catalog entry is no longer configured.
+pub const UNKNOWN_SUBSCRIPTION_PLAN_NAME: &str = "unknown";
+
 /// API response model with plan name resolved from `price_id` (HoS clients use `price_id` + `provider` for wallet flows).
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,7 +104,8 @@ pub struct SubscriptionWithPlan {
     pub user_id: String,
     pub provider: String,
     pub price_id: String,
-    pub plan: String, // Resolved from price_id
+    /// Resolved from `price_id`; `unknown` is returned only for inactive off-catalog history rows.
+    pub plan: String,
     pub status: String,
     pub current_period_end: DateTime<Utc>,
     pub cancel_at_period_end: bool,

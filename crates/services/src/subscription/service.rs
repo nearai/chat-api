@@ -14,7 +14,7 @@ use super::ports::{
     Subscription, SubscriptionError, SubscriptionPlan, SubscriptionReplacement,
     SubscriptionRepository, SubscriptionService, SubscriptionWithPlan, DEFAULT_MONTHLY_TOKEN_LIMIT,
     NEAR_STAKING_SYNC_SKIPPED_REASON_RPC_UNAVAILABLE,
-    NEAR_STAKING_SYNC_SKIPPED_REASON_UPSERT_BLOCKED_NON_HOS,
+    NEAR_STAKING_SYNC_SKIPPED_REASON_UPSERT_BLOCKED_NON_HOS, UNKNOWN_SUBSCRIPTION_PLAN_NAME,
 };
 use crate::agent::ports::AgentRepository;
 use crate::agent::ports::AgentService;
@@ -1526,9 +1526,7 @@ impl SubscriptionServiceImpl {
         let has_active_non_hos = subs
             .iter()
             .any(|s| Self::is_active_or_trialing(&s.status) && s.provider != "house-of-stake");
-        let has_active_local_hos = subs
-            .iter()
-            .any(|s| s.provider == "house-of-stake" && Self::is_active_or_trialing(&s.status));
+        let has_any_local_hos = subs.iter().any(|s| s.provider == "house-of-stake");
         let configs = self
             .system_configs_service
             .get_configs()
@@ -1611,9 +1609,25 @@ impl SubscriptionServiceImpl {
                 Err(_) => {}
             }
         }
+        if selected_chain_row.is_some() {
+            if first_err.is_some() {
+                tracing::warn!(
+                    user_id = %user_id.0,
+                    error_category = "rpc_or_decode_error",
+                    "Skipping failed HoS chain subscription candidate during sync"
+                );
+            }
+            if first_parse_err.is_some() {
+                tracing::warn!(
+                    user_id = %user_id.0,
+                    error_category = "parse_error",
+                    "Skipping unparseable HoS chain subscription candidate during sync"
+                );
+            }
+        }
         if selected_chain_row.is_none() {
             if let Some(err) = first_err {
-                if has_active_non_hos && !has_active_local_hos {
+                if has_active_non_hos && !has_any_local_hos {
                     let error_category = if err == NEAR_VIEW_RPC_TIMEOUT_MSG {
                         "timeout"
                     } else {
@@ -1622,7 +1636,7 @@ impl SubscriptionServiceImpl {
                     tracing::warn!(
                         user_id = %user_id.0,
                         error_category = error_category,
-                        "NEAR RPC unavailable during HoS sync; no active local HoS context, reporting retryable sync no-op"
+                        "NEAR RPC unavailable during HoS sync; no local HoS context, reporting retryable sync no-op"
                     );
                     return Ok(Self::hos_reconcile_summary(
                         false,
@@ -1681,9 +1695,14 @@ impl SubscriptionServiceImpl {
         }
 
         let mut row = selected_chain_row.expect("checked is_some");
-        if row.status == SUBSCRIPTION_STATUS_CANCELED {
-            // Chain terminal rows are history, whether restored for Stripe-primary users or refreshed
-            // for HoS-primary users. Keep their shape consistent with local canceled HoS history.
+        let matching_local_hos = subs
+            .iter()
+            .find(|s| s.provider == "house-of-stake" && s.subscription_id == row.subscription_id);
+        let should_normalize_terminal_chain_history = row.status == SUBSCRIPTION_STATUS_CANCELED
+            && !matches!(matching_local_hos, Some(s) if Self::is_active_or_trialing(&s.status));
+        if should_normalize_terminal_chain_history {
+            // Restored or already-inactive chain terminal rows are history. Keep their shape
+            // consistent with local canceled HoS history without changing the active-HoS expiry path.
             row = Self::canceled_house_of_stake_chain_history_row(row);
         }
 
@@ -2809,13 +2828,13 @@ impl SubscriptionService for SubscriptionServiceImpl {
             ) {
                 Some(plan) => plan,
                 None if !Self::is_active_or_trialing(&sub.status) => {
-                    tracing::warn!(
+                    tracing::debug!(
                         user_id = %user_id.0,
                         provider = %sub.provider,
                         price_id = %sub.price_id,
                         "Subscription row has no matching catalog plan; reporting unknown plan"
                     );
-                    "unknown".to_string()
+                    UNKNOWN_SUBSCRIPTION_PLAN_NAME.to_string()
                 }
                 None => {
                     return Err(SubscriptionError::InternalError(format!(

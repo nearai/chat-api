@@ -128,7 +128,13 @@ impl PostgresSubscriptionRepository {
                     pending_downgrade_expected_period_end, pending_downgrade_status,
                     pending_downgrade_updated_at, canceled_at
                  )
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                 VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                    CASE
+                        WHEN $6::VARCHAR = 'canceled' THEN COALESCE($14, NOW())
+                        ELSE NULL
+                    END
+                 )
                  ON CONFLICT (subscription_id)
                  DO UPDATE SET
                     user_id = EXCLUDED.user_id,
@@ -272,6 +278,8 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
         // Preserve historical canceled ordering while keeping restored HoS history from winning
         // solely because sync refreshed `updated_at` or carried a future terminal chain boundary.
         // A future terminal HoS row becomes eligible only after that paid period boundary passes.
+        // Non-HoS rows keep their legacy ordering semantics; changing Stripe future-period anchors
+        // would be a separate billing-policy migration.
         let row = client
             .query_opt(
                 "SELECT current_period_end FROM subscriptions \
