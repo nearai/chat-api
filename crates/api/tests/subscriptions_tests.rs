@@ -3328,7 +3328,7 @@ async fn last_cancelled_period_ignores_non_canceled_statuses_and_future_periods(
         .expect("user should exist");
 
     let client = db.pool().get().await.unwrap();
-    let now = Utc::now();
+    let now = Utc::now().with_nanosecond(0).unwrap();
     let canceled_end = now - Duration::days(60);
     let other_provider_canceled_end = now - Duration::days(30);
     let active_end = now + Duration::days(30);
@@ -5098,6 +5098,44 @@ async fn test_near_staking_sync_reports_retryable_skip_for_stripe_only_when_near
             .and_then(|x| x.as_bool()),
         Some(false)
     );
+    assert_eq!(
+        body.get("skipped_reason").and_then(|x| x.as_str()),
+        Some(NEAR_STAKING_SYNC_SKIPPED_REASON_RPC_UNAVAILABLE)
+    );
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(near_email)
+        .await
+        .unwrap()
+        .unwrap();
+    let client = db.pool().get().await.unwrap();
+    let inactive_hos_period_end = Utc::now() - Duration::days(1);
+    client
+        .execute(
+            "INSERT INTO subscriptions (
+                subscription_id, user_id, provider, customer_id, price_id, status,
+                current_period_end, cancel_at_period_end
+            ) VALUES (
+                'sub_inactive_hos_rpc_error_context', $1, 'house-of-stake', 'cus_test',
+                'price_hos_basic', 'canceled', $2, false
+            )",
+            &[&user.id, &inactive_hos_period_end],
+        )
+        .await
+        .expect("seed inactive HoS history");
+
+    let response = server
+        .post("/v1/subscriptions/near/sync")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 200, "{}", response.text());
+    let body: serde_json::Value = response.json();
+    assert_eq!(body.get("skipped").and_then(|x| x.as_bool()), Some(true));
     assert_eq!(
         body.get("skipped_reason").and_then(|x| x.as_str()),
         Some(NEAR_STAKING_SYNC_SKIPPED_REASON_RPC_UNAVAILABLE)

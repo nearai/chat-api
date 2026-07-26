@@ -1503,7 +1503,9 @@ impl SubscriptionServiceImpl {
         let has_active_non_hos = subs
             .iter()
             .any(|s| Self::is_active_or_trialing(&s.status) && s.provider != "house-of-stake");
-        let has_local_hos = subs.iter().any(|s| s.provider == "house-of-stake");
+        let has_active_local_hos = subs
+            .iter()
+            .any(|s| s.provider == "house-of-stake" && Self::is_active_or_trialing(&s.status));
         let configs = self
             .system_configs_service
             .get_configs()
@@ -1573,10 +1575,10 @@ impl SubscriptionServiceImpl {
         }
         if raw.is_none() {
             if let Some(err) = first_err {
-                if has_active_non_hos && !has_local_hos {
+                if has_active_non_hos && !has_active_local_hos {
                     tracing::warn!(
                         user_id = %user_id.0,
-                        "NEAR RPC unavailable during HoS sync; no local HoS context, reporting retryable skipped sync"
+                        "NEAR RPC unavailable during HoS sync; no active local HoS context, reporting retryable skipped sync"
                     );
                     return Ok(Self::hos_reconcile_summary(
                         true,
