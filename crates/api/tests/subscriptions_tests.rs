@@ -4617,7 +4617,14 @@ async fn test_near_staking_sync_restores_expired_hos_history_when_active_stripe_
     set_subscription_plans(
         &server,
         json!({
-            "basic": { "providers": { "house-of-stake": { "price_id": "price_hos_basic" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } }
+            "basic": {
+                "providers": {
+                    "stripe": { "price_id": "price_test_basic" },
+                    "house-of-stake": { "price_id": "price_hos_basic" }
+                },
+                "agent_instances": { "max": 1 },
+                "monthly_credits": { "max": 1000000 }
+            }
         }),
     )
     .await;
