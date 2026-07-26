@@ -18,7 +18,8 @@ use services::aml::{
     AmlRiskLevel, AmlRiskService,
 };
 use services::subscription::ports::{
-    ChangePlanOutcome, NEAR_STAKING_SYNC_SKIPPED_REASON_UPSERT_BLOCKED_NON_HOS,
+    ChangePlanOutcome, NEAR_STAKING_SYNC_SKIPPED_REASON_RPC_UNAVAILABLE,
+    NEAR_STAKING_SYNC_SKIPPED_REASON_UPSERT_BLOCKED_NON_HOS,
 };
 use services::subscription::SubscriptionRepository;
 use services::system_configs::ports::RateLimitConfig;
@@ -4681,7 +4682,7 @@ async fn test_near_staking_sync_restores_expired_hos_history_when_active_stripe_
     assert_eq!(row.get::<_, String>("provider"), "house-of-stake");
     assert_eq!(row.get::<_, String>("price_id"), "price_hos_basic");
     assert_eq!(row.get::<_, String>("status"), "canceled");
-    assert!(row.get::<_, bool>("cancel_at_period_end"));
+    assert!(!row.get::<_, bool>("cancel_at_period_end"));
     assert_eq!(
         row.get::<_, chrono::DateTime<Utc>>("current_period_end"),
         Utc.with_ymd_and_hms(2026, 7, 3, 0, 39, 34).unwrap() + Duration::microseconds(474_808)
@@ -4707,6 +4708,96 @@ async fn test_near_staking_sync_restores_expired_hos_history_when_active_stripe_
                 && sub["status"] == "canceled"
         }),
         "include_inactive=true should return restored HoS history: {subscriptions:?}"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_near_staking_sync_normalizes_canceled_chain_history() {
+    clear_proxy_env_for_local_wiremock();
+    let chain_sub = json!({
+        "subscription_id": "sub_chain_future_canceled_hos",
+        "price_id": "price_hos_basic",
+        "end_ns": "2000000000000000000",
+        "status": "Cancelled",
+        "cancel_at_period_end": true
+    });
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(near_rpc_wiremock_hos_subscription_probe_only(chain_sub))
+        .mount(&mock)
+        .await;
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        near_rpc_url: Some(mock.uri().to_string()),
+        near_staking_contract_id: Some("staking.testnet".to_string()),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": { "providers": { "house-of-stake": { "price_id": "price_hos_basic" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } }
+        }),
+    )
+    .await;
+
+    let near_email = "hos_sync_normalize_canceled.testnet@near";
+    let login = json!({
+        "email": near_email,
+        "name": "HoS Normalize Canceled",
+        "oauth_provider": "near"
+    });
+    let response = server.post("/v1/auth/mock-login").json(&login).await;
+    let token = response.json::<serde_json::Value>()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    cleanup_user_subscriptions(&db, near_email).await;
+    let before_sync = Utc::now() - Duration::seconds(1);
+
+    let response = server
+        .post("/v1/subscriptions/near/sync")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .await;
+
+    let after_sync = Utc::now() + Duration::seconds(1);
+    assert_eq!(response.status_code(), 200, "{}", response.text());
+    let body: serde_json::Value = response.json();
+    assert_eq!(
+        body.get("upserted_house_of_stake_row")
+            .and_then(|x| x.as_bool()),
+        Some(true)
+    );
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(near_email)
+        .await
+        .unwrap()
+        .unwrap();
+    let client = db.pool().get().await.unwrap();
+    let row = client
+        .query_one(
+            "SELECT status, current_period_end, cancel_at_period_end
+             FROM subscriptions
+             WHERE user_id = $1 AND subscription_id = 'sub_chain_future_canceled_hos'",
+            &[&user.id],
+        )
+        .await
+        .expect("canceled HoS history should be restored");
+    let period_end = row.get::<_, chrono::DateTime<Utc>>("current_period_end");
+    assert_eq!(row.get::<_, String>("status"), "canceled");
+    assert!(!row.get::<_, bool>("cancel_at_period_end"));
+    assert!(
+        before_sync <= period_end && period_end <= after_sync,
+        "future canceled HoS period end should be clamped to sync time, got {period_end}"
     );
 }
 
@@ -4803,7 +4894,7 @@ async fn test_near_staking_sync_noops_when_active_stripe_and_chain_returns_null(
 
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn test_near_staking_sync_noops_for_stripe_only_when_near_rpc_errors() {
+async fn test_near_staking_sync_reports_retryable_skip_for_stripe_only_when_near_rpc_errors() {
     clear_proxy_env_for_local_wiremock();
     let mock = MockServer::start().await;
     Mock::given(method("POST"))
@@ -4861,13 +4952,16 @@ async fn test_near_staking_sync_noops_for_stripe_only_when_near_rpc_errors() {
 
     assert_eq!(response.status_code(), 200, "{}", response.text());
     let body: serde_json::Value = response.json();
-    assert_eq!(body.get("skipped").and_then(|x| x.as_bool()), Some(false));
+    assert_eq!(body.get("skipped").and_then(|x| x.as_bool()), Some(true));
     assert_eq!(
         body.get("upserted_house_of_stake_row")
             .and_then(|x| x.as_bool()),
         Some(false)
     );
-    assert_eq!(body.get("skipped_reason"), None);
+    assert_eq!(
+        body.get("skipped_reason").and_then(|x| x.as_str()),
+        Some(NEAR_STAKING_SYNC_SKIPPED_REASON_RPC_UNAVAILABLE)
+    );
 }
 
 #[tokio::test]

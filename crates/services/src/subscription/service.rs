@@ -12,6 +12,7 @@ use super::ports::{
     StripeCustomerRepository, StripeSubscriptionSnapshot, StripeUpdateSubscriptionParams,
     Subscription, SubscriptionError, SubscriptionPlan, SubscriptionReplacement,
     SubscriptionRepository, SubscriptionService, SubscriptionWithPlan, DEFAULT_MONTHLY_TOKEN_LIMIT,
+    NEAR_STAKING_SYNC_SKIPPED_REASON_RPC_UNAVAILABLE,
     NEAR_STAKING_SYNC_SKIPPED_REASON_UPSERT_BLOCKED_NON_HOS,
 };
 use crate::agent::ports::AgentRepository;
@@ -1576,9 +1577,15 @@ impl SubscriptionServiceImpl {
                     tracing::warn!(
                         user_id = %user_id.0,
                         error = %err,
-                        "NEAR RPC unavailable during HoS sync; no local HoS context, reporting no-op"
+                        "NEAR RPC unavailable during HoS sync; no local HoS context, reporting retryable skipped sync"
                     );
-                    return Ok(Self::hos_reconcile_summary(false, 0, 0, false, None));
+                    return Ok(Self::hos_reconcile_summary(
+                        true,
+                        0,
+                        0,
+                        false,
+                        Some(NEAR_STAKING_SYNC_SKIPPED_REASON_RPC_UNAVAILABLE),
+                    ));
                 }
                 return Err(Self::near_rpc_err(err));
             }
@@ -1623,8 +1630,11 @@ impl SubscriptionServiceImpl {
         }
 
         let chain_subscription = raw.as_ref().expect("checked is_some");
-        let row = subscription_row_from_chain(user_id, &near_account, chain_subscription)
+        let mut row = subscription_row_from_chain(user_id, &near_account, chain_subscription)
             .map_err(SubscriptionError::InternalError)?;
+        if row.status == SUBSCRIPTION_STATUS_CANCELED {
+            row = Self::canceled_house_of_stake_history_row(row, Utc::now());
+        }
 
         // Do not insert/update an active HoS row while a non-HoS subscription is active/trialing locally:
         // `get_active_subscription` picks newest `created_at`, so a fresh HoS upsert could wrongly
