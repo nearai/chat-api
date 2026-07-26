@@ -258,13 +258,13 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
         user_id: UserId,
     ) -> anyhow::Result<Option<chrono::DateTime<chrono::Utc>>> {
         let client = self.pool.get().await?;
-        // Use the latest canceled period boundary, not the most recently updated row.
+        // Use the latest ended canceled period boundary, not the most recently updated row.
         // Restored historical rows get a fresh `updated_at`, but should not override a newer
         // cancellation period when anchoring free-plan monthly windows.
         let row = client
             .query_opt(
                 "SELECT current_period_end FROM subscriptions \
-                 WHERE user_id = $1 AND status = 'canceled' \
+                 WHERE user_id = $1 AND status = 'canceled' AND current_period_end <= NOW() \
                  ORDER BY current_period_end DESC, updated_at DESC, created_at DESC, subscription_id DESC \
                  LIMIT 1",
                 &[&user_id],

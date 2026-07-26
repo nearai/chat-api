@@ -1635,7 +1635,10 @@ impl SubscriptionServiceImpl {
             let now = Utc::now();
             let clamp_at = if row.current_period_end > now {
                 subs.iter()
-                    .find(|sub| sub.subscription_id == row.subscription_id)
+                    .find(|sub| {
+                        sub.provider == "house-of-stake"
+                            && sub.subscription_id == row.subscription_id
+                    })
                     .map(|sub| sub.current_period_end.min(now))
                     .unwrap_or(now)
             } else {

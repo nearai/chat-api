@@ -3314,7 +3314,7 @@ async fn last_cancelled_period_uses_latest_canceled_period_end() {
 
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn last_cancelled_period_ignores_non_canceled_statuses() {
+async fn last_cancelled_period_ignores_non_canceled_statuses_and_future_periods() {
     let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
 
     let user_email = "test_free_anchor_ignore_non_canceled@example.com";
@@ -3328,10 +3328,12 @@ async fn last_cancelled_period_ignores_non_canceled_statuses() {
         .expect("user should exist");
 
     let client = db.pool().get().await.unwrap();
-    let canceled_end = Utc.with_ymd_and_hms(2026, 3, 19, 0, 0, 0).unwrap();
-    let active_end = Utc.with_ymd_and_hms(2027, 12, 31, 23, 59, 59).unwrap();
-    let incomplete_end = Utc.with_ymd_and_hms(2028, 1, 1, 0, 0, 0).unwrap();
-    let other_provider_canceled_end = Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap();
+    let now = Utc::now();
+    let canceled_end = now - Duration::days(60);
+    let other_provider_canceled_end = now - Duration::days(30);
+    let active_end = now + Duration::days(30);
+    let incomplete_end = now + Duration::days(60);
+    let future_canceled_end = now + Duration::days(90);
 
     client
         .execute(
@@ -3340,6 +3342,16 @@ async fn last_cancelled_period_ignores_non_canceled_statuses() {
                 current_period_end, cancel_at_period_end
             ) VALUES ($1, $2, 'stripe', 'cus_x', 'price_test_basic', 'canceled', $3, false)",
             &[&"sub_only_canceled", &user.id, &canceled_end],
+        )
+        .await
+        .unwrap();
+    client
+        .execute(
+            "INSERT INTO subscriptions (
+                subscription_id, user_id, provider, customer_id, price_id, status,
+                current_period_end, cancel_at_period_end
+            ) VALUES ($1, $2, 'stripe', 'cus_x', 'price_test_basic', 'canceled', $3, false)",
+            &[&"sub_future_canceled", &user.id, &future_canceled_end],
         )
         .await
         .unwrap();
@@ -3386,7 +3398,7 @@ async fn last_cancelled_period_ignores_non_canceled_statuses() {
     assert_eq!(
         got,
         Some(other_provider_canceled_end),
-        "latest canceled row should win regardless of provider"
+        "latest ended canceled row should win regardless of provider; future canceled rows are ignored"
     );
 }
 
