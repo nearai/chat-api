@@ -3255,7 +3255,7 @@ async fn test_subscription_gating_full_flow() {
 
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn last_cancelled_period_uses_most_recent_canceled_row() {
+async fn last_cancelled_period_uses_latest_canceled_period_end() {
     let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
 
     let user_email = "test_free_anchor_max_canceled@example.com";
@@ -3269,10 +3269,10 @@ async fn last_cancelled_period_uses_most_recent_canceled_row() {
         .expect("user should exist");
 
     let client = db.pool().get().await.unwrap();
-    let older_row_period_end = Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap();
-    let newer_row_period_end = Utc.with_ymd_and_hms(2026, 3, 19, 8, 0, 0).unwrap();
-    let older_updated_at = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-    let newer_updated_at = Utc.with_ymd_and_hms(2026, 1, 2, 0, 0, 0).unwrap();
+    let later_period_end = Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap();
+    let restored_history_period_end = Utc.with_ymd_and_hms(2026, 3, 19, 8, 0, 0).unwrap();
+    let original_updated_at = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+    let restored_history_updated_at = Utc.with_ymd_and_hms(2026, 1, 2, 0, 0, 0).unwrap();
 
     client
         .execute(
@@ -3280,7 +3280,7 @@ async fn last_cancelled_period_uses_most_recent_canceled_row() {
                 subscription_id, user_id, provider, customer_id, price_id, status,
                 current_period_end, cancel_at_period_end, created_at, updated_at
             ) VALUES ($1, $2, 'stripe', 'cus_anchor', 'price_test_basic', 'canceled', $3, false, $4, $4)",
-            &[&"sub_free_anchor_old", &user.id, &older_row_period_end, &older_updated_at],
+            &[&"sub_free_anchor_latest_period", &user.id, &later_period_end, &original_updated_at],
         )
         .await
         .unwrap();
@@ -3290,7 +3290,12 @@ async fn last_cancelled_period_uses_most_recent_canceled_row() {
                 subscription_id, user_id, provider, customer_id, price_id, status,
                 current_period_end, cancel_at_period_end, created_at, updated_at
             ) VALUES ($1, $2, 'stripe', 'cus_anchor', 'price_test_basic', 'canceled', $3, false, $4, $4)",
-            &[&"sub_free_anchor_new", &user.id, &newer_row_period_end, &newer_updated_at],
+            &[
+                &"sub_free_anchor_restored_history",
+                &user.id,
+                &restored_history_period_end,
+                &restored_history_updated_at,
+            ],
         )
         .await
         .unwrap();
@@ -3302,8 +3307,8 @@ async fn last_cancelled_period_uses_most_recent_canceled_row() {
         .unwrap();
     assert_eq!(
         got,
-        Some(newer_row_period_end),
-        "latest canceled row (by updated_at) should win, not greatest period_end"
+        Some(later_period_end),
+        "latest canceled period end should win even when an older restored row has newer updated_at"
     );
 }
 
