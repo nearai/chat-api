@@ -265,7 +265,10 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
                 "SELECT current_period_end FROM subscriptions \
                  WHERE user_id = $1 AND status = 'canceled' AND current_period_end <= NOW() \
                  ORDER BY \
-                    CASE WHEN provider = 'house-of-stake' THEN current_period_end ELSE updated_at END DESC, \
+                    CASE \
+                        WHEN provider = 'house-of-stake' THEN LEAST(updated_at, current_period_end) \
+                        ELSE updated_at \
+                    END DESC, \
                     created_at DESC, subscription_id DESC \
                  LIMIT 1",
                 &[&user_id],

@@ -3330,8 +3330,10 @@ async fn last_cancelled_period_deprioritizes_restored_hos_updated_at() {
     let client = db.pool().get().await.unwrap();
     let stripe_period_end = Utc.with_ymd_and_hms(2026, 2, 1, 0, 0, 0).unwrap();
     let hos_history_period_end = Utc.with_ymd_and_hms(2024, 5, 1, 0, 0, 0).unwrap();
+    let ended_future_hos_period_end = Utc.with_ymd_and_hms(2026, 7, 1, 0, 0, 0).unwrap();
     let stripe_updated_at = Utc.with_ymd_and_hms(2026, 2, 1, 0, 0, 0).unwrap();
     let restored_hos_updated_at = Utc.with_ymd_and_hms(2026, 7, 26, 0, 0, 0).unwrap();
+    let early_hos_restore_updated_at = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
 
     client
         .execute(
@@ -3340,6 +3342,21 @@ async fn last_cancelled_period_deprioritizes_restored_hos_updated_at() {
                 current_period_end, cancel_at_period_end, created_at, updated_at
             ) VALUES ($1, $2, 'stripe', 'cus_anchor', 'price_test_basic', 'canceled', $3, false, $4, $4)",
             &[&"sub_free_anchor_stripe", &user.id, &stripe_period_end, &stripe_updated_at],
+        )
+        .await
+        .unwrap();
+    client
+        .execute(
+            "INSERT INTO subscriptions (
+                subscription_id, user_id, provider, customer_id, price_id, status,
+                current_period_end, cancel_at_period_end, created_at, updated_at
+            ) VALUES ($1, $2, 'house-of-stake', 'cus_anchor', 'price_hos_basic', 'canceled', $3, false, $4, $4)",
+            &[
+                &"sub_free_anchor_ended_future_hos",
+                &user.id,
+                &ended_future_hos_period_end,
+                &early_hos_restore_updated_at,
+            ],
         )
         .await
         .unwrap();
@@ -5163,6 +5180,7 @@ async fn test_near_staking_sync_reports_retryable_skip_for_stripe_only_when_near
         body.get("skipped_reason").and_then(|x| x.as_str()),
         Some(NEAR_STAKING_SYNC_SKIPPED_REASON_RPC_UNAVAILABLE)
     );
+    assert_eq!(body.get("retryable").and_then(|x| x.as_bool()), Some(true));
 
     let user = db
         .user_repository()
@@ -5201,6 +5219,7 @@ async fn test_near_staking_sync_reports_retryable_skip_for_stripe_only_when_near
         body.get("skipped_reason").and_then(|x| x.as_str()),
         Some(NEAR_STAKING_SYNC_SKIPPED_REASON_RPC_UNAVAILABLE)
     );
+    assert_eq!(body.get("retryable").and_then(|x| x.as_bool()), Some(true));
 }
 
 #[tokio::test]

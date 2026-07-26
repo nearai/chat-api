@@ -337,6 +337,9 @@ pub struct NearStakingSyncSummary {
     pub canceled_house_of_stake_rows: u32,
     /// True when a local row was upserted from chain JSON.
     pub upserted_house_of_stake_row: bool,
+    /// True when the no-op is retryable, such as transient NEAR RPC unavailability.
+    #[serde(default)]
+    pub retryable: bool,
     /// When reconcile did not upsert or delete, optionally explains a no-op (e.g. blocked upsert
     /// or retryable RPC unavailability). Omitted from JSON when `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]

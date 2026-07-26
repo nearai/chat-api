@@ -12,7 +12,7 @@ use tokio::time::timeout;
 /// Upper bound for NEAR JSON-RPC view calls so API handlers do not block indefinitely.
 const NEAR_VIEW_RPC_TIMEOUT: Duration = Duration::from_secs(15);
 
-const NEAR_VIEW_RPC_TIMEOUT_MSG: &str = "NEAR RPC view call timed out";
+pub(crate) const NEAR_VIEW_RPC_TIMEOUT_MSG: &str = "NEAR RPC view call timed out";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct YoctoNear(u128);

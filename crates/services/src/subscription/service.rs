@@ -2,6 +2,7 @@ use super::near_staking::{
     lock_amount_yocto, subscription_row_from_chain, view_get_lock, view_get_price,
     view_get_purchase, view_get_subscription_for_price, view_storage_balance_bounds,
     view_storage_balance_of, NearStakingStorageBalance, NearStakingStorageBalanceBounds,
+    NEAR_VIEW_RPC_TIMEOUT_MSG,
 };
 use super::ports::{
     BillingCycleAnchor, BillingPeriod, CancelSubscriptionOutcome, ChangePlanOutcome,
@@ -140,6 +141,7 @@ impl SubscriptionServiceImpl {
             deleted_house_of_stake_rows: deleted,
             canceled_house_of_stake_rows: canceled,
             upserted_house_of_stake_row: upserted,
+            retryable: false,
             skipped_reason: skipped_reason.map(String::from),
         }
     }
@@ -156,6 +158,17 @@ impl SubscriptionServiceImpl {
         if sub.current_period_end > now {
             sub.current_period_end = now;
         }
+        sub.cancel_at_period_end = false;
+        sub.pending_downgrade_target_price_id = None;
+        sub.pending_downgrade_from_price_id = None;
+        sub.pending_downgrade_expected_period_end = None;
+        sub.pending_downgrade_status = None;
+        sub.pending_downgrade_updated_at = None;
+        sub
+    }
+
+    fn canceled_house_of_stake_chain_history_row(mut sub: Subscription) -> Subscription {
+        sub.status = SUBSCRIPTION_STATUS_CANCELED.to_string();
         sub.cancel_at_period_end = false;
         sub.pending_downgrade_target_price_id = None;
         sub.pending_downgrade_from_price_id = None;
@@ -1576,7 +1589,7 @@ impl SubscriptionServiceImpl {
         if raw.is_none() {
             if let Some(err) = first_err {
                 if has_active_non_hos && !has_active_local_hos {
-                    let error_category = if err.contains("timed out") {
+                    let error_category = if err == NEAR_VIEW_RPC_TIMEOUT_MSG {
                         "timeout"
                     } else {
                         "rpc_error"
@@ -1586,13 +1599,15 @@ impl SubscriptionServiceImpl {
                         error_category = error_category,
                         "NEAR RPC unavailable during HoS sync; no active local HoS context, reporting retryable skipped sync"
                     );
-                    return Ok(Self::hos_reconcile_summary(
+                    let mut summary = Self::hos_reconcile_summary(
                         true,
                         0,
                         0,
                         false,
                         Some(NEAR_STAKING_SYNC_SKIPPED_REASON_RPC_UNAVAILABLE),
-                    ));
+                    );
+                    summary.retryable = true;
+                    return Ok(summary);
                 }
                 return Err(Self::near_rpc_err(err));
             }
@@ -1640,8 +1655,7 @@ impl SubscriptionServiceImpl {
         let mut row = subscription_row_from_chain(user_id, &near_account, chain_subscription)
             .map_err(SubscriptionError::InternalError)?;
         if row.status == SUBSCRIPTION_STATUS_CANCELED {
-            let chain_period_end = row.current_period_end;
-            row = Self::canceled_house_of_stake_history_row(row, chain_period_end);
+            row = Self::canceled_house_of_stake_chain_history_row(row);
         }
 
         // Do not insert/update an active HoS row while a non-HoS subscription is active/trialing locally:
