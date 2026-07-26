@@ -361,20 +361,24 @@ pub fn subscription_row_from_chain(
         .map(ts_ns_to_datetime)
         .transpose()?;
 
-    let (pd_target, pd_from, pd_end, pd_status) = if let Some(ref tgt) = pending_down {
-        (
-            Some(tgt.clone()),
-            Some(price_id.clone()),
-            Some(pending_apply_at.unwrap_or(current_period_end)),
-            Some(DowngradeIntentStatus::Pending),
-        )
-    } else if has_stake_only_pending_update {
-        (
-            None,
-            Some(price_id.clone()),
-            Some(pending_apply_at.unwrap_or(current_period_end)),
-            Some(DowngradeIntentStatus::Pending),
-        )
+    let (pd_target, pd_from, pd_end, pd_status) = if status == "active" {
+        if let Some(ref tgt) = pending_down {
+            (
+                Some(tgt.clone()),
+                Some(price_id.clone()),
+                Some(pending_apply_at.unwrap_or(current_period_end)),
+                Some(DowngradeIntentStatus::Pending),
+            )
+        } else if has_stake_only_pending_update {
+            (
+                None,
+                Some(price_id.clone()),
+                Some(pending_apply_at.unwrap_or(current_period_end)),
+                Some(DowngradeIntentStatus::Pending),
+            )
+        } else {
+            (None, None, None, None)
+        }
     } else {
         (None, None, None, None)
     };
@@ -544,6 +548,34 @@ mod tests {
         );
         assert!(row.pending_downgrade_expected_period_end.is_some());
         assert!(row.pending_downgrade_updated_at.is_some());
+    }
+
+    #[test]
+    fn subscription_row_clears_pending_update_for_canceled_status() {
+        let future_end_ns = (Utc::now() + chrono::Duration::hours(1))
+            .timestamp_nanos_opt()
+            .expect("timestamp nanos")
+            .to_string();
+        let chain = chain_subscription(json!({
+            "subscription_id": "sub_hos_canceled_pending",
+            "price_id": "price_hos_pro",
+            "end_ns": future_end_ns,
+            "status": "Expired",
+            "pending_update": {
+                "target_price_id": "price_hos_basic",
+                "target_amount": null,
+                "apply_ns": future_end_ns
+            }
+        }));
+        let row = subscription_row_from_chain(UserId(Uuid::new_v4()), "alice.testnet", &chain)
+            .expect("parse chain subscription");
+
+        assert_eq!(row.status, "canceled");
+        assert_eq!(row.pending_downgrade_target_price_id, None);
+        assert_eq!(row.pending_downgrade_from_price_id, None);
+        assert_eq!(row.pending_downgrade_expected_period_end, None);
+        assert_eq!(row.pending_downgrade_status, None);
+        assert_eq!(row.pending_downgrade_updated_at, None);
     }
 
     #[test]
