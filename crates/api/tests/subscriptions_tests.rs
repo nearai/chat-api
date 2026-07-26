@@ -3255,7 +3255,7 @@ async fn test_subscription_gating_full_flow() {
 
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn last_cancelled_period_uses_latest_canceled_period_end() {
+async fn last_cancelled_period_uses_most_recent_non_hos_canceled_row() {
     let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
 
     let user_email = "test_free_anchor_max_canceled@example.com";
@@ -3307,8 +3307,67 @@ async fn last_cancelled_period_uses_latest_canceled_period_end() {
         .unwrap();
     assert_eq!(
         got,
-        Some(later_period_end),
-        "latest canceled period end should win even when an older restored row has newer updated_at"
+        Some(restored_history_period_end),
+        "non-HoS cancellations should keep updated_at ordering, not greatest period_end"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn last_cancelled_period_deprioritizes_restored_hos_updated_at() {
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    let user_email = "test_free_anchor_restored_hos_updated_at@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+    let _ = mock_login(&server, user_email).await;
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .unwrap()
+        .expect("user should exist");
+
+    let client = db.pool().get().await.unwrap();
+    let stripe_period_end = Utc.with_ymd_and_hms(2026, 2, 1, 0, 0, 0).unwrap();
+    let hos_history_period_end = Utc.with_ymd_and_hms(2024, 5, 1, 0, 0, 0).unwrap();
+    let stripe_updated_at = Utc.with_ymd_and_hms(2026, 2, 1, 0, 0, 0).unwrap();
+    let restored_hos_updated_at = Utc.with_ymd_and_hms(2026, 7, 26, 0, 0, 0).unwrap();
+
+    client
+        .execute(
+            "INSERT INTO subscriptions (
+                subscription_id, user_id, provider, customer_id, price_id, status,
+                current_period_end, cancel_at_period_end, created_at, updated_at
+            ) VALUES ($1, $2, 'stripe', 'cus_anchor', 'price_test_basic', 'canceled', $3, false, $4, $4)",
+            &[&"sub_free_anchor_stripe", &user.id, &stripe_period_end, &stripe_updated_at],
+        )
+        .await
+        .unwrap();
+    client
+        .execute(
+            "INSERT INTO subscriptions (
+                subscription_id, user_id, provider, customer_id, price_id, status,
+                current_period_end, cancel_at_period_end, created_at, updated_at
+            ) VALUES ($1, $2, 'house-of-stake', 'cus_anchor', 'price_hos_basic', 'canceled', $3, false, $4, $4)",
+            &[
+                &"sub_free_anchor_restored_hos",
+                &user.id,
+                &hos_history_period_end,
+                &restored_hos_updated_at,
+            ],
+        )
+        .await
+        .unwrap();
+
+    let got = db
+        .subscription_repository()
+        .last_cancelled_subscription_period_end_for_user(user.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        got,
+        Some(stripe_period_end),
+        "freshly restored old HoS history should not override a newer Stripe cancellation boundary"
     );
 }
 
