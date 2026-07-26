@@ -3394,6 +3394,46 @@ async fn last_cancelled_period_deprioritizes_restored_hos_updated_at() {
 
 #[tokio::test]
 #[serial(subscription_tests)]
+async fn last_cancelled_period_ignores_hos_only_history() {
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    let user_email = "test_free_anchor_hos_only_history@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+    let _ = mock_login(&server, user_email).await;
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .unwrap()
+        .expect("user should exist");
+
+    let client = db.pool().get().await.unwrap();
+    let hos_period_end = Utc.with_ymd_and_hms(2024, 5, 1, 0, 0, 0).unwrap();
+    let hos_updated_at = Utc.with_ymd_and_hms(2026, 7, 26, 0, 0, 0).unwrap();
+    client
+        .execute(
+            "INSERT INTO subscriptions (
+                subscription_id, user_id, provider, customer_id, price_id, status,
+                current_period_end, cancel_at_period_end, created_at, updated_at, canceled_at
+            ) VALUES ($1, $2, 'house-of-stake', 'cus_anchor', 'price_hos_basic', 'canceled', $3, false, $4, $4, $3)",
+            &[&"sub_free_anchor_hos_only", &user.id, &hos_period_end, &hos_updated_at],
+        )
+        .await
+        .unwrap();
+
+    let got = db
+        .subscription_repository()
+        .last_cancelled_subscription_period_end_for_user(user.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        got, None,
+        "HoS inactive history should not move free-plan usage windows"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
 async fn last_cancelled_period_ignores_non_canceled_statuses_and_future_hos_periods() {
     let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
 

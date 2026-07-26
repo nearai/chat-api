@@ -1650,6 +1650,21 @@ impl SubscriptionServiceImpl {
                 return Err(Self::near_rpc_err(err));
             }
             if let Some(err) = first_parse_err {
+                if has_active_non_hos && !has_any_local_hos {
+                    tracing::warn!(
+                        user_id = %user_id.0,
+                        error_category = "parse_error",
+                        "NEAR RPC returned unparseable HoS sync data; no local HoS context, reporting retryable sync no-op"
+                    );
+                    return Ok(Self::hos_reconcile_summary(
+                        false,
+                        0,
+                        0,
+                        false,
+                        true,
+                        Some(NEAR_STAKING_SYNC_SKIPPED_REASON_RPC_UNAVAILABLE),
+                    ));
+                }
                 return Err(SubscriptionError::InternalError(err));
             }
         }
