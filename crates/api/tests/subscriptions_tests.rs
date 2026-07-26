@@ -4833,6 +4833,104 @@ async fn test_near_staking_sync_normalizes_canceled_chain_history() {
 
 #[tokio::test]
 #[serial(subscription_tests)]
+async fn test_near_staking_sync_preserves_later_past_chain_period_end() {
+    clear_proxy_env_for_local_wiremock();
+    let local_period_end = Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap();
+    let chain_period_end = Utc.with_ymd_and_hms(2026, 6, 15, 0, 0, 0).unwrap();
+    let chain_sub = json!({
+        "subscription_id": "sub_chain_later_past_canceled_hos",
+        "price_id": "price_hos_basic",
+        "end_ns": chain_period_end
+            .timestamp_nanos_opt()
+            .expect("nanoseconds timestamp should be representable")
+            .to_string(),
+        "status": "Expired",
+        "cancel_at_period_end": true
+    });
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(near_rpc_wiremock_hos_subscription_probe_only(chain_sub))
+        .mount(&mock)
+        .await;
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        near_rpc_url: Some(mock.uri().to_string()),
+        near_staking_contract_id: Some("staking.testnet".to_string()),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": { "providers": { "house-of-stake": { "price_id": "price_hos_basic" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } }
+        }),
+    )
+    .await;
+
+    let near_email = "hos_sync_preserve_later_past.testnet@near";
+    let login = json!({
+        "email": near_email,
+        "name": "HoS Preserve Later Past Period",
+        "oauth_provider": "near"
+    });
+    let response = server.post("/v1/auth/mock-login").json(&login).await;
+    let token = response.json::<serde_json::Value>()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    cleanup_user_subscriptions(&db, near_email).await;
+    let user = db
+        .user_repository()
+        .get_user_by_email(near_email)
+        .await
+        .unwrap()
+        .unwrap();
+    let client = db.pool().get().await.unwrap();
+    client
+        .execute(
+            "INSERT INTO subscriptions (
+                subscription_id, user_id, provider, customer_id, price_id, status,
+                current_period_end, cancel_at_period_end
+            ) VALUES (
+                'sub_chain_later_past_canceled_hos', $1, 'house-of-stake', 'cus_test',
+                'price_hos_basic', 'canceled', $2, false
+            )",
+            &[&user.id, &local_period_end],
+        )
+        .await
+        .expect("seed stale local HoS history");
+
+    let response = server
+        .post("/v1/subscriptions/near/sync")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 200, "{}", response.text());
+    let row = client
+        .query_one(
+            "SELECT current_period_end, cancel_at_period_end
+             FROM subscriptions
+             WHERE user_id = $1 AND subscription_id = 'sub_chain_later_past_canceled_hos'",
+            &[&user.id],
+        )
+        .await
+        .expect("load synced HoS history");
+    assert_eq!(
+        row.get::<_, chrono::DateTime<Utc>>("current_period_end"),
+        chain_period_end,
+        "past terminal chain period should replace stale earlier local history"
+    );
+    assert!(!row.get::<_, bool>("cancel_at_period_end"));
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
 async fn test_near_staking_sync_noops_when_active_stripe_and_chain_returns_null() {
     clear_proxy_env_for_local_wiremock();
     let mock = MockServer::start().await;
