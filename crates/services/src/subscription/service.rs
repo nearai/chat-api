@@ -1557,17 +1557,29 @@ impl SubscriptionServiceImpl {
         .await;
 
         let mut raw = None;
+        let mut active_raw = None;
+        let mut active_end_ns = 0;
         let mut first_err = None;
         for (_, result) in &probe_results {
             match result {
                 Ok(Some(v)) => {
-                    raw = Some(v.clone());
-                    break;
+                    if raw.is_none() {
+                        raw = Some(v.clone());
+                    }
+                    let candidate = subscription_row_from_chain(user_id, &near_account, v)
+                        .map_err(SubscriptionError::InternalError)?;
+                    if Self::is_active_or_trialing(&candidate.status) && v.end_ns >= active_end_ns {
+                        active_end_ns = v.end_ns;
+                        active_raw = Some(v.clone());
+                    }
                 }
                 Ok(None) => {}
                 Err(e) if first_err.is_none() => first_err = Some(e.clone()),
                 Err(_) => {}
             }
+        }
+        if active_raw.is_some() {
+            raw = active_raw;
         }
         if raw.is_none() {
             if let Some(err) = first_err {
