@@ -4732,10 +4732,14 @@ async fn test_near_staking_sync_restores_expired_hos_history_when_active_stripe_
 #[serial(subscription_tests)]
 async fn test_near_staking_sync_normalizes_canceled_chain_history() {
     clear_proxy_env_for_local_wiremock();
+    let chain_period_end = Utc.timestamp_opt(2_000_000_000, 0).unwrap();
     let chain_sub = json!({
         "subscription_id": "sub_chain_future_canceled_hos",
         "price_id": "price_hos_basic",
-        "end_ns": "2000000000000000000",
+        "end_ns": chain_period_end
+            .timestamp_nanos_opt()
+            .expect("nanoseconds timestamp should be representable")
+            .to_string(),
         "status": "Cancelled",
         "cancel_at_period_end": true
     });
@@ -4774,7 +4778,6 @@ async fn test_near_staking_sync_normalizes_canceled_chain_history() {
         .to_string();
 
     cleanup_user_subscriptions(&db, near_email).await;
-    let before_sync = Utc::now() - Duration::seconds(1);
 
     let response = server
         .post("/v1/subscriptions/near/sync")
@@ -4784,7 +4787,6 @@ async fn test_near_staking_sync_normalizes_canceled_chain_history() {
         )
         .await;
 
-    let after_sync = Utc::now() + Duration::seconds(1);
     assert_eq!(response.status_code(), 200, "{}", response.text());
     let body: serde_json::Value = response.json();
     assert_eq!(
@@ -4812,9 +4814,9 @@ async fn test_near_staking_sync_normalizes_canceled_chain_history() {
     let period_end = row.get::<_, chrono::DateTime<Utc>>("current_period_end");
     assert_eq!(row.get::<_, String>("status"), "canceled");
     assert!(!row.get::<_, bool>("cancel_at_period_end"));
-    assert!(
-        before_sync <= period_end && period_end <= after_sync,
-        "future canceled HoS period end should be clamped to sync time, got {period_end}"
+    assert_eq!(
+        period_end, chain_period_end,
+        "future terminal HoS period end should stay chain-authored"
     );
 
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;

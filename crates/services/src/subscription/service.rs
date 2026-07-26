@@ -1576,8 +1576,14 @@ impl SubscriptionServiceImpl {
         if raw.is_none() {
             if let Some(err) = first_err {
                 if has_active_non_hos && !has_active_local_hos {
+                    let error_category = if err.contains("timed out") {
+                        "timeout"
+                    } else {
+                        "rpc_error"
+                    };
                     tracing::warn!(
                         user_id = %user_id.0,
+                        error_category = error_category,
                         "NEAR RPC unavailable during HoS sync; no active local HoS context, reporting retryable skipped sync"
                     );
                     return Ok(Self::hos_reconcile_summary(
@@ -1634,19 +1640,8 @@ impl SubscriptionServiceImpl {
         let mut row = subscription_row_from_chain(user_id, &near_account, chain_subscription)
             .map_err(SubscriptionError::InternalError)?;
         if row.status == SUBSCRIPTION_STATUS_CANCELED {
-            let now = Utc::now();
-            let clamp_at = if row.current_period_end > now {
-                subs.iter()
-                    .find(|sub| {
-                        sub.provider == "house-of-stake"
-                            && sub.subscription_id == row.subscription_id
-                    })
-                    .map(|sub| sub.current_period_end.min(now))
-                    .unwrap_or(now)
-            } else {
-                row.current_period_end
-            };
-            row = Self::canceled_house_of_stake_history_row(row, clamp_at);
+            let chain_period_end = row.current_period_end;
+            row = Self::canceled_house_of_stake_history_row(row, chain_period_end);
         }
 
         // Do not insert/update an active HoS row while a non-HoS subscription is active/trialing locally:
