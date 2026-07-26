@@ -259,11 +259,13 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
     ) -> anyhow::Result<Option<chrono::DateTime<chrono::Utc>>> {
         let client = self.pool.get().await?;
         // Preserve the historical updated_at ordering for non-HoS cancellations, but do not let a
-        // freshly-restored HoS history row win solely because sync refreshed its updated_at.
+        // freshly-restored HoS history row win solely because sync refreshed its updated_at or
+        // carries a future terminal chain boundary.
         let row = client
             .query_opt(
                 "SELECT current_period_end FROM subscriptions \
-                 WHERE user_id = $1 AND status = 'canceled' AND current_period_end <= NOW() \
+                 WHERE user_id = $1 AND status = 'canceled' \
+                   AND (provider != 'house-of-stake' OR current_period_end <= NOW()) \
                  ORDER BY \
                     CASE \
                         WHEN provider = 'house-of-stake' THEN LEAST(updated_at, current_period_end) \

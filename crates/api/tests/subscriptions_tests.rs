@@ -3390,7 +3390,7 @@ async fn last_cancelled_period_deprioritizes_restored_hos_updated_at() {
 
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn last_cancelled_period_ignores_non_canceled_statuses_and_future_periods() {
+async fn last_cancelled_period_ignores_non_canceled_statuses_and_future_hos_periods() {
     let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
 
     let user_email = "test_free_anchor_ignore_non_canceled@example.com";
@@ -3409,7 +3409,7 @@ async fn last_cancelled_period_ignores_non_canceled_statuses_and_future_periods(
     let other_provider_canceled_end = now - Duration::days(30);
     let active_end = now + Duration::days(30);
     let incomplete_end = now + Duration::days(60);
-    let future_canceled_end = now + Duration::days(90);
+    let future_hos_canceled_end = now + Duration::days(90);
 
     client
         .execute(
@@ -3426,8 +3426,12 @@ async fn last_cancelled_period_ignores_non_canceled_statuses_and_future_periods(
             "INSERT INTO subscriptions (
                 subscription_id, user_id, provider, customer_id, price_id, status,
                 current_period_end, cancel_at_period_end
-            ) VALUES ($1, $2, 'stripe', 'cus_x', 'price_test_basic', 'canceled', $3, false)",
-            &[&"sub_future_canceled", &user.id, &future_canceled_end],
+            ) VALUES ($1, $2, 'house-of-stake', 'cus_x', 'price_hos_basic', 'canceled', $3, false)",
+            &[
+                &"sub_future_hos_canceled",
+                &user.id,
+                &future_hos_canceled_end,
+            ],
         )
         .await
         .unwrap();
@@ -3474,7 +3478,62 @@ async fn last_cancelled_period_ignores_non_canceled_statuses_and_future_periods(
     assert_eq!(
         got,
         Some(other_provider_canceled_end),
-        "latest ended canceled row should win regardless of provider; future canceled rows are ignored"
+        "latest ended canceled row should win regardless of provider; future HoS terminal rows are ignored"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn last_cancelled_period_preserves_future_non_hos_updated_at_ordering() {
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+
+    let user_email = "test_free_anchor_future_non_hos@example.com";
+    cleanup_user_subscriptions(&db, user_email).await;
+    let _ = mock_login(&server, user_email).await;
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .unwrap()
+        .expect("user should exist");
+
+    let client = db.pool().get().await.unwrap();
+    let now = Utc::now().with_nanosecond(0).unwrap();
+    let ended_period = now - Duration::days(30);
+    let future_period = now + Duration::days(30);
+    let older_updated_at = now - Duration::days(2);
+    let newer_updated_at = now - Duration::days(1);
+
+    client
+        .execute(
+            "INSERT INTO subscriptions (
+                subscription_id, user_id, provider, customer_id, price_id, status,
+                current_period_end, cancel_at_period_end, created_at, updated_at
+            ) VALUES ($1, $2, 'stripe', 'cus_anchor', 'price_test_basic', 'canceled', $3, false, $4, $4)",
+            &[&"sub_ended_non_hos_anchor", &user.id, &ended_period, &older_updated_at],
+        )
+        .await
+        .unwrap();
+    client
+        .execute(
+            "INSERT INTO subscriptions (
+                subscription_id, user_id, provider, customer_id, price_id, status,
+                current_period_end, cancel_at_period_end, created_at, updated_at
+            ) VALUES ($1, $2, 'stripe', 'cus_anchor', 'price_test_basic', 'canceled', $3, false, $4, $4)",
+            &[&"sub_future_non_hos_anchor", &user.id, &future_period, &newer_updated_at],
+        )
+        .await
+        .unwrap();
+
+    let got = db
+        .subscription_repository()
+        .last_cancelled_subscription_period_end_for_user(user.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        got,
+        Some(future_period),
+        "future non-HoS cancellations should keep legacy updated_at ordering"
     );
 }
 
