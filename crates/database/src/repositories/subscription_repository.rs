@@ -474,7 +474,7 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
                      provider = $3,
                      customer_id = $4,
                      price_id = $5,
-                     status = $6,
+                     status = $6::VARCHAR,
                      current_period_end = $7,
                      cancel_at_period_end = $8,
                      created_at = $9,
@@ -484,7 +484,7 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
                      pending_downgrade_status = $13,
                      pending_downgrade_updated_at = $14,
                      canceled_at = CASE
-                         WHEN $6::text = 'canceled' THEN COALESCE(canceled_at, NOW())
+                         WHEN $6::VARCHAR = 'canceled' THEN COALESCE(canceled_at, NOW())
                          ELSE NULL
                      END,
                      updated_at = NOW()
