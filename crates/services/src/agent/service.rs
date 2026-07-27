@@ -425,10 +425,21 @@ impl AgentServiceImpl {
         }
 
         match self
-            .get_latest_image_non_tee(manager, canonical_service_type, "deploy")
+            .get_latest_image_non_tee(
+                manager,
+                AllowlistServiceType::Canonical(canonical_service_type),
+                "deploy",
+            )
             .await
         {
-            Ok((ref_, _, _)) => Ok(ref_),
+            Ok(Some((ref_, _, _))) => Ok(ref_),
+            Ok(None) => {
+                tracing::warn!(
+                    service_type = %canonical_service_type,
+                    "No versioned allowlist image; falling back to configured image ref"
+                );
+                Ok(get_image_for_service_type(canonical_service_type, hosting))
+            }
             Err(e) => {
                 tracing::warn!(
                     error = %e,
@@ -4011,6 +4022,37 @@ struct NonTeeInstanceResponse {
     image: String,
     #[serde(default)]
     image_digest: Option<String>,
+    /// Crabshack's `service_type` for the instance. Upgrade flows filter the image
+    /// allowlist by this when present (see [`AllowlistServiceType::Native`]).
+    #[serde(default)]
+    service_type: Option<String>,
+}
+
+/// Which service type the crabshack image-allowlist filter should use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AllowlistServiceType<'a> {
+    /// Canonical chat-api type (e.g. "ironclaw"), mapped via [`service_type_for_crabshack`]
+    /// (honoring the `crabshack.ironclaw_service_type` override). For flows with no live
+    /// crabshack instance record: new deploys, and the instance-404 branch of the check.
+    Canonical(&'a str),
+    /// The `service_type` crabshack reports for an existing instance (e.g. "ironclaw-dind"),
+    /// used verbatim. The canonical mapping must NOT apply here: with `ironclaw_service_type`
+    /// pointed at "ironclaw-reborn" (new creates on Reborn), mapping an existing dind instance
+    /// would offer it a reborn-only image that crabshack then rejects on restart with
+    /// `service_type "ironclaw-dind" not supported by image`.
+    Native(&'a str),
+}
+
+/// [`AllowlistServiceType::Native`] when the manager reported a non-blank `service_type`
+/// for the instance, else the canonical-mapping fallback (older managers omit the field).
+fn allowlist_type_from_instance<'a>(
+    native: Option<&'a str>,
+    canonical: &'a str,
+) -> AllowlistServiceType<'a> {
+    match native {
+        Some(t) if !t.trim().is_empty() => AllowlistServiceType::Native(t),
+        _ => AllowlistServiceType::Canonical(canonical),
+    }
 }
 
 impl AgentServiceImpl {
@@ -4178,7 +4220,7 @@ impl AgentServiceImpl {
     async fn fetch_allowed_images_non_tee(
         &self,
         manager: &AgentManager,
-        target_service_type: &str,
+        target: AllowlistServiceType<'_>,
         context: &str,
     ) -> anyhow::Result<(Vec<CrabshackImageEntry>, Option<AgentHostingConfig>)> {
         let bearer_token = &manager.token;
@@ -4250,7 +4292,8 @@ impl AgentServiceImpl {
             );
         }
 
-        // Transform canonical service type to crabshack format (configurable via system_configs)
+        // Resolve the filter type: canonical types are transformed to crabshack format
+        // (configurable via system_configs); instance-native types are already crabshack format.
         let system_configs = self
             .system_configs_service
             .get_configs()
@@ -4260,8 +4303,10 @@ impl AgentServiceImpl {
         let hosting_config = system_configs
             .as_ref()
             .and_then(|cfg| cfg.agent_hosting.as_ref());
-        let crabshack_service_type =
-            service_type_for_crabshack(target_service_type, hosting_config);
+        let crabshack_service_type = match target {
+            AllowlistServiceType::Canonical(t) => service_type_for_crabshack(t, hosting_config),
+            AllowlistServiceType::Native(t) => t.to_string(),
+        };
 
         tracing::debug!(
             "Non-TEE ({}): Filtering for service_type='{}' with status='allow-create'",
@@ -4306,11 +4351,11 @@ impl AgentServiceImpl {
     async fn get_latest_image_non_tee(
         &self,
         manager: &AgentManager,
-        target_service_type: &str,
+        target: AllowlistServiceType<'_>,
         context: &str, // For logging: "check", "upgrade", or "deploy"
-    ) -> anyhow::Result<(String, String, Option<String>)> {
+    ) -> anyhow::Result<Option<(String, String, Option<String>)>> {
         let (available_images, hosting_config) = self
-            .fetch_allowed_images_non_tee(manager, target_service_type, context)
+            .fetch_allowed_images_non_tee(manager, target, context)
             .await?;
 
         // Extract versions from image refs and log them
@@ -4350,7 +4395,9 @@ impl AgentServiceImpl {
             );
         }
 
-        // Find the newest image by comparing semantic versions
+        // Find the newest image by comparing semantic versions. An empty candidate set is a
+        // normal domain state (e.g. a service type's line fully retired from the allowlist),
+        // reported as Ok(None) — callers decide whether that is an error for their flow.
         let latest_image_entry = images_with_versions
             .iter()
             .filter_map(|(ref_, version, digest)| {
@@ -4361,14 +4408,16 @@ impl AgentServiceImpl {
             // Tags can look numeric (`1.2.x`) but fail strict semver — exclude them from "latest" selection.
             .filter(|(_, v, _)| parse_semantic_version(v).is_some())
             .filter(|(_, v, _)| allow_prerelease || is_stable_version(v))
-            .max_by(|a, b| compare_semantic_versions(&a.1, &b.1))
-            .ok_or_else(|| {
-                anyhow!(
-                    "No images with numeric versions available in allowlist: context='{}', service_type='{}'",
-                    context,
-                    target_service_type
-                )
-            })?;
+            .max_by(|a, b| compare_semantic_versions(&a.1, &b.1));
+
+        let Some(latest_image_entry) = latest_image_entry else {
+            tracing::info!(
+                "Non-TEE ({}): No images with numeric versions available in allowlist: service_type={:?}",
+                context,
+                target
+            );
+            return Ok(None);
+        };
 
         tracing::debug!(
             "Non-TEE ({}): Latest image: ref={}, version={}, digest={:?}",
@@ -4378,11 +4427,11 @@ impl AgentServiceImpl {
             latest_image_entry.2
         );
 
-        Ok((
+        Ok(Some((
             latest_image_entry.0,
             latest_image_entry.1,
             latest_image_entry.2,
-        ))
+        )))
     }
 
     /// Check upgrade availability for non-TEE infrastructure (crabshack)
@@ -4444,12 +4493,17 @@ impl AgentServiceImpl {
 
             // Log image + digest only — raw body can carry sensitive crabshack instance metadata.
             tracing::debug!(
-                "Non-TEE: Parsed /instances/{} response: image={}, digest={:?}",
+                "Non-TEE: Parsed /instances/{} response: image={}, digest={:?}, service_type={:?}",
                 encoded_name,
                 instance_status.image,
-                instance_status.image_digest
+                instance_status.image_digest,
+                instance_status.service_type
             );
-            Some((instance_status.image, instance_status.image_digest))
+            Some((
+                instance_status.image,
+                instance_status.image_digest,
+                instance_status.service_type,
+            ))
         } else {
             None
         };
@@ -4459,11 +4513,15 @@ impl AgentServiceImpl {
         if instance_not_found {
             // Try to fetch allowlist to provide the latest_image info, but don't fail if we can't
             let (latest_image, latest_digest) = match self
-                .get_latest_image_non_tee(manager, instance.service_type_str(), "check")
+                .get_latest_image_non_tee(
+                    manager,
+                    AllowlistServiceType::Canonical(instance.service_type_str()),
+                    "check",
+                )
                 .await
             {
-                Ok((img, _, digest)) => (img, digest),
-                Err(_) => ("unknown".to_string(), None),
+                Ok(Some((img, _, digest))) => (img, digest),
+                Ok(None) | Err(_) => ("unknown".to_string(), None),
             };
 
             tracing::info!(
@@ -4480,8 +4538,15 @@ impl AgentServiceImpl {
             });
         }
 
-        let (current_image_ref, current_digest) =
+        let (current_image_ref, current_digest, native_service_type) =
             current_image.ok_or_else(|| anyhow!("Missing current image after non-found guard"))?;
+
+        // Filter the allowlist by what the instance actually runs (crabshack's service_type),
+        // not by what the canonical mapping says new creates should get.
+        let allowlist_target = allowlist_type_from_instance(
+            native_service_type.as_deref(),
+            instance.service_type_str(),
+        );
 
         // Determine upgrade availability based on image tag type
         let current_version = extract_version_from_image(&current_image_ref);
@@ -4494,9 +4559,25 @@ impl AgentServiceImpl {
                 curr_v
             );
 
-            let (latest_image, latest_version, latest_digest) = self
-                .get_latest_image_non_tee(manager, instance.service_type_str(), "check")
-                .await?;
+            // No versioned allow-create entries for this line (e.g. retired from the allowlist):
+            // report "no upgrade" to the user; only the upgrade POST treats this as an error.
+            let Some((latest_image, latest_version, latest_digest)) = self
+                .get_latest_image_non_tee(manager, allowlist_target, "check")
+                .await?
+            else {
+                tracing::info!(
+                    "Non-TEE upgrade check: no versioned allowlist images for {:?}; reporting no upgrade (instance_id={})",
+                    allowlist_target,
+                    instance_id
+                );
+                return Ok(UpgradeAvailability {
+                    has_upgrade: false,
+                    current_image: Some(current_image_ref.clone()),
+                    latest_image: current_image_ref,
+                    current_digest,
+                    latest_digest: None,
+                });
+            };
 
             let has_upgrade =
                 compare_semantic_versions(&curr_v, &latest_version) == std::cmp::Ordering::Less;
@@ -4524,7 +4605,7 @@ impl AgentServiceImpl {
             );
 
             let (allowed_entries, _hosting_config) = self
-                .fetch_allowed_images_non_tee(manager, instance.service_type_str(), "check")
+                .fetch_allowed_images_non_tee(manager, allowlist_target, "check")
                 .await?;
 
             let matching_entry = allowed_entries.iter().find(|e| e.ref_ == current_image_ref);
@@ -4731,26 +4812,40 @@ impl AgentServiceImpl {
                 )
             })?;
 
+        let native_service_type = current_instance.service_type.clone();
+        let allowlist_target = allowlist_type_from_instance(
+            native_service_type.as_deref(),
+            instance.service_type_str(),
+        );
         let current_image = current_instance.image;
         tracing::debug!(
-            "Non-TEE upgrade: Current instance image: {}, digest: {:?}",
+            "Non-TEE upgrade: Current instance image: {}, digest: {:?}, service_type: {:?}",
             current_image,
-            current_instance.image_digest
+            current_instance.image_digest,
+            native_service_type
         );
 
         // Determine image and digest to upgrade to based on tag type
         let (image, image_digest) = if extract_version_from_image(&current_image).is_some() {
             // VERSIONED TAG: Get latest semver version
             tracing::debug!("Non-TEE upgrade: Upgrading versioned image");
+            // Unlike the check, an upgrade with nothing to upgrade TO is a hard error —
+            // "succeeding" without a target image would lie to the user.
             let (latest_image, _version, latest_digest) = self
-                .get_latest_image_non_tee(manager, instance.service_type_str(), "upgrade")
-                .await?;
+                .get_latest_image_non_tee(manager, allowlist_target, "upgrade")
+                .await?
+                .ok_or_else(|| {
+                    anyhow!(
+                        "No images with numeric versions available in allowlist: context='upgrade', service_type={:?}",
+                        allowlist_target
+                    )
+                })?;
             (latest_image, latest_digest)
         } else {
             // NON-VERSIONED TAG: Validate current ref exists in allowlist and use same tag
             tracing::debug!("Non-TEE upgrade: Upgrading non-versioned image");
             let (allowed_entries, _hosting_config) = self
-                .fetch_allowed_images_non_tee(manager, instance.service_type_str(), "upgrade")
+                .fetch_allowed_images_non_tee(manager, allowlist_target, "upgrade")
                 .await?;
 
             let allowlist_entry = allowed_entries.iter().find(|e| e.ref_ == current_image);
@@ -4983,6 +5078,24 @@ mod tests {
         );
     }
 
+    /// Why: the manager-reported service_type must win over the canonical mapping so
+    /// existing instances track their own image line; blank/missing values fall back.
+    #[test]
+    fn allowlist_type_from_instance_prefers_native_falls_back_to_canonical() {
+        assert_eq!(
+            allowlist_type_from_instance(Some("ironclaw-dind"), "ironclaw"),
+            AllowlistServiceType::Native("ironclaw-dind")
+        );
+        assert_eq!(
+            allowlist_type_from_instance(None, "ironclaw"),
+            AllowlistServiceType::Canonical("ironclaw")
+        );
+        assert_eq!(
+            allowlist_type_from_instance(Some("  "), "ironclaw"),
+            AllowlistServiceType::Canonical("ironclaw")
+        );
+    }
+
     // --- Mock SystemConfigsService ---
 
     struct MockSystemConfigsService {
@@ -5054,6 +5167,23 @@ mod tests {
                         new_agent_with_non_tee_infra: None,
                         crabshack: AgentHostingCrabshackConfig {
                             allow_prerelease_upgrades: Some(allow_prerelease),
+                            ..Default::default()
+                        },
+                    }),
+                    ..Default::default()
+                }),
+            }
+        }
+
+        /// `crabshack.ironclaw_service_type` override set (the "new creates go to Reborn" rollout).
+        fn with_ironclaw_service_type_override(service_type: &str) -> Self {
+            use crate::system_configs::ports::{AgentHostingConfig, AgentHostingCrabshackConfig};
+            Self {
+                configs: Some(SystemConfigs {
+                    agent_hosting: Some(AgentHostingConfig {
+                        new_agent_with_non_tee_infra: None,
+                        crabshack: AgentHostingCrabshackConfig {
+                            ironclaw_service_type: Some(service_type.to_string()),
                             ..Default::default()
                         },
                     }),
@@ -7332,6 +7462,362 @@ mod tests {
             assert_eq!(
                 out.latest_image,
                 "docker.io/nearaidev/openclaw-dind:0.22.0-rc1"
+            );
+        }
+
+        /// The allowlist as registered for the Reborn rollout: dind releases under
+        /// `ironclaw-dind`, the Reborn line under `ironclaw-reborn`, both allow-create.
+        async fn mount_reborn_rollout_allowlist(server: &MockServer) {
+            Mock::given(method("GET"))
+                .and(path("/images"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                    {
+                        "ref": "docker.io/nearaidev/ironclaw-dind:0.29.1",
+                        "service_type": "ironclaw-dind",
+                        "status": "allow-create",
+                        "created_at": "2026-06-08T00:00:00Z"
+                    },
+                    {
+                        "ref": "docker.io/nearaidev/ironclaw:1.0.0",
+                        "service_type": "ironclaw-reborn",
+                        "status": "allow-create",
+                        "created_at": "2026-07-27T00:00:00Z"
+                    },
+                    {
+                        "ref": "docker.io/nearaidev/ironclaw:1.1.0",
+                        "service_type": "ironclaw-reborn",
+                        "status": "allow-create",
+                        "created_at": "2026-07-28T00:00:00Z"
+                    }
+                ])))
+                .mount(server)
+                .await;
+        }
+
+        /// Why: with `ironclaw_service_type = "ironclaw-reborn"` routing NEW creates to Reborn,
+        /// an EXISTING dind instance must still be offered dind releases — not the Reborn image,
+        /// which crabshack would reject on restart (`service_type not supported by image`).
+        /// Given a crabshack instance reporting `service_type: ironclaw-dind` on 0.27.0,
+        /// when checking upgrade availability, then latest is dind 0.29.1, not reborn 1.x.
+        #[tokio::test]
+        async fn non_tee_check_upgrade_dind_instance_ignores_reborn_override() {
+            let server = setup_mock_server().await;
+            let uri = server.uri();
+            let instance_id = Uuid::new_v4();
+            let user_id = UserId(Uuid::new_v4());
+
+            mount_reborn_rollout_allowlist(&server).await;
+            Mock::given(method("GET"))
+                .and(path("/instances/test-instance"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "name": "test-instance",
+                    "image": "docker.io/nearaidev/ironclaw-dind:0.27.0",
+                    "service_type": "ironclaw-dind",
+                    "status": "running"
+                })))
+                .mount(&server)
+                .await;
+
+            let instance = upgrade_check_instance(
+                instance_id,
+                user_id,
+                "test-instance",
+                &uri,
+                Some("ironclaw"),
+            );
+            let svc = service_for_upgrade_check_with_configs(
+                instance,
+                &uri,
+                "crab-token",
+                Arc::new(
+                    MockSystemConfigsService::with_ironclaw_service_type_override(
+                        "ironclaw-reborn",
+                    ),
+                ),
+            );
+            let out = AgentService::check_upgrade_available(&svc, instance_id, user_id)
+                .await
+                .expect("check_upgrade_available");
+
+            assert!(out.has_upgrade);
+            assert_eq!(out.latest_image, "docker.io/nearaidev/ironclaw-dind:0.29.1");
+        }
+
+        /// Why: the same override must keep working for instances that ARE Reborn.
+        /// Given a crabshack instance reporting `service_type: ironclaw-reborn` on 1.0.0,
+        /// when checking upgrade availability, then latest is the Reborn 1.1.0 release
+        /// and the dind line does not leak in.
+        #[tokio::test]
+        async fn non_tee_check_upgrade_reborn_instance_sees_reborn_releases() {
+            let server = setup_mock_server().await;
+            let uri = server.uri();
+            let instance_id = Uuid::new_v4();
+            let user_id = UserId(Uuid::new_v4());
+
+            mount_reborn_rollout_allowlist(&server).await;
+            Mock::given(method("GET"))
+                .and(path("/instances/test-instance"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "name": "test-instance",
+                    "image": "docker.io/nearaidev/ironclaw:1.0.0",
+                    "service_type": "ironclaw-reborn",
+                    "status": "running"
+                })))
+                .mount(&server)
+                .await;
+
+            let instance = upgrade_check_instance(
+                instance_id,
+                user_id,
+                "test-instance",
+                &uri,
+                Some("ironclaw"),
+            );
+            let svc = service_for_upgrade_check_with_configs(
+                instance,
+                &uri,
+                "crab-token",
+                Arc::new(
+                    MockSystemConfigsService::with_ironclaw_service_type_override(
+                        "ironclaw-reborn",
+                    ),
+                ),
+            );
+            let out = AgentService::check_upgrade_available(&svc, instance_id, user_id)
+                .await
+                .expect("check_upgrade_available");
+
+            assert!(out.has_upgrade);
+            assert_eq!(out.latest_image, "docker.io/nearaidev/ironclaw:1.1.0");
+        }
+
+        /// Why: older managers may omit `service_type` on `/instances/{name}`; the check must
+        /// then fall back to the canonical mapping (override included) instead of erroring.
+        /// Given an instance response WITHOUT `service_type` and the reborn override set,
+        /// when checking upgrade availability, then the reborn line is used (mapped behavior).
+        #[tokio::test]
+        async fn non_tee_check_upgrade_missing_service_type_falls_back_to_mapping() {
+            let server = setup_mock_server().await;
+            let uri = server.uri();
+            let instance_id = Uuid::new_v4();
+            let user_id = UserId(Uuid::new_v4());
+
+            mount_reborn_rollout_allowlist(&server).await;
+            Mock::given(method("GET"))
+                .and(path("/instances/test-instance"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "name": "test-instance",
+                    "image": "docker.io/nearaidev/ironclaw:1.0.0",
+                    "status": "running"
+                })))
+                .mount(&server)
+                .await;
+
+            let instance = upgrade_check_instance(
+                instance_id,
+                user_id,
+                "test-instance",
+                &uri,
+                Some("ironclaw"),
+            );
+            let svc = service_for_upgrade_check_with_configs(
+                instance,
+                &uri,
+                "crab-token",
+                Arc::new(
+                    MockSystemConfigsService::with_ironclaw_service_type_override(
+                        "ironclaw-reborn",
+                    ),
+                ),
+            );
+            let out = AgentService::check_upgrade_available(&svc, instance_id, user_id)
+                .await
+                .expect("check_upgrade_available");
+
+            assert!(out.has_upgrade);
+            assert_eq!(out.latest_image, "docker.io/nearaidev/ironclaw:1.1.0");
+        }
+
+        /// Why: fixing only the check would leave the upgrade POST still picking the mapped
+        /// (reborn) image for a dind instance — crabshack 400s and the user's upgrade dies.
+        /// Given a dind instance on 0.27.0 and the reborn override set, when upgrading,
+        /// then the restart call targets dind 0.29.1 (asserted via the body matcher + expect(1)).
+        #[tokio::test]
+        async fn non_tee_upgrade_stream_targets_instance_native_image() {
+            use wiremock::matchers::body_partial_json;
+
+            let server = setup_mock_server().await;
+            let uri = server.uri();
+            let instance_id = Uuid::new_v4();
+            let user_id = UserId(Uuid::new_v4());
+
+            mount_reborn_rollout_allowlist(&server).await;
+            Mock::given(method("GET"))
+                .and(path("/instances/test-instance"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "name": "test-instance",
+                    "image": "docker.io/nearaidev/ironclaw-dind:0.27.0",
+                    "service_type": "ironclaw-dind",
+                    "status": "running"
+                })))
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/instances/test-instance/restart"))
+                .and(body_partial_json(serde_json::json!({
+                    "image": "docker.io/nearaidev/ironclaw-dind:0.29.1"
+                })))
+                .respond_with(ResponseTemplate::new(200).set_body_string("event: done\n\n"))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let instance = upgrade_check_instance(
+                instance_id,
+                user_id,
+                "test-instance",
+                &uri,
+                Some("ironclaw"),
+            );
+            let svc = service_for_upgrade_check_with_configs(
+                instance,
+                &uri,
+                "crab-token",
+                Arc::new(
+                    MockSystemConfigsService::with_ironclaw_service_type_override(
+                        "ironclaw-reborn",
+                    ),
+                ),
+            );
+
+            let mut rx = AgentService::upgrade_instance_stream(&svc, instance_id, user_id)
+                .await
+                .expect("upgrade_instance_stream");
+            while let Some(chunk) = rx.recv().await {
+                chunk.expect("upgrade stream chunk");
+            }
+            // MockServer::verify on drop asserts the restart mock matched exactly once.
+        }
+
+        /// The dind line fully retired: every dind entry blocked, only Reborn allow-create.
+        async fn mount_retired_dind_allowlist(server: &MockServer) {
+            Mock::given(method("GET"))
+                .and(path("/images"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                    {
+                        "ref": "docker.io/nearaidev/ironclaw-dind:0.29.1",
+                        "service_type": "ironclaw-dind",
+                        "status": "blocked",
+                        "created_at": "2026-06-08T00:00:00Z"
+                    },
+                    {
+                        "ref": "docker.io/nearaidev/ironclaw:1.1.0",
+                        "service_type": "ironclaw-reborn",
+                        "status": "allow-create",
+                        "created_at": "2026-07-28T00:00:00Z"
+                    }
+                ])))
+                .mount(server)
+                .await;
+        }
+
+        /// Why: retiring a service type's allowlist line must not break the check for
+        /// instances still running it — an empty candidate set is a normal domain state,
+        /// not a transport failure. Given a dind instance whose native type has no
+        /// allow-create versioned entries left, when checking upgrade availability,
+        /// then the check returns has_upgrade=false instead of propagating a 500.
+        #[tokio::test]
+        async fn non_tee_check_upgrade_retired_native_line_reports_no_upgrade() {
+            let server = setup_mock_server().await;
+            let uri = server.uri();
+            let instance_id = Uuid::new_v4();
+            let user_id = UserId(Uuid::new_v4());
+
+            mount_retired_dind_allowlist(&server).await;
+            Mock::given(method("GET"))
+                .and(path("/instances/test-instance"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "name": "test-instance",
+                    "image": "docker.io/nearaidev/ironclaw-dind:0.29.1",
+                    "service_type": "ironclaw-dind",
+                    "status": "running"
+                })))
+                .mount(&server)
+                .await;
+
+            let instance = upgrade_check_instance(
+                instance_id,
+                user_id,
+                "test-instance",
+                &uri,
+                Some("ironclaw"),
+            );
+            let svc = service_for_upgrade_check_with_configs(
+                instance,
+                &uri,
+                "crab-token",
+                Arc::new(
+                    MockSystemConfigsService::with_ironclaw_service_type_override(
+                        "ironclaw-reborn",
+                    ),
+                ),
+            );
+            let out = AgentService::check_upgrade_available(&svc, instance_id, user_id)
+                .await
+                .expect("check must not error when the native line is retired");
+
+            assert!(!out.has_upgrade);
+            assert_eq!(
+                out.current_image.as_deref(),
+                Some("docker.io/nearaidev/ironclaw-dind:0.29.1")
+            );
+            assert_eq!(out.latest_image, "docker.io/nearaidev/ironclaw-dind:0.29.1");
+        }
+
+        /// Why: the upgrade POST must keep failing hard in the same state — silently
+        /// "upgrading" to nothing would lie to the user; the check (above) is the surface
+        /// that should soften. Given the retired dind line, when upgrading, then Err.
+        #[tokio::test]
+        async fn non_tee_upgrade_stream_retired_native_line_fails() {
+            let server = setup_mock_server().await;
+            let uri = server.uri();
+            let instance_id = Uuid::new_v4();
+            let user_id = UserId(Uuid::new_v4());
+
+            mount_retired_dind_allowlist(&server).await;
+            Mock::given(method("GET"))
+                .and(path("/instances/test-instance"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "name": "test-instance",
+                    "image": "docker.io/nearaidev/ironclaw-dind:0.29.1",
+                    "service_type": "ironclaw-dind",
+                    "status": "running"
+                })))
+                .mount(&server)
+                .await;
+
+            let instance = upgrade_check_instance(
+                instance_id,
+                user_id,
+                "test-instance",
+                &uri,
+                Some("ironclaw"),
+            );
+            let svc = service_for_upgrade_check_with_configs(
+                instance,
+                &uri,
+                "crab-token",
+                Arc::new(
+                    MockSystemConfigsService::with_ironclaw_service_type_override(
+                        "ironclaw-reborn",
+                    ),
+                ),
+            );
+
+            let result = AgentService::upgrade_instance_stream(&svc, instance_id, user_id).await;
+            assert!(
+                result.is_err(),
+                "upgrade must hard-fail when no versioned allow-create image exists for the native type"
             );
         }
 
