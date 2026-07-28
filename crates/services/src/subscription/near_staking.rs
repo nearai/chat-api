@@ -101,6 +101,8 @@ struct GetPurchaseArgs<'a> {
 #[derive(Debug, Clone, Serialize)]
 struct GetLockArgs<'a> {
     lock_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effective: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -311,7 +313,35 @@ pub async fn view_get_lock(
     contract_id: &str,
     lock_id: &str,
 ) -> Result<Option<NearStakingLock>, String> {
-    view_call(rpc_url, contract_id, "get_lock", GetLockArgs { lock_id }).await
+    view_call(
+        rpc_url,
+        contract_id,
+        "get_lock",
+        GetLockArgs {
+            lock_id,
+            effective: None,
+        },
+    )
+    .await
+}
+
+/// Fetch `get_lock(lock_id, effective=true)` for HoS entitlement reads that
+/// need due subscription downgrades projected without mutating contract state.
+pub async fn view_get_effective_lock(
+    rpc_url: &str,
+    contract_id: &str,
+    lock_id: &str,
+) -> Result<Option<NearStakingLock>, String> {
+    view_call(
+        rpc_url,
+        contract_id,
+        "get_lock",
+        GetLockArgs {
+            lock_id,
+            effective: Some(true),
+        },
+    )
+    .await
 }
 
 /// Parse lock `amount_near` field as yoctoNEAR integer.
@@ -472,6 +502,64 @@ mod tests {
                 .await
                 .expect("rpc client");
         assert!(out.is_none());
+    }
+
+    #[tokio::test]
+    async fn view_get_effective_lock_sends_effective_true() {
+        for k in [
+            "http_proxy",
+            "https_proxy",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "all_proxy",
+        ] {
+            std::env::remove_var(k);
+        }
+        std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(|req: &wiremock::Request| {
+                use base64::{engine::general_purpose::STANDARD, Engine};
+
+                let body: Value = serde_json::from_slice(&req.body).expect("request body");
+                let params = body.get("params").expect("query params");
+                assert_eq!(
+                    params.get("method_name").and_then(|x| x.as_str()),
+                    Some("get_lock")
+                );
+                let decoded = params
+                    .get("args_base64")
+                    .and_then(|x| x.as_str())
+                    .and_then(|args| STANDARD.decode(args).ok())
+                    .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                    .expect("decoded args");
+                assert_eq!(
+                    decoded.get("lock_id").and_then(|x| x.as_str()),
+                    Some("lock_effective")
+                );
+                assert_eq!(
+                    decoded.get("effective").and_then(|x| x.as_bool()),
+                    Some(true)
+                );
+
+                ResponseTemplate::new(200).set_body_json(call_function_query_response(&json!({
+                    "amount_near": "10000000000000000000000000"
+                })))
+            })
+            .mount(&mock)
+            .await;
+
+        let url = mock.uri();
+        let out = view_get_effective_lock(&url, "staking.testnet", "lock_effective")
+            .await
+            .expect("rpc client")
+            .expect("lock");
+        assert_eq!(
+            lock_amount_yocto(&out),
+            Some(10_000_000_000_000_000_000_000_000)
+        );
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use super::near_staking::{
-    lock_amount_yocto, subscription_row_from_chain, view_get_lock, view_get_price,
+    lock_amount_yocto, subscription_row_from_chain, view_get_effective_lock, view_get_price,
     view_get_purchase, view_get_subscription_for_price, view_storage_balance_bounds,
     view_storage_balance_of, NearStakingStorageBalance, NearStakingStorageBalanceBounds,
 };
@@ -1103,28 +1103,29 @@ impl SubscriptionServiceImpl {
             return None;
         };
 
-        let lock = match view_get_lock(&self.near_rpc_url, contract_id, last_lock_id).await {
-            Ok(Some(lock)) => lock,
-            Ok(None) => {
-                tracing::warn!(
-                    user_id = %user_id.0,
-                    subscription_id = %subscription.subscription_id,
-                    last_lock_id,
-                    "cannot resolve HoS stake-based credits: lock missing on chain"
-                );
-                return None;
-            }
-            Err(err) => {
-                tracing::warn!(
-                    user_id = %user_id.0,
-                    subscription_id = %subscription.subscription_id,
-                    last_lock_id,
-                    error = %err,
-                    "cannot resolve HoS stake-based credits: lock RPC failed"
-                );
-                return None;
-            }
-        };
+        let lock =
+            match view_get_effective_lock(&self.near_rpc_url, contract_id, last_lock_id).await {
+                Ok(Some(lock)) => lock,
+                Ok(None) => {
+                    tracing::warn!(
+                        user_id = %user_id.0,
+                        subscription_id = %subscription.subscription_id,
+                        last_lock_id,
+                        "cannot resolve HoS stake-based credits: lock missing on chain"
+                    );
+                    return None;
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        user_id = %user_id.0,
+                        subscription_id = %subscription.subscription_id,
+                        last_lock_id,
+                        error = %err,
+                        "cannot resolve HoS stake-based credits: lock RPC failed"
+                    );
+                    return None;
+                }
+            };
 
         let Some(lock_amount) = lock_amount_yocto(&lock) else {
             tracing::warn!(
@@ -2514,7 +2515,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 .ok_or_else(|| {
                     SubscriptionError::InternalError("HoS subscription missing last_lock_id".into())
                 })?;
-            let lock_j = view_get_lock(&self.near_rpc_url, contract_id, last_lock_id)
+            let lock_j = view_get_effective_lock(&self.near_rpc_url, contract_id, last_lock_id)
                 .await
                 .map_err(Self::near_rpc_err)?
                 .ok_or_else(|| {
