@@ -64,6 +64,16 @@ where
     })
 }
 
+fn deserialize_optional_u128<'de, D>(deserializer: D) -> Result<Option<u128>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let Some(value) = Option::<IntegerStringOrNumber>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    parse_u128_value::<D>(value).map(Some)
+}
+
 fn deserialize_required_yocto_near<'de, D>(deserializer: D) -> Result<YoctoNear, D::Error>
 where
     D: Deserializer<'de>,
@@ -201,6 +211,10 @@ pub struct NearStakingPurchase {
 pub struct NearStakingLock {
     #[serde(default, deserialize_with = "deserialize_optional_yocto_near")]
     pub amount_near: Option<YoctoNear>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_u128")]
+    pub shares: Option<u128>,
 }
 
 async fn view_call<Args, Response>(
@@ -347,6 +361,13 @@ pub async fn view_get_effective_lock(
 /// Parse lock `amount_near` field as yoctoNEAR integer.
 pub fn lock_amount_yocto(lock: &NearStakingLock) -> Option<u128> {
     lock.amount_near.map(YoctoNear::as_u128)
+}
+
+pub fn lock_has_active_shares(lock: &NearStakingLock) -> bool {
+    lock.status
+        .as_deref()
+        .is_some_and(|status| status.eq_ignore_ascii_case("active"))
+        && lock.shares.is_some_and(|shares| shares > 0)
 }
 
 /// Map stake.dao `Subscription` into our DB [`Subscription`] row (`provider = house-of-stake`).
@@ -560,6 +581,33 @@ mod tests {
             lock_amount_yocto(&out),
             Some(10_000_000_000_000_000_000_000_000)
         );
+    }
+
+    #[test]
+    fn lock_has_active_shares_requires_active_status_and_nonzero_shares() {
+        let active: NearStakingLock = serde_json::from_value(json!({
+            "amount_near": "30000000000000000000000000",
+            "status": "Active",
+            "shares": "1"
+        }))
+        .expect("active lock");
+        assert!(lock_has_active_shares(&active));
+
+        let unlock_requested: NearStakingLock = serde_json::from_value(json!({
+            "amount_near": "30000000000000000000000000",
+            "status": "UnlockRequested",
+            "shares": "1"
+        }))
+        .expect("unlock requested lock");
+        assert!(!lock_has_active_shares(&unlock_requested));
+
+        let zero_shares: NearStakingLock = serde_json::from_value(json!({
+            "amount_near": "30000000000000000000000000",
+            "status": "Active",
+            "shares": "0"
+        }))
+        .expect("zero-share lock");
+        assert!(!lock_has_active_shares(&zero_shares));
     }
 
     #[test]

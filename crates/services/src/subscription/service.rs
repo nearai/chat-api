@@ -1,8 +1,8 @@
 use super::near_staking::{
-    lock_amount_yocto, subscription_row_from_chain, view_get_effective_lock, view_get_lock,
-    view_get_price, view_get_purchase, view_get_subscription_for_price,
-    view_storage_balance_bounds, view_storage_balance_of, NearStakingStorageBalance,
-    NearStakingStorageBalanceBounds,
+    lock_amount_yocto, lock_has_active_shares, subscription_row_from_chain,
+    view_get_effective_lock, view_get_lock, view_get_price, view_get_purchase,
+    view_get_subscription_for_price, view_storage_balance_bounds, view_storage_balance_of,
+    NearStakingStorageBalance, NearStakingStorageBalanceBounds,
 };
 use super::ports::{
     BillingCycleAnchor, BillingPeriod, CancelSubscriptionOutcome, ChangePlanOutcome,
@@ -1127,6 +1127,31 @@ impl SubscriptionServiceImpl {
                     return None;
                 }
             };
+
+        if !lock_has_active_shares(&lock) {
+            let lock_status = lock.status.as_deref().unwrap_or("<missing>");
+            let lock_shares = lock
+                .shares
+                .map(|shares| shares.to_string())
+                .unwrap_or_else(|| "<missing>".to_string());
+            tracing::warn!(
+                user_id = %user_id.0,
+                subscription_id = %subscription.subscription_id,
+                last_lock_id,
+                lock_status = %lock_status,
+                lock_shares = %lock_shares,
+                "HoS effective lock is not active with staked shares; granting zero stake-based credits"
+            );
+            self.house_of_stake_stake_source_cache.write().await.insert(
+                cache_key,
+                CachedHouseOfStakeStakeSource {
+                    last_lock_id: last_lock_id.to_string(),
+                    amount_yocto: 0,
+                    cached_at: Instant::now(),
+                },
+            );
+            return Self::stake_based_credits_for_lock(plan_config, 0);
+        }
 
         let Some(lock_amount) = lock_amount_yocto(&lock) else {
             tracing::warn!(

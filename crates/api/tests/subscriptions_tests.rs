@@ -3900,66 +3900,76 @@ fn near_rpc_wiremock_hos_subscriptions_by_price(
     }
 }
 
-#[tokio::test]
-#[serial(subscription_tests)]
-async fn test_house_of_stake_credits_use_effective_lock_amount_after_projected_downgrade() {
+async fn assert_house_of_stake_credits_for_effective_lock(
+    effective_lock: serde_json::Value,
+    expected_plan_credits: i64,
+    near_email: &str,
+    assertion_message: &str,
+) {
     clear_proxy_env_for_local_wiremock();
     let mock = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/"))
-        .respond_with(|req: &wiremock::Request| {
-            use base64::{engine::general_purpose::STANDARD, Engine};
+        .respond_with({
+            let effective_lock = effective_lock.clone();
+            move |req: &wiremock::Request| {
+                use base64::{engine::general_purpose::STANDARD, Engine};
 
-            let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or(json!({}));
-            let empty = json!({});
-            let params = body.get("params").unwrap_or(&empty);
-            let method_name = params
-                .get("method_name")
-                .and_then(|x| x.as_str())
-                .unwrap_or("");
-            let decoded_args = params
-                .get("args_base64")
-                .and_then(|x| x.as_str())
-                .and_then(|args| STANDARD.decode(args).ok())
-                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                .unwrap_or_default();
+                let body: serde_json::Value =
+                    serde_json::from_slice(&req.body).unwrap_or(json!({}));
+                let empty = json!({});
+                let params = body.get("params").unwrap_or(&empty);
+                let method_name = params
+                    .get("method_name")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("");
+                let decoded_args = params
+                    .get("args_base64")
+                    .and_then(|x| x.as_str())
+                    .and_then(|args| STANDARD.decode(args).ok())
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                    .unwrap_or_default();
 
-            match method_name {
-                "get_subscription_for_price" => {
-                    ResponseTemplate::new(200).set_body_json(near_rpc_call_function_body(&json!({
-                        "subscription_id": "sub_chain_hos_effective_credits",
-                        "price_id": "price_hos_basic",
-                        "last_lock_id": "lock_chain_hos_effective_credits",
-                        "end_ns": "2000000000000000000",
-                        "status": "Active",
-                        "cancel_at_period_end": false,
-                        "pending_update": {
-                            "target_price_id": null,
-                            "target_amount": "10000000000000000000000000",
-                            "apply_ns": "1000000000000000000"
-                        }
-                    })))
-                }
-                "get_lock" => {
-                    assert_eq!(
-                        decoded_args.get("lock_id").and_then(|x| x.as_str()),
-                        Some("lock_chain_hos_effective_credits")
-                    );
-                    let amount_near =
-                        if decoded_args.get("effective").and_then(|x| x.as_bool()) == Some(true) {
-                            "10000000000000000000000000"
+                match method_name {
+                    "get_subscription_for_price" => ResponseTemplate::new(200).set_body_json(
+                        near_rpc_call_function_body(&json!({
+                            "subscription_id": "sub_chain_hos_effective_credits",
+                            "price_id": "price_hos_basic",
+                            "last_lock_id": "lock_chain_hos_effective_credits",
+                            "end_ns": "2000000000000000000",
+                            "status": "Active",
+                            "cancel_at_period_end": false,
+                            "pending_update": {
+                                "target_price_id": null,
+                                "target_amount": "10000000000000000000000000",
+                                "apply_ns": "1000000000000000000"
+                            }
+                        })),
+                    ),
+                    "get_lock" => {
+                        assert_eq!(
+                            decoded_args.get("lock_id").and_then(|x| x.as_str()),
+                            Some("lock_chain_hos_effective_credits")
+                        );
+                        let lock = if decoded_args.get("effective").and_then(|x| x.as_bool())
+                            == Some(true)
+                        {
+                            effective_lock.clone()
                         } else {
-                            "100000000000000000000000000"
+                            json!({
+                                "lock_id": "lock_chain_hos_effective_credits",
+                                "amount_near": "100000000000000000000000000",
+                                "status": "Active",
+                                "shares": "100000000000000000000000000"
+                            })
                         };
-                    ResponseTemplate::new(200).set_body_json(near_rpc_call_function_body(&json!({
-                        "lock_id": "lock_chain_hos_effective_credits",
-                        "amount_near": amount_near
-                    })))
+                        ResponseTemplate::new(200).set_body_json(near_rpc_call_function_body(&lock))
+                    }
+                    _ => ResponseTemplate::new(500).set_body_json(json!({
+                        "error": "unexpected NEAR RPC mock",
+                        "method_name": method_name
+                    })),
                 }
-                _ => ResponseTemplate::new(500).set_body_json(json!({
-                    "error": "unexpected NEAR RPC mock",
-                    "method_name": method_name
-                })),
             }
         })
         .mount(&mock)
@@ -3986,7 +3996,6 @@ async fn test_house_of_stake_credits_use_effective_lock_amount_after_projected_d
     )
     .await;
 
-    let near_email = "hos_effective_credits.testnet@near";
     let login = json!({
         "email": near_email,
         "name": "HoS Effective Credits",
@@ -4013,9 +4022,43 @@ async fn test_house_of_stake_credits_use_effective_lock_amount_after_projected_d
     let body: serde_json::Value = response.json();
     assert_eq!(
         body.get("plan_credits").and_then(|x| x.as_i64()),
-        Some(5_000_000_000),
-        "10 effective staked NEAR at $0.50/NEAR should grant $5 plan credits"
+        Some(expected_plan_credits),
+        "{assertion_message}"
     );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_house_of_stake_credits_use_effective_lock_amount_after_projected_downgrade() {
+    assert_house_of_stake_credits_for_effective_lock(
+        json!({
+            "lock_id": "lock_chain_hos_effective_credits",
+            "amount_near": "10000000000000000000000000",
+            "status": "Active",
+            "shares": "10000000000000000000000000"
+        }),
+        5_000_000_000,
+        "hos_effective_credits.testnet@near",
+        "10 effective staked NEAR at $0.50/NEAR should grant $5 plan credits",
+    )
+    .await;
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_house_of_stake_credits_zero_for_effective_lock_with_no_active_shares() {
+    assert_house_of_stake_credits_for_effective_lock(
+        json!({
+            "lock_id": "lock_chain_hos_effective_credits",
+            "amount_near": "30000000000000000000000000",
+            "status": "UnlockRequested",
+            "shares": "0"
+        }),
+        0,
+        "hos_effective_zero_shares.testnet@near",
+        "effective locks with no active shares must grant zero stake-based credits",
+    )
+    .await;
 }
 
 #[test]
