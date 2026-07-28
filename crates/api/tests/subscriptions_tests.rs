@@ -3716,6 +3716,13 @@ fn near_rpc_hos_catalog_respond_with_pending_update(
         .get("method_name")
         .and_then(|x| x.as_str())
         .unwrap_or("");
+    let decoded_args = params
+        .get("args_base64")
+        .and_then(|x| x.as_str())
+        .and_then(|args| STANDARD.decode(args).ok())
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .unwrap_or_default();
+
     match method_name {
         "get_subscription_for_price" => {
             let mut sub = json!({
@@ -3736,16 +3743,7 @@ fn near_rpc_hos_catalog_respond_with_pending_update(
             ResponseTemplate::new(200).set_body_json(near_rpc_call_function_body(&sub))
         }
         "get_price" => {
-            let args_b64 = params
-                .get("args_base64")
-                .and_then(|x| x.as_str())
-                .unwrap_or("");
-            let decoded = STANDARD
-                .decode(args_b64)
-                .ok()
-                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                .unwrap_or_default();
-            let pid = decoded
+            let pid = decoded_args
                 .get("price_id")
                 .and_then(|x| x.as_str())
                 .unwrap_or("");
@@ -3757,6 +3755,10 @@ fn near_rpc_hos_catalog_respond_with_pending_update(
             ResponseTemplate::new(200).set_body_json(near_rpc_call_function_body(price))
         }
         "get_lock" => {
+            assert!(
+                decoded_args.get("effective").is_none(),
+                "HoS change-plan quote must use the stored lock amount, not the effective projection"
+            );
             let amount_near = if active_price_id == "price_hos_pro" {
                 "2000000000000000000000000"
             } else {
@@ -3896,6 +3898,167 @@ fn near_rpc_wiremock_hos_subscriptions_by_price(
             _ => ResponseTemplate::new(500).set_body_json(json!({ "error": "unmocked NEAR RPC" })),
         }
     }
+}
+
+async fn assert_house_of_stake_credits_for_effective_lock(
+    effective_lock: serde_json::Value,
+    expected_plan_credits: i64,
+    near_email: &str,
+    assertion_message: &str,
+) {
+    clear_proxy_env_for_local_wiremock();
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with({
+            let effective_lock = effective_lock.clone();
+            move |req: &wiremock::Request| {
+                use base64::{engine::general_purpose::STANDARD, Engine};
+
+                let body: serde_json::Value =
+                    serde_json::from_slice(&req.body).unwrap_or(json!({}));
+                let empty = json!({});
+                let params = body.get("params").unwrap_or(&empty);
+                let method_name = params
+                    .get("method_name")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("");
+                let decoded_args = params
+                    .get("args_base64")
+                    .and_then(|x| x.as_str())
+                    .and_then(|args| STANDARD.decode(args).ok())
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                    .unwrap_or_default();
+
+                match method_name {
+                    "get_subscription_for_price" => ResponseTemplate::new(200).set_body_json(
+                        near_rpc_call_function_body(&json!({
+                            "subscription_id": "sub_chain_hos_effective_credits",
+                            "price_id": "price_hos_basic",
+                            "last_lock_id": "lock_chain_hos_effective_credits",
+                            "end_ns": "2000000000000000000",
+                            "status": "Active",
+                            "cancel_at_period_end": false,
+                            "pending_update": {
+                                "target_price_id": null,
+                                "target_amount": "10000000000000000000000000",
+                                "apply_ns": "1000000000000000000"
+                            }
+                        })),
+                    ),
+                    "get_lock" => {
+                        assert_eq!(
+                            decoded_args.get("lock_id").and_then(|x| x.as_str()),
+                            Some("lock_chain_hos_effective_credits")
+                        );
+                        let lock = if decoded_args.get("effective").and_then(|x| x.as_bool())
+                            == Some(true)
+                        {
+                            effective_lock.clone()
+                        } else {
+                            json!({
+                                "lock_id": "lock_chain_hos_effective_credits",
+                                "amount_near": "100000000000000000000000000",
+                                "status": "Active",
+                                "shares": "100000000000000000000000000"
+                            })
+                        };
+                        ResponseTemplate::new(200).set_body_json(near_rpc_call_function_body(&lock))
+                    }
+                    _ => ResponseTemplate::new(500).set_body_json(json!({
+                        "error": "unexpected NEAR RPC mock",
+                        "method_name": method_name
+                    })),
+                }
+            }
+        })
+        .mount(&mock)
+        .await;
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        near_rpc_url: Some(mock.uri().to_string()),
+        near_staking_contract_id: Some("staking.testnet".to_string()),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": { "house-of-stake": { "price_id": "price_hos_basic" } },
+                "agent_instances": { "max": 2 },
+                "stake_based_monthly_credits": {
+                    "credits_per_staked_near_nano_usd": 500000000
+                }
+            }
+        }),
+    )
+    .await;
+
+    let login = json!({
+        "email": near_email,
+        "name": "HoS Effective Credits",
+        "oauth_provider": "near"
+    });
+    let response = server.post("/v1/auth/mock-login").json(&login).await;
+    let token = response.json::<serde_json::Value>()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    cleanup_user_subscriptions(&db, near_email).await;
+    insert_house_of_stake_subscription_for_existing_user(&db, near_email, "price_hos_basic", false)
+        .await;
+
+    let response = server
+        .get("/v1/credits")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 200, "{}", response.text());
+    let body: serde_json::Value = response.json();
+    assert_eq!(
+        body.get("plan_credits").and_then(|x| x.as_i64()),
+        Some(expected_plan_credits),
+        "{assertion_message}"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_house_of_stake_credits_use_effective_lock_amount_after_projected_downgrade() {
+    assert_house_of_stake_credits_for_effective_lock(
+        json!({
+            "lock_id": "lock_chain_hos_effective_credits",
+            "amount_near": "10000000000000000000000000",
+            "status": "Active",
+            "shares": "10000000000000000000000000"
+        }),
+        5_000_000_000,
+        "hos_effective_credits.testnet@near",
+        "10 effective staked NEAR at $0.50/NEAR should grant $5 plan credits",
+    )
+    .await;
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_house_of_stake_credits_zero_for_effective_lock_with_no_active_shares() {
+    assert_house_of_stake_credits_for_effective_lock(
+        json!({
+            "lock_id": "lock_chain_hos_effective_credits",
+            "amount_near": "30000000000000000000000000",
+            "status": "UnlockRequested",
+            "shares": "0"
+        }),
+        0,
+        "hos_effective_zero_shares.testnet@near",
+        "effective locks with no active shares must grant zero stake-based credits",
+    )
+    .await;
 }
 
 #[test]
