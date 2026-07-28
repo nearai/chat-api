@@ -3640,6 +3640,31 @@ pub struct MigrateInstanceResponse {
     pub message: String,
 }
 
+/// ironclaw-dind tags exist and are allow-listed contiguously from 0.23.0 up.
+/// Legacy agents on anything older deduce to a tag that doesn't exist / isn't
+/// allow-listed, so migrate jumps them to a supported tag instead.
+const MIGRATE_MIN_ASIS_DIND_VERSION: (u64, u64, u64) = (0, 23, 0);
+const MIGRATE_FALLBACK_DIND_VERSION: &str = "0.29.1";
+
+/// True if `ver` ("major.minor.patch", optional leading 'v' / trailing suffix)
+/// is below `floor`. Unparseable versions count as below — safest is to upgrade
+/// an unrecognized legacy version to the supported tag.
+fn ironclaw_version_below(ver: &str, floor: (u64, u64, u64)) -> bool {
+    fn num(part: Option<&str>) -> Option<u64> {
+        let digits: String = part?.chars().take_while(|c| c.is_ascii_digit()).collect();
+        digits.parse().ok()
+    }
+    let mut parts = ver.trim().trim_start_matches('v').split('.');
+    match (
+        num(parts.next()),
+        num(parts.next()),
+        num(parts.next().or(Some("0"))),
+    ) {
+        (Some(a), Some(b), Some(c)) => (a, b, c) < floor,
+        _ => true,
+    }
+}
+
 /// Admin endpoint: Migrate a single instance from legacy compose-api to CrabShack
 pub async fn admin_migrate_instance(
     State(app_state): State<AppState>,
@@ -3969,7 +3994,7 @@ pub async fn admin_migrate_instance(
         );
         let mut fallback = default_image;
         if fallback == "docker.io/nearaidev/ironclaw-dind:latest" {
-            fallback = "docker.io/nearaidev/ironclaw-dind:0.29.1".to_string();
+            fallback = format!("docker.io/nearaidev/ironclaw-dind:{MIGRATE_FALLBACK_DIND_VERSION}");
         }
         tracing::info!(
             "Migrate: backup_url provided, using default image={}, instance_id={}",
@@ -4025,13 +4050,31 @@ pub async fn admin_migrate_instance(
                 Some((b, tag)) if !tag.contains('/') => b,
                 _ => &default_image,
             };
-            let img = format!("{}:{}", base, ver);
-            tracing::info!("Migrate: resolved image={}, instance_id={}", img, id);
+            // The version floor is ironclaw-dind release semantics; other
+            // service types (openclaw) use a different base and date-based
+            // tags, so leave their deduced tag untouched. Below the oldest
+            // usable dind tag the deduced image doesn't exist / isn't
+            // allow-listed, so jump to a supported tag instead.
+            let is_ironclaw = service_type == "ironclaw" || service_type.starts_with("ironclaw-");
+            let tag = if is_ironclaw && ironclaw_version_below(&ver, MIGRATE_MIN_ASIS_DIND_VERSION)
+            {
+                MIGRATE_FALLBACK_DIND_VERSION
+            } else {
+                ver.as_str()
+            };
+            let img = format!("{}:{}", base, tag);
+            tracing::info!(
+                "Migrate: resolved image={} (deduced version={}), instance_id={}",
+                img,
+                ver,
+                id
+            );
             img
         } else {
             let mut fallback = default_image;
             if fallback == "docker.io/nearaidev/ironclaw-dind:latest" {
-                fallback = "docker.io/nearaidev/ironclaw-dind:0.29.1".to_string();
+                fallback =
+                    format!("docker.io/nearaidev/ironclaw-dind:{MIGRATE_FALLBACK_DIND_VERSION}");
             }
             tracing::info!(
                 "Migrate: version query failed, using default image={}, instance_id={}",
@@ -4936,4 +4979,47 @@ pub fn create_admin_router() -> Router<AppState> {
                 .route("/usage", get(bi_usage))
                 .route("/usage/top", get(bi_top_consumers)),
         )
+}
+
+#[cfg(test)]
+mod migrate_version_tests {
+    use super::{ironclaw_version_below, MIGRATE_MIN_ASIS_DIND_VERSION};
+
+    const FLOOR: (u64, u64, u64) = MIGRATE_MIN_ASIS_DIND_VERSION;
+
+    #[test]
+    fn below_floor_versions_upgrade() {
+        // Legacy agents with no usable dind tag (< 0.23.0, incl. the 0.22.0 gap).
+        for v in ["0.0.1", "0.19.0", "0.21.0", "0.22.0", "0.22.9"] {
+            assert!(
+                ironclaw_version_below(v, FLOOR),
+                "{v} should be below floor"
+            );
+        }
+    }
+
+    #[test]
+    fn floor_and_above_map_as_is() {
+        for v in [
+            "0.23.0", "0.24.0", "0.25.0", "0.28.2", "0.29.0", "0.29.1", "1.0.0",
+        ] {
+            assert!(!ironclaw_version_below(v, FLOOR), "{v} should map as-is");
+        }
+    }
+
+    #[test]
+    fn unparseable_or_partial_versions_upgrade() {
+        // Unknown/garbage versions fall back to the supported tag.
+        for v in ["", "latest", "garbage", "0"] {
+            assert!(ironclaw_version_below(v, FLOOR), "{v} should upgrade");
+        }
+    }
+
+    #[test]
+    fn missing_patch_and_suffix_handled() {
+        assert!(ironclaw_version_below("0.22", FLOOR));
+        assert!(!ironclaw_version_below("0.23", FLOOR));
+        assert!(!ironclaw_version_below("v0.29.1", FLOOR));
+        assert!(!ironclaw_version_below("0.29.1-rc1", FLOOR));
+    }
 }
