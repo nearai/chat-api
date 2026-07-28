@@ -64,6 +64,16 @@ where
     })
 }
 
+fn deserialize_optional_u128<'de, D>(deserializer: D) -> Result<Option<u128>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let Some(value) = Option::<IntegerStringOrNumber>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    parse_u128_value::<D>(value).map(Some)
+}
+
 fn deserialize_required_yocto_near<'de, D>(deserializer: D) -> Result<YoctoNear, D::Error>
 where
     D: Deserializer<'de>,
@@ -101,6 +111,8 @@ struct GetPurchaseArgs<'a> {
 #[derive(Debug, Clone, Serialize)]
 struct GetLockArgs<'a> {
     lock_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effective: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -199,6 +211,10 @@ pub struct NearStakingPurchase {
 pub struct NearStakingLock {
     #[serde(default, deserialize_with = "deserialize_optional_yocto_near")]
     pub amount_near: Option<YoctoNear>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_u128")]
+    pub shares: Option<u128>,
 }
 
 async fn view_call<Args, Response>(
@@ -311,12 +327,47 @@ pub async fn view_get_lock(
     contract_id: &str,
     lock_id: &str,
 ) -> Result<Option<NearStakingLock>, String> {
-    view_call(rpc_url, contract_id, "get_lock", GetLockArgs { lock_id }).await
+    view_call(
+        rpc_url,
+        contract_id,
+        "get_lock",
+        GetLockArgs {
+            lock_id,
+            effective: None,
+        },
+    )
+    .await
+}
+
+/// Fetch `get_lock(lock_id, effective=true)` for HoS entitlement reads that
+/// need due subscription downgrades projected without mutating contract state.
+pub async fn view_get_effective_lock(
+    rpc_url: &str,
+    contract_id: &str,
+    lock_id: &str,
+) -> Result<Option<NearStakingLock>, String> {
+    view_call(
+        rpc_url,
+        contract_id,
+        "get_lock",
+        GetLockArgs {
+            lock_id,
+            effective: Some(true),
+        },
+    )
+    .await
 }
 
 /// Parse lock `amount_near` field as yoctoNEAR integer.
 pub fn lock_amount_yocto(lock: &NearStakingLock) -> Option<u128> {
     lock.amount_near.map(YoctoNear::as_u128)
+}
+
+pub fn lock_has_active_shares(lock: &NearStakingLock) -> bool {
+    lock.status
+        .as_deref()
+        .is_some_and(|status| status.eq_ignore_ascii_case("active"))
+        && lock.shares.is_some_and(|shares| shares > 0)
 }
 
 /// Map stake.dao `Subscription` into our DB [`Subscription`] row (`provider = house-of-stake`).
@@ -361,20 +412,24 @@ pub fn subscription_row_from_chain(
         .map(ts_ns_to_datetime)
         .transpose()?;
 
-    let (pd_target, pd_from, pd_end, pd_status) = if let Some(ref tgt) = pending_down {
-        (
-            Some(tgt.clone()),
-            Some(price_id.clone()),
-            Some(pending_apply_at.unwrap_or(current_period_end)),
-            Some(DowngradeIntentStatus::Pending),
-        )
-    } else if has_stake_only_pending_update {
-        (
-            None,
-            Some(price_id.clone()),
-            Some(pending_apply_at.unwrap_or(current_period_end)),
-            Some(DowngradeIntentStatus::Pending),
-        )
+    let (pd_target, pd_from, pd_end, pd_status) = if status == "active" {
+        if let Some(ref tgt) = pending_down {
+            (
+                Some(tgt.clone()),
+                Some(price_id.clone()),
+                Some(pending_apply_at.unwrap_or(current_period_end)),
+                Some(DowngradeIntentStatus::Pending),
+            )
+        } else if has_stake_only_pending_update {
+            (
+                None,
+                Some(price_id.clone()),
+                Some(pending_apply_at.unwrap_or(current_period_end)),
+                Some(DowngradeIntentStatus::Pending),
+            )
+        } else {
+            (None, None, None, None)
+        }
     } else {
         (None, None, None, None)
     };
@@ -470,6 +525,91 @@ mod tests {
         assert!(out.is_none());
     }
 
+    #[tokio::test]
+    async fn view_get_effective_lock_sends_effective_true() {
+        for k in [
+            "http_proxy",
+            "https_proxy",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "all_proxy",
+        ] {
+            std::env::remove_var(k);
+        }
+        std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(|req: &wiremock::Request| {
+                use base64::{engine::general_purpose::STANDARD, Engine};
+
+                let body: Value = serde_json::from_slice(&req.body).expect("request body");
+                let params = body.get("params").expect("query params");
+                assert_eq!(
+                    params.get("method_name").and_then(|x| x.as_str()),
+                    Some("get_lock")
+                );
+                let decoded = params
+                    .get("args_base64")
+                    .and_then(|x| x.as_str())
+                    .and_then(|args| STANDARD.decode(args).ok())
+                    .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                    .expect("decoded args");
+                assert_eq!(
+                    decoded.get("lock_id").and_then(|x| x.as_str()),
+                    Some("lock_effective")
+                );
+                assert_eq!(
+                    decoded.get("effective").and_then(|x| x.as_bool()),
+                    Some(true)
+                );
+
+                ResponseTemplate::new(200).set_body_json(call_function_query_response(&json!({
+                    "amount_near": "10000000000000000000000000"
+                })))
+            })
+            .mount(&mock)
+            .await;
+
+        let url = mock.uri();
+        let out = view_get_effective_lock(&url, "staking.testnet", "lock_effective")
+            .await
+            .expect("rpc client")
+            .expect("lock");
+        assert_eq!(
+            lock_amount_yocto(&out),
+            Some(10_000_000_000_000_000_000_000_000)
+        );
+    }
+
+    #[test]
+    fn lock_has_active_shares_requires_active_status_and_nonzero_shares() {
+        let active: NearStakingLock = serde_json::from_value(json!({
+            "amount_near": "30000000000000000000000000",
+            "status": "Active",
+            "shares": "1"
+        }))
+        .expect("active lock");
+        assert!(lock_has_active_shares(&active));
+
+        let unlock_requested: NearStakingLock = serde_json::from_value(json!({
+            "amount_near": "30000000000000000000000000",
+            "status": "UnlockRequested",
+            "shares": "1"
+        }))
+        .expect("unlock requested lock");
+        assert!(!lock_has_active_shares(&unlock_requested));
+
+        let zero_shares: NearStakingLock = serde_json::from_value(json!({
+            "amount_near": "30000000000000000000000000",
+            "status": "Active",
+            "shares": "0"
+        }))
+        .expect("zero-share lock");
+        assert!(!lock_has_active_shares(&zero_shares));
+    }
+
     #[test]
     fn subscription_row_marks_cancel_at_period_end_row_canceled_after_period_end() {
         let past_end_ns = (Utc::now() - chrono::Duration::hours(1))
@@ -544,6 +684,34 @@ mod tests {
         );
         assert!(row.pending_downgrade_expected_period_end.is_some());
         assert!(row.pending_downgrade_updated_at.is_some());
+    }
+
+    #[test]
+    fn subscription_row_clears_pending_update_for_canceled_status() {
+        let future_end_ns = (Utc::now() + chrono::Duration::hours(1))
+            .timestamp_nanos_opt()
+            .expect("timestamp nanos")
+            .to_string();
+        let chain = chain_subscription(json!({
+            "subscription_id": "sub_hos_canceled_pending",
+            "price_id": "price_hos_pro",
+            "end_ns": future_end_ns,
+            "status": "Expired",
+            "pending_update": {
+                "target_price_id": "price_hos_basic",
+                "target_amount": null,
+                "apply_ns": future_end_ns
+            }
+        }));
+        let row = subscription_row_from_chain(UserId(Uuid::new_v4()), "alice.testnet", &chain)
+            .expect("parse chain subscription");
+
+        assert_eq!(row.status, "canceled");
+        assert_eq!(row.pending_downgrade_target_price_id, None);
+        assert_eq!(row.pending_downgrade_from_price_id, None);
+        assert_eq!(row.pending_downgrade_expected_period_end, None);
+        assert_eq!(row.pending_downgrade_status, None);
+        assert_eq!(row.pending_downgrade_updated_at, None);
     }
 
     #[test]

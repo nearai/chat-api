@@ -1,7 +1,8 @@
 use super::near_staking::{
-    lock_amount_yocto, subscription_row_from_chain, view_get_lock, view_get_price,
-    view_get_purchase, view_get_subscription_for_price, view_storage_balance_bounds,
-    view_storage_balance_of, NearStakingStorageBalance, NearStakingStorageBalanceBounds,
+    lock_amount_yocto, lock_has_active_shares, subscription_row_from_chain,
+    view_get_effective_lock, view_get_lock, view_get_price, view_get_purchase,
+    view_get_subscription_for_price, view_storage_balance_bounds, view_storage_balance_of,
+    NearStakingStorageBalance, NearStakingStorageBalanceBounds,
 };
 use super::ports::{
     BillingCycleAnchor, BillingPeriod, CancelSubscriptionOutcome, ChangePlanOutcome,
@@ -1103,28 +1104,54 @@ impl SubscriptionServiceImpl {
             return None;
         };
 
-        let lock = match view_get_lock(&self.near_rpc_url, contract_id, last_lock_id).await {
-            Ok(Some(lock)) => lock,
-            Ok(None) => {
-                tracing::warn!(
-                    user_id = %user_id.0,
-                    subscription_id = %subscription.subscription_id,
-                    last_lock_id,
-                    "cannot resolve HoS stake-based credits: lock missing on chain"
-                );
-                return None;
-            }
-            Err(err) => {
-                tracing::warn!(
-                    user_id = %user_id.0,
-                    subscription_id = %subscription.subscription_id,
-                    last_lock_id,
-                    error = %err,
-                    "cannot resolve HoS stake-based credits: lock RPC failed"
-                );
-                return None;
-            }
-        };
+        let lock =
+            match view_get_effective_lock(&self.near_rpc_url, contract_id, last_lock_id).await {
+                Ok(Some(lock)) => lock,
+                Ok(None) => {
+                    tracing::warn!(
+                        user_id = %user_id.0,
+                        subscription_id = %subscription.subscription_id,
+                        last_lock_id,
+                        "cannot resolve HoS stake-based credits: lock missing on chain"
+                    );
+                    return None;
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        user_id = %user_id.0,
+                        subscription_id = %subscription.subscription_id,
+                        last_lock_id,
+                        error = %err,
+                        "cannot resolve HoS stake-based credits: lock RPC failed"
+                    );
+                    return None;
+                }
+            };
+
+        if !lock_has_active_shares(&lock) {
+            let lock_status = lock.status.as_deref().unwrap_or("<missing>");
+            let lock_shares = lock
+                .shares
+                .map(|shares| shares.to_string())
+                .unwrap_or_else(|| "<missing>".to_string());
+            tracing::warn!(
+                user_id = %user_id.0,
+                subscription_id = %subscription.subscription_id,
+                last_lock_id,
+                lock_status = %lock_status,
+                lock_shares = %lock_shares,
+                "HoS effective lock is not active with staked shares; granting zero stake-based credits"
+            );
+            self.house_of_stake_stake_source_cache.write().await.insert(
+                cache_key,
+                CachedHouseOfStakeStakeSource {
+                    last_lock_id: last_lock_id.to_string(),
+                    amount_yocto: 0,
+                    cached_at: Instant::now(),
+                },
+            );
+            return Self::stake_based_credits_for_lock(plan_config, 0);
+        }
 
         let Some(lock_amount) = lock_amount_yocto(&lock) else {
             tracing::warn!(
@@ -1502,22 +1529,6 @@ impl SubscriptionServiceImpl {
         let has_active_non_hos = subs
             .iter()
             .any(|s| Self::is_active_or_trialing(&s.status) && s.provider != "house-of-stake");
-        let hos_subscription_ids: Vec<String> = subs
-            .iter()
-            .filter(|s| s.provider == "house-of-stake")
-            .map(|s| s.subscription_id.clone())
-            .collect();
-
-        if has_active_non_hos && hos_subscription_ids.is_empty() {
-            return Ok(Self::hos_reconcile_summary(
-                false,
-                0,
-                0,
-                false,
-                Some(NEAR_STAKING_SYNC_SKIPPED_REASON_UPSERT_BLOCKED_NON_HOS),
-            ));
-        }
-
         let configs = self
             .system_configs_service
             .get_configs()
@@ -1573,17 +1584,29 @@ impl SubscriptionServiceImpl {
         .await;
 
         let mut raw = None;
+        let mut active_raw = None;
+        let mut active_end_ns = 0;
         let mut first_err = None;
         for (_, result) in &probe_results {
             match result {
                 Ok(Some(v)) => {
-                    raw = Some(v.clone());
-                    break;
+                    if raw.is_none() {
+                        raw = Some(v.clone());
+                    }
+                    let candidate = subscription_row_from_chain(user_id, &near_account, v)
+                        .map_err(SubscriptionError::InternalError)?;
+                    if Self::is_active_or_trialing(&candidate.status) && v.end_ns >= active_end_ns {
+                        active_end_ns = v.end_ns;
+                        active_raw = Some(v.clone());
+                    }
                 }
                 Ok(None) => {}
                 Err(e) if first_err.is_none() => first_err = Some(e.clone()),
                 Err(_) => {}
             }
+        }
+        if active_raw.is_some() {
+            raw = active_raw;
         }
         if raw.is_none() {
             if let Some(err) = first_err {
@@ -1633,10 +1656,12 @@ impl SubscriptionServiceImpl {
         let row = subscription_row_from_chain(user_id, &near_account, chain_subscription)
             .map_err(SubscriptionError::InternalError)?;
 
-        // Do not insert/update a HoS row while a non-HoS subscription is active/trialing locally:
+        // Do not insert/update an active HoS row while a non-HoS subscription is active/trialing locally:
         // `get_active_subscription` picks newest `created_at`, so a fresh HoS upsert could wrongly
         // become the "active" row for Stripe-primary users who also staked on-chain separately.
-        if has_active_non_hos {
+        // Canceled/expired chain rows are safe to upsert as history and allow restoring HoS rows
+        // that were deleted before canceled history was preserved locally.
+        if has_active_non_hos && Self::is_active_or_trialing(&row.status) {
             let active_hos_subscriptions: Vec<Subscription> = subs
                 .iter()
                 .filter(|s| {

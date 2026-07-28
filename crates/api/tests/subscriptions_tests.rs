@@ -3716,6 +3716,13 @@ fn near_rpc_hos_catalog_respond_with_pending_update(
         .get("method_name")
         .and_then(|x| x.as_str())
         .unwrap_or("");
+    let decoded_args = params
+        .get("args_base64")
+        .and_then(|x| x.as_str())
+        .and_then(|args| STANDARD.decode(args).ok())
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .unwrap_or_default();
+
     match method_name {
         "get_subscription_for_price" => {
             let mut sub = json!({
@@ -3736,16 +3743,7 @@ fn near_rpc_hos_catalog_respond_with_pending_update(
             ResponseTemplate::new(200).set_body_json(near_rpc_call_function_body(&sub))
         }
         "get_price" => {
-            let args_b64 = params
-                .get("args_base64")
-                .and_then(|x| x.as_str())
-                .unwrap_or("");
-            let decoded = STANDARD
-                .decode(args_b64)
-                .ok()
-                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                .unwrap_or_default();
-            let pid = decoded
+            let pid = decoded_args
                 .get("price_id")
                 .and_then(|x| x.as_str())
                 .unwrap_or("");
@@ -3757,6 +3755,10 @@ fn near_rpc_hos_catalog_respond_with_pending_update(
             ResponseTemplate::new(200).set_body_json(near_rpc_call_function_body(price))
         }
         "get_lock" => {
+            assert!(
+                decoded_args.get("effective").is_none(),
+                "HoS change-plan quote must use the stored lock amount, not the effective projection"
+            );
             let amount_near = if active_price_id == "price_hos_pro" {
                 "2000000000000000000000000"
             } else {
@@ -3860,6 +3862,203 @@ fn near_rpc_wiremock_hos_subscription_by_price(
             _ => ResponseTemplate::new(500).set_body_json(json!({ "error": "unmocked NEAR RPC" })),
         }
     }
+}
+
+fn near_rpc_wiremock_hos_subscriptions_by_price(
+    subscriptions_by_price: Vec<(&'static str, serde_json::Value)>,
+) -> impl wiremock::Respond {
+    move |req: &wiremock::Request| {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+
+        let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or(json!({}));
+        let empty = json!({});
+        let params = body.get("params").unwrap_or(&empty);
+        match params.get("method_name").and_then(|x| x.as_str()) {
+            Some("get_subscription_for_price") => {
+                let args_b64 = params
+                    .get("args_base64")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("");
+                let decoded = STANDARD
+                    .decode(args_b64)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                    .unwrap_or_default();
+                let price_id = decoded
+                    .get("price_id")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("");
+                let result = subscriptions_by_price
+                    .iter()
+                    .find(|(configured_price_id, _)| *configured_price_id == price_id)
+                    .map(|(_, subscription)| subscription.clone())
+                    .unwrap_or(serde_json::Value::Null);
+                ResponseTemplate::new(200).set_body_json(near_rpc_call_function_body(&result))
+            }
+            _ => ResponseTemplate::new(500).set_body_json(json!({ "error": "unmocked NEAR RPC" })),
+        }
+    }
+}
+
+async fn assert_house_of_stake_credits_for_effective_lock(
+    effective_lock: serde_json::Value,
+    expected_plan_credits: i64,
+    near_email: &str,
+    assertion_message: &str,
+) {
+    clear_proxy_env_for_local_wiremock();
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with({
+            let effective_lock = effective_lock.clone();
+            move |req: &wiremock::Request| {
+                use base64::{engine::general_purpose::STANDARD, Engine};
+
+                let body: serde_json::Value =
+                    serde_json::from_slice(&req.body).unwrap_or(json!({}));
+                let empty = json!({});
+                let params = body.get("params").unwrap_or(&empty);
+                let method_name = params
+                    .get("method_name")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("");
+                let decoded_args = params
+                    .get("args_base64")
+                    .and_then(|x| x.as_str())
+                    .and_then(|args| STANDARD.decode(args).ok())
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                    .unwrap_or_default();
+
+                match method_name {
+                    "get_subscription_for_price" => ResponseTemplate::new(200).set_body_json(
+                        near_rpc_call_function_body(&json!({
+                            "subscription_id": "sub_chain_hos_effective_credits",
+                            "price_id": "price_hos_basic",
+                            "last_lock_id": "lock_chain_hos_effective_credits",
+                            "end_ns": "2000000000000000000",
+                            "status": "Active",
+                            "cancel_at_period_end": false,
+                            "pending_update": {
+                                "target_price_id": null,
+                                "target_amount": "10000000000000000000000000",
+                                "apply_ns": "1000000000000000000"
+                            }
+                        })),
+                    ),
+                    "get_lock" => {
+                        assert_eq!(
+                            decoded_args.get("lock_id").and_then(|x| x.as_str()),
+                            Some("lock_chain_hos_effective_credits")
+                        );
+                        let lock = if decoded_args.get("effective").and_then(|x| x.as_bool())
+                            == Some(true)
+                        {
+                            effective_lock.clone()
+                        } else {
+                            json!({
+                                "lock_id": "lock_chain_hos_effective_credits",
+                                "amount_near": "100000000000000000000000000",
+                                "status": "Active",
+                                "shares": "100000000000000000000000000"
+                            })
+                        };
+                        ResponseTemplate::new(200).set_body_json(near_rpc_call_function_body(&lock))
+                    }
+                    _ => ResponseTemplate::new(500).set_body_json(json!({
+                        "error": "unexpected NEAR RPC mock",
+                        "method_name": method_name
+                    })),
+                }
+            }
+        })
+        .mount(&mock)
+        .await;
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        near_rpc_url: Some(mock.uri().to_string()),
+        near_staking_contract_id: Some("staking.testnet".to_string()),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": { "house-of-stake": { "price_id": "price_hos_basic" } },
+                "agent_instances": { "max": 2 },
+                "stake_based_monthly_credits": {
+                    "credits_per_staked_near_nano_usd": 500000000
+                }
+            }
+        }),
+    )
+    .await;
+
+    let login = json!({
+        "email": near_email,
+        "name": "HoS Effective Credits",
+        "oauth_provider": "near"
+    });
+    let response = server.post("/v1/auth/mock-login").json(&login).await;
+    let token = response.json::<serde_json::Value>()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    cleanup_user_subscriptions(&db, near_email).await;
+    insert_house_of_stake_subscription_for_existing_user(&db, near_email, "price_hos_basic", false)
+        .await;
+
+    let response = server
+        .get("/v1/credits")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 200, "{}", response.text());
+    let body: serde_json::Value = response.json();
+    assert_eq!(
+        body.get("plan_credits").and_then(|x| x.as_i64()),
+        Some(expected_plan_credits),
+        "{assertion_message}"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_house_of_stake_credits_use_effective_lock_amount_after_projected_downgrade() {
+    assert_house_of_stake_credits_for_effective_lock(
+        json!({
+            "lock_id": "lock_chain_hos_effective_credits",
+            "amount_near": "10000000000000000000000000",
+            "status": "Active",
+            "shares": "10000000000000000000000000"
+        }),
+        5_000_000_000,
+        "hos_effective_credits.testnet@near",
+        "10 effective staked NEAR at $0.50/NEAR should grant $5 plan credits",
+    )
+    .await;
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_house_of_stake_credits_zero_for_effective_lock_with_no_active_shares() {
+    assert_house_of_stake_credits_for_effective_lock(
+        json!({
+            "lock_id": "lock_chain_hos_effective_credits",
+            "amount_near": "30000000000000000000000000",
+            "status": "UnlockRequested",
+            "shares": "0"
+        }),
+        0,
+        "hos_effective_zero_shares.testnet@near",
+        "effective locks with no active shares must grant zero stake-based credits",
+    )
+    .await;
 }
 
 #[test]
@@ -4591,6 +4790,136 @@ async fn test_near_staking_sync_skipped_reason_when_upsert_blocked_by_active_str
 
 #[tokio::test]
 #[serial(subscription_tests)]
+async fn test_near_staking_sync_restores_expired_hos_history_when_active_stripe_exists() {
+    clear_proxy_env_for_local_wiremock();
+    let past_ns = (Utc::now() - Duration::hours(1))
+        .timestamp_nanos_opt()
+        .expect("timestamp nanos")
+        .to_string();
+    let chain_sub = json!({
+        "subscription_id": "sub_on_chain_hos_expired_restore",
+        "price_id": "price_hos_basic",
+        "end_ns": past_ns,
+        "status": "Expired",
+        "cancel_at_period_end": false
+    });
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(near_rpc_wiremock_hos_subscription_probe_only(chain_sub))
+        .mount(&mock)
+        .await;
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        near_rpc_url: Some(mock.uri().to_string()),
+        near_staking_contract_id: Some("staking.testnet".to_string()),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": {
+                    "stripe": { "price_id": "price_test_basic" },
+                    "house-of-stake": { "price_id": "price_hos_basic" }
+                },
+                "agent_instances": { "max": 1 },
+                "monthly_credits": { "max": 1000000 }
+            }
+        }),
+    )
+    .await;
+
+    let near_email = "hos_sync_restore_expired_with_stripe.testnet@near";
+    let login = json!({
+        "email": near_email,
+        "name": "HoS Restore Expired With Stripe",
+        "oauth_provider": "near"
+    });
+    let response = server.post("/v1/auth/mock-login").json(&login).await;
+    let token = response.json::<serde_json::Value>()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    insert_test_subscription(&server, &db, near_email, false).await;
+
+    let response = server
+        .post("/v1/subscriptions/near/sync")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 200, "{}", response.text());
+    let body: serde_json::Value = response.json();
+    assert_eq!(body.get("skipped").and_then(|x| x.as_bool()), Some(false));
+    assert_eq!(
+        body.get("deleted_house_of_stake_rows")
+            .and_then(|x| x.as_u64()),
+        Some(0)
+    );
+    assert_eq!(
+        body.get("canceled_house_of_stake_rows")
+            .and_then(|x| x.as_u64()),
+        Some(0)
+    );
+    assert_eq!(
+        body.get("upserted_house_of_stake_row")
+            .and_then(|x| x.as_bool()),
+        Some(true)
+    );
+    assert!(body.get("skipped_reason").is_none());
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(near_email)
+        .await
+        .unwrap()
+        .unwrap();
+    let client = db.pool().get().await.unwrap();
+    let row = client
+        .query_one(
+            "SELECT status, current_period_end
+             FROM subscriptions
+             WHERE user_id = $1
+               AND provider = 'house-of-stake'
+               AND subscription_id = 'sub_on_chain_hos_expired_restore'",
+            &[&user.id],
+        )
+        .await
+        .expect("expired HoS history should be restored from chain");
+    assert_eq!(row.get::<_, String>("status"), "canceled");
+    assert!(row.get::<_, chrono::DateTime<Utc>>("current_period_end") <= Utc::now());
+
+    let response = server
+        .get("/v1/subscriptions?include_inactive=true")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 200, "{}", response.text());
+    let body: serde_json::Value = response.json();
+    let subscriptions = body["subscriptions"]
+        .as_array()
+        .expect("subscriptions should be an array");
+    assert!(
+        subscriptions.iter().any(|sub| {
+            sub.get("subscription_id").and_then(|v| v.as_str())
+                == Some("sub_on_chain_hos_expired_restore")
+                && sub.get("status").and_then(|v| v.as_str()) == Some("canceled")
+        }),
+        "restored expired HoS history should be listed when inactive rows are included"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
 async fn test_near_staking_sync_marks_local_hos_canceled_when_chain_returns_null() {
     clear_proxy_env_for_local_wiremock();
     let mock = MockServer::start().await;
@@ -4859,6 +5188,106 @@ async fn test_near_staking_sync_falls_back_to_configured_prices_before_canceling
     let price_id: Option<String> = row.get(1);
     assert_eq!(cnt, 1, "sync should update the existing HoS row");
     assert_eq!(price_id.as_deref(), Some("price_hos_pro"));
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_near_staking_sync_prefers_active_chain_subscription_over_expired() {
+    clear_proxy_env_for_local_wiremock();
+    let past_ns = (Utc::now() - Duration::hours(1))
+        .timestamp_nanos_opt()
+        .expect("timestamp nanos")
+        .to_string();
+    let expired_basic = json!({
+        "subscription_id": "sub_chain_hos_expired_basic",
+        "price_id": "price_hos_basic",
+        "end_ns": past_ns,
+        "status": "Expired",
+        "cancel_at_period_end": false
+    });
+    let active_pro = json!({
+        "subscription_id": "sub_chain_hos_active_pro",
+        "price_id": "price_hos_pro",
+        "end_ns": "2000000000000000000",
+        "status": "Active",
+        "cancel_at_period_end": false
+    });
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(near_rpc_wiremock_hos_subscriptions_by_price(vec![
+            ("price_hos_basic", expired_basic),
+            ("price_hos_pro", active_pro),
+        ]))
+        .mount(&mock)
+        .await;
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        near_rpc_url: Some(mock.uri().to_string()),
+        near_staking_contract_id: Some("staking.testnet".to_string()),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": { "providers": { "house-of-stake": { "price_id": "price_hos_basic" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } },
+            "pro": { "providers": { "house-of-stake": { "price_id": "price_hos_pro" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } }
+        }),
+    )
+    .await;
+
+    let near_email = "hos_sync_prefers_active.testnet@near";
+    let login = json!({
+        "email": near_email,
+        "name": "HoS Sync Prefers Active",
+        "oauth_provider": "near"
+    });
+    let response = server.post("/v1/auth/mock-login").json(&login).await;
+    let token = response.json::<serde_json::Value>()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let response = server
+        .post("/v1/subscriptions/near/sync")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 200, "{}", response.text());
+    let body: serde_json::Value = response.json();
+    assert_eq!(
+        body.get("upserted_house_of_stake_row")
+            .and_then(|x| x.as_bool()),
+        Some(true)
+    );
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(near_email)
+        .await
+        .unwrap()
+        .unwrap();
+    let client = db.pool().get().await.unwrap();
+    let row = client
+        .query_one(
+            "SELECT subscription_id, price_id, status
+             FROM subscriptions
+             WHERE user_id = $1 AND provider = 'house-of-stake'",
+            &[&user.id],
+        )
+        .await
+        .expect("load synced HoS row");
+    assert_eq!(
+        row.get::<_, String>("subscription_id"),
+        "sub_chain_hos_active_pro"
+    );
+    assert_eq!(row.get::<_, String>("price_id"), "price_hos_pro");
+    assert_eq!(row.get::<_, String>("status"), "active");
 }
 
 #[tokio::test]
