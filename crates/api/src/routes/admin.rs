@@ -4050,9 +4050,14 @@ pub async fn admin_migrate_instance(
                 Some((b, tag)) if !tag.contains('/') => b,
                 _ => &default_image,
             };
-            // Below the oldest usable dind tag → the deduced image doesn't
-            // exist / isn't allow-listed; jump to a supported tag instead.
-            let tag = if ironclaw_version_below(&ver, MIGRATE_MIN_ASIS_DIND_VERSION) {
+            // The version floor is ironclaw-dind release semantics; other
+            // service types (openclaw) use a different base and date-based
+            // tags, so leave their deduced tag untouched. Below the oldest
+            // usable dind tag the deduced image doesn't exist / isn't
+            // allow-listed, so jump to a supported tag instead.
+            let is_ironclaw = service_type == "ironclaw" || service_type.starts_with("ironclaw-");
+            let tag = if is_ironclaw && ironclaw_version_below(&ver, MIGRATE_MIN_ASIS_DIND_VERSION)
+            {
                 MIGRATE_FALLBACK_DIND_VERSION
             } else {
                 ver.as_str()
