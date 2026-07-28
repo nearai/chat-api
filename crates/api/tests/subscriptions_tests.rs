@@ -3716,6 +3716,13 @@ fn near_rpc_hos_catalog_respond_with_pending_update(
         .get("method_name")
         .and_then(|x| x.as_str())
         .unwrap_or("");
+    let decoded_args = params
+        .get("args_base64")
+        .and_then(|x| x.as_str())
+        .and_then(|args| STANDARD.decode(args).ok())
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .unwrap_or_default();
+
     match method_name {
         "get_subscription_for_price" => {
             let mut sub = json!({
@@ -3736,16 +3743,7 @@ fn near_rpc_hos_catalog_respond_with_pending_update(
             ResponseTemplate::new(200).set_body_json(near_rpc_call_function_body(&sub))
         }
         "get_price" => {
-            let args_b64 = params
-                .get("args_base64")
-                .and_then(|x| x.as_str())
-                .unwrap_or("");
-            let decoded = STANDARD
-                .decode(args_b64)
-                .ok()
-                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                .unwrap_or_default();
-            let pid = decoded
+            let pid = decoded_args
                 .get("price_id")
                 .and_then(|x| x.as_str())
                 .unwrap_or("");
@@ -3757,6 +3755,10 @@ fn near_rpc_hos_catalog_respond_with_pending_update(
             ResponseTemplate::new(200).set_body_json(near_rpc_call_function_body(price))
         }
         "get_lock" => {
+            assert!(
+                decoded_args.get("effective").is_none(),
+                "HoS change-plan quote must use the stored lock amount, not the effective projection"
+            );
             let amount_near = if active_price_id == "price_hos_pro" {
                 "2000000000000000000000000"
             } else {
@@ -3931,7 +3933,11 @@ async fn test_house_of_stake_credits_use_effective_lock_amount_after_projected_d
                         "end_ns": "2000000000000000000",
                         "status": "Active",
                         "cancel_at_period_end": false,
-                        "pending_update": null
+                        "pending_update": {
+                            "target_price_id": null,
+                            "target_amount": "10000000000000000000000000",
+                            "apply_ns": "1000000000000000000"
+                        }
                     })))
                 }
                 "get_lock" => {
@@ -3939,14 +3945,15 @@ async fn test_house_of_stake_credits_use_effective_lock_amount_after_projected_d
                         decoded_args.get("lock_id").and_then(|x| x.as_str()),
                         Some("lock_chain_hos_effective_credits")
                     );
-                    assert_eq!(
-                        decoded_args.get("effective").and_then(|x| x.as_bool()),
-                        Some(true),
-                        "HoS credit calculation must request the contract's effective lock view"
-                    );
+                    let amount_near =
+                        if decoded_args.get("effective").and_then(|x| x.as_bool()) == Some(true) {
+                            "10000000000000000000000000"
+                        } else {
+                            "100000000000000000000000000"
+                        };
                     ResponseTemplate::new(200).set_body_json(near_rpc_call_function_body(&json!({
                         "lock_id": "lock_chain_hos_effective_credits",
-                        "amount_near": "10000000000000000000000000"
+                        "amount_near": amount_near
                     })))
                 }
                 _ => ResponseTemplate::new(500).set_body_json(json!({
