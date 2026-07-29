@@ -2,7 +2,8 @@ mod common;
 
 use api::routes::api::SUBSCRIPTION_REQUIRED_ERROR_MESSAGE;
 use async_trait::async_trait;
-use chrono::{Duration, TimeZone, Timelike, Utc};
+use axum_test::TestServer;
+use chrono::{DateTime, Duration, TimeZone, Timelike, Utc};
 use common::{
     cleanup_user_agent_instances, cleanup_user_subscription_credits, cleanup_user_subscriptions,
     cleanup_user_usage, clear_subscription_plans, create_test_server, create_test_server_and_db,
@@ -25,7 +26,7 @@ use services::system_configs::ports::RateLimitConfig;
 use services::user::ports::UserRepository;
 use services::user_usage::{UserUsageRepository, METRIC_KEY_LLM_TOKENS};
 use services::UserId;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -186,7 +187,7 @@ async fn insert_house_of_stake_subscription_for_existing_user(
     user_email: &str,
     price_id: &str,
     cancel_at_period_end: bool,
-) {
+) -> String {
     let user = db
         .user_repository()
         .get_user_by_email(user_email)
@@ -208,6 +209,42 @@ async fn insert_house_of_stake_subscription_for_existing_user(
                 &price_id,
                 &period_end,
                 &cancel_at_period_end,
+            ],
+        )
+        .await
+        .unwrap();
+    sub_id
+}
+
+async fn insert_house_of_stake_credit_snapshot(
+    db: &database::Database,
+    user_email: &str,
+    subscription_id: &str,
+    period_start: DateTime<Utc>,
+    period_end: DateTime<Utc>,
+    credited_stake_yocto: &str,
+    credit_limit_nano_usd: i64,
+) {
+    let user = db
+        .user_repository()
+        .get_user_by_email(user_email)
+        .await
+        .unwrap()
+        .unwrap();
+    let client = db.pool().get().await.unwrap();
+    client
+        .execute(
+            "INSERT INTO house_of_stake_credit_entitlement_snapshots (
+                user_id, subscription_id, period_start, period_end,
+                credited_stake_yocto, credit_limit_nano_usd
+            ) VALUES ($1, $2, $3, $4, $5, $6)",
+            &[
+                &user.id,
+                &subscription_id,
+                &period_start,
+                &period_end,
+                &credited_stake_yocto,
+                &credit_limit_nano_usd,
             ],
         )
         .await
@@ -3907,11 +3944,17 @@ async fn assert_house_of_stake_credits_for_effective_lock(
     assertion_message: &str,
 ) {
     clear_proxy_env_for_local_wiremock();
+    let period_start = Utc::now() - Duration::days(1);
+    let period_end = Utc::now() + Duration::days(29);
+    let period_start_ns = period_start.timestamp_nanos_opt().unwrap().to_string();
+    let period_end_ns = period_end.timestamp_nanos_opt().unwrap().to_string();
     let mock = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/"))
         .respond_with({
             let effective_lock = effective_lock.clone();
+            let period_start_ns = period_start_ns.clone();
+            let period_end_ns = period_end_ns.clone();
             move |req: &wiremock::Request| {
                 use base64::{engine::general_purpose::STANDARD, Engine};
 
@@ -3936,7 +3979,8 @@ async fn assert_house_of_stake_credits_for_effective_lock(
                             "subscription_id": "sub_chain_hos_effective_credits",
                             "price_id": "price_hos_basic",
                             "last_lock_id": "lock_chain_hos_effective_credits",
-                            "end_ns": "2000000000000000000",
+                            "start_ns": period_start_ns.clone(),
+                            "end_ns": period_end_ns.clone(),
                             "status": "Active",
                             "cancel_at_period_end": false,
                             "pending_update": {
@@ -4007,8 +4051,29 @@ async fn assert_house_of_stake_credits_for_effective_lock(
         .unwrap()
         .to_string();
     cleanup_user_subscriptions(&db, near_email).await;
-    insert_house_of_stake_subscription_for_existing_user(&db, near_email, "price_hos_basic", false)
+    let subscription_id = insert_house_of_stake_subscription_for_existing_user(
+        &db,
+        near_email,
+        "price_hos_basic",
+        false,
+    )
+    .await;
+    if expected_plan_credits > 0 {
+        let credited_stake_yocto = effective_lock
+            .get("amount_near")
+            .and_then(|x| x.as_str())
+            .expect("effective lock amount_near");
+        insert_house_of_stake_credit_snapshot(
+            &db,
+            near_email,
+            &subscription_id,
+            period_start,
+            period_end,
+            credited_stake_yocto,
+            expected_plan_credits,
+        )
         .await;
+    }
 
     let response = server
         .get("/v1/credits")
@@ -4059,6 +4124,358 @@ async fn test_house_of_stake_credits_zero_for_effective_lock_with_no_active_shar
         "effective locks with no active shares must grant zero stake-based credits",
     )
     .await;
+}
+
+struct HouseOfStakeCreditMockState {
+    amount_near: String,
+    start_ns: u64,
+    end_ns: u64,
+    cancel_at_period_end: bool,
+}
+
+fn yocto_near(near: u64) -> String {
+    (u128::from(near) * 1_000_000_000_000_000_000_000_000u128).to_string()
+}
+
+async fn get_credits_plan_limit(server: &TestServer, token: &str) -> i64 {
+    let response = server
+        .get("/v1/credits")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .await;
+    assert_eq!(response.status_code(), 200, "{}", response.text());
+    response.json::<serde_json::Value>()["plan_credits"]
+        .as_i64()
+        .expect("plan_credits")
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_house_of_stake_credit_snapshot_prorates_increases_and_resets_next_period() {
+    clear_proxy_env_for_local_wiremock();
+    let now = Utc::now();
+    let period_start = now - Duration::days(20);
+    let period_end = now + Duration::days(10);
+    let state = Arc::new(Mutex::new(HouseOfStakeCreditMockState {
+        amount_near: yocto_near(500),
+        start_ns: period_start
+            .timestamp_nanos_opt()
+            .unwrap()
+            .try_into()
+            .unwrap(),
+        end_ns: period_end
+            .timestamp_nanos_opt()
+            .unwrap()
+            .try_into()
+            .unwrap(),
+        cancel_at_period_end: false,
+    }));
+
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with({
+            let state = state.clone();
+            move |req: &wiremock::Request| {
+                use base64::{engine::general_purpose::STANDARD, Engine};
+
+                let body: serde_json::Value =
+                    serde_json::from_slice(&req.body).unwrap_or(json!({}));
+                let empty = json!({});
+                let params = body.get("params").unwrap_or(&empty);
+                let method_name = params
+                    .get("method_name")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("");
+                let decoded_args = params
+                    .get("args_base64")
+                    .and_then(|x| x.as_str())
+                    .and_then(|args| STANDARD.decode(args).ok())
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                    .unwrap_or_default();
+                let state = state.lock().expect("lock HoS mock state");
+
+                match method_name {
+                    "get_subscription_for_price" => ResponseTemplate::new(200).set_body_json(
+                        near_rpc_call_function_body(&json!({
+                            "subscription_id": "sub_chain_hos_snapshot_credits",
+                            "price_id": "price_hos_basic",
+                            "start_ns": state.start_ns.to_string(),
+                            "end_ns": state.end_ns.to_string(),
+                            "status": "Active",
+                            "cancel_at_period_end": state.cancel_at_period_end,
+                            "last_lock_id": "lock_chain_hos_snapshot_credits"
+                        })),
+                    ),
+                    "get_lock" => {
+                        assert_eq!(
+                            decoded_args.get("lock_id").and_then(|x| x.as_str()),
+                            Some("lock_chain_hos_snapshot_credits")
+                        );
+                        assert_eq!(
+                            decoded_args.get("effective").and_then(|x| x.as_bool()),
+                            Some(true)
+                        );
+                        ResponseTemplate::new(200).set_body_json(near_rpc_call_function_body(
+                            &json!({
+                                "lock_id": "lock_chain_hos_snapshot_credits",
+                                "amount_near": state.amount_near.clone(),
+                                "status": "Active",
+                                "shares": "1"
+                            }),
+                        ))
+                    }
+                    _ => ResponseTemplate::new(500).set_body_json(json!({
+                        "error": "unexpected NEAR RPC mock",
+                        "method_name": method_name
+                    })),
+                }
+            }
+        })
+        .mount(&mock)
+        .await;
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        near_rpc_url: Some(mock.uri().to_string()),
+        near_staking_contract_id: Some("staking.testnet".to_string()),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": { "house-of-stake": { "price_id": "price_hos_basic" } },
+                "agent_instances": { "max": 2 },
+                "stake_based_monthly_credits": {
+                    "credits_per_staked_near_nano_usd": 10_000_000
+                }
+            }
+        }),
+    )
+    .await;
+
+    let near_email = "hos_snapshot_credits.testnet@near";
+    let login = json!({
+        "email": near_email,
+        "name": "HoS Snapshot Credits",
+        "oauth_provider": "near"
+    });
+    let response = server.post("/v1/auth/mock-login").json(&login).await;
+    let token = response.json::<serde_json::Value>()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    cleanup_user_subscriptions(&db, near_email).await;
+    let subscription_id = insert_house_of_stake_subscription_for_existing_user(
+        &db,
+        near_email,
+        "price_hos_basic",
+        false,
+    )
+    .await;
+    insert_house_of_stake_credit_snapshot(
+        &db,
+        near_email,
+        &subscription_id,
+        period_start,
+        period_end,
+        &yocto_near(500),
+        5_000_000_000,
+    )
+    .await;
+
+    assert_eq!(get_credits_plan_limit(&server, &token).await, 5_000_000_000);
+
+    {
+        let mut state = state.lock().expect("lock HoS mock state");
+        state.amount_near = yocto_near(800);
+        state.cancel_at_period_end = true;
+    }
+    let first_increase_limit = get_credits_plan_limit(&server, &token).await;
+    assert!(
+        (5_900_000_000..6_100_000_000).contains(&first_increase_limit),
+        "late-period increase plus cancel should add only about one prorated credit, got {first_increase_limit}"
+    );
+
+    {
+        let mut state = state.lock().expect("lock HoS mock state");
+        state.amount_near = yocto_near(1000);
+    }
+    let second_increase_limit = get_credits_plan_limit(&server, &token).await;
+    assert!(
+        second_increase_limit > first_increase_limit && second_increase_limit < 7_000_000_000,
+        "repeated increase should add only the incremental prorated delta, got {second_increase_limit}"
+    );
+
+    {
+        let mut state = state.lock().expect("lock HoS mock state");
+        state.amount_near = yocto_near(400);
+    }
+    assert_eq!(
+        get_credits_plan_limit(&server, &token).await,
+        second_increase_limit,
+        "stake decreases must not reduce the current-period snapshot"
+    );
+
+    let new_period_now = Utc::now();
+    {
+        let mut state = state.lock().expect("lock HoS mock state");
+        state.start_ns = (new_period_now - Duration::days(1))
+            .timestamp_nanos_opt()
+            .unwrap()
+            .try_into()
+            .unwrap();
+        state.end_ns = (new_period_now + Duration::days(29))
+            .timestamp_nanos_opt()
+            .unwrap()
+            .try_into()
+            .unwrap();
+        state.amount_near = yocto_near(400);
+        state.cancel_at_period_end = false;
+    }
+    assert_eq!(
+        get_credits_plan_limit(&server, &token).await,
+        4_000_000_000,
+        "new periods should seed from the then-effective stake and only prorate later increases"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_house_of_stake_credits_refreshes_auto_renewed_expired_local_row() {
+    clear_proxy_env_for_local_wiremock();
+    let now = Utc::now();
+    let period_start = now - Duration::days(1);
+    let period_end = now + Duration::days(29);
+
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(move |req: &wiremock::Request| {
+            use base64::{engine::general_purpose::STANDARD, Engine};
+
+            let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or(json!({}));
+            let empty = json!({});
+            let params = body.get("params").unwrap_or(&empty);
+            let method_name = params
+                .get("method_name")
+                .and_then(|x| x.as_str())
+                .unwrap_or("");
+            let decoded_args = params
+                .get("args_base64")
+                .and_then(|x| x.as_str())
+                .and_then(|args| STANDARD.decode(args).ok())
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .unwrap_or_default();
+
+            match method_name {
+                "get_subscription_for_price" => {
+                    ResponseTemplate::new(200).set_body_json(near_rpc_call_function_body(&json!({
+                        "subscription_id": "sub_chain_hos_auto_renewed",
+                        "price_id": "price_hos_basic",
+                        "start_ns": period_start.timestamp_nanos_opt().unwrap().to_string(),
+                        "end_ns": period_end.timestamp_nanos_opt().unwrap().to_string(),
+                        "status": "Active",
+                        "cancel_at_period_end": false,
+                        "last_lock_id": "lock_chain_hos_auto_renewed"
+                    })))
+                }
+                "get_lock" => {
+                    assert_eq!(
+                        decoded_args.get("effective").and_then(|x| x.as_bool()),
+                        Some(true)
+                    );
+                    ResponseTemplate::new(200).set_body_json(near_rpc_call_function_body(&json!({
+                        "lock_id": "lock_chain_hos_auto_renewed",
+                        "amount_near": yocto_near(500),
+                        "status": "Active",
+                        "shares": "1"
+                    })))
+                }
+                _ => ResponseTemplate::new(500).set_body_json(json!({
+                    "error": "unexpected NEAR RPC mock",
+                    "method_name": method_name
+                })),
+            }
+        })
+        .mount(&mock)
+        .await;
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        near_rpc_url: Some(mock.uri().to_string()),
+        near_staking_contract_id: Some("staking.testnet".to_string()),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "free": {
+                "providers": { "stripe": { "price_id": "price_free" } },
+                "agent_instances": { "max": 1 },
+                "monthly_credits": { "max": 1_000_000_000 }
+            },
+            "basic": {
+                "providers": { "house-of-stake": { "price_id": "price_hos_basic" } },
+                "agent_instances": { "max": 2 },
+                "stake_based_monthly_credits": {
+                    "credits_per_staked_near_nano_usd": 10_000_000
+                }
+            }
+        }),
+    )
+    .await;
+
+    let near_email = "hos_auto_renewed.testnet@near";
+    let login = json!({
+        "email": near_email,
+        "name": "HoS Auto Renewed",
+        "oauth_provider": "near"
+    });
+    let response = server.post("/v1/auth/mock-login").json(&login).await;
+    let token = response.json::<serde_json::Value>()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    cleanup_user_subscriptions(&db, near_email).await;
+
+    let user = db
+        .user_repository()
+        .get_user_by_email(near_email)
+        .await
+        .unwrap()
+        .unwrap();
+    let client = db.pool().get().await.unwrap();
+    client
+        .execute(
+            "INSERT INTO subscriptions (
+                subscription_id, user_id, provider, customer_id, price_id, status,
+                current_period_end, cancel_at_period_end
+            ) VALUES (
+                'sub_chain_hos_auto_renewed', $1, 'house-of-stake', 'near:hos_auto_renewed.testnet',
+                'price_hos_basic', 'active', $2, false
+            )",
+            &[&user.id, &(now - Duration::days(1))],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(get_credits_plan_limit(&server, &token).await, 5_000_000_000);
+
+    let refreshed_end: chrono::DateTime<Utc> = client
+        .query_one(
+            "SELECT current_period_end FROM subscriptions WHERE subscription_id = 'sub_chain_hos_auto_renewed'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get("current_period_end");
+    assert!(refreshed_end > now);
 }
 
 #[test]

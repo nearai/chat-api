@@ -17,6 +17,28 @@ impl PostgresCreditsRepository {
     }
 }
 
+fn purchased_reconciliation_update(
+    old_spent: i64,
+    total_purchased: i64,
+    last_over_plan: i64,
+    current_over_plan: i64,
+    is_same_period: bool,
+) -> (i64, i64) {
+    let already_applied = if is_same_period {
+        last_over_plan.max(0)
+    } else {
+        0
+    };
+    let delta_over_plan = (current_over_plan - already_applied).max(0);
+    let new_spent = (old_spent + delta_over_plan).min(total_purchased).max(0);
+    let reconciled_over_plan = if is_same_period {
+        last_over_plan.max(current_over_plan).max(0)
+    } else {
+        current_over_plan.max(0)
+    };
+    (new_spent, reconciled_over_plan)
+}
+
 #[async_trait]
 impl CreditsRepository for PostgresCreditsRepository {
     /// Remaining purchased credits: total_purchased - used_purchased (computed).
@@ -231,20 +253,19 @@ impl CreditsRepository for PostgresCreditsRepository {
         let plan = plan_credits_nano_usd.max(0);
         let current_over_plan = (u - plan).max(0);
 
-        // We treat spent_nano_usd as lifetime spent. To avoid double-counting, we only add the
-        // delta since the last reconciliation for the same period_start.
         let is_same_period = last_period_start
             .map(|s| s == period_start)
             .unwrap_or(false);
-        let already_applied = if is_same_period {
-            last_over_plan.max(0)
-        } else {
-            0
-        };
-        let delta_over_plan = (current_over_plan - already_applied).max(0);
-
-        // Apply delta, but never exceed total_purchased.
-        let new_spent = (old_spent + delta_over_plan).min(total_purchased).max(0);
+        // We treat spent_nano_usd as lifetime spent. The over-plan cursor is a period high-water
+        // mark because stake-backed plan limits can increase after usage has already consumed
+        // purchased credits; lowering the cursor would charge the same overage twice.
+        let (new_spent, reconciled_over_plan) = purchased_reconciliation_update(
+            old_spent,
+            total_purchased,
+            last_over_plan,
+            current_over_plan,
+            is_same_period,
+        );
 
         txn.execute(
             r#"
@@ -255,11 +276,34 @@ impl CreditsRepository for PostgresCreditsRepository {
                 updated_at = NOW()
             WHERE user_id = $1
             "#,
-            &[&user_id, &new_spent, &period_start, &current_over_plan],
+            &[&user_id, &new_spent, &period_start, &reconciled_over_plan],
         )
         .await?;
 
         txn.commit().await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::purchased_reconciliation_update;
+
+    #[test]
+    fn purchased_reconciliation_keeps_same_period_overage_high_water() {
+        let (spent_after_increase, cursor_after_increase) =
+            purchased_reconciliation_update(1_000_000_000, 10_000_000_000, 1_000_000_000, 0, true);
+        assert_eq!(spent_after_increase, 1_000_000_000);
+        assert_eq!(cursor_after_increase, 1_000_000_000);
+
+        let (spent_after_more_usage, cursor_after_more_usage) = purchased_reconciliation_update(
+            spent_after_increase,
+            10_000_000_000,
+            cursor_after_increase,
+            1_000_000_000,
+            true,
+        );
+        assert_eq!(spent_after_more_usage, 1_000_000_000);
+        assert_eq!(cursor_after_more_usage, 1_000_000_000);
     }
 }

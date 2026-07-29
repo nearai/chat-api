@@ -124,6 +124,8 @@ struct StorageBalanceOfArgs<'a> {
 pub struct NearStakingSubscription {
     pub subscription_id: String,
     pub price_id: String,
+    #[serde(default, deserialize_with = "deserialize_optional_u64")]
+    pub start_ns: Option<u64>,
     #[serde(deserialize_with = "deserialize_required_u64")]
     pub end_ns: u64,
     #[serde(default)]
