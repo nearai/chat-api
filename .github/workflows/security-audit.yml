@@ -19,7 +19,7 @@ jobs:
       # does NOT publish a separate failing check-run or open issues - so no red check and no public-issue spam
       # on this PUBLIC repo. Advisories are tracked/triaged via the Vulnerability Management procedure; remove
       # continue-on-error to gate merges once the backlog is triaged to a baseline.
-      - uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe  # v2.0.20
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25  # v2.1.1
         continue-on-error: true
         with:
           rust-version: "1.91.1"   # match rust-toolchain.toml so cargo-deny reads Cargo.lock v4
