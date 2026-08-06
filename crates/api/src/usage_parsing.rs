@@ -56,17 +56,21 @@ pub fn parse_response_usage_from_bytes(bytes: &[u8]) -> Option<ParsedUsage> {
 }
 
 /// Chat completions: parse usage from a JSON value with top-level `usage` and `model`.
-/// Expects OpenAI-style fields: `prompt_tokens`, `completion_tokens`, optional `total_tokens`.
+/// Accepts OpenAI-style fields (`prompt_tokens`, `completion_tokens`) and cloud-api-style
+/// fields (`input_tokens`, `output_tokens`), with optional `total_tokens`.
 fn parse_chat_completion_usage_from_json(root: &serde_json::Value) -> Option<ParsedUsage> {
     let usage = root.get("usage")?.as_object()?;
-    let input_tokens = usage.get("prompt_tokens").and_then(|v| v.as_u64())?;
-    let output_tokens = usage.get("completion_tokens").and_then(|v| v.as_u64())?;
+    let input_tokens = token_count_from_usage(usage, "prompt_tokens", "input_tokens")?;
+    let output_tokens = token_count_from_usage(usage, "completion_tokens", "output_tokens")?;
     let total_tokens = usage
         .get("total_tokens")
         .and_then(|v| v.as_u64())
         .unwrap_or(input_tokens + output_tokens);
-    let cache_read_tokens =
-        cache_read_tokens_from_details(usage, "prompt_tokens_details", input_tokens);
+    let cache_read_tokens = cache_read_tokens_from_any_details(
+        usage,
+        &["prompt_tokens_details", "input_tokens_details"],
+        input_tokens,
+    );
     let model = root
         .get("model")
         .and_then(|v| v.as_str())
@@ -78,6 +82,17 @@ fn parse_chat_completion_usage_from_json(root: &serde_json::Value) -> Option<Par
         cache_read_tokens,
         model,
     })
+}
+
+fn token_count_from_usage(
+    usage: &serde_json::Map<String, serde_json::Value>,
+    primary_key: &str,
+    fallback_key: &str,
+) -> Option<u64> {
+    usage
+        .get(primary_key)
+        .or_else(|| usage.get(fallback_key))
+        .and_then(|v| v.as_u64())
 }
 
 /// /v1/responses: parse usage from a JSON value with top-level `usage` and `model`.
@@ -103,6 +118,24 @@ fn parse_response_usage_from_json(root: &serde_json::Value) -> Option<ParsedUsag
         cache_read_tokens,
         model,
     })
+}
+
+fn cache_read_tokens_from_any_details(
+    usage: &serde_json::Map<String, serde_json::Value>,
+    details_keys: &[&str],
+    input_tokens: u64,
+) -> u64 {
+    details_keys
+        .iter()
+        .find_map(|key| {
+            usage
+                .get(*key)
+                .and_then(|v| v.as_object())
+                .and_then(|details| details.get("cached_tokens"))
+                .and_then(|v| v.as_u64())
+        })
+        .unwrap_or(0)
+        .min(input_tokens)
 }
 
 fn cache_read_tokens_from_details(
@@ -466,6 +499,17 @@ mod tests {
     }
 
     #[test]
+    fn chat_completion_accepts_input_output_tokens() {
+        let body = br#"{"model":"ironclaw-model","usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15,"input_tokens_details":{"cached_tokens":4}}}"#;
+        let parsed = parse_chat_completion_usage_from_bytes(body).expect("should parse");
+        assert_eq!(parsed.input_tokens, 10);
+        assert_eq!(parsed.output_tokens, 5);
+        assert_eq!(parsed.total_tokens, 15);
+        assert_eq!(parsed.cache_read_tokens, 4);
+        assert_eq!(parsed.model, "ironclaw-model");
+    }
+
+    #[test]
     fn chat_completion_parses_cache_read_tokens() {
         let body = br#"{"model":"gpt-4","usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15,"prompt_tokens_details":{"cached_tokens":6}}}"#;
         let parsed = parse_chat_completion_usage_from_bytes(body).expect("should parse");
@@ -495,6 +539,17 @@ mod tests {
         assert_eq!(parsed.total_tokens, 20);
         assert_eq!(parsed.cache_read_tokens, 0);
         assert_eq!(parsed.model, "Qwen/Qwen3-VL-30B");
+    }
+
+    #[test]
+    fn sse_chat_completion_chunk_accepts_input_output_tokens() {
+        let line = r#"data: {"id":"chatcmpl-1","object":"chat.completion.chunk","model":"ironclaw-model","choices":[],"usage":{"input_tokens":9,"total_tokens":20,"output_tokens":11,"input_tokens_details":{"cached_tokens":3}}}"#;
+        let parsed = parse_usage_from_chat_completion_sse_line(line).expect("should parse");
+        assert_eq!(parsed.input_tokens, 9);
+        assert_eq!(parsed.output_tokens, 11);
+        assert_eq!(parsed.total_tokens, 20);
+        assert_eq!(parsed.cache_read_tokens, 3);
+        assert_eq!(parsed.model, "ironclaw-model");
     }
 
     #[test]
