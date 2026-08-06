@@ -3613,6 +3613,7 @@ async fn prepare_chat_completions_body(
                 modified = true;
             }
         }
+        modified |= ensure_stream_usage_options(&mut body);
         if modified || auto_routed {
             serde_json::to_vec(&body).map(Bytes::from).map_err(|_| {
                 (
@@ -3630,6 +3631,36 @@ async fn prepare_chat_completions_body(
         Ok(body_bytes)
     }?;
     Ok(modified_body_bytes)
+}
+
+fn ensure_stream_usage_options(body: &mut serde_json::Value) -> bool {
+    if body.get("stream").and_then(|v| v.as_bool()) != Some(true) {
+        return false;
+    }
+
+    let Some(body) = body.as_object_mut() else {
+        return false;
+    };
+
+    match body
+        .get_mut("stream_options")
+        .and_then(|v| v.as_object_mut())
+    {
+        Some(options) => {
+            if options.get("include_usage").and_then(|v| v.as_bool()) == Some(true) {
+                return false;
+            }
+            options.insert("include_usage".to_string(), serde_json::Value::Bool(true));
+        }
+        None => {
+            body.insert(
+                "stream_options".to_string(),
+                json!({ "include_usage": true }),
+            );
+        }
+    }
+
+    true
 }
 
 /// Configuration for proxying POST requests to cloud-api endpoints (no usage tracking).
@@ -5398,10 +5429,11 @@ async fn collect_stream_to_bytes(
 
 #[cfg(test)]
 mod tests {
-    use super::{decompress_if_encoded, validate_proxy_path_segment};
+    use super::{decompress_if_encoded, ensure_stream_usage_options, validate_proxy_path_segment};
     use bytes::Bytes;
     use flate2::{write::DeflateEncoder, write::GzEncoder, write::ZlibEncoder, Compression};
     use http::{HeaderMap, HeaderValue};
+    use serde_json::json;
     use std::io::Write;
 
     fn headers(content_encoding: &str) -> HeaderMap {
@@ -5474,6 +5506,51 @@ mod tests {
                 "segment should be rejected: {value}"
             );
         }
+    }
+
+    #[test]
+    fn streaming_chat_requests_enable_usage_options() {
+        let mut body = json!({
+            "model": "ironclaw-model",
+            "stream": true,
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+
+        assert!(ensure_stream_usage_options(&mut body));
+        assert_eq!(
+            body["stream_options"]["include_usage"],
+            serde_json::Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn streaming_chat_requests_preserve_existing_stream_options() {
+        let mut body = json!({
+            "model": "ironclaw-model",
+            "stream": true,
+            "stream_options": {
+                "chunk_size": 3,
+                "include_usage": false
+            }
+        });
+
+        assert!(ensure_stream_usage_options(&mut body));
+        assert_eq!(
+            body["stream_options"]["include_usage"],
+            serde_json::Value::Bool(true)
+        );
+        assert_eq!(body["stream_options"]["chunk_size"], json!(3));
+    }
+
+    #[test]
+    fn non_streaming_chat_requests_do_not_add_usage_options() {
+        let mut body = json!({
+            "model": "ironclaw-model",
+            "stream": false
+        });
+
+        assert!(!ensure_stream_usage_options(&mut body));
+        assert!(body.get("stream_options").is_none());
     }
 
     #[test]
