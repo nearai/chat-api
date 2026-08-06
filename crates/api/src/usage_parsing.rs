@@ -91,8 +91,8 @@ fn token_count_from_usage(
 ) -> Option<u64> {
     usage
         .get(primary_key)
-        .or_else(|| usage.get(fallback_key))
         .and_then(|v| v.as_u64())
+        .or_else(|| usage.get(fallback_key).and_then(|v| v.as_u64()))
 }
 
 /// /v1/responses: parse usage from a JSON value with top-level `usage` and `model`.
@@ -507,6 +507,15 @@ mod tests {
         assert_eq!(parsed.total_tokens, 15);
         assert_eq!(parsed.cache_read_tokens, 4);
         assert_eq!(parsed.model, "ironclaw-model");
+    }
+
+    #[test]
+    fn chat_completion_falls_back_when_openai_token_fields_are_null() {
+        let body = br#"{"model":"ironclaw-model","usage":{"prompt_tokens":null,"input_tokens":10,"completion_tokens":null,"output_tokens":5,"total_tokens":15}}"#;
+        let parsed = parse_chat_completion_usage_from_bytes(body).expect("should parse");
+        assert_eq!(parsed.input_tokens, 10);
+        assert_eq!(parsed.output_tokens, 5);
+        assert_eq!(parsed.total_tokens, 15);
     }
 
     #[test]
