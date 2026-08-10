@@ -34,7 +34,13 @@ pub async fn http_metrics_middleware(
     next: Next,
 ) -> Response {
     let start = Instant::now();
-    let method = req.method().to_string();
+    let method = match req.method().as_str() {
+        "CONNECT" | "DELETE" | "GET" | "HEAD" | "OPTIONS" | "PATCH" | "POST" | "PUT" | "TRACE" => {
+            req.method().as_str()
+        }
+        _ => "OTHER",
+    }
+    .to_owned();
     let endpoint = req
         .extensions()
         .get::<MatchedPath>()
@@ -78,7 +84,10 @@ mod tests {
     use std::sync::Arc;
     use tower::ServiceExt;
 
-    async fn recorded_metrics_for_request(path: &str) -> Vec<RecordedMetric> {
+    async fn recorded_metrics_for_request_with_method(
+        method: &str,
+        path: &str,
+    ) -> Vec<RecordedMetric> {
         let metrics_service = Arc::new(CapturingMetricsService::new());
         let app = Router::new()
             .route(
@@ -95,6 +104,7 @@ mod tests {
         let response = app
             .oneshot(
                 Request::builder()
+                    .method(method)
                     .uri(path)
                     .body(Body::empty())
                     .expect("request should build"),
@@ -104,6 +114,10 @@ mod tests {
 
         assert!(response.status().is_success() || response.status().is_client_error());
         metrics_service.get_metrics()
+    }
+
+    async fn recorded_metrics_for_request(path: &str) -> Vec<RecordedMetric> {
+        recorded_metrics_for_request_with_method("GET", path).await
     }
 
     fn endpoint_tag(metrics: &[RecordedMetric], name: &str) -> String {
@@ -117,6 +131,21 @@ mod tests {
 
     fn assert_common_tags(metrics: &[RecordedMetric], status: u16) {
         for metric in metrics {
+            let mut tag_keys = metric
+                .tags
+                .iter()
+                .map(|tag| {
+                    tag.split_once(':')
+                        .expect("metric tag should have a value")
+                        .0
+                })
+                .collect::<Vec<_>>();
+            tag_keys.sort_unstable();
+            assert_eq!(
+                tag_keys,
+                ["endpoint", "environment", "method", "status_code"],
+                "HTTP metric tag keys should match the Cloud API contract"
+            );
             assert!(metric.tags.iter().any(|tag| tag == "method:GET"));
             assert!(metric
                 .tags
@@ -175,6 +204,32 @@ mod tests {
             assert!(metrics
                 .iter()
                 .all(|metric| metric.tags.iter().all(|tag| !tag.contains(path))));
+        }
+    }
+
+    #[tokio::test]
+    async fn nonstandard_methods_use_bounded_label() {
+        let metrics = recorded_metrics_for_request_with_method("KLFQ", "/health").await;
+
+        assert_eq!(metrics.len(), 2);
+        assert!(metrics.iter().all(|metric| {
+            metric.tags.iter().any(|tag| tag == "method:OTHER")
+                && metric.tags.iter().all(|tag| tag != "method:KLFQ")
+        }));
+    }
+
+    #[tokio::test]
+    async fn standard_methods_preserve_method_label() {
+        for method in [
+            "CONNECT", "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "TRACE",
+        ] {
+            let metrics = recorded_metrics_for_request_with_method(method, "/health").await;
+            let expected_tag = format!("method:{method}");
+
+            assert_eq!(metrics.len(), 2);
+            assert!(metrics
+                .iter()
+                .all(|metric| metric.tags.iter().any(|tag| tag == &expected_tag)));
         }
     }
 }
