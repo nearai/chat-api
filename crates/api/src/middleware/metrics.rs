@@ -3,10 +3,14 @@
 //! This middleware records low-cardinality metrics for all HTTP requests:
 //! - `chat_api.http.requests` - Count of HTTP requests by method, endpoint, status
 //! - `chat_api.http.duration` - Histogram of request durations by method, endpoint
-//!
-//! Endpoints are normalized to replace UUIDs with `{id}` to reduce cardinality.
 
-use axum::{body::Body, extract::State, http::Request, middleware::Next, response::Response};
+use axum::{
+    body::Body,
+    extract::{MatchedPath, State},
+    http::Request,
+    middleware::Next,
+    response::Response,
+};
 use services::metrics::{
     consts::{
         get_environment, METRIC_HTTP_DURATION, METRIC_HTTP_REQUESTS, TAG_ENDPOINT, TAG_ENVIRONMENT,
@@ -31,14 +35,17 @@ pub async fn http_metrics_middleware(
 ) -> Response {
     let start = Instant::now();
     let method = req.method().to_string();
-    let path = req.uri().path().to_string();
+    let endpoint = req
+        .extensions()
+        .get::<MatchedPath>()
+        .map(MatchedPath::as_str)
+        .unwrap_or("unmatched")
+        .to_owned();
 
     let response = next.run(req).await;
     let duration = start.elapsed();
     let status = response.status().as_u16();
 
-    // Normalize path to reduce cardinality (replace UUIDs with {id})
-    let endpoint = normalize_path(&path);
     let environment = get_environment();
 
     let tags = [
@@ -59,90 +66,115 @@ pub async fn http_metrics_middleware(
     response
 }
 
-/// Normalize path by replacing UUIDs and dynamic IDs with `{id}` to reduce cardinality.
-///
-/// Examples:
-/// - `/v1/conversations/abc12345-1234-5678-9abc-def012345678` -> `/v1/conversations/{id}`
-/// - `/v1/files/abc12345-1234-5678-9abc-def012345678/content` -> `/v1/files/{id}/content`
-fn normalize_path(path: &str) -> String {
-    path.split('/')
-        .map(|segment| {
-            if is_uuid(segment) || is_conversation_id(segment) {
-                "{id}"
-            } else {
-                segment
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
-/// Check if a string looks like a UUID (8-4-4-4-12 hex pattern)
-fn is_uuid(s: &str) -> bool {
-    if s.len() != 36 {
-        return false;
-    }
-    let parts: Vec<&str> = s.split('-').collect();
-    if parts.len() != 5 {
-        return false;
-    }
-    let expected_lens = [8, 4, 4, 4, 12];
-    parts
-        .iter()
-        .zip(expected_lens.iter())
-        .all(|(part, &len)| part.len() == len && part.chars().all(|c| c.is_ascii_hexdigit()))
-}
-
-/// Check if a string looks like an OpenAI-style conversation ID (e.g., conv_xxx)
-fn is_conversation_id(s: &str) -> bool {
-    // OpenAI conversation IDs typically start with "conv_" or similar prefixes
-    s.starts_with("conv_") || s.starts_with("chatcmpl-") || s.starts_with("resp_")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{body::Body, http::Request, middleware::from_fn_with_state, routing::get, Router};
+    use services::metrics::capturing::MetricValue;
+    use services::metrics::{
+        capturing::{CapturingMetricsService, RecordedMetric},
+        consts::{METRIC_HTTP_DURATION, METRIC_HTTP_REQUESTS},
+    };
+    use std::sync::Arc;
+    use tower::ServiceExt;
 
-    #[test]
-    fn test_is_uuid() {
-        assert!(is_uuid("abc12345-1234-5678-9abc-def012345678"));
-        assert!(is_uuid("ABC12345-1234-5678-9ABC-DEF012345678"));
-        assert!(!is_uuid("not-a-uuid"));
-        assert!(!is_uuid("abc12345-1234-5678-9abc")); // too short
-        assert!(!is_uuid("abc12345-1234-5678-9abc-def012345678x")); // too long
+    async fn recorded_metrics_for_request(path: &str) -> Vec<RecordedMetric> {
+        let metrics_service = Arc::new(CapturingMetricsService::new());
+        let app = Router::new()
+            .route(
+                "/v1/conversations/{conversation_id}",
+                get(|| async { "ok" }),
+            )
+            .layer(from_fn_with_state(
+                MetricsState {
+                    metrics_service: metrics_service.clone(),
+                },
+                http_metrics_middleware,
+            ));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+
+        assert!(response.status().is_success() || response.status().is_client_error());
+        metrics_service.get_metrics()
     }
 
-    #[test]
-    fn test_is_conversation_id() {
-        assert!(is_conversation_id("conv_abc123xyz"));
-        assert!(is_conversation_id("chatcmpl-abc123xyz"));
-        assert!(is_conversation_id("resp_abc123"));
-        assert!(!is_conversation_id("models"));
-        assert!(!is_conversation_id("health"));
+    fn endpoint_tag(metrics: &[RecordedMetric], name: &str) -> String {
+        metrics
+            .iter()
+            .find(|metric| metric.name == name)
+            .and_then(|metric| metric.tags.iter().find(|tag| tag.starts_with("endpoint:")))
+            .cloned()
+            .expect("HTTP metric should have an endpoint tag")
     }
 
-    #[test]
-    fn test_normalize_path() {
-        // UUID normalization
-        assert_eq!(
-            normalize_path("/v1/conversations/abc12345-1234-5678-9abc-def012345678"),
-            "/v1/conversations/{id}"
-        );
+    fn assert_common_tags(metrics: &[RecordedMetric], status: u16) {
+        for metric in metrics {
+            assert!(metric.tags.iter().any(|tag| tag == "method:GET"));
+            assert!(metric
+                .tags
+                .iter()
+                .any(|tag| tag == &format!("status_code:{status}")));
+            assert!(metric
+                .tags
+                .iter()
+                .any(|tag| tag.starts_with("environment:")));
+        }
+    }
 
-        // Multiple UUIDs
-        assert_eq!(
-            normalize_path("/v1/files/abc12345-1234-5678-9abc-def012345678/content"),
-            "/v1/files/{id}/content"
-        );
+    #[tokio::test]
+    async fn matched_routes_use_route_template() {
+        for path in ["/v1/conversations/first-id", "/v1/conversations/second-id"] {
+            let metrics = recorded_metrics_for_request(path).await;
 
-        // Conversation IDs
-        assert_eq!(
-            normalize_path("/v1/conversations/conv_abc123xyz"),
-            "/v1/conversations/{id}"
-        );
+            assert_eq!(metrics.len(), 2);
+            assert!(metrics.iter().any(|metric| {
+                metric.name == METRIC_HTTP_DURATION
+                    && matches!(metric.value, MetricValue::Latency(_))
+            }));
+            assert!(metrics.iter().any(|metric| {
+                metric.name == METRIC_HTTP_REQUESTS && matches!(metric.value, MetricValue::Count(1))
+            }));
+            assert_common_tags(&metrics, 200);
+            assert_eq!(
+                endpoint_tag(&metrics, METRIC_HTTP_DURATION),
+                "endpoint:/v1/conversations/{conversation_id}"
+            );
+            assert_eq!(
+                endpoint_tag(&metrics, METRIC_HTTP_REQUESTS),
+                "endpoint:/v1/conversations/{conversation_id}"
+            );
+            assert!(metrics
+                .iter()
+                .all(|metric| metric.tags.iter().all(|tag| !tag.contains(path))));
+        }
+    }
 
-        // No IDs to normalize
-        assert_eq!(normalize_path("/v1/models"), "/v1/models");
-        assert_eq!(normalize_path("/health"), "/health");
+    #[tokio::test]
+    async fn unmatched_routes_use_bounded_label() {
+        for path in ["/.env", "/wp-admin/install.php"] {
+            let metrics = recorded_metrics_for_request(path).await;
+
+            assert_eq!(metrics.len(), 2);
+            assert_common_tags(&metrics, 404);
+            assert_eq!(
+                endpoint_tag(&metrics, METRIC_HTTP_DURATION),
+                "endpoint:unmatched"
+            );
+            assert_eq!(
+                endpoint_tag(&metrics, METRIC_HTTP_REQUESTS),
+                "endpoint:unmatched"
+            );
+            assert!(metrics
+                .iter()
+                .all(|metric| metric.tags.iter().all(|tag| !tag.contains(path))));
+        }
     }
 }
