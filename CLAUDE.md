@@ -143,3 +143,9 @@ Key variables (see `crates/config/src/lib.rs` for defaults):
 - `--features test` enables `/v1/auth/mock-login` for test authentication
 - E2E tests are `#[ignore]` because they call real OpenAI APIs
 - Tests expect PostgreSQL running with correct schema
+
+## Required before every PR
+- Add or update tests for the change; all CI checks must pass before merge.
+- Run the repo's dependency audit and introduce no new high or critical advisories; commit the lockfile.
+- Never commit secrets, keys, or tokens.
+- Fill the PR template (risk/impact, testing, rollback) and get a non-author review before merge.
