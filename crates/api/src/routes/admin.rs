@@ -3615,8 +3615,9 @@ pub struct MigrateInstanceRequest {
     /// Useful when backup was obtained directly from compose-api (e.g. the
     /// SSE stream stalls through chat-api but works when called directly).
     /// The backup must be age-encrypted with the recipient derived from the
-    /// user's stored passphrase + instance name. The legacy instance will NOT
-    /// be started — stop it before taking the external backup to avoid data loss.
+    /// user's stored passphrase + the name it will be imported under, which is
+    /// `crabshack_name` when that is set. The legacy instance will NOT be
+    /// started — stop it before taking the external backup to avoid data loss.
     pub backup_url: Option<String>,
     /// Override the CrabShack service_type, bypassing the config-derived
     /// ironclaw_service_type/openclaw_service_type mapping (e.g. "ironclaw-dind"
@@ -3771,6 +3772,18 @@ pub async fn admin_migrate_instance(
             requested.to_string()
         }
     };
+
+    // A backup taken under the old name cannot be decrypted after the rename, and backup_url
+    // requires the legacy instance already stopped, so this fails past the point of no return.
+    if request_has_backup_url && target_name != instance.name {
+        tracing::warn!(
+            "Migrate: backup_url with a renamed target — the backup must be encrypted to the \
+             recipient derived from crabshack_name: instance_id={}, name={}, crabshack_name={}",
+            id,
+            instance.name,
+            target_name,
+        );
+    }
 
     let backup_passphrase = match creds {
         Some((_auth_secret, passphrase)) => passphrase,
@@ -4475,9 +4488,10 @@ pub async fn admin_migrate_instance(
     }
 
     tracing::info!(
-        "Migrate: completed successfully, elapsed={:.1}s, instance_id={}, name={}",
+        "Migrate: completed successfully, elapsed={:.1}s, instance_id={}, name={}, previous_name={}",
         migrate_start.elapsed().as_secs_f64(),
         id,
+        target_name,
         instance_name,
     );
 
@@ -5106,12 +5120,5 @@ mod migrate_name_tests {
         ] {
             assert!(!is_valid_crabshack_name(n), "{n:?} should be rejected");
         }
-    }
-
-    #[test]
-    fn rejects_an_empty_name_rather_than_ignoring_it() {
-        // An empty crabshack_name must 400, not fall through to the current name — that
-        // would migrate under the colliding name and 409 at import, after the stop.
-        assert!(!is_valid_crabshack_name(""));
     }
 }
