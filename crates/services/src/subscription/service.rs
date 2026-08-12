@@ -66,6 +66,10 @@ struct CachedCreditLimit {
     cached_at: Instant,
 }
 
+struct CachedHouseOfStakeRefreshFailure {
+    failed_at: Instant,
+}
+
 /// Cached system configs snapshot for model access checks.
 struct CachedSystemConfigs {
     configs: Option<Arc<SystemConfigs>>,
@@ -108,6 +112,8 @@ pub struct SubscriptionServiceImpl {
     near_rpc_url: String,
     near_network_id: String,
     credit_limit_cache: Arc<RwLock<HashMap<UserId, CachedCreditLimit>>>,
+    house_of_stake_refresh_failure_cache:
+        Arc<RwLock<HashMap<UserId, CachedHouseOfStakeRefreshFailure>>>,
     system_configs_cache: Arc<RwLock<Option<CachedSystemConfigs>>>,
 }
 
@@ -181,6 +187,7 @@ impl SubscriptionServiceImpl {
             near_rpc_url: config.near_rpc_url,
             near_network_id: config.near_network_id,
             credit_limit_cache: Arc::new(RwLock::new(HashMap::new())),
+            house_of_stake_refresh_failure_cache: Arc::new(RwLock::new(HashMap::new())),
             system_configs_cache: Arc::new(RwLock::new(None)),
         }
     }
@@ -188,7 +195,49 @@ impl SubscriptionServiceImpl {
     /// Invalidate cached credit-limit state for a user (e.g. when plan, credits, or HoS lock state changes via webhook/reconcile).
     async fn invalidate_credit_limit_cache(&self, user_id: UserId) {
         self.credit_limit_cache.write().await.remove(&user_id);
+        self.house_of_stake_refresh_failure_cache
+            .write()
+            .await
+            .remove(&user_id);
         tracing::debug!("Invalidated credit limit cache for user_id={}", user_id);
+    }
+
+    async fn cached_credit_limit_for_user(
+        &self,
+        user_id: UserId,
+        ttl_secs: u64,
+    ) -> Option<(u64, DateTime<Utc>, DateTime<Utc>)> {
+        let cache_guard = self.credit_limit_cache.read().await;
+        let cached = cache_guard.get(&user_id)?;
+        if cached.cached_at.elapsed().as_secs() >= ttl_secs {
+            return None;
+        }
+
+        tracing::debug!(
+            "Using cached credit limit for user_id={} (plan={}, age_secs={})",
+            user_id,
+            cached.plan_credits,
+            cached.cached_at.elapsed().as_secs()
+        );
+        Some((cached.plan_credits, cached.period_start, cached.period_end))
+    }
+
+    async fn cache_credit_limit_for_user(
+        &self,
+        user_id: UserId,
+        plan_credits: u64,
+        period_start: DateTime<Utc>,
+        period_end: DateTime<Utc>,
+    ) {
+        self.credit_limit_cache.write().await.insert(
+            user_id,
+            CachedCreditLimit {
+                plan_credits,
+                period_start,
+                period_end,
+                cached_at: Instant::now(),
+            },
+        );
     }
 
     async fn get_system_configs_cached(
@@ -789,24 +838,57 @@ impl SubscriptionServiceImpl {
 
         let mut expired_hos_refresh_failed = false;
         if !expired_hos_subscriptions.is_empty() {
-            match self
-                .reconcile_near_staking_from_rpc_with_subs(user_id, active_subscriptions.clone())
+            let recent_refresh_failure = self
+                .house_of_stake_refresh_failure_cache
+                .read()
                 .await
-            {
-                Ok(_) => {
-                    active_subscriptions = self
-                        .subscription_repo
-                        .get_active_subscriptions(user_id)
-                        .await
-                        .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        user_id = %user_id.0,
-                        error = %err,
-                        "could not refresh expired local HoS subscription from chain before entitlement check"
-                    );
-                    expired_hos_refresh_failed = true;
+                .get(&user_id)
+                .is_some_and(|cached| {
+                    cached.failed_at.elapsed().as_secs() < HOUSE_OF_STAKE_CREDIT_LIMIT_CACHE_SECS
+                });
+
+            if recent_refresh_failure {
+                tracing::warn!(
+                    user_id = %user_id.0,
+                    "skipping expired local HoS subscription refresh due to recent chain refresh failure"
+                );
+                expired_hos_refresh_failed = true;
+            } else {
+                match self
+                    .reconcile_near_staking_from_rpc_with_subs(
+                        user_id,
+                        active_subscriptions.clone(),
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        self.house_of_stake_refresh_failure_cache
+                            .write()
+                            .await
+                            .remove(&user_id);
+                        active_subscriptions = self
+                            .subscription_repo
+                            .get_active_subscriptions(user_id)
+                            .await
+                            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+                    }
+                    Err(err) => {
+                        self.house_of_stake_refresh_failure_cache
+                            .write()
+                            .await
+                            .insert(
+                                user_id,
+                                CachedHouseOfStakeRefreshFailure {
+                                    failed_at: Instant::now(),
+                                },
+                            );
+                        tracing::warn!(
+                            user_id = %user_id.0,
+                            error = %err,
+                            "could not refresh expired local HoS subscription from chain before entitlement check"
+                        );
+                        expired_hos_refresh_failed = true;
+                    }
                 }
             }
         }
@@ -917,20 +999,34 @@ impl SubscriptionServiceImpl {
         &self,
         user_id: UserId,
     ) -> Result<(i64, chrono::DateTime<Utc>, chrono::DateTime<Utc>), SubscriptionError> {
-        let configs = self
-            .system_configs_service
-            .get_configs()
-            .await
-            .map_err(|e| SubscriptionError::InternalError(e.to_string()))?;
+        let active_subscription = self
+            .get_active_subscription_for_entitlement(user_id)
+            .await?;
+
+        if active_subscription
+            .as_ref()
+            .is_some_and(|sub| sub.provider == "house-of-stake")
+        {
+            if let Some((plan_credits, period_start, period_end)) = self
+                .cached_credit_limit_for_user(user_id, HOUSE_OF_STAKE_CREDIT_LIMIT_CACHE_SECS)
+                .await
+            {
+                return Ok((
+                    plan_credits.min(i64::MAX as u64) as i64,
+                    period_start,
+                    period_end,
+                ));
+            }
+        }
+
+        let configs = self.get_system_configs_cached().await?;
         let subscription_plans = configs
-            .and_then(|c| c.subscription_plans)
+            .as_deref()
+            .and_then(|c| c.subscription_plans.clone())
             .unwrap_or_default();
 
-        let (plan_credits, period_start, period_end) = match self
-            .get_active_subscription_for_entitlement(user_id)
-            .await?
-        {
-            Some(ref sub) => {
+        let (plan_credits, period_start, period_end) = match active_subscription.as_ref() {
+            Some(sub) => {
                 let fallback_period_end = sub.current_period_end;
                 let fallback_period_start = sub_one_month_same_day(sub.current_period_end);
                 let plan_name = resolve_plan_name_from_config(
@@ -989,6 +1085,14 @@ impl SubscriptionServiceImpl {
                 (plan_credits, period_start, period_end)
             }
         };
+
+        if active_subscription
+            .as_ref()
+            .is_some_and(|sub| sub.provider == "house-of-stake")
+        {
+            self.cache_credit_limit_for_user(user_id, plan_credits, period_start, period_end)
+                .await;
+        }
 
         // Clamp to i64::MAX so CreditsSummary.plan_credits and comparisons don't overflow
         let plan_credits_i64 = plan_credits.min(i64::MAX as u64) as i64;
@@ -2383,6 +2487,70 @@ fn generate_credit_checkout_idempotency_key(
     format!("{:x}", hasher.finalize())
 }
 
+impl SubscriptionServiceImpl {
+    async fn purchased_reconciliation_plan_period(
+        &self,
+        user_id: UserId,
+        plan_credits: i64,
+        period_start: DateTime<Utc>,
+        period_end: DateTime<Utc>,
+    ) -> Result<Option<(i64, DateTime<Utc>, DateTime<Utc>)>, SubscriptionError> {
+        if plan_credits > 0 {
+            return Ok(Some((plan_credits, period_start, period_end)));
+        }
+
+        let active_subscription = match self.get_active_subscription_for_entitlement(user_id).await
+        {
+            Ok(sub) => sub,
+            Err(err) => {
+                tracing::warn!(
+                    user_id = %user_id.0,
+                    error = %err,
+                    "skipping purchased credit reconciliation: could not verify HoS snapshot floor after zero entitlement"
+                );
+                return Ok(None);
+            }
+        };
+
+        let Some(subscription) = active_subscription else {
+            return Ok(Some((plan_credits, period_start, period_end)));
+        };
+        if subscription.provider != "house-of-stake" {
+            return Ok(Some((plan_credits, period_start, period_end)));
+        }
+
+        match self
+            .current_house_of_stake_snapshot_limit(&subscription.subscription_id, Utc::now())
+            .await
+        {
+            Ok(Some((snapshot_limit, snapshot_start, snapshot_end))) => {
+                let snapshot_limit = snapshot_limit.min(i64::MAX as u64) as i64;
+                if snapshot_limit > plan_credits {
+                    tracing::warn!(
+                        user_id = %user_id.0,
+                        subscription_id = %subscription.subscription_id,
+                        plan_credits,
+                        snapshot_limit,
+                        "using current HoS snapshot as purchased-credit reconciliation floor after zero entitlement"
+                    );
+                    return Ok(Some((snapshot_limit, snapshot_start, snapshot_end)));
+                }
+                Ok(Some((plan_credits, period_start, period_end)))
+            }
+            Ok(None) => Ok(Some((plan_credits, period_start, period_end))),
+            Err(err) => {
+                tracing::warn!(
+                    user_id = %user_id.0,
+                    subscription_id = %subscription.subscription_id,
+                    error = %err,
+                    "skipping purchased credit reconciliation: could not read HoS snapshot floor after zero entitlement"
+                );
+                Ok(None)
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl SubscriptionService for SubscriptionServiceImpl {
     async fn get_available_plans(
@@ -3728,22 +3896,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
             } else {
                 TTL_CACHE_SECS
             };
-            let cache_guard = self.credit_limit_cache.read().await;
-            if let Some(cached) = cache_guard.get(&user_id) {
-                if cached.cached_at.elapsed().as_secs() < credit_limit_cache_secs {
-                    tracing::debug!(
-                        "Using cached credit limit for user_id={} (plan={}, age_secs={})",
-                        user_id,
-                        cached.plan_credits,
-                        cached.cached_at.elapsed().as_secs()
-                    );
-                    Some((cached.plan_credits, cached.period_start, cached.period_end))
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
+            self.cached_credit_limit_for_user(user_id, credit_limit_cache_secs)
+                .await
         };
 
         let (plan_credits, period_start, period_end) = match cached_limit {
@@ -3859,18 +4013,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     }
                 };
 
-                {
-                    let mut cache_guard = self.credit_limit_cache.write().await;
-                    cache_guard.insert(
-                        user_id,
-                        CachedCreditLimit {
-                            plan_credits,
-                            period_start,
-                            period_end,
-                            cached_at: Instant::now(),
-                        },
-                    );
-                }
+                self.cache_credit_limit_for_user(user_id, plan_credits, period_start, period_end)
+                    .await;
                 (plan_credits, period_start, period_end)
             }
         };
@@ -4530,11 +4674,16 @@ impl SubscriptionService for SubscriptionServiceImpl {
     ) -> Result<(), SubscriptionError> {
         let (plan_credits, period_start, period_end) =
             self.resolve_plan_period_for_user(user_id).await?;
+        let Some((plan_credits, period_start, period_end)) = self
+            .purchased_reconciliation_plan_period(user_id, plan_credits, period_start, period_end)
+            .await?
+        else {
+            return Ok(());
+        };
         self.credits_repo
             .reconcile_purchased_after_usage(user_id, plan_credits, period_start, period_end)
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-        self.invalidate_credit_limit_cache(user_id).await;
         Ok(())
     }
 
@@ -4551,15 +4700,38 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .unwrap_or(0);
 
         if period_spent_credits > 0 {
-            if let Err(e) = self
-                .credits_repo
-                .reconcile_purchased_after_usage(user_id, plan_credits, period_start, period_end)
+            match self
+                .purchased_reconciliation_plan_period(
+                    user_id,
+                    plan_credits,
+                    period_start,
+                    period_end,
+                )
                 .await
-                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))
             {
-                tracing::warn!(error = ?e, "Failed to reconcile purchased credits before get_credits");
-            } else {
-                self.invalidate_credit_limit_cache(user_id).await;
+                Ok(Some((
+                    reconciliation_plan_credits,
+                    reconciliation_period_start,
+                    reconciliation_period_end,
+                ))) => {
+                    if let Err(e) = self
+                        .credits_repo
+                        .reconcile_purchased_after_usage(
+                            user_id,
+                            reconciliation_plan_credits,
+                            reconciliation_period_start,
+                            reconciliation_period_end,
+                        )
+                        .await
+                        .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))
+                    {
+                        tracing::warn!(error = ?e, "Failed to reconcile purchased credits before get_credits");
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!(error = ?e, "Failed to resolve purchased-credit reconciliation floor before get_credits");
+                }
             }
         }
 
