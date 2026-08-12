@@ -3641,6 +3641,12 @@ pub struct MigrateInstanceRequest {
     /// The user-facing `name` is left unchanged; this is stored separately as
     /// `crabshack_instance_name`. Pass the **full** name, not just a suffix.
     ///
+    /// The caller is responsible for the name being free on CrabShack — it is not
+    /// checked here. A name already in use fails at import with a 409, which lands
+    /// after the legacy instance has been stopped, so the caller pays a
+    /// stop/restart and a wasted backup for it. Check with
+    /// `GET {crabshack}/instances/{name}` (404 = free) before calling.
+    ///
     /// Pass the same value on a retry: the backup is encrypted to a recipient
     /// derived from this name, so changing it between attempts makes an existing
     /// backup (including one reused via `backup_url`) undecryptable.
@@ -3674,51 +3680,6 @@ fn is_valid_crabshack_name(name: &str) -> bool {
         && name
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-}
-
-/// True if an instance with this name already exists on CrabShack.
-///
-/// Used as a migrate preflight so a name clash is refused before any side effect, rather
-/// than surfacing as a 409 at import — which happens after the legacy instance is stopped.
-async fn crabshack_instance_exists(app_state: &AppState, name: &str) -> Result<bool, ApiError> {
-    let manager = app_state
-        .agent_service
-        .find_crabshack_manager()
-        .ok_or_else(|| ApiError::bad_request("No CrabShack manager configured"))?;
-    let url = format!(
-        "{}/instances/{}",
-        manager.url.trim_end_matches('/'),
-        urlencoding::encode(name)
-    );
-    let resp = app_state
-        .http_client
-        .get(&url)
-        .bearer_auth(&manager.token)
-        .timeout(std::time::Duration::from_secs(30))
-        .send()
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                "Failed to query CrabShack for name availability: error={}",
-                e
-            );
-            ApiError::internal_server_error("Failed to contact CrabShack")
-        })?;
-    if resp.status() == reqwest::StatusCode::NOT_FOUND {
-        return Ok(false);
-    }
-    if resp.status().is_success() {
-        return Ok(true);
-    }
-    let status = resp.status();
-    tracing::error!(
-        "CrabShack name-availability check failed: status={}, name={}",
-        status,
-        name
-    );
-    Err(ApiError::internal_server_error(
-        "Failed to check name availability on CrabShack",
-    ))
 }
 
 /// True if `ver` ("major.minor.patch", optional leading 'v' / trailing suffix)
@@ -3829,15 +3790,6 @@ pub async fn admin_migrate_instance(
                     instance.name,
                     requested,
                 );
-            }
-            // Fail here rather than at import: import runs after the legacy instance is
-            // stopped, so a name clash discovered there costs the user a stop/restart cycle
-            // and a wasted backup.
-            if crabshack_instance_exists(&app_state, requested).await? {
-                return Err(ApiError::bad_request(
-                    "crabshack_name is already taken on CrabShack — pick another \
-                     (convention: original name plus a 5-char proquint)",
-                ));
             }
             requested.to_string()
         }
