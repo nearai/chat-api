@@ -372,7 +372,8 @@ pub trait AgentRepository: Send + Sync {
         i64,
     )>;
 
-    /// Admin update instance fields for migration (agent_api_base_url, instance_url, instance_token, dashboard_url).
+    /// Admin update instance fields for migration (agent_api_base_url, instance_url, instance_token,
+    /// dashboard_url, crabshack_instance_name).
     /// Only updates fields that are Some. instance_token is stored already-encrypted.
     async fn admin_update_instance(
         &self,
@@ -381,7 +382,17 @@ pub trait AgentRepository: Send + Sync {
         instance_url: Option<String>,
         encrypted_instance_token: Option<String>,
         dashboard_url: Option<String>,
+        crabshack_instance_name: Option<String>,
     ) -> anyhow::Result<AgentInstance>;
+
+    /// The instance's name on CrabShack when it differs from `name`, else None.
+    ///
+    /// Set by migration when the user-facing name was already taken on CrabShack. Read it
+    /// before addressing an instance on the orchestrator by name; `name` stays user-facing.
+    async fn get_crabshack_instance_name(
+        &self,
+        instance_id: Uuid,
+    ) -> anyhow::Result<Option<String>>;
 
     /// Returns (total, migrated, pending, no_url, unknown).
     async fn get_migration_status_counts(

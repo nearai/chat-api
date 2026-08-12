@@ -1,0 +1,12 @@
+-- The name an instance carries on CrabShack, when it differs from the user-facing `name`.
+--
+-- Legacy agent names were never unique: only `instance_id` is UNIQUE, so the same
+-- `name` is held by unrelated users across the agent0-4 nodes (the node is part of
+-- the legacy hostname, so `brave-toad.agent1` and `brave-toad.agent3` coexist).
+-- CrabShack's namespace is flat and the name drives the gateway hostname
+-- (`<name>.<zone>`), so the second agent of a colliding set has to land under a
+-- different name. Recording it here keeps the user-facing `name` untouched while
+-- later operations can still address the instance on CrabShack.
+--
+-- NULL means "same as name", which is true for every instance migrated before this.
+ALTER TABLE agent_instances ADD COLUMN crabshack_instance_name VARCHAR(255);

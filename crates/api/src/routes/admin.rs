@@ -3530,6 +3530,7 @@ pub async fn admin_patch_instance(
             request.instance_url,
             encrypted_token,
             request.dashboard_url,
+            None, // the CrabShack-side name is set by migration, not by this patch endpoint
         )
         .await
         .map_err(|e| {
@@ -3630,6 +3631,20 @@ pub struct MigrateInstanceRequest {
     /// Pin the migrated instance to a specific CrabShack node id. When set,
     /// CrabShack places it on that node and cross-checks it against node_policy.
     pub node_id: Option<String>,
+    /// Name to give the instance on CrabShack, when the user-facing `name` is
+    /// already taken there. Legacy names are not unique (only `instance_id` is),
+    /// while CrabShack's namespace is flat and the name becomes the gateway
+    /// hostname — so the second agent of a colliding set needs a distinct one.
+    /// Convention is the original name plus a 5-char proquint, e.g.
+    /// `brave-toad` -> `brave-toad-abcde`.
+    ///
+    /// The user-facing `name` is left unchanged; this is stored separately as
+    /// `crabshack_instance_name`. Pass the **full** name, not just a suffix.
+    ///
+    /// Pass the same value on a retry: the backup is encrypted to a recipient
+    /// derived from this name, so changing it between attempts makes an existing
+    /// backup (including one reused via `backup_url`) undecryptable.
+    pub crabshack_name: Option<String>,
 }
 
 /// Response for migrate endpoint
@@ -3645,6 +3660,66 @@ pub struct MigrateInstanceResponse {
 /// allow-listed, so migrate jumps them to a supported tag instead.
 const MIGRATE_MIN_ASIS_DIND_VERSION: (u64, u64, u64) = (0, 23, 0);
 const MIGRATE_FALLBACK_DIND_VERSION: &str = "0.29.1";
+
+/// True if `name` is usable as a CrabShack instance name.
+///
+/// The name becomes the gateway hostname (`<name>.<zone>`) and appears in log-upload and
+/// secret paths, so it must be a single lowercase DNS label. Dots are rejected outright:
+/// they would split the hostname and break those paths.
+fn is_valid_crabshack_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 63
+        && !name.starts_with('-')
+        && !name.ends_with('-')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// True if an instance with this name already exists on CrabShack.
+///
+/// Used as a migrate preflight so a name clash is refused before any side effect, rather
+/// than surfacing as a 409 at import — which happens after the legacy instance is stopped.
+async fn crabshack_instance_exists(app_state: &AppState, name: &str) -> Result<bool, ApiError> {
+    let manager = app_state
+        .agent_service
+        .find_crabshack_manager()
+        .ok_or_else(|| ApiError::bad_request("No CrabShack manager configured"))?;
+    let url = format!(
+        "{}/instances/{}",
+        manager.url.trim_end_matches('/'),
+        urlencoding::encode(name)
+    );
+    let resp = app_state
+        .http_client
+        .get(&url)
+        .bearer_auth(&manager.token)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to query CrabShack for name availability: error={}",
+                e
+            );
+            ApiError::internal_server_error("Failed to contact CrabShack")
+        })?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(false);
+    }
+    if resp.status().is_success() {
+        return Ok(true);
+    }
+    let status = resp.status();
+    tracing::error!(
+        "CrabShack name-availability check failed: status={}, name={}",
+        status,
+        name
+    );
+    Err(ApiError::internal_server_error(
+        "Failed to check name availability on CrabShack",
+    ))
+}
 
 /// True if `ver` ("major.minor.patch", optional leading 'v' / trailing suffix)
 /// is below `floor`. Unparseable versions count as below — safest is to upgrade
@@ -3727,6 +3802,47 @@ pub async fn admin_migrate_instance(
         .and_then(|b| b.backup_url.as_ref())
         .is_some_and(|s| !s.is_empty());
 
+    // Resolve the name the instance will carry on CrabShack. Must be settled here, before
+    // the age recipient is derived below: the backup is encrypted to a recipient derived
+    // from this name, and CrabShack derives the matching identity from the imported name.
+    let target_name = match body
+        .as_ref()
+        .and_then(|b| b.crabshack_name.as_deref())
+        .filter(|s| !s.is_empty())
+    {
+        None => instance.name.clone(),
+        Some(requested) => {
+            if !is_valid_crabshack_name(requested) {
+                return Err(ApiError::bad_request(
+                    "crabshack_name must be a single lowercase DNS label \
+                     (a-z, 0-9, '-'; no dots; not starting or ending with '-'; max 63 chars)",
+                ));
+            }
+            // A name that does not extend the original is legal but almost always a mistake
+            // (copy-paste of the wrong row), and it strands the agent under a name nobody
+            // will look for. Warn and proceed rather than block a deliberate choice.
+            if !requested.starts_with(&instance.name) {
+                tracing::warn!(
+                    "Migrate: crabshack_name does not extend the instance name — proceeding \
+                     anyway: instance_id={}, name={}, crabshack_name={}",
+                    id,
+                    instance.name,
+                    requested,
+                );
+            }
+            // Fail here rather than at import: import runs after the legacy instance is
+            // stopped, so a name clash discovered there costs the user a stop/restart cycle
+            // and a wasted backup.
+            if crabshack_instance_exists(&app_state, requested).await? {
+                return Err(ApiError::bad_request(
+                    "crabshack_name is already taken on CrabShack — pick another \
+                     (convention: original name plus a 5-char proquint)",
+                ));
+            }
+            requested.to_string()
+        }
+    };
+
     let backup_passphrase = match creds {
         Some((_auth_secret, passphrase)) => passphrase,
         None if request_has_backup_url => {
@@ -3763,9 +3879,10 @@ pub async fn admin_migrate_instance(
         }
     };
 
-    // Derive age recipient for the backup
+    // Derive age recipient for the backup. Keyed on the CrabShack-side name so that
+    // CrabShack's import, which derives the identity from the name it is given, can decrypt.
     let (age_recipient, _age_identity) =
-        services::agent::age_derivation::derive_age_keypair(&backup_passphrase, &instance.name);
+        services::agent::age_derivation::derive_age_keypair(&backup_passphrase, &target_name);
 
     // Decrypt and validate instance_token
     let instance_token = instance
@@ -4292,7 +4409,7 @@ pub async fn admin_migrate_instance(
     let node_id = request.node_id;
     let import_url = format!("{}/instances/import", crabshack_manager.url);
     let mut import_body = serde_json::json!({
-        "name": instance.name,
+        "name": target_name,
         "token": instance_token,
         "backup_url": backup_presigned_url,
         "backup_passphrase": backup_passphrase,
@@ -4382,13 +4499,15 @@ pub async fn admin_migrate_instance(
 
     // Construct instance_url from CrabShack manager domain + instance name + token.
     // CrabShack doesn't emit URLs — same pattern as the normal create flow (service.rs:1584-1597).
+    // Uses target_name, the CrabShack-side name, which differs from the user-facing name when
+    // the latter was already taken there.
     let new_instance_url = url::Url::parse(&crabshack_manager.url)
         .ok()
         .and_then(|u| u.host_str().map(|h| h.to_string()))
         .map(|domain| {
             format!(
                 "https://{}.{}/?token={}",
-                instance_name, domain, instance_token
+                target_name, domain, instance_token
             )
         });
     let new_dashboard_url = new_instance_url.clone();
@@ -4406,6 +4525,8 @@ pub async fn admin_migrate_instance(
             new_instance_url,
             None, // keep instance_token unchanged
             new_dashboard_url,
+            // Only recorded when it diverges from `name`; NULL keeps meaning "same as name".
+            (target_name != instance.name).then(|| target_name.clone()),
         )
         .await;
     if let Err(e) = db_update {
@@ -4564,11 +4685,27 @@ pub async fn admin_grant_instance_owner(
     })?;
     let owner_user_id = hex::encode(Sha256::digest(&auth_secret_bytes));
 
+    // Address the instance by its CrabShack-side name, which diverges from the user-facing
+    // `name` when that was already taken there (see MigrateInstanceRequest::crabshack_name).
+    let crabshack_side_name = app_state
+        .agent_repository
+        .get_crabshack_instance_name(id)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "grant-owner: failed to read crabshack_instance_name: instance_id={}, error={}",
+                id,
+                e
+            );
+            ApiError::internal_server_error("Failed to get instance")
+        })?
+        .unwrap_or_else(|| instance.name.clone());
+
     // Grant owner access on CrabShack (admin endpoint). Idempotent: last-write-wins.
     let grant_url = format!(
         "{}/instances/{}/access",
         crabshack_manager.url.trim_end_matches('/'),
-        encode(&instance.name)
+        encode(&crabshack_side_name)
     );
     let resp = app_state
         .http_client
@@ -5021,5 +5158,52 @@ mod migrate_version_tests {
         assert!(!ironclaw_version_below("0.23", FLOOR));
         assert!(!ironclaw_version_below("v0.29.1", FLOOR));
         assert!(!ironclaw_version_below("0.29.1-rc1", FLOOR));
+    }
+}
+
+#[cfg(test)]
+mod migrate_name_tests {
+    use super::is_valid_crabshack_name;
+
+    #[test]
+    fn accepts_a_proquint_suffixed_label() {
+        // The convention this field exists for: original name plus a 5-char proquint.
+        for n in [
+            "brave-toad-abcde",
+            "brave-toad",
+            "a",
+            "rich-orca-2",
+            "x9",
+            &"a".repeat(63),
+        ] {
+            assert!(is_valid_crabshack_name(n), "{n} should be accepted");
+        }
+    }
+
+    #[test]
+    fn rejects_anything_that_is_not_a_dns_label() {
+        // Dots would split the gateway hostname and break log-upload / secret paths;
+        // uppercase and underscores are not valid in a hostname label.
+        for n in [
+            "",
+            "brave-toad.agent1",
+            "Brave-Toad",
+            "brave_toad",
+            "-brave-toad",
+            "brave-toad-",
+            "brave toad",
+            &"a".repeat(64),
+        ] {
+            assert!(!is_valid_crabshack_name(n), "{n:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn prefix_rule_flags_a_name_that_does_not_extend_the_original() {
+        // The handler warns (and proceeds) on the false cases; asserting the predicate
+        // keeps that rule honest if the check is ever reshaped.
+        assert!("brave-toad-abcde".starts_with("brave-toad"));
+        assert!("brave-toad".starts_with("brave-toad"));
+        assert!(!"wise-fox-abcde".starts_with("brave-toad"));
     }
 }
