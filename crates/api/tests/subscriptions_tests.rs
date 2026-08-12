@@ -3,7 +3,7 @@ mod common;
 use api::routes::api::SUBSCRIPTION_REQUIRED_ERROR_MESSAGE;
 use async_trait::async_trait;
 use axum_test::TestServer;
-use chrono::{DateTime, Duration, TimeZone, Timelike, Utc};
+use chrono::{DateTime, Datelike, Duration, TimeZone, Timelike, Utc};
 use common::{
     cleanup_user_agent_instances, cleanup_user_subscription_credits, cleanup_user_subscriptions,
     cleanup_user_usage, clear_subscription_plans, create_test_server, create_test_server_and_db,
@@ -3944,8 +3944,8 @@ async fn assert_house_of_stake_credits_for_effective_lock(
     assertion_message: &str,
 ) {
     clear_proxy_env_for_local_wiremock();
-    let period_start = Utc::now() - Duration::days(1);
     let period_end = Utc::now() + Duration::days(29);
+    let period_start = sub_one_month_same_day_for_test(period_end);
     let period_start_ns = period_start.timestamp_nanos_opt().unwrap().to_string();
     let period_end_ns = period_end.timestamp_nanos_opt().unwrap().to_string();
     let mock = MockServer::start().await;
@@ -4058,6 +4058,7 @@ async fn assert_house_of_stake_credits_for_effective_lock(
         false,
     )
     .await;
+    set_house_of_stake_subscription_period_end(&db, &subscription_id, period_end).await;
     if expected_plan_credits > 0 {
         let credited_stake_yocto = effective_lock
             .get("amount_near")
@@ -4138,6 +4139,42 @@ fn yocto_near(near: u64) -> String {
     (u128::from(near) * 1_000_000_000_000_000_000_000_000u128).to_string()
 }
 
+fn sub_one_month_same_day_for_test(dt: DateTime<Utc>) -> DateTime<Utc> {
+    let d = dt.date_naive();
+    let (y, m, day) = (d.year(), d.month(), d.day());
+    let (new_y, new_m) = if m == 1 { (y - 1, 12) } else { (y, m - 1) };
+    let last_day = match new_m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if (new_y % 4 == 0 && new_y % 100 != 0) || (new_y % 400 == 0) {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 28,
+    };
+    let new_day = day.min(last_day);
+    let new_date = chrono::NaiveDate::from_ymd_opt(new_y, new_m, new_day).expect("valid test date");
+    chrono::DateTime::<Utc>::from_naive_utc_and_offset(new_date.and_time(dt.time()), Utc)
+}
+
+async fn set_house_of_stake_subscription_period_end(
+    db: &database::Database,
+    subscription_id: &str,
+    period_end: DateTime<Utc>,
+) {
+    let client = db.pool().get().await.unwrap();
+    client
+        .execute(
+            "UPDATE subscriptions SET current_period_end = $2 WHERE subscription_id = $1",
+            &[&subscription_id, &period_end],
+        )
+        .await
+        .expect("set HoS subscription period end");
+}
+
 async fn get_credits_plan_limit(server: &TestServer, token: &str) -> i64 {
     let response = server
         .get("/v1/credits")
@@ -4168,8 +4205,8 @@ async fn sync_house_of_stake_subscription(server: &TestServer, token: &str) {
 async fn test_house_of_stake_credit_snapshot_prorates_increases_and_resets_next_period() {
     clear_proxy_env_for_local_wiremock();
     let now = Utc::now();
-    let period_start = now - Duration::days(20);
     let period_end = now + Duration::days(10);
+    let period_start = sub_one_month_same_day_for_test(period_end);
     let state = Arc::new(Mutex::new(HouseOfStakeCreditMockState {
         subscription_id: "sub_chain_hos_snapshot_credits".to_string(),
         amount_near: yocto_near(500),
@@ -4290,6 +4327,7 @@ async fn test_house_of_stake_credit_snapshot_prorates_increases_and_resets_next_
         false,
     )
     .await;
+    set_house_of_stake_subscription_period_end(&db, &subscription_id, period_end).await;
     {
         let mut state = state.lock().expect("lock HoS mock state");
         state.subscription_id = subscription_id.clone();
@@ -4358,10 +4396,10 @@ async fn test_house_of_stake_credit_snapshot_prorates_increases_and_resets_next_
         state.cancel_at_period_end = false;
     }
     sync_house_of_stake_subscription(&server, &token).await;
-    assert_eq!(
-        get_credits_plan_limit(&server, &token).await,
-        4_000_000_000,
-        "new periods should seed from the then-effective stake and only prorate later increases"
+    let new_period_limit = get_credits_plan_limit(&server, &token).await;
+    assert!(
+        (3_000_000_000..=4_000_000_000).contains(&new_period_limit),
+        "new periods without a pre-seeded snapshot should prorate the first observed stake, got {new_period_limit}"
     );
 }
 
@@ -4370,8 +4408,8 @@ async fn test_house_of_stake_credit_snapshot_prorates_increases_and_resets_next_
 async fn test_house_of_stake_credits_refreshes_auto_renewed_expired_local_row() {
     clear_proxy_env_for_local_wiremock();
     let now = Utc::now();
-    let period_start = now - Duration::days(1);
     let period_end = now + Duration::days(29);
+    let period_start = sub_one_month_same_day_for_test(period_end);
 
     let mock = MockServer::start().await;
     Mock::given(method("POST"))
@@ -4486,7 +4524,11 @@ async fn test_house_of_stake_credits_refreshes_auto_renewed_expired_local_row() 
         .await
         .unwrap();
 
-    assert_eq!(get_credits_plan_limit(&server, &token).await, 5_000_000_000);
+    let plan_limit = get_credits_plan_limit(&server, &token).await;
+    assert!(
+        (4_500_000_000..=5_000_000_000).contains(&plan_limit),
+        "auto-renewed rows without a pre-seeded snapshot should prorate the first observed stake, got {plan_limit}"
+    );
 
     let refreshed_end: chrono::DateTime<Utc> = client
         .query_one(
@@ -4703,8 +4745,8 @@ async fn test_house_of_stake_chain_missing_ignores_persisted_snapshot() {
         .unwrap()
         .get("spent_nano_usd");
     assert_eq!(
-        spent, 0,
-        "zero HoS entitlement should not drain purchased credits when a current snapshot covers usage"
+        spent, 1_000_000_000,
+        "confirmed zero HoS entitlement should reconcile purchased credits against a zero plan"
     );
 }
 
@@ -4713,8 +4755,8 @@ async fn test_house_of_stake_chain_missing_ignores_persisted_snapshot() {
 async fn test_house_of_stake_transient_lock_failure_uses_current_snapshot_only() {
     clear_proxy_env_for_local_wiremock();
     let now = Utc::now();
-    let current_start = now - Duration::days(1);
     let current_end = now + Duration::days(29);
+    let current_start = sub_one_month_same_day_for_test(current_end);
     let previous_start = current_start - Duration::days(30);
     let previous_end = current_start;
 
@@ -4808,6 +4850,7 @@ async fn test_house_of_stake_transient_lock_failure_uses_current_snapshot_only()
         false,
     )
     .await;
+    set_house_of_stake_subscription_period_end(&db, &subscription_id, current_end).await;
     insert_house_of_stake_credit_snapshot(
         &db,
         near_email,
@@ -4840,8 +4883,8 @@ async fn test_house_of_stake_transient_lock_failure_uses_current_snapshot_only()
 #[serial(subscription_tests)]
 async fn test_house_of_stake_credits_cache_resolver_hot_path() {
     clear_proxy_env_for_local_wiremock();
-    let period_start = Utc::now() - Duration::days(1);
     let period_end = Utc::now() + Duration::days(29);
+    let period_start = sub_one_month_same_day_for_test(period_end);
 
     let mock = MockServer::start().await;
     Mock::given(method("POST"))
@@ -4929,11 +4972,21 @@ async fn test_house_of_stake_credits_cache_resolver_hot_path() {
         .unwrap()
         .to_string();
     cleanup_user_subscriptions(&db, near_email).await;
-    insert_house_of_stake_subscription_for_existing_user(&db, near_email, "price_hos_basic", false)
-        .await;
+    let subscription_id = insert_house_of_stake_subscription_for_existing_user(
+        &db,
+        near_email,
+        "price_hos_basic",
+        false,
+    )
+    .await;
+    set_house_of_stake_subscription_period_end(&db, &subscription_id, period_end).await;
 
-    assert_eq!(get_credits_plan_limit(&server, &token).await, 5_000_000_000);
-    assert_eq!(get_credits_plan_limit(&server, &token).await, 5_000_000_000);
+    let first_limit = get_credits_plan_limit(&server, &token).await;
+    assert!(
+        (4_500_000_000..=5_000_000_000).contains(&first_limit),
+        "first observed HoS stake should be prorated for the remaining period, got {first_limit}"
+    );
+    assert_eq!(get_credits_plan_limit(&server, &token).await, first_limit);
 
     let requests = mock.received_requests().await.unwrap();
     assert_eq!(

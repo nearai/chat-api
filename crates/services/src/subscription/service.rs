@@ -63,6 +63,7 @@ struct CachedCreditLimit {
     plan_credits: u64,
     period_start: chrono::DateTime<Utc>,
     period_end: chrono::DateTime<Utc>,
+    house_of_stake_source: Option<HouseOfStakeEntitlementSource>,
     cached_at: Instant,
 }
 
@@ -74,6 +75,29 @@ struct CachedHouseOfStakeRefreshFailure {
 struct CachedSystemConfigs {
     configs: Option<Arc<SystemConfigs>>,
     cached_at: Instant,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HouseOfStakeEntitlementSource {
+    Chain,
+    TransientFallback,
+    ConfirmedZero,
+}
+
+#[derive(Clone, Debug)]
+struct ResolvedPlanPeriod {
+    plan_credits: u64,
+    period_start: chrono::DateTime<Utc>,
+    period_end: chrono::DateTime<Utc>,
+    house_of_stake_source: Option<HouseOfStakeEntitlementSource>,
+}
+
+#[derive(Clone, Debug)]
+struct HouseOfStakeEntitlement {
+    plan_credits: u64,
+    period_start: chrono::DateTime<Utc>,
+    period_end: chrono::DateTime<Utc>,
+    source: HouseOfStakeEntitlementSource,
 }
 
 const TTL_CACHE_SECS: u64 = 600; // 10 minutes
@@ -206,7 +230,7 @@ impl SubscriptionServiceImpl {
         &self,
         user_id: UserId,
         ttl_secs: u64,
-    ) -> Option<(u64, DateTime<Utc>, DateTime<Utc>)> {
+    ) -> Option<ResolvedPlanPeriod> {
         let cache_guard = self.credit_limit_cache.read().await;
         let cached = cache_guard.get(&user_id)?;
         if cached.cached_at.elapsed().as_secs() >= ttl_secs {
@@ -219,7 +243,12 @@ impl SubscriptionServiceImpl {
             cached.plan_credits,
             cached.cached_at.elapsed().as_secs()
         );
-        Some((cached.plan_credits, cached.period_start, cached.period_end))
+        Some(ResolvedPlanPeriod {
+            plan_credits: cached.plan_credits,
+            period_start: cached.period_start,
+            period_end: cached.period_end,
+            house_of_stake_source: cached.house_of_stake_source,
+        })
     }
 
     async fn cache_credit_limit_for_user(
@@ -228,6 +257,7 @@ impl SubscriptionServiceImpl {
         plan_credits: u64,
         period_start: DateTime<Utc>,
         period_end: DateTime<Utc>,
+        house_of_stake_source: Option<HouseOfStakeEntitlementSource>,
     ) {
         self.credit_limit_cache.write().await.insert(
             user_id,
@@ -235,6 +265,7 @@ impl SubscriptionServiceImpl {
                 plan_credits,
                 period_start,
                 period_end,
+                house_of_stake_source,
                 cached_at: Instant::now(),
             },
         );
@@ -999,6 +1030,20 @@ impl SubscriptionServiceImpl {
         &self,
         user_id: UserId,
     ) -> Result<(i64, chrono::DateTime<Utc>, chrono::DateTime<Utc>), SubscriptionError> {
+        let resolved = self
+            .resolve_plan_period_for_user_with_source(user_id)
+            .await?;
+        Ok((
+            resolved.plan_credits.min(i64::MAX as u64) as i64,
+            resolved.period_start,
+            resolved.period_end,
+        ))
+    }
+
+    async fn resolve_plan_period_for_user_with_source(
+        &self,
+        user_id: UserId,
+    ) -> Result<ResolvedPlanPeriod, SubscriptionError> {
         let active_subscription = self
             .get_active_subscription_for_entitlement(user_id)
             .await?;
@@ -1007,15 +1052,11 @@ impl SubscriptionServiceImpl {
             .as_ref()
             .is_some_and(|sub| sub.provider == "house-of-stake")
         {
-            if let Some((plan_credits, period_start, period_end)) = self
+            if let Some(resolved) = self
                 .cached_credit_limit_for_user(user_id, HOUSE_OF_STAKE_CREDIT_LIMIT_CACHE_SECS)
                 .await
             {
-                return Ok((
-                    plan_credits.min(i64::MAX as u64) as i64,
-                    period_start,
-                    period_end,
-                ));
+                return Ok(resolved);
             }
         }
 
@@ -1025,7 +1066,7 @@ impl SubscriptionServiceImpl {
             .and_then(|c| c.subscription_plans.clone())
             .unwrap_or_default();
 
-        let (plan_credits, period_start, period_end) = match active_subscription.as_ref() {
+        let resolved = match active_subscription.as_ref() {
             Some(sub) => {
                 let fallback_period_end = sub.current_period_end;
                 let fallback_period_start = sub_one_month_same_day(sub.current_period_end);
@@ -1046,12 +1087,18 @@ impl SubscriptionServiceImpl {
                             )
                             .await
                         {
-                            Ok(Some(result)) => result,
-                            Ok(None) => (
-                                Self::plan_limit_max(plan_config),
-                                fallback_period_start,
-                                fallback_period_end,
-                            ),
+                            Ok(Some(entitlement)) => ResolvedPlanPeriod {
+                                plan_credits: entitlement.plan_credits,
+                                period_start: entitlement.period_start,
+                                period_end: entitlement.period_end,
+                                house_of_stake_source: Some(entitlement.source),
+                            },
+                            Ok(None) => ResolvedPlanPeriod {
+                                plan_credits: Self::plan_limit_max(plan_config),
+                                period_start: fallback_period_start,
+                                period_end: fallback_period_end,
+                                house_of_stake_source: None,
+                            },
                             Err(err) => {
                                 tracing::error!(
                                     user_id = %user_id.0,
@@ -1062,17 +1109,19 @@ impl SubscriptionServiceImpl {
                                 return Err(err);
                             }
                         },
-                        None => (
-                            DEFAULT_MONTHLY_CREDITS_NANO_USD,
-                            fallback_period_start,
-                            fallback_period_end,
-                        ),
+                        None => ResolvedPlanPeriod {
+                            plan_credits: DEFAULT_MONTHLY_CREDITS_NANO_USD,
+                            period_start: fallback_period_start,
+                            period_end: fallback_period_end,
+                            house_of_stake_source: None,
+                        },
                     },
-                    None => (
-                        DEFAULT_MONTHLY_CREDITS_NANO_USD,
-                        fallback_period_start,
-                        fallback_period_end,
-                    ),
+                    None => ResolvedPlanPeriod {
+                        plan_credits: DEFAULT_MONTHLY_CREDITS_NANO_USD,
+                        period_start: fallback_period_start,
+                        period_end: fallback_period_end,
+                        house_of_stake_source: None,
+                    },
                 }
             }
             None => {
@@ -1082,7 +1131,12 @@ impl SubscriptionServiceImpl {
                     .unwrap_or(DEFAULT_MONTHLY_CREDITS_NANO_USD);
                 let (period_start, period_end) =
                     self.resolve_free_plan_period_for_user(user_id).await?;
-                (plan_credits, period_start, period_end)
+                ResolvedPlanPeriod {
+                    plan_credits,
+                    period_start,
+                    period_end,
+                    house_of_stake_source: None,
+                }
             }
         };
 
@@ -1090,13 +1144,17 @@ impl SubscriptionServiceImpl {
             .as_ref()
             .is_some_and(|sub| sub.provider == "house-of-stake")
         {
-            self.cache_credit_limit_for_user(user_id, plan_credits, period_start, period_end)
-                .await;
+            self.cache_credit_limit_for_user(
+                user_id,
+                resolved.plan_credits,
+                resolved.period_start,
+                resolved.period_end,
+                resolved.house_of_stake_source,
+            )
+            .await;
         }
 
-        // Clamp to i64::MAX so CreditsSummary.plan_credits and comparisons don't overflow
-        let plan_credits_i64 = plan_credits.min(i64::MAX as u64) as i64;
-        Ok((plan_credits_i64, period_start, period_end))
+        Ok(resolved)
     }
 
     fn mark_downgrade_pending(subscription: &mut Subscription, target_price_id: String) {
@@ -1180,10 +1238,6 @@ impl SubscriptionServiceImpl {
         period_end: DateTime<Utc>,
         effective_stake_yocto: u128,
     ) -> Result<u64, SubscriptionError> {
-        let full_period_limit =
-            Self::stake_based_credits_for_lock(plan_config, effective_stake_yocto)
-                .unwrap_or(0)
-                .min(i64::MAX as u64);
         let mut client = self
             .db_pool
             .get()
@@ -1227,8 +1281,8 @@ impl SubscriptionServiceImpl {
                         &subscription_id,
                         &period_start,
                         &period_end,
-                        &effective_stake_yocto.to_string(),
-                        &(full_period_limit as i64),
+                        &"0",
+                        &0_i64,
                     ],
                 )
                 .await
@@ -1344,7 +1398,7 @@ impl SubscriptionServiceImpl {
         period: (DateTime<Utc>, DateTime<Utc>),
         reason: &'static str,
         error: impl std::fmt::Display,
-    ) -> Result<Option<(u64, DateTime<Utc>, DateTime<Utc>)>, SubscriptionError> {
+    ) -> Result<Option<HouseOfStakeEntitlement>, SubscriptionError> {
         let (period_start, period_end) = period;
         tracing::warn!(
             user_id = %user_id.0,
@@ -1357,11 +1411,21 @@ impl SubscriptionServiceImpl {
             .current_house_of_stake_snapshot_limit(&subscription.subscription_id, Utc::now())
             .await?
         {
-            return Ok(Some((limit, snapshot_start, snapshot_end)));
+            return Ok(Some(HouseOfStakeEntitlement {
+                plan_credits: limit,
+                period_start: snapshot_start,
+                period_end: snapshot_end,
+                source: HouseOfStakeEntitlementSource::TransientFallback,
+            }));
         }
 
         let limit = Self::plan_limit_max(plan_config);
-        Ok(Some((limit, period_start, period_end)))
+        Ok(Some(HouseOfStakeEntitlement {
+            plan_credits: limit,
+            period_start,
+            period_end,
+            source: HouseOfStakeEntitlementSource::TransientFallback,
+        }))
     }
 
     fn house_of_stake_zero_entitlement(
@@ -1369,7 +1433,7 @@ impl SubscriptionServiceImpl {
         subscription: &Subscription,
         period: (DateTime<Utc>, DateTime<Utc>),
         reason: &'static str,
-    ) -> Option<(u64, DateTime<Utc>, DateTime<Utc>)> {
+    ) -> Option<HouseOfStakeEntitlement> {
         let (period_start, period_end) = period;
         tracing::warn!(
             user_id = %user_id.0,
@@ -1377,7 +1441,12 @@ impl SubscriptionServiceImpl {
             reason,
             "HoS chain reported no active stake entitlement; granting zero stake-based credits"
         );
-        Some((0, period_start, period_end))
+        Some(HouseOfStakeEntitlement {
+            plan_credits: 0,
+            period_start,
+            period_end,
+            source: HouseOfStakeEntitlementSource::ConfirmedZero,
+        })
     }
 
     async fn stake_based_plan_limit_and_period(
@@ -1387,7 +1456,7 @@ impl SubscriptionServiceImpl {
         plan_config: &SubscriptionPlanConfig,
         fallback_period_start: DateTime<Utc>,
         fallback_period_end: DateTime<Utc>,
-    ) -> Result<Option<(u64, DateTime<Utc>, DateTime<Utc>)>, SubscriptionError> {
+    ) -> Result<Option<HouseOfStakeEntitlement>, SubscriptionError> {
         if subscription.provider != "house-of-stake" {
             return Ok(None);
         }
@@ -1528,25 +1597,24 @@ impl SubscriptionServiceImpl {
             ));
         }
 
-        let (period_start, period_end) = match chain_sub
+        if let Some((chain_start, chain_end)) = chain_sub
             .start_ns
             .and_then(Self::ns_to_datetime)
             .zip(Self::ns_to_datetime(chain_sub.end_ns))
+            .filter(|(start, end)| end > start)
         {
-            Some((start, end)) if end > start => (start, end),
-            Some((start, end)) => {
-                tracing::warn!(
-                    user_id = %user_id.0,
-                    subscription_id = %subscription.subscription_id,
-                    price_id = %subscription.price_id,
-                    chain_period_start = %start,
-                    chain_period_end = %end,
-                    "HoS chain subscription period is invalid; using persisted subscription period"
-                );
-                (fallback_period_start, fallback_period_end)
-            }
-            None => (fallback_period_start, fallback_period_end),
-        };
+            tracing::debug!(
+                user_id = %user_id.0,
+                subscription_id = %subscription.subscription_id,
+                price_id = %subscription.price_id,
+                chain_period_start = %chain_start,
+                chain_period_end = %chain_end,
+                fallback_period_start = %fallback_period_start,
+                fallback_period_end = %fallback_period_end,
+                "using persisted local HoS billing period key for entitlement snapshot"
+            );
+        }
+        let (period_start, period_end) = (fallback_period_start, fallback_period_end);
 
         let Some(last_lock_id) = chain_sub
             .last_lock_id
@@ -1652,7 +1720,12 @@ impl SubscriptionServiceImpl {
                 lock_amount,
             )
             .await?;
-        Ok(Some((limit, period_start, period_end)))
+        Ok(Some(HouseOfStakeEntitlement {
+            plan_credits: limit,
+            period_start,
+            period_end,
+            source: HouseOfStakeEntitlementSource::Chain,
+        }))
     }
 
     fn should_check_pending_downgrade(subscription: &Subscription) -> bool {
@@ -2491,12 +2564,17 @@ impl SubscriptionServiceImpl {
     async fn purchased_reconciliation_plan_period(
         &self,
         user_id: UserId,
-        plan_credits: i64,
-        period_start: DateTime<Utc>,
-        period_end: DateTime<Utc>,
+        resolved: &ResolvedPlanPeriod,
     ) -> Result<Option<(i64, DateTime<Utc>, DateTime<Utc>)>, SubscriptionError> {
+        let plan_credits = resolved.plan_credits.min(i64::MAX as u64) as i64;
+        let period_start = resolved.period_start;
+        let period_end = resolved.period_end;
         if plan_credits > 0 {
             return Ok(Some((plan_credits, period_start, period_end)));
+        }
+
+        if resolved.house_of_stake_source == Some(HouseOfStakeEntitlementSource::ConfirmedZero) {
+            return Ok(Some((0, period_start, period_end)));
         }
 
         let active_subscription = match self.get_active_subscription_for_entitlement(user_id).await
@@ -3900,8 +3978,8 @@ impl SubscriptionService for SubscriptionServiceImpl {
                 .await
         };
 
-        let (plan_credits, period_start, period_end) = match cached_limit {
-            Some((plan, start, end)) => (plan, start, end),
+        let resolved = match cached_limit {
+            Some(resolved) => resolved,
             None => {
                 let configs = self
                     .system_configs_service
@@ -3913,7 +3991,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     .unwrap_or_default();
 
                 // Use monthly_credits when set (nano USD); else monthly_tokens → nano USD at 1.5 USD per M tokens. Never fail for missing config.
-                let (plan_credits, period_start, period_end) = match active_subscription.as_ref() {
+                let resolved = match active_subscription.as_ref() {
                     Some(sub) => {
                         let effective_sub = if sub.provider == "stripe"
                             && Self::should_check_pending_downgrade(sub)
@@ -3953,12 +4031,18 @@ impl SubscriptionService for SubscriptionServiceImpl {
                                     )
                                     .await
                                 {
-                                    Ok(Some(result)) => result,
-                                    Ok(None) => (
-                                        Self::plan_limit_max(plan_config),
-                                        fallback_period_start,
-                                        fallback_period_end,
-                                    ),
+                                    Ok(Some(entitlement)) => ResolvedPlanPeriod {
+                                        plan_credits: entitlement.plan_credits,
+                                        period_start: entitlement.period_start,
+                                        period_end: entitlement.period_end,
+                                        house_of_stake_source: Some(entitlement.source),
+                                    },
+                                    Ok(None) => ResolvedPlanPeriod {
+                                        plan_credits: Self::plan_limit_max(plan_config),
+                                        period_start: fallback_period_start,
+                                        period_end: fallback_period_end,
+                                        house_of_stake_source: None,
+                                    },
                                     Err(err) => {
                                         tracing::error!(
                                             user_id = %user_id.0,
@@ -3975,11 +4059,12 @@ impl SubscriptionService for SubscriptionServiceImpl {
                                         plan_name,
                                         DEFAULT_MONTHLY_CREDITS_NANO_USD
                                     );
-                                    (
-                                        DEFAULT_MONTHLY_CREDITS_NANO_USD,
-                                        fallback_period_start,
-                                        fallback_period_end,
-                                    )
+                                    ResolvedPlanPeriod {
+                                        plan_credits: DEFAULT_MONTHLY_CREDITS_NANO_USD,
+                                        period_start: fallback_period_start,
+                                        period_end: fallback_period_end,
+                                        house_of_stake_source: None,
+                                    }
                                 }
                             },
                             None => {
@@ -3988,11 +4073,12 @@ impl SubscriptionService for SubscriptionServiceImpl {
                                     plan_name,
                                     DEFAULT_MONTHLY_CREDITS_NANO_USD
                                 );
-                                (
-                                    DEFAULT_MONTHLY_CREDITS_NANO_USD,
-                                    fallback_period_start,
-                                    fallback_period_end,
-                                )
+                                ResolvedPlanPeriod {
+                                    plan_credits: DEFAULT_MONTHLY_CREDITS_NANO_USD,
+                                    period_start: fallback_period_start,
+                                    period_end: fallback_period_end,
+                                    house_of_stake_source: None,
+                                }
                             }
                         }
                     }
@@ -4009,15 +4095,29 @@ impl SubscriptionService for SubscriptionServiceImpl {
                             });
                         let (period_start, period_end) =
                             self.resolve_free_plan_period_for_user(user_id).await?;
-                        (plan_credits, period_start, period_end)
+                        ResolvedPlanPeriod {
+                            plan_credits,
+                            period_start,
+                            period_end,
+                            house_of_stake_source: None,
+                        }
                     }
                 };
 
-                self.cache_credit_limit_for_user(user_id, plan_credits, period_start, period_end)
-                    .await;
-                (plan_credits, period_start, period_end)
+                self.cache_credit_limit_for_user(
+                    user_id,
+                    resolved.plan_credits,
+                    resolved.period_start,
+                    resolved.period_end,
+                    resolved.house_of_stake_source,
+                )
+                .await;
+                resolved
             }
         };
+        let plan_credits = resolved.plan_credits;
+        let period_start = resolved.period_start;
+        let period_end = resolved.period_end;
 
         // 2. Get spent credits (cost_nano_usd) in the period
         let period_spent_credits = self
@@ -4672,10 +4772,11 @@ impl SubscriptionService for SubscriptionServiceImpl {
         &self,
         user_id: UserId,
     ) -> Result<(), SubscriptionError> {
-        let (plan_credits, period_start, period_end) =
-            self.resolve_plan_period_for_user(user_id).await?;
+        let resolved = self
+            .resolve_plan_period_for_user_with_source(user_id)
+            .await?;
         let Some((plan_credits, period_start, period_end)) = self
-            .purchased_reconciliation_plan_period(user_id, plan_credits, period_start, period_end)
+            .purchased_reconciliation_plan_period(user_id, &resolved)
             .await?
         else {
             return Ok(());
@@ -4688,8 +4789,12 @@ impl SubscriptionService for SubscriptionServiceImpl {
     }
 
     async fn get_credits(&self, user_id: UserId) -> Result<CreditsSummary, SubscriptionError> {
-        let (plan_credits, period_start, period_end) =
-            self.resolve_plan_period_for_user(user_id).await?;
+        let resolved = self
+            .resolve_plan_period_for_user_with_source(user_id)
+            .await?;
+        let plan_credits = resolved.plan_credits.min(i64::MAX as u64) as i64;
+        let period_start = resolved.period_start;
+        let period_end = resolved.period_end;
 
         let period_spent_credits = self
             .user_usage_repo
@@ -4701,12 +4806,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
 
         if period_spent_credits > 0 {
             match self
-                .purchased_reconciliation_plan_period(
-                    user_id,
-                    plan_credits,
-                    period_start,
-                    period_end,
-                )
+                .purchased_reconciliation_plan_period(user_id, &resolved)
                 .await
             {
                 Ok(Some((
