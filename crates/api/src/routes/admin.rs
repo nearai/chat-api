@@ -3749,11 +3749,7 @@ pub async fn admin_migrate_instance(
 
     // Settled before the age recipient below: the backup is encrypted to a recipient derived
     // from this name, and CrabShack derives the matching identity from the imported name.
-    let target_name = match body
-        .as_ref()
-        .and_then(|b| b.crabshack_name.as_deref())
-        .filter(|s| !s.is_empty())
-    {
+    let target_name = match body.as_ref().and_then(|b| b.crabshack_name.as_deref()) {
         None => instance.name.clone(),
         Some(requested) => {
             if !is_valid_crabshack_name(requested) {
@@ -5113,11 +5109,9 @@ mod migrate_name_tests {
     }
 
     #[test]
-    fn prefix_rule_flags_a_name_that_does_not_extend_the_original() {
-        // The handler warns (and proceeds) on the false cases; asserting the predicate
-        // keeps that rule honest if the check is ever reshaped.
-        assert!("brave-toad-abcde".starts_with("brave-toad"));
-        assert!("brave-toad".starts_with("brave-toad"));
-        assert!(!"wise-fox-abcde".starts_with("brave-toad"));
+    fn rejects_an_empty_name_rather_than_ignoring_it() {
+        // An empty crabshack_name must 400, not fall through to the current name — that
+        // would migrate under the colliding name and 409 at import, after the stop.
+        assert!(!is_valid_crabshack_name(""));
     }
 }
