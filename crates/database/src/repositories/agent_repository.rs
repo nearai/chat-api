@@ -1139,20 +1139,6 @@ impl AgentRepository for PostgresAgentRepository {
         Ok((instances, usage_map, total))
     }
 
-    async fn get_crabshack_instance_name(
-        &self,
-        instance_id: Uuid,
-    ) -> anyhow::Result<Option<String>> {
-        let client = self.pool.get().await?;
-        let row = client
-            .query_opt(
-                "SELECT crabshack_instance_name FROM agent_instances WHERE id = $1",
-                &[&instance_id],
-            )
-            .await?;
-        Ok(row.and_then(|r| r.get(0)))
-    }
-
     async fn admin_update_instance(
         &self,
         instance_id: Uuid,
@@ -1160,7 +1146,7 @@ impl AgentRepository for PostgresAgentRepository {
         instance_url: Option<String>,
         encrypted_instance_token: Option<String>,
         dashboard_url: Option<String>,
-        crabshack_instance_name: Option<String>,
+        name: Option<String>,
     ) -> anyhow::Result<AgentInstance> {
         let client = self.pool.get().await?;
 
@@ -1189,8 +1175,8 @@ impl AgentRepository for PostgresAgentRepository {
             param_values.push(Box::new(val.clone()));
             param_idx += 1;
         }
-        if let Some(ref val) = crabshack_instance_name {
-            set_clauses.push(format!("crabshack_instance_name = ${}", param_idx));
+        if let Some(ref val) = name {
+            set_clauses.push(format!("name = ${}", param_idx));
             param_values.push(Box::new(val.clone()));
             param_idx += 1;
         }

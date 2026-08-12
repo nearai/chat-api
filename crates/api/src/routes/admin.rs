@@ -3530,7 +3530,7 @@ pub async fn admin_patch_instance(
             request.instance_url,
             encrypted_token,
             request.dashboard_url,
-            None, // the CrabShack-side name is set by migration, not by this patch endpoint
+            None, // renaming is a migration concern, not something this patch endpoint exposes
         )
         .await
         .map_err(|e| {
@@ -3631,15 +3631,17 @@ pub struct MigrateInstanceRequest {
     /// Pin the migrated instance to a specific CrabShack node id. When set,
     /// CrabShack places it on that node and cross-checks it against node_policy.
     pub node_id: Option<String>,
-    /// Name to give the instance on CrabShack, when the user-facing `name` is
-    /// already taken there. Legacy names are not unique (only `instance_id` is),
-    /// while CrabShack's namespace is flat and the name becomes the gateway
+    /// Rename the instance as part of migrating it, for when its current `name` is
+    /// already taken on CrabShack. Legacy names are not unique (only `instance_id`
+    /// is), while CrabShack's namespace is flat and the name becomes the gateway
     /// hostname — so the second agent of a colliding set needs a distinct one.
     /// Convention is the original name plus a 5-char proquint, e.g.
-    /// `brave-toad` -> `brave-toad-abcde`.
+    /// `brave-toad` -> `brave-toad-abcde`, matching the shape every natively
+    /// created agent has had since 2026-04.
     ///
-    /// The user-facing `name` is left unchanged; this is stored separately as
-    /// `crabshack_instance_name`. Pass the **full** name, not just a suffix.
+    /// On success the instance **is** this name: the record's `name` is updated
+    /// along with `instance_url`/`dashboard_url`, so there is one name everywhere.
+    /// Pass the **full** name, not just a suffix.
     ///
     /// The caller is responsible for the name being free on CrabShack — it is not
     /// checked here. A name already in use fails at import with a 409, which lands
@@ -4477,7 +4479,9 @@ pub async fn admin_migrate_instance(
             new_instance_url,
             None, // keep instance_token unchanged
             new_dashboard_url,
-            // Only recorded when it diverges from `name`; NULL keeps meaning "same as name".
+            // Rename the record to match: after migration the instance simply is target_name,
+            // the same shape every natively-created agent has had since 2026-04. Keeping one
+            // name means later CrabShack calls can keep addressing it by `name`.
             (target_name != instance.name).then(|| target_name.clone()),
         )
         .await;
@@ -4509,7 +4513,8 @@ pub async fn admin_migrate_instance(
 
     Ok(Json(MigrateInstanceResponse {
         status: "success".to_string(),
-        instance_name,
+        // The name it now carries, which differs from the one migrated when renamed.
+        instance_name: target_name,
         message: "Instance migrated to CrabShack".to_string(),
     }))
 }
@@ -4637,27 +4642,11 @@ pub async fn admin_grant_instance_owner(
     })?;
     let owner_user_id = hex::encode(Sha256::digest(&auth_secret_bytes));
 
-    // Address the instance by its CrabShack-side name, which diverges from the user-facing
-    // `name` when that was already taken there (see MigrateInstanceRequest::crabshack_name).
-    let crabshack_side_name = app_state
-        .agent_repository
-        .get_crabshack_instance_name(id)
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                "grant-owner: failed to read crabshack_instance_name: instance_id={}, error={}",
-                id,
-                e
-            );
-            ApiError::internal_server_error("Failed to get instance")
-        })?
-        .unwrap_or_else(|| instance.name.clone());
-
     // Grant owner access on CrabShack (admin endpoint). Idempotent: last-write-wins.
     let grant_url = format!(
         "{}/instances/{}/access",
         crabshack_manager.url.trim_end_matches('/'),
-        encode(&crabshack_side_name)
+        encode(&instance.name)
     );
     let resp = app_state
         .http_client
