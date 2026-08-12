@@ -3631,27 +3631,12 @@ pub struct MigrateInstanceRequest {
     /// Pin the migrated instance to a specific CrabShack node id. When set,
     /// CrabShack places it on that node and cross-checks it against node_policy.
     pub node_id: Option<String>,
-    /// Rename the instance as part of migrating it, for when its current `name` is
-    /// already taken on CrabShack. Legacy names are not unique (only `instance_id`
-    /// is), while CrabShack's namespace is flat and the name becomes the gateway
-    /// hostname — so the second agent of a colliding set needs a distinct one.
-    /// Convention is the original name plus a 5-char proquint, e.g.
-    /// `brave-toad` -> `brave-toad-abcde`, matching the shape every natively
-    /// created agent has had since 2026-04.
-    ///
-    /// On success the instance **is** this name: the record's `name` is updated
-    /// along with `instance_url`/`dashboard_url`, so there is one name everywhere.
-    /// Pass the **full** name, not just a suffix.
-    ///
-    /// The caller is responsible for the name being free on CrabShack — it is not
-    /// checked here. A name already in use fails at import with a 409, which lands
-    /// after the legacy instance has been stopped, so the caller pays a
-    /// stop/restart and a wasted backup for it. Check with
-    /// `GET {crabshack}/instances/{name}` (404 = free) before calling.
-    ///
-    /// Pass the same value on a retry: the backup is encrypted to a recipient
-    /// derived from this name, so changing it between attempts makes an existing
-    /// backup (including one reused via `backup_url`) undecryptable.
+    /// Rename the instance while migrating it, for when its `name` is already taken on
+    /// CrabShack (legacy names are not unique; CrabShack's are). Pass the full name —
+    /// convention is the original plus a 5-char proquint, `brave-toad-abcde`. On success
+    /// `name` and both URLs become this. The caller must ensure it is free; a clash fails
+    /// at import, after the legacy instance is stopped. Pass the same value on a retry —
+    /// the backup's encryption key derives from it.
     pub crabshack_name: Option<String>,
 }
 
@@ -3669,11 +3654,8 @@ pub struct MigrateInstanceResponse {
 const MIGRATE_MIN_ASIS_DIND_VERSION: (u64, u64, u64) = (0, 23, 0);
 const MIGRATE_FALLBACK_DIND_VERSION: &str = "0.29.1";
 
-/// True if `name` is usable as a CrabShack instance name.
-///
-/// The name becomes the gateway hostname (`<name>.<zone>`) and appears in log-upload and
-/// secret paths, so it must be a single lowercase DNS label. Dots are rejected outright:
-/// they would split the hostname and break those paths.
+/// True if `name` works as a CrabShack instance name: a single lowercase DNS label.
+/// It becomes the gateway hostname, so a dot would split it.
 fn is_valid_crabshack_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 63
@@ -3765,8 +3747,7 @@ pub async fn admin_migrate_instance(
         .and_then(|b| b.backup_url.as_ref())
         .is_some_and(|s| !s.is_empty());
 
-    // Resolve the name the instance will carry on CrabShack. Must be settled here, before
-    // the age recipient is derived below: the backup is encrypted to a recipient derived
+    // Settled before the age recipient below: the backup is encrypted to a recipient derived
     // from this name, and CrabShack derives the matching identity from the imported name.
     let target_name = match body
         .as_ref()
@@ -3781,9 +3762,7 @@ pub async fn admin_migrate_instance(
                      (a-z, 0-9, '-'; no dots; not starting or ending with '-'; max 63 chars)",
                 ));
             }
-            // A name that does not extend the original is legal but almost always a mistake
-            // (copy-paste of the wrong row), and it strands the agent under a name nobody
-            // will look for. Warn and proceed rather than block a deliberate choice.
+            // Usually a copy-paste of the wrong row; warn rather than block a deliberate choice.
             if !requested.starts_with(&instance.name) {
                 tracing::warn!(
                     "Migrate: crabshack_name does not extend the instance name — proceeding \
@@ -3833,8 +3812,7 @@ pub async fn admin_migrate_instance(
         }
     };
 
-    // Derive age recipient for the backup. Keyed on the CrabShack-side name so that
-    // CrabShack's import, which derives the identity from the name it is given, can decrypt.
+    // Keyed on target_name: CrabShack's import derives the identity from the name it is given.
     let (age_recipient, _age_identity) =
         services::agent::age_derivation::derive_age_keypair(&backup_passphrase, &target_name);
 
@@ -4453,8 +4431,6 @@ pub async fn admin_migrate_instance(
 
     // Construct instance_url from CrabShack manager domain + instance name + token.
     // CrabShack doesn't emit URLs — same pattern as the normal create flow (service.rs:1584-1597).
-    // Uses target_name, the CrabShack-side name, which differs from the user-facing name when
-    // the latter was already taken there.
     let new_instance_url = url::Url::parse(&crabshack_manager.url)
         .ok()
         .and_then(|u| u.host_str().map(|h| h.to_string()))
@@ -4479,9 +4455,7 @@ pub async fn admin_migrate_instance(
             new_instance_url,
             None, // keep instance_token unchanged
             new_dashboard_url,
-            // Rename the record to match: after migration the instance simply is target_name,
-            // the same shape every natively-created agent has had since 2026-04. Keeping one
-            // name means later CrabShack calls can keep addressing it by `name`.
+            // Rename the record to match, so there is one name everywhere.
             (target_name != instance.name).then(|| target_name.clone()),
         )
         .await;
@@ -4513,7 +4487,6 @@ pub async fn admin_migrate_instance(
 
     Ok(Json(MigrateInstanceResponse {
         status: "success".to_string(),
-        // The name it now carries, which differs from the one migrated when renamed.
         instance_name: target_name,
         message: "Instance migrated to CrabShack".to_string(),
     }))
