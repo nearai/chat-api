@@ -1597,24 +1597,39 @@ impl SubscriptionServiceImpl {
             ));
         }
 
-        if let Some((chain_start, chain_end)) = chain_sub
+        let chain_period = chain_sub
             .start_ns
             .and_then(Self::ns_to_datetime)
             .zip(Self::ns_to_datetime(chain_sub.end_ns))
-            .filter(|(start, end)| end > start)
-        {
-            tracing::debug!(
-                user_id = %user_id.0,
-                subscription_id = %subscription.subscription_id,
-                price_id = %subscription.price_id,
-                chain_period_start = %chain_start,
-                chain_period_end = %chain_end,
-                fallback_period_start = %fallback_period_start,
-                fallback_period_end = %fallback_period_end,
-                "using persisted local HoS billing period key for entitlement snapshot"
-            );
-        }
-        let (period_start, period_end) = (fallback_period_start, fallback_period_end);
+            .filter(|(start, end)| end > start);
+        let (period_start, period_end) = match chain_period {
+            Some((chain_start, chain_end)) => {
+                tracing::debug!(
+                    user_id = %user_id.0,
+                    subscription_id = %subscription.subscription_id,
+                    price_id = %subscription.price_id,
+                    chain_period_start = %chain_start,
+                    chain_period_end = %chain_end,
+                    fallback_period_start = %fallback_period_start,
+                    fallback_period_end = %fallback_period_end,
+                    "using chain HoS billing period for entitlement snapshot"
+                );
+                (chain_start, chain_end)
+            }
+            None => {
+                tracing::warn!(
+                    user_id = %user_id.0,
+                    subscription_id = %subscription.subscription_id,
+                    price_id = %subscription.price_id,
+                    chain_start_ns = ?chain_sub.start_ns,
+                    chain_end_ns = chain_sub.end_ns,
+                    fallback_period_start = %fallback_period_start,
+                    fallback_period_end = %fallback_period_end,
+                    "cannot resolve valid HoS chain billing period; using local fallback period"
+                );
+                (fallback_period_start, fallback_period_end)
+            }
+        };
 
         let Some(last_lock_id) = chain_sub
             .last_lock_id

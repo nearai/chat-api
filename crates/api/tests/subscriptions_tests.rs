@@ -4206,7 +4206,7 @@ async fn test_house_of_stake_credit_snapshot_prorates_increases_and_resets_next_
     clear_proxy_env_for_local_wiremock();
     let now = Utc::now();
     let period_end = now + Duration::days(10);
-    let period_start = sub_one_month_same_day_for_test(period_end);
+    let period_start = now - Duration::days(20);
     let state = Arc::new(Mutex::new(HouseOfStakeCreditMockState {
         subscription_id: "sub_chain_hos_snapshot_credits".to_string(),
         amount_near: yocto_near(500),
@@ -4756,7 +4756,7 @@ async fn test_house_of_stake_transient_lock_failure_uses_current_snapshot_only()
     clear_proxy_env_for_local_wiremock();
     let now = Utc::now();
     let current_end = now + Duration::days(29);
-    let current_start = sub_one_month_same_day_for_test(current_end);
+    let current_start = now - Duration::days(1);
     let previous_start = current_start - Duration::days(30);
     let previous_end = current_start;
 
