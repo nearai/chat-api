@@ -1146,6 +1146,7 @@ impl AgentRepository for PostgresAgentRepository {
         instance_url: Option<String>,
         encrypted_instance_token: Option<String>,
         dashboard_url: Option<String>,
+        name: Option<String>,
     ) -> anyhow::Result<AgentInstance> {
         let client = self.pool.get().await?;
 
@@ -1171,6 +1172,11 @@ impl AgentRepository for PostgresAgentRepository {
         }
         if let Some(ref val) = dashboard_url {
             set_clauses.push(format!("dashboard_url = ${}", param_idx));
+            param_values.push(Box::new(val.clone()));
+            param_idx += 1;
+        }
+        if let Some(ref val) = name {
+            set_clauses.push(format!("name = ${}", param_idx));
             param_values.push(Box::new(val.clone()));
             param_idx += 1;
         }
