@@ -4509,6 +4509,15 @@ pub async fn admin_migrate_instance(
 /// callers (even admins) — the caller can't obtain it any other way. When the granted
 /// owner needs verifying, read it from CrabShack's own access endpoint
 /// (`GET /instances/{name}/access`), which is the source of truth.
+/// Optional request body for the grant-owner endpoint
+#[derive(Deserialize, Default, utoipa::ToSchema)]
+pub struct GrantInstanceOwnerRequest {
+    /// The name the instance carries on CrabShack, for when this record holds a different one: a
+    /// migrate renamed on collision renames the record only in its last bookkeeping step, so one that
+    /// failed earlier leaves the legacy name behind. Defaults to the record name.
+    pub crabshack_name: Option<String>,
+}
+
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct GrantInstanceOwnerResponse {
     pub status: String,
@@ -4539,6 +4548,7 @@ pub struct GrantInstanceOwnerResponse {
     params(
         ("id" = String, Path, description = "Instance ID")
     ),
+    request_body(content = GrantInstanceOwnerRequest, description = "Optional: the instance's CrabShack name"),
     responses(
         (status = 200, description = "Owner access granted", body = GrantInstanceOwnerResponse),
         (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
@@ -4553,6 +4563,7 @@ pub async fn admin_grant_instance_owner(
     State(app_state): State<AppState>,
     Extension(_user): Extension<AuthenticatedUser>,
     Path(instance_id): Path<String>,
+    body: Option<Json<GrantInstanceOwnerRequest>>,
 ) -> Result<Json<GrantInstanceOwnerResponse>, ApiError> {
     let id = Uuid::parse_str(&instance_id)
         .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
@@ -4590,17 +4601,20 @@ pub async fn admin_grant_instance_owner(
         ));
     }
 
-    // The record name is not always the name the instance carries on CrabShack. A migrate renamed on
-    // collision renames the record in its last bookkeeping step, so one that failed before that — or
-    // was repaired by hand — keeps the legacy name, which on CrabShack belongs to a different tenant.
-    // CrabShack's access route takes any name, so granting on it silently hands that tenant's agent
-    // to this user. Read the name off the url the migrate wrote, then confirm CrabShack has it.
-    let crabshack_name = crabshack_instance_name(
-        instance.instance_url.as_deref(),
-        instance.dashboard_url.as_deref(),
-        &crabshack_manager.url,
+    // Grant on the name the instance carries on CrabShack, which is not always this record's name: a
+    // migrate renamed on collision renames the record in its last bookkeeping step, so one that failed
+    // earlier keeps the legacy name — and on CrabShack that name belongs to a different tenant. The
+    // caller knows the name it migrated under and passes it here; CrabShack's access route takes any
+    // name it is given, so we confirm the instance exists before writing the grant.
+    let crabshack_name = grant_target_name(
+        body.as_ref().and_then(|b| b.crabshack_name.as_deref()),
+        &instance.name,
     )
-    .unwrap_or_else(|| instance.name.clone());
+    .ok_or_else(|| {
+        ApiError::bad_request(
+            "crabshack_name must be a single lowercase DNS label (letters, digits, dashes)",
+        )
+    })?;
     let probe = app_state
         .http_client
         .get(format!(
@@ -4717,76 +4731,49 @@ pub async fn admin_grant_instance_owner(
     }))
 }
 
-/// The name an instance carries on CrabShack, read from the urls a migrate wrote for it
-/// (`https://<name>.<crabshack host>/…`). `None` when neither url points at CrabShack, which leaves
-/// the caller on the record name.
-fn crabshack_instance_name(
-    instance_url: Option<&str>,
-    dashboard_url: Option<&str>,
-    crabshack_url: &str,
-) -> Option<String> {
-    let host = url::Url::parse(crabshack_url).ok()?.host_str()?.to_string();
-    let suffix = format!(".{host}");
-    [instance_url, dashboard_url]
-        .into_iter()
-        .flatten()
-        .filter_map(|u| url::Url::parse(u).ok())
-        .filter_map(|u| u.host_str().map(str::to_string))
-        .find_map(|h| {
-            h.strip_suffix(&suffix)
-                .filter(|label| !label.is_empty() && !label.contains('.'))
-                .map(str::to_string)
-        })
+/// The name to grant on: the caller's `crabshack_name` when it is a valid CrabShack label, else this
+/// record's name. `None` rejects a malformed name rather than sending it to CrabShack.
+fn grant_target_name(requested: Option<&str>, record_name: &str) -> Option<String> {
+    match requested {
+        Some(name) if is_valid_crabshack_name(name) => Some(name.to_string()),
+        Some(_) => None,
+        None => Some(record_name.to_string()),
+    }
 }
 
 #[cfg(test)]
 mod grant_owner_name_tests {
-    use super::crabshack_instance_name;
-
-    const CRAB: &str = "https://agents.near.ai/api/crabshack";
+    use super::grant_target_name;
 
     #[test]
-    fn reads_the_name_a_rename_gave_the_instance() {
+    fn caller_supplied_name_wins() {
         // The record still says rich-orca; CrabShack holds it as rich-orca-fibir.
         assert_eq!(
-            crabshack_instance_name(
-                Some("https://rich-orca-fibir.agents.near.ai/?token=abc"),
-                Some("https://rich-orca-fibir.agents.near.ai/"),
-                CRAB
-            ),
+            grant_target_name(Some("rich-orca-fibir"), "rich-orca"),
             Some("rich-orca-fibir".to_string())
         );
     }
 
     #[test]
-    fn falls_back_to_the_dashboard_url() {
+    fn falls_back_to_the_record_name() {
         assert_eq!(
-            crabshack_instance_name(None, Some("https://wise-fish.agents.near.ai/"), CRAB),
+            grant_target_name(None, "wise-fish"),
             Some("wise-fish".to_string())
         );
     }
 
     #[test]
-    fn ignores_a_legacy_url() {
-        // api.agentN urls must never be mistaken for a CrabShack name.
-        assert_eq!(
-            crabshack_instance_name(
-                Some("https://dark-pike.agent1.near.ai/"),
-                Some("https://dark-pike.agent1.near.ai/"),
-                CRAB
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn ignores_urls_without_a_single_label() {
-        assert_eq!(
-            crabshack_instance_name(Some("https://agents.near.ai/"), None, CRAB),
-            None
-        );
-        assert_eq!(crabshack_instance_name(Some("not a url"), None, CRAB), None);
-        assert_eq!(crabshack_instance_name(None, None, CRAB), None);
+    fn rejects_a_malformed_name() {
+        // Anything that is not a single DNS label — a url, a path, an empty string — is refused
+        // instead of being sent on to CrabShack's access route, which accepts any name it is given.
+        for bad in [
+            "https://wise-fish.agents.near.ai/",
+            "wise fish",
+            "wise/fish",
+            "",
+        ] {
+            assert_eq!(grant_target_name(Some(bad), "wise-fish"), None, "{bad}");
+        }
     }
 }
 
