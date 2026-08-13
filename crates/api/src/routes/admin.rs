@@ -3647,9 +3647,6 @@ pub struct MigrateInstanceResponse {
     pub status: String,
     pub instance_name: String,
     pub message: String,
-    /// True when the migrate also made the owning user the instance's owner on CrabShack. False means
-    /// the instance is migrated but ownerless — retry with the grant-owner endpoint.
-    pub owner_granted: bool,
 }
 
 /// ironclaw-dind tags exist and are allow-listed contiguously from 0.23.0 up.
@@ -3729,8 +3726,6 @@ pub async fn admin_migrate_instance(
             status: "skipped".to_string(),
             instance_name,
             message: "Instance is already on CrabShack".to_string(),
-            // Nothing ran, so nothing was granted. Use grant-owner if this one needs an owner.
-            owner_granted: false,
         }));
     }
 
@@ -3790,13 +3785,8 @@ pub async fn admin_migrate_instance(
         );
     }
 
-    // The auth_secret is kept for the owner grant at the end: the CrabShack owner id derives from it.
-    let mut owner_auth_secret: Option<String> = None;
     let backup_passphrase = match creds {
-        Some((auth_secret, passphrase)) => {
-            owner_auth_secret = Some(auth_secret);
-            passphrase
-        }
+        Some((_auth_secret, passphrase)) => passphrase,
         None if request_has_backup_url => {
             return Err(ApiError::bad_request(
                 "backup_url requires existing passkey credentials — run a normal \
@@ -4497,58 +4487,6 @@ pub async fn admin_migrate_instance(
         ));
     }
 
-    // Own the instance here, while the name it was imported under is in hand. CrabShack's import
-    // creates it ownerless and its grant is keyed by name, so leaving this to a later grant-owner call
-    // means that call has to work out the name — which is how renamed instances ended up granting a
-    // stranger. A failure here does not fail the migration: the instance is migrated either way and
-    // grant-owner retries it.
-    let owner_granted = match owner_auth_secret.as_deref().and_then(crabshack_user_id) {
-        None => {
-            tracing::warn!(
-                "Migrate: no passkey credentials, so no CrabShack owner: instance_id={}, name={}",
-                id,
-                target_name
-            );
-            false
-        }
-        Some(owner_user_id) => {
-            match write_crabshack_owner(
-                &app_state.http_client,
-                &crabshack_manager.url,
-                &crabshack_manager.token,
-                &target_name,
-                &owner_user_id,
-                // migrate chose this name and just imported under it, so clearing any other owner row
-                // is safe here. 10s per leg: a failure only costs `owner_granted: false`.
-                true,
-                std::time::Duration::from_secs(10),
-            )
-            .await
-            {
-                Ok(outcome) => {
-                    tracing::info!(
-                        "Migrate: owner granted: instance_id={}, name={}, owner_user_id={}, changed={}, revoked={}",
-                        id,
-                        target_name,
-                        owner_user_id,
-                        outcome.changed,
-                        outcome.revoked.len()
-                    );
-                    true
-                }
-                Err(e) => {
-                    tracing::error!(
-                        "Migrate: owner grant failed, retry with grant-owner: instance_id={}, name={}, error={:?}",
-                        id,
-                        target_name,
-                        e
-                    );
-                    false
-                }
-            }
-        }
-    };
-
     tracing::info!(
         "Migrate: completed successfully, elapsed={:.1}s, instance_id={}, name={}, previous_name={}",
         migrate_start.elapsed().as_secs_f64(),
@@ -4561,21 +4499,7 @@ pub async fn admin_migrate_instance(
         status: "success".to_string(),
         instance_name: target_name,
         message: "Instance migrated to CrabShack".to_string(),
-        owner_granted,
     }))
-}
-
-/// Optional request body for the grant-owner endpoint.
-///
-/// `deny_unknown_fields`: a typo'd field would otherwise deserialize to `None` and silently take the
-/// record-name fallback, which is the path this endpoint exists to avoid.
-#[derive(Deserialize, Default, utoipa::ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct GrantInstanceOwnerRequest {
-    /// The name the instance carries on CrabShack, for when this record holds a different one: a
-    /// migrate renamed on collision renames the record only in its last bookkeeping step, so one that
-    /// failed earlier leaves the legacy name behind. Defaults to the record name.
-    pub crabshack_name: Option<String>,
 }
 
 /// Response for the grant-owner endpoint.
@@ -4584,24 +4508,26 @@ pub struct GrantInstanceOwnerRequest {
 /// `auth_secret`, and chat-api does not surface credential-derived identity to API
 /// callers (even admins) — the caller can't obtain it any other way. When the granted
 /// owner needs verifying, read it from CrabShack's own access endpoint
-/// (`GET /instances/{name}/access`), which is the source of truth. The ids this call
-/// saw go to the logs for the same reason.
+/// (`GET /instances/{name}/access`), which is the source of truth.
+/// Optional request body for the grant-owner endpoint.
+///
+/// `deny_unknown_fields`: a typo'd field would otherwise deserialize to `None` and silently fall back
+/// to the record name, which is the case this exists to avoid.
+#[derive(Deserialize, Default, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GrantInstanceOwnerRequest {
+    /// The name the instance carries on CrabShack, when this record holds a different one: a migrate
+    /// renamed on collision renames the record only in its last bookkeeping step, so one that failed
+    /// earlier leaves the legacy name behind — and on CrabShack that name is a different tenant's
+    /// instance. Defaults to the record name.
+    pub crabshack_name: Option<String>,
+}
+
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct GrantInstanceOwnerResponse {
     pub status: String,
     pub instance_name: String,
     pub message: String,
-    /// False when CrabShack already held this exact owner and there was nothing to clear.
-    pub changed: bool,
-    /// Owner rows for other users that this call revoked, so the instance ends with one owner.
-    pub revoked_owners: usize,
-    /// Owner rows for other users still in place — either left because the caller did not name the
-    /// instance, or a revoke that failed. Above zero means the instance has more than one owner,
-    /// which also makes it appear twice in CrabShack's instance list.
-    pub stale_owners_left: usize,
-    /// True when CrabShack's access list could not be read. The grant still happened, but nothing was
-    /// revoked and `stale_owners_left` is not a measurement — re-run to find out.
-    pub owners_unknown: bool,
 }
 
 /// Admin endpoint: Grant CrabShack owner access for an already-migrated instance.
@@ -4680,20 +4606,6 @@ pub async fn admin_grant_instance_owner(
         ));
     }
 
-    // Grant on the name the instance carries on CrabShack, which is not always this record's name: a
-    // migrate renamed on collision renames the record in its last bookkeeping step, so one that failed
-    // earlier keeps the legacy name — and on CrabShack that name belongs to a different tenant. The
-    // caller knows the name it migrated under and passes it here.
-    let crabshack_name = grant_target_name(
-        body.as_ref().and_then(|b| b.crabshack_name.as_deref()),
-        &instance.name,
-    )
-    .ok_or_else(|| {
-        ApiError::bad_request(
-            "crabshack_name must be a single lowercase DNS label (letters, digits, dashes)",
-        )
-    })?;
-
     // Look up the owning user's passkey credentials. The auth_secret is the root of the CrabShack
     // user identity. Never mint new credentials here: fresh creds would derive a different identity
     // and backup key than the migrated backup was encrypted with.
@@ -4717,185 +4629,65 @@ pub async fn admin_grant_instance_owner(
         }
     };
 
-    let owner_user_id = crabshack_user_id(&auth_secret).ok_or_else(|| {
+    // CrabShack user id = hex(sha256(hex_decode(auth_secret))).
+    // Mirrors CrabShack's userIdFromAuthSecret (orchestrator-api/src/auth/user-queries.ts).
+    let auth_secret_bytes = hex::decode(auth_secret.trim()).map_err(|e| {
         tracing::error!(
-            "grant-owner: stored auth_secret is not valid hex: instance_id={}",
-            id
+            "grant-owner: stored auth_secret is not valid hex: instance_id={}, error={}",
+            id,
+            e
         );
         ApiError::internal_server_error("Stored auth_secret is not valid hex")
     })?;
+    let owner_user_id = hex::encode(Sha256::digest(&auth_secret_bytes));
 
-    // Only replace other owners when the caller named the instance. Falling back to the record name
-    // and then revoking would delete the rightful owner of whatever instance holds that name.
-    let caller_named = body
-        .as_ref()
-        .and_then(|b| b.crabshack_name.as_deref())
-        .is_some();
-    let outcome = write_crabshack_owner(
-        &app_state.http_client,
-        &crabshack_manager.url,
-        &crabshack_manager.token,
-        &crabshack_name,
-        &owner_user_id,
-        caller_named,
-        std::time::Duration::from_secs(30),
+    // Grant owner access on CrabShack (admin endpoint). Idempotent: last-write-wins.
+    //
+    // On the name: CrabShack's access route takes whatever name it is given and does not check the
+    // instance exists, so granting on the wrong one writes owner access onto another tenant's agent
+    // and reports success. The record's name is not always the instance's name on CrabShack, so the
+    // caller passes the name it migrated under. Everything else — checking what the instance already
+    // has, clearing a stale owner — is the caller's to do with its own CrabShack admin token.
+    let crabshack_name = grant_target_name(
+        body.as_ref().and_then(|b| b.crabshack_name.as_deref()),
+        &instance.name,
     )
-    .await?;
-
-    tracing::info!(
-        "grant-owner: instance_id={}, crabshack_name={}, record_name={}, owner_user_id={}, changed={}, replaced={}, previous_owners=[{}]",
-        id,
-        crabshack_name,
-        instance_name,
-        owner_user_id,
-        outcome.changed,
-        caller_named,
-        outcome
-            .previous_owners
-            .as_ref()
-            .map(|p| p.join(","))
-            .unwrap_or_else(|| "unreadable".to_string())
+    .ok_or_else(|| {
+        ApiError::bad_request(
+            "crabshack_name must be a single lowercase DNS label (letters, digits, dashes)",
+        )
+    })?;
+    let grant_url = format!(
+        "{}/instances/{}/access",
+        crabshack_manager.url.trim_end_matches('/'),
+        encode(&crabshack_name)
     );
-    Ok(Json(GrantInstanceOwnerResponse {
-        status: "success".to_string(),
-        instance_name: crabshack_name,
-        message: outcome.message,
-        changed: outcome.changed,
-        revoked_owners: outcome.revoked.len(),
-        stale_owners_left: outcome.left,
-        owners_unknown: outcome.previous_owners.is_none(),
-    }))
-}
-
-/// The name to grant on: the caller's `crabshack_name` when it is a valid CrabShack label, else this
-/// record's name. `None` rejects a malformed name rather than sending it to CrabShack.
-fn grant_target_name(requested: Option<&str>, record_name: &str) -> Option<String> {
-    match requested {
-        Some(name) if is_valid_crabshack_name(name) => Some(name.to_string()),
-        Some(_) => None,
-        None => Some(record_name.to_string()),
-    }
-}
-
-/// CrabShack user id = hex(sha256(hex_decode(auth_secret))).
-/// Mirrors CrabShack's userIdFromAuthSecret (orchestrator-api/src/auth/user-queries.ts).
-fn crabshack_user_id(auth_secret: &str) -> Option<String> {
-    hex::decode(auth_secret.trim())
-        .ok()
-        .map(|bytes| hex::encode(Sha256::digest(&bytes)))
-}
-
-/// What making a user the owner on CrabShack did.
-#[derive(Debug)]
-struct OwnerGrantOutcome {
-    /// `None` when CrabShack's access list could not be read. "No owners" and "unknown" must not look
-    /// alike, or a report of zero leftover owners would be a guess.
-    previous_owners: Option<Vec<String>>,
-    revoked: Vec<String>,
-    /// Other owner rows still in place: either left deliberately or a revoke that failed.
-    left: usize,
-    changed: bool,
-    message: String,
-}
-
-/// Reads as: who owns this instance now, and what this call moved to get there.
-fn owner_grant_message(
-    previous_owners: Option<&[String]>,
-    revoked: &[String],
-    left: usize,
-    owner: &str,
-) -> String {
-    let already = previous_owners.is_some_and(|prev| prev.iter().any(|u| u == owner));
-    let mut msg = if already {
-        "Owner already granted on CrabShack".to_string()
-    } else {
-        "Owner access granted on CrabShack".to_string()
-    };
-    if previous_owners.is_none() {
-        msg.push_str("; could not read its existing owners, so none were cleared");
-        return msg;
-    }
-    if !revoked.is_empty() {
-        msg.push_str(&format!("; revoked {} stale owner row(s)", revoked.len()));
-    }
-    if left > 0 {
-        msg.push_str(&format!("; left {left} other owner row(s) in place"));
-    }
-    if already && revoked.is_empty() && left == 0 {
-        msg.push_str(" — nothing changed");
-    }
-    msg
-}
-
-/// Make `owner_user_id` the instance's sole owner on CrabShack.
-///
-/// CrabShack keys a grant on (instance, user) and never replaces, so granting a second user leaves
-/// two owner rows — and its own owner join (`role = 'owner'`) then returns that instance twice in
-/// `GET /instances`. One owner is the model, so any other owner row is revoked here. `member` rows
-/// are left alone. Re-granting the same user rewrites the same row, so this is idempotent.
-async fn write_crabshack_owner(
-    http: &reqwest::Client,
-    crabshack_url: &str,
-    crabshack_token: &str,
-    instance_name: &str,
-    owner_user_id: &str,
-    replace_other_owners: bool,
-    timeout: std::time::Duration,
-) -> Result<OwnerGrantOutcome, ApiError> {
-    let base = crabshack_url.trim_end_matches('/');
-    let enc = encode(instance_name);
-
-    // CrabShack's access route takes any name without checking the instance exists, so a wrong name
-    // would write a grant onto another tenant (or nowhere) and report success. Confirm first.
-    let probe = http
-        .get(format!("{base}/instances/{enc}"))
-        .bearer_auth(crabshack_token)
-        .timeout(timeout)
-        .send()
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                "grant-owner: CrabShack lookup failed: name={instance_name}, error={e}"
-            );
-            ApiError::bad_gateway("Failed to look up the instance on CrabShack")
-        })?;
-    // Only a 404 means the name is wrong. A 401 from a stale admin token or a 503 during a CrabShack
-    // blip is worth retrying, and must not read as "no such instance".
-    if probe.status() == reqwest::StatusCode::NOT_FOUND {
-        return Err(ApiError::bad_request(format!(
-            "CrabShack has no instance named {instance_name} — nothing to grant"
-        )));
-    }
-    if !probe.status().is_success() {
-        return Err(ApiError::bad_gateway(format!(
-            "CrabShack lookup for {instance_name} failed (status {})",
-            probe.status()
-        )));
-    }
-
-    let previous_owners = read_crabshack_owners(http, base, crabshack_token, &enc, timeout).await;
-
-    let resp = http
-        .post(format!("{base}/instances/{enc}/access"))
-        .bearer_auth(crabshack_token)
+    let resp = app_state
+        .http_client
+        .post(&grant_url)
+        .bearer_auth(&crabshack_manager.token)
         .json(&serde_json::json!({ "user_id": owner_user_id, "role": "owner" }))
-        .timeout(timeout)
+        .timeout(std::time::Duration::from_secs(30))
         .send()
         .await
         .map_err(|e| {
             tracing::error!(
-                "grant-owner: CrabShack access call failed: name={instance_name}, error={e}"
+                "grant-owner: CrabShack access call failed: instance_id={}, error={}",
+                id,
+                e
             );
-            ApiError::bad_gateway("Failed to call CrabShack access endpoint")
+            ApiError::internal_server_error("Failed to call CrabShack access endpoint")
         })?;
     let status = resp.status();
     if !status.is_success() {
-        // Read the body for diagnosis and surface CrabShack's status, so a misconfigured-admin-token
-        // 401 or a CrabShack 5xx is distinguishable from a generic failure.
+        // Read the body for diagnosis and surface CrabShack's status to the caller, so a
+        // misconfigured-admin-token 401 or a CrabShack 5xx is distinguishable from a generic
+        // failure. (CrabShack's grant is idempotent and does not check instance existence, so it
+        // never returns 404/409 here — only 4xx for a malformed request or auth/transport errors.)
         let body = resp.text().await.unwrap_or_default();
         tracing::error!(
-            "grant-owner: CrabShack access grant failed: name={}, status={}, body={}",
-            instance_name,
+            "grant-owner: CrabShack access grant failed: instance_id={}, status={}, body={}",
+            id,
             status,
             body.chars().take(300).collect::<String>()
         );
@@ -4904,326 +4696,27 @@ async fn write_crabshack_owner(
         )));
     }
 
-    // Clear the other owners, but only when the caller vouched for the target name. On the fallback
-    // path the name comes from the chat-api record, and for the very records this exists to repair
-    // that name belongs to a DIFFERENT tenant whose instance passes the probe — revoking there would
-    // lock the rightful owner out of their own agent. Additive is recoverable; a delete is not.
-    let others: Vec<&String> = previous_owners
-        .as_deref()
-        .unwrap_or_default()
-        .iter()
-        .filter(|u| *u != owner_user_id)
-        .collect();
-    let mut revoked = Vec::new();
-    let mut left = others.len();
-    if replace_other_owners {
-        for other in others {
-            let del = http
-                .delete(format!("{base}/instances/{enc}/access/{}", encode(other)))
-                .bearer_auth(crabshack_token)
-                .timeout(timeout)
-                .send()
-                .await;
-            match del {
-                // The right owner is already in place, so a failed revoke is logged and reported
-                // rather than failing the call.
-                Ok(r) if r.status().is_success() => {
-                    tracing::info!(
-                        "grant-owner: revoked stale owner: name={instance_name}, user_id={other}"
-                    );
-                    revoked.push(other.clone());
-                    left -= 1;
-                }
-                Ok(r) => tracing::error!(
-                    "grant-owner: revoke failed: name={instance_name}, user_id={other}, status={}",
-                    r.status()
-                ),
-                Err(e) => tracing::error!(
-                    "grant-owner: revoke call failed: name={instance_name}, user_id={other}, error={e}"
-                ),
-            }
-        }
-    } else if left > 0 {
-        tracing::warn!(
-            "grant-owner: left {left} other owner row(s) on {instance_name}: the name came from the \
-             chat-api record, not the caller, so replacing them is not safe here"
-        );
-    }
-
-    let already_owner = previous_owners
-        .as_deref()
-        .is_some_and(|prev| prev.iter().any(|u| u == owner_user_id));
-    let changed = !already_owner || !revoked.is_empty();
-    let message = owner_grant_message(previous_owners.as_deref(), &revoked, left, owner_user_id);
-    Ok(OwnerGrantOutcome {
-        previous_owners,
-        revoked,
-        left,
-        changed,
-        message,
-    })
+    tracing::info!(
+        "grant-owner: granted CrabShack owner: instance_id={}, crabshack_name={}, record_name={}, owner_user_id={}",
+        id,
+        crabshack_name,
+        instance_name,
+        owner_user_id
+    );
+    Ok(Json(GrantInstanceOwnerResponse {
+        status: "success".to_string(),
+        instance_name: crabshack_name,
+        message: "Owner access granted on CrabShack".to_string(),
+    }))
 }
 
-/// Owner user ids CrabShack currently holds for an instance, or `None` when the list could not be
-/// read. The caller must not treat that as "no owners": the grant still goes ahead, but nothing is
-/// revoked and the response says so, rather than reporting a clean single owner it never saw.
-async fn read_crabshack_owners(
-    http: &reqwest::Client,
-    base: &str,
-    crabshack_token: &str,
-    encoded_name: &str,
-    timeout: std::time::Duration,
-) -> Option<Vec<String>> {
-    let resp = http
-        .get(format!("{base}/instances/{encoded_name}/access"))
-        .bearer_auth(crabshack_token)
-        .timeout(timeout)
-        .send()
-        .await
-        .inspect_err(|e| {
-            tracing::error!("grant-owner: could not read owners: name={encoded_name}, error={e}")
-        })
-        .ok()?;
-    if !resp.status().is_success() {
-        tracing::error!(
-            "grant-owner: could not read owners: name={}, status={}",
-            encoded_name,
-            resp.status()
-        );
-        return None;
-    }
-    // CrabShack returns a bare array here (`jsonOk(listAccess(...))`), not an envelope.
-    let rows = resp
-        .json::<Vec<serde_json::Value>>()
-        .await
-        .inspect_err(|e| {
-            tracing::error!("grant-owner: owner list did not parse: name={encoded_name}, error={e}")
-        })
-        .ok()?;
-    Some(
-        rows.iter()
-            .filter(|r| r.get("role").and_then(|v| v.as_str()) == Some("owner"))
-            .filter_map(|r| {
-                r.get("user_id")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string)
-            })
-            .collect(),
-    )
-}
-
-#[cfg(test)]
-mod grant_owner_message_tests {
-    use super::owner_grant_message;
-
-    const ME: &str = "aaaa";
-    const OTHER: &str = "bbbb";
-
-    #[test]
-    fn fresh_grant() {
-        assert_eq!(
-            owner_grant_message(Some(&[]), &[], 0, ME),
-            "Owner access granted on CrabShack"
-        );
-    }
-
-    #[test]
-    fn already_the_only_owner() {
-        assert_eq!(
-            owner_grant_message(Some(&[ME.to_string()]), &[], 0, ME),
-            "Owner already granted on CrabShack — nothing changed"
-        );
-    }
-
-    #[test]
-    fn replaced_a_wrong_owner() {
-        assert_eq!(
-            owner_grant_message(Some(&[OTHER.to_string()]), &[OTHER.to_string()], 0, ME),
-            "Owner access granted on CrabShack; revoked 1 stale owner row(s)"
-        );
-    }
-
-    #[test]
-    fn cleared_a_second_owner_from_an_already_owned_instance() {
-        assert_eq!(
-            owner_grant_message(
-                Some(&[ME.to_string(), OTHER.to_string()]),
-                &[OTHER.to_string()],
-                0,
-                ME
-            ),
-            "Owner already granted on CrabShack; revoked 1 stale owner row(s)"
-        );
-    }
-
-    #[test]
-    fn left_a_foreign_owner_alone() {
-        assert_eq!(
-            owner_grant_message(Some(&[OTHER.to_string()]), &[], 1, ME),
-            "Owner access granted on CrabShack; left 1 other owner row(s) in place"
-        );
-    }
-
-    #[test]
-    fn says_so_when_the_owners_could_not_be_read() {
-        // Never "nothing changed" here: the call cannot know what it did not see.
-        assert_eq!(
-            owner_grant_message(None, &[], 0, ME),
-            "Owner access granted on CrabShack; could not read its existing owners, \
-             so none were cleared"
-        );
-    }
-}
-
-#[cfg(test)]
-mod write_crabshack_owner_tests {
-    use super::write_crabshack_owner;
-    use std::time::Duration;
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    const ME: &str = "aaaa";
-    const OTHER: &str = "bbbb";
-    const NAME: &str = "wise-fish";
-
-    fn owner_row(user: &str) -> serde_json::Value {
-        serde_json::json!({
-            "instance_name": NAME, "user_id": user, "role": "owner",
-            "granted_at": "2026-08-13T00:00:00Z"
-        })
-    }
-
-    /// A CrabShack that has the instance, answers its access list with `owners`, and accepts the
-    /// grant. DELETEs are matched by the caller when it cares.
-    async fn crabshack_with(owners: Vec<serde_json::Value>) -> MockServer {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path(format!("/instances/{NAME}")))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "name": NAME, "status": "running"
-            })))
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path(format!("/instances/{NAME}/access")))
-            .respond_with(ResponseTemplate::new(200).set_body_json(owners))
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path(format!("/instances/{NAME}/access")))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
-            .mount(&server)
-            .await;
-        server
-    }
-
-    async fn grant(server: &MockServer, replace: bool) -> super::OwnerGrantOutcome {
-        write_crabshack_owner(
-            &reqwest::Client::new(),
-            &server.uri(),
-            "token",
-            NAME,
-            ME,
-            replace,
-            Duration::from_secs(5),
-        )
-        .await
-        .expect("grant should succeed")
-    }
-
-    #[tokio::test]
-    async fn already_sole_owner_revokes_nothing() {
-        let server = crabshack_with(vec![owner_row(ME)]).await;
-        let outcome = grant(&server, true).await;
-        assert!(!outcome.changed);
-        assert!(outcome.revoked.is_empty());
-        assert_eq!(outcome.left, 0);
-        // No DELETE was issued: nothing but the three mounted mocks was called.
-        assert!(!server
-            .received_requests()
-            .await
-            .unwrap()
-            .iter()
-            .any(|r| r.method == wiremock::http::Method::DELETE));
-    }
-
-    #[tokio::test]
-    async fn replaces_a_foreign_owner_when_the_caller_named_the_instance() {
-        let server = crabshack_with(vec![owner_row(OTHER)]).await;
-        Mock::given(method("DELETE"))
-            .and(path(format!("/instances/{NAME}/access/{OTHER}")))
-            .respond_with(ResponseTemplate::new(200))
-            .expect(1)
-            .mount(&server)
-            .await;
-        let outcome = grant(&server, true).await;
-        assert_eq!(outcome.revoked, vec![OTHER.to_string()]);
-        assert_eq!(outcome.left, 0);
-        assert!(outcome.changed);
-    }
-
-    #[tokio::test]
-    async fn leaves_a_foreign_owner_when_the_name_came_from_the_record() {
-        // The dangerous path: the target may be someone else's instance, so it must stay additive.
-        let server = crabshack_with(vec![owner_row(OTHER)]).await;
-        let outcome = grant(&server, false).await;
-        assert!(outcome.revoked.is_empty());
-        assert_eq!(outcome.left, 1);
-        assert!(!server
-            .received_requests()
-            .await
-            .unwrap()
-            .iter()
-            .any(|r| r.method == wiremock::http::Method::DELETE));
-    }
-
-    #[tokio::test]
-    async fn an_unreadable_owner_list_revokes_nothing_and_admits_it() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path(format!("/instances/{NAME}")))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path(format!("/instances/{NAME}/access")))
-            .respond_with(ResponseTemplate::new(500))
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path(format!("/instances/{NAME}/access")))
-            .respond_with(ResponseTemplate::new(200))
-            .mount(&server)
-            .await;
-        let outcome = grant(&server, true).await;
-        assert!(outcome.previous_owners.is_none());
-        assert!(outcome.revoked.is_empty());
-        assert_eq!(outcome.left, 0);
-        assert!(outcome.message.contains("could not read"));
-    }
-
-    #[tokio::test]
-    async fn a_missing_instance_is_a_400_and_a_blip_is_a_502() {
-        for (status, expected) in [(404, 400), (503, 502)] {
-            let server = MockServer::start().await;
-            Mock::given(method("GET"))
-                .and(path(format!("/instances/{NAME}")))
-                .respond_with(ResponseTemplate::new(status))
-                .mount(&server)
-                .await;
-            let err = write_crabshack_owner(
-                &reqwest::Client::new(),
-                &server.uri(),
-                "token",
-                NAME,
-                ME,
-                true,
-                Duration::from_secs(5),
-            )
-            .await
-            .expect_err("should refuse to grant");
-            assert_eq!(err.status.as_u16(), expected, "probe {status}");
-        }
+/// The name to grant on: the caller's `crabshack_name` when it is a valid CrabShack label, else this
+/// record's name. `None` rejects a malformed name rather than passing it to CrabShack.
+fn grant_target_name(requested: Option<&str>, record_name: &str) -> Option<String> {
+    match requested {
+        Some(name) if is_valid_crabshack_name(name) => Some(name.to_string()),
+        Some(_) => None,
+        None => Some(record_name.to_string()),
     }
 }
 
@@ -5250,8 +4743,8 @@ mod grant_owner_name_tests {
 
     #[test]
     fn rejects_a_malformed_name() {
-        // Anything that is not a single DNS label — a url, a path, an empty string — is refused
-        // instead of being sent on to CrabShack's access route, which accepts any name it is given.
+        // A url, spaces, a slash or an empty string is refused rather than passed to CrabShack's
+        // access route, which accepts any name it is given.
         for bad in [
             "https://wise-fish.agents.near.ai/",
             "wise fish",
