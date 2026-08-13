@@ -3647,7 +3647,8 @@ pub struct MigrateInstanceResponse {
     pub status: String,
     pub instance_name: String,
     pub message: String,
-    /// `None` when the user has no passkey credentials, and on the `skipped` path.
+    /// `None` only on the `skipped` path or a corrupt stored secret — never a reason to skip the
+    /// grant, resolve the id another way.
     pub owner_user_id: Option<String>,
 }
 
@@ -3789,13 +3790,11 @@ pub async fn admin_migrate_instance(
         );
     }
 
-    // Kept for the owner id in the response: the caller needs it to grant ownership on CrabShack.
-    let mut owner_auth_secret: Option<String> = None;
-    let backup_passphrase = match creds {
-        Some((auth_secret, passphrase)) => {
-            owner_auth_secret = Some(auth_secret);
-            passphrase
-        }
+    // Both halves matter downstream: the passphrase encrypts the backup, and the auth_secret is what
+    // the owner id in the response derives from. Every arm states both, so neither can be dropped by
+    // accident — a missing owner id makes the caller skip the grant and the instance lands ownerless.
+    let (owner_auth_secret, backup_passphrase) = match creds {
+        Some((auth_secret, passphrase)) => (auth_secret, passphrase),
         None if request_has_backup_url => {
             return Err(ApiError::bad_request(
                 "backup_url requires existing passkey credentials — run a normal \
@@ -3826,7 +3825,7 @@ pub async fn admin_migrate_instance(
                     );
                     ApiError::internal_server_error("Failed to store credentials")
                 })?;
-            passphrase
+            (auth_secret, passphrase)
         }
     };
 
@@ -4504,10 +4503,10 @@ pub async fn admin_migrate_instance(
         instance_name,
     );
 
-    let owner_user_id = owner_auth_secret.as_deref().and_then(crabshack_user_id);
+    let owner_user_id = crabshack_user_id(&owner_auth_secret);
     if owner_user_id.is_none() {
-        tracing::warn!(
-            "Migrate: no passkey credentials, so no owner id for the caller to grant: instance_id={}, name={}",
+        tracing::error!(
+            "Migrate: stored auth_secret is not valid hex, so the caller gets no owner id: instance_id={}, name={}",
             id,
             target_name
         );
@@ -4524,6 +4523,7 @@ pub async fn admin_migrate_instance(
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct GrantInstanceOwnerResponse {
     pub status: String,
+    /// chat-api's record name — NOT necessarily the name CrabShack knows. Do not grant on it.
     pub instance_name: String,
     pub message: String,
     pub owner_user_id: String,
