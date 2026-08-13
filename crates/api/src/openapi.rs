@@ -149,7 +149,6 @@ use utoipa::OpenApi;
         services::user::ports::AccountDeletion,
         services::user::ports::AccountDeletionStatus,
         crate::routes::admin::AdminRetryAccountDeletionResponse,
-        crate::routes::admin::GrantInstanceOwnerRequest,
         crate::routes::admin::GrantInstanceOwnerResponse,
         crate::models::AuthResponse,
         crate::error::ApiErrorResponse,

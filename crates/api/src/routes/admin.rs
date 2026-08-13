@@ -3647,6 +3647,14 @@ pub struct MigrateInstanceResponse {
     pub status: String,
     pub instance_name: String,
     pub message: String,
+    /// The CrabShack user id to grant as owner, derived from the user's `auth_secret`. A CrabShack
+    /// import lands ownerless, so the caller finishes the job:
+    /// `POST <crabshack>/instances/<instance_name>/access {"user_id": ..., "role": "owner"}` —
+    /// `instance_name` above is the name it was imported under, which is what the grant must use.
+    ///
+    /// `None` when the user has no passkey credentials to derive from, and on the `skipped` path
+    /// (nothing was migrated; use the grant-owner endpoint to look it up).
+    pub owner_user_id: Option<String>,
 }
 
 /// ironclaw-dind tags exist and are allow-listed contiguously from 0.23.0 up.
@@ -3726,6 +3734,8 @@ pub async fn admin_migrate_instance(
             status: "skipped".to_string(),
             instance_name,
             message: "Instance is already on CrabShack".to_string(),
+            // Nothing was migrated here; grant-owner returns the id if this one needs an owner.
+            owner_user_id: None,
         }));
     }
 
@@ -3785,8 +3795,13 @@ pub async fn admin_migrate_instance(
         );
     }
 
+    // Kept for the owner id in the response: the caller needs it to grant ownership on CrabShack.
+    let mut owner_auth_secret: Option<String> = None;
     let backup_passphrase = match creds {
-        Some((_auth_secret, passphrase)) => passphrase,
+        Some((auth_secret, passphrase)) => {
+            owner_auth_secret = Some(auth_secret);
+            passphrase
+        }
         None if request_has_backup_url => {
             return Err(ApiError::bad_request(
                 "backup_url requires existing passkey credentials — run a normal \
@@ -4495,57 +4510,52 @@ pub async fn admin_migrate_instance(
         instance_name,
     );
 
+    let owner_user_id = owner_auth_secret.as_deref().and_then(crabshack_user_id);
+    if owner_user_id.is_none() {
+        tracing::warn!(
+            "Migrate: no passkey credentials, so no owner id for the caller to grant: instance_id={}, name={}",
+            id,
+            target_name
+        );
+    }
     Ok(Json(MigrateInstanceResponse {
         status: "success".to_string(),
         instance_name: target_name,
         message: "Instance migrated to CrabShack".to_string(),
+        owner_user_id,
     }))
 }
 
 /// Response for the grant-owner endpoint.
 ///
-/// Intentionally omits the derived owner user id. It is computed from the user's
-/// `auth_secret`, and chat-api does not surface credential-derived identity to API
-/// callers (even admins) — the caller can't obtain it any other way. When the granted
-/// owner needs verifying, read it from CrabShack's own access endpoint
-/// (`GET /instances/{name}/access`), which is the source of truth.
-/// Optional request body for the grant-owner endpoint.
-///
-/// `deny_unknown_fields`: a typo'd field would otherwise deserialize to `None` and silently fall back
-/// to the record name, which is the case this exists to avoid.
-#[derive(Deserialize, Default, utoipa::ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct GrantInstanceOwnerRequest {
-    /// The name the instance carries on CrabShack, when this record holds a different one: a migrate
-    /// renamed on collision renames the record only in its last bookkeeping step, so one that failed
-    /// earlier leaves the legacy name behind — and on CrabShack that name is a different tenant's
-    /// instance. Defaults to the record name.
-    pub crabshack_name: Option<String>,
-}
-
+/// Carries the derived owner user id, because the caller is the one that writes the grant and cannot
+/// compute this id itself — it comes from the user's `auth_secret`, which never leaves chat-api. Admin
+/// scope only. Knowing the id lets a caller grant, check or revoke that user's access on CrabShack;
+/// it reveals nothing about the secret it derives from.
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct GrantInstanceOwnerResponse {
     pub status: String,
     pub instance_name: String,
     pub message: String,
+    /// The CrabShack user id of this instance's owner: `sha256(hex_decode(auth_secret))`, the same
+    /// derivation CrabShack does on login. Grant it with
+    /// `POST <crabshack>/instances/<name>/access {"user_id": ..., "role": "owner"}`.
+    pub owner_user_id: String,
 }
 
-/// Admin endpoint: Grant CrabShack owner access for an already-migrated instance.
+/// Admin endpoint: the CrabShack owner user id for an instance.
 ///
-/// Migration (`admin_migrate_instance`) imports the instance and seeds the CrabShack backup
-/// vault, but never establishes an owner access row — CrabShack imports run with the admin
-/// token, so the instance lands ownerless. Without an owner, CrabShack's scheduled backups skip
-/// the instance ("no owner") and the owning user can't see it in the portal.
+/// CrabShack imports run with the admin token, so a migrated instance lands ownerless: its scheduled
+/// backups are skipped and the owning user cannot see it in the portal. Establishing the owner needs
+/// one thing only chat-api has — the user id CrabShack derives on login,
+/// `sha256(hex_decode(auth_secret))` (mirroring orchestrator-api's `userIdFromAuthSecret`).
 ///
-/// This reconciles ownership: it derives the CrabShack user id the same way CrabShack does on
-/// login (`sha256(hex_decode(auth_secret))`, mirroring orchestrator-api's `userIdFromAuthSecret`)
-/// and calls CrabShack's admin access-grant endpoint. Idempotent — CrabShack's grant is
-/// last-write-wins, so re-running is safe.
-///
-/// Guarded on the instance already pointing at CrabShack (`agent_api_base_url == crabshack url`),
-/// which chat-api only sets after a fully successful migration. This prevents granting ownership
-/// to a half-migrated instance whose data restore may still be running (a backup of it would
-/// capture an incomplete volume).
+/// This returns that id and writes nothing. The caller grants it on CrabShack itself
+/// (`POST <crabshack>/instances/<name>/access`), which is where the decisions live: which instance
+/// name to write it on, whether an existing owner row should be revoked first, and whether the
+/// instance is far enough along to own. chat-api cannot answer those — the name in this record is not
+/// always the name the instance carries on CrabShack, and a grant on the wrong name silently lands on
+/// another tenant's agent.
 #[utoipa::path(
     post,
     path = "/v1/admin/agents/instances/{id}/grant-owner",
@@ -4553,9 +4563,8 @@ pub struct GrantInstanceOwnerResponse {
     params(
         ("id" = String, Path, description = "Instance ID")
     ),
-    request_body(content = GrantInstanceOwnerRequest, description = "Optional: the instance's CrabShack name"),
     responses(
-        (status = 200, description = "Owner access granted", body = GrantInstanceOwnerResponse),
+        (status = 200, description = "Owner user id derived", body = GrantInstanceOwnerResponse),
         (status = 400, description = "Bad request", body = crate::error::ApiErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
         (status = 403, description = "Forbidden - admin only", body = crate::error::ApiErrorResponse),
@@ -4568,7 +4577,6 @@ pub async fn admin_grant_instance_owner(
     State(app_state): State<AppState>,
     Extension(_user): Extension<AuthenticatedUser>,
     Path(instance_id): Path<String>,
-    body: Option<Json<GrantInstanceOwnerRequest>>,
 ) -> Result<Json<GrantInstanceOwnerResponse>, ApiError> {
     let id = Uuid::parse_str(&instance_id)
         .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
@@ -4588,23 +4596,6 @@ pub async fn admin_grant_instance_owner(
         .ok_or_else(|| ApiError::not_found("Instance not found"))?;
 
     let instance_name = instance.name.clone();
-
-    // Require the instance to already be on CrabShack. chat-api flips agent_api_base_url to the
-    // CrabShack url only after a fully successful migration, so this is the "migration complete"
-    // signal — granting before it would risk owning a still-restoring instance.
-    let crabshack_manager = app_state
-        .agent_service
-        .find_crabshack_manager()
-        .ok_or_else(|| ApiError::internal_server_error("No CrabShack manager configured"))?;
-    let agent_api_base_url = instance
-        .agent_api_base_url
-        .as_deref()
-        .ok_or_else(|| ApiError::bad_request("Instance has no agent_api_base_url"))?;
-    if agent_api_base_url.trim_end_matches('/') != crabshack_manager.url.trim_end_matches('/') {
-        return Err(ApiError::bad_request(
-            "Instance is not on CrabShack — migrate it first",
-        ));
-    }
 
     // Look up the owning user's passkey credentials. The auth_secret is the root of the CrabShack
     // user identity. Never mint new credentials here: fresh creds would derive a different identity
@@ -4629,130 +4620,66 @@ pub async fn admin_grant_instance_owner(
         }
     };
 
-    // CrabShack user id = hex(sha256(hex_decode(auth_secret))).
-    // Mirrors CrabShack's userIdFromAuthSecret (orchestrator-api/src/auth/user-queries.ts).
-    let auth_secret_bytes = hex::decode(auth_secret.trim()).map_err(|e| {
+    let owner_user_id = crabshack_user_id(&auth_secret).ok_or_else(|| {
         tracing::error!(
-            "grant-owner: stored auth_secret is not valid hex: instance_id={}, error={}",
-            id,
-            e
+            "grant-owner: stored auth_secret is not valid hex: instance_id={}",
+            id
         );
         ApiError::internal_server_error("Stored auth_secret is not valid hex")
     })?;
-    let owner_user_id = hex::encode(Sha256::digest(&auth_secret_bytes));
-
-    // Grant owner access on CrabShack (admin endpoint). Idempotent: last-write-wins.
-    //
-    // On the name: CrabShack's access route takes whatever name it is given and does not check the
-    // instance exists, so granting on the wrong one writes owner access onto another tenant's agent
-    // and reports success. The record's name is not always the instance's name on CrabShack, so the
-    // caller passes the name it migrated under. Everything else — checking what the instance already
-    // has, clearing a stale owner — is the caller's to do with its own CrabShack admin token.
-    let crabshack_name = grant_target_name(
-        body.as_ref().and_then(|b| b.crabshack_name.as_deref()),
-        &instance.name,
-    )
-    .ok_or_else(|| {
-        ApiError::bad_request(
-            "crabshack_name must be a single lowercase DNS label (letters, digits, dashes)",
-        )
-    })?;
-    let grant_url = format!(
-        "{}/instances/{}/access",
-        crabshack_manager.url.trim_end_matches('/'),
-        encode(&crabshack_name)
-    );
-    let resp = app_state
-        .http_client
-        .post(&grant_url)
-        .bearer_auth(&crabshack_manager.token)
-        .json(&serde_json::json!({ "user_id": owner_user_id, "role": "owner" }))
-        .timeout(std::time::Duration::from_secs(30))
-        .send()
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                "grant-owner: CrabShack access call failed: instance_id={}, error={}",
-                id,
-                e
-            );
-            ApiError::internal_server_error("Failed to call CrabShack access endpoint")
-        })?;
-    let status = resp.status();
-    if !status.is_success() {
-        // Read the body for diagnosis and surface CrabShack's status to the caller, so a
-        // misconfigured-admin-token 401 or a CrabShack 5xx is distinguishable from a generic
-        // failure. (CrabShack's grant is idempotent and does not check instance existence, so it
-        // never returns 404/409 here — only 4xx for a malformed request or auth/transport errors.)
-        let body = resp.text().await.unwrap_or_default();
-        tracing::error!(
-            "grant-owner: CrabShack access grant failed: instance_id={}, status={}, body={}",
-            id,
-            status,
-            body.chars().take(300).collect::<String>()
-        );
-        return Err(ApiError::internal_server_error(format!(
-            "CrabShack rejected the access grant (status {status})"
-        )));
-    }
 
     tracing::info!(
-        "grant-owner: granted CrabShack owner: instance_id={}, crabshack_name={}, record_name={}, owner_user_id={}",
+        "grant-owner: derived CrabShack owner: instance_id={}, record_name={}, owner_user_id={}",
         id,
-        crabshack_name,
         instance_name,
         owner_user_id
     );
     Ok(Json(GrantInstanceOwnerResponse {
         status: "success".to_string(),
-        instance_name: crabshack_name,
-        message: "Owner access granted on CrabShack".to_string(),
+        instance_name,
+        message: "Grant this user_id on CrabShack to own the instance".to_string(),
+        owner_user_id,
     }))
 }
 
-/// The name to grant on: the caller's `crabshack_name` when it is a valid CrabShack label, else this
-/// record's name. `None` rejects a malformed name rather than passing it to CrabShack.
-fn grant_target_name(requested: Option<&str>, record_name: &str) -> Option<String> {
-    match requested {
-        Some(name) if is_valid_crabshack_name(name) => Some(name.to_string()),
-        Some(_) => None,
-        None => Some(record_name.to_string()),
-    }
+/// CrabShack user id = hex(sha256(hex_decode(auth_secret))).
+/// Mirrors CrabShack's userIdFromAuthSecret (orchestrator-api/src/auth/user-queries.ts).
+fn crabshack_user_id(auth_secret: &str) -> Option<String> {
+    hex::decode(auth_secret.trim())
+        .ok()
+        .map(|bytes| hex::encode(Sha256::digest(&bytes)))
 }
 
 #[cfg(test)]
-mod grant_owner_name_tests {
-    use super::grant_target_name;
+mod crabshack_user_id_tests {
+    use super::crabshack_user_id;
 
     #[test]
-    fn caller_supplied_name_wins() {
-        // The record still says rich-orca; CrabShack holds it as rich-orca-fibir.
+    fn matches_crabshacks_own_derivation() {
+        // sha256 of the DECODED secret, not of its hex text — the distinction CrabShack's
+        // userIdFromAuthSecret makes, and the one an owner id would silently be wrong about.
         assert_eq!(
-            grant_target_name(Some("rich-orca-fibir"), "rich-orca"),
-            Some("rich-orca-fibir".to_string())
+            crabshack_user_id("00").as_deref(),
+            Some("6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d")
+        );
+        assert_eq!(
+            crabshack_user_id("deadbeef").as_deref(),
+            Some("5f78c33274e43fa9de5659265c1d917e25c03722dcb0b8d27db8d5feaa813953")
         );
     }
 
     #[test]
-    fn falls_back_to_the_record_name() {
+    fn tolerates_surrounding_whitespace() {
         assert_eq!(
-            grant_target_name(None, "wise-fish"),
-            Some("wise-fish".to_string())
+            crabshack_user_id(" deadbeef\n"),
+            crabshack_user_id("deadbeef")
         );
     }
 
     #[test]
-    fn rejects_a_malformed_name() {
-        // A url, spaces, a slash or an empty string is refused rather than passed to CrabShack's
-        // access route, which accepts any name it is given.
-        for bad in [
-            "https://wise-fish.agents.near.ai/",
-            "wise fish",
-            "wise/fish",
-            "",
-        ] {
-            assert_eq!(grant_target_name(Some(bad), "wise-fish"), None, "{bad}");
-        }
+    fn refuses_a_non_hex_secret() {
+        assert_eq!(crabshack_user_id("not-hex"), None);
+        assert_eq!(crabshack_user_id("abc"), None); // odd length
     }
 }
 
