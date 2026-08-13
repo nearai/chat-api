@@ -3647,13 +3647,7 @@ pub struct MigrateInstanceResponse {
     pub status: String,
     pub instance_name: String,
     pub message: String,
-    /// The CrabShack user id to grant as owner, derived from the user's `auth_secret`. A CrabShack
-    /// import lands ownerless, so the caller finishes the job:
-    /// `POST <crabshack>/instances/<instance_name>/access {"user_id": ..., "role": "owner"}` —
-    /// `instance_name` above is the name it was imported under, which is what the grant must use.
-    ///
-    /// `None` when the user has no passkey credentials to derive from, and on the `skipped` path
-    /// (nothing was migrated; use the grant-owner endpoint to look it up).
+    /// `None` when the user has no passkey credentials, and on the `skipped` path.
     pub owner_user_id: Option<String>,
 }
 
@@ -4527,19 +4521,11 @@ pub async fn admin_migrate_instance(
 }
 
 /// Response for the grant-owner endpoint.
-///
-/// Carries the derived owner user id, because the caller is the one that writes the grant and cannot
-/// compute this id itself — it comes from the user's `auth_secret`, which never leaves chat-api. Admin
-/// scope only. Knowing the id lets a caller grant, check or revoke that user's access on CrabShack;
-/// it reveals nothing about the secret it derives from.
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct GrantInstanceOwnerResponse {
     pub status: String,
     pub instance_name: String,
     pub message: String,
-    /// The CrabShack user id of this instance's owner: `sha256(hex_decode(auth_secret))`, the same
-    /// derivation CrabShack does on login. Grant it with
-    /// `POST <crabshack>/instances/<name>/access {"user_id": ..., "role": "owner"}`.
     pub owner_user_id: String,
 }
 
