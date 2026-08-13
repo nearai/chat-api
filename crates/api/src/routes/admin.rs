@@ -4590,6 +4590,44 @@ pub async fn admin_grant_instance_owner(
         ));
     }
 
+    // The record name is not always the name the instance carries on CrabShack. A migrate renamed on
+    // collision renames the record in its last bookkeeping step, so one that failed before that — or
+    // was repaired by hand — keeps the legacy name, which on CrabShack belongs to a different tenant.
+    // CrabShack's access route takes any name, so granting on it silently hands that tenant's agent
+    // to this user. Read the name off the url the migrate wrote, then confirm CrabShack has it.
+    let crabshack_name = crabshack_instance_name(
+        instance.instance_url.as_deref(),
+        instance.dashboard_url.as_deref(),
+        &crabshack_manager.url,
+    )
+    .unwrap_or_else(|| instance.name.clone());
+    let probe = app_state
+        .http_client
+        .get(format!(
+            "{}/instances/{}",
+            crabshack_manager.url.trim_end_matches('/'),
+            encode(&crabshack_name)
+        ))
+        .bearer_auth(&crabshack_manager.token)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "grant-owner: CrabShack lookup failed: instance_id={}, name={}, error={}",
+                id,
+                crabshack_name,
+                e
+            );
+            ApiError::internal_server_error("Failed to look up the instance on CrabShack")
+        })?;
+    if !probe.status().is_success() {
+        return Err(ApiError::bad_request(format!(
+            "CrabShack has no instance named {crabshack_name} (status {}) — nothing to grant",
+            probe.status()
+        )));
+    }
+
     // Look up the owning user's passkey credentials. The auth_secret is the root of the CrabShack
     // user identity. Never mint new credentials here: fresh creds would derive a different identity
     // and backup key than the migrated backup was encrypted with.
@@ -4629,7 +4667,7 @@ pub async fn admin_grant_instance_owner(
     let grant_url = format!(
         "{}/instances/{}/access",
         crabshack_manager.url.trim_end_matches('/'),
-        encode(&instance.name)
+        encode(&crabshack_name)
     );
     let resp = app_state
         .http_client
@@ -4666,15 +4704,90 @@ pub async fn admin_grant_instance_owner(
     }
 
     tracing::info!(
-        "grant-owner: granted CrabShack owner: instance_id={}, owner_user_id={}",
+        "grant-owner: granted CrabShack owner: instance_id={}, crabshack_name={}, record_name={}, owner_user_id={}",
         id,
+        crabshack_name,
+        instance_name,
         owner_user_id
     );
     Ok(Json(GrantInstanceOwnerResponse {
         status: "success".to_string(),
-        instance_name,
+        instance_name: crabshack_name,
         message: "Owner access granted on CrabShack".to_string(),
     }))
+}
+
+/// The name an instance carries on CrabShack, read from the urls a migrate wrote for it
+/// (`https://<name>.<crabshack host>/…`). `None` when neither url points at CrabShack, which leaves
+/// the caller on the record name.
+fn crabshack_instance_name(
+    instance_url: Option<&str>,
+    dashboard_url: Option<&str>,
+    crabshack_url: &str,
+) -> Option<String> {
+    let host = url::Url::parse(crabshack_url).ok()?.host_str()?.to_string();
+    let suffix = format!(".{host}");
+    [instance_url, dashboard_url]
+        .into_iter()
+        .flatten()
+        .filter_map(|u| url::Url::parse(u).ok())
+        .filter_map(|u| u.host_str().map(str::to_string))
+        .find_map(|h| {
+            h.strip_suffix(&suffix)
+                .filter(|label| !label.is_empty() && !label.contains('.'))
+                .map(str::to_string)
+        })
+}
+
+#[cfg(test)]
+mod grant_owner_name_tests {
+    use super::crabshack_instance_name;
+
+    const CRAB: &str = "https://agents.near.ai/api/crabshack";
+
+    #[test]
+    fn reads_the_name_a_rename_gave_the_instance() {
+        // The record still says rich-orca; CrabShack holds it as rich-orca-fibir.
+        assert_eq!(
+            crabshack_instance_name(
+                Some("https://rich-orca-fibir.agents.near.ai/?token=abc"),
+                Some("https://rich-orca-fibir.agents.near.ai/"),
+                CRAB
+            ),
+            Some("rich-orca-fibir".to_string())
+        );
+    }
+
+    #[test]
+    fn falls_back_to_the_dashboard_url() {
+        assert_eq!(
+            crabshack_instance_name(None, Some("https://wise-fish.agents.near.ai/"), CRAB),
+            Some("wise-fish".to_string())
+        );
+    }
+
+    #[test]
+    fn ignores_a_legacy_url() {
+        // api.agentN urls must never be mistaken for a CrabShack name.
+        assert_eq!(
+            crabshack_instance_name(
+                Some("https://dark-pike.agent1.near.ai/"),
+                Some("https://dark-pike.agent1.near.ai/"),
+                CRAB
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn ignores_urls_without_a_single_label() {
+        assert_eq!(
+            crabshack_instance_name(Some("https://agents.near.ai/"), None, CRAB),
+            None
+        );
+        assert_eq!(crabshack_instance_name(Some("not a url"), None, CRAB), None);
+        assert_eq!(crabshack_instance_name(None, None, CRAB), None);
+    }
 }
 
 /// Maximum buffer size for SSE parsing (1 MB).
