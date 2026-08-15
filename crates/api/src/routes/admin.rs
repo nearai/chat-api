@@ -3632,6 +3632,13 @@ pub struct MigrateInstanceRequest {
     /// Pin the migrated instance to a specific CrabShack node id. When set,
     /// CrabShack places it on that node and cross-checks it against node_policy.
     pub node_id: Option<String>,
+    /// Raise the budget CrabShack gives `compose up`, in milliseconds, for an image the target
+    /// node does not hold yet — that step downloads it, so a large uncached image can outlast the
+    /// default. `openclaw-nearai-worker` (1.8GB) needs this on a node that has never run it;
+    /// `ironclaw-dind` never does, being smaller and cached everywhere. CrabShack accepts
+    /// 600_000..=3_600_000 and defaults to 600_000. When set, this also extends how long chat-api
+    /// waits on the import leg, since that wait wraps the same work.
+    pub compose_timeout_ms: Option<u64>,
     /// Rename the instance while migrating it, for when its `name` is already taken on
     /// CrabShack (legacy names are not unique; CrabShack's are). Pass the full name —
     /// convention is the original plus a 5-char proquint, `brave-toad-abcde`. On success
@@ -3917,6 +3924,9 @@ pub async fn admin_migrate_instance(
         .and_then(|v| v.as_str())
         .ok_or_else(|| ApiError::bad_request("Instance has no nearai_api_url — cannot migrate"))?;
     let request = body.map(|b| b.0).unwrap_or_default();
+    // Checked here, before the first side effect: a range error found later would land after the
+    // backup has run and the legacy instance is stopped.
+    validate_compose_timeout(request.compose_timeout_ms)?;
     // Infer service type from compose-api image name when the DB value is null
     // (all legacy instances have service_type=null).
     let service_type = instance.service_type.as_deref().unwrap_or_else(|| {
@@ -4356,6 +4366,10 @@ pub async fn admin_migrate_instance(
         .node_policy
         .unwrap_or_else(|| serde_json::json!({ "version": 1, "tee": "ANY_TEE" }));
     let node_id = request.node_id;
+    // The import leg is CrabShack downloading the image and starting the container, so our wait on
+    // it cannot be shorter than the budget we just asked CrabShack to allow. Both default to 600s.
+    let compose_timeout_ms = request.compose_timeout_ms;
+    let import_timeout = import_leg_timeout(compose_timeout_ms);
     let import_url = format!("{}/instances/import", crabshack_manager.url);
     let mut import_body = serde_json::json!({
         "name": target_name,
@@ -4376,13 +4390,16 @@ pub async fn admin_migrate_instance(
     if let Some(node_id) = node_id {
         import_body["node_id"] = serde_json::Value::String(node_id);
     }
+    if let Some(ms) = compose_timeout_ms {
+        import_body["compose_timeout_ms"] = serde_json::Value::from(ms);
+    }
 
     let import_resp = app_state
         .http_client
         .post(&import_url)
         .bearer_auth(&crabshack_manager.token)
         .json(&import_body)
-        .timeout(SSE_MIGRATION_TOTAL_TIMEOUT)
+        .timeout(import_timeout)
         .send()
         .await
         .map_err(|e| {
@@ -4674,6 +4691,95 @@ const SSE_BUFFER_LIMIT: usize = 1024 * 1024;
 /// Total time budget for an SSE migration stream (backup or import).
 /// Applied as reqwest's per-request .timeout() on the backup/import POST calls.
 const SSE_MIGRATION_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+/// Added to a caller-supplied compose budget so our wait outlasts CrabShack's own, and a deploy
+/// that overruns is reported by CrabShack rather than cut from this side.
+const IMPORT_TIMEOUT_HEADROOM: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// CrabShack's own accepted range for the field. Mirrored rather than discovered so a bad value is
+/// refused before this migration touches anything, instead of surfacing as a failed import.
+const COMPOSE_TIMEOUT_MIN_MS: u64 = 600_000;
+const COMPOSE_TIMEOUT_MAX_MS: u64 = 3_600_000;
+
+/// Refuse a budget CrabShack would reject. Below the minimum is worse than useless — it would make
+/// this side give up sooner than the standing 600s — and above the maximum lets one migration hold
+/// a node's deploy slot for as long as it likes.
+fn validate_compose_timeout(compose_timeout_ms: Option<u64>) -> Result<(), ApiError> {
+    match compose_timeout_ms {
+        None => Ok(()),
+        Some(ms) if (COMPOSE_TIMEOUT_MIN_MS..=COMPOSE_TIMEOUT_MAX_MS).contains(&ms) => Ok(()),
+        Some(_) => Err(ApiError::bad_request(format!(
+            "compose_timeout_ms must be between {COMPOSE_TIMEOUT_MIN_MS} and {COMPOSE_TIMEOUT_MAX_MS}"
+        ))),
+    }
+}
+
+/// How long to wait on CrabShack's import. The import downloads the image and starts the
+/// container, so a raised compose budget has to raise this too or the wait cuts the very work it
+/// was raised for. Absent ⇒ the standing 600s.
+fn import_leg_timeout(compose_timeout_ms: Option<u64>) -> std::time::Duration {
+    match compose_timeout_ms {
+        Some(ms) => std::time::Duration::from_millis(ms) + IMPORT_TIMEOUT_HEADROOM,
+        None => SSE_MIGRATION_TOTAL_TIMEOUT,
+    }
+}
+
+#[cfg(test)]
+mod migrate_timeout_tests {
+    use super::*;
+
+    #[test]
+    fn omitted_compose_timeout_keeps_the_standing_budget() {
+        // why: every migration predating the field must wait exactly as long as it always has
+        assert_eq!(import_leg_timeout(None), SSE_MIGRATION_TOTAL_TIMEOUT);
+    }
+
+    #[test]
+    fn raised_compose_timeout_outlasts_crabshacks_own_budget() {
+        // why: waiting for exactly the compose budget would race CrabShack's own deadline and cut
+        //   the import from this side, losing the error CrabShack is about to report
+        let timeout = import_leg_timeout(Some(1_800_000));
+        assert!(timeout > std::time::Duration::from_millis(1_800_000));
+        assert_eq!(timeout, std::time::Duration::from_secs(1860));
+    }
+
+    #[test]
+    fn migrate_request_defaults_compose_timeout_to_absent() {
+        // why: the field is optional on the wire; an old caller's body must still deserialize
+        let body = serde_json::json!({ "node_id": "baremetal07" });
+        let parsed: MigrateInstanceRequest = serde_json::from_value(body).expect("parses");
+        assert_eq!(parsed.compose_timeout_ms, None);
+        assert_eq!(
+            import_leg_timeout(parsed.compose_timeout_ms),
+            SSE_MIGRATION_TOTAL_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn compose_timeout_outside_crabshacks_range_is_refused() {
+        // why: a value CrabShack would reject must fail before this migration touches anything —
+        //   found later, the error lands after the backup ran and the legacy copy is stopped
+        assert!(validate_compose_timeout(Some(60_000)).is_err());
+        assert!(validate_compose_timeout(Some(3_600_001)).is_err());
+    }
+
+    #[test]
+    fn compose_timeout_inside_the_range_and_absence_are_accepted() {
+        // why: absent is the ordinary case and must stay valid; the ends of the range are the
+        //   values a caller reading the docs will actually send
+        assert!(validate_compose_timeout(None).is_ok());
+        assert!(validate_compose_timeout(Some(600_000)).is_ok());
+        assert!(validate_compose_timeout(Some(1_800_000)).is_ok());
+        assert!(validate_compose_timeout(Some(3_600_000)).is_ok());
+    }
+
+    #[test]
+    fn migrate_request_carries_a_supplied_compose_timeout() {
+        // why: the value has to reach CrabShack's import body, not be silently dropped
+        let body = serde_json::json!({ "node_id": "baremetal07", "compose_timeout_ms": 1_800_000 });
+        let parsed: MigrateInstanceRequest = serde_json::from_value(body).expect("parses");
+        assert_eq!(parsed.compose_timeout_ms, Some(1_800_000));
+    }
+}
 /// How long to wait for a single chunk before logging a stall warning.
 /// Compose-api sends keepalives every 15s, so 30s without any data means trouble.
 const SSE_STALL_DETECT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
