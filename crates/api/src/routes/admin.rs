@@ -3924,6 +3924,9 @@ pub async fn admin_migrate_instance(
         .and_then(|v| v.as_str())
         .ok_or_else(|| ApiError::bad_request("Instance has no nearai_api_url — cannot migrate"))?;
     let request = body.map(|b| b.0).unwrap_or_default();
+    // Checked here, before the first side effect: a range error found later would land after the
+    // backup has run and the legacy instance is stopped.
+    validate_compose_timeout(request.compose_timeout_ms)?;
     // Infer service type from compose-api image name when the DB value is null
     // (all legacy instances have service_type=null).
     let service_type = instance.service_type.as_deref().unwrap_or_else(|| {
@@ -4692,6 +4695,24 @@ const SSE_MIGRATION_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::fr
 /// that overruns is reported by CrabShack rather than cut from this side.
 const IMPORT_TIMEOUT_HEADROOM: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// CrabShack's own accepted range for the field. Mirrored rather than discovered so a bad value is
+/// refused before this migration touches anything, instead of surfacing as a failed import.
+const COMPOSE_TIMEOUT_MIN_MS: u64 = 600_000;
+const COMPOSE_TIMEOUT_MAX_MS: u64 = 3_600_000;
+
+/// Refuse a budget CrabShack would reject. Below the minimum is worse than useless — it would make
+/// this side give up sooner than the standing 600s — and above the maximum lets one migration hold
+/// a node's deploy slot for as long as it likes.
+fn validate_compose_timeout(compose_timeout_ms: Option<u64>) -> Result<(), ApiError> {
+    match compose_timeout_ms {
+        None => Ok(()),
+        Some(ms) if (COMPOSE_TIMEOUT_MIN_MS..=COMPOSE_TIMEOUT_MAX_MS).contains(&ms) => Ok(()),
+        Some(_) => Err(ApiError::bad_request(&format!(
+            "compose_timeout_ms must be between {COMPOSE_TIMEOUT_MIN_MS} and {COMPOSE_TIMEOUT_MAX_MS}"
+        ))),
+    }
+}
+
 /// How long to wait on CrabShack's import. The import downloads the image and starts the
 /// container, so a raised compose budget has to raise this too or the wait cuts the very work it
 /// was raised for. Absent ⇒ the standing 600s.
@@ -4731,6 +4752,24 @@ mod migrate_timeout_tests {
             import_leg_timeout(parsed.compose_timeout_ms),
             SSE_MIGRATION_TOTAL_TIMEOUT
         );
+    }
+
+    #[test]
+    fn compose_timeout_outside_crabshacks_range_is_refused() {
+        // why: a value CrabShack would reject must fail before this migration touches anything —
+        //   found later, the error lands after the backup ran and the legacy copy is stopped
+        assert!(validate_compose_timeout(Some(60_000)).is_err());
+        assert!(validate_compose_timeout(Some(3_600_001)).is_err());
+    }
+
+    #[test]
+    fn compose_timeout_inside_the_range_and_absence_are_accepted() {
+        // why: absent is the ordinary case and must stay valid; the ends of the range are the
+        //   values a caller reading the docs will actually send
+        assert!(validate_compose_timeout(None).is_ok());
+        assert!(validate_compose_timeout(Some(600_000)).is_ok());
+        assert!(validate_compose_timeout(Some(1_800_000)).is_ok());
+        assert!(validate_compose_timeout(Some(3_600_000)).is_ok());
     }
 
     #[test]
