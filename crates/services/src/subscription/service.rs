@@ -101,7 +101,7 @@ struct HouseOfStakeEntitlement {
 }
 
 const TTL_CACHE_SECS: u64 = 600; // 10 minutes
-const HOUSE_OF_STAKE_CREDIT_LIMIT_CACHE_SECS: u64 = 60; // 1 minute
+const HOUSE_OF_STAKE_CREDIT_LIMIT_CACHE_SECS: u64 = 600; // 10 minutes
 const SYSTEM_CONFIGS_TTL_CACHE_SECS: u64 = 60; // 1 minute
 /// Default monthly credits when plan has no monthly_credits config. 1 USD in nano-dollars ($1 = 1_000_000_000).
 const DEFAULT_MONTHLY_CREDITS_NANO_USD: u64 = 1_000_000_000;
