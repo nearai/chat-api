@@ -4707,7 +4707,7 @@ fn validate_compose_timeout(compose_timeout_ms: Option<u64>) -> Result<(), ApiEr
     match compose_timeout_ms {
         None => Ok(()),
         Some(ms) if (COMPOSE_TIMEOUT_MIN_MS..=COMPOSE_TIMEOUT_MAX_MS).contains(&ms) => Ok(()),
-        Some(_) => Err(ApiError::bad_request(&format!(
+        Some(_) => Err(ApiError::bad_request(format!(
             "compose_timeout_ms must be between {COMPOSE_TIMEOUT_MIN_MS} and {COMPOSE_TIMEOUT_MAX_MS}"
         ))),
     }
