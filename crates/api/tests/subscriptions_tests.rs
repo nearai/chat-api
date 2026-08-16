@@ -4397,9 +4397,9 @@ async fn test_house_of_stake_credit_snapshot_prorates_increases_and_resets_next_
     }
     sync_house_of_stake_subscription(&server, &token).await;
     let new_period_limit = get_credits_plan_limit(&server, &token).await;
-    assert!(
-        (3_000_000_000..=4_000_000_000).contains(&new_period_limit),
-        "new periods without a pre-seeded snapshot should prorate the first observed stake, got {new_period_limit}"
+    assert_eq!(
+        new_period_limit, 4_000_000_000,
+        "new periods without a pre-seeded snapshot should grant the full current stake baseline"
     );
 }
 
@@ -4525,9 +4525,9 @@ async fn test_house_of_stake_credits_refreshes_auto_renewed_expired_local_row() 
         .unwrap();
 
     let plan_limit = get_credits_plan_limit(&server, &token).await;
-    assert!(
-        (4_500_000_000..=5_000_000_000).contains(&plan_limit),
-        "auto-renewed rows without a pre-seeded snapshot should prorate the first observed stake, got {plan_limit}"
+    assert_eq!(
+        plan_limit, 5_000_000_000,
+        "auto-renewed rows without a pre-seeded snapshot should grant the full current stake baseline"
     );
 
     let refreshed_end: chrono::DateTime<Utc> = client
@@ -4628,7 +4628,7 @@ async fn test_house_of_stake_expired_refresh_failure_is_cached() {
 
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn test_house_of_stake_chain_missing_ignores_persisted_snapshot() {
+async fn test_house_of_stake_chain_missing_uses_persisted_snapshot_floor() {
     clear_proxy_env_for_local_wiremock();
     let mock = MockServer::start().await;
     Mock::given(method("POST"))
@@ -4693,8 +4693,8 @@ async fn test_house_of_stake_chain_missing_ignores_persisted_snapshot() {
 
     assert_eq!(
         get_credits_plan_limit(&server, &token).await,
-        0,
-        "definitive chain absence must not serve a persisted HoS snapshot"
+        5_000_000_000,
+        "missing chain data should fall back to the persisted HoS snapshot"
     );
 
     let user = db
@@ -4745,8 +4745,8 @@ async fn test_house_of_stake_chain_missing_ignores_persisted_snapshot() {
         .unwrap()
         .get("spent_nano_usd");
     assert_eq!(
-        spent, 1_000_000_000,
-        "confirmed zero HoS entitlement should reconcile purchased credits against a zero plan"
+        spent, 0,
+        "missing chain data must not retroactively charge purchased credits below the snapshot floor"
     );
 }
 
@@ -4883,8 +4883,9 @@ async fn test_house_of_stake_transient_lock_failure_uses_current_snapshot_only()
 #[serial(subscription_tests)]
 async fn test_house_of_stake_credits_cache_resolver_hot_path() {
     clear_proxy_env_for_local_wiremock();
-    let period_end = Utc::now() + Duration::days(29);
-    let period_start = sub_one_month_same_day_for_test(period_end);
+    let now = Utc::now();
+    let period_start = now - Duration::days(20);
+    let period_end = now + Duration::days(10);
 
     let mock = MockServer::start().await;
     Mock::given(method("POST"))
@@ -4982,9 +4983,9 @@ async fn test_house_of_stake_credits_cache_resolver_hot_path() {
     set_house_of_stake_subscription_period_end(&db, &subscription_id, period_end).await;
 
     let first_limit = get_credits_plan_limit(&server, &token).await;
-    assert!(
-        (4_500_000_000..=5_000_000_000).contains(&first_limit),
-        "first observed HoS stake should be prorated for the remaining period, got {first_limit}"
+    assert_eq!(
+        first_limit, 5_000_000_000,
+        "first observed HoS stake should seed the current stake as the full-period baseline"
     );
     assert_eq!(get_credits_plan_limit(&server, &token).await, first_limit);
 
