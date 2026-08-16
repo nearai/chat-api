@@ -1044,13 +1044,31 @@ impl SubscriptionServiceImpl {
         &self,
         user_id: UserId,
     ) -> Result<ResolvedPlanPeriod, SubscriptionError> {
+        self.resolve_plan_period_for_user_with_source_inner(user_id, true)
+            .await
+    }
+
+    async fn refresh_plan_period_for_user_with_source(
+        &self,
+        user_id: UserId,
+    ) -> Result<ResolvedPlanPeriod, SubscriptionError> {
+        self.resolve_plan_period_for_user_with_source_inner(user_id, false)
+            .await
+    }
+
+    async fn resolve_plan_period_for_user_with_source_inner(
+        &self,
+        user_id: UserId,
+        allow_house_of_stake_cache: bool,
+    ) -> Result<ResolvedPlanPeriod, SubscriptionError> {
         let active_subscription = self
             .get_active_subscription_for_entitlement(user_id)
             .await?;
 
-        if active_subscription
-            .as_ref()
-            .is_some_and(|sub| sub.provider == "house-of-stake")
+        if allow_house_of_stake_cache
+            && active_subscription
+                .as_ref()
+                .is_some_and(|sub| sub.provider == "house-of-stake")
         {
             if let Some(resolved) = self
                 .cached_credit_limit_for_user(user_id, HOUSE_OF_STAKE_CREDIT_LIMIT_CACHE_SECS)
@@ -4787,8 +4805,10 @@ impl SubscriptionService for SubscriptionServiceImpl {
         &self,
         user_id: UserId,
     ) -> Result<(), SubscriptionError> {
+        // Purchased-credit reconciliation advances a high-water cursor, so refresh HoS
+        // entitlement instead of charging against a stale credit-limit cache.
         let resolved = self
-            .resolve_plan_period_for_user_with_source(user_id)
+            .refresh_plan_period_for_user_with_source(user_id)
             .await?;
         let Some((plan_credits, period_start, period_end)) = self
             .purchased_reconciliation_plan_period(user_id, &resolved)
@@ -4804,14 +4824,14 @@ impl SubscriptionService for SubscriptionServiceImpl {
     }
 
     async fn get_credits(&self, user_id: UserId) -> Result<CreditsSummary, SubscriptionError> {
-        let resolved = self
+        let mut resolved = self
             .resolve_plan_period_for_user_with_source(user_id)
             .await?;
-        let plan_credits = resolved.plan_credits.min(i64::MAX as u64) as i64;
-        let period_start = resolved.period_start;
-        let period_end = resolved.period_end;
+        let mut plan_credits = resolved.plan_credits.min(i64::MAX as u64) as i64;
+        let mut period_start = resolved.period_start;
+        let mut period_end = resolved.period_end;
 
-        let period_spent_credits = self
+        let mut period_spent_credits = self
             .user_usage_repo
             .get_usage_by_user_id(user_id, Some(period_start), Some(period_end))
             .await
@@ -4820,6 +4840,28 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .unwrap_or(0);
 
         if period_spent_credits > 0 {
+            let should_refresh_house_of_stake_entitlement = self
+                .get_active_subscription_for_entitlement(user_id)
+                .await?
+                .as_ref()
+                .is_some_and(|sub| sub.provider == "house-of-stake");
+            if should_refresh_house_of_stake_entitlement {
+                // The HoS cache is fine for display hot paths, but reconciliation can
+                // permanently charge purchased credits against stale post-stake-mutation limits.
+                resolved = self
+                    .refresh_plan_period_for_user_with_source(user_id)
+                    .await?;
+                plan_credits = resolved.plan_credits.min(i64::MAX as u64) as i64;
+                period_start = resolved.period_start;
+                period_end = resolved.period_end;
+                period_spent_credits = self
+                    .user_usage_repo
+                    .get_usage_by_user_id(user_id, Some(period_start), Some(period_end))
+                    .await
+                    .map_err(|e| SubscriptionError::InternalError(e.to_string()))?
+                    .map(|s| s.cost_nano_usd)
+                    .unwrap_or(0);
+            }
             match self
                 .purchased_reconciliation_plan_period(user_id, &resolved)
                 .await
