@@ -3619,6 +3619,19 @@ pub struct MigrateInstanceRequest {
     /// `crabshack_name` when that is set. The legacy instance will NOT be
     /// started — stop it before taking the external backup to avoid data loss.
     pub backup_url: Option<String>,
+    /// Supply the instance's `SECRETS_MASTER_KEY` when compose-api cannot report it.
+    ///
+    /// ironclaw persists the key on the config volume and only falls back to minting a
+    /// fresh one when it finds neither the env var nor the file — at which point the
+    /// instance's stored secrets are undecryptable, silently. The preflight below exists
+    /// to stop a migration reaching that state, so this does not disable it: it satisfies
+    /// it with a key the caller has recovered another way (e.g. read out of the
+    /// pre-migration archive), and that key is passed to the imported instance.
+    ///
+    /// Needed for an instance whose legacy container no longer reports as ironclaw — a
+    /// mislabelled record, or one recreated onto the wrong image — since compose-api only
+    /// looks for the key when it believes the instance is ironclaw.
+    pub secrets_master_key: Option<String>,
     /// Override the CrabShack service_type, bypassing the config-derived
     /// ironclaw_service_type/openclaw_service_type mapping (e.g. "ironclaw-dind"
     /// to force the dind runtime regardless of the current hosting policy).
@@ -3660,6 +3673,18 @@ const MIGRATE_FALLBACK_DIND_VERSION: &str = "0.29.1";
 
 /// True if `name` works as a CrabShack instance name: a single lowercase DNS label.
 /// It becomes the gateway hostname, so a dot would split it.
+/// ironclaw's key is 32 bytes as lowercase hex (`openssl rand -hex 32`). Checked before it
+/// reaches the imported instance's env, because a malformed one decrypts nothing and the
+/// agent gives no signal beyond failing to read its own secrets.
+fn valid_secrets_master_key(key: &str) -> Result<String, ApiError> {
+    if key.len() != 64 || !key.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(ApiError::bad_request(
+            "secrets_master_key must be 64 hexadecimal characters",
+        ));
+    }
+    Ok(key.to_ascii_lowercase())
+}
+
 fn is_valid_crabshack_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 63
@@ -3982,11 +4007,18 @@ pub async fn admin_migrate_instance(
     // Preflight: ironclaw instances must have SECRETS_MASTER_KEY available.
     // compose-api reads it via docker exec at startup — stopped containers are
     // unreachable so the key is missing. Fail early before any side effects.
-    let has_master_key = compose_data
-        .get("extra_env")
-        .and_then(|v| v.get("SECRETS_MASTER_KEY"))
-        .and_then(|v| v.as_str())
-        .is_some_and(|s| !s.is_empty());
+    // A caller-supplied key satisfies this too; it is overlaid onto extra_env below so the
+    // imported instance starts with it rather than minting a replacement.
+    let supplied_master_key = match request.secrets_master_key.as_deref().map(str::trim) {
+        None => None,
+        Some(key) => Some(valid_secrets_master_key(key)?),
+    };
+    let has_master_key = supplied_master_key.is_some()
+        || compose_data
+            .get("extra_env")
+            .and_then(|v| v.get("SECRETS_MASTER_KEY"))
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty());
     if !has_master_key && (service_type == "ironclaw" || service_type.starts_with("ironclaw-")) {
         tracing::error!(
             "Migrate: SECRETS_MASTER_KEY not found — aborting before side effects. \
@@ -4316,6 +4348,14 @@ pub async fn admin_migrate_instance(
                 extra_env_map.insert(k.clone(), v.clone());
             }
         }
+    }
+    // Overlaid after the legacy vars: when the caller supplied the key, theirs is the one
+    // that was verified against the data being imported.
+    if let Some(ref key) = supplied_master_key {
+        extra_env_map.insert(
+            "SECRETS_MASTER_KEY".into(),
+            serde_json::Value::String(key.clone()),
+        );
     }
     extra_env_map.insert(
         "LEGACY_API_BASE_URL".into(),
@@ -5111,6 +5151,43 @@ mod migrate_name_tests {
             &"a".repeat(64),
         ] {
             assert!(!is_valid_crabshack_name(n), "{n:?} should be rejected");
+        }
+    }
+}
+
+#[cfg(test)]
+mod migrate_master_key_tests {
+    use super::valid_secrets_master_key;
+
+    #[test]
+    fn accepts_a_32_byte_hex_key_in_either_case() {
+        // `openssl rand -hex 32`, which is what ironclaw's entrypoint writes.
+        let key = "a1b2c3d4e5f6".repeat(5) + "abcd";
+        assert_eq!(key.len(), 64);
+        assert_eq!(valid_secrets_master_key(&key).unwrap(), key);
+        assert_eq!(
+            valid_secrets_master_key(&key.to_ascii_uppercase()).unwrap(),
+            key,
+            "normalised to lowercase so it matches what ironclaw wrote"
+        );
+    }
+
+    #[test]
+    fn rejects_anything_that_would_decrypt_nothing() {
+        // A wrong key is not an error the agent reports — it simply fails to read its own
+        // secrets — so the shape is checked before it reaches the instance env.
+        for k in [
+            "",
+            "deadbeef",
+            &"a".repeat(63),
+            &"a".repeat(65),
+            &"z".repeat(64),
+            &format!("{} ", "a".repeat(63)),
+        ] {
+            assert!(
+                valid_secrets_master_key(k).is_err(),
+                "{k:?} should be rejected"
+            );
         }
     }
 }
