@@ -3786,8 +3786,6 @@ pub struct MigrateInstanceResponse {
 const MIGRATE_MIN_ASIS_DIND_VERSION: (u64, u64, u64) = (0, 23, 0);
 const MIGRATE_FALLBACK_DIND_VERSION: &str = "0.29.1";
 
-/// True if `name` works as a CrabShack instance name: a single lowercase DNS label.
-/// It becomes the gateway hostname, so a dot would split it.
 /// ironclaw's key is 32 bytes as lowercase hex (`openssl rand -hex 32`). Checked before it
 /// reaches the imported instance's env, because a malformed one decrypts nothing and the
 /// agent gives no signal beyond failing to read its own secrets.
@@ -3800,6 +3798,8 @@ fn valid_secrets_master_key(key: &str) -> Result<String, ApiError> {
     Ok(key.to_ascii_lowercase())
 }
 
+/// True if `name` works as a CrabShack instance name: a single lowercase DNS label.
+/// It becomes the gateway hostname, so a dot would split it.
 fn is_valid_crabshack_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 63
