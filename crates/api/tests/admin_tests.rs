@@ -765,3 +765,59 @@ async fn test_admin_lifecycle_change_reason_too_long_returns_400() {
         message
     );
 }
+
+#[tokio::test]
+async fn test_admin_patch_instance_config_requires_admin() {
+    let server = create_test_server().await;
+    let user_token = mock_login(&server, "patch_config_not_admin@example.com").await;
+
+    let response = server
+        .patch(&format!(
+            "/v1/admin/agents/instances/{}/config",
+            Uuid::new_v4()
+        ))
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {user_token}")).unwrap(),
+        )
+        .json(&json!({"service_type": "ironclaw"}))
+        .await;
+
+    assert_eq!(response.status_code(), 403);
+}
+
+#[tokio::test]
+async fn test_admin_patch_instance_config_validates_before_reaching_compose_api() {
+    let server = create_test_server().await;
+    let admin_token = mock_login(&server, "patch_config_admin@admin.org").await;
+    let auth = |req: axum_test::TestRequest| {
+        req.add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {admin_token}")).unwrap(),
+        )
+    };
+
+    // Malformed id is rejected before any lookup.
+    let response = auth(server.patch("/v1/admin/agents/instances/not-a-uuid/config"))
+        .json(&json!({"service_type": "ironclaw"}))
+        .await;
+    assert_eq!(response.status_code(), 400);
+
+    // A non-object body cannot be a valid compose-api patch, so it never leaves chat-api.
+    let response = auth(server.patch(&format!(
+        "/v1/admin/agents/instances/{}/config",
+        Uuid::new_v4()
+    )))
+    .json(&json!("not-an-object"))
+    .await;
+    assert_eq!(response.status_code(), 400);
+
+    // A well-formed id for an instance that does not exist is a 404, not a forward.
+    let response = auth(server.patch(&format!(
+        "/v1/admin/agents/instances/{}/config",
+        Uuid::new_v4()
+    )))
+    .json(&json!({"service_type": "ironclaw"}))
+    .await;
+    assert_eq!(response.status_code(), 404);
+}

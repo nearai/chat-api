@@ -2575,6 +2575,121 @@ pub async fn admin_set_aml_report_active(
     Ok(Json(report.into()))
 }
 
+/// Admin: patch an instance's configuration on the compose-api that hosts it.
+///
+/// A thin forward to compose-api's `PATCH /instances/{name}`. Admins have no route to
+/// compose-api of their own — the manager tokens are not handed out — so repairing an
+/// instance whose recorded service_type or image drifted from what it runs has to come
+/// through here.
+///
+/// The body is passed through untouched and compose-api validates it, so a field added
+/// there works without redeploying chat-api. It rejects an image that is not a digest
+/// reference, an extra_env key it manages itself, and a service_type that contradicts the
+/// image; it recreates the container and keeps the named volumes.
+#[utoipa::path(
+    patch,
+    path = "/v1/admin/agents/instances/{id}/config",
+    tag = "Admin",
+    params(("id" = String, Path, description = "Instance ID")),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "compose-api response, passed through"),
+        (status = 400, description = "Rejected by compose-api, or the instance is not on a legacy manager", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "Instance not found", body = crate::error::ApiErrorResponse),
+    ),
+    security(("session_token" = []))
+)]
+pub async fn admin_patch_instance_config(
+    State(app_state): State<AppState>,
+    Extension(_user): Extension<AuthenticatedUser>,
+    Path(instance_id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Response, ApiError> {
+    let instance_uuid = Uuid::parse_str(&instance_id)
+        .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
+
+    if !body.is_object() {
+        return Err(ApiError::bad_request("Body must be a JSON object"));
+    }
+
+    let instance = app_state
+        .agent_repository
+        .get_instance(instance_uuid)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to fetch instance: instance_id={}, error={}",
+                instance_uuid,
+                e
+            );
+            ApiError::internal_server_error("Failed to fetch instance")
+        })?
+        .ok_or_else(|| ApiError::not_found("Instance not found"))?;
+
+    let agent_api_base_url = instance
+        .agent_api_base_url
+        .as_deref()
+        .ok_or_else(|| ApiError::bad_request("Instance has no agent_api_base_url"))?;
+
+    let manager = app_state
+        .agent_service
+        .find_manager_for_url(agent_api_base_url)
+        .ok_or_else(|| {
+            ApiError::bad_request("No manager configured for this instance's agent_api_base_url")
+        })?;
+
+    let url = format!(
+        "{}/instances/{}",
+        manager.url.trim_end_matches('/'),
+        urlencoding::encode(&instance.name)
+    );
+
+    // The body may carry extra_env values, so it is never logged — only ids.
+    tracing::info!(
+        "Admin: patching instance config: instance_id={}, manager={}",
+        instance_uuid,
+        manager.url
+    );
+
+    let response = app_state
+        .http_client
+        .patch(&url)
+        .bearer_auth(&manager.token)
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(180))
+        .send()
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to reach compose-api: instance_id={}, error={}",
+                instance_uuid,
+                e
+            );
+            ApiError::internal_server_error("Failed to reach compose-api")
+        })?;
+
+    let status = response.status();
+    let payload = response.bytes().await.map_err(|e| {
+        tracing::error!(
+            "Failed to read compose-api response: instance_id={}, error={}",
+            instance_uuid,
+            e
+        );
+        ApiError::internal_server_error("Failed to read compose-api response")
+    })?;
+
+    tracing::info!(
+        "Admin: patch instance config returned: instance_id={}, status={}",
+        instance_uuid,
+        status
+    );
+
+    let mut out = Response::new(axum::body::Body::from(payload));
+    *out.status_mut() = status;
+    Ok(out)
+}
+
 /// Create a backup of an agent instance
 #[utoipa::path(
     post,
@@ -5047,6 +5162,10 @@ pub fn create_admin_router() -> Router<AppState> {
                 .route("/instances/{id}/stop", post(admin_stop_instance))
                 .route("/instances/{id}/restart", post(admin_restart_instance))
                 .route("/instances/{id}/migrate", post(admin_migrate_instance))
+                .route(
+                    "/instances/{id}/config",
+                    axum::routing::patch(admin_patch_instance_config),
+                )
                 .route(
                     "/instances/{id}/grant-owner",
                     post(admin_grant_instance_owner),
