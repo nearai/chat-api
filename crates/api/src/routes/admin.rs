@@ -2791,7 +2791,10 @@ pub async fn admin_patch_instance_config(
         .patch(&url)
         .bearer_auth(&manager.token)
         .json(&body)
-        .timeout(std::time::Duration::from_secs(180))
+        // The recreate on the far side pulls the image when the host does not have it, which
+        // outlasts a request timeout. A timeout here does not mean the patch was not applied —
+        // read the instance back with GET before sending it again.
+        .timeout(std::time::Duration::from_secs(600))
         .send()
         .await
         .map_err(|e| {
