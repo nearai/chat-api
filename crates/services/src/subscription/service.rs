@@ -103,6 +103,7 @@ const TTL_CACHE_SECS: u64 = 600; // 10 minutes
 const HOUSE_OF_STAKE_CREDIT_LIMIT_CACHE_SECS: u64 = 600; // 10 minutes
 const SYSTEM_CONFIGS_TTL_CACHE_SECS: u64 = 60; // 1 minute
 const HOUSE_OF_STAKE_MAX_CHAIN_PERIOD_DAYS: i64 = 35;
+const HOUSE_OF_STAKE_PERIOD_START_BASELINE_GRACE_SECS: i64 = 600;
 /// Default monthly credits when plan has no monthly_credits config. 1 USD in nano-dollars ($1 = 1_000_000_000).
 const DEFAULT_MONTHLY_CREDITS_NANO_USD: u64 = 1_000_000_000;
 const YOCTO_PER_NEAR: u128 = 1_000_000_000_000_000_000_000_000;
@@ -1262,6 +1263,15 @@ impl SubscriptionServiceImpl {
             <= Duration::days(HOUSE_OF_STAKE_MAX_CHAIN_PERIOD_DAYS)
     }
 
+    fn is_house_of_stake_period_start_baseline_observation(
+        period_start: DateTime<Utc>,
+        observed_at: DateTime<Utc>,
+    ) -> bool {
+        observed_at >= period_start
+            && observed_at.signed_duration_since(period_start)
+                <= Duration::seconds(HOUSE_OF_STAKE_PERIOD_START_BASELINE_GRACE_SECS)
+    }
+
     async fn reconcile_house_of_stake_credit_entitlement_snapshot(
         &self,
         user_id: UserId,
@@ -1271,6 +1281,7 @@ impl SubscriptionServiceImpl {
         period_end: DateTime<Utc>,
         effective_stake_yocto: u128,
     ) -> Result<u64, SubscriptionError> {
+        let observed_at = Utc::now();
         let mut client = self
             .db_pool
             .get()
@@ -1299,10 +1310,10 @@ impl SubscriptionServiceImpl {
         let row = match row {
             Some(row) => row,
             None => {
-                let previous_credited_stake = match txn
+                let previous_snapshot_exists = txn
                     .query_opt(
                         r#"
-                        SELECT credited_stake_yocto
+                        SELECT 1
                         FROM house_of_stake_credit_entitlement_snapshots
                         WHERE subscription_id = $1
                           AND period_end <= $2
@@ -1313,17 +1324,17 @@ impl SubscriptionServiceImpl {
                     )
                     .await
                     .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
-                {
-                    Some(row) => Some(
-                        row.get::<_, String>("credited_stake_yocto")
-                            .parse::<u128>()
-                            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?,
-                    ),
-                    None => None,
+                    .is_some();
+                let seed_full_period_baseline = !previous_snapshot_exists
+                    || Self::is_house_of_stake_period_start_baseline_observation(
+                        period_start,
+                        observed_at,
+                    );
+                let baseline_stake = if seed_full_period_baseline {
+                    effective_stake_yocto
+                } else {
+                    0
                 };
-                let baseline_stake = previous_credited_stake
-                    .map(|stake| stake.min(effective_stake_yocto))
-                    .unwrap_or(effective_stake_yocto);
                 let baseline_limit =
                     Self::stake_based_credits_for_lock(plan_config, baseline_stake).unwrap_or(0);
                 match txn
@@ -1382,7 +1393,7 @@ impl SubscriptionServiceImpl {
                 full_period_delta,
                 period_start,
                 period_end,
-                Utc::now(),
+                observed_at,
             );
             let new_limit = current_limit
                 .saturating_add(prorated_delta)
@@ -3176,7 +3187,17 @@ impl SubscriptionService for SubscriptionServiceImpl {
         &self,
         user_id: UserId,
     ) -> Result<NearStakingSyncSummary, SubscriptionError> {
-        self.reconcile_near_staking_from_rpc(user_id).await
+        let summary = self.reconcile_near_staking_from_rpc(user_id).await?;
+        if summary.upserted_house_of_stake_row {
+            if let Err(err) = self.refresh_plan_period_for_user_with_source(user_id).await {
+                tracing::warn!(
+                    user_id = %user_id.0,
+                    error = %err,
+                    "HoS sync succeeded but entitlement snapshot seeding failed"
+                );
+            }
+        }
+        Ok(summary)
     }
 
     async fn change_plan(
