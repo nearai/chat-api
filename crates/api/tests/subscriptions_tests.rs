@@ -5034,6 +5034,134 @@ async fn test_house_of_stake_transient_lock_failure_uses_current_snapshot_only()
 
 #[tokio::test]
 #[serial(subscription_tests)]
+async fn test_house_of_stake_invalid_chain_period_reuses_current_snapshot() {
+    clear_proxy_env_for_local_wiremock();
+    let now = Utc::now();
+    let snapshot_start = now - Duration::days(1);
+    let snapshot_end = now + Duration::days(29);
+    let invalid_chain_start = now - Duration::days(60);
+    let invalid_chain_end = now + Duration::days(10);
+
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(move |req: &wiremock::Request| {
+            use base64::{engine::general_purpose::STANDARD, Engine};
+
+            let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or(json!({}));
+            let empty = json!({});
+            let params = body.get("params").unwrap_or(&empty);
+            let method_name = params
+                .get("method_name")
+                .and_then(|x| x.as_str())
+                .unwrap_or("");
+            let decoded_args = params
+                .get("args_base64")
+                .and_then(|x| x.as_str())
+                .and_then(|args| STANDARD.decode(args).ok())
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .unwrap_or_default();
+
+            match method_name {
+                "get_subscription_for_price" => {
+                    ResponseTemplate::new(200).set_body_json(near_rpc_call_function_body(&json!({
+                        "subscription_id": "sub_chain_hos_invalid_period_snapshot",
+                        "price_id": "price_hos_basic",
+                        "start_ns": invalid_chain_start.timestamp_nanos_opt().unwrap().to_string(),
+                        "end_ns": invalid_chain_end.timestamp_nanos_opt().unwrap().to_string(),
+                        "status": "Active",
+                        "cancel_at_period_end": false,
+                        "last_lock_id": "lock_chain_hos_invalid_period_snapshot"
+                    })))
+                }
+                "get_lock" => ResponseTemplate::new(500).set_body_json(json!({
+                    "error": "invalid chain period should reuse the current snapshot before lock lookup",
+                    "args": decoded_args
+                })),
+                _ => ResponseTemplate::new(500).set_body_json(json!({
+                    "error": "unexpected NEAR RPC mock",
+                    "method_name": method_name
+                })),
+            }
+        })
+        .mount(&mock)
+        .await;
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        near_rpc_url: Some(mock.uri().to_string()),
+        near_staking_contract_id: Some("staking.testnet".to_string()),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": { "house-of-stake": { "price_id": "price_hos_basic" } },
+                "agent_instances": { "max": 2 },
+                "stake_based_monthly_credits": {
+                    "credits_per_staked_near_nano_usd": 10_000_000
+                }
+            }
+        }),
+    )
+    .await;
+
+    let near_email = "hos_invalid_period_snapshot.testnet@near";
+    let login = json!({
+        "email": near_email,
+        "name": "HoS Invalid Period Snapshot",
+        "oauth_provider": "near"
+    });
+    let response = server.post("/v1/auth/mock-login").json(&login).await;
+    let token = response.json::<serde_json::Value>()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    cleanup_user_subscriptions(&db, near_email).await;
+    let subscription_id = insert_house_of_stake_subscription_for_existing_user(
+        &db,
+        near_email,
+        "price_hos_basic",
+        false,
+    )
+    .await;
+    set_house_of_stake_subscription_period_end(&db, &subscription_id, invalid_chain_end).await;
+    insert_house_of_stake_credit_snapshot(
+        &db,
+        near_email,
+        &subscription_id,
+        snapshot_start,
+        snapshot_end,
+        &yocto_near(700),
+        7_000_000_000,
+    )
+    .await;
+
+    assert_eq!(
+        get_credits_plan_limit(&server, &token).await,
+        7_000_000_000,
+        "invalid chain period should reuse the current snapshot entitlement"
+    );
+
+    let client = db.pool().get().await.unwrap();
+    let snapshot_count: i64 = client
+        .query_one(
+            "SELECT COUNT(*) FROM house_of_stake_credit_entitlement_snapshots WHERE subscription_id = $1",
+            &[&subscription_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        snapshot_count, 1,
+        "invalid chain periods must not create an overlapping fallback snapshot row"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
 async fn test_house_of_stake_credits_cache_resolver_hot_path() {
     clear_proxy_env_for_local_wiremock();
     let now = Utc::now();
@@ -5152,7 +5280,7 @@ async fn test_house_of_stake_credits_cache_resolver_hot_path() {
 
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn test_house_of_stake_purchased_reconciliation_refreshes_stale_credit_limit_cache() {
+async fn test_house_of_stake_purchased_reconciliation_uses_synced_credit_limit_cache() {
     clear_proxy_env_for_local_wiremock();
     let period_end = Utc::now() + Duration::days(29);
     let period_start = sub_one_month_same_day_for_test(period_end);
@@ -5293,6 +5421,8 @@ async fn test_house_of_stake_purchased_reconciliation_refreshes_stale_credit_lim
         let mut state = state.lock().expect("lock HoS mock state");
         state.amount_near = yocto_near(1000);
     }
+    sync_house_of_stake_subscription(&server, &token).await;
+
     let user = db
         .user_repository()
         .get_user_by_email(&near_email)
@@ -5332,7 +5462,7 @@ async fn test_house_of_stake_purchased_reconciliation_refreshes_stale_credit_lim
     let plan_credits = body["plan_credits"].as_i64().expect("plan_credits");
     assert!(
         plan_credits > 7_000_000_000,
-        "reconciliation should refresh the stale HoS cache before charging purchased credits, got body={body}"
+        "reconciliation should use the synced HoS entitlement before charging purchased credits, got body={body}"
     );
 
     let spent: i64 = client
@@ -5345,7 +5475,7 @@ async fn test_house_of_stake_purchased_reconciliation_refreshes_stale_credit_lim
         .get("spent_nano_usd");
     assert_eq!(
         spent, 0,
-        "purchased credits must not be charged against the stale lower HoS entitlement"
+        "purchased credits must not be charged after HoS sync raised the entitlement above usage"
     );
 }
 

@@ -465,7 +465,7 @@ fn pending_downgrade_price_id(chain: &NearStakingSubscription) -> Option<String>
 
 fn ts_ns_to_datetime(ns: u64) -> Result<DateTime<Utc>, String> {
     let secs = (ns / 1_000_000_000) as i64;
-    let nsec = (ns % 1_000_000_000) as u32;
+    let nsec = ((ns % 1_000_000_000) / 1_000 * 1_000) as u32;
     DateTime::from_timestamp(secs, nsec).ok_or_else(|| "timestamp out of range".to_string())
 }
 

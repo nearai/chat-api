@@ -39,6 +39,29 @@ fn purchased_reconciliation_update(
     (new_spent, reconciled_over_plan)
 }
 
+fn is_same_reconciliation_period(
+    last_period_start: Option<DateTime<Utc>>,
+    period_start: DateTime<Utc>,
+    period_end: DateTime<Utc>,
+) -> bool {
+    let Some(last_period_start) = last_period_start else {
+        return false;
+    };
+    if last_period_start == period_start {
+        return true;
+    }
+
+    let start_delta_ms = last_period_start
+        .signed_duration_since(period_start)
+        .num_milliseconds()
+        .abs();
+    if start_delta_ms <= 1_000 {
+        return true;
+    }
+
+    last_period_start >= period_start && last_period_start < period_end
+}
+
 #[async_trait]
 impl CreditsRepository for PostgresCreditsRepository {
     /// Remaining purchased credits: total_purchased - used_purchased (computed).
@@ -253,9 +276,8 @@ impl CreditsRepository for PostgresCreditsRepository {
         let plan = plan_credits_nano_usd.max(0);
         let current_over_plan = (u - plan).max(0);
 
-        let is_same_period = last_period_start
-            .map(|s| s == period_start)
-            .unwrap_or(false);
+        let is_same_period =
+            is_same_reconciliation_period(last_period_start, period_start, period_end);
         // We treat spent_nano_usd as lifetime spent. The over-plan cursor is a period high-water
         // mark because stake-backed plan limits can increase after usage has already consumed
         // purchased credits; lowering the cursor would charge the same overage twice.
@@ -287,7 +309,8 @@ impl CreditsRepository for PostgresCreditsRepository {
 
 #[cfg(test)]
 mod tests {
-    use super::purchased_reconciliation_update;
+    use super::{is_same_reconciliation_period, purchased_reconciliation_update};
+    use chrono::Duration;
 
     #[test]
     fn purchased_reconciliation_keeps_same_period_overage_high_water() {
@@ -305,5 +328,31 @@ mod tests {
         );
         assert_eq!(spent_after_more_usage, 1_000_000_000);
         assert_eq!(cursor_after_more_usage, 1_000_000_000);
+    }
+
+    #[test]
+    fn purchased_reconciliation_tolerates_equivalent_period_start_changes() {
+        let period_start = chrono::DateTime::parse_from_rfc3339("2026-08-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let period_end = chrono::DateTime::parse_from_rfc3339("2026-09-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        assert!(is_same_reconciliation_period(
+            Some(period_start + Duration::milliseconds(250)),
+            period_start,
+            period_end,
+        ));
+        assert!(is_same_reconciliation_period(
+            Some(period_start + Duration::days(1)),
+            period_start,
+            period_end,
+        ));
+        assert!(!is_same_reconciliation_period(
+            Some(period_start - Duration::days(30)),
+            period_start,
+            period_end,
+        ));
     }
 }

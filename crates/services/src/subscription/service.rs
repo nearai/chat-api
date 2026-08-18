@@ -1211,7 +1211,7 @@ impl SubscriptionServiceImpl {
 
     fn ns_to_datetime(ns: u64) -> Option<DateTime<Utc>> {
         let secs = (ns / 1_000_000_000) as i64;
-        let nsec = (ns % 1_000_000_000) as u32;
+        let nsec = ((ns % 1_000_000_000) / 1_000 * 1_000) as u32;
         DateTime::from_timestamp(secs, nsec)
     }
 
@@ -1242,6 +1242,8 @@ impl SubscriptionServiceImpl {
             return 0;
         }
 
+        // HoS contract reads currently expose the effective stake, not the stake-change
+        // timestamp, so increments are anchored to the first backend observation.
         let prorated = u128::from(full_period_delta)
             .saturating_mul(remaining_ns as u128)
             .saturating_div(total_ns as u128);
@@ -1717,6 +1719,28 @@ impl SubscriptionServiceImpl {
                     fallback_period_end = %fallback_period_end,
                     "cannot resolve valid HoS chain billing period; using local fallback period"
                 );
+                match self
+                    .current_house_of_stake_snapshot_limit(&subscription.subscription_id, now)
+                    .await
+                {
+                    Ok(Some((snapshot_limit, snapshot_start, snapshot_end))) => {
+                        return Ok(Some(HouseOfStakeEntitlement {
+                            plan_credits: snapshot_limit,
+                            period_start: snapshot_start,
+                            period_end: snapshot_end,
+                            source: HouseOfStakeEntitlementSource::TransientFallback,
+                        }));
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        tracing::warn!(
+                            user_id = %user_id.0,
+                            subscription_id = %subscription.subscription_id,
+                            error = %err,
+                            "HoS snapshot lookup failed after invalid chain period; using local fallback period"
+                        );
+                    }
+                }
                 (fallback_period_start, fallback_period_end)
             }
         };
@@ -4923,10 +4947,10 @@ impl SubscriptionService for SubscriptionServiceImpl {
         &self,
         user_id: UserId,
     ) -> Result<(), SubscriptionError> {
-        // Purchased-credit reconciliation advances a high-water cursor, so refresh HoS
-        // entitlement instead of charging against a stale credit-limit cache.
+        // Keep per-message accounting on the HoS entitlement cache. Stake mutations and
+        // `/near/sync` invalidate this cache before seeding a fresh snapshot.
         let resolved = self
-            .refresh_plan_period_for_user_with_source(user_id)
+            .resolve_plan_period_for_user_with_source(user_id)
             .await?;
         let Some((plan_credits, period_start, period_end)) = self
             .purchased_reconciliation_plan_period(user_id, &resolved)
@@ -4942,14 +4966,14 @@ impl SubscriptionService for SubscriptionServiceImpl {
     }
 
     async fn get_credits(&self, user_id: UserId) -> Result<CreditsSummary, SubscriptionError> {
-        let mut resolved = self
+        let resolved = self
             .resolve_plan_period_for_user_with_source(user_id)
             .await?;
-        let mut plan_credits = resolved.plan_credits.min(i64::MAX as u64) as i64;
-        let mut period_start = resolved.period_start;
-        let mut period_end = resolved.period_end;
+        let plan_credits = resolved.plan_credits.min(i64::MAX as u64) as i64;
+        let period_start = resolved.period_start;
+        let period_end = resolved.period_end;
 
-        let mut period_spent_credits = self
+        let period_spent_credits = self
             .user_usage_repo
             .get_usage_by_user_id(user_id, Some(period_start), Some(period_end))
             .await
@@ -4958,28 +4982,6 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .unwrap_or(0);
 
         if period_spent_credits > 0 {
-            let should_refresh_house_of_stake_entitlement = self
-                .get_active_subscription_for_entitlement(user_id)
-                .await?
-                .as_ref()
-                .is_some_and(|sub| sub.provider == "house-of-stake");
-            if should_refresh_house_of_stake_entitlement {
-                // The HoS cache is fine for display hot paths, but reconciliation can
-                // permanently charge purchased credits against stale post-stake-mutation limits.
-                resolved = self
-                    .refresh_plan_period_for_user_with_source(user_id)
-                    .await?;
-                plan_credits = resolved.plan_credits.min(i64::MAX as u64) as i64;
-                period_start = resolved.period_start;
-                period_end = resolved.period_end;
-                period_spent_credits = self
-                    .user_usage_repo
-                    .get_usage_by_user_id(user_id, Some(period_start), Some(period_end))
-                    .await
-                    .map_err(|e| SubscriptionError::InternalError(e.to_string()))?
-                    .map(|s| s.cost_nano_usd)
-                    .unwrap_or(0);
-            }
             match self
                 .purchased_reconciliation_plan_period(user_id, &resolved)
                 .await
