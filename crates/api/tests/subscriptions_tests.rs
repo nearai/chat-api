@@ -216,6 +216,16 @@ async fn insert_house_of_stake_subscription_for_existing_user(
     sub_id
 }
 
+struct HouseOfStakeCreditSnapshotInsert<'a> {
+    user_email: &'a str,
+    subscription_id: &'a str,
+    period_start: DateTime<Utc>,
+    period_end: DateTime<Utc>,
+    credited_stake_yocto: &'a str,
+    last_observed_stake_yocto: &'a str,
+    credit_limit_nano_usd: i64,
+}
+
 async fn insert_house_of_stake_credit_snapshot(
     db: &database::Database,
     user_email: &str,
@@ -227,30 +237,26 @@ async fn insert_house_of_stake_credit_snapshot(
 ) {
     insert_house_of_stake_credit_snapshot_with_last_observed(
         db,
-        user_email,
-        subscription_id,
-        period_start,
-        period_end,
-        credited_stake_yocto,
-        credited_stake_yocto,
-        credit_limit_nano_usd,
+        HouseOfStakeCreditSnapshotInsert {
+            user_email,
+            subscription_id,
+            period_start,
+            period_end,
+            credited_stake_yocto,
+            last_observed_stake_yocto: credited_stake_yocto,
+            credit_limit_nano_usd,
+        },
     )
     .await;
 }
 
 async fn insert_house_of_stake_credit_snapshot_with_last_observed(
     db: &database::Database,
-    user_email: &str,
-    subscription_id: &str,
-    period_start: DateTime<Utc>,
-    period_end: DateTime<Utc>,
-    credited_stake_yocto: &str,
-    last_observed_stake_yocto: &str,
-    credit_limit_nano_usd: i64,
+    snapshot: HouseOfStakeCreditSnapshotInsert<'_>,
 ) {
     let user = db
         .user_repository()
-        .get_user_by_email(user_email)
+        .get_user_by_email(snapshot.user_email)
         .await
         .unwrap()
         .unwrap();
@@ -263,12 +269,12 @@ async fn insert_house_of_stake_credit_snapshot_with_last_observed(
             ) VALUES ($1, $2, $3, $4, $5, $6, $7)",
             &[
                 &user.id,
-                &subscription_id,
-                &period_start,
-                &period_end,
-                &credited_stake_yocto,
-                &last_observed_stake_yocto,
-                &credit_limit_nano_usd,
+                &snapshot.subscription_id,
+                &snapshot.period_start,
+                &snapshot.period_end,
+                &snapshot.credited_stake_yocto,
+                &snapshot.last_observed_stake_yocto,
+                &snapshot.credit_limit_nano_usd,
             ],
         )
         .await
@@ -4714,15 +4720,19 @@ async fn test_house_of_stake_late_first_snapshot_prorates_above_last_observed_st
         let mut state = state.lock().expect("lock HoS mock state");
         state.subscription_id = subscription_id.clone();
     }
+    let credited_stake_yocto = yocto_near(1000);
+    let last_observed_stake_yocto = yocto_near(400);
     insert_house_of_stake_credit_snapshot_with_last_observed(
         &db,
-        near_email,
-        &subscription_id,
-        previous_start,
-        previous_end,
-        &yocto_near(1000),
-        &yocto_near(400),
-        10_000_000_000,
+        HouseOfStakeCreditSnapshotInsert {
+            user_email: near_email,
+            subscription_id: &subscription_id,
+            period_start: previous_start,
+            period_end: previous_end,
+            credited_stake_yocto: &credited_stake_yocto,
+            last_observed_stake_yocto: &last_observed_stake_yocto,
+            credit_limit_nano_usd: 10_000_000_000,
+        },
     )
     .await;
 
