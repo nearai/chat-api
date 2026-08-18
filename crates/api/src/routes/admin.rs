@@ -2575,6 +2575,258 @@ pub async fn admin_set_aml_report_active(
     Ok(Json(report.into()))
 }
 
+/// The instance plus the compose-api that hosts it, for the two admin routes that forward to
+/// it. An instance's own `agent_api_base_url` picks the manager, so a forward can only ever
+/// address the compose-api that already holds that instance.
+async fn legacy_manager_for_instance(
+    app_state: &AppState,
+    instance_uuid: Uuid,
+) -> Result<(AgentInstance, config::AgentManager), ApiError> {
+    let instance = app_state
+        .agent_repository
+        .get_instance(instance_uuid)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to fetch instance: instance_id={}, error={}",
+                instance_uuid,
+                e
+            );
+            ApiError::internal_server_error("Failed to fetch instance")
+        })?
+        .ok_or_else(|| ApiError::not_found("Instance not found"))?;
+
+    let agent_api_base_url = instance
+        .agent_api_base_url
+        .as_deref()
+        .ok_or_else(|| ApiError::bad_request("Instance has no agent_api_base_url"))?;
+
+    let manager = app_state
+        .agent_service
+        .find_manager_for_url(agent_api_base_url)
+        .ok_or_else(|| {
+            ApiError::bad_request("No manager configured for this instance's agent_api_base_url")
+        })?;
+
+    Ok((instance, manager))
+}
+
+/// What compose-api holds for an instance, minus everything that authenticates it.
+///
+/// compose-api's own response carries the gateway token, the tenant's NEAR AI key and the
+/// secrets master key, and the repair needs none of them — so this reports the fields it does
+/// need instead of forwarding the body. A read cannot borrow the passthrough argument the
+/// patch below makes: there is no downstream validator, and a secret added to that response
+/// later would start flowing through here on its own.
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct InstanceComposeConfig {
+    /// The name compose-api knows it by — the legacy name, not the CrabShack one.
+    pub name: String,
+    /// compose-api's own status for the container, e.g. "running" or "stopped".
+    pub status: Option<String>,
+    /// The image the container actually runs. On a drifted instance this is the openclaw
+    /// image while chat-api's record says ironclaw; after a repair it names ironclaw.
+    pub image: Option<String>,
+    pub image_digest: Option<String>,
+    /// Whether compose-api can report a SECRETS_MASTER_KEY for this instance — the exact field
+    /// `/migrate`'s preflight reads, so it answers whether a migration will get past it without
+    /// running one.
+    ///
+    /// Absent when the running image names openclaw: compose-api does not look for an ironclaw
+    /// key then, so neither `true` nor `false` would be the truth. That is the state a drifted
+    /// instance is in, and the patch below reports what it found instead — from before its
+    /// recreate, which is the only moment the answer is still readable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub master_key_present: Option<bool>,
+}
+
+/// Admin: read what the compose-api hosting an instance holds for it.
+///
+/// The counterpart to the patch below: it reports the running image, the container status and
+/// whether a master key is readable, none of which chat-api's own record can answer. Use it to
+/// check an instance before repairing it, to confirm the repair took, and to re-read state
+/// after a patch that timed out.
+#[utoipa::path(
+    get,
+    path = "/v1/admin/agents/instances/{id}/config",
+    tag = "Admin",
+    params(("id" = String, Path, description = "Instance ID")),
+    responses(
+        (status = 200, description = "What compose-api holds for the instance", body = InstanceComposeConfig),
+        (status = 400, description = "The instance is not on a legacy manager", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "Instance not found", body = crate::error::ApiErrorResponse),
+    ),
+    security(("session_token" = []))
+)]
+pub async fn admin_get_instance_config(
+    State(app_state): State<AppState>,
+    Extension(_user): Extension<AuthenticatedUser>,
+    Path(instance_id): Path<String>,
+) -> Result<Json<InstanceComposeConfig>, ApiError> {
+    let instance_uuid = Uuid::parse_str(&instance_id)
+        .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
+    let (instance, manager) = legacy_manager_for_instance(&app_state, instance_uuid).await?;
+
+    let url = format!(
+        "{}/instances/{}",
+        manager.url.trim_end_matches('/'),
+        urlencoding::encode(&instance.name)
+    );
+
+    let response = app_state
+        .http_client
+        .get(&url)
+        .bearer_auth(&manager.token)
+        .timeout(std::time::Duration::from_secs(60))
+        .send()
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to reach compose-api: instance_id={}, error={}",
+                instance_uuid,
+                e
+            );
+            ApiError::internal_server_error("Failed to reach compose-api")
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        tracing::error!(
+            "Admin: compose-api instance read returned: instance_id={}, status={}",
+            instance_uuid,
+            status
+        );
+        return Err(ApiError::bad_request(format!(
+            "compose-api returned {} for instance '{}'",
+            status, instance.name
+        )));
+    }
+
+    let data: serde_json::Value = response.json().await.map_err(|e| {
+        tracing::error!(
+            "Failed to parse compose-api response: instance_id={}, error={}",
+            instance_uuid,
+            e
+        );
+        ApiError::internal_server_error("Failed to parse compose-api response")
+    })?;
+
+    let string_field = |key: &str| {
+        data.get(key)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    };
+    let image = string_field("image");
+    let looks_for_a_key = !image.as_deref().is_some_and(|i| i.contains("openclaw"));
+    Ok(Json(InstanceComposeConfig {
+        name: instance.name,
+        status: string_field("status"),
+        image,
+        image_digest: string_field("image_digest"),
+        master_key_present: looks_for_a_key.then(|| {
+            data.get("extra_env")
+                .and_then(|v| v.get("SECRETS_MASTER_KEY"))
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| !s.is_empty())
+        }),
+    }))
+}
+
+/// Admin: patch an instance's configuration on the compose-api that hosts it.
+///
+/// A thin forward to compose-api's `PATCH /instances/{name}`. Admins have no route to
+/// compose-api of their own — the manager tokens are not handed out — so repairing an
+/// instance whose recorded service_type or image drifted from what it runs has to come
+/// through here.
+///
+/// The body is passed through untouched and compose-api validates it, so a field added
+/// there works without redeploying chat-api. It rejects an image that is not a digest
+/// reference, an extra_env key it manages itself, and a service_type that contradicts the
+/// image; it recreates the container and keeps the named volumes.
+#[utoipa::path(
+    patch,
+    path = "/v1/admin/agents/instances/{id}/config",
+    tag = "Admin",
+    params(("id" = String, Path, description = "Instance ID")),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "compose-api response, passed through"),
+        (status = 400, description = "Rejected by compose-api, or the instance is not on a legacy manager", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "Instance not found", body = crate::error::ApiErrorResponse),
+    ),
+    security(("session_token" = []))
+)]
+pub async fn admin_patch_instance_config(
+    State(app_state): State<AppState>,
+    Extension(_user): Extension<AuthenticatedUser>,
+    Path(instance_id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Response, ApiError> {
+    let instance_uuid = Uuid::parse_str(&instance_id)
+        .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
+
+    if !body.is_object() {
+        return Err(ApiError::bad_request("Body must be a JSON object"));
+    }
+
+    let (instance, manager) = legacy_manager_for_instance(&app_state, instance_uuid).await?;
+
+    let url = format!(
+        "{}/instances/{}",
+        manager.url.trim_end_matches('/'),
+        urlencoding::encode(&instance.name)
+    );
+
+    // The body may carry extra_env values, so it is never logged — only ids.
+    tracing::info!(
+        "Admin: patching instance config: instance_id={}, manager={}",
+        instance_uuid,
+        manager.url
+    );
+
+    let response = app_state
+        .http_client
+        .patch(&url)
+        .bearer_auth(&manager.token)
+        .json(&body)
+        // The recreate on the far side pulls the image when the host does not have it, which
+        // outlasts a request timeout. A timeout here does not mean the patch was not applied —
+        // read the instance back with GET before sending it again.
+        .timeout(std::time::Duration::from_secs(600))
+        .send()
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to reach compose-api: instance_id={}, error={}",
+                instance_uuid,
+                e
+            );
+            ApiError::internal_server_error("Failed to reach compose-api")
+        })?;
+
+    let status = response.status();
+    let payload = response.bytes().await.map_err(|e| {
+        tracing::error!(
+            "Failed to read compose-api response: instance_id={}, error={}",
+            instance_uuid,
+            e
+        );
+        ApiError::internal_server_error("Failed to read compose-api response")
+    })?;
+
+    tracing::info!(
+        "Admin: patch instance config returned: instance_id={}, status={}",
+        instance_uuid,
+        status
+    );
+
+    let mut out = Response::new(axum::body::Body::from(payload));
+    *out.status_mut() = status;
+    Ok(out)
+}
+
 /// Create a backup of an agent instance
 #[utoipa::path(
     post,
@@ -3619,6 +3871,19 @@ pub struct MigrateInstanceRequest {
     /// `crabshack_name` when that is set. The legacy instance will NOT be
     /// started — stop it before taking the external backup to avoid data loss.
     pub backup_url: Option<String>,
+    /// Supply the instance's `SECRETS_MASTER_KEY` when compose-api cannot report it.
+    ///
+    /// ironclaw persists the key on the config volume and only falls back to minting a
+    /// fresh one when it finds neither the env var nor the file — at which point the
+    /// instance's stored secrets are undecryptable, silently. The preflight below exists
+    /// to stop a migration reaching that state, so this does not disable it: it satisfies
+    /// it with a key the caller has recovered another way (e.g. read out of the
+    /// pre-migration archive), and that key is passed to the imported instance.
+    ///
+    /// Needed for an instance whose legacy container no longer reports as ironclaw — a
+    /// mislabelled record, or one recreated onto the wrong image — since compose-api only
+    /// looks for the key when it believes the instance is ironclaw.
+    pub secrets_master_key: Option<String>,
     /// Override the CrabShack service_type, bypassing the config-derived
     /// ironclaw_service_type/openclaw_service_type mapping (e.g. "ironclaw-dind"
     /// to force the dind runtime regardless of the current hosting policy).
@@ -3657,6 +3922,18 @@ pub struct MigrateInstanceResponse {
 /// allow-listed, so migrate jumps them to a supported tag instead.
 const MIGRATE_MIN_ASIS_DIND_VERSION: (u64, u64, u64) = (0, 23, 0);
 const MIGRATE_FALLBACK_DIND_VERSION: &str = "0.29.1";
+
+/// ironclaw's key is 32 bytes as lowercase hex (`openssl rand -hex 32`). Checked before it
+/// reaches the imported instance's env, because a malformed one decrypts nothing and the
+/// agent gives no signal beyond failing to read its own secrets.
+fn valid_secrets_master_key(key: &str) -> Result<String, ApiError> {
+    if key.len() != 64 || !key.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(ApiError::bad_request(
+            "secrets_master_key must be 64 hexadecimal characters",
+        ));
+    }
+    Ok(key.to_ascii_lowercase())
+}
 
 /// True if `name` works as a CrabShack instance name: a single lowercase DNS label.
 /// It becomes the gateway hostname, so a dot would split it.
@@ -3982,11 +4259,18 @@ pub async fn admin_migrate_instance(
     // Preflight: ironclaw instances must have SECRETS_MASTER_KEY available.
     // compose-api reads it via docker exec at startup — stopped containers are
     // unreachable so the key is missing. Fail early before any side effects.
-    let has_master_key = compose_data
-        .get("extra_env")
-        .and_then(|v| v.get("SECRETS_MASTER_KEY"))
-        .and_then(|v| v.as_str())
-        .is_some_and(|s| !s.is_empty());
+    // A caller-supplied key satisfies this too; it is overlaid onto extra_env below so the
+    // imported instance starts with it rather than minting a replacement.
+    let supplied_master_key = match request.secrets_master_key.as_deref().map(str::trim) {
+        None => None,
+        Some(key) => Some(valid_secrets_master_key(key)?),
+    };
+    let has_master_key = supplied_master_key.is_some()
+        || compose_data
+            .get("extra_env")
+            .and_then(|v| v.get("SECRETS_MASTER_KEY"))
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty());
     if !has_master_key && (service_type == "ironclaw" || service_type.starts_with("ironclaw-")) {
         tracing::error!(
             "Migrate: SECRETS_MASTER_KEY not found — aborting before side effects. \
@@ -4316,6 +4600,14 @@ pub async fn admin_migrate_instance(
                 extra_env_map.insert(k.clone(), v.clone());
             }
         }
+    }
+    // Overlaid after the legacy vars: when the caller supplied the key, theirs is the one
+    // that was verified against the data being imported.
+    if let Some(ref key) = supplied_master_key {
+        extra_env_map.insert(
+            "SECRETS_MASTER_KEY".into(),
+            serde_json::Value::String(key.clone()),
+        );
     }
     extra_env_map.insert(
         "LEGACY_API_BASE_URL".into(),
@@ -5008,6 +5300,10 @@ pub fn create_admin_router() -> Router<AppState> {
                 .route("/instances/{id}/restart", post(admin_restart_instance))
                 .route("/instances/{id}/migrate", post(admin_migrate_instance))
                 .route(
+                    "/instances/{id}/config",
+                    get(admin_get_instance_config).patch(admin_patch_instance_config),
+                )
+                .route(
                     "/instances/{id}/grant-owner",
                     post(admin_grant_instance_owner),
                 )
@@ -5111,6 +5407,43 @@ mod migrate_name_tests {
             &"a".repeat(64),
         ] {
             assert!(!is_valid_crabshack_name(n), "{n:?} should be rejected");
+        }
+    }
+}
+
+#[cfg(test)]
+mod migrate_master_key_tests {
+    use super::valid_secrets_master_key;
+
+    #[test]
+    fn accepts_a_32_byte_hex_key_in_either_case() {
+        // `openssl rand -hex 32`, which is what ironclaw's entrypoint writes.
+        let key = "a1b2c3d4e5f6".repeat(5) + "abcd";
+        assert_eq!(key.len(), 64);
+        assert_eq!(valid_secrets_master_key(&key).unwrap(), key);
+        assert_eq!(
+            valid_secrets_master_key(&key.to_ascii_uppercase()).unwrap(),
+            key,
+            "normalised to lowercase so it matches what ironclaw wrote"
+        );
+    }
+
+    #[test]
+    fn rejects_anything_that_would_decrypt_nothing() {
+        // A wrong key is not an error the agent reports — it simply fails to read its own
+        // secrets — so the shape is checked before it reaches the instance env.
+        for k in [
+            "",
+            "deadbeef",
+            &"a".repeat(63),
+            &"a".repeat(65),
+            &"z".repeat(64),
+            &format!("{} ", "a".repeat(63)),
+        ] {
+            assert!(
+                valid_secrets_master_key(k).is_err(),
+                "{k:?} should be rejected"
+            );
         }
     }
 }
