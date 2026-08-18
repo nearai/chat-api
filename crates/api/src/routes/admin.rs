@@ -3904,6 +3904,14 @@ pub struct MigrateInstanceRequest {
     /// at import, after the legacy instance is stopped. Pass the same value on a retry —
     /// the backup's encryption key derives from it.
     pub crabshack_name: Option<String>,
+    /// Seconds to allow for each of the two SSE streams (backup, then import), replacing the
+    /// `MIGRATE_STREAM_TIMEOUT_DEFAULT_SECS` default. A migration's cost is dominated by the size
+    /// of the instance's home, which the caller knows and this endpoint does not: a 44 KB agent
+    /// and a 4.7 GB one cannot share one deadline. Too low and the stream is cut while
+    /// compose-api is still working — the backup completes anyway, the migration does not.
+    /// Clamped to `MIGRATE_STREAM_TIMEOUT_MAX_SECS` so a caller cannot hold a connection open
+    /// indefinitely.
+    pub stream_timeout_secs: Option<u64>,
 }
 
 /// Response for migrate endpoint
@@ -4222,6 +4230,7 @@ pub async fn admin_migrate_instance(
         .crabshack_ironclaw_image
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
+    let stream_timeout = migrate_stream_timeout(request.stream_timeout_secs);
     let provided_backup_url = request.backup_url.filter(|s| !s.is_empty());
     let has_backup_url = provided_backup_url.is_some();
     if let Some(ref url) = provided_backup_url {
@@ -4247,7 +4256,12 @@ pub async fn admin_migrate_instance(
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
 
-    let was_running = compose_status != "stopped" && compose_status != "exited";
+    // compose-api's stop runs `compose down`, which REMOVES the container, and its instance record
+    // only covers containers that exist — so a stopped instance reads back as "not found", never
+    // "stopped". Treating that as running made `backup_url` unreachable: it demands a state the
+    // manager cannot report. No container means nothing can be writing, which is what this guards.
+    let was_running =
+        compose_status != "stopped" && compose_status != "exited" && compose_status != "not found";
 
     if has_backup_url && was_running {
         return Err(ApiError::bad_request(
@@ -4461,7 +4475,7 @@ pub async fn admin_migrate_instance(
             .post(&backup_url)
             .bearer_auth(&manager.token)
             .json(&backup_body)
-            .timeout(SSE_MIGRATION_TOTAL_TIMEOUT)
+            .timeout(stream_timeout)
             .send()
             .await
             .map_err(|e| {
@@ -4674,7 +4688,7 @@ pub async fn admin_migrate_instance(
         .post(&import_url)
         .bearer_auth(&crabshack_manager.token)
         .json(&import_body)
-        .timeout(SSE_MIGRATION_TOTAL_TIMEOUT)
+        .timeout(stream_timeout)
         .send()
         .await
         .map_err(|e| {
@@ -4963,9 +4977,22 @@ mod crabshack_user_id_tests {
 
 /// Maximum buffer size for SSE parsing (1 MB).
 const SSE_BUFFER_LIMIT: usize = 1024 * 1024;
-/// Total time budget for an SSE migration stream (backup or import).
-/// Applied as reqwest's per-request .timeout() on the backup/import POST calls.
-const SSE_MIGRATION_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+/// Default time budget for an SSE migration stream (backup or import), when the caller does not
+/// pass `stream_timeout_secs`. Applied as reqwest's per-request .timeout() on the backup/import
+/// POST calls.
+const MIGRATE_STREAM_TIMEOUT_DEFAULT_SECS: u64 = 600;
+/// Ceiling for a caller-supplied `stream_timeout_secs`, so one request cannot hold a connection
+/// open indefinitely.
+const MIGRATE_STREAM_TIMEOUT_MAX_SECS: u64 = 3600;
+
+/// Resolve the per-stream timeout for one migration.
+fn migrate_stream_timeout(requested: Option<u64>) -> std::time::Duration {
+    let secs = requested
+        .filter(|s| *s > 0)
+        .unwrap_or(MIGRATE_STREAM_TIMEOUT_DEFAULT_SECS)
+        .min(MIGRATE_STREAM_TIMEOUT_MAX_SECS);
+    std::time::Duration::from_secs(secs)
+}
 /// How long to wait for a single chunk before logging a stall warning.
 /// Compose-api sends keepalives every 15s, so 30s without any data means trouble.
 const SSE_STALL_DETECT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
