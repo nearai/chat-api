@@ -1297,7 +1297,7 @@ impl SubscriptionServiceImpl {
         let row = txn
             .query_opt(
                 r#"
-                SELECT credited_stake_yocto, credit_limit_nano_usd
+                SELECT credited_stake_yocto, last_observed_stake_yocto, credit_limit_nano_usd
                 FROM house_of_stake_credit_entitlement_snapshots
                 WHERE subscription_id = $1
                   AND period_start = $2
@@ -1312,10 +1312,10 @@ impl SubscriptionServiceImpl {
         let row = match row {
             Some(row) => row,
             None => {
-                let previous_snapshot_exists = txn
+                let previous_last_observed_stake = match txn
                     .query_opt(
                         r#"
-                        SELECT 1
+                        SELECT last_observed_stake_yocto
                         FROM house_of_stake_credit_entitlement_snapshots
                         WHERE subscription_id = $1
                           AND period_end <= $2
@@ -1326,16 +1326,25 @@ impl SubscriptionServiceImpl {
                     )
                     .await
                     .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
-                    .is_some();
-                let seed_full_period_baseline = !previous_snapshot_exists
-                    || Self::is_house_of_stake_period_start_baseline_observation(
-                        period_start,
-                        observed_at,
-                    );
-                let baseline_stake = if seed_full_period_baseline {
-                    effective_stake_yocto
-                } else {
-                    0
+                {
+                    Some(row) => Some(
+                        row.get::<_, String>("last_observed_stake_yocto")
+                            .parse::<u128>()
+                            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?,
+                    ),
+                    None => None,
+                };
+                let baseline_stake = match previous_last_observed_stake {
+                    Some(_)
+                        if Self::is_house_of_stake_period_start_baseline_observation(
+                            period_start,
+                            observed_at,
+                        ) =>
+                    {
+                        effective_stake_yocto
+                    }
+                    Some(stake) => stake.min(effective_stake_yocto),
+                    None => effective_stake_yocto,
                 };
                 let baseline_limit =
                     Self::stake_based_credits_for_lock(plan_config, baseline_stake).unwrap_or(0);
@@ -1344,11 +1353,11 @@ impl SubscriptionServiceImpl {
                         r#"
                     INSERT INTO house_of_stake_credit_entitlement_snapshots (
                         user_id, subscription_id, period_start, period_end,
-                        credited_stake_yocto, credit_limit_nano_usd
+                        credited_stake_yocto, last_observed_stake_yocto, credit_limit_nano_usd
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)
                     ON CONFLICT (subscription_id, period_start, period_end) DO NOTHING
-                    RETURNING credited_stake_yocto, credit_limit_nano_usd
+                    RETURNING credited_stake_yocto, last_observed_stake_yocto, credit_limit_nano_usd
                     "#,
                         &[
                             &user_id,
@@ -1356,6 +1365,7 @@ impl SubscriptionServiceImpl {
                             &period_start,
                             &period_end,
                             &baseline_stake.to_string(),
+                            &effective_stake_yocto.to_string(),
                             &(baseline_limit.min(i64::MAX as u64) as i64),
                         ],
                     )
@@ -1366,7 +1376,7 @@ impl SubscriptionServiceImpl {
                     None => txn
                         .query_one(
                             r#"
-                        SELECT credited_stake_yocto, credit_limit_nano_usd
+                        SELECT credited_stake_yocto, last_observed_stake_yocto, credit_limit_nano_usd
                         FROM house_of_stake_credit_entitlement_snapshots
                         WHERE subscription_id = $1
                           AND period_start = $2
@@ -1383,6 +1393,10 @@ impl SubscriptionServiceImpl {
 
         let credited_stake = row
             .get::<_, String>("credited_stake_yocto")
+            .parse::<u128>()
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+        let last_observed_stake = row
+            .get::<_, String>("last_observed_stake_yocto")
             .parse::<u128>()
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
         let current_limit = row.get::<_, i64>("credit_limit_nano_usd").max(0) as u64;
@@ -1404,7 +1418,8 @@ impl SubscriptionServiceImpl {
                 r#"
                 UPDATE house_of_stake_credit_entitlement_snapshots
                 SET credited_stake_yocto = $4,
-                    credit_limit_nano_usd = $5,
+                    last_observed_stake_yocto = $5,
+                    credit_limit_nano_usd = $6,
                     last_reconciled_at = NOW()
                 WHERE subscription_id = $1
                   AND period_start = $2
@@ -1415,6 +1430,7 @@ impl SubscriptionServiceImpl {
                     &period_start,
                     &period_end,
                     &effective_stake_yocto.to_string(),
+                    &effective_stake_yocto.to_string(),
                     &(new_limit as i64),
                 ],
             )
@@ -1422,6 +1438,26 @@ impl SubscriptionServiceImpl {
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
             new_limit
         } else {
+            if effective_stake_yocto != last_observed_stake {
+                txn.execute(
+                    r#"
+                    UPDATE house_of_stake_credit_entitlement_snapshots
+                    SET last_observed_stake_yocto = $4,
+                        last_reconciled_at = NOW()
+                    WHERE subscription_id = $1
+                      AND period_start = $2
+                      AND period_end = $3
+                    "#,
+                    &[
+                        &subscription_id,
+                        &period_start,
+                        &period_end,
+                        &effective_stake_yocto.to_string(),
+                    ],
+                )
+                .await
+                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+            }
             current_limit
         };
 
