@@ -4260,8 +4260,7 @@ pub async fn admin_migrate_instance(
     // only covers containers that exist — so a stopped instance reads back as "not found", never
     // "stopped". Treating that as running made `backup_url` unreachable: it demands a state the
     // manager cannot report. No container means nothing can be writing, which is what this guards.
-    let was_running =
-        compose_status != "stopped" && compose_status != "exited" && compose_status != "not found";
+    let was_running = !MIGRATE_NOT_RUNNING_STATUSES.contains(&compose_status);
 
     if has_backup_url && was_running {
         return Err(ApiError::bad_request(
@@ -4969,6 +4968,46 @@ mod crabshack_user_id_tests {
     }
 
     #[test]
+    fn stream_timeout_defaults_clamps_and_ignores_zero() {
+        use super::{
+            migrate_stream_timeout, MIGRATE_STREAM_TIMEOUT_DEFAULT_SECS,
+            MIGRATE_STREAM_TIMEOUT_MAX_SECS,
+        };
+        let default = std::time::Duration::from_secs(MIGRATE_STREAM_TIMEOUT_DEFAULT_SECS);
+        // absent, and zero, both mean "caller expressed no preference"
+        assert_eq!(migrate_stream_timeout(None), default);
+        assert_eq!(migrate_stream_timeout(Some(0)), default);
+        // an honoured value, and one clamped to the ceiling
+        assert_eq!(
+            migrate_stream_timeout(Some(2400)),
+            std::time::Duration::from_secs(2400)
+        );
+        assert_eq!(
+            migrate_stream_timeout(Some(MIGRATE_STREAM_TIMEOUT_MAX_SECS + 1)),
+            std::time::Duration::from_secs(MIGRATE_STREAM_TIMEOUT_MAX_SECS)
+        );
+    }
+
+    #[test]
+    fn only_known_quiet_statuses_count_as_not_running() {
+        use super::MIGRATE_NOT_RUNNING_STATUSES;
+        for quiet in ["stopped", "exited", "dead", "not found"] {
+            assert!(
+                MIGRATE_NOT_RUNNING_STATUSES.contains(&quiet),
+                "{quiet} should count as not running"
+            );
+        }
+        // Anything unrecognised must read as running: mistaking a live container for a stopped one
+        // lets backup_url import over data still being written.
+        for live in ["running", "restarting", "paused", "unknown", ""] {
+            assert!(
+                !MIGRATE_NOT_RUNNING_STATUSES.contains(&live),
+                "{live} must not count as not running"
+            );
+        }
+    }
+
+    #[test]
     fn refuses_a_non_hex_secret() {
         assert_eq!(crabshack_user_id("not-hex"), None);
         assert_eq!(crabshack_user_id("abc"), None); // odd length
@@ -4984,6 +5023,15 @@ const MIGRATE_STREAM_TIMEOUT_DEFAULT_SECS: u64 = 600;
 /// Ceiling for a caller-supplied `stream_timeout_secs`, so one request cannot hold a connection
 /// open indefinitely.
 const MIGRATE_STREAM_TIMEOUT_MAX_SECS: u64 = 3600;
+
+/// compose-api statuses that mean nothing can be writing to the volume.
+///
+/// Deliberately a list of known-quiet states rather than `status == "running"`: the two mistakes
+/// are not symmetric. Reading a live container as stopped lets `backup_url` import over data still
+/// being written — silent loss. Reading an odd state as running only fails the migration, which is
+/// recoverable and loud. So anything unrecognised — including the "unknown" this falls back to when
+/// compose-api reports no status at all — counts as running.
+const MIGRATE_NOT_RUNNING_STATUSES: [&str; 4] = ["stopped", "exited", "dead", "not found"];
 
 /// Resolve the per-stream timeout for one migration.
 fn migrate_stream_timeout(requested: Option<u64>) -> std::time::Duration {
