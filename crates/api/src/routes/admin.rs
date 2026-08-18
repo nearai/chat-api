@@ -2575,6 +2575,164 @@ pub async fn admin_set_aml_report_active(
     Ok(Json(report.into()))
 }
 
+/// The instance plus the compose-api that hosts it, for the two admin routes that forward to
+/// it. An instance's own `agent_api_base_url` picks the manager, so a forward can only ever
+/// address the compose-api that already holds that instance.
+async fn legacy_manager_for_instance(
+    app_state: &AppState,
+    instance_uuid: Uuid,
+) -> Result<(AgentInstance, config::AgentManager), ApiError> {
+    let instance = app_state
+        .agent_repository
+        .get_instance(instance_uuid)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to fetch instance: instance_id={}, error={}",
+                instance_uuid,
+                e
+            );
+            ApiError::internal_server_error("Failed to fetch instance")
+        })?
+        .ok_or_else(|| ApiError::not_found("Instance not found"))?;
+
+    let agent_api_base_url = instance
+        .agent_api_base_url
+        .as_deref()
+        .ok_or_else(|| ApiError::bad_request("Instance has no agent_api_base_url"))?;
+
+    let manager = app_state
+        .agent_service
+        .find_manager_for_url(agent_api_base_url)
+        .ok_or_else(|| {
+            ApiError::bad_request("No manager configured for this instance's agent_api_base_url")
+        })?;
+
+    Ok((instance, manager))
+}
+
+/// What compose-api holds for an instance, minus everything that authenticates it.
+///
+/// compose-api's own response carries the gateway token, the tenant's NEAR AI key and the
+/// secrets master key, and the repair needs none of them — so this reports the fields it does
+/// need instead of forwarding the body. A read cannot borrow the passthrough argument the
+/// patch below makes: there is no downstream validator, and a secret added to that response
+/// later would start flowing through here on its own.
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct InstanceComposeConfig {
+    /// The name compose-api knows it by — the legacy name, not the CrabShack one.
+    pub name: String,
+    /// compose-api's own status for the container, e.g. "running" or "stopped".
+    pub status: Option<String>,
+    /// The image the container actually runs. On a drifted instance this is the openclaw
+    /// image while chat-api's record says ironclaw; after a repair it names ironclaw.
+    pub image: Option<String>,
+    pub image_digest: Option<String>,
+    /// Whether compose-api can report a SECRETS_MASTER_KEY for this instance — the exact field
+    /// `/migrate`'s preflight reads, so it answers whether a migration will get past it without
+    /// running one.
+    ///
+    /// Absent when the running image names openclaw: compose-api does not look for an ironclaw
+    /// key then, so neither `true` nor `false` would be the truth. That is the state a drifted
+    /// instance is in, and the patch below reports what it found instead — from before its
+    /// recreate, which is the only moment the answer is still readable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub master_key_present: Option<bool>,
+}
+
+/// Admin: read what the compose-api hosting an instance holds for it.
+///
+/// The counterpart to the patch below: it reports the running image, the container status and
+/// whether a master key is readable, none of which chat-api's own record can answer. Use it to
+/// check an instance before repairing it, to confirm the repair took, and to re-read state
+/// after a patch that timed out.
+#[utoipa::path(
+    get,
+    path = "/v1/admin/agents/instances/{id}/config",
+    tag = "Admin",
+    params(("id" = String, Path, description = "Instance ID")),
+    responses(
+        (status = 200, description = "What compose-api holds for the instance", body = InstanceComposeConfig),
+        (status = 400, description = "The instance is not on a legacy manager", body = crate::error::ApiErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
+        (status = 404, description = "Instance not found", body = crate::error::ApiErrorResponse),
+    ),
+    security(("session_token" = []))
+)]
+pub async fn admin_get_instance_config(
+    State(app_state): State<AppState>,
+    Extension(_user): Extension<AuthenticatedUser>,
+    Path(instance_id): Path<String>,
+) -> Result<Json<InstanceComposeConfig>, ApiError> {
+    let instance_uuid = Uuid::parse_str(&instance_id)
+        .map_err(|_| ApiError::bad_request("Invalid instance ID format"))?;
+    let (instance, manager) = legacy_manager_for_instance(&app_state, instance_uuid).await?;
+
+    let url = format!(
+        "{}/instances/{}",
+        manager.url.trim_end_matches('/'),
+        urlencoding::encode(&instance.name)
+    );
+
+    let response = app_state
+        .http_client
+        .get(&url)
+        .bearer_auth(&manager.token)
+        .timeout(std::time::Duration::from_secs(60))
+        .send()
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to reach compose-api: instance_id={}, error={}",
+                instance_uuid,
+                e
+            );
+            ApiError::internal_server_error("Failed to reach compose-api")
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        tracing::error!(
+            "Admin: compose-api instance read returned: instance_id={}, status={}",
+            instance_uuid,
+            status
+        );
+        return Err(ApiError::bad_request(format!(
+            "compose-api returned {} for instance '{}'",
+            status, instance.name
+        )));
+    }
+
+    let data: serde_json::Value = response.json().await.map_err(|e| {
+        tracing::error!(
+            "Failed to parse compose-api response: instance_id={}, error={}",
+            instance_uuid,
+            e
+        );
+        ApiError::internal_server_error("Failed to parse compose-api response")
+    })?;
+
+    let string_field = |key: &str| {
+        data.get(key)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    };
+    let image = string_field("image");
+    let looks_for_a_key = !image.as_deref().is_some_and(|i| i.contains("openclaw"));
+    Ok(Json(InstanceComposeConfig {
+        name: instance.name,
+        status: string_field("status"),
+        image,
+        image_digest: string_field("image_digest"),
+        master_key_present: looks_for_a_key.then(|| {
+            data.get("extra_env")
+                .and_then(|v| v.get("SECRETS_MASTER_KEY"))
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| !s.is_empty())
+        }),
+    }))
+}
+
 /// Admin: patch an instance's configuration on the compose-api that hosts it.
 ///
 /// A thin forward to compose-api's `PATCH /instances/{name}`. Admins have no route to
@@ -2613,31 +2771,7 @@ pub async fn admin_patch_instance_config(
         return Err(ApiError::bad_request("Body must be a JSON object"));
     }
 
-    let instance = app_state
-        .agent_repository
-        .get_instance(instance_uuid)
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                "Failed to fetch instance: instance_id={}, error={}",
-                instance_uuid,
-                e
-            );
-            ApiError::internal_server_error("Failed to fetch instance")
-        })?
-        .ok_or_else(|| ApiError::not_found("Instance not found"))?;
-
-    let agent_api_base_url = instance
-        .agent_api_base_url
-        .as_deref()
-        .ok_or_else(|| ApiError::bad_request("Instance has no agent_api_base_url"))?;
-
-    let manager = app_state
-        .agent_service
-        .find_manager_for_url(agent_api_base_url)
-        .ok_or_else(|| {
-            ApiError::bad_request("No manager configured for this instance's agent_api_base_url")
-        })?;
+    let (instance, manager) = legacy_manager_for_instance(&app_state, instance_uuid).await?;
 
     let url = format!(
         "{}/instances/{}",
@@ -5164,7 +5298,7 @@ pub fn create_admin_router() -> Router<AppState> {
                 .route("/instances/{id}/migrate", post(admin_migrate_instance))
                 .route(
                     "/instances/{id}/config",
-                    axum::routing::patch(admin_patch_instance_config),
+                    get(admin_get_instance_config).patch(admin_patch_instance_config),
                 )
                 .route(
                     "/instances/{id}/grant-owner",
