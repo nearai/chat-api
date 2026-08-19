@@ -1,14 +1,16 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+pub const DEFAULT_AML_HIGH_RISK_SCORE_THRESHOLD: i64 = 75;
 const PROVIDER_LUKKA: &str = "lukka";
 const NEAR_ADDRESS_TYPE: &str = "NEAR";
+const AML_SLACK_SOURCE_APP: &str = "chat-api";
 const PROVIDER_FAILURE_CACHE_TTL_SECS: u64 = 60;
 const PROVIDER_FAILURE_ALERT_TTL_SECS: u64 = 300;
 
@@ -30,6 +32,15 @@ impl AmlRiskLevel {
             "HIGH" => Self::High,
             _ => return None,
         })
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "LOW",
+            Self::Medium => "MEDIUM",
+            Self::High => "HIGH",
+            Self::Unknown => "UNKNOWN",
+        }
     }
 }
 
@@ -69,8 +80,25 @@ impl AmlCheckResult {
         }
     }
 
+    pub fn is_high_risk_at_score_threshold(&self, threshold: i64) -> bool {
+        self.score.is_some_and(|score| score >= threshold)
+    }
+
+    pub fn is_high_risk_by_policy(
+        &self,
+        risk_levels: &[AmlRiskLevel],
+        score_threshold: Option<i64>,
+    ) -> bool {
+        (self.risk_level != AmlRiskLevel::Unknown && risk_levels.contains(&self.risk_level))
+            || score_threshold
+                .is_some_and(|threshold| self.is_high_risk_at_score_threshold(threshold))
+    }
+
     pub fn is_high_risk(&self) -> bool {
-        self.risk_level == AmlRiskLevel::High
+        self.is_high_risk_by_policy(
+            &[AmlRiskLevel::High],
+            Some(DEFAULT_AML_HIGH_RISK_SCORE_THRESHOLD),
+        )
     }
 
     pub fn is_provider_failure(&self) -> bool {
@@ -82,12 +110,58 @@ impl AmlCheckResult {
     }
 }
 
+fn high_risk_aml_slack_payload(
+    user_id: crate::UserId,
+    flow: &str,
+    result: &AmlCheckResult,
+    high_risk_risk_levels: &[AmlRiskLevel],
+    high_risk_score_threshold: Option<i64>,
+) -> serde_json::Value {
+    let risk_levels = high_risk_risk_levels
+        .iter()
+        .map(|level| level.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    let risk_levels = if risk_levels.is_empty() {
+        "disabled".to_string()
+    } else {
+        risk_levels
+    };
+    let threshold = high_risk_score_threshold
+        .map(|threshold| threshold.to_string())
+        .unwrap_or_else(|| "disabled".to_string());
+    let score = result
+        .score
+        .map(|score| score.to_string())
+        .unwrap_or_else(|| "n/a".to_string());
+    serde_json::json!({
+        "text": format!(
+            "High-risk AML detection: source_app={} account={} user_id={} flow={} provider={} address_type={} risk_level={:?} score={} high_risk_risk_levels={} high_risk_score_threshold={} report_id={} reason={} checked_at={}",
+            AML_SLACK_SOURCE_APP,
+            result.account_id,
+            user_id,
+            flow,
+            result.provider,
+            result.address_type,
+            result.risk_level,
+            score,
+            risk_levels,
+            threshold,
+            result.report_id.as_deref().unwrap_or("n/a"),
+            result.reason.as_deref().unwrap_or("n/a"),
+            result.checked_at.to_rfc3339()
+        ),
+    })
+}
+
 fn send_high_risk_aml_slack_alert(
     http_client: reqwest::Client,
     webhook_url: &str,
     user_id: crate::UserId,
     flow: &str,
     result: &AmlCheckResult,
+    high_risk_risk_levels: &[AmlRiskLevel],
+    high_risk_score_threshold: Option<i64>,
 ) {
     let webhook_url = webhook_url.trim();
     if webhook_url.is_empty() {
@@ -95,31 +169,14 @@ fn send_high_risk_aml_slack_alert(
     }
 
     let webhook_url = webhook_url.to_string();
-    let account_id = result.account_id.clone();
-    let provider = result.provider.clone();
-    let report_id = result.report_id.clone();
-    let reason = result.reason.clone();
-    let score = result
-        .score
-        .map(|score| score.to_string())
-        .unwrap_or_else(|| "n/a".to_string());
-    let checked_at = result.checked_at.to_rfc3339();
     let flow = flow.to_string();
-    let payload = serde_json::json!({
-        "text": format!(
-            "High-risk AML detection: account={} user_id={} flow={} provider={} address_type={} risk_level={:?} score={} report_id={} reason={} checked_at={}",
-            account_id,
-            user_id,
-            flow,
-            provider,
-            result.address_type,
-            result.risk_level,
-            score,
-            report_id.as_deref().unwrap_or("n/a"),
-            reason.as_deref().unwrap_or("n/a"),
-            checked_at
-        ),
-    });
+    let payload = high_risk_aml_slack_payload(
+        user_id,
+        &flow,
+        result,
+        high_risk_risk_levels,
+        high_risk_score_threshold,
+    );
 
     tokio::spawn(async move {
         match http_client.post(&webhook_url).json(&payload).send().await {
@@ -144,6 +201,33 @@ fn send_high_risk_aml_slack_alert(
     });
 }
 
+fn aml_provider_failure_slack_payload(
+    user_id: crate::UserId,
+    flow: &str,
+    result: &AmlCheckResult,
+) -> serde_json::Value {
+    let score = result
+        .score
+        .map(|score| score.to_string())
+        .unwrap_or_else(|| "n/a".to_string());
+    serde_json::json!({
+        "text": format!(
+            "AML provider failure: source_app={} account={} user_id={} flow={} provider={} address_type={} risk_level={:?} score={} report_id={} reason={} checked_at={} action=fail_open",
+            AML_SLACK_SOURCE_APP,
+            result.account_id,
+            user_id,
+            flow,
+            result.provider,
+            result.address_type,
+            result.risk_level,
+            score,
+            result.report_id.as_deref().unwrap_or("n/a"),
+            result.reason.as_deref().unwrap_or("unknown"),
+            result.checked_at.to_rfc3339()
+        ),
+    })
+}
+
 fn send_aml_provider_failure_slack_alert(
     http_client: reqwest::Client,
     webhook_url: &str,
@@ -157,39 +241,8 @@ fn send_aml_provider_failure_slack_alert(
     }
 
     let webhook_url = webhook_url.to_string();
-    let account_id = result.account_id.clone();
-    let provider = result.provider.clone();
-    let address_type = result.address_type.clone();
-    let risk_level = result.risk_level;
-    let reason = result
-        .reason
-        .clone()
-        .unwrap_or_else(|| "unknown".to_string());
-    let report_id = result
-        .report_id
-        .clone()
-        .unwrap_or_else(|| "n/a".to_string());
-    let score = result
-        .score
-        .map(|score| score.to_string())
-        .unwrap_or_else(|| "n/a".to_string());
-    let checked_at = result.checked_at.to_rfc3339();
     let flow = flow.to_string();
-    let payload = serde_json::json!({
-        "text": format!(
-            "AML provider failure: account={} user_id={} flow={} provider={} address_type={} risk_level={:?} score={} report_id={} reason={} checked_at={} action=fail_open",
-            account_id,
-            user_id,
-            flow,
-            provider,
-            address_type,
-            risk_level,
-            score,
-            report_id,
-            reason,
-            checked_at
-        ),
-    });
+    let payload = aml_provider_failure_slack_payload(user_id, &flow, result);
 
     tokio::spawn(async move {
         match http_client.post(&webhook_url).json(&payload).send().await {
@@ -222,6 +275,18 @@ pub trait AmlRiskService: Send + Sync {
     }
     fn alert_on_cached_reports(&self) -> bool {
         false
+    }
+    fn high_risk_risk_levels(&self) -> Vec<AmlRiskLevel> {
+        vec![AmlRiskLevel::High]
+    }
+    fn high_risk_score_threshold(&self) -> Option<i64> {
+        Some(DEFAULT_AML_HIGH_RISK_SCORE_THRESHOLD)
+    }
+    fn is_high_risk_result(&self, result: &AmlCheckResult) -> bool {
+        result.is_high_risk_by_policy(
+            &self.high_risk_risk_levels(),
+            self.high_risk_score_threshold(),
+        )
     }
     fn send_high_risk_slack_alert(
         &self,
@@ -426,8 +491,30 @@ struct LukkaReportInfoSection {
 
 #[derive(Debug, Deserialize)]
 struct LukkaCscoreSection {
+    #[serde(default, deserialize_with = "optional_i64_from_json")]
     cscore: Option<i64>,
     risk_level: Option<String>,
+}
+
+fn optional_i64_from_json<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if let Some(number) = value.as_i64() {
+        return Ok(Some(number));
+    }
+    if let Some(number) = value.as_f64() {
+        if number.is_finite() && number >= i64::MIN as f64 && number <= i64::MAX as f64 {
+            return Ok(Some(number.round() as i64));
+        }
+    }
+    Ok(value
+        .as_str()
+        .and_then(|value| value.trim().parse::<i64>().ok()))
 }
 
 impl LukkaAmlService {
@@ -589,15 +676,23 @@ impl LukkaAmlService {
                     let parsed = response.json::<LukkaAmlScoreResponse>().await;
                     return match parsed {
                         Ok(body) => {
-                            let result = normalize_lukka_response(account_id, body);
+                            let result = normalize_lukka_response(
+                                account_id,
+                                body,
+                                self.config.high_risk_risk_levels.is_empty()
+                                    && self.config.high_risk_score_threshold.is_some(),
+                            );
                             tracing::debug!(
                                 elapsed_ms = started.elapsed().as_millis() as u64,
                                 "Lukka AML check completed"
                             );
-                            if result.is_high_risk() {
+                            if self.is_high_risk_result(&result) {
                                 tracing::warn!(
                                     report_id = ?result.report_id,
-                                    "Lukka AML high risk NEAR account detected"
+                                    score = ?result.score,
+                                    high_risk_risk_levels = ?self.config.high_risk_risk_levels,
+                                    high_risk_score_threshold = self.config.high_risk_score_threshold,
+                                    "Lukka AML high-risk policy matched for NEAR account"
                                 );
                             }
                             result
@@ -653,39 +748,36 @@ enum LukkaAuthMode<'a> {
     Bearer(&'a str),
 }
 
-fn normalize_lukka_response(account_id: &str, body: LukkaAmlScoreResponse) -> AmlCheckResult {
+fn normalize_lukka_response(
+    account_id: &str,
+    body: LukkaAmlScoreResponse,
+    require_score: bool,
+) -> AmlCheckResult {
     let report = body.report_info_section;
     let cscore = body.cscore_section;
-    let risk_level = AmlRiskLevel::from_provider(
-        cscore
-            .as_ref()
-            .and_then(|section| section.risk_level.as_deref()),
-    );
+    let score = cscore.as_ref().and_then(|section| section.cscore);
 
-    let Some(risk_level) = risk_level else {
-        let mut result = AmlCheckResult::unknown(account_id, "provider_invalid_response");
-        if let Some(report) = report {
-            if let Some(address) = report.address.filter(|address| !address.trim().is_empty()) {
-                result.account_id = address;
-            }
-            if let Some(address_type) = report
-                .address_type
-                .filter(|address_type| !address_type.trim().is_empty())
-            {
-                result.address_type = address_type;
-            }
-            result.report_id = report.report_id;
-            result.checked_at = report
-                .report_time
-                .as_deref()
-                .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or(result.checked_at);
-        }
-        if let Some(cscore) = cscore.and_then(|section| section.cscore) {
-            result.score = Some(cscore);
-        }
-        return result;
+    if cscore.is_none() {
+        return unknown_lukka_response(account_id, report, cscore, "provider_invalid_response");
+    }
+
+    if require_score && score.is_none() {
+        return unknown_lukka_response(account_id, report, cscore, "provider_missing_score");
+    }
+
+    let provider_risk_level = cscore
+        .as_ref()
+        .and_then(|section| section.risk_level.as_deref());
+    let risk_level =
+        AmlRiskLevel::from_provider(provider_risk_level).unwrap_or(AmlRiskLevel::Unknown);
+    let reason = if risk_level == AmlRiskLevel::Unknown {
+        Some(
+            provider_risk_level
+                .map(|value| format!("unrecognized_risk_level:{}", value.trim()))
+                .unwrap_or_else(|| "missing_risk_level".to_string()),
+        )
+    } else {
+        None
     };
 
     let checked_at = report
@@ -708,11 +800,40 @@ fn normalize_lukka_response(account_id: &str, body: LukkaAmlScoreResponse) -> Am
             .filter(|address_type| !address_type.trim().is_empty())
             .unwrap_or_else(|| NEAR_ADDRESS_TYPE.to_string()),
         risk_level,
-        score: cscore.and_then(|section| section.cscore),
+        score,
         report_id: report.and_then(|r| r.report_id),
         checked_at,
-        reason: None,
+        reason,
     }
+}
+
+fn unknown_lukka_response(
+    account_id: &str,
+    report: Option<LukkaReportInfoSection>,
+    cscore: Option<LukkaCscoreSection>,
+    reason: &str,
+) -> AmlCheckResult {
+    let mut result = AmlCheckResult::unknown(account_id, reason);
+    if let Some(report) = report {
+        if let Some(address) = report.address.filter(|address| !address.trim().is_empty()) {
+            result.account_id = address;
+        }
+        if let Some(address_type) = report
+            .address_type
+            .filter(|address_type| !address_type.trim().is_empty())
+        {
+            result.address_type = address_type;
+        }
+        result.report_id = report.report_id;
+        result.checked_at = report
+            .report_time
+            .as_deref()
+            .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or(result.checked_at);
+    }
+    result.score = cscore.and_then(|section| section.cscore);
+    result
 }
 
 #[async_trait]
@@ -729,6 +850,18 @@ impl AmlRiskService for LukkaAmlService {
         self.config.high_risk_slack_alert_on_cached_reports
     }
 
+    fn high_risk_risk_levels(&self) -> Vec<AmlRiskLevel> {
+        self.config
+            .high_risk_risk_levels
+            .iter()
+            .filter_map(|level| AmlRiskLevel::from_provider(Some(level)))
+            .collect()
+    }
+
+    fn high_risk_score_threshold(&self) -> Option<i64> {
+        self.config.high_risk_score_threshold
+    }
+
     fn send_high_risk_slack_alert(
         &self,
         user_id: crate::UserId,
@@ -741,6 +874,8 @@ impl AmlRiskService for LukkaAmlService {
             user_id,
             flow,
             result,
+            &self.high_risk_risk_levels(),
+            self.config.high_risk_score_threshold,
         );
     }
 
@@ -795,6 +930,8 @@ mod tests {
             enabled: true,
             base_url,
             bearer_token: "test-token".to_string(),
+            high_risk_risk_levels: vec!["HIGH".to_string()],
+            high_risk_score_threshold: Some(75),
             high_risk_slack_webhook_url: String::new(),
             high_risk_slack_timeout_ms: 1_000,
             high_risk_slack_alert_on_cached_reports: false,
@@ -839,6 +976,17 @@ mod tests {
             report_id: Some("report".to_string()),
             checked_at: Utc::now(),
             reason: None,
+        }
+    }
+
+    fn aml_result_with_score(
+        account_id: &str,
+        risk_level: AmlRiskLevel,
+        score: Option<i64>,
+    ) -> AmlCheckResult {
+        AmlCheckResult {
+            score,
+            ..aml_result(account_id, risk_level)
         }
     }
 
@@ -894,6 +1042,26 @@ mod tests {
     }
 
     #[test]
+    fn high_risk_policy_supports_risk_level_score_and_combined_predicates() {
+        assert!(
+            aml_result_with_score("risk-level.near", AmlRiskLevel::High, None)
+                .is_high_risk_by_policy(&[AmlRiskLevel::High], None)
+        );
+        assert!(
+            aml_result_with_score("alice.near", AmlRiskLevel::Low, Some(75))
+                .is_high_risk_by_policy(&[], Some(75))
+        );
+        assert!(
+            !aml_result_with_score("bob.near", AmlRiskLevel::High, Some(74))
+                .is_high_risk_by_policy(&[], Some(75))
+        );
+        assert!(
+            aml_result_with_score("carol.near", AmlRiskLevel::Medium, Some(80))
+                .is_high_risk_by_policy(&[AmlRiskLevel::High], Some(75))
+        );
+    }
+
+    #[test]
     fn incomplete_success_response_is_provider_failure() {
         let result = normalize_lukka_response(
             "alice.near",
@@ -901,6 +1069,7 @@ mod tests {
                 report_info_section: None,
                 cscore_section: None,
             },
+            true,
         );
 
         assert_eq!(result.risk_level, AmlRiskLevel::Unknown);
@@ -909,7 +1078,107 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_provider_risk_level_is_provider_failure() {
+    fn missing_score_is_provider_failure_when_score_threshold_is_only_policy() {
+        let result = normalize_lukka_response(
+            "alice.near",
+            LukkaAmlScoreResponse {
+                report_info_section: None,
+                cscore_section: Some(LukkaCscoreSection {
+                    cscore: None,
+                    risk_level: Some("HIGH".to_string()),
+                }),
+            },
+            true,
+        );
+
+        assert_eq!(result.risk_level, AmlRiskLevel::Unknown);
+        assert_eq!(result.reason.as_deref(), Some("provider_missing_score"));
+        assert!(result.is_provider_failure());
+        assert!(!result.is_high_risk_at_score_threshold(75));
+    }
+
+    #[test]
+    fn missing_score_keeps_risk_level_when_risk_level_policy_is_present() {
+        let result = normalize_lukka_response(
+            "alice.near",
+            LukkaAmlScoreResponse {
+                report_info_section: None,
+                cscore_section: Some(LukkaCscoreSection {
+                    cscore: None,
+                    risk_level: Some("HIGH".to_string()),
+                }),
+            },
+            false,
+        );
+
+        assert_eq!(result.risk_level, AmlRiskLevel::High);
+        assert_eq!(result.score, None);
+        assert_eq!(result.reason, None);
+        assert!(result.is_high_risk_by_policy(&[AmlRiskLevel::High], None));
+    }
+
+    #[tokio::test]
+    async fn malformed_score_returns_provider_failure() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v3/reports/aml/score/alice.near"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "report_info_section": {
+                    "address": "alice.near",
+                    "address_type": "NEAR"
+                },
+                "cscore_section": {
+                    "cscore": "not-a-number",
+                    "risk_level": "HIGH"
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut cfg = test_config(server.uri());
+        cfg.high_risk_risk_levels.clear();
+        let service = LukkaAmlService::new(cfg);
+        let result = service.check_near_account("alice.near").await;
+
+        assert_eq!(result.risk_level, AmlRiskLevel::Unknown);
+        assert_eq!(result.reason.as_deref(), Some("provider_missing_score"));
+        assert!(result.is_provider_failure());
+        assert!(!result.is_high_risk_at_score_threshold(75));
+    }
+
+    #[tokio::test]
+    async fn malformed_score_keeps_risk_level_when_risk_level_policy_is_present() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v3/reports/aml/score/alice.near"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "report_info_section": {
+                    "address": "alice.near",
+                    "address_type": "NEAR"
+                },
+                "cscore_section": {
+                    "cscore": "not-a-number",
+                    "risk_level": "HIGH"
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut cfg = test_config(server.uri());
+        cfg.high_risk_score_threshold = None;
+        let service = LukkaAmlService::new(cfg);
+        let result = service.check_near_account("alice.near").await;
+
+        assert_eq!(result.risk_level, AmlRiskLevel::High);
+        assert_eq!(result.score, None);
+        assert!(!result.is_provider_failure());
+        assert!(service.is_high_risk_result(&result));
+    }
+
+    #[test]
+    fn unsupported_provider_risk_level_is_audit_metadata_not_high_risk_predicate() {
         let result = normalize_lukka_response(
             "alice.near",
             LukkaAmlScoreResponse {
@@ -919,12 +1188,50 @@ mod tests {
                     risk_level: Some("unexpected".to_string()),
                 }),
             },
+            true,
         );
 
         assert_eq!(result.risk_level, AmlRiskLevel::Unknown);
-        assert_eq!(result.reason.as_deref(), Some("provider_invalid_response"));
-        assert!(result.is_provider_failure());
+        assert_eq!(
+            result.reason.as_deref(),
+            Some("unrecognized_risk_level:unexpected")
+        );
+        assert!(!result.is_provider_failure());
         assert_eq!(result.score, Some(7));
+    }
+
+    #[test]
+    fn high_risk_slack_payload_includes_score_threshold_decision_context() {
+        let user_id = crate::UserId::new();
+        let result = aml_result_with_score("alice.near", AmlRiskLevel::Low, Some(91));
+
+        let payload = high_risk_aml_slack_payload(
+            user_id,
+            "user_status",
+            &result,
+            &[AmlRiskLevel::High],
+            Some(75),
+        );
+        let text = payload["text"].as_str().expect("slack text");
+
+        assert!(text.contains("source_app=chat-api"));
+        assert!(text.contains("risk_level=Low"));
+        assert!(text.contains("score=91"));
+        assert!(text.contains("high_risk_risk_levels=HIGH"));
+        assert!(text.contains("high_risk_score_threshold=75"));
+        assert!(!text.contains("test-token"));
+    }
+
+    #[test]
+    fn provider_failure_slack_payload_includes_source_app() {
+        let user_id = crate::UserId::new();
+        let result = AmlCheckResult::unknown("alice.near", "provider_timeout");
+
+        let payload = aml_provider_failure_slack_payload(user_id, "user_status", &result);
+        let text = payload["text"].as_str().expect("slack text");
+
+        assert!(text.contains("source_app=chat-api"));
+        assert!(text.contains("reason=provider_timeout"));
     }
 
     #[test]

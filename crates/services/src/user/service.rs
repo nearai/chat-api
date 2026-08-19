@@ -46,7 +46,7 @@ impl UserServiceImpl {
         result: &AmlCheckResult,
         alert_high_risk: bool,
     ) -> Result<(), UserStatusError> {
-        if result.is_high_risk()
+        if self.aml_service.is_high_risk_result(result)
             && !self
                 .aml_report_repo
                 .is_account_allowlisted(&result.account_id)
@@ -307,7 +307,8 @@ impl UserService for UserServiceImpl {
 
         self.alert_aml_provider_failure(user_id, flow, &result);
         if result.is_provider_failure() {
-            if let Some(report) = stale_active_report.filter(|report| report.result.is_high_risk())
+            if let Some(report) = stale_active_report
+                .filter(|report| self.aml_service.is_high_risk_result(&report.result))
             {
                 self.enforce_user_aml_result(user_id, flow, &report.result, true)
                     .await?;

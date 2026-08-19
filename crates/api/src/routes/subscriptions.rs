@@ -9,7 +9,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use services::aml::{AmlCheckResult, AmlRiskLevel};
+use services::aml::AmlCheckResult;
 use services::subscription::ports::{
     CancelSubscriptionOutcome, ChangePlanOutcome, CreateSubscriptionOutcome,
     NearStakingStorageIntent, NearStakingSyncSummary, ResumeSubscriptionOutcome, SubscriptionError,
@@ -89,14 +89,12 @@ impl From<CreateSubscriptionOutcome> for CreateSubscriptionResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PublicAmlCheckResult {
-    pub risk_level: AmlRiskLevel,
     pub checked_at: DateTime<Utc>,
 }
 
 impl From<&AmlCheckResult> for PublicAmlCheckResult {
     fn from(result: &AmlCheckResult) -> Self {
         Self {
-            risk_level: result.risk_level,
             checked_at: result.checked_at,
         }
     }
@@ -937,10 +935,8 @@ mod tests {
         });
 
         let value = serde_json::to_value(response).expect("serialize response");
-        assert_eq!(
-            value.pointer("/aml/risk_level").and_then(|x| x.as_str()),
-            Some("LOW")
-        );
+        assert!(value.pointer("/aml/checked_at").is_some());
+        assert!(value.pointer("/aml/risk_level").is_none());
         assert!(value.pointer("/aml/score").is_none());
         assert!(value.pointer("/aml/report_id").is_none());
         assert!(value.pointer("/aml/reason").is_none());
@@ -951,6 +947,8 @@ mod tests {
 
     #[test]
     fn public_aml_result_omits_high_risk() {
-        assert!(public_aml_result(aml_result(AmlRiskLevel::High)).is_none());
+        let mut result = aml_result(AmlRiskLevel::Low);
+        result.score = Some(75);
+        assert!(public_aml_result(result).is_none());
     }
 }

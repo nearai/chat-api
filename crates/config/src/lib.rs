@@ -193,6 +193,8 @@ pub struct LukkaAmlConfig {
     pub enabled: bool,
     pub base_url: String,
     pub bearer_token: String,
+    pub high_risk_risk_levels: Vec<String>,
+    pub high_risk_score_threshold: Option<i64>,
     pub high_risk_slack_webhook_url: String,
     pub high_risk_slack_timeout_ms: u64,
     pub high_risk_slack_alert_on_cached_reports: bool,
@@ -208,6 +210,8 @@ impl fmt::Debug for LukkaAmlConfig {
             .field("enabled", &self.enabled)
             .field("base_url", &self.base_url)
             .field("bearer_token", &"<redacted>")
+            .field("high_risk_risk_levels", &self.high_risk_risk_levels)
+            .field("high_risk_score_threshold", &self.high_risk_score_threshold)
             .field("high_risk_slack_webhook_url", &"<redacted>")
             .field(
                 "high_risk_slack_timeout_ms",
@@ -235,6 +239,8 @@ impl Default for LukkaAmlConfig {
             base_url: std::env::var("LUKKA_BASE_URL")
                 .unwrap_or_else(|_| "https://api.blockchain-analytics.lukka.tech".to_string()),
             bearer_token: std::env::var("LUKKA_BEARER_TOKEN").unwrap_or_default(),
+            high_risk_risk_levels: parse_lukka_aml_high_risk_levels(),
+            high_risk_score_threshold: parse_lukka_aml_score_threshold(),
             high_risk_slack_webhook_url: std::env::var("LUKKA_AML_HIGH_RISK_SLACK_WEBHOOK_URL")
                 .unwrap_or_default(),
             high_risk_slack_timeout_ms: std::env::var("LUKKA_AML_HIGH_RISK_SLACK_TIMEOUT_MS")
@@ -266,6 +272,54 @@ impl Default for LukkaAmlConfig {
         }
     }
 }
+
+fn parse_lukka_aml_high_risk_levels() -> Vec<String> {
+    let raw = std::env::var("LUKKA_AML_HIGH_RISK_LEVELS")
+        .or_else(|_| std::env::var("LUKKA_AML_BLOCKED_RISK_LEVELS"))
+        .unwrap_or_else(|_| "HIGH".to_string());
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || ["disabled", "none", "off", "false"]
+            .iter()
+            .any(|value| trimmed.eq_ignore_ascii_case(value))
+    {
+        return Vec::new();
+    }
+
+    let mut levels = Vec::new();
+    for level in trimmed.split(',') {
+        let level = level.trim().to_ascii_uppercase();
+        if matches!(level.as_str(), "LOW" | "MEDIUM" | "HIGH") && !levels.contains(&level) {
+            levels.push(level);
+        }
+    }
+    if levels.is_empty() {
+        vec!["HIGH".to_string()]
+    } else {
+        levels
+    }
+}
+
+fn parse_lukka_aml_score_threshold() -> Option<i64> {
+    let raw = std::env::var("LUKKA_AML_HIGH_RISK_SCORE_THRESHOLD")
+        .or_else(|_| std::env::var("LUKKA_AML_SCORE_BLOCK_THRESHOLD"))
+        .unwrap_or_else(|_| DEFAULT_LUKKA_AML_HIGH_RISK_SCORE_THRESHOLD.to_string());
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || ["disabled", "none", "off", "false"]
+            .iter()
+            .any(|value| trimmed.eq_ignore_ascii_case(value))
+    {
+        return None;
+    }
+    trimmed
+        .parse()
+        .ok()
+        .filter(|threshold| (1..=100).contains(threshold))
+        .or(Some(DEFAULT_LUKKA_AML_HIGH_RISK_SCORE_THRESHOLD))
+}
+
+const DEFAULT_LUKKA_AML_HIGH_RISK_SCORE_THRESHOLD: i64 = 75;
 
 /// Configuration for VPC authentication to obtain API keys dynamically
 #[derive(Debug, Clone, Deserialize)]
@@ -870,6 +924,62 @@ mod tests {
             .contains(&"http://test.com".to_string()));
         assert!(config.wildcard_suffixes.is_empty());
         std::env::remove_var("CORS_ALLOWED_ORIGINS");
+    }
+
+    #[test]
+    #[serial]
+    fn test_lukka_aml_high_risk_score_threshold_env() {
+        std::env::remove_var("LUKKA_AML_HIGH_RISK_SCORE_THRESHOLD");
+        std::env::remove_var("LUKKA_AML_SCORE_BLOCK_THRESHOLD");
+        assert_eq!(
+            LukkaAmlConfig::default().high_risk_score_threshold,
+            Some(75)
+        );
+
+        std::env::set_var("LUKKA_AML_SCORE_BLOCK_THRESHOLD", "82");
+        assert_eq!(
+            LukkaAmlConfig::default().high_risk_score_threshold,
+            Some(82)
+        );
+
+        std::env::set_var("LUKKA_AML_HIGH_RISK_SCORE_THRESHOLD", "91");
+        assert_eq!(
+            LukkaAmlConfig::default().high_risk_score_threshold,
+            Some(91)
+        );
+
+        std::env::set_var("LUKKA_AML_HIGH_RISK_SCORE_THRESHOLD", "101");
+        assert_eq!(
+            LukkaAmlConfig::default().high_risk_score_threshold,
+            Some(75)
+        );
+
+        std::env::set_var("LUKKA_AML_HIGH_RISK_SCORE_THRESHOLD", "disabled");
+        assert_eq!(LukkaAmlConfig::default().high_risk_score_threshold, None);
+        std::env::remove_var("LUKKA_AML_HIGH_RISK_SCORE_THRESHOLD");
+        std::env::remove_var("LUKKA_AML_SCORE_BLOCK_THRESHOLD");
+    }
+
+    #[test]
+    #[serial]
+    fn test_lukka_aml_high_risk_levels_env() {
+        std::env::remove_var("LUKKA_AML_HIGH_RISK_LEVELS");
+        std::env::remove_var("LUKKA_AML_BLOCKED_RISK_LEVELS");
+        assert_eq!(
+            LukkaAmlConfig::default().high_risk_risk_levels,
+            vec!["HIGH".to_string()]
+        );
+
+        std::env::set_var("LUKKA_AML_BLOCKED_RISK_LEVELS", " medium, high, medium ");
+        assert_eq!(
+            LukkaAmlConfig::default().high_risk_risk_levels,
+            vec!["MEDIUM".to_string(), "HIGH".to_string()]
+        );
+
+        std::env::set_var("LUKKA_AML_HIGH_RISK_LEVELS", "disabled");
+        assert!(LukkaAmlConfig::default().high_risk_risk_levels.is_empty());
+        std::env::remove_var("LUKKA_AML_HIGH_RISK_LEVELS");
+        std::env::remove_var("LUKKA_AML_BLOCKED_RISK_LEVELS");
     }
 
     #[test]

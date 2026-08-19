@@ -317,10 +317,11 @@ impl SubscriptionServiceImpl {
         self.alert_aml_provider_failure(user_id, flow, &result);
         if result.is_provider_failure() {
             // Compliance decision (2026-07-18): Lukka provider outages fail open for
-            // user-initiated HoS billing flows unless a stale active HIGH report is
+            // user-initiated HoS billing flows unless a stale active high-score report is
             // already known for the NEAR account. Provider failures are recorded and
             // alerted so compliance can review outage-period activity.
-            if let Some(report) = stale_active_report.filter(|report| report.result.is_high_risk())
+            if let Some(report) = stale_active_report
+                .filter(|report| self.aml_service.is_high_risk_result(&report.result))
             {
                 if block_high_risk {
                     self.enforce_aml_result(user_id, flow, &report.result, true)
@@ -350,12 +351,15 @@ impl SubscriptionServiceImpl {
         result: &AmlCheckResult,
         alert_high_risk: bool,
     ) -> Result<(), SubscriptionError> {
-        if result.is_high_risk() {
+        if self.aml_service.is_high_risk_result(result) {
             tracing::warn!(
                 user_id = %user_id,
                 flow = %flow,
                 report_id = ?result.report_id,
-                "High-risk AML result for NEAR wallet flow"
+                score = ?result.score,
+                high_risk_risk_levels = ?self.aml_service.high_risk_risk_levels(),
+                high_risk_score_threshold = self.aml_service.high_risk_score_threshold(),
+                "AML high-risk policy matched for NEAR wallet flow"
             );
             let allowlisted = self
                 .aml_report_repo
