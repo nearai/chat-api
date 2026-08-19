@@ -271,7 +271,9 @@ impl SubscriptionServiceImpl {
         {
             Ok(Some(report)) => {
                 let age = Utc::now().signed_duration_since(report.created_at);
-                if age < Duration::days(self.aml_service.report_refresh_days()) {
+                if age < Duration::days(self.aml_service.report_refresh_days())
+                    && self.aml_service.has_usable_policy_signal(&report.result)
+                {
                     if block_high_risk {
                         self.enforce_aml_result(
                             user_id,
@@ -304,6 +306,7 @@ impl SubscriptionServiceImpl {
             user_id,
             flow: flow.to_string(),
             result: result.clone(),
+            active: self.aml_service.should_record_active_report(&result),
         };
         if let Err(err) = self.aml_report_repo.record_report(event).await {
             tracing::error!(
@@ -317,9 +320,9 @@ impl SubscriptionServiceImpl {
         self.alert_aml_provider_failure(user_id, flow, &result);
         if result.is_provider_failure() {
             // Compliance decision (2026-07-18): Lukka provider outages fail open for
-            // user-initiated HoS billing flows unless a stale active high-score report is
-            // already known for the NEAR account. Provider failures are recorded and
-            // alerted so compliance can review outage-period activity.
+            // user-initiated HoS billing flows unless a stale active report matching the
+            // configured high-risk policy is already known for the NEAR account. Provider
+            // failures are recorded and alerted so compliance can review outage-period activity.
             if let Some(report) = stale_active_report
                 .filter(|report| self.aml_service.is_high_risk_result(&report.result))
             {
@@ -356,7 +359,6 @@ impl SubscriptionServiceImpl {
                 user_id = %user_id,
                 flow = %flow,
                 report_id = ?result.report_id,
-                score = ?result.score,
                 high_risk_risk_levels = ?self.aml_service.high_risk_risk_levels(),
                 high_risk_score_threshold = self.aml_service.high_risk_score_threshold(),
                 "AML high-risk policy matched for NEAR wallet flow"

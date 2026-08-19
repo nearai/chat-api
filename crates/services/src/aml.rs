@@ -95,10 +95,7 @@ impl AmlCheckResult {
     }
 
     pub fn is_high_risk(&self) -> bool {
-        self.is_high_risk_by_policy(
-            &[AmlRiskLevel::High],
-            Some(DEFAULT_AML_HIGH_RISK_SCORE_THRESHOLD),
-        )
+        self.is_high_risk_by_policy(&[AmlRiskLevel::High], None)
     }
 
     pub fn is_provider_failure(&self) -> bool {
@@ -280,13 +277,29 @@ pub trait AmlRiskService: Send + Sync {
         vec![AmlRiskLevel::High]
     }
     fn high_risk_score_threshold(&self) -> Option<i64> {
-        Some(DEFAULT_AML_HIGH_RISK_SCORE_THRESHOLD)
+        None
     }
     fn is_high_risk_result(&self, result: &AmlCheckResult) -> bool {
         result.is_high_risk_by_policy(
             &self.high_risk_risk_levels(),
             self.high_risk_score_threshold(),
         )
+    }
+    fn has_usable_policy_signal(&self, result: &AmlCheckResult) -> bool {
+        let risk_level_policy_configured = !self.high_risk_risk_levels().is_empty();
+        let score_policy_configured = self.high_risk_score_threshold().is_some();
+
+        (risk_level_policy_configured && result.risk_level != AmlRiskLevel::Unknown)
+            || (score_policy_configured && result.score.is_some())
+    }
+    fn should_record_active_report(&self, result: &AmlCheckResult) -> bool {
+        if self.is_high_risk_result(result) {
+            return true;
+        }
+        if result.is_provider_failure() {
+            return false;
+        }
+        self.has_usable_policy_signal(result)
     }
     fn send_high_risk_slack_alert(
         &self,
@@ -337,6 +350,7 @@ pub struct AmlReportEvent {
     pub user_id: crate::UserId,
     pub flow: String,
     pub result: AmlCheckResult,
+    pub active: bool,
 }
 
 #[async_trait]
@@ -386,7 +400,6 @@ pub struct NoopAmlReportRepository;
 impl AmlReportRepository for NoopAmlReportRepository {
     async fn record_report(&self, event: AmlReportEvent) -> anyhow::Result<AmlReportRecord> {
         let now = Utc::now();
-        let active = event.result.risk_level != AmlRiskLevel::Unknown;
         Ok(AmlReportRecord {
             id: Uuid::new_v4(),
             user_id: Some(event.user_id),
@@ -400,7 +413,7 @@ impl AmlReportRepository for NoopAmlReportRepository {
             checked_at: event.result.checked_at,
             reason: event.result.reason.clone(),
             result: event.result,
-            active,
+            active: event.active,
             created_at: now,
             updated_at: now,
         })
@@ -633,7 +646,7 @@ impl LukkaAmlService {
 
     async fn store_cache(&self, account_id: &str, result: AmlCheckResult) -> AmlCheckResult {
         if self.config.cache_ttl_secs > 0 {
-            if result.risk_level == AmlRiskLevel::Unknown && !result.is_provider_failure() {
+            if !result.is_provider_failure() && !self.should_record_active_report(&result) {
                 return result;
             }
 
@@ -676,21 +689,27 @@ impl LukkaAmlService {
                     let parsed = response.json::<LukkaAmlScoreResponse>().await;
                     return match parsed {
                         Ok(body) => {
-                            let result = normalize_lukka_response(
-                                account_id,
-                                body,
-                                self.config.high_risk_risk_levels.is_empty()
-                                    && self.config.high_risk_score_threshold.is_some(),
-                            );
+                            let high_risk_risk_levels = self.high_risk_risk_levels();
+                            let require_score = high_risk_risk_levels.is_empty()
+                                && self.config.high_risk_score_threshold.is_some();
+                            let result = normalize_lukka_response(account_id, body, require_score);
                             tracing::debug!(
                                 elapsed_ms = started.elapsed().as_millis() as u64,
                                 "Lukka AML check completed"
                             );
+                            if self.config.high_risk_score_threshold.is_some()
+                                && result.score.is_none()
+                            {
+                                tracing::warn!(
+                                    report_id = ?result.report_id,
+                                    high_risk_score_threshold = self.config.high_risk_score_threshold,
+                                    "Lukka AML response missing usable score for configured score policy"
+                                );
+                            }
                             if self.is_high_risk_result(&result) {
                                 tracing::warn!(
                                     report_id = ?result.report_id,
-                                    score = ?result.score,
-                                    high_risk_risk_levels = ?self.config.high_risk_risk_levels,
+                                    high_risk_risk_levels = ?high_risk_risk_levels,
                                     high_risk_score_threshold = self.config.high_risk_score_threshold,
                                     "Lukka AML high-risk policy matched for NEAR account"
                                 );
@@ -773,8 +792,8 @@ fn normalize_lukka_response(
     let reason = if risk_level == AmlRiskLevel::Unknown {
         Some(
             provider_risk_level
-                .map(|value| format!("unrecognized_risk_level:{}", value.trim()))
-                .unwrap_or_else(|| "missing_risk_level".to_string()),
+                .map(|value| format!("provider_unrecognized_risk_level:{}", value.trim()))
+                .unwrap_or_else(|| "provider_missing_risk_level".to_string()),
         )
     } else {
         None
@@ -1062,6 +1081,12 @@ mod tests {
     }
 
     #[test]
+    fn default_high_risk_helper_is_risk_level_only() {
+        assert!(aml_result_with_score("risk-level.near", AmlRiskLevel::High, None).is_high_risk());
+        assert!(!aml_result_with_score("score.near", AmlRiskLevel::Low, Some(75)).is_high_risk());
+    }
+
+    #[test]
     fn incomplete_success_response_is_provider_failure() {
         let result = normalize_lukka_response(
             "alice.near",
@@ -1178,7 +1203,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_provider_risk_level_is_audit_metadata_not_high_risk_predicate() {
+    fn unsupported_provider_risk_level_is_provider_failure_not_risk_level_predicate() {
         let result = normalize_lukka_response(
             "alice.near",
             LukkaAmlScoreResponse {
@@ -1194,10 +1219,59 @@ mod tests {
         assert_eq!(result.risk_level, AmlRiskLevel::Unknown);
         assert_eq!(
             result.reason.as_deref(),
-            Some("unrecognized_risk_level:unexpected")
+            Some("provider_unrecognized_risk_level:unexpected")
         );
-        assert!(!result.is_provider_failure());
+        assert!(result.is_provider_failure());
         assert_eq!(result.score, Some(7));
+        assert!(!result.is_high_risk_by_policy(&[AmlRiskLevel::High], None));
+    }
+
+    #[test]
+    fn score_only_policy_does_not_reuse_scoreless_reports() {
+        let mut cfg = test_config("http://127.0.0.1:1".to_string());
+        cfg.high_risk_risk_levels.clear();
+        cfg.high_risk_score_threshold = Some(75);
+        let service = LukkaAmlService::new(cfg);
+        let result = aml_result_with_score("legacy.near", AmlRiskLevel::High, None);
+
+        assert!(!service.has_usable_policy_signal(&result));
+        assert!(!service.should_record_active_report(&result));
+    }
+
+    #[test]
+    fn score_only_high_score_unknown_risk_level_remains_active() {
+        let mut cfg = test_config("http://127.0.0.1:1".to_string());
+        cfg.high_risk_risk_levels.clear();
+        cfg.high_risk_score_threshold = Some(75);
+        let service = LukkaAmlService::new(cfg);
+        let result = AmlCheckResult {
+            score: Some(91),
+            reason: Some("provider_missing_risk_level".to_string()),
+            ..aml_result("score.near", AmlRiskLevel::Unknown)
+        };
+
+        assert!(result.is_provider_failure());
+        assert!(service.is_high_risk_result(&result));
+        assert!(service.has_usable_policy_signal(&result));
+        assert!(service.should_record_active_report(&result));
+    }
+
+    #[test]
+    fn score_only_low_score_unknown_risk_level_is_not_active() {
+        let mut cfg = test_config("http://127.0.0.1:1".to_string());
+        cfg.high_risk_risk_levels.clear();
+        cfg.high_risk_score_threshold = Some(75);
+        let service = LukkaAmlService::new(cfg);
+        let result = AmlCheckResult {
+            score: Some(7),
+            reason: Some("provider_missing_risk_level".to_string()),
+            ..aml_result("score.near", AmlRiskLevel::Unknown)
+        };
+
+        assert!(result.is_provider_failure());
+        assert!(!service.is_high_risk_result(&result));
+        assert!(service.has_usable_policy_signal(&result));
+        assert!(!service.should_record_active_report(&result));
     }
 
     #[test]

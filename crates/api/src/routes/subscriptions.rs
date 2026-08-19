@@ -9,7 +9,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use services::aml::AmlCheckResult;
+use services::aml::{AmlCheckResult, AmlRiskLevel};
 use services::subscription::ports::{
     CancelSubscriptionOutcome, ChangePlanOutcome, CreateSubscriptionOutcome,
     NearStakingStorageIntent, NearStakingSyncSummary, ResumeSubscriptionOutcome, SubscriptionError,
@@ -61,8 +61,8 @@ pub enum CreateSubscriptionResponse {
     },
 }
 
-impl From<CreateSubscriptionOutcome> for CreateSubscriptionResponse {
-    fn from(outcome: CreateSubscriptionOutcome) -> Self {
+impl CreateSubscriptionResponse {
+    fn from_outcome(outcome: CreateSubscriptionOutcome) -> Self {
         match outcome {
             CreateSubscriptionOutcome::StripeCheckout { checkout_url } => {
                 Self::StripeCheckout { checkout_url }
@@ -89,23 +89,21 @@ impl From<CreateSubscriptionOutcome> for CreateSubscriptionResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PublicAmlCheckResult {
+    pub risk_level: AmlRiskLevel,
     pub checked_at: DateTime<Utc>,
 }
 
 impl From<&AmlCheckResult> for PublicAmlCheckResult {
     fn from(result: &AmlCheckResult) -> Self {
         Self {
+            risk_level: result.risk_level,
             checked_at: result.checked_at,
         }
     }
 }
 
 pub(crate) fn public_aml_result(result: AmlCheckResult) -> Option<PublicAmlCheckResult> {
-    if result.is_high_risk() {
-        None
-    } else {
-        Some(PublicAmlCheckResult::from(&result))
-    }
+    Some(PublicAmlCheckResult::from(&result))
 }
 
 fn public_change_plan_result(outcome: ChangePlanOutcome) -> serde_json::Value {
@@ -364,7 +362,7 @@ pub async fn create_subscription(
             }
         })?;
 
-    Ok(Json(CreateSubscriptionResponse::from(outcome)))
+    Ok(Json(CreateSubscriptionResponse::from_outcome(outcome)))
 }
 
 /// Cancel user's active subscription
@@ -925,18 +923,22 @@ mod tests {
 
     #[test]
     fn public_subscription_response_omits_raw_aml_fields() {
-        let response = CreateSubscriptionResponse::from(CreateSubscriptionOutcome::NearStakeLock {
-            contract_id: "staking.testnet".to_string(),
-            price_id: "price_hos_basic".to_string(),
-            network_id: "testnet".to_string(),
-            attached_deposit_yocto: "1".to_string(),
-            storage: storage_intent(),
-            aml: Box::new(aml_result(AmlRiskLevel::Low)),
-        });
+        let response =
+            CreateSubscriptionResponse::from_outcome(CreateSubscriptionOutcome::NearStakeLock {
+                contract_id: "staking.testnet".to_string(),
+                price_id: "price_hos_basic".to_string(),
+                network_id: "testnet".to_string(),
+                attached_deposit_yocto: "1".to_string(),
+                storage: storage_intent(),
+                aml: Box::new(aml_result(AmlRiskLevel::Low)),
+            });
 
         let value = serde_json::to_value(response).expect("serialize response");
         assert!(value.pointer("/aml/checked_at").is_some());
-        assert!(value.pointer("/aml/risk_level").is_none());
+        assert_eq!(
+            value.pointer("/aml/risk_level").and_then(|x| x.as_str()),
+            Some("LOW")
+        );
         assert!(value.pointer("/aml/score").is_none());
         assert!(value.pointer("/aml/report_id").is_none());
         assert!(value.pointer("/aml/reason").is_none());
@@ -946,9 +948,10 @@ mod tests {
     }
 
     #[test]
-    fn public_aml_result_omits_high_risk() {
+    fn public_aml_result_returns_public_safe_high_risk_metadata() {
         let mut result = aml_result(AmlRiskLevel::Low);
         result.score = Some(75);
-        assert!(public_aml_result(result).is_none());
+        let public = public_aml_result(result).expect("public aml result");
+        assert_eq!(public.risk_level, AmlRiskLevel::Low);
     }
 }

@@ -266,7 +266,9 @@ impl UserService for UserServiceImpl {
         match self.aml_report_repo.latest_active_report(&account_id).await {
             Ok(Some(report)) => {
                 let age = Utc::now().signed_duration_since(report.created_at);
-                if age < Duration::days(self.aml_service.report_refresh_days()) {
+                if age < Duration::days(self.aml_service.report_refresh_days())
+                    && self.aml_service.has_usable_policy_signal(&report.result)
+                {
                     self.enforce_user_aml_result(
                         user_id,
                         flow,
@@ -295,6 +297,7 @@ impl UserService for UserServiceImpl {
                 user_id,
                 flow: flow.to_string(),
                 result: result.clone(),
+                active: self.aml_service.should_record_active_report(&result),
             })
             .await
         {

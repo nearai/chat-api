@@ -111,7 +111,7 @@ impl AmlReportRepository for StaticAmlReportRepository {
             checked_at: event.result.checked_at,
             reason: event.result.reason.clone(),
             result: event.result,
-            active: false,
+            active: event.active,
             created_at: now,
             updated_at: now,
         })
@@ -4235,7 +4235,10 @@ async fn test_create_subscription_house_of_stake_returns_flat_json() {
         Some("1250000000000000000000")
     );
     assert!(body.pointer("/aml/checked_at").is_some());
-    assert!(body.pointer("/aml/risk_level").is_none());
+    assert_eq!(
+        body.pointer("/aml/risk_level").and_then(|x| x.as_str()),
+        Some("UNKNOWN")
+    );
     assert!(body.pointer("/aml/score").is_none());
     assert!(body.pointer("/aml/report_id").is_none());
     assert!(body.pointer("/aml/reason").is_none());
@@ -4710,7 +4713,10 @@ async fn test_resume_subscription_house_of_stake_allows_provider_high_below_scor
         body.get("kind").and_then(|x| x.as_str()),
         Some("near_staking_resume")
     );
-    assert!(body.pointer("/aml/risk_level").is_none());
+    assert_eq!(
+        body.pointer("/aml/risk_level").and_then(|x| x.as_str()),
+        Some("HIGH")
+    );
     assert!(body.pointer("/aml/score").is_none());
 }
 
@@ -4793,7 +4799,10 @@ async fn test_resume_subscription_house_of_stake_allowlist_overrides_high_aml_sc
         body.get("kind").and_then(|x| x.as_str()),
         Some("near_staking_resume")
     );
-    assert!(body.pointer("/aml/risk_level").is_none());
+    assert_eq!(
+        body.pointer("/aml/risk_level").and_then(|x| x.as_str()),
+        Some("LOW")
+    );
     assert!(body.pointer("/aml/score").is_none());
 }
 

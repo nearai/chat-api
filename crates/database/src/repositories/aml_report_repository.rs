@@ -71,9 +71,8 @@ impl AmlReportRepository for PostgresAmlReportRepository {
         let result_json = serde_json::to_value(&event.result)?;
         let account_id = normalize_account_id(&event.result.account_id);
         let risk_level = Self::risk_level_to_db(event.result.risk_level);
-        let active = event.result.risk_level != AmlRiskLevel::Unknown;
 
-        if event.result.risk_level == AmlRiskLevel::Unknown {
+        if event.result.risk_level == AmlRiskLevel::Unknown && !event.active {
             let row = client
                 .query_opt(
                     r#"
@@ -134,7 +133,7 @@ impl AmlReportRepository for PostgresAmlReportRepository {
                     &event.result.checked_at,
                     &event.result.reason,
                     &result_json,
-                    &active,
+                    &event.active,
                 ],
             )
             .await?;
@@ -153,7 +152,7 @@ impl AmlReportRepository for PostgresAmlReportRepository {
                 r#"
                 SELECT *
                 FROM aml_risk_reports
-                WHERE account_id = $1 AND active = TRUE AND risk_level <> 'UNKNOWN'
+                WHERE account_id = $1 AND active = TRUE
                 ORDER BY created_at DESC, checked_at DESC
                 LIMIT 1
                 "#,
