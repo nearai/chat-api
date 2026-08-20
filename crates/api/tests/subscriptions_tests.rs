@@ -90,7 +90,7 @@ fn static_aml_service(result: AmlCheckResult) -> StaticAmlRiskService {
 }
 
 struct StaticAmlReportRepository {
-    latest: Option<AmlReportRecord>,
+    active_reports: Vec<AmlReportRecord>,
     allowlisted: bool,
 }
 
@@ -121,7 +121,11 @@ impl AmlReportRepository for StaticAmlReportRepository {
         &self,
         _account_id: &str,
     ) -> anyhow::Result<Option<AmlReportRecord>> {
-        Ok(self.latest.clone())
+        Ok(self.active_reports.first().cloned())
+    }
+
+    async fn active_reports(&self, _account_id: &str) -> anyhow::Result<Vec<AmlReportRecord>> {
+        Ok(self.active_reports.clone())
     }
 
     async fn is_account_allowlisted(&self, _account_id: &str) -> anyhow::Result<bool> {
@@ -4748,7 +4752,7 @@ async fn test_resume_subscription_house_of_stake_allowlist_overrides_high_aml_sc
             None,
         )))),
         aml_report_repo: Some(Arc::new(StaticAmlReportRepository {
-            latest: None,
+            active_reports: Vec::new(),
             allowlisted: true,
         })),
         ..Default::default()
@@ -4808,7 +4812,7 @@ async fn test_resume_subscription_house_of_stake_allowlist_overrides_high_aml_sc
 
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn test_resume_subscription_malformed_aml_response_uses_stale_high_risk_report() {
+async fn test_resume_subscription_provider_timeout_uses_older_migrated_legacy_score_report() {
     clear_proxy_env_for_local_wiremock();
     let chain_sub = json!({
         "subscription_id": "sub_on_chain_hos_resume_stale_high",
@@ -4824,21 +4828,41 @@ async fn test_resume_subscription_malformed_aml_response_uses_stale_high_risk_re
         .mount(&mock)
         .await;
 
-    let stale_high = aml_report(
-        aml_result("hos_resume_stale_high.testnet", AmlRiskLevel::High, None),
+    // This is the newest pre-score-policy report: it has a known level but no score, so it
+    // cannot satisfy the combined policy and must not hide an older matching report.
+    let newer_scoreless = aml_report(
+        aml_result_with_score(
+            "hos_resume_stale_high.testnet",
+            AmlRiskLevel::Low,
+            None,
+            None,
+        ),
+        Utc::now() - Duration::hours(1),
+    );
+    // V36 reclassifies this untouched legacy UNKNOWN report as active because its score can
+    // independently satisfy a newly configured threshold. A manually deactivated row remains
+    // inactive and is not returned by the repository.
+    let migrated_legacy_score_high = aml_report(
+        aml_result_with_score(
+            "hos_resume_stale_high.testnet",
+            AmlRiskLevel::Unknown,
+            Some(99),
+            Some("provider_invalid_response"),
+        ),
         Utc::now() - Duration::days(31),
     );
     let (server, db) = create_test_server_and_db(TestServerConfig {
         near_rpc_url: Some(mock.uri().to_string()),
         near_staking_contract_id: Some("staking.testnet".to_string()),
         near_network_id: Some("testnet".to_string()),
-        aml_service: Some(Arc::new(static_aml_service(aml_result(
+        aml_service: Some(Arc::new(static_aml_service(aml_result_with_score(
             "hos_resume_stale_high.testnet",
             AmlRiskLevel::Unknown,
-            Some("provider_invalid_response"),
+            None,
+            Some("provider_timeout"),
         )))),
         aml_report_repo: Some(Arc::new(StaticAmlReportRepository {
-            latest: Some(stale_high),
+            active_reports: vec![newer_scoreless, migrated_legacy_score_high],
             allowlisted: false,
         })),
         ..Default::default()

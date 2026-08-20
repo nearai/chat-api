@@ -145,22 +145,27 @@ impl AmlReportRepository for PostgresAmlReportRepository {
         &self,
         account_id: &str,
     ) -> anyhow::Result<Option<AmlReportRecord>> {
+        Ok(self.active_reports(account_id).await?.into_iter().next())
+    }
+
+    async fn active_reports(&self, account_id: &str) -> anyhow::Result<Vec<AmlReportRecord>> {
         let client = self.pool.get().await?;
         let account_id = normalize_account_id(account_id);
-        let row = client
-            .query_opt(
+        let rows = client
+            .query(
                 r#"
                 SELECT *
                 FROM aml_risk_reports
                 WHERE account_id = $1 AND active = TRUE
                 ORDER BY created_at DESC, checked_at DESC
-                LIMIT 1
                 "#,
                 &[&account_id],
             )
             .await?;
 
-        row.map(Self::report_from_row).transpose()
+        rows.into_iter()
+            .map(Self::report_from_row)
+            .collect::<Result<Vec<_>, _>>()
     }
 
     async fn is_account_allowlisted(&self, account_id: &str) -> anyhow::Result<bool> {
@@ -264,7 +269,7 @@ impl AmlReportRepository for PostgresAmlReportRepository {
             .query_opt(
                 r#"
                 UPDATE aml_risk_reports
-                SET active = $2
+                SET active = $2, active_source = 'manual'
                 WHERE id = $1
                 RETURNING *
                 "#,

@@ -262,33 +262,43 @@ impl UserService for UserServiceImpl {
 
         let flow = "user_status";
         let account_id = normalize_account_id(&near_account);
-        let mut stale_active_report = None;
-        match self.aml_report_repo.latest_active_report(&account_id).await {
-            Ok(Some(report)) => {
-                let age = Utc::now().signed_duration_since(report.created_at);
-                if age < Duration::days(self.aml_service.report_refresh_days())
-                    && self.aml_service.has_usable_policy_signal(&report.result)
-                {
-                    self.enforce_user_aml_result(
-                        user_id,
-                        flow,
-                        &report.result,
-                        self.aml_service.alert_on_cached_reports(),
-                    )
-                    .await?;
-                    return Ok(());
-                }
-                stale_active_report = Some(report);
-            }
-            Ok(None) => {}
+        let active_reports = match self.aml_report_repo.active_reports(&account_id).await {
+            Ok(reports) => reports,
             Err(err) => {
                 tracing::error!(
                     user_id = %user_id,
                     error = ?err,
-                    "Failed to read AML report during user status check; continuing with provider check"
+                    "Failed to read AML report candidates during user status check; continuing with provider check"
                 );
+                Vec::new()
             }
         };
+
+        let now = Utc::now();
+        if let Some(report) = active_reports
+            .iter()
+            .find(|report| {
+                now.signed_duration_since(report.created_at)
+                    < Duration::days(self.aml_service.report_refresh_days())
+                    && self.aml_service.has_usable_policy_signal(&report.result)
+            })
+            .cloned()
+        {
+            self.enforce_user_aml_result(
+                user_id,
+                flow,
+                &report.result,
+                self.aml_service.alert_on_cached_reports(),
+            )
+            .await?;
+            return Ok(());
+        }
+
+        // A newer incomplete record must not hide an older report that matches policy if Lukka
+        // subsequently fails. The repository returns candidates newest first.
+        let fallback_high_risk_report = active_reports
+            .into_iter()
+            .find(|report| self.aml_service.is_high_risk_result(&report.result));
 
         let result = self.aml_service.check_near_account(&account_id).await;
         if let Err(err) = self
@@ -310,9 +320,7 @@ impl UserService for UserServiceImpl {
 
         self.alert_aml_provider_failure(user_id, flow, &result);
         if result.is_provider_failure() {
-            if let Some(report) = stale_active_report
-                .filter(|report| self.aml_service.is_high_risk_result(&report.result))
-            {
+            if let Some(report) = fallback_high_risk_report {
                 self.enforce_user_aml_result(user_id, flow, &report.result, true)
                     .await?;
                 return Ok(());

@@ -364,6 +364,15 @@ pub trait AmlReportRepository: Send + Sync {
         &self,
         account_id: &str,
     ) -> anyhow::Result<Option<AmlReportRecord>>;
+    /// Returns active reports ordered newest first. Callers evaluate policy usability after
+    /// loading the candidates so a newer incomplete report cannot hide an older policy match.
+    async fn active_reports(&self, account_id: &str) -> anyhow::Result<Vec<AmlReportRecord>> {
+        Ok(self
+            .latest_active_report(account_id)
+            .await?
+            .into_iter()
+            .collect())
+    }
     async fn is_account_allowlisted(&self, account_id: &str) -> anyhow::Result<bool>;
     async fn list_reports(
         &self,
@@ -654,7 +663,13 @@ impl LukkaAmlService {
 
     async fn store_cache(&self, account_id: &str, result: AmlCheckResult) -> AmlCheckResult {
         if self.config.cache_ttl_secs > 0 {
-            if !result.is_provider_failure() && !self.should_record_active_report(&result) {
+            // Cacheability is independent from whether a report has every signal needed to
+            // short-circuit a configured policy. In particular, a known risk level with a
+            // temporarily missing score should not force a provider request on every API call.
+            if result.risk_level == AmlRiskLevel::Unknown
+                && !result.is_provider_failure()
+                && !self.is_high_risk_result(&result)
+            {
                 return result;
             }
 
@@ -1256,6 +1271,19 @@ mod tests {
 
         assert!(!service.has_usable_policy_signal(&result));
         assert!(!service.should_record_active_report(&result));
+    }
+
+    #[tokio::test]
+    async fn combined_policy_caches_scoreless_known_risk_level_results() {
+        let mut cfg = test_config("http://127.0.0.1:1".to_string());
+        cfg.high_risk_risk_levels = vec!["HIGH".to_string()];
+        cfg.high_risk_score_threshold = Some(75);
+        let service = LukkaAmlService::new(cfg);
+        let result = aml_result_with_score("legacy.near", AmlRiskLevel::Low, None);
+
+        service.store_cache("legacy.near", result.clone()).await;
+
+        assert_eq!(service.cached_result("legacy.near").await, Some(result));
     }
 
     #[test]
