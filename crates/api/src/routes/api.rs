@@ -1,8 +1,3 @@
-// #379 changes the public surface first. The dormant stateful handlers below
-// are intentionally retained for the #381 cleanup follow-up, so suppress their
-// temporary dead-code warnings without changing the rollback boundary.
-#![allow(dead_code)]
-
 use crate::consts::{
     LIST_FILES_LIMIT_MAX, MAX_DECOMPRESSED_RESPONSE_BODY_SIZE, MAX_REQUEST_BODY_SIZE,
     MAX_RESPONSE_BODY_SIZE,
@@ -24,7 +19,10 @@ use bytes::Bytes;
 use chrono::{Duration, Utc};
 use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
 use futures::stream;
-use http::{header::CONTENT_LENGTH, HeaderValue};
+use http::{
+    header::{CONTENT_ENCODING, CONTENT_LENGTH},
+    HeaderValue,
+};
 use multer::Multipart;
 use near_api::{Account, AccountId, NetworkConfig};
 use serde::{Deserialize, Serialize};
@@ -102,7 +100,10 @@ use openapi_tags::*;
 /// These paths historically supported optional authentication for public shares.
 /// Keep that boundary while returning the same migration response as the
 /// authenticated stateful routes.
-pub fn create_optional_auth_router() -> Router<crate::state::AppState> {
+pub fn create_optional_auth_router<S>() -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
     Router::new()
         .route(
             "/v1/conversations/{conversation_id}",
@@ -112,6 +113,115 @@ pub fn create_optional_auth_router() -> Router<crate::state::AppState> {
             "/v1/conversations/{conversation_id}/items",
             get(retired_stateful_api),
         )
+}
+
+/// Create the retired stateful surfaces without their authentication layer.
+///
+/// Conversation GET routes intentionally omit their handlers here: they merge
+/// with `create_optional_auth_router` at the application boundary so public
+/// shared reads retain their historical optional-auth behavior. Every other
+/// request is protected by the caller's session-auth layer.
+fn create_retired_stateful_router<S>() -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    // The nested router's fallback is stored separately by Axum, which lets it
+    // catch unknown descendants without conflicting with `{conversation_id}`.
+    let conversations_router = Router::new()
+        .route(
+            "/",
+            post(retired_stateful_api)
+                .get(retired_stateful_api)
+                .fallback(retired_stateful_api),
+        )
+        .route(
+            "/{conversation_id}",
+            post(retired_stateful_api)
+                .delete(retired_stateful_api)
+                .fallback(retired_stateful_api),
+        )
+        .route(
+            "/{conversation_id}/shares",
+            post(retired_stateful_api)
+                .get(retired_stateful_api)
+                .fallback(retired_stateful_api),
+        )
+        .route(
+            "/{conversation_id}/shares/{share_id}",
+            delete(retired_stateful_api).fallback(retired_stateful_api),
+        )
+        .route(
+            "/{conversation_id}/items",
+            post(retired_stateful_api).fallback(retired_stateful_api),
+        )
+        .route(
+            "/{conversation_id}/pin",
+            post(retired_stateful_api)
+                .delete(retired_stateful_api)
+                .fallback(retired_stateful_api),
+        )
+        .route(
+            "/{conversation_id}/archive",
+            post(retired_stateful_api)
+                .delete(retired_stateful_api)
+                .fallback(retired_stateful_api),
+        )
+        .route(
+            "/{conversation_id}/clone",
+            post(retired_stateful_api).fallback(retired_stateful_api),
+        )
+        .fallback(retired_stateful_api);
+
+    let share_groups_router = Router::new()
+        .route(
+            "/",
+            post(retired_stateful_api)
+                .get(retired_stateful_api)
+                .fallback(retired_stateful_api),
+        )
+        .route(
+            "/{group_id}",
+            patch(retired_stateful_api)
+                .delete(retired_stateful_api)
+                .fallback(retired_stateful_api),
+        )
+        .fallback(retired_stateful_api);
+
+    let files_router = Router::new()
+        .route(
+            "/",
+            post(retired_stateful_api)
+                .get(retired_stateful_api)
+                .fallback(retired_stateful_api),
+        )
+        .route(
+            "/{file_id}",
+            get(retired_stateful_api)
+                .delete(retired_stateful_api)
+                .fallback(retired_stateful_api),
+        )
+        .route(
+            "/{file_id}/content",
+            get(retired_stateful_api).fallback(retired_stateful_api),
+        )
+        .fallback(retired_stateful_api);
+
+    let shared_with_me_router = Router::new()
+        .route(
+            "/",
+            get(retired_stateful_api).fallback(retired_stateful_api),
+        )
+        .fallback(retired_stateful_api);
+
+    Router::new()
+        .nest("/v1/conversations", conversations_router)
+        .route("/v1/conversations/", any(retired_stateful_api))
+        .nest("/v1/share-groups", share_groups_router)
+        .route("/v1/share-groups/", any(retired_stateful_api))
+        .nest("/v1/files", files_router)
+        .route("/v1/files/", any(retired_stateful_api))
+        .nest("/v1/shared-with-me", shared_with_me_router)
+        .route("/v1/shared-with-me/", any(retired_stateful_api))
 }
 
 /// Create the unified API router with all v1 proxy and API routes.
@@ -182,105 +292,12 @@ pub fn create_api_router(
                 crate::middleware::dual_auth_middleware,
             ));
 
-    // Retired stateful API surfaces retain their existing session-auth boundary.
-    // Their handlers deliberately do not access the legacy services, database,
-    // or Cloud API; they return a consistent migration response instead.
-    let conversations_router = Router::new()
-        .route(
-            "/v1/conversations",
-            post(retired_stateful_api)
-                .get(retired_stateful_api)
-                .fallback(retired_stateful_api),
-        )
-        .route(
-            "/v1/conversations/{conversation_id}",
-            post(retired_stateful_api)
-                .delete(retired_stateful_api)
-                .fallback(retired_stateful_api),
-        )
-        .route(
-            "/v1/conversations/{conversation_id}/shares",
-            post(retired_stateful_api)
-                .get(retired_stateful_api)
-                .fallback(retired_stateful_api),
-        )
-        .route(
-            "/v1/conversations/{conversation_id}/shares/{share_id}",
-            delete(retired_stateful_api).fallback(retired_stateful_api),
-        )
-        .route(
-            "/v1/conversations/{conversation_id}/items",
-            post(retired_stateful_api).fallback(retired_stateful_api),
-        )
-        .route(
-            "/v1/conversations/{conversation_id}/pin",
-            post(retired_stateful_api)
-                .delete(retired_stateful_api)
-                .fallback(retired_stateful_api),
-        )
-        .route(
-            "/v1/conversations/{conversation_id}/archive",
-            post(retired_stateful_api)
-                .delete(retired_stateful_api)
-                .fallback(retired_stateful_api),
-        )
-        .route(
-            "/v1/conversations/{conversation_id}/clone",
-            post(retired_stateful_api).fallback(retired_stateful_api),
-        )
-        // Keep the retirement behavior stable for unversioned legacy children
-        // too. The known public GET paths use create_optional_auth_router.
-        .route("/v1/conversations/", any(retired_stateful_api))
-        .route("/v1/conversations/{*path}", any(retired_stateful_api));
-
-    let share_groups_router = Router::new()
-        .route(
-            "/v1/share-groups",
-            post(retired_stateful_api)
-                .get(retired_stateful_api)
-                .fallback(retired_stateful_api),
-        )
-        .route(
-            "/v1/share-groups/{group_id}",
-            patch(retired_stateful_api)
-                .delete(retired_stateful_api)
-                .fallback(retired_stateful_api),
-        )
-        .route("/v1/share-groups/", any(retired_stateful_api))
-        .route("/v1/share-groups/{*path}", any(retired_stateful_api))
-        .route(
-            "/v1/shared-with-me",
-            get(retired_stateful_api).fallback(retired_stateful_api),
-        );
-
-    let files_router = Router::new()
-        .route(
-            "/v1/files",
-            post(retired_stateful_api)
-                .get(retired_stateful_api)
-                .fallback(retired_stateful_api),
-        )
-        .route(
-            "/v1/files/{file_id}",
-            get(retired_stateful_api)
-                .delete(retired_stateful_api)
-                .fallback(retired_stateful_api),
-        )
-        .route(
-            "/v1/files/{file_id}/content",
-            get(retired_stateful_api).fallback(retired_stateful_api),
-        )
-        .route("/v1/files/", any(retired_stateful_api))
-        .route("/v1/files/{*path}", any(retired_stateful_api));
-
-    let session_auth_routes = Router::new()
-        .merge(conversations_router)
-        .merge(share_groups_router)
-        .merge(files_router)
-        .layer(axum::middleware::from_fn_with_state(
-            auth_state,
-            crate::middleware::auth_middleware,
-        ));
+    // Retired stateful routes retain their existing session-auth boundary. The
+    // handlers deliberately do not access legacy services, the database, or
+    // Cloud API; they only return a consistent migration response.
+    let session_auth_routes = create_retired_stateful_router::<crate::state::AppState>().layer(
+        axum::middleware::from_fn_with_state(auth_state, crate::middleware::auth_middleware),
+    );
 
     Router::new()
         .merge(llm_proxy_router)
@@ -291,6 +308,7 @@ pub fn create_api_router(
 }
 
 /// Type of resource to track in the response
+#[allow(dead_code)] // Retained only until #381 removes the retired stateful implementation.
 enum TrackableResource {
     /// New conversation - records metrics
     Conversation,
@@ -317,6 +335,19 @@ fn with_no_store_cache_control(mut response: Response) -> Response {
         HeaderValue::from_static("no-store"),
     );
     response
+}
+
+/// Accept only the HTTP no-op `identity` content coding. The request body is
+/// inspected before it is normalized, so accepting a compressed representation
+/// would let stateful fields evade the local stateless validation.
+fn has_only_identity_content_encoding(headers: &HeaderMap) -> bool {
+    headers.get_all(CONTENT_ENCODING).iter().all(|value| {
+        value.to_str().is_ok_and(|value| {
+            value
+                .split(',')
+                .all(|coding| coding.trim().eq_ignore_ascii_case("identity"))
+        })
+    })
 }
 
 /// Apply no-store to every `/v1/responses` result, including middleware and
@@ -355,10 +386,9 @@ fn stateless_responses_bad_request(error: impl Into<String>) -> Response {
 /// or response state. Keep the messages aligned with Cloud API so callers get
 /// a stable 400 locally instead of a version-dependent upstream error.
 fn validate_stateless_response_body(body: &serde_json::Value) -> Result<(), &'static str> {
-    let Some(request) = body.as_object() else {
-        // Leave malformed root values to Cloud API's normal request parsing.
-        return Ok(());
-    };
+    let request = body
+        .as_object()
+        .ok_or("The stateless Responses API requires a JSON object body.")?;
 
     if request.get("store").and_then(serde_json::Value::as_bool) == Some(true) {
         return Err("The Responses API only supports store: false.");
@@ -458,11 +488,10 @@ fn validate_stateless_response_body(body: &serde_json::Value) -> Result<(), &'st
 /// Normalize a valid JSON request at the proxy boundary. This makes the
 /// no-store contract explicit even when a client omits `store`.
 fn normalize_stateless_response_body(body: &mut serde_json::Value) -> Result<(), &'static str> {
-    validate_stateless_response_body(body)?;
-
-    if let Some(request) = body.as_object_mut() {
-        request.insert("store".to_string(), serde_json::Value::Bool(false));
-    }
+    let request = body
+        .as_object_mut()
+        .ok_or("The stateless Responses API requires a JSON object body.")?;
+    request.insert("store".to_string(), serde_json::Value::Bool(false));
 
     Ok(())
 }
@@ -604,6 +633,7 @@ impl From<ShareRecipient> for ShareRecipientPayload {
     }
 }
 
+#[allow(dead_code)]
 fn to_share_response(
     share: services::conversation::ports::ConversationShare,
 ) -> ConversationShareResponse {
@@ -620,6 +650,7 @@ fn to_share_response(
     }
 }
 
+#[allow(dead_code)]
 fn to_share_group_response(group: services::conversation::ports::ShareGroup) -> ShareGroupResponse {
     ShareGroupResponse {
         id: group.id,
@@ -654,6 +685,7 @@ pub struct ValidatedListFilesParams {
 
 impl ListFilesParams {
     /// Validate query parameters and return normalized values (with defaults applied)
+    #[allow(dead_code)]
     fn validate(self) -> Result<ValidatedListFilesParams, (StatusCode, Json<ErrorResponse>)> {
         // Apply default values
         let limit = self.limit.unwrap_or(LIST_FILES_LIMIT_MAX);
@@ -704,6 +736,7 @@ impl ListFilesParams {
         ("session_token" = [])
     )
 )]
+#[allow(dead_code)]
 async fn create_conversation(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -805,6 +838,7 @@ async fn create_conversation(
         ("session_token" = [])
     )
 )]
+#[allow(dead_code)]
 async fn update_conversation(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -891,6 +925,7 @@ async fn update_conversation(
         ("session_token" = [])
     )
 )]
+#[allow(dead_code)]
 async fn list_conversations(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -952,6 +987,7 @@ async fn list_conversations(
         ("session_token" = []) // Optional - session token for authenticated access
     )
 )]
+#[allow(dead_code)]
 async fn get_conversation(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<Option<AuthenticatedUser>>,
@@ -998,6 +1034,7 @@ async fn get_conversation(
         ("session_token" = [])
     )
 )]
+#[allow(dead_code)]
 async fn delete_conversation(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1063,6 +1100,7 @@ async fn delete_conversation(
         ("session_token" = [])
     )
 )]
+#[allow(dead_code)]
 async fn create_conversation_share(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1172,6 +1210,7 @@ async fn create_conversation_share(
         ("session_token" = [])
     )
 )]
+#[allow(dead_code)]
 async fn list_conversation_shares(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1253,6 +1292,7 @@ async fn list_conversation_shares(
         ("session_token" = [])
     )
 )]
+#[allow(dead_code)]
 async fn delete_conversation_share(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1282,6 +1322,7 @@ async fn delete_conversation_share(
         ("session_token" = [])
     )
 )]
+#[allow(dead_code)]
 async fn create_share_group(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1359,6 +1400,7 @@ async fn create_share_group(
         ("session_token" = [])
     )
 )]
+#[allow(dead_code)]
 async fn list_share_groups(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1428,6 +1470,7 @@ async fn list_share_groups(
         ("session_token" = [])
     )
 )]
+#[allow(dead_code)]
 async fn update_share_group(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1513,6 +1556,7 @@ async fn update_share_group(
         ("session_token" = [])
     )
 )]
+#[allow(dead_code)]
 async fn delete_share_group(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1540,6 +1584,7 @@ pub struct SharedConversationInfo {
 }
 
 /// Maximum concurrent requests when fetching conversation details
+#[allow(dead_code)]
 const SHARED_CONVERSATIONS_FETCH_CONCURRENCY: usize = 10;
 
 /// List conversations shared with the authenticated user
@@ -1556,6 +1601,7 @@ const SHARED_CONVERSATIONS_FETCH_CONCURRENCY: usize = 10;
         ("session_token" = [])
     )
 )]
+#[allow(dead_code)]
 async fn list_shared_with_me(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1642,6 +1688,7 @@ async fn list_shared_with_me(
         ("session_token" = [])
     )
 )]
+#[allow(dead_code)]
 async fn create_conversation_items(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1769,6 +1816,7 @@ async fn create_conversation_items(
         ("session_token" = []) // Optional - session token for authenticated access
     )
 )]
+#[allow(dead_code)]
 async fn list_conversation_items(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<Option<AuthenticatedUser>>,
@@ -1843,6 +1891,7 @@ async fn list_conversation_items(
         ("session_token" = [])
     )
 )]
+#[allow(dead_code)]
 async fn pin_conversation(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1915,6 +1964,7 @@ async fn pin_conversation(
         ("session_token" = [])
     )
 )]
+#[allow(dead_code)]
 async fn unpin_conversation(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1987,6 +2037,7 @@ async fn unpin_conversation(
         ("session_token" = [])
     )
 )]
+#[allow(dead_code)]
 async fn archive_conversation(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -2059,6 +2110,7 @@ async fn archive_conversation(
         ("session_token" = [])
     )
 )]
+#[allow(dead_code)]
 async fn unarchive_conversation(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -2131,6 +2183,7 @@ async fn unarchive_conversation(
         ("session_token" = [])
     )
 )]
+#[allow(dead_code)]
 async fn clone_conversation(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -2204,6 +2257,7 @@ async fn clone_conversation(
         ("session_token" = [])
     )
 )]
+#[allow(dead_code)]
 async fn upload_file(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -2275,6 +2329,7 @@ async fn upload_file(
         ("session_token" = [])
     )
 )]
+#[allow(dead_code)]
 async fn list_files(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -2343,6 +2398,7 @@ async fn list_files(
         ("session_token" = [])
     )
 )]
+#[allow(dead_code)]
 async fn get_file(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -2397,6 +2453,7 @@ async fn get_file(
         ("session_token" = [])
     )
 )]
+#[allow(dead_code)]
 async fn delete_file(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -2458,6 +2515,7 @@ async fn delete_file(
         ("session_token" = [])
     )
 )]
+#[allow(dead_code)]
 async fn get_file_content(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -2550,7 +2608,8 @@ async fn proxy_responses(
     // Extract body bytes
     let body_bytes = extract_body_bytes(request).await?;
 
-    // Parsed JSON body (if applicable)
+    // Parsed JSON body. A non-empty request has to be an uncompressed JSON
+    // object so no stateful field can bypass local validation as opaque bytes.
     let mut body_json: Option<serde_json::Value> = None;
     // Optional system prompt resolved from model settings
     let mut model_system_prompt: Option<String> = None;
@@ -2570,19 +2629,30 @@ async fn proxy_responses(
             body_bytes.len()
         );
 
-        // Try to parse JSON body once for further processing (model visibility + system prompt)
-        match serde_json::from_slice::<serde_json::Value>(&body_bytes) {
-            Ok(v) => {
-                body_json = Some(v);
-            }
-            Err(e) => {
-                tracing::debug!(
-                    "Failed to parse /responses request body as JSON for user_id={}: {}",
-                    user.user_id,
-                    e
-                );
-            }
+        if !has_only_identity_content_encoding(&headers) {
+            return Err(stateless_responses_bad_request(
+                "The stateless Responses API requires an uncompressed JSON object body.",
+            ));
         }
+
+        let body = serde_json::from_slice::<serde_json::Value>(&body_bytes).map_err(|e| {
+            tracing::debug!(
+                "Failed to parse /responses request body as JSON for user_id={}: {}",
+                user.user_id,
+                e
+            );
+            stateless_responses_bad_request(
+                "The stateless Responses API requires an uncompressed JSON object body.",
+            )
+        })?;
+
+        if !body.is_object() {
+            return Err(stateless_responses_bad_request(
+                "The stateless Responses API requires a JSON object body.",
+            ));
+        }
+
+        body_json = Some(body);
     }
 
     // Reject every request feature that would make Cloud API retain state
@@ -4757,6 +4827,7 @@ async fn proxy_models(
 }
 
 /// Helper function to handle response: buffer, parse, and track resource
+#[allow(dead_code)]
 async fn handle_trackable_response(
     state: &crate::state::AppState,
     user: &AuthenticatedUser,
@@ -4948,6 +5019,7 @@ async fn build_response(status: u16, headers: HeaderMap, body: Body) -> Result<R
     })
 }
 
+#[allow(dead_code)]
 async fn validate_user_conversation(
     state: &crate::state::AppState,
     user: &AuthenticatedUser,
@@ -4965,6 +5037,7 @@ async fn validate_user_conversation(
 }
 
 /// Validate user has access OR the conversation is publicly shared
+#[allow(dead_code)]
 async fn validate_user_or_public_conversation(
     state: &crate::state::AppState,
     user: &AuthenticatedUser,
@@ -4996,6 +5069,7 @@ async fn validate_user_or_public_conversation(
 /// Validate conversation access with optional authentication
 /// - If user is authenticated: check their access (owner, shared, or public)
 /// - If user is not authenticated: only check if publicly shared
+#[allow(dead_code)]
 async fn validate_conversation_access_optional_auth(
     state: &crate::state::AppState,
     user: Option<&AuthenticatedUser>,
@@ -5020,6 +5094,7 @@ async fn validate_conversation_access_optional_auth(
     }
 }
 
+#[allow(dead_code)]
 async fn validate_owner_conversation(
     state: &crate::state::AppState,
     user: &AuthenticatedUser,
@@ -5047,6 +5122,7 @@ async fn validate_owner_conversation(
         })
 }
 
+#[allow(dead_code)]
 fn map_share_error(error: ConversationError) -> Response {
     let (status, message) = match error {
         ConversationError::NotFound => {
@@ -5064,6 +5140,7 @@ fn map_share_error(error: ConversationError) -> Response {
     (status, Json(ErrorResponse { error: message })).into_response()
 }
 
+#[allow(dead_code)]
 async fn fetch_conversation_from_proxy(
     state: &crate::state::AppState,
     conversation_id: &str,
@@ -5126,6 +5203,7 @@ async fn fetch_conversation_from_proxy(
     Ok(conversation)
 }
 
+#[allow(dead_code)]
 async fn validate_user_file(
     state: &crate::state::AppState,
     user: &AuthenticatedUser,
@@ -5570,14 +5648,18 @@ async fn collect_stream_to_bytes(
 #[cfg(test)]
 mod tests {
     use super::{
-        decompress_if_encoded, ensure_stream_usage_options, normalize_stateless_response_body,
-        validate_proxy_path_segment, validate_stateless_response_body,
+        create_optional_auth_router, create_retired_stateful_router, decompress_if_encoded,
+        ensure_stream_usage_options, has_only_identity_content_encoding,
+        normalize_stateless_response_body, validate_proxy_path_segment,
+        validate_stateless_response_body,
     };
+    use axum::{body::Body, Router};
     use bytes::Bytes;
     use flate2::{write::DeflateEncoder, write::GzEncoder, write::ZlibEncoder, Compression};
-    use http::{HeaderMap, HeaderValue};
+    use http::{HeaderMap, HeaderValue, Method, Request, StatusCode};
     use serde_json::json;
     use std::io::Write;
+    use tower::ServiceExt;
 
     fn headers(content_encoding: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
@@ -5586,6 +5668,75 @@ mod tests {
             HeaderValue::from_str(content_encoding).unwrap(),
         );
         headers
+    }
+
+    #[test]
+    fn stateless_responses_accept_only_identity_content_encoding() {
+        let empty_headers = HeaderMap::new();
+        assert!(has_only_identity_content_encoding(&empty_headers));
+
+        let mut identity_headers = headers("identity");
+        assert!(has_only_identity_content_encoding(&identity_headers));
+        identity_headers.append("content-encoding", HeaderValue::from_static("IDENTITY"));
+        assert!(has_only_identity_content_encoding(&identity_headers));
+
+        let mixed_headers = headers("identity, gzip");
+        assert!(!has_only_identity_content_encoding(&mixed_headers));
+        let gzip_headers = headers("gzip");
+        assert!(!has_only_identity_content_encoding(&gzip_headers));
+    }
+
+    async fn assert_retired_route(app: &Router, method: Method, path: &str) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("test request should be valid"),
+            )
+            .await
+            .expect("router should not return an error");
+
+        assert_eq!(
+            response.status(),
+            StatusCode::GONE,
+            "unexpected route: {path}"
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(http::header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+    }
+
+    #[tokio::test]
+    async fn retired_stateful_router_merges_optional_reads_and_catches_descendants() {
+        // This is the same composition used by the application before the
+        // respective optional/session authentication layers are applied.
+        let app = create_optional_auth_router::<()>().merge(create_retired_stateful_router());
+
+        assert_retired_route(&app, Method::GET, "/v1/conversations/conv_legacy").await;
+        assert_retired_route(&app, Method::GET, "/v1/conversations/conv_legacy/items").await;
+        assert_retired_route(&app, Method::PATCH, "/v1/conversations/conv_legacy").await;
+        assert_retired_route(
+            &app,
+            Method::PATCH,
+            "/v1/conversations/conv_legacy/unknown-child",
+        )
+        .await;
+        assert_retired_route(&app, Method::GET, "/v1/conversations/").await;
+        assert_retired_route(&app, Method::PATCH, "/v1/files/file_legacy/unknown-child").await;
+        assert_retired_route(
+            &app,
+            Method::GET,
+            "/v1/share-groups/group_legacy/unknown-child",
+        )
+        .await;
+        assert_retired_route(&app, Method::GET, "/v1/shared-with-me/unknown-child").await;
     }
 
     fn gzip_encode(input: &[u8]) -> Vec<u8> {
@@ -5722,6 +5873,15 @@ mod tests {
                 json!({ "tools": [{ "type": "mcp" }] }),
                 "The stateless Responses API does not support MCP tools that require approval.",
             ),
+            (
+                json!({
+                    "tools": [{
+                        "type": "mcp",
+                        "require_approval": { "never": { "tool_names": ["search"] } }
+                    }]
+                }),
+                "The stateless Responses API does not support MCP tools that require approval.",
+            ),
         ];
 
         for (body, expected) in cases {
@@ -5736,6 +5896,17 @@ mod tests {
             "tools": [{ "type": "mcp", "require_approval": "never" }]
         }))
         .is_ok());
+    }
+
+    #[test]
+    fn stateless_responses_require_a_json_object() {
+        for body in [json!(null), json!(["not", "an", "object"]), json!("text")] {
+            assert_eq!(
+                validate_stateless_response_body(&body),
+                Err("The stateless Responses API requires a JSON object body."),
+                "non-object body should be rejected: {body}"
+            );
+        }
     }
 
     #[test]

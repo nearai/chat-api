@@ -39,6 +39,15 @@ async fn retired_conversation_routes_return_the_migration_response() {
     assert_retired(server.get("/v1/conversations/conv_legacy").await);
     assert_retired(server.get("/v1/conversations/conv_legacy/items").await);
 
+    // Unknown descendants remain protected by the original session boundary.
+    assert_eq!(
+        server
+            .get("/v1/conversations/conv_legacy/unknown-child")
+            .await
+            .status_code(),
+        StatusCode::UNAUTHORIZED
+    );
+
     // Mutating conversation routes retain the old session-auth boundary.
     assert_eq!(
         server.post("/v1/conversations").await.status_code(),
@@ -64,6 +73,7 @@ async fn retired_conversation_routes_return_the_migration_response() {
         (Method::POST, "/v1/conversations/conv_legacy/archive"),
         (Method::DELETE, "/v1/conversations/conv_legacy/archive"),
         (Method::POST, "/v1/conversations/conv_legacy/clone"),
+        (Method::GET, "/v1/conversations/"),
         // Exact known routes and unknown descendants also use the migration
         // response for methods that were never part of the old contract.
         (Method::PATCH, "/v1/conversations/conv_legacy"),

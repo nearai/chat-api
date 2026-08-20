@@ -127,10 +127,11 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
     // Conversation read routes with optional authentication
     // These routes work for both authenticated users and unauthenticated users
     // (for accessing publicly shared conversations)
-    let optional_auth_routes = api::create_optional_auth_router().layer(from_fn_with_state(
-        auth_state.clone(),
-        crate::middleware::optional_auth_middleware,
-    ));
+    let optional_auth_routes =
+        api::create_optional_auth_router::<crate::state::AppState>().layer(from_fn_with_state(
+            auth_state.clone(),
+            crate::middleware::optional_auth_middleware,
+        ));
 
     let dual_auth_state = crate::middleware::DualAuthState {
         auth_state: auth_state.clone(),

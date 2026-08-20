@@ -41,6 +41,13 @@ async fn retired_file_and_sharing_routes_return_the_migration_response() {
         server.get("/v1/files").await.status_code(),
         StatusCode::UNAUTHORIZED
     );
+    assert_eq!(
+        server
+            .get("/v1/files/file_legacy/unknown-child")
+            .await
+            .status_code(),
+        StatusCode::UNAUTHORIZED
+    );
 
     for (method, path) in [
         // Every method that was previously supported by the session-auth API.
@@ -49,8 +56,10 @@ async fn retired_file_and_sharing_routes_return_the_migration_response() {
         (Method::GET, "/v1/files/file_legacy"),
         (Method::DELETE, "/v1/files/file_legacy"),
         (Method::GET, "/v1/files/file_legacy/content"),
+        (Method::GET, "/v1/files/"),
         (Method::POST, "/v1/share-groups"),
         (Method::GET, "/v1/share-groups"),
+        (Method::GET, "/v1/share-groups/"),
         (Method::PATCH, "/v1/share-groups/group_legacy"),
         (Method::DELETE, "/v1/share-groups/group_legacy"),
         (Method::GET, "/v1/shared-with-me"),
@@ -60,6 +69,7 @@ async fn retired_file_and_sharing_routes_return_the_migration_response() {
         (Method::PATCH, "/v1/files/file_legacy/unknown-child"),
         (Method::PATCH, "/v1/share-groups/group_legacy/unknown-child"),
         (Method::POST, "/v1/shared-with-me"),
+        (Method::GET, "/v1/shared-with-me/unknown-child"),
     ] {
         assert_retired(
             server
