@@ -67,7 +67,7 @@ tracing::debug!("Session validated: session_id={}, user_id={}", session_id, user
 
 ## Project Overview
 
-NEAR AI Chat API - A Rust backend that proxies OpenAI API requests while tracking user conversations in PostgreSQL. Provides OAuth authentication (Google/GitHub), user session management, and a frontend served as static files.
+NEAR AI Chat API - A Rust backend for authenticated, OpenAI-compatible Cloud API proxying, account and agent management, and a frontend served as static files. Conversations, Files, sharing, share groups, and shared-with-me are retired local surfaces: they return a stable `410 Gone` response rather than accessing PostgreSQL or an upstream stateful API. `/v1/responses` remains as a stateless proxy and always sends `store: false`.
 
 ## Build & Development Commands
 
@@ -83,11 +83,10 @@ cargo run --bin api
 cargo test --features test                    # All tests with mock-login endpoint
 cargo test --test admin_tests --features test # Admin tests only
 
-# E2E tests (make real OpenAI API calls, require valid credentials)
-cargo test --test e2e_api_tests --features test -- --ignored --nocapture
-
-# Run a specific test
-cargo test --test e2e_api_tests test_conversation_workflow --features test -- --ignored --nocapture
+# Focused stateless-proxy and retired-route tests
+cargo test --test responses_stateless_tests --features test
+cargo test --test conversations_tests --features test
+cargo test --test files_tests --features test
 ```
 
 ## Docker Development
@@ -104,7 +103,7 @@ docker compose up -d --build   # Rebuild and start
 ```
 crates/
 ├── api/          # Axum HTTP server, routes, middleware, OpenAPI docs (utoipa)
-├── services/     # Business logic: auth, conversation, response proxy, user management
+├── services/     # Business logic: auth, response proxy, user/agent/subscription management
 ├── database/     # PostgreSQL (tokio-postgres, deadpool), migrations, repositories
 └── config/       # Environment-based configuration structs
 ```
@@ -113,20 +112,23 @@ crates/
 
 - **Repository Pattern**: Database access through trait-based repositories (`PostgresUserRepository`, etc.)
 - **Service Layer**: Business logic in `services` crate, injected into `AppState`
-- **OpenAI Proxy**: All `/v1/*` routes forward to OpenAI with auth; conversation endpoints (`/v1/conversations/*`) track IDs in PostgreSQL
+- **Cloud API Proxy**: Supported proxy routes forward upstream after their configured authentication, subscription, and rate-limit middleware. `/v1/responses` is explicitly stateless: it rejects stateful features locally and forwards `store: false`.
+- **Retired Stateful Surfaces**: Conversations, Files, sharing, share groups, and shared-with-me retain their historical authentication boundaries but return local `410 Gone` responses with `Cache-Control: no-store`; they do not call provider-backed services, repositories, or Cloud API endpoints.
 - **Patroni Support**: Optional cluster discovery for HA PostgreSQL via `DATABASE_PRIMARY_APP_ID`
 
 ### Request Flow
 
-1. Request → Auth middleware (validates session token) → Route handler
-2. Conversation operations → Forward to OpenAI → Parse response → Track in DB
-3. Generic `/v1/{*path}` → Forward to OpenAI (pass-through)
+1. Request → its configured authentication boundary (session, optional session, or dual auth) → route handler
+2. Supported proxy route → subscription/rate-limit checks where configured → Cloud API → response and usage handling
+3. `/v1/responses` → strict local stateless validation → force `store: false` → Cloud API → `Cache-Control: no-store`
+4. Retired Conversation/File/sharing route → historical authentication boundary → local `410 Gone` with no database or upstream state access
 
 ### Database
 
 - Migrations: `crates/database/src/migrations/sql/V*.sql` (refinery)
 - Runs automatically on startup in `main.rs`
 - Default connection: `localhost:5432/chat_api` (see `config/src/lib.rs` for env vars)
+- Retired Conversation/File/sharing tables remain as historical schema and for existing local account-deletion cleanup; they are no longer wired into `AppState` or request handlers.
 
 ## Environment Variables
 
