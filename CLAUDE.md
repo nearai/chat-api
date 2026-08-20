@@ -67,7 +67,7 @@ tracing::debug!("Session validated: session_id={}, user_id={}", session_id, user
 
 ## Project Overview
 
-NEAR AI Chat API - A Rust backend for authenticated, OpenAI-compatible Cloud API proxying, account and agent management, and a frontend served as static files. Conversations, Files, sharing, share groups, and shared-with-me are retired local surfaces: they return a stable `410 Gone` response rather than accessing PostgreSQL or an upstream stateful API. `/v1/responses` remains as a stateless proxy and always sends `store: false`.
+NEAR AI Chat API - A Rust backend for authenticated, OpenAI-compatible Cloud API proxying, account and agent management, and a frontend served as static files. Conversations, Files, sharing, share groups, and shared-with-me are retired local surfaces: after their historical session or optional-auth boundary, their handlers return a stable `410 Gone` response rather than accessing Private Chat repositories or an upstream stateful API. `/v1/responses` remains as a stateless proxy; valid JSON object requests are normalized with `store: false` before forwarding.
 
 ## Build & Development Commands
 
@@ -112,16 +112,16 @@ crates/
 
 - **Repository Pattern**: Database access through trait-based repositories (`PostgresUserRepository`, etc.)
 - **Service Layer**: Business logic in `services` crate, injected into `AppState`
-- **Cloud API Proxy**: Supported proxy routes forward upstream after their configured authentication, subscription, and rate-limit middleware. `/v1/responses` is explicitly stateless: it rejects stateful features locally and forwards `store: false`.
-- **Retired Stateful Surfaces**: Conversations, Files, sharing, share groups, and shared-with-me retain their historical authentication boundaries but return local `410 Gone` responses with `Cache-Control: no-store`; they do not call provider-backed services, repositories, or Cloud API endpoints.
+- **Cloud API Proxy**: Supported proxy routes forward upstream after their configured authentication, subscription, and rate-limit middleware. `/v1/responses` is explicitly stateless: it rejects stateful features locally and normalizes valid JSON object requests with `store: false` before forwarding.
+- **Retired Stateful Surfaces**: Conversations, Files, sharing, share groups, and shared-with-me retain their historical authentication boundaries but return local `410 Gone` responses with `Cache-Control: no-store`; their handlers do not call Private Chat repositories or upstream stateful API endpoints.
 - **Patroni Support**: Optional cluster discovery for HA PostgreSQL via `DATABASE_PRIMARY_APP_ID`
 
 ### Request Flow
 
 1. Request → its configured authentication boundary (session, optional session, or dual auth) → route handler
 2. Supported proxy route → subscription/rate-limit checks where configured → Cloud API → response and usage handling
-3. `/v1/responses` → strict local stateless validation → force `store: false` → Cloud API → `Cache-Control: no-store`
-4. Retired Conversation/File/sharing route → historical authentication boundary → local `410 Gone` with no database or upstream state access
+3. Valid JSON object `/v1/responses` request → strict local stateless validation → normalize `store: false` → Cloud API → `Cache-Control: no-store`
+4. Retired Conversation/File/sharing route → historical authentication boundary (which may inspect sessions) → local `410 Gone`; the handler makes no Private Chat repository or upstream state request
 
 ### Database
 
