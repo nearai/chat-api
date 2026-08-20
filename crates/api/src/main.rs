@@ -36,6 +36,85 @@ fn near_rpc_network_hint(host: Option<&str>) -> Option<&'static str> {
     }
 }
 
+fn aml_env_value(primary: &'static str, alias: &'static str) -> Option<(&'static str, String)> {
+    std::env::var(primary)
+        .map(|value| (primary, value))
+        .or_else(|_| std::env::var(alias).map(|value| (alias, value)))
+        .ok()
+}
+
+fn aml_disabled_value(value: &str) -> bool {
+    let value = value.trim();
+    value.is_empty()
+        || ["disabled", "none", "off", "false"]
+            .iter()
+            .any(|disabled| value.eq_ignore_ascii_case(disabled))
+}
+
+fn log_lukka_aml_policy_config(config: &config::LukkaAmlConfig) {
+    tracing::info!(
+        enabled = config.enabled,
+        high_risk_risk_levels = ?config.high_risk_risk_levels,
+        high_risk_score_threshold = ?config.high_risk_score_threshold,
+        "Lukka AML policy configuration"
+    );
+
+    if let Some((source, raw)) = aml_env_value(
+        "LUKKA_AML_HIGH_RISK_LEVELS",
+        "LUKKA_AML_BLOCKED_RISK_LEVELS",
+    ) {
+        if !aml_disabled_value(&raw) {
+            let invalid_levels = raw
+                .split(',')
+                .map(str::trim)
+                .filter(|level| !level.is_empty())
+                .filter(|level| {
+                    !matches!(
+                        level.to_ascii_uppercase().as_str(),
+                        "LOW" | "MEDIUM" | "HIGH"
+                    )
+                })
+                .collect::<Vec<_>>();
+            if !invalid_levels.is_empty() {
+                tracing::warn!(
+                    source,
+                    invalid_levels = ?invalid_levels,
+                    high_risk_risk_levels = ?config.high_risk_risk_levels,
+                    "Unrecognized Lukka AML risk level tokens were ignored"
+                );
+            }
+        }
+    }
+
+    if let Some((source, raw)) = aml_env_value(
+        "LUKKA_AML_SCORE_BLOCK_THRESHOLD",
+        "LUKKA_AML_HIGH_RISK_SCORE_THRESHOLD",
+    ) {
+        if !aml_disabled_value(&raw) {
+            let valid = raw
+                .trim()
+                .parse::<i64>()
+                .is_ok_and(|threshold| (1..=100).contains(&threshold));
+            if !valid {
+                tracing::warn!(
+                    source,
+                    value = %raw.trim(),
+                    "Invalid Lukka AML score block threshold ignored; expected integer 1..=100"
+                );
+            }
+        }
+    }
+
+    if config.enabled
+        && config.high_risk_risk_levels.is_empty()
+        && config.high_risk_score_threshold.is_none()
+    {
+        tracing::warn!(
+            "Lukka AML is enabled but both high-risk predicates are disabled; AML checks will not block accounts"
+        );
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Load .env file if it exists
@@ -49,6 +128,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize tracing based on configuration
     api::init_tracing_from_config(&config.logging);
+    log_lukka_aml_policy_config(&config.lukka_aml);
 
     if config.tasks.enabled {
         if config.tasks.is_scheduler_configured() {

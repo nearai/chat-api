@@ -7,7 +7,6 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-pub const DEFAULT_AML_HIGH_RISK_SCORE_THRESHOLD: i64 = 75;
 const PROVIDER_LUKKA: &str = "lukka";
 const NEAR_ADDRESS_TYPE: &str = "NEAR";
 const AML_SLACK_SOURCE_APP: &str = "chat-api";
@@ -286,11 +285,16 @@ pub trait AmlRiskService: Send + Sync {
         )
     }
     fn has_usable_policy_signal(&self, result: &AmlCheckResult) -> bool {
-        let risk_level_policy_configured = !self.high_risk_risk_levels().is_empty();
-        let score_policy_configured = self.high_risk_score_threshold().is_some();
+        let high_risk_risk_levels = self.high_risk_risk_levels();
+        let high_risk_score_threshold = self.high_risk_score_threshold();
+        if high_risk_risk_levels.is_empty() && high_risk_score_threshold.is_none() {
+            return false;
+        }
 
-        (risk_level_policy_configured && result.risk_level != AmlRiskLevel::Unknown)
-            || (score_policy_configured && result.score.is_some())
+        let risk_level_signal_usable =
+            high_risk_risk_levels.is_empty() || result.risk_level != AmlRiskLevel::Unknown;
+        let score_signal_usable = high_risk_score_threshold.is_none() || result.score.is_some();
+        risk_level_signal_usable && score_signal_usable
     }
     fn should_record_active_report(&self, result: &AmlCheckResult) -> bool {
         if self.is_high_risk_result(result) {
@@ -518,16 +522,20 @@ where
         return Ok(None);
     };
     if let Some(number) = value.as_i64() {
-        return Ok(Some(number));
+        return Ok((0..=100).contains(&number).then_some(number));
     }
     if let Some(number) = value.as_f64() {
-        if number.is_finite() && number >= i64::MIN as f64 && number <= i64::MAX as f64 {
-            return Ok(Some(number.round() as i64));
+        if number.is_finite() {
+            let rounded = number.round();
+            if (0.0..=100.0).contains(&rounded) {
+                return Ok(Some(rounded as i64));
+            }
         }
     }
     Ok(value
         .as_str()
-        .and_then(|value| value.trim().parse::<i64>().ok()))
+        .and_then(|value| value.trim().parse::<i64>().ok())
+        .filter(|score| (0..=100).contains(score)))
 }
 
 impl LukkaAmlService {
@@ -635,7 +643,7 @@ impl LukkaAmlService {
     }
 
     fn cache_ttl_secs(&self, result: &AmlCheckResult) -> u64 {
-        if result.is_provider_failure() {
+        if result.is_provider_failure() && !self.is_high_risk_result(result) {
             return self
                 .config
                 .cache_ttl_secs
@@ -1239,6 +1247,30 @@ mod tests {
     }
 
     #[test]
+    fn combined_policy_does_not_reuse_scoreless_reports_when_score_configured() {
+        let mut cfg = test_config("http://127.0.0.1:1".to_string());
+        cfg.high_risk_risk_levels = vec!["HIGH".to_string()];
+        cfg.high_risk_score_threshold = Some(75);
+        let service = LukkaAmlService::new(cfg);
+        let result = aml_result_with_score("legacy.near", AmlRiskLevel::Low, None);
+
+        assert!(!service.has_usable_policy_signal(&result));
+        assert!(!service.should_record_active_report(&result));
+    }
+
+    #[test]
+    fn policy_without_predicates_has_no_usable_signal() {
+        let mut cfg = test_config("http://127.0.0.1:1".to_string());
+        cfg.high_risk_risk_levels.clear();
+        cfg.high_risk_score_threshold = None;
+        let service = LukkaAmlService::new(cfg);
+        let result = aml_result_with_score("alice.near", AmlRiskLevel::High, Some(91));
+
+        assert!(!service.has_usable_policy_signal(&result));
+        assert!(!service.should_record_active_report(&result));
+    }
+
+    #[test]
     fn score_only_high_score_unknown_risk_level_remains_active() {
         let mut cfg = test_config("http://127.0.0.1:1".to_string());
         cfg.high_risk_risk_levels.clear();
@@ -1272,6 +1304,60 @@ mod tests {
         assert!(!service.is_high_risk_result(&result));
         assert!(service.has_usable_policy_signal(&result));
         assert!(!service.should_record_active_report(&result));
+    }
+
+    #[test]
+    fn high_risk_provider_failure_uses_normal_cache_ttl() {
+        let mut cfg = test_config("http://127.0.0.1:1".to_string());
+        cfg.high_risk_risk_levels.clear();
+        cfg.high_risk_score_threshold = Some(75);
+        cfg.cache_ttl_secs = 300;
+        let service = LukkaAmlService::new(cfg);
+        let result = AmlCheckResult {
+            score: Some(91),
+            reason: Some("provider_missing_risk_level".to_string()),
+            ..aml_result("score.near", AmlRiskLevel::Unknown)
+        };
+
+        assert!(result.is_provider_failure());
+        assert!(service.is_high_risk_result(&result));
+        assert_eq!(service.cache_ttl_secs(&result), 300);
+    }
+
+    #[test]
+    fn non_blocking_provider_failure_uses_short_cache_ttl() {
+        let mut cfg = test_config("http://127.0.0.1:1".to_string());
+        cfg.high_risk_risk_levels.clear();
+        cfg.high_risk_score_threshold = Some(75);
+        cfg.cache_ttl_secs = 300;
+        let service = LukkaAmlService::new(cfg);
+        let result = AmlCheckResult {
+            score: Some(7),
+            reason: Some("provider_missing_risk_level".to_string()),
+            ..aml_result("score.near", AmlRiskLevel::Unknown)
+        };
+
+        assert!(result.is_provider_failure());
+        assert!(!service.is_high_risk_result(&result));
+        assert_eq!(
+            service.cache_ttl_secs(&result),
+            PROVIDER_FAILURE_CACHE_TTL_SECS
+        );
+    }
+
+    #[test]
+    fn out_of_range_provider_score_is_unusable() {
+        let body = serde_json::from_value::<LukkaAmlScoreResponse>(serde_json::json!({
+            "cscore_section": {
+                "cscore": 101,
+                "risk_level": "LOW"
+            }
+        }))
+        .expect("deserialize Lukka response");
+        let result = normalize_lukka_response("alice.near", body, true);
+
+        assert_eq!(result.reason.as_deref(), Some("provider_missing_score"));
+        assert!(result.is_provider_failure());
     }
 
     #[test]

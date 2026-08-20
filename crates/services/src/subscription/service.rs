@@ -341,7 +341,7 @@ impl SubscriptionServiceImpl {
     }
 
     fn alert_aml_provider_failure(&self, user_id: UserId, flow: &str, result: &AmlCheckResult) {
-        if result.is_provider_failure() {
+        if result.is_provider_failure() && !self.aml_service.is_high_risk_result(result) {
             self.aml_service
                 .send_provider_failure_slack_alert(user_id, flow, result);
         }
