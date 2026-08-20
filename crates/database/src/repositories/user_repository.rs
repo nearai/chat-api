@@ -6,7 +6,6 @@ use services::user::ports::{
     BanType, LinkedOAuthAccount, OAuthProvider, User, UserRepository,
 };
 use services::UserId;
-use std::collections::HashSet;
 use tokio_postgres::GenericClient;
 use uuid::Uuid;
 
@@ -249,8 +248,8 @@ impl UserRepository for PostgresUserRepository {
     async fn delete_user_account(
         &self,
         user_id: UserId,
-        cloud_deleted_conversation_ids: &[String],
-        cloud_deleted_file_ids: &[String],
+        _cloud_deleted_conversation_ids: &[String],
+        _cloud_deleted_file_ids: &[String],
     ) -> Result<(), AccountDeletionError> {
         let mut client = self.pool.get().await.map_err(anyhow::Error::from)?;
         let tx = client.transaction().await.map_err(anyhow::Error::from)?;
@@ -272,48 +271,6 @@ impl UserRepository for PostgresUserRepository {
             .into_iter()
             .map(|row| row.get("provider_user_id"))
             .collect();
-
-        let verified_conversation_ids: HashSet<&str> = cloud_deleted_conversation_ids
-            .iter()
-            .map(String::as_str)
-            .collect();
-        let current_conversation_rows = tx
-            .query(
-                "SELECT id FROM conversations WHERE user_id = $1 ORDER BY id",
-                &[&user_id],
-            )
-            .await
-            .map_err(anyhow::Error::from)?;
-        let missing_cloud_deletes: Vec<String> = current_conversation_rows
-            .into_iter()
-            .map(|row| row.get::<_, String>("id"))
-            .filter(|id| !verified_conversation_ids.contains(id.as_str()))
-            .collect();
-        if !missing_cloud_deletes.is_empty() {
-            return Err(AccountDeletionError::ConversationCleanupIncomplete {
-                conversation_ids: missing_cloud_deletes,
-            });
-        }
-
-        let verified_file_ids: HashSet<&str> =
-            cloud_deleted_file_ids.iter().map(String::as_str).collect();
-        let current_file_rows = tx
-            .query(
-                "SELECT id FROM files WHERE user_id = $1 ORDER BY id",
-                &[&user_id],
-            )
-            .await
-            .map_err(anyhow::Error::from)?;
-        let missing_cloud_file_deletes: Vec<String> = current_file_rows
-            .into_iter()
-            .map(|row| row.get::<_, String>("id"))
-            .filter(|id| !verified_file_ids.contains(id.as_str()))
-            .collect();
-        if !missing_cloud_file_deletes.is_empty() {
-            return Err(AccountDeletionError::FileCleanupIncomplete {
-                file_ids: missing_cloud_file_deletes,
-            });
-        }
 
         if let Some(ref email) = user_email {
             tx.execute(

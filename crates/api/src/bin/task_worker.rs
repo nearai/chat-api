@@ -3,13 +3,10 @@ use async_trait::async_trait;
 use axum::{routing::get, Json, Router};
 use chrono::{Duration, Utc};
 use serde::Serialize;
-use services::conversation::ports::ConversationService;
-use services::response::service::OpenAIProxy;
 use services::tasks::{
     AccountDeletionTaskPayload, CleanupCanceledInstancesTaskPayload, NoopTaskPayload, TaskExecutor,
 };
 use services::user::ports::{AccountDeletionError, AccountDeletionStatus, UserRepository};
-use services::vpc::{initialize_vpc_credentials, VpcAuthConfig};
 use services::{agent::ports::AgentService, UserId};
 use std::sync::Arc;
 
@@ -30,7 +27,6 @@ struct DefaultTaskExecutor {
     db_pool: database::DbPool,
     agent_service: Arc<dyn AgentService>,
     user_repository: Arc<dyn UserRepository>,
-    conversation_service: Arc<dyn ConversationService>,
 }
 
 const ACCOUNT_DELETION_LEASE_SECONDS: i64 = 300;
@@ -48,21 +44,15 @@ fn progress_string_ids(progress: &serde_json::Value, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn progress_deleted_conversation_ids(progress: &serde_json::Value) -> Vec<String> {
-    progress_string_ids(progress, "cloud_deleted_conversation_ids")
-}
-
-fn progress_deleted_file_ids(progress: &serde_json::Value) -> Vec<String> {
-    progress_string_ids(progress, "cloud_deleted_file_ids")
-}
-
-fn build_account_deletion_progress(
-    conversation_ids: &[String],
-    file_ids: &[String],
-) -> serde_json::Value {
+/// Safely preserves legacy Cloud cleanup markers for in-flight deletion records.
+///
+/// The retired Cloud Conversations and Files APIs are no longer contacted, and
+/// these fields are not prerequisites for finalization. Keeping a normalized
+/// copy lets old progress records be retried without trusting malformed JSON.
+fn normalize_legacy_account_deletion_progress(progress: &serde_json::Value) -> serde_json::Value {
     serde_json::json!({
-        "cloud_deleted_conversation_ids": conversation_ids,
-        "cloud_deleted_file_ids": file_ids,
+        "cloud_deleted_conversation_ids": progress_string_ids(progress, "cloud_deleted_conversation_ids"),
+        "cloud_deleted_file_ids": progress_string_ids(progress, "cloud_deleted_file_ids"),
     })
 }
 
@@ -289,7 +279,7 @@ impl TaskExecutor for DefaultTaskExecutor {
                 .mark_account_deletion_failed_needs_review(
                     request.id,
                     last_error.clone(),
-                    request.progress.clone(),
+                    normalize_legacy_account_deletion_progress(&request.progress),
                 )
                 .await
                 .context("failed to mark account deletion as failed_needs_review")?;
@@ -302,112 +292,11 @@ impl TaskExecutor for DefaultTaskExecutor {
             return Ok(());
         }
 
-        let mut cloud_deleted_conversation_ids =
-            progress_deleted_conversation_ids(&request.progress);
-        let mut cloud_deleted_file_ids = progress_deleted_file_ids(&request.progress);
-        let mut cloud_deleted_set = cloud_deleted_conversation_ids
-            .iter()
-            .cloned()
-            .collect::<std::collections::HashSet<_>>();
-        let mut cloud_deleted_file_set = cloud_deleted_file_ids
-            .iter()
-            .cloned()
-            .collect::<std::collections::HashSet<_>>();
-
-        let conversation_ids = self
-            .user_repository
-            .list_owned_conversation_ids(request.user_id)
-            .await
-            .context("failed to list account conversations")?;
-
-        for conversation_id in conversation_ids {
-            if cloud_deleted_set.contains(&conversation_id) {
-                continue;
-            }
-
-            if let Err(err) = self
-                .conversation_service
-                .delete_conversation_from_provider(&conversation_id)
-                .await
-            {
-                let progress = build_account_deletion_progress(
-                    &cloud_deleted_conversation_ids,
-                    &cloud_deleted_file_ids,
-                );
-                let last_error =
-                    format!("failed to delete cloud conversation {conversation_id}: {err}");
-                self.user_repository
-                    .mark_account_deletion_retrying(request.id, last_error.clone(), progress)
-                    .await
-                    .context("failed to mark account deletion retrying")?;
-                anyhow::bail!(last_error);
-            }
-
-            cloud_deleted_set.insert(conversation_id.clone());
-            cloud_deleted_conversation_ids.push(conversation_id);
-            self.user_repository
-                .update_account_deletion_progress(
-                    request.id,
-                    build_account_deletion_progress(
-                        &cloud_deleted_conversation_ids,
-                        &cloud_deleted_file_ids,
-                    ),
-                    ACCOUNT_DELETION_LEASE_SECONDS,
-                )
-                .await
-                .context("failed to update account deletion progress")?;
-        }
-
-        let file_ids = self
-            .user_repository
-            .list_owned_file_ids(request.user_id)
-            .await
-            .context("failed to list account files")?;
-
-        for file_id in file_ids {
-            if cloud_deleted_file_set.contains(&file_id) {
-                continue;
-            }
-
-            if let Err(err) = self
-                .conversation_service
-                .delete_file_from_provider(&file_id)
-                .await
-            {
-                let progress = build_account_deletion_progress(
-                    &cloud_deleted_conversation_ids,
-                    &cloud_deleted_file_ids,
-                );
-                let last_error = format!("failed to delete provider file {file_id}: {err}");
-                self.user_repository
-                    .mark_account_deletion_retrying(request.id, last_error.clone(), progress)
-                    .await
-                    .context("failed to mark account deletion retrying")?;
-                anyhow::bail!(last_error);
-            }
-
-            cloud_deleted_file_set.insert(file_id.clone());
-            cloud_deleted_file_ids.push(file_id);
-            self.user_repository
-                .update_account_deletion_progress(
-                    request.id,
-                    build_account_deletion_progress(
-                        &cloud_deleted_conversation_ids,
-                        &cloud_deleted_file_ids,
-                    ),
-                    ACCOUNT_DELETION_LEASE_SECONDS,
-                )
-                .await
-                .context("failed to update account deletion file progress")?;
-        }
+        let legacy_progress = normalize_legacy_account_deletion_progress(&request.progress);
 
         match self
             .user_repository
-            .delete_user_account(
-                request.user_id,
-                &cloud_deleted_conversation_ids,
-                &cloud_deleted_file_ids,
-            )
+            .delete_user_account(request.user_id, &[], &[])
             .await
         {
             Ok(()) | Err(AccountDeletionError::UserNotFound) => {
@@ -426,16 +315,12 @@ impl TaskExecutor for DefaultTaskExecutor {
                 err @ (AccountDeletionError::BlockingSubscriptions { .. }
                 | AccountDeletionError::InstancesNotDeleted { .. }),
             ) => {
-                let progress = build_account_deletion_progress(
-                    &cloud_deleted_conversation_ids,
-                    &cloud_deleted_file_ids,
-                );
                 let last_error = err.to_string();
                 self.user_repository
                     .mark_account_deletion_failed_needs_review(
                         request.id,
                         last_error.clone(),
-                        progress,
+                        legacy_progress,
                     )
                     .await
                     .context(
@@ -444,13 +329,9 @@ impl TaskExecutor for DefaultTaskExecutor {
                 Err(anyhow!(last_error))
             }
             Err(err) => {
-                let progress = build_account_deletion_progress(
-                    &cloud_deleted_conversation_ids,
-                    &cloud_deleted_file_ids,
-                );
                 let last_error = err.to_string();
                 self.user_repository
-                    .mark_account_deletion_retrying(request.id, last_error.clone(), progress)
+                    .mark_account_deletion_retrying(request.id, last_error.clone(), legacy_progress)
                     .await
                     .context("failed to mark account deletion retrying after finalization error")?;
                 Err(anyhow!(last_error))
@@ -507,46 +388,6 @@ async fn main() -> anyhow::Result<()> {
         config.agent.non_tee_agent_url_pattern.clone(),
     ));
 
-    let vpc_auth_config = if config.vpc_auth.is_configured() {
-        let base_url = config.openai.base_url.as_ref().ok_or_else(|| {
-            anyhow!("OPENAI_BASE_URL is required when VPC authentication is configured")
-        })?;
-        let shared_secret = config
-            .vpc_auth
-            .read_shared_secret()
-            .ok_or_else(|| anyhow!("Failed to read VPC shared secret"))?;
-        Some(VpcAuthConfig {
-            client_id: config.vpc_auth.client_id.clone(),
-            shared_secret,
-            base_url: base_url.clone(),
-        })
-    } else {
-        None
-    };
-
-    let static_api_key = if vpc_auth_config.is_none() {
-        Some(config.openai.api_key.clone())
-    } else {
-        None
-    };
-    let vpc_credentials_service = initialize_vpc_credentials(
-        vpc_auth_config,
-        db.app_config_repository() as Arc<dyn services::vpc::VpcCredentialsRepository>,
-        static_api_key,
-    )
-    .await?;
-
-    let mut proxy_service = OpenAIProxy::new(vpc_credentials_service);
-    if let Some(base_url) = config.openai.base_url.clone() {
-        proxy_service = proxy_service.with_base_url(base_url);
-    }
-    let conversation_service = Arc::new(
-        services::conversation::service::ConversationServiceImpl::new(
-            db.conversation_repository(),
-            Arc::new(proxy_service),
-        ),
-    );
-
     let aws_config = api::tasks::load_aws_sdk_config(region).await;
 
     let sqs_client = aws_sdk_sqs::Client::new(&aws_config);
@@ -554,7 +395,6 @@ async fn main() -> anyhow::Result<()> {
         db_pool: db.pool().clone(),
         agent_service,
         user_repository: db.user_repository(),
-        conversation_service,
     });
 
     let health_port = tasks.port;
@@ -594,4 +434,27 @@ async fn main() -> anyhow::Result<()> {
         .context("task worker loop exited unexpectedly");
     let _ = shutdown_tx.send(());
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_legacy_account_deletion_progress;
+    use serde_json::json;
+
+    #[test]
+    fn legacy_cloud_cleanup_progress_is_inert_and_safe_to_resume() {
+        let normalized = normalize_legacy_account_deletion_progress(&json!({
+            "cloud_deleted_conversation_ids": ["conv_already_deleted", 42, null],
+            "cloud_deleted_file_ids": "not-an-array",
+            "unrelated_legacy_value": { "keep": false },
+        }));
+
+        assert_eq!(
+            normalized,
+            json!({
+                "cloud_deleted_conversation_ids": ["conv_already_deleted"],
+                "cloud_deleted_file_ids": [],
+            })
+        );
+    }
 }

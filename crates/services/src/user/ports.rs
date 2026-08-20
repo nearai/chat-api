@@ -179,6 +179,10 @@ pub trait UserRepository: Send + Sync {
     ) -> anyhow::Result<User>;
 
     /// Delete a user account and direct PII rows while preserving audit and billing data.
+    ///
+    /// The legacy Cloud cleanup ID lists are accepted for compatibility with
+    /// in-flight account-deletion records, but are no longer required before
+    /// local finalization.
     async fn delete_user_account(
         &self,
         user_id: UserId,

@@ -2,7 +2,7 @@ mod common;
 
 use common::{create_test_server_and_db, mock_login, TestServerConfig};
 use http::{HeaderName, HeaderValue};
-use services::user::ports::{AccountDeletionError, UserRepository};
+use services::user::ports::UserRepository;
 use uuid::Uuid;
 
 fn auth_header(token: &str) -> (HeaderName, HeaderValue) {
@@ -245,7 +245,7 @@ async fn delete_account_request_creates_pending_state_and_blocks_access() {
     assert_eq!(profile_response.status_code(), 403);
 
     db.user_repository()
-        .delete_user_account(user.id, std::slice::from_ref(&conversation_id), &[])
+        .delete_user_account(user.id, &[], &[])
         .await
         .expect("finalize delete account");
     db.user_repository()
@@ -386,7 +386,7 @@ async fn account_deletion_request_reports_insert_vs_existing() {
 }
 
 #[tokio::test]
-async fn delete_account_requires_cloud_file_cleanup() {
+async fn delete_account_finalizes_legacy_local_file_rows_without_cloud_cleanup() {
     let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
     let email = format!("delete_account_file_guard_{}@test.org", Uuid::new_v4());
     let token = mock_login(&server, &email).await;
@@ -409,29 +409,17 @@ async fn delete_account_requires_cloud_file_cleanup() {
         .await
         .expect("insert file");
 
-    let err = db
-        .user_repository()
+    db.user_repository()
         .delete_user_account(user.id, &[], &[])
         .await
-        .expect_err("file guard should block finalization");
-    match err {
-        AccountDeletionError::FileCleanupIncomplete { file_ids } => {
-            assert_eq!(file_ids, vec![file_id.clone()]);
-        }
-        other => panic!("unexpected error: {other:?}"),
-    }
+        .expect("finalize without retired Cloud file cleanup");
 
     assert!(db
         .user_repository()
         .get_user(user.id)
         .await
-        .expect("get user after blocked finalization")
-        .is_some());
-
-    db.user_repository()
-        .delete_user_account(user.id, &[], std::slice::from_ref(&file_id))
-        .await
-        .expect("finalize after file provider cleanup");
+        .expect("get user after finalization")
+        .is_none());
 
     let file_count: i64 = client
         .query_one("SELECT COUNT(*) FROM files WHERE id = $1", &[&file_id])
