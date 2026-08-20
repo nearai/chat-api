@@ -4,12 +4,12 @@ use common::{create_test_server, mock_login};
 use serde_json::json;
 
 #[tokio::test]
-async fn responses_requires_write_access_when_conversation_is_provided() {
+async fn responses_rejects_conversation_state_locally() {
     let server = create_test_server().await;
     let token = mock_login(&server, "no-write@test.com").await;
 
-    // Use a conversation id the user does not own and is not shared with.
-    // The handler should reject with 403 BEFORE attempting any OpenAI call.
+    // The stateless proxy must reject a conversation reference before it can
+    // invoke Cloud API or the legacy conversation-access service.
     let request_body = json!({
         "conversation": "conv_no_write_access",
         "model": "gpt-4o",
@@ -33,7 +33,19 @@ async fn responses_requires_write_access_when_conversation_is_provided() {
 
     assert_eq!(
         response.status_code(),
-        403,
-        "Should require write access for existing conversations"
+        400,
+        "Stateful conversation requests must fail locally"
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(http::header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store")
+    );
+    let body: serde_json::Value = response.json();
+    assert_eq!(
+        body.get("error").and_then(|value| value.as_str()),
+        Some("The stateless Responses API does not support conversation.")
     );
 }

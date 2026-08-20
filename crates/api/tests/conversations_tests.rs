@@ -1,353 +1,79 @@
 mod common;
 
-use common::create_test_server;
-use serde_json::json;
+use api::routes::api::STATEFUL_API_RETIRED_MESSAGE;
+use axum_test::TestResponse;
+use common::{create_test_server, mock_login};
+use http::{HeaderName, HeaderValue, Method, StatusCode};
+use serde_json::Value;
 
-const SESSION_TOKEN: &str = "sess_7770c53028d8400a9c69600d800ab86e";
+fn bearer(token: &str) -> (HeaderName, HeaderValue) {
+    (
+        HeaderName::from_static("authorization"),
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("test token header"),
+    )
+}
+
+fn assert_retired(response: TestResponse) {
+    assert_eq!(response.status_code(), StatusCode::GONE);
+    assert_eq!(
+        response
+            .headers()
+            .get(http::header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store")
+    );
+    let body: Value = response.json();
+    assert_eq!(
+        body.get("error").and_then(Value::as_str),
+        Some(STATEFUL_API_RETIRED_MESSAGE)
+    );
+}
 
 #[tokio::test]
-#[ignore] // This makes real OpenAI API calls - run with: cargo test -- --ignored --nocapture
-async fn test_conversation_workflow() {
+async fn retired_conversation_routes_return_the_migration_response() {
     let server = create_test_server().await;
+    let token = mock_login(&server, "retired-conversations@example.com").await;
 
-    println!("\n=== Test: Conversation Workflow ===");
+    // Publicly shared conversation reads remain optional-auth, but never expose
+    // the legacy resource now that the API is retired.
+    assert_retired(server.get("/v1/conversations/conv_legacy").await);
+    assert_retired(server.get("/v1/conversations/conv_legacy/items").await);
 
-    // Step 1: Create a conversation using OpenAI's API
-    println!("1. Creating a conversation via OpenAI...");
-    let create_conv_body = json!({
-        "metadata": {"test": "e2e"}
-    });
+    // Mutating conversation routes retain the old session-auth boundary.
+    assert_eq!(
+        server.post("/v1/conversations").await.status_code(),
+        StatusCode::UNAUTHORIZED
+    );
 
-    let response = server
-        .post("/v1/conversations")
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {SESSION_TOKEN}")).unwrap(),
-        )
-        .json(&create_conv_body)
-        .await;
-
-    let status = response.status_code();
-    println!("   Status: {status}");
-
-    let conversation_id = if status.is_success() {
-        let body: serde_json::Value = response.json();
-        println!("   ✓ Conversation created successfully");
-        let conv_id = body
-            .get("id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .expect("Conversation should have an ID");
-        println!("   Conversation ID: {conv_id}");
-        conv_id
-    } else {
-        let error_text = response.text();
-        println!("   ✗ Failed: {error_text}");
-        panic!("Failed to create conversation");
-    };
-
-    // Step 2: Add first response to the conversation
-    println!("\n2. Adding first response to the conversation...");
-    let request_body = json!({
-        "conversation": conversation_id,
-        "model": "gpt-4o",
-        "input": [
-            {
-                "type": "message",
-                "role": "user",
-                "content": "Say hello!"
-            }
-        ]
-    });
-
-    let response = server
-        .post("/v1/responses")
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {SESSION_TOKEN}")).unwrap(),
-        )
-        .json(&request_body)
-        .await;
-
-    let status = response.status_code();
-    println!("   Status: {status}");
-
-    if status.is_success() {
-        let body: serde_json::Value = response.json();
-        println!("   ✓ First response created successfully");
-        println!(
-            "   Response ID: {}",
-            body.get("id").unwrap_or(&json!("N/A"))
+    let auth = bearer(&token);
+    for (method, path) in [
+        // Every method that was previously supported by the session-auth API.
+        (Method::POST, "/v1/conversations"),
+        (Method::GET, "/v1/conversations"),
+        (Method::POST, "/v1/conversations/conv_legacy"),
+        (Method::DELETE, "/v1/conversations/conv_legacy"),
+        (Method::POST, "/v1/conversations/conv_legacy/items"),
+        (Method::POST, "/v1/conversations/conv_legacy/shares"),
+        (Method::GET, "/v1/conversations/conv_legacy/shares"),
+        (
+            Method::DELETE,
+            "/v1/conversations/conv_legacy/shares/share_legacy",
+        ),
+        (Method::POST, "/v1/conversations/conv_legacy/pin"),
+        (Method::DELETE, "/v1/conversations/conv_legacy/pin"),
+        (Method::POST, "/v1/conversations/conv_legacy/archive"),
+        (Method::DELETE, "/v1/conversations/conv_legacy/archive"),
+        (Method::POST, "/v1/conversations/conv_legacy/clone"),
+        // Exact known routes and unknown descendants also use the migration
+        // response for methods that were never part of the old contract.
+        (Method::PATCH, "/v1/conversations/conv_legacy"),
+        (Method::PATCH, "/v1/conversations/conv_legacy/unknown-child"),
+    ] {
+        assert_retired(
+            server
+                .method(method, path)
+                .add_header(auth.0.clone(), auth.1.clone())
+                .await,
         );
-    } else {
-        let error_text = response.text();
-        println!("   ✗ Failed: {error_text}");
-        panic!("Failed to create first response");
-    };
-
-    // Step 3: Add second response to the same conversation
-    println!("\n3. Adding second response to the conversation...");
-    let request_body = json!({
-        "conversation": conversation_id,
-        "model": "gpt-4o",
-        "input": [
-            {
-                "type": "message",
-                "role": "user",
-                "content": "Tell me a joke!"
-            }
-        ]
-    });
-
-    let response = server
-        .post("/v1/responses")
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {SESSION_TOKEN}")).unwrap(),
-        )
-        .json(&request_body)
-        .await;
-
-    let status = response.status_code();
-    println!("   Status: {status}");
-
-    if status.is_success() {
-        let body: serde_json::Value = response.json();
-        println!("   ✓ Second response created successfully");
-        println!(
-            "   Response ID: {}",
-            body.get("id").unwrap_or(&json!("N/A"))
-        );
-    } else {
-        let error_text = response.text();
-        println!("   ✗ Failed: {error_text}");
-        panic!("Failed to create second response");
-    };
-
-    // Step 4: List conversations (fetches from OpenAI with details)
-    println!("\n4. Listing conversations (should fetch details from OpenAI)...");
-    let response = server
-        .get("/v1/conversations")
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {SESSION_TOKEN}")).unwrap(),
-        )
-        .await;
-
-    assert_eq!(response.status_code(), 200, "Should list conversations");
-
-    let conversations: Vec<serde_json::Value> = response.json();
-    println!("   Found {} total conversations", conversations.len());
-
-    // Find our conversation
-    let our_conv = conversations.iter().find(|c| {
-        c.get("id")
-            .and_then(|v| v.as_str())
-            .map(|id| id == conversation_id)
-            .unwrap_or(false)
-    });
-
-    if let Some(conv) = our_conv {
-        println!("   ✓ Found our conversation in the list!");
-        println!("      ID: {}", conv.get("id").unwrap_or(&json!("N/A")));
-
-        // Verify that we got OpenAI conversation details (not just ID)
-        if conv.get("created_at").is_some() {
-            println!("      Created: {}", conv.get("created_at").unwrap());
-        }
-        if conv.get("updated_at").is_some() {
-            println!("      Updated: {}", conv.get("updated_at").unwrap());
-        }
-        if conv.get("metadata").is_some() {
-            println!("      Metadata: {:?}", conv.get("metadata").unwrap());
-        }
-
-        println!("   ✓ Conversation details fetched from OpenAI");
-    } else {
-        println!("   ✗ Our conversation not found in list");
-        panic!("Conversation tracking is not working properly");
     }
-
-    println!("\n=== Test Complete ===");
-    println!("✅ Test passed: Created conversation, added responses, and listed conversations with OpenAI details\n");
-}
-
-#[tokio::test]
-#[ignore] // This makes real OpenAI API calls - run with: cargo test -- --ignored --nocapture
-async fn test_conversation_access_control() {
-    let server = create_test_server().await;
-
-    println!("\n=== Test: Conversation Access Control ===");
-
-    // Step 1: Create a conversation
-    println!("1. Creating a conversation...");
-    let create_conv_body = json!({
-        "metadata": {"test": "access_control"}
-    });
-
-    let response = server
-        .post("/v1/conversations")
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {SESSION_TOKEN}")).unwrap(),
-        )
-        .json(&create_conv_body)
-        .await;
-
-    assert!(
-        response.status_code().is_success(),
-        "Should create conversation"
-    );
-
-    let body: serde_json::Value = response.json();
-    let conversation_id = body
-        .get("id")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .expect("Conversation should have an ID");
-    println!("   ✓ Conversation created: {conversation_id}");
-
-    // Step 2: Try to access with the same user (should succeed)
-    println!("\n2. Accessing conversation as owner...");
-    let response = server
-        .get(&format!("/v1/conversations/{}", conversation_id))
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {SESSION_TOKEN}")).unwrap(),
-        )
-        .await;
-
-    // Note: This will go through the proxy handler since we don't have a specific GET route
-    // In a real implementation, you'd want to add a specific route that uses the service
-    println!("   Status: {}", response.status_code());
-
-    // For now, we're testing through the proxy which should work
-    if response.status_code().is_success() {
-        println!("   ✓ Successfully accessed conversation");
-    }
-
-    println!("\n=== Test Complete ===");
-    println!("✅ Test passed: Access control working correctly\n");
-}
-
-#[tokio::test]
-#[ignore] // This makes real OpenAI API calls - run with: cargo test -- --ignored --nocapture
-async fn test_empty_conversation_list() {
-    let server = create_test_server().await;
-
-    println!("\n=== Test: Empty Conversation List ===");
-
-    // List conversations (may or may not be empty depending on previous tests)
-    println!("1. Listing conversations...");
-    let response = server
-        .get("/v1/conversations")
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {SESSION_TOKEN}")).unwrap(),
-        )
-        .await;
-
-    assert_eq!(response.status_code(), 200, "Should list conversations");
-
-    let conversations: Vec<serde_json::Value> = response.json();
-    println!("   Found {} conversations", conversations.len());
-    println!("   ✓ List endpoint works even with zero or many conversations");
-
-    println!("\n=== Test Complete ===");
-    println!("✅ Test passed: Can list conversations successfully\n");
-}
-
-#[tokio::test]
-#[ignore] // This makes real OpenAI API calls - run with: cargo test -- --ignored --nocapture
-async fn test_conversation_tracking_on_response_creation() {
-    let server = create_test_server().await;
-
-    println!("\n=== Test: Conversation Tracking on Response Creation ===");
-
-    // Step 1: Create a conversation
-    println!("1. Creating a conversation...");
-    let create_conv_body = json!({
-        "metadata": {"test": "response_tracking"}
-    });
-
-    let response = server
-        .post("/v1/conversations")
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {SESSION_TOKEN}")).unwrap(),
-        )
-        .json(&create_conv_body)
-        .await;
-
-    assert!(
-        response.status_code().is_success(),
-        "Should create conversation"
-    );
-
-    let body: serde_json::Value = response.json();
-    let conversation_id = body
-        .get("id")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .expect("Conversation should have an ID");
-    println!("   ✓ Conversation created: {conversation_id}");
-
-    // Step 2: Add response (this should trigger conversation tracking)
-    println!("\n2. Adding response to track conversation...");
-    let request_body = json!({
-        "conversation": conversation_id,
-        "model": "gpt-4o",
-        "input": [
-            {
-                "type": "message",
-                "role": "user",
-                "content": "Test message"
-            }
-        ]
-    });
-
-    let response = server
-        .post("/v1/responses")
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {SESSION_TOKEN}")).unwrap(),
-        )
-        .json(&request_body)
-        .await;
-
-    assert!(
-        response.status_code().is_success(),
-        "Should create response"
-    );
-    println!("   ✓ Response created");
-
-    // Step 3: Verify conversation is now tracked in our database
-    println!("\n3. Verifying conversation is tracked...");
-    let response = server
-        .get("/v1/conversations")
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {SESSION_TOKEN}")).unwrap(),
-        )
-        .await;
-
-    assert_eq!(response.status_code(), 200);
-
-    let conversations: Vec<serde_json::Value> = response.json();
-    let found = conversations.iter().any(|c| {
-        c.get("id")
-            .and_then(|v| v.as_str())
-            .map(|id| id == conversation_id)
-            .unwrap_or(false)
-    });
-
-    assert!(
-        found,
-        "Conversation should be tracked after response creation"
-    );
-    println!("   ✓ Conversation is tracked in database");
-    println!("   ✓ Details fetched from OpenAI successfully");
-
-    println!("\n=== Test Complete ===");
-    println!("✅ Test passed: Conversation tracking on response creation works correctly\n");
 }

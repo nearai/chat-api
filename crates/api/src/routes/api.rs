@@ -1,3 +1,8 @@
+// #379 changes the public surface first. The dormant stateful handlers below
+// are intentionally retained for the #381 cleanup follow-up, so suppress their
+// temporary dead-code warnings without changing the rollback boundary.
+#![allow(dead_code)]
+
 use crate::consts::{
     LIST_FILES_LIMIT_MAX, MAX_DECOMPRESSED_RESPONSE_BODY_SIZE, MAX_REQUEST_BODY_SIZE,
     MAX_RESPONSE_BODY_SIZE,
@@ -12,7 +17,7 @@ use axum::{
     extract::{Extension, Path, Request, State},
     http::{HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
-    routing::{delete, get, patch, post},
+    routing::{any, delete, get, patch, post},
     Json, Router,
 };
 use bytes::Bytes;
@@ -92,38 +97,60 @@ mod openapi_errors {
 use openapi_errors::*;
 use openapi_tags::*;
 
-/// Create router for conversation read routes that work with optional authentication
-/// These routes can be accessed by both authenticated users and unauthenticated users
-/// (for publicly shared conversations)
+/// Create retirement routes for legacy public conversation reads.
+///
+/// These paths historically supported optional authentication for public shares.
+/// Keep that boundary while returning the same migration response as the
+/// authenticated stateful routes.
 pub fn create_optional_auth_router() -> Router<crate::state::AppState> {
     Router::new()
-        .route("/v1/conversations/{conversation_id}", get(get_conversation))
+        .route(
+            "/v1/conversations/{conversation_id}",
+            get(retired_stateful_api),
+        )
         .route(
             "/v1/conversations/{conversation_id}/items",
-            get(list_conversation_items),
+            get(retired_stateful_api),
         )
 }
 
 /// Create the unified API router with all v1 proxy and API routes.
 ///
 /// Route groups and their middleware:
-/// - Chat completions, images, responses: dual auth + subscription + rate limited
+/// - Chat completions and images: dual auth + subscription + rate limited
+/// - Responses: dual auth + subscription + rate limited, always no-store
 /// - Model list, models, signature: dual auth only (not rate limited)
-/// - Conversations, share groups, files: session auth only
+/// - Retired conversations, share groups, files: their existing auth boundary
 pub fn create_api_router(
     rate_limit_state: crate::middleware::RateLimitState,
     dual_auth_state: crate::middleware::DualAuthState,
     auth_state: crate::middleware::AuthState,
     subscription_state: crate::middleware::SubscriptionState,
 ) -> Router<crate::state::AppState> {
-    // Dual auth + subscription + rate limited: chat completions, images, responses
+    // Dual auth + subscription + rate limited: chat completions and images
     let llm_proxy_router = Router::new()
         .route("/v1/chat/completions", post(proxy_chat_completions))
         .route("/v1/images/generations", post(proxy_image_generations))
         .route("/v1/images/edits", post(proxy_image_edits))
-        .route("/v1/responses", post(proxy_responses))
         .layer(axum::middleware::from_fn_with_state(
             rate_limit_state.clone(),
+            crate::middleware::rate_limit_middleware,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            subscription_state.clone(),
+            crate::middleware::subscription_middleware,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            dual_auth_state.clone(),
+            crate::middleware::dual_auth_middleware,
+        ));
+
+    // Keep every Responses result out of shared caches, including failures
+    // returned by authentication, subscription, or rate-limit middleware.
+    let responses_proxy_router = Router::new()
+        .route("/v1/responses", post(proxy_responses))
+        .layer(axum::middleware::from_fn_with_state(
+            rate_limit_state,
             crate::middleware::rate_limit_middleware,
         ))
         .layer(axum::middleware::from_fn_with_state(
@@ -133,7 +160,8 @@ pub fn create_api_router(
         .layer(axum::middleware::from_fn_with_state(
             dual_auth_state.clone(),
             crate::middleware::dual_auth_middleware,
-        ));
+        ))
+        .layer(axum::middleware::map_response(force_no_store_response));
 
     // Dual auth only (not rate limited): model list, models, signature
     let models_proxy_router = Router::new()
@@ -154,56 +182,96 @@ pub fn create_api_router(
                 crate::middleware::dual_auth_middleware,
             ));
 
-    // Session auth only: conversations, share groups, files
+    // Retired stateful API surfaces retain their existing session-auth boundary.
+    // Their handlers deliberately do not access the legacy services, database,
+    // or Cloud API; they return a consistent migration response instead.
     let conversations_router = Router::new()
         .route(
             "/v1/conversations",
-            post(create_conversation).get(list_conversations),
+            post(retired_stateful_api)
+                .get(retired_stateful_api)
+                .fallback(retired_stateful_api),
         )
         .route(
             "/v1/conversations/{conversation_id}",
-            post(update_conversation).delete(delete_conversation),
+            post(retired_stateful_api)
+                .delete(retired_stateful_api)
+                .fallback(retired_stateful_api),
         )
         .route(
             "/v1/conversations/{conversation_id}/shares",
-            post(create_conversation_share).get(list_conversation_shares),
+            post(retired_stateful_api)
+                .get(retired_stateful_api)
+                .fallback(retired_stateful_api),
         )
         .route(
             "/v1/conversations/{conversation_id}/shares/{share_id}",
-            delete(delete_conversation_share),
+            delete(retired_stateful_api).fallback(retired_stateful_api),
         )
         .route(
             "/v1/conversations/{conversation_id}/items",
-            post(create_conversation_items),
+            post(retired_stateful_api).fallback(retired_stateful_api),
         )
         .route(
             "/v1/conversations/{conversation_id}/pin",
-            post(pin_conversation).delete(unpin_conversation),
+            post(retired_stateful_api)
+                .delete(retired_stateful_api)
+                .fallback(retired_stateful_api),
         )
         .route(
             "/v1/conversations/{conversation_id}/archive",
-            post(archive_conversation).delete(unarchive_conversation),
+            post(retired_stateful_api)
+                .delete(retired_stateful_api)
+                .fallback(retired_stateful_api),
         )
         .route(
             "/v1/conversations/{conversation_id}/clone",
-            post(clone_conversation),
-        );
+            post(retired_stateful_api).fallback(retired_stateful_api),
+        )
+        // Keep the retirement behavior stable for unversioned legacy children
+        // too. The known public GET paths use create_optional_auth_router.
+        .route("/v1/conversations/", any(retired_stateful_api))
+        .route("/v1/conversations/{*path}", any(retired_stateful_api));
 
     let share_groups_router = Router::new()
         .route(
             "/v1/share-groups",
-            post(create_share_group).get(list_share_groups),
+            post(retired_stateful_api)
+                .get(retired_stateful_api)
+                .fallback(retired_stateful_api),
         )
         .route(
             "/v1/share-groups/{group_id}",
-            patch(update_share_group).delete(delete_share_group),
+            patch(retired_stateful_api)
+                .delete(retired_stateful_api)
+                .fallback(retired_stateful_api),
         )
-        .route("/v1/shared-with-me", get(list_shared_with_me));
+        .route("/v1/share-groups/", any(retired_stateful_api))
+        .route("/v1/share-groups/{*path}", any(retired_stateful_api))
+        .route(
+            "/v1/shared-with-me",
+            get(retired_stateful_api).fallback(retired_stateful_api),
+        );
 
     let files_router = Router::new()
-        .route("/v1/files", post(upload_file).get(list_files))
-        .route("/v1/files/{file_id}", get(get_file).delete(delete_file))
-        .route("/v1/files/{file_id}/content", get(get_file_content));
+        .route(
+            "/v1/files",
+            post(retired_stateful_api)
+                .get(retired_stateful_api)
+                .fallback(retired_stateful_api),
+        )
+        .route(
+            "/v1/files/{file_id}",
+            get(retired_stateful_api)
+                .delete(retired_stateful_api)
+                .fallback(retired_stateful_api),
+        )
+        .route(
+            "/v1/files/{file_id}/content",
+            get(retired_stateful_api).fallback(retired_stateful_api),
+        )
+        .route("/v1/files/", any(retired_stateful_api))
+        .route("/v1/files/{*path}", any(retired_stateful_api));
 
     let session_auth_routes = Router::new()
         .merge(conversations_router)
@@ -216,6 +284,7 @@ pub fn create_api_router(
 
     Router::new()
         .merge(llm_proxy_router)
+        .merge(responses_proxy_router)
         .merge(models_proxy_router)
         .merge(mcp_router)
         .merge(session_auth_routes)
@@ -233,6 +302,169 @@ enum TrackableResource {
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct ErrorResponse {
     pub error: String,
+}
+
+/// Message returned by every retired stateful API route.
+///
+/// The stateful surfaces are intentionally still registered so clients receive
+/// a clear migration signal rather than a proxy error from Cloud API.
+pub const STATEFUL_API_RETIRED_MESSAGE: &str =
+    "This stateful API has been retired. Use /v1/responses with store: false and include all context in each request.";
+
+fn with_no_store_cache_control(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
+/// Apply no-store to every `/v1/responses` result, including middleware and
+/// extractor rejections that do not enter `proxy_responses` itself.
+async fn force_no_store_response(response: Response) -> Response {
+    with_no_store_cache_control(response)
+}
+
+/// Return the stable migration response for legacy conversation, file, and
+/// sharing routes. The route remains behind its existing authentication layer.
+async fn retired_stateful_api() -> Response {
+    with_no_store_cache_control(
+        (
+            StatusCode::GONE,
+            Json(ErrorResponse {
+                error: STATEFUL_API_RETIRED_MESSAGE.to_string(),
+            }),
+        )
+            .into_response(),
+    )
+}
+
+fn stateless_responses_bad_request(error: impl Into<String>) -> Response {
+    with_no_store_cache_control(
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: error.into(),
+            }),
+        )
+            .into_response(),
+    )
+}
+
+/// Reject response fields that require Cloud API to retain conversation, file,
+/// or response state. Keep the messages aligned with Cloud API so callers get
+/// a stable 400 locally instead of a version-dependent upstream error.
+fn validate_stateless_response_body(body: &serde_json::Value) -> Result<(), &'static str> {
+    let Some(request) = body.as_object() else {
+        // Leave malformed root values to Cloud API's normal request parsing.
+        return Ok(());
+    };
+
+    if request.get("store").and_then(serde_json::Value::as_bool) == Some(true) {
+        return Err("The Responses API only supports store: false.");
+    }
+
+    if request
+        .get("conversation")
+        .is_some_and(|value| !value.is_null())
+    {
+        return Err("The stateless Responses API does not support conversation.");
+    }
+
+    if request
+        .get("previous_response_id")
+        .is_some_and(|value| !value.is_null())
+    {
+        return Err("The stateless Responses API does not support previous_response_id.");
+    }
+
+    if request
+        .get("background")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        return Err("The stateless Responses API does not support background.");
+    }
+
+    if let Some(input_items) = request.get("input").and_then(serde_json::Value::as_array) {
+        for item in input_items {
+            match item.get("type").and_then(serde_json::Value::as_str) {
+                Some("mcp_approval_response") => {
+                    return Err(
+                        "The stateless Responses API does not support MCP approval continuation.",
+                    );
+                }
+                Some("function_call_output") => {
+                    return Err(
+                        "The stateless Responses API does not support function continuation.",
+                    );
+                }
+                _ => {}
+            }
+
+            if item
+                .get("content")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|parts| {
+                    parts.iter().any(|part| {
+                        part.get("type").and_then(serde_json::Value::as_str) == Some("input_file")
+                    })
+                })
+            {
+                return Err("The stateless Responses API does not support input_file.");
+            }
+        }
+    }
+
+    if let Some(tools) = request.get("tools").and_then(serde_json::Value::as_array) {
+        for tool in tools {
+            match tool.get("type").and_then(serde_json::Value::as_str) {
+                Some("file_search") => {
+                    return Err("The stateless Responses API does not support file_search.");
+                }
+                Some("function") => {
+                    return Err(
+                        "The stateless Responses API does not support function tools because they require continuation.",
+                    );
+                }
+                Some("code_interpreter") => {
+                    return Err(
+                        "The stateless Responses API does not support code_interpreter because it requires continuation.",
+                    );
+                }
+                Some("computer") => {
+                    return Err(
+                        "The stateless Responses API does not support computer because it requires continuation.",
+                    );
+                }
+                Some("mcp")
+                    if tool
+                        .get("require_approval")
+                        .and_then(serde_json::Value::as_str)
+                        != Some("never") =>
+                {
+                    return Err(
+                        "The stateless Responses API does not support MCP tools that require approval.",
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Normalize a valid JSON request at the proxy boundary. This makes the
+/// no-store contract explicit even when a client omits `store`.
+fn normalize_stateless_response_body(body: &mut serde_json::Value) -> Result<(), &'static str> {
+    validate_stateless_response_body(body)?;
+
+    if let Some(request) = body.as_object_mut() {
+        request.insert("store".to_string(), serde_json::Value::Bool(false));
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2278,7 +2510,7 @@ async fn get_file_content(
     .await
 }
 
-/// Proxy responses endpoint - forwards to OpenAI with model settings and author metadata injection
+/// Proxy a single, stateless Responses request to Cloud API.
 #[utoipa::path(
     post,
     path = "/v1/responses",
@@ -2353,16 +2585,12 @@ async fn proxy_responses(
         }
     }
 
-    // If a conversation ID is provided, this is a write operation on an existing conversation.
-    // Enforce that the caller has write access (owner OR shared with write permission).
+    // Reject every request feature that would make Cloud API retain state
+    // before it can be forwarded. This avoids exposing version-dependent
+    // upstream validation and makes the stateless contract explicit here.
     if let Some(ref body) = body_json {
-        if let Some(conversation_id) = body
-            .get("conversation")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-        {
-            validate_user_conversation(&state, &user, conversation_id, SharePermission::Write)
-                .await?;
+        if let Err(error) = validate_stateless_response_body(body) {
+            return Err(stateless_responses_bad_request(error));
         }
     }
 
@@ -2389,11 +2617,12 @@ async fn proxy_responses(
         }
     }
 
-    // Fetch user profile to inject author metadata into messages
-    let user_profile = state.user_service.get_user_profile(user.user_id).await.ok();
-
-    // Modify request body to inject system prompt and/or author metadata
+    // Modify the request only for the existing model-level system prompt and
+    // to make its no-store contract explicit. Do not inject author metadata:
+    // it previously forced `store: true` and depended on conversation state.
     let modified_body_bytes = if let Some(mut body) = body_json {
+        normalize_stateless_response_body(&mut body).map_err(stateless_responses_bad_request)?;
+
         // Inject model-level system prompt if present
         if let Some(system_prompt) = model_system_prompt.as_ref() {
             let new_instructions = match body.get("instructions").and_then(|v| v.as_str()) {
@@ -2403,33 +2632,6 @@ async fn proxy_responses(
                 _ => system_prompt.clone(),
             };
             body["instructions"] = serde_json::Value::String(new_instructions);
-        }
-
-        // Inject author metadata with user info
-        // This allows shared conversations to show who sent each message.
-        // Author tracking is handled by cloud-api.
-        if let Some(profile) = user_profile {
-            let mut metadata = body
-                .get("metadata")
-                .and_then(|m| m.as_object())
-                .cloned()
-                .unwrap_or_default();
-
-            metadata.insert(
-                "author_id".to_string(),
-                serde_json::Value::String(user.user_id.to_string()),
-            );
-            if let Some(name) = profile.user.name.as_ref() {
-                metadata.insert(
-                    "author_name".to_string(),
-                    serde_json::Value::String(name.clone()),
-                );
-            }
-
-            body["metadata"] = serde_json::Value::Object(metadata);
-
-            // OpenAI requires `store: true` when `metadata` is present for some models.
-            body["store"] = serde_json::Value::Bool(true);
         }
 
         match serde_json::to_vec(&body) {
@@ -2453,19 +2655,6 @@ async fn proxy_responses(
     let content_length = HeaderValue::from_str(&modified_body_bytes.len().to_string())
         .expect("usize to string conversion always produces valid HeaderValue");
     headers.insert(CONTENT_LENGTH, content_length);
-
-    // Track conversation from the request
-    tracing::debug!("POST to /responses detected, attempting to track conversation");
-    if let Err(e) =
-        track_conversation_from_request(&state, user.user_id, &modified_body_bytes).await
-    {
-        tracing::error!(
-            "Failed to track conversation for user {} from /responses: {}",
-            user.user_id,
-            e
-        );
-        // Don't fail the request if conversation tracking fails
-    }
 
     tracing::debug!(
         "Forwarding POST /v1/responses to OpenAI for user_id={}",
@@ -2599,7 +2788,9 @@ async fn proxy_responses(
         Body::from(bytes)
     };
 
-    build_response(proxy_response.status, proxy_response.headers, response_body).await
+    let response =
+        build_response(proxy_response.status, proxy_response.headers, response_body).await?;
+    Ok(with_no_store_cache_control(response))
 }
 
 /// Ensure that if the authenticated user logged in with NEAR (has a NEAR-linked account),
@@ -4738,7 +4929,7 @@ async fn build_response(status: u16, headers: HeaderMap, body: Body) -> Result<R
             // Skip certain headers that shouldn't be forwarded:
             // - transfer-encoding: hyper handles this
             // - connection: hop-by-hop header
-            // - content-length: may be incorrect if we modified the body (e.g., injecting author metadata)
+            // - content-length: may be incorrect if the proxy modified a body
             //   hyper will calculate the correct content-length automatically
             if key != "transfer-encoding" && key != "connection" && key != "content-length" {
                 response_headers.insert(key, value.clone());
@@ -4755,57 +4946,6 @@ async fn build_response(status: u16, headers: HeaderMap, body: Body) -> Result<R
         )
             .into_response()
     })
-}
-
-/// Track a conversation from a response creation request
-async fn track_conversation_from_request(
-    state: &crate::state::AppState,
-    user_id: UserId,
-    body: &Bytes,
-) -> anyhow::Result<()> {
-    tracing::debug!(
-        "Attempting to track conversation from /responses request for user_id={}",
-        user_id
-    );
-
-    // Parse the request body to extract conversation_id if present
-    #[derive(Deserialize)]
-    struct ResponseRequest {
-        conversation: Option<String>,
-    }
-
-    if let Ok(req) = serde_json::from_slice::<ResponseRequest>(body) {
-        if let Some(conversation_id) = req.conversation {
-            tracing::info!(
-                "Found conversation_id={} in /responses request for user_id={}, tracking...",
-                conversation_id,
-                user_id
-            );
-
-            state
-                .conversation_service
-                .track_conversation(&conversation_id, user_id)
-                .await?;
-
-            tracing::info!(
-                "Successfully tracked conversation {} from /responses for user_id={}",
-                conversation_id,
-                user_id
-            );
-        } else {
-            tracing::debug!(
-                "No conversation_id found in /responses request body for user_id={}",
-                user_id
-            );
-        }
-    } else {
-        tracing::debug!(
-            "Failed to parse /responses request body for user_id={}",
-            user_id
-        );
-    }
-
-    Ok(())
 }
 
 async fn validate_user_conversation(
@@ -5429,7 +5569,10 @@ async fn collect_stream_to_bytes(
 
 #[cfg(test)]
 mod tests {
-    use super::{decompress_if_encoded, ensure_stream_usage_options, validate_proxy_path_segment};
+    use super::{
+        decompress_if_encoded, ensure_stream_usage_options, normalize_stateless_response_body,
+        validate_proxy_path_segment, validate_stateless_response_body,
+    };
     use bytes::Bytes;
     use flate2::{write::DeflateEncoder, write::GzEncoder, write::ZlibEncoder, Compression};
     use http::{HeaderMap, HeaderValue};
@@ -5506,6 +5649,93 @@ mod tests {
                 "segment should be rejected: {value}"
             );
         }
+    }
+
+    #[test]
+    fn stateless_responses_normalizes_store_without_author_metadata() {
+        let mut body = json!({
+            "model": "test-model",
+            "input": "hello",
+            "metadata": { "client_key": "client_value" }
+        });
+
+        normalize_stateless_response_body(&mut body).expect("stateless request should be valid");
+
+        assert_eq!(body["store"], json!(false));
+        assert_eq!(body["metadata"], json!({ "client_key": "client_value" }));
+        assert!(body["metadata"].get("author_id").is_none());
+        assert!(body["metadata"].get("author_name").is_none());
+    }
+
+    #[test]
+    fn stateless_responses_rejects_every_cloud_stateful_feature() {
+        let cases = [
+            (
+                json!({ "store": true }),
+                "The Responses API only supports store: false.",
+            ),
+            (
+                json!({ "conversation": "conv_legacy" }),
+                "The stateless Responses API does not support conversation.",
+            ),
+            (
+                json!({ "previous_response_id": "resp_legacy" }),
+                "The stateless Responses API does not support previous_response_id.",
+            ),
+            (
+                json!({ "background": true }),
+                "The stateless Responses API does not support background.",
+            ),
+            (
+                json!({ "input": [{ "type": "function_call_output" }] }),
+                "The stateless Responses API does not support function continuation.",
+            ),
+            (
+                json!({ "input": [{ "type": "mcp_approval_response" }] }),
+                "The stateless Responses API does not support MCP approval continuation.",
+            ),
+            (
+                json!({
+                    "input": [{
+                        "content": [{ "type": "input_file", "file_id": "file_legacy" }]
+                    }]
+                }),
+                "The stateless Responses API does not support input_file.",
+            ),
+            (
+                json!({ "tools": [{ "type": "file_search" }] }),
+                "The stateless Responses API does not support file_search.",
+            ),
+            (
+                json!({ "tools": [{ "type": "function" }] }),
+                "The stateless Responses API does not support function tools because they require continuation.",
+            ),
+            (
+                json!({ "tools": [{ "type": "code_interpreter" }] }),
+                "The stateless Responses API does not support code_interpreter because it requires continuation.",
+            ),
+            (
+                json!({ "tools": [{ "type": "computer" }] }),
+                "The stateless Responses API does not support computer because it requires continuation.",
+            ),
+            (
+                json!({ "tools": [{ "type": "mcp" }] }),
+                "The stateless Responses API does not support MCP tools that require approval.",
+            ),
+        ];
+
+        for (body, expected) in cases {
+            assert_eq!(
+                validate_stateless_response_body(&body),
+                Err(expected),
+                "stateful body should be rejected: {body}"
+            );
+        }
+
+        assert!(validate_stateless_response_body(&json!({
+            "tools": [{ "type": "mcp", "require_approval": "never" }]
+        }))
+        .is_ok());
     }
 
     #[test]
