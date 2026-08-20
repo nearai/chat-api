@@ -8,9 +8,8 @@ pub mod repositories;
 pub use pool::DbPool;
 pub use repositories::{
     PostgresAgentRepository, PostgresAmlReportRepository, PostgresAnalyticsRepository,
-    PostgresAppConfigRepository, PostgresBiMetricsRepository, PostgresConversationRepository,
-    PostgresConversationShareRepository, PostgresCreditsRepository,
-    PostgresEmailVerificationChallengeRepository, PostgresFileRepository, PostgresModelRepository,
+    PostgresAppConfigRepository, PostgresBiMetricsRepository, PostgresCreditsRepository,
+    PostgresEmailVerificationChallengeRepository, PostgresModelRepository,
     PostgresNearNonceRepository, PostgresOAuthRepository, PostgresPaymentWebhookRepository,
     PostgresSessionRepository, PostgresStripeCustomerRepository, PostgresSubscriptionRepository,
     PostgresSystemConfigsRepository, PostgresUserRepository, PostgresUserSettingsRepository,
@@ -31,9 +30,6 @@ pub struct Database {
     user_repository: Arc<PostgresUserRepository>,
     session_repository: Arc<PostgresSessionRepository>,
     oauth_repository: Arc<PostgresOAuthRepository>,
-    conversation_repository: Arc<PostgresConversationRepository>,
-    conversation_share_repository: Arc<PostgresConversationShareRepository>,
-    file_repository: Arc<PostgresFileRepository>,
     user_settings_repository: Arc<PostgresUserSettingsRepository>,
     system_configs_repository: Arc<PostgresSystemConfigsRepository>,
     app_config_repository: Arc<PostgresAppConfigRepository>,
@@ -58,10 +54,6 @@ impl Database {
         let user_repository = Arc::new(PostgresUserRepository::new(pool.clone()));
         let session_repository = Arc::new(PostgresSessionRepository::new(pool.clone()));
         let oauth_repository = Arc::new(PostgresOAuthRepository::new(pool.clone()));
-        let conversation_repository = Arc::new(PostgresConversationRepository::new(pool.clone()));
-        let conversation_share_repository =
-            Arc::new(PostgresConversationShareRepository::new(pool.clone()));
-        let file_repository = Arc::new(PostgresFileRepository::new(pool.clone()));
         let user_settings_repository = Arc::new(PostgresUserSettingsRepository::new(pool.clone()));
         let system_configs_repository =
             Arc::new(PostgresSystemConfigsRepository::new(pool.clone()));
@@ -88,9 +80,6 @@ impl Database {
             user_repository,
             session_repository,
             oauth_repository,
-            conversation_repository,
-            conversation_share_repository,
-            file_repository,
             user_settings_repository,
             system_configs_repository,
             app_config_repository,
@@ -245,21 +234,6 @@ impl Database {
     /// Get the OAuth repository
     pub fn oauth_repository(&self) -> Arc<PostgresOAuthRepository> {
         self.oauth_repository.clone()
-    }
-
-    /// Get the conversation repository
-    pub fn conversation_repository(&self) -> Arc<PostgresConversationRepository> {
-        self.conversation_repository.clone()
-    }
-
-    /// Get the conversation share repository
-    pub fn conversation_share_repository(&self) -> Arc<PostgresConversationShareRepository> {
-        self.conversation_share_repository.clone()
-    }
-
-    /// Get the file repository
-    pub fn file_repository(&self) -> Arc<PostgresFileRepository> {
-        self.file_repository.clone()
     }
 
     /// Get the user settings repository

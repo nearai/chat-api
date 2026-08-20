@@ -11,9 +11,6 @@ use services::{
     agent::proxy::AgentProxy,
     analytics::AnalyticsServiceImpl,
     auth::{EmailAuthServiceImpl, OAuthServiceImpl},
-    conversation::service::ConversationServiceImpl,
-    conversation::share_service::ConversationShareServiceImpl,
-    file::service::FileServiceImpl,
     metrics::{MockMetricsService, OtlpMetricsService},
     model::service::ModelServiceImpl,
     response::service::OpenAIProxy,
@@ -105,9 +102,6 @@ async fn main() -> anyhow::Result<()> {
     let user_repo = db.user_repository();
     let session_repo = db.session_repository();
     let oauth_repo = db.oauth_repository();
-    let conversation_repo = db.conversation_repository();
-    let conversation_share_repo = db.conversation_share_repository();
-    let file_repo = db.file_repository();
     let user_settings_repo = db.user_settings_repository();
     let app_config_repo = db.app_config_repository();
     let near_nonce_repo = db.near_nonce_repository();
@@ -197,21 +191,6 @@ async fn main() -> anyhow::Result<()> {
         proxy_service = proxy_service.with_base_url(base_url);
     }
     let proxy_service = Arc::new(proxy_service);
-
-    // Initialize conversation service
-    let conversation_service = Arc::new(ConversationServiceImpl::new(
-        conversation_repo,
-        proxy_service.clone(),
-    ));
-
-    let conversation_share_service = Arc::new(ConversationShareServiceImpl::new(
-        db.conversation_repository(),
-        conversation_share_repo,
-        user_repo.clone(),
-    ));
-
-    // Initialize file service
-    let file_service = Arc::new(FileServiceImpl::new(file_repo, proxy_service.clone()));
 
     // Initialize system configs service (needed by agent service)
     tracing::info!("Initializing system configs service...");
@@ -400,9 +379,6 @@ async fn main() -> anyhow::Result<()> {
         subscription_service,
         session_repository: session_repo,
         proxy_service,
-        conversation_service,
-        conversation_share_service,
-        file_service,
         agent_service,
         agent_repository: agent_repo,
         agent_proxy_service,

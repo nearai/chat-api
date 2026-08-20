@@ -1,7 +1,6 @@
 use crate::consts::SYSTEM_PROMPT_MAX_LEN;
 use crate::ApiError;
 use serde::{Deserialize, Serialize};
-use services::file::ports::FileData;
 use services::system_configs::ports::{
     AgentHostingConfig, AutoRouteConfig, CreditsConfig, InstanceDefaultsConfig,
     SubscriptionPlanConfig,
@@ -872,41 +871,6 @@ impl TryFrom<UpsertSystemConfigsRequest> for services::system_configs::ports::Pa
             instance_defaults: req.instance_defaults,
             agent_hosting: req.agent_hosting,
         })
-    }
-}
-
-/// File list response with pagination
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct FileListResponse {
-    /// Always "list"
-    pub object: String,
-    /// List of files (without `object` field per item)
-    pub data: Vec<FileGetResponse>,
-    /// First file ID in the list
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub first_id: Option<String>,
-    /// Last file ID in the list
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_id: Option<String>,
-    /// Whether there are more files available
-    pub has_more: bool,
-}
-
-/// File get response with `object` field
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct FileGetResponse {
-    /// Always "file"
-    pub object: String,
-    #[serde(flatten)]
-    pub file: FileData,
-}
-
-impl From<FileData> for FileGetResponse {
-    fn from(file: FileData) -> Self {
-        Self {
-            object: "file".to_string(),
-            file,
-        }
     }
 }
 

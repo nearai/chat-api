@@ -7,8 +7,6 @@ use axum_test::TestServer;
 use chrono::Duration;
 use serde_json::json;
 use services::analytics::AnalyticsServiceImpl;
-use services::conversation::share_service::ConversationShareServiceImpl;
-use services::file::service::FileServiceImpl;
 use services::metrics::MockMetricsService;
 use services::subscription::ports::{StripeClientPort, SubscriptionService};
 use services::system_configs::ports::RateLimitConfig;
@@ -129,9 +127,6 @@ async fn create_test_server_and_db_inner(
     let user_repo = db.user_repository();
     let session_repo = db.session_repository();
     let oauth_repo = db.oauth_repository();
-    let conversation_repo = db.conversation_repository();
-    let conversation_share_repo = db.conversation_share_repository();
-    let file_repo = db.file_repository();
     let user_settings_repo = db.user_settings_repository();
     let model_repo = db.model_repository();
     let system_configs_repo = db.system_configs_repository();
@@ -295,20 +290,6 @@ async fn create_test_server_and_db_inner(
     }
     let proxy_service = Arc::new(proxy_service);
 
-    // Initialize conversation service
-    let conversation_service = Arc::new(
-        services::conversation::service::ConversationServiceImpl::new(
-            conversation_repo,
-            proxy_service.clone(),
-        ),
-    );
-
-    let conversation_share_service = Arc::new(ConversationShareServiceImpl::new(
-        db.conversation_repository(),
-        conversation_share_repo,
-        user_repo.clone(),
-    ));
-
     let mut admin_domains = test_config
         .admin_domains
         .clone()
@@ -317,8 +298,6 @@ async fn create_test_server_and_db_inner(
 
     // Add `admin.org` as test admin domain
     admin_domains.push("admin.org".to_string());
-
-    let file_service = Arc::new(FileServiceImpl::new(file_repo, proxy_service.clone()));
 
     // Create metrics service (mock for tests)
     let metrics_service: Arc<dyn services::metrics::MetricsServiceTrait> =
@@ -384,9 +363,6 @@ async fn create_test_server_and_db_inner(
         vpc_credentials_service,
         user_repository: user_repo,
         proxy_service,
-        conversation_service,
-        conversation_share_service,
-        file_service,
         agent_service,
         agent_repository: agent_repo,
         agent_proxy_service,
