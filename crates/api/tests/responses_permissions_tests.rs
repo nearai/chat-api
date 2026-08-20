@@ -1,12 +1,28 @@
 mod common;
 
-use common::{create_test_server, mock_login};
+use common::{
+    create_test_server_and_db, insert_test_subscription, mock_login, set_subscription_plans,
+    TestServerConfig,
+};
 use serde_json::json;
+use uuid::Uuid;
 
 #[tokio::test]
 async fn responses_rejects_conversation_state_locally() {
-    let server = create_test_server().await;
-    let token = mock_login(&server, "no-write@test.com").await;
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": {
+                "providers": { "stripe": { "price_id": "price_test_basic" } },
+                "monthly_credits": { "max": 1_000_000_000 }
+            }
+        }),
+    )
+    .await;
+    let email = format!("stateless-permissions-{}@example.com", Uuid::new_v4());
+    let token = mock_login(&server, &email).await;
+    insert_test_subscription(&server, &db, &email, false).await;
 
     // The stateless proxy must reject a conversation reference before it can
     // invoke Cloud API or the legacy conversation-access service.
