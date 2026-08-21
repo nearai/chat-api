@@ -30,7 +30,7 @@ crates/
 - **Repository Pattern**: Database access through trait-based repositories (`PostgresUserRepository`, etc.)
 - **Service Layer**: Business logic in `services` crate, injected into `AppState`
 - **NEAR AI Cloud API Proxy**: OpenAI-compatible inference routes forward to NEAR AI Cloud API with auth; Responses requests are stateless
-- **Temporary Read Views**: Owner-only Conversation and File GET endpoints remain available for the Stage I migration/export window. Sharing surfaces and all write operations return `410 Gone`.
+- **Temporary Read Views**: Owner-only Conversation and File GET endpoints remain available for the Stage I migration/export window. Ordinary Conversation, File, and sharing writes return `410 Gone`; the existing `DELETE /v1/users/me` account-deletion flow remains available.
 - **Patroni Support**: Optional cluster discovery for HA PostgreSQL via `DATABASE_PRIMARY_APP_ID`
 
 ### Request Flow
@@ -195,7 +195,11 @@ OpenAPI docs available at `/docs`.
 - `/v1/users/*` - User management
 - `/v1/admin/*` - Admin operations
 
-**Stage I migration**: owner-only Conversation and File GET views remain temporarily available for authenticated private-chat data export. Sharing APIs, all established write operations (create/update/delete, item creation, upload, pin/archive, clone, and share-group mutation), plus unsupported methods and descendants within those legacy namespaces, return `410 Gone` with `Cache-Control: no-store` after session authentication. These views will be removed in Stage III. `/v1/responses` is stateless: requests are normalized to `store: false`, and response/conversation linkage fields such as `conversation`, `previous_response_id`, and `background: true` are rejected. Clients may use custom function tools and replay their own function results; Cloud validates tool and input shapes.
+**Stage I migration**: owner-only Conversation and File GET views remain temporarily available for authenticated private-chat data export. Ordinary Conversation, File, and sharing state writes (create/update/delete, item creation, upload, pin/archive, clone, and share-group mutation), plus unsupported methods and descendants within those legacy namespaces, return `410 Gone` with `Cache-Control: no-store` after session authentication. These views will be removed in Stage III.
+
+**Account-deletion exception**: `DELETE /v1/users/me` remains available. Its existing asynchronous worker continues Cloud Conversation/File cleanup through Cloud API's retained, API-key/workspace-scoped resource DELETE endpoints before it performs local finalization; this flow is outside the retired session-proxy write surface.
+
+`/v1/responses` is stateless: requests are normalized to `store: false`, and response/conversation linkage fields such as `conversation`, `previous_response_id`, and `background: true` are rejected. Clients may use custom function tools and replay their own function results; Cloud validates tool and input shapes.
 
 **Note**: OpenAI-compatible inference requests are proxied to **NEAR AI Cloud API**. Set `OPENAI_BASE_URL` to your NEAR AI Cloud API endpoint.
 
