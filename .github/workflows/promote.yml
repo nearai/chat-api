@@ -1,0 +1,138 @@
+name: Promote to Production
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Docker Hub tag to promote to :prod (e.g. "0.2.13" or "v0.2.13"). Must already exist on Docker Hub.'
+        required: true
+        type: string
+      confirm:
+        description: 'Type "promote" to confirm'
+        required: true
+        type: string
+
+env:
+  REGISTRY: docker.io
+  IMAGE_REPOSITORY: ${{ vars.DOCKER_REGISTRY_USER }}/private-chat
+
+concurrency:
+  group: prod-image-mutation
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    name: Promote tag -> prod
+    permissions:
+      contents: write
+      id-token: write
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Validate inputs
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+          TAG_INPUT: ${{ inputs.tag }}
+        run: |
+          if [ "$CONFIRM" != "promote" ]; then
+            echo "::error::Confirmation input must be exactly 'promote'" >&2
+            exit 1
+          fi
+          if [ -z "$TAG_INPUT" ]; then
+            echo "::error::tag input is required" >&2
+            exit 1
+          fi
+
+      - name: Log in to Docker registry
+        uses: docker/login-action@65b78e6e13532edd9afa3aa52ac7964289d1a9c1
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ vars.DOCKER_REGISTRY_USER }}
+          password: ${{ secrets.DOCKER_REGISTRY_TOKEN }}
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y skopeo jq
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+
+      - name: Resolve tag digest and validate it exists on Docker Hub
+        env:
+          TAG_INPUT: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_REPOSITORY }}"
+
+          # Accept both "v0.2.13" and "0.2.13"; Docker Hub uses the stripped form
+          DOCKER_TAG="${TAG_INPUT#v}"
+          GIT_TAG="v${DOCKER_TAG}"
+
+          DIGEST=$(skopeo inspect "docker://${IMAGE}:${DOCKER_TAG}" 2>/dev/null | jq -r '.Digest' || true)
+          if [ -z "$DIGEST" ] || [ "$DIGEST" = "null" ]; then
+            echo "::error::Tag ${DOCKER_TAG} not found on Docker Hub for ${IMAGE}"
+            exit 1
+          fi
+
+          echo "IMAGE=${IMAGE}" >> "$GITHUB_ENV"
+          echo "DOCKER_TAG=${DOCKER_TAG}" >> "$GITHUB_ENV"
+          echo "GIT_TAG=${GIT_TAG}" >> "$GITHUB_ENV"
+          echo "DIGEST=${DIGEST}" >> "$GITHUB_ENV"
+
+      - name: Verify image was built and signed by build.yml in this repo
+        run: |
+          set -euo pipefail
+          cosign verify \
+            --certificate-identity-regexp '^https://github\.com/nearai/chat-api/\.github/workflows/build\.yml@refs/(heads/main|tags/v.*)$' \
+            --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+            --certificate-github-workflow-repository 'nearai/chat-api' \
+            "${IMAGE}@${DIGEST}"
+
+      - name: Promote tag to :prod
+        run: |
+          set -euo pipefail
+          skopeo copy "docker://${IMAGE}@${DIGEST}" "docker://${IMAGE}:prod"
+
+      - name: Confirm :prod resolves to the promoted digest
+        run: |
+          set -euo pipefail
+          RESOLVED=$(skopeo inspect "docker://${IMAGE}:prod" | jq -r '.Digest')
+          if [ "$RESOLVED" != "$DIGEST" ]; then
+            echo "::error::${IMAGE}:prod resolved to ${RESOLVED}, expected ${DIGEST}"
+            exit 1
+          fi
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          NOTES=$(cat <<EOF
+          ## Production Promotion
+
+          - **Image**: \`${IMAGE}:prod\`
+          - **Promoted from**: \`${IMAGE}:${DOCKER_TAG}\`
+          - **Digest**: \`${DIGEST}\`
+          - **Sigstore**: https://search.sigstore.dev/?hash=${DIGEST}
+          EOF
+          )
+          if gh release view "$GIT_TAG" >/dev/null 2>&1; then
+            gh release edit "$GIT_TAG" --title "Production Release ${GIT_TAG}" --notes "$NOTES" --latest
+          else
+            gh release create "$GIT_TAG" --title "Production Release ${GIT_TAG}" --notes "$NOTES" --latest
+          fi
+
+      - name: Generate build summary
+        run: |
+          {
+            echo "## Promotion: ${IMAGE}:${DOCKER_TAG} -> prod"
+            echo ""
+            echo "- prod: \`${IMAGE}:prod\`"
+            echo "- digest: \`${DIGEST}\`"
+            echo "- release: \`${GIT_TAG}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
