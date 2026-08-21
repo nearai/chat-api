@@ -95,64 +95,41 @@ mod openapi_errors {
 use openapi_errors::*;
 use openapi_tags::*;
 
-/// Create retirement routes for legacy public conversation reads.
+/// Create the Stage I stateful API surface.
 ///
-/// These paths historically supported optional authentication for public shares.
-/// Keep that boundary while returning the same migration response as the
-/// authenticated stateful routes.
-pub fn create_optional_auth_router<S>() -> Router<S>
-where
-    S: Clone + Send + Sync + 'static,
-{
-    Router::new()
-        .route(
-            "/v1/conversations/{conversation_id}",
-            get(retired_stateful_api),
-        )
-        .route(
-            "/v1/conversations/{conversation_id}/items",
-            get(retired_stateful_api),
-        )
-}
-
-/// Create the retired stateful surfaces without their authentication layer.
-///
-/// Conversation GET routes intentionally omit their handlers here: they merge
-/// with `create_optional_auth_router` at the application boundary so public
-/// shared reads retain their historical optional-auth behavior. Every other
-/// request is protected by the caller's session-auth layer.
-fn create_retired_stateful_router<S>() -> Router<S>
-where
-    S: Clone + Send + Sync + 'static,
-{
-    // The nested router's fallback is stored separately by Axum, which lets it
-    // catch unknown descendants without conflicting with `{conversation_id}`.
+/// Owner-only Conversation and File views remain available temporarily for
+/// private-chat export. Sharing surfaces and every established mutation return
+/// the migration response. This router keeps that response scoped to the
+/// legacy stateful namespaces, so unsupported methods and descendants cannot
+/// fall through to unrelated app routes.
+fn create_read_only_stateful_router() -> Router<crate::state::AppState> {
     let conversations_router = Router::new()
         .route(
             "/",
-            post(retired_stateful_api)
-                .get(retired_stateful_api)
+            get(list_conversations)
+                .post(retired_stateful_api)
                 .fallback(retired_stateful_api),
         )
+        // `batch` is internal to the Chat API list implementation. Never
+        // expose it as a public conversation ID or endpoint.
+        .route("/batch", any(retired_stateful_api))
         .route(
             "/{conversation_id}",
-            post(retired_stateful_api)
+            get(get_conversation)
+                .post(retired_stateful_api)
                 .delete(retired_stateful_api)
                 .fallback(retired_stateful_api),
         )
-        .route(
-            "/{conversation_id}/shares",
-            post(retired_stateful_api)
-                .get(retired_stateful_api)
-                .fallback(retired_stateful_api),
-        )
+        .route("/{conversation_id}/shares", any(retired_stateful_api))
         .route(
             "/{conversation_id}/shares/{share_id}",
             delete(retired_stateful_api).fallback(retired_stateful_api),
         )
         .route(
             "/{conversation_id}/items",
-            post(retired_stateful_api).fallback(retired_stateful_api),
+            get(list_conversation_items)
+                .post(retired_stateful_api)
+                .fallback(retired_stateful_api),
         )
         .route(
             "/{conversation_id}/pin",
@@ -173,12 +150,7 @@ where
         .fallback(retired_stateful_api);
 
     let share_groups_router = Router::new()
-        .route(
-            "/",
-            post(retired_stateful_api)
-                .get(retired_stateful_api)
-                .fallback(retired_stateful_api),
-        )
+        .route("/", any(retired_stateful_api))
         .route(
             "/{group_id}",
             patch(retired_stateful_api)
@@ -190,27 +162,24 @@ where
     let files_router = Router::new()
         .route(
             "/",
-            post(retired_stateful_api)
-                .get(retired_stateful_api)
+            get(list_files)
+                .post(retired_stateful_api)
                 .fallback(retired_stateful_api),
         )
         .route(
             "/{file_id}",
-            get(retired_stateful_api)
+            get(get_file)
                 .delete(retired_stateful_api)
                 .fallback(retired_stateful_api),
         )
         .route(
             "/{file_id}/content",
-            get(retired_stateful_api).fallback(retired_stateful_api),
+            get(get_file_content).fallback(retired_stateful_api),
         )
         .fallback(retired_stateful_api);
 
     let shared_with_me_router = Router::new()
-        .route(
-            "/",
-            get(retired_stateful_api).fallback(retired_stateful_api),
-        )
+        .route("/", any(retired_stateful_api))
         .fallback(retired_stateful_api);
 
     Router::new()
@@ -218,10 +187,10 @@ where
         .route("/v1/conversations/", any(retired_stateful_api))
         .nest("/v1/share-groups", share_groups_router)
         .route("/v1/share-groups/", any(retired_stateful_api))
-        .nest("/v1/files", files_router)
-        .route("/v1/files/", any(retired_stateful_api))
         .nest("/v1/shared-with-me", shared_with_me_router)
         .route("/v1/shared-with-me/", any(retired_stateful_api))
+        .nest("/v1/files", files_router)
+        .route("/v1/files/", any(retired_stateful_api))
 }
 
 /// Create the unified API router with all v1 proxy and API routes.
@@ -230,7 +199,8 @@ where
 /// - Chat completions and images: dual auth + subscription + rate limited
 /// - Responses: dual auth + subscription + rate limited, always no-store
 /// - Model list, models, signature: dual auth only (not rate limited)
-/// - Retired conversations, share groups, files: their existing auth boundary
+/// - Temporary owner-only Conversation and File views: session auth; sharing,
+///   mutations, and unsupported legacy paths return 410
 pub fn create_api_router(
     rate_limit_state: crate::middleware::RateLimitState,
     dual_auth_state: crate::middleware::DualAuthState,
@@ -292,12 +262,15 @@ pub fn create_api_router(
                 crate::middleware::dual_auth_middleware,
             ));
 
-    // Retired stateful routes retain their existing session-auth boundary. The
-    // handlers deliberately do not access legacy services, the database, or
-    // Cloud API; they only return a consistent migration response.
-    let session_auth_routes = create_retired_stateful_router::<crate::state::AppState>().layer(
-        axum::middleware::from_fn_with_state(auth_state, crate::middleware::auth_middleware),
-    );
+    // Temporary stateful read views retain their existing session-auth
+    // boundary. Wrap the whole layer so reads, migration responses, and auth
+    // errors are never cached.
+    let session_auth_routes = create_read_only_stateful_router()
+        .layer(axum::middleware::from_fn_with_state(
+            auth_state,
+            crate::middleware::auth_middleware,
+        ))
+        .layer(axum::middleware::map_response(force_no_store_response));
 
     Router::new()
         .merge(llm_proxy_router)
@@ -308,7 +281,7 @@ pub fn create_api_router(
 }
 
 /// Type of resource to track in the response
-#[allow(dead_code)] // Retained only until #381 removes the retired stateful implementation.
+#[allow(dead_code)] // Retained until the Stage III physical cleanup.
 enum TrackableResource {
     /// New conversation - records metrics
     Conversation,
@@ -322,10 +295,11 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
-/// Message returned by every retired stateful API route.
+/// Message returned by every disabled stateful mutation route.
 ///
-/// The stateful surfaces are intentionally still registered so clients receive
-/// a clear migration signal rather than a proxy error from Cloud API.
+/// Temporary stateful read views remain available for the Stage I export
+/// window. Disabled mutations return this clear migration signal rather than a
+/// proxy error from Cloud API.
 pub const STATEFUL_API_RETIRED_MESSAGE: &str =
     "This stateful API has been retired. Use /v1/responses with store: false and include all context in each request.";
 
@@ -350,14 +324,16 @@ fn has_only_identity_content_encoding(headers: &HeaderMap) -> bool {
     })
 }
 
-/// Apply no-store to every `/v1/responses` result, including middleware and
-/// extractor rejections that do not enter `proxy_responses` itself.
-async fn force_no_store_response(response: Response) -> Response {
+/// Apply no-store to every temporary sensitive-data response, including
+/// middleware and extractor rejections that do not enter a handler itself.
+pub(crate) async fn force_no_store_response(response: Response) -> Response {
     with_no_store_cache_control(response)
 }
 
-/// Return the stable migration response for legacy conversation, file, and
-/// sharing routes. The route remains behind its existing authentication layer.
+/// Return the stable migration response for a disabled Stage I stateful
+/// surface. This covers mutations, retired sharing reads, and unsupported
+/// paths within the scoped legacy namespaces; the route remains behind its
+/// existing authentication layer.
 async fn retired_stateful_api() -> Response {
     with_no_store_cache_control(
         (
@@ -382,9 +358,9 @@ fn stateless_responses_bad_request(error: impl Into<String>) -> Response {
     )
 }
 
-/// Reject response fields that require Cloud API to retain conversation, file,
-/// or response state. Keep the messages aligned with Cloud API so callers get
-/// a stable 400 locally instead of a version-dependent upstream error.
+/// Reject the response fields that unambiguously require Cloud API to retain
+/// state. Tool and input-item shapes are otherwise forwarded unchanged so
+/// Cloud remains the single source of truth for its supported capabilities.
 fn validate_stateless_response_body(body: &serde_json::Value) -> Result<(), &'static str> {
     let request = body
         .as_object()
@@ -414,72 +390,6 @@ fn validate_stateless_response_body(body: &serde_json::Value) -> Result<(), &'st
         == Some(true)
     {
         return Err("The stateless Responses API does not support background.");
-    }
-
-    if let Some(input_items) = request.get("input").and_then(serde_json::Value::as_array) {
-        for item in input_items {
-            match item.get("type").and_then(serde_json::Value::as_str) {
-                Some("mcp_approval_response") => {
-                    return Err(
-                        "The stateless Responses API does not support MCP approval continuation.",
-                    );
-                }
-                Some("function_call_output") => {
-                    return Err(
-                        "The stateless Responses API does not support function continuation.",
-                    );
-                }
-                _ => {}
-            }
-
-            if item
-                .get("content")
-                .and_then(serde_json::Value::as_array)
-                .is_some_and(|parts| {
-                    parts.iter().any(|part| {
-                        part.get("type").and_then(serde_json::Value::as_str) == Some("input_file")
-                    })
-                })
-            {
-                return Err("The stateless Responses API does not support input_file.");
-            }
-        }
-    }
-
-    if let Some(tools) = request.get("tools").and_then(serde_json::Value::as_array) {
-        for tool in tools {
-            match tool.get("type").and_then(serde_json::Value::as_str) {
-                Some("file_search") => {
-                    return Err("The stateless Responses API does not support file_search.");
-                }
-                Some("function") => {
-                    return Err(
-                        "The stateless Responses API does not support function tools because they require continuation.",
-                    );
-                }
-                Some("code_interpreter") => {
-                    return Err(
-                        "The stateless Responses API does not support code_interpreter because it requires continuation.",
-                    );
-                }
-                Some("computer") => {
-                    return Err(
-                        "The stateless Responses API does not support computer because it requires continuation.",
-                    );
-                }
-                Some("mcp")
-                    if tool
-                        .get("require_approval")
-                        .and_then(serde_json::Value::as_str)
-                        != Some("never") =>
-                {
-                    return Err(
-                        "The stateless Responses API does not support MCP tools that require approval.",
-                    );
-                }
-                _ => {}
-            }
-        }
     }
 
     Ok(())
@@ -633,7 +543,6 @@ impl From<ShareRecipient> for ShareRecipientPayload {
     }
 }
 
-#[allow(dead_code)]
 fn to_share_response(
     share: services::conversation::ports::ConversationShare,
 ) -> ConversationShareResponse {
@@ -650,7 +559,6 @@ fn to_share_response(
     }
 }
 
-#[allow(dead_code)]
 fn to_share_group_response(group: services::conversation::ports::ShareGroup) -> ShareGroupResponse {
     ShareGroupResponse {
         id: group.id,
@@ -685,7 +593,6 @@ pub struct ValidatedListFilesParams {
 
 impl ListFilesParams {
     /// Validate query parameters and return normalized values (with defaults applied)
-    #[allow(dead_code)]
     fn validate(self) -> Result<ValidatedListFilesParams, (StatusCode, Json<ErrorResponse>)> {
         // Apply default values
         let limit = self.limit.unwrap_or(LIST_FILES_LIMIT_MAX);
@@ -925,7 +832,6 @@ async fn update_conversation(
         ("session_token" = [])
     )
 )]
-#[allow(dead_code)]
 async fn list_conversations(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -960,16 +866,13 @@ async fn list_conversations(
     Ok(Json(conversations).into_response())
 }
 
-/// Get a conversation - validates user access or public share and fetches details via service/OpenAI
-/// Works with optional authentication - authenticated users get their access checked,
-/// unauthenticated users can only access publicly shared conversations
+/// Get a conversation for an authenticated user and fetch details via service/OpenAI.
+///
+/// Only the Conversation owner may use this temporary export view during the
+/// Stage I window. Public and shared access are not exposed here.
 ///
 /// # Authentication
-/// This endpoint supports **optional authentication**:
-/// - **With authentication**: Returns conversation if user owns it or has been granted access via sharing
-/// - **Without authentication**: Returns conversation only if it has been publicly shared
-///
-/// This allows public sharing of conversations while maintaining access control for private conversations.
+/// Returns the conversation only when the session user owns it.
 #[utoipa::path(
     get,
     path = "/v1/conversations/{conversation_id}",
@@ -979,35 +882,26 @@ async fn list_conversations(
     ),
     responses(
         (status = 200, description = "Conversation retrieved successfully", body = serde_json::Value),
-        (status = 403, description = "Access denied - conversation not accessible to this user or not publicly shared"),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
         (status = 404, description = CONVERSATION_NOT_FOUND)
     ),
     security(
-        (), // Optional - no auth required for publicly shared conversations
-        ("session_token" = []) // Optional - session token for authenticated access
+        ("session_token" = [])
     )
 )]
-#[allow(dead_code)]
 async fn get_conversation(
     State(state): State<crate::state::AppState>,
-    Extension(user): Extension<Option<AuthenticatedUser>>,
+    Extension(user): Extension<AuthenticatedUser>,
     Path(conversation_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, Response> {
     tracing::info!(
-        "get_conversation called for user_id={:?}, conversation_id={}",
-        user.as_ref().map(|u| u.user_id),
+        "get_conversation called for user_id={}, conversation_id={}",
+        user.user_id,
         conversation_id
     );
 
-    // Check user access OR public share access
-    validate_conversation_access_optional_auth(
-        &state,
-        user.as_ref(),
-        &conversation_id,
-        SharePermission::Read,
-    )
-    .await?;
+    validate_owner_conversation(&state, &user, &conversation_id).await?;
 
     let conversation =
         fetch_conversation_from_proxy(&state, &conversation_id, headers.clone()).await?;
@@ -1210,7 +1104,7 @@ async fn create_conversation_share(
         ("session_token" = [])
     )
 )]
-#[allow(dead_code)]
+#[allow(dead_code)] // Sharing reads are removed from the Stage I surface.
 async fn list_conversation_shares(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1400,7 +1294,7 @@ async fn create_share_group(
         ("session_token" = [])
     )
 )]
-#[allow(dead_code)]
+#[allow(dead_code)] // Sharing reads are removed from the Stage I surface.
 async fn list_share_groups(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1584,7 +1478,6 @@ pub struct SharedConversationInfo {
 }
 
 /// Maximum concurrent requests when fetching conversation details
-#[allow(dead_code)]
 const SHARED_CONVERSATIONS_FETCH_CONCURRENCY: usize = 10;
 
 /// List conversations shared with the authenticated user
@@ -1601,7 +1494,7 @@ const SHARED_CONVERSATIONS_FETCH_CONCURRENCY: usize = 10;
         ("session_token" = [])
     )
 )]
-#[allow(dead_code)]
+#[allow(dead_code)] // Sharing reads are removed from the Stage I surface.
 async fn list_shared_with_me(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1790,15 +1683,11 @@ async fn create_conversation_items(
     .await
 }
 
-/// List conversation items - works with optional authentication
-/// Authenticated users get their access checked, unauthenticated users can only access public conversations
+/// List conversation items for an authenticated user.
 ///
 /// # Authentication
-/// This endpoint supports **optional authentication**:
-/// - **With authentication**: Returns items if user owns the conversation or has been granted access via sharing
-/// - **Without authentication**: Returns items only if the conversation has been publicly shared
-///
-/// This allows public sharing of conversation content while maintaining access control for private conversations.
+/// Only the Conversation owner may use this temporary export view during the
+/// Stage I window.
 #[utoipa::path(
     get,
     path = "/v1/conversations/{conversation_id}/items",
@@ -1808,39 +1697,30 @@ async fn create_conversation_items(
     ),
     responses(
         (status = 200, description = "Conversation items retrieved successfully"),
-        (status = 403, description = "Access denied - conversation not accessible to this user or not publicly shared"),
+        (status = 401, description = UNAUTHORIZED, body = ErrorResponse),
         (status = 404, description = CONVERSATION_NOT_FOUND)
     ),
     security(
-        (), // Optional - no auth required for publicly shared conversations
-        ("session_token" = []) // Optional - session token for authenticated access
+        ("session_token" = [])
     )
 )]
-#[allow(dead_code)]
 async fn list_conversation_items(
     State(state): State<crate::state::AppState>,
-    Extension(user): Extension<Option<AuthenticatedUser>>,
+    Extension(user): Extension<AuthenticatedUser>,
     Path(conversation_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, Response> {
     tracing::info!(
-        "list_conversation_items called for user_id={:?}, conversation_id={}",
-        user.as_ref().map(|u| u.user_id),
+        "list_conversation_items called for user_id={}, conversation_id={}",
+        user.user_id,
         conversation_id
     );
 
-    // Check user access OR public share access
-    validate_conversation_access_optional_auth(
-        &state,
-        user.as_ref(),
-        &conversation_id,
-        SharePermission::Read,
-    )
-    .await?;
+    validate_owner_conversation(&state, &user, &conversation_id).await?;
 
     tracing::debug!(
-        "Forwarding conversation items list request to OpenAI for user_id={:?}",
-        user.as_ref().map(|u| u.user_id)
+        "Forwarding conversation items list request to OpenAI for user_id={}",
+        user.user_id
     );
 
     // Forward to OpenAI
@@ -2329,7 +2209,6 @@ async fn upload_file(
         ("session_token" = [])
     )
 )]
-#[allow(dead_code)]
 async fn list_files(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -2398,7 +2277,6 @@ async fn list_files(
         ("session_token" = [])
     )
 )]
-#[allow(dead_code)]
 async fn get_file(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -2515,7 +2393,6 @@ async fn delete_file(
         ("session_token" = [])
     )
 )]
-#[allow(dead_code)]
 async fn get_file_content(
     State(state): State<crate::state::AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -5037,7 +4914,6 @@ async fn validate_user_conversation(
 }
 
 /// Validate user has access OR the conversation is publicly shared
-#[allow(dead_code)]
 async fn validate_user_or_public_conversation(
     state: &crate::state::AppState,
     user: &AuthenticatedUser,
@@ -5066,35 +4942,6 @@ async fn validate_user_or_public_conversation(
         .map_err(map_share_error)
 }
 
-/// Validate conversation access with optional authentication
-/// - If user is authenticated: check their access (owner, shared, or public)
-/// - If user is not authenticated: only check if publicly shared
-#[allow(dead_code)]
-async fn validate_conversation_access_optional_auth(
-    state: &crate::state::AppState,
-    user: Option<&AuthenticatedUser>,
-    conversation_id: &str,
-    required_permission: SharePermission,
-) -> Result<(), Response> {
-    validate_proxy_path_segment(conversation_id)
-        .map_err(|_| invalid_proxy_path_segment_response("conversation_id"))?;
-
-    if let Some(user) = user {
-        // User is authenticated - check their access or public share
-        validate_user_or_public_conversation(state, user, conversation_id, required_permission)
-            .await
-    } else {
-        // User is not authenticated - only public share is allowed
-        state
-            .conversation_share_service
-            .get_public_access_by_conversation_id(conversation_id, required_permission)
-            .await
-            .map(|_| ())
-            .map_err(map_share_error)
-    }
-}
-
-#[allow(dead_code)]
 async fn validate_owner_conversation(
     state: &crate::state::AppState,
     user: &AuthenticatedUser,
@@ -5122,7 +4969,6 @@ async fn validate_owner_conversation(
         })
 }
 
-#[allow(dead_code)]
 fn map_share_error(error: ConversationError) -> Response {
     let (status, message) = match error {
         ConversationError::NotFound => {
@@ -5140,7 +4986,6 @@ fn map_share_error(error: ConversationError) -> Response {
     (status, Json(ErrorResponse { error: message })).into_response()
 }
 
-#[allow(dead_code)]
 async fn fetch_conversation_from_proxy(
     state: &crate::state::AppState,
     conversation_id: &str,
@@ -5203,7 +5048,6 @@ async fn fetch_conversation_from_proxy(
     Ok(conversation)
 }
 
-#[allow(dead_code)]
 async fn validate_user_file(
     state: &crate::state::AppState,
     user: &AuthenticatedUser,
@@ -5648,18 +5492,15 @@ async fn collect_stream_to_bytes(
 #[cfg(test)]
 mod tests {
     use super::{
-        create_optional_auth_router, create_retired_stateful_router, decompress_if_encoded,
-        ensure_stream_usage_options, has_only_identity_content_encoding,
-        normalize_stateless_response_body, validate_proxy_path_segment,
-        validate_stateless_response_body,
+        create_read_only_stateful_router, decompress_if_encoded, ensure_stream_usage_options,
+        has_only_identity_content_encoding, normalize_stateless_response_body,
+        validate_proxy_path_segment, validate_stateless_response_body,
     };
-    use axum::{body::Body, Router};
     use bytes::Bytes;
     use flate2::{write::DeflateEncoder, write::GzEncoder, write::ZlibEncoder, Compression};
-    use http::{HeaderMap, HeaderValue, Method, Request, StatusCode};
+    use http::{HeaderMap, HeaderValue};
     use serde_json::json;
     use std::io::Write;
-    use tower::ServiceExt;
 
     fn headers(content_encoding: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
@@ -5686,57 +5527,11 @@ mod tests {
         assert!(!has_only_identity_content_encoding(&gzip_headers));
     }
 
-    async fn assert_retired_route(app: &Router, method: Method, path: &str) {
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method(method)
-                    .uri(path)
-                    .body(Body::empty())
-                    .expect("test request should be valid"),
-            )
-            .await
-            .expect("router should not return an error");
-
-        assert_eq!(
-            response.status(),
-            StatusCode::GONE,
-            "unexpected route: {path}"
-        );
-        assert_eq!(
-            response
-                .headers()
-                .get(http::header::CACHE_CONTROL)
-                .and_then(|value| value.to_str().ok()),
-            Some("no-store")
-        );
-    }
-
-    #[tokio::test]
-    async fn retired_stateful_router_merges_optional_reads_and_catches_descendants() {
-        // This is the same composition used by the application before the
-        // respective optional/session authentication layers are applied.
-        let app = create_optional_auth_router::<()>().merge(create_retired_stateful_router());
-
-        assert_retired_route(&app, Method::GET, "/v1/conversations/conv_legacy").await;
-        assert_retired_route(&app, Method::GET, "/v1/conversations/conv_legacy/items").await;
-        assert_retired_route(&app, Method::PATCH, "/v1/conversations/conv_legacy").await;
-        assert_retired_route(
-            &app,
-            Method::PATCH,
-            "/v1/conversations/conv_legacy/unknown-child",
-        )
-        .await;
-        assert_retired_route(&app, Method::GET, "/v1/conversations/").await;
-        assert_retired_route(&app, Method::PATCH, "/v1/files/file_legacy/unknown-child").await;
-        assert_retired_route(
-            &app,
-            Method::GET,
-            "/v1/share-groups/group_legacy/unknown-child",
-        )
-        .await;
-        assert_retired_route(&app, Method::GET, "/v1/shared-with-me/unknown-child").await;
+    #[test]
+    fn stage_one_stateful_router_has_non_overlapping_scoped_fallbacks() {
+        // Router construction catches overlapping nested and exact routes,
+        // including the explicit trailing-slash namespace reservations.
+        let _router = create_read_only_stateful_router();
     }
 
     fn gzip_encode(input: &[u8]) -> Vec<u8> {
@@ -5819,7 +5614,7 @@ mod tests {
     }
 
     #[test]
-    fn stateless_responses_rejects_every_cloud_stateful_feature() {
+    fn stateless_responses_rejects_only_cloud_state_linkage_fields() {
         let cases = [
             (
                 json!({ "store": true }),
@@ -5837,65 +5632,44 @@ mod tests {
                 json!({ "background": true }),
                 "The stateless Responses API does not support background.",
             ),
-            (
-                json!({ "input": [{ "type": "function_call_output" }] }),
-                "The stateless Responses API does not support function continuation.",
-            ),
-            (
-                json!({ "input": [{ "type": "mcp_approval_response" }] }),
-                "The stateless Responses API does not support MCP approval continuation.",
-            ),
-            (
-                json!({
-                    "input": [{
-                        "content": [{ "type": "input_file", "file_id": "file_legacy" }]
-                    }]
-                }),
-                "The stateless Responses API does not support input_file.",
-            ),
-            (
-                json!({ "tools": [{ "type": "file_search" }] }),
-                "The stateless Responses API does not support file_search.",
-            ),
-            (
-                json!({ "tools": [{ "type": "function" }] }),
-                "The stateless Responses API does not support function tools because they require continuation.",
-            ),
-            (
-                json!({ "tools": [{ "type": "code_interpreter" }] }),
-                "The stateless Responses API does not support code_interpreter because it requires continuation.",
-            ),
-            (
-                json!({ "tools": [{ "type": "computer" }] }),
-                "The stateless Responses API does not support computer because it requires continuation.",
-            ),
-            (
-                json!({ "tools": [{ "type": "mcp" }] }),
-                "The stateless Responses API does not support MCP tools that require approval.",
-            ),
-            (
-                json!({
-                    "tools": [{
-                        "type": "mcp",
-                        "require_approval": { "never": { "tool_names": ["search"] } }
-                    }]
-                }),
-                "The stateless Responses API does not support MCP tools that require approval.",
-            ),
         ];
 
         for (body, expected) in cases {
             assert_eq!(
                 validate_stateless_response_body(&body),
                 Err(expected),
-                "stateful body should be rejected: {body}"
+                "state linkage field should be rejected: {body}"
             );
         }
+    }
 
-        assert!(validate_stateless_response_body(&json!({
-            "tools": [{ "type": "mcp", "require_approval": "never" }]
-        }))
-        .is_ok());
+    #[test]
+    fn stateless_responses_forward_tool_and_input_shapes_to_cloud() {
+        for body in [
+            json!({ "input": [{ "type": "function_call_output" }] }),
+            json!({ "input": [{ "type": "mcp_approval_response" }] }),
+            json!({
+                "input": [{
+                    "content": [{ "type": "input_file", "file_id": "file_legacy" }]
+                }]
+            }),
+            json!({ "tools": [{ "type": "file_search" }] }),
+            json!({ "tools": [{ "type": "function" }] }),
+            json!({ "tools": [{ "type": "code_interpreter" }] }),
+            json!({ "tools": [{ "type": "computer" }] }),
+            json!({ "tools": [{ "type": "mcp" }] }),
+            json!({
+                "tools": [{
+                    "type": "mcp",
+                    "require_approval": { "never": { "tool_names": ["search"] } }
+                }]
+            }),
+        ] {
+            assert!(
+                validate_stateless_response_body(&body).is_ok(),
+                "tool/input shape should be forwarded to Cloud: {body}"
+            );
+        }
     }
 
     #[test]

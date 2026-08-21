@@ -20,7 +20,7 @@ A Rust backend service that proxies OpenAI-compatible inference requests to **NE
 ```
 crates/
 ├── api/          # Axum HTTP server, routes, middleware, OpenAPI docs (utoipa)
-├── services/     # Business logic: auth, response proxy, user management
+├── services/     # Business logic: auth, temporary read views, response proxy, user management
 ├── database/     # PostgreSQL (tokio-postgres, deadpool), migrations, repositories
 └── config/       # Environment-based configuration structs
 ```
@@ -30,13 +30,15 @@ crates/
 - **Repository Pattern**: Database access through trait-based repositories (`PostgresUserRepository`, etc.)
 - **Service Layer**: Business logic in `services` crate, injected into `AppState`
 - **NEAR AI Cloud API Proxy**: OpenAI-compatible inference routes forward to NEAR AI Cloud API with auth; Responses requests are stateless
+- **Temporary Read Views**: Owner-only Conversation and File GET endpoints remain available for the Stage I migration/export window. Sharing surfaces and all write operations return `410 Gone`.
 - **Patroni Support**: Optional cluster discovery for HA PostgreSQL via `DATABASE_PRIMARY_APP_ID`
 
 ### Request Flow
 
-1. Request → Auth middleware (validates session token) → Route handler
-2. `/v1/responses` → validate stateless fields → forward to NEAR AI Cloud API with `store: false`
-3. Usage, subscription, rate-limit, and attestation-related proxy behavior remain local to Chat API
+1. Request → its historical authentication boundary → route handler
+2. `/v1/responses` → validate stateless linkage fields → forward to NEAR AI Cloud API with `store: false`
+3. Temporary owner-only Conversation/File GET views → local ownership lookup and, where needed, Cloud read view
+4. Usage, subscription, rate-limit, and attestation-related proxy behavior remain local to Chat API
 
 ## Development
 
@@ -81,9 +83,11 @@ docker compose down               # Stop services
 ### Testing
 
 ```bash
-cargo test --features test                                    # All tests
-cargo test --test admin_tests --features test                # Admin tests only
-cargo test --test responses_permissions_tests --features test          # Stateless Responses boundary tests
+cargo test --features test                            # All tests
+cargo test --test admin_tests --features test         # Admin tests only
+cargo test --test responses_stateless_tests --features test
+cargo test --test conversations_tests --features test
+cargo test --test files_tests --features test
 ```
 
 ### Code Quality
@@ -185,11 +189,13 @@ OpenAPI docs available at `/docs`.
 **Key endpoints**:
 - `/v1/auth/*` - OAuth authentication
 - `/v1/responses` - OpenAI-compatible, stateless Responses API (proxied to NEAR AI Cloud API)
+- `/v1/conversations/*` - Temporary owner-only Conversation views for migration/export
+- `/v1/files/*` - Temporary read-only File views for migration/export
 - `/v1/attestation/report` - TEE attestation reports
 - `/v1/users/*` - User management
 - `/v1/admin/*` - Admin operations
 
-**Stateless migration**: `/v1/conversations/**`, `/v1/files/**`, `/v1/share-groups/**`, and `/v1/shared-with-me` are retired. After their historical authentication boundary, they return `410 Gone`. Build multi-turn context in the next request rather than referring to a stored conversation or response. `/v1/responses` rejects stateful fields such as `conversation`, `previous_response_id`, `store: true`, file input, background mode, and continuation-dependent tools with a local `400` response.
+**Stage I migration**: owner-only Conversation and File GET views remain temporarily available for authenticated private-chat data export. Sharing APIs, all established write operations (create/update/delete, item creation, upload, pin/archive, clone, and share-group mutation), plus unsupported methods and descendants within those legacy namespaces, return `410 Gone` with `Cache-Control: no-store` after session authentication. These views will be removed in Stage III. `/v1/responses` is stateless: requests are normalized to `store: false`, and response/conversation linkage fields such as `conversation`, `previous_response_id`, and `background: true` are rejected. Clients may use custom function tools and replay their own function results; Cloud validates tool and input shapes.
 
 **Note**: OpenAI-compatible inference requests are proxied to **NEAR AI Cloud API**. Set `OPENAI_BASE_URL` to your NEAR AI Cloud API endpoint.
 

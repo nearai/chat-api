@@ -6,7 +6,7 @@ use utoipa::OpenApi;
 #[openapi(
     info(
         title = "NEAR AI Chat API",
-        description = "An OpenAI-compatible, stateless inference proxy for NEAR AI Cloud API.",
+        description = "An authenticated OpenAI-compatible inference proxy with temporary read-only Private Chat views for migration and export.",
         version = "1.0.0",
         contact(name = "NEAR AI Team", email = "support@near.ai"),
         license(name = "MIT",)
@@ -25,6 +25,14 @@ use utoipa::OpenApi;
         crate::routes::users::get_user_status,
         crate::routes::users::delete_current_user,
         crate::routes::users::get_my_usage,
+        // Temporary Stage I owner-only Conversation endpoints
+        crate::routes::api::list_conversations,
+        crate::routes::api::get_conversation,
+        crate::routes::api::list_conversation_items,
+        // Temporary Stage I read-only File endpoints
+        crate::routes::api::list_files,
+        crate::routes::api::get_file,
+        crate::routes::api::get_file_content,
         // Proxy endpoints
         crate::routes::api::proxy_responses,
         crate::routes::api::proxy_chat_completions,
@@ -148,6 +156,11 @@ use utoipa::OpenApi;
         crate::models::UserUsageResponse,
         crate::routes::admin::TopUsageResponse,
         crate::routes::api::ErrorResponse,
+        // Temporary owner-only Conversation models
+        // Temporary read-only File models
+        crate::models::FileListResponse,
+        crate::models::FileGetResponse,
+        crate::routes::api::ListFilesParams,
         // Credits models
         crate::routes::credits::CreateCreditCheckoutRequest,
         crate::routes::credits::CreateCreditCheckoutResponse,
@@ -223,6 +236,8 @@ use utoipa::OpenApi;
         (name = "Health", description = "Health check and service status endpoints"),
         (name = "Auth", description = "OAuth authentication endpoints"),
         (name = "Users", description = "User profile management endpoints"),
+        (name = "Conversations", description = "Temporary owner-only Conversation views for migration/export. Conversation sharing and all mutations return 410 Gone."),
+        (name = "Files", description = "Temporary owner-only File views for migration/export. File mutations and unsupported legacy paths return 410 Gone."),
         (name = "Proxy", description = "Proxy endpoints for OpenAI-compatible APIs"),
         (name = "Credits", description = "Credit purchase and balance endpoints"),
         (name = "Subscriptions", description = "Subscription management endpoints"),
@@ -260,28 +275,36 @@ mod tests {
     use utoipa::OpenApi;
 
     #[test]
-    fn omits_retired_stateful_api_paths() {
+    fn documents_owner_only_views_but_not_stateful_or_sharing_surfaces() {
         let spec = serde_json::to_value(ApiDoc::openapi()).expect("OpenAPI serialization");
 
         for path in [
             "/v1/conversations",
             "/v1/conversations/{conversation_id}",
             "/v1/conversations/{conversation_id}/items",
+            "/v1/files",
+            "/v1/files/{file_id}",
+            "/v1/files/{file_id}/content",
+        ] {
+            assert!(
+                spec["paths"].get(path).is_some(),
+                "temporary read path {path} must be in OpenAPI"
+            );
+        }
+
+        for path in [
             "/v1/conversations/{conversation_id}/shares",
             "/v1/conversations/{conversation_id}/shares/{share_id}",
             "/v1/conversations/{conversation_id}/pin",
             "/v1/conversations/{conversation_id}/archive",
             "/v1/conversations/{conversation_id}/clone",
-            "/v1/files",
-            "/v1/files/{file_id}",
-            "/v1/files/{file_id}/content",
             "/v1/share-groups",
             "/v1/share-groups/{group_id}",
             "/v1/shared-with-me",
         ] {
             assert!(
                 spec["paths"].get(path).is_none(),
-                "retired stateful path {path} must not be in OpenAPI"
+                "disabled stateful or sharing path {path} must not be in OpenAPI"
             );
         }
     }

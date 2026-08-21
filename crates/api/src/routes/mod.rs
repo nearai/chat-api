@@ -124,15 +124,6 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
     // Public subscription routes (webhook, no auth required)
     let public_subscription_routes = subscriptions::create_public_subscriptions_router();
 
-    // Conversation read routes with optional authentication
-    // These routes work for both authenticated users and unauthenticated users
-    // (for accessing publicly shared conversations)
-    let optional_auth_routes =
-        api::create_optional_auth_router::<crate::state::AppState>().layer(from_fn_with_state(
-            auth_state.clone(),
-            crate::middleware::optional_auth_middleware,
-        ));
-
     let dual_auth_state = crate::middleware::DualAuthState {
         auth_state: auth_state.clone(),
         agent_auth_state: crate::middleware::AgentAuthState {
@@ -152,9 +143,7 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         subscription_state,
     );
 
-    // Build the base router
-    // Note: optional_auth_routes must come BEFORE api_routes since they share paths
-    // but have different HTTP methods (optional auth for GET, required auth for POST/DELETE)
+    // Build the base router.
     let router = Router::new()
         .route("/health", get(health_check))
         .merge(configs_routes) // Configs route (requires user auth)
@@ -167,8 +156,7 @@ pub fn create_router_with_cors(app_state: AppState, cors_config: config::CorsCon
         .nest("/v1/agents", agent_routes) // Agent routes (requires user auth)
         .merge(verify_agent_key_route) // Agent key verification (no session auth)
         .nest("/v1/admin", admin_routes)
-        .merge(optional_auth_routes) // Conversation read routes (optional auth)
-        .merge(api_routes) // API routes: llm proxy, models proxy, conversations, share groups, files
+        .merge(api_routes) // API routes: proxy, temporary views, and disabled mutations
         .merge(attestation_routes) // Merge attestation routes (already have /v1 prefix)
         .with_state(app_state)
         // Add static file serving as fallback (must be last)
