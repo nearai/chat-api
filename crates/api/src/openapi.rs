@@ -127,7 +127,6 @@ use utoipa::OpenApi;
         crate::models::AdminUserListResponse,
         crate::models::LinkedAccountResponse,
         crate::models::UserProfileResponse,
-        crate::models::UserAccountDeletionResponse,
         crate::routes::users::UserStatusResponse,
         services::user::ports::AccountDeletion,
         services::user::ports::AccountDeletionStatus,
@@ -307,5 +306,15 @@ mod tests {
                 "disabled stateful or sharing path {path} must not be in OpenAPI"
             );
         }
+
+        let account_deletion_responses = &spec["paths"]["/v1/users/me"]["delete"]["responses"];
+        assert!(
+            account_deletion_responses.get("410").is_some(),
+            "retired self-service account deletion must document 410"
+        );
+        assert!(
+            account_deletion_responses.get("202").is_none(),
+            "retired self-service account deletion must not document its old async success"
+        );
     }
 }

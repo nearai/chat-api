@@ -1,7 +1,7 @@
 mod common;
 
 use common::{create_test_server_and_db, mock_login, TestServerConfig};
-use http::{HeaderName, HeaderValue};
+use http::{HeaderName, HeaderValue, StatusCode};
 use services::user::ports::{AccountDeletionError, UserRepository};
 use uuid::Uuid;
 
@@ -13,113 +13,9 @@ fn auth_header(token: &str) -> (HeaderName, HeaderValue) {
 }
 
 #[tokio::test]
-async fn delete_account_blocks_non_terminal_subscription_statuses() {
+async fn delete_account_is_gone_and_does_not_create_or_mutate_account_data() {
     let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
-    let client = db.pool().get().await.expect("db client");
-
-    for status in [
-        "active",
-        "trialing",
-        "past_due",
-        "unpaid",
-        "incomplete",
-        "paused",
-    ] {
-        let email = format!(
-            "delete_account_{}_subscription_{}@test.org",
-            status,
-            Uuid::new_v4()
-        );
-        let token = mock_login(&server, &email).await;
-        let user = db
-            .user_repository()
-            .get_user_by_email(&email)
-            .await
-            .expect("get user")
-            .expect("user exists");
-        let subscription_id = format!("sub_delete_{}_{}", status, Uuid::new_v4());
-        let customer_id = format!("cus_delete_{}_{}", status, Uuid::new_v4());
-
-        client
-            .execute(
-                "INSERT INTO subscriptions (
-                    subscription_id, user_id, provider, customer_id, price_id, status,
-                    current_period_end, cancel_at_period_end
-                ) VALUES ($1, $2, 'stripe', $3, 'price_test', $4, NOW() + INTERVAL '1 day', false)",
-                &[&subscription_id, &user.id, &customer_id, &status],
-            )
-            .await
-            .expect("insert non-terminal subscription");
-
-        let (name, value) = auth_header(&token);
-        let response = server.delete("/v1/users/me").add_header(name, value).await;
-
-        assert_eq!(
-            response.status_code(),
-            409,
-            "{status} subscription should block account deletion"
-        );
-        let body: serde_json::Value = response.json();
-        assert!(body
-            .get("message")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .contains("non-terminal subscription"));
-        assert!(db
-            .user_repository()
-            .get_user(user.id)
-            .await
-            .expect("get user after blocked delete")
-            .is_some());
-    }
-}
-
-#[tokio::test]
-async fn delete_account_allows_terminal_subscription_statuses() {
-    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
-    let client = db.pool().get().await.expect("db client");
-
-    for status in ["canceled", "incomplete_expired"] {
-        let email = format!(
-            "delete_account_{}_subscription_{}@test.org",
-            status,
-            Uuid::new_v4()
-        );
-        let token = mock_login(&server, &email).await;
-        let user = db
-            .user_repository()
-            .get_user_by_email(&email)
-            .await
-            .expect("get user")
-            .expect("user exists");
-        let subscription_id = format!("sub_delete_{}_{}", status, Uuid::new_v4());
-        let customer_id = format!("cus_delete_{}_{}", status, Uuid::new_v4());
-
-        client
-            .execute(
-                "INSERT INTO subscriptions (
-                    subscription_id, user_id, provider, customer_id, price_id, status,
-                    current_period_end, cancel_at_period_end
-                ) VALUES ($1, $2, 'stripe', $3, 'price_test', $4, NOW() - INTERVAL '1 day', false)",
-                &[&subscription_id, &user.id, &customer_id, &status],
-            )
-            .await
-            .expect("insert terminal subscription");
-
-        let (name, value) = auth_header(&token);
-        let response = server.delete("/v1/users/me").add_header(name, value).await;
-        assert_eq!(
-            response.status_code(),
-            202,
-            "{status} subscription should allow account deletion"
-        );
-    }
-}
-
-#[tokio::test]
-async fn delete_account_blocks_non_deleted_instance() {
-    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
-    let email = format!("delete_account_active_instance_{}@test.org", Uuid::new_v4());
+    let email = format!("delete_account_cutoff_{}@test.org", Uuid::new_v4());
     let token = mock_login(&server, &email).await;
     let user = db
         .user_repository()
@@ -127,31 +23,125 @@ async fn delete_account_blocks_non_deleted_instance() {
         .await
         .expect("get user")
         .expect("user exists");
-
     let client = db.pool().get().await.expect("db client");
+    let conversation_id = format!("conv_delete_cutoff_{}", Uuid::new_v4());
+    let file_id = format!("file_delete_cutoff_{}", Uuid::new_v4());
+
     client
         .execute(
-            "INSERT INTO agent_instances (user_id, instance_id, name, type, status)
-             VALUES ($1, $2, 'active delete blocker', 'openclaw', 'active')",
-            &[&user.id, &format!("inst_delete_active_{}", Uuid::new_v4())],
+            "INSERT INTO conversations (id, user_id) VALUES ($1, $2)",
+            &[&conversation_id, &user.id],
         )
         .await
-        .expect("insert active instance");
+        .expect("insert conversation");
+    client
+        .execute(
+            "INSERT INTO files (id, user_id, bytes, file_created_at, filename, purpose)
+             VALUES ($1, $2, 10, 123, 'delete-cutoff.txt', 'assistants')",
+            &[&file_id, &user.id],
+        )
+        .await
+        .expect("insert file");
 
     let (name, value) = auth_header(&token);
-    let response = server.delete("/v1/users/me").add_header(name, value).await;
-
-    assert_eq!(response.status_code(), 409);
+    let response = server.delete("/v1/users/me/").add_header(name, value).await;
+    assert_eq!(response.status_code(), StatusCode::GONE);
+    assert_eq!(
+        response
+            .headers()
+            .get(http::header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store")
+    );
     let body: serde_json::Value = response.json();
-    assert!(body
-        .get("details")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .contains("active"));
+    assert_eq!(
+        body.get("code").and_then(|value| value.as_str()),
+        Some("gone")
+    );
+
+    let deletion_count: i64 = client
+        .query_one(
+            "SELECT COUNT(*) FROM user_account_deletions WHERE user_id = $1",
+            &[&user.id],
+        )
+        .await
+        .expect("count deletion requests")
+        .get(0);
+    assert_eq!(deletion_count, 0);
+
+    assert!(db
+        .user_repository()
+        .get_user(user.id)
+        .await
+        .expect("get user after retired delete")
+        .is_some());
+
+    let conversation_count: i64 = client
+        .query_one(
+            "SELECT COUNT(*) FROM conversations WHERE id = $1 AND user_id = $2",
+            &[&conversation_id, &user.id],
+        )
+        .await
+        .expect("count conversation")
+        .get(0);
+    assert_eq!(conversation_count, 1);
+
+    let file_count: i64 = client
+        .query_one(
+            "SELECT COUNT(*) FROM files WHERE id = $1 AND user_id = $2",
+            &[&file_id, &user.id],
+        )
+        .await
+        .expect("count file")
+        .get(0);
+    assert_eq!(file_count, 1);
+
+    let (name, value) = auth_header(&token);
+    let profile_response = server.get("/v1/users/me").add_header(name, value).await;
+    assert_eq!(profile_response.status_code(), StatusCode::OK);
 }
 
 #[tokio::test]
-async fn delete_account_request_creates_pending_state_and_blocks_access() {
+async fn delete_account_is_gone_and_leaves_accepted_deletion_unchanged() {
+    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
+    let email = format!("delete_account_accepted_{}@test.org", Uuid::new_v4());
+    let token = mock_login(&server, &email).await;
+    let user = db
+        .user_repository()
+        .get_user_by_email(&email)
+        .await
+        .expect("get user")
+        .expect("user exists");
+    let accepted = db
+        .user_repository()
+        .create_account_deletion_request(user.id)
+        .await
+        .expect("create accepted deletion request");
+    assert!(accepted.was_inserted);
+
+    let (name, value) = auth_header(&token);
+    let response = server.delete("/v1/users/me").add_header(name, value).await;
+    assert_eq!(response.status_code(), StatusCode::GONE);
+    assert_eq!(
+        response
+            .headers()
+            .get(http::header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store")
+    );
+
+    let unchanged = db
+        .user_repository()
+        .get_account_deletion_by_user_id(user.id)
+        .await
+        .expect("get accepted deletion")
+        .expect("accepted deletion should remain");
+    assert_eq!(unchanged.id, accepted.deletion.id);
+    assert_eq!(unchanged.status, accepted.deletion.status);
+}
+
+#[tokio::test]
+async fn legacy_account_deletion_request_still_finalizes_accepted_job() {
     let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
     let email = format!("delete_account_success_{}@test.org", Uuid::new_v4());
     let token = mock_login(&server, &email).await;
@@ -218,19 +208,13 @@ async fn delete_account_request_creates_pending_state_and_blocks_access() {
         .await
         .expect("insert deleted instance");
 
-    let (name, value) = auth_header(&token);
-    let response = server.delete("/v1/users/me").add_header(name, value).await;
-    assert_eq!(response.status_code(), 202);
-
-    let body: serde_json::Value = response.json();
-    assert_eq!(body.get("status").and_then(|v| v.as_str()), Some("pending"));
-
-    let deletion = db
+    let deletion_request = db
         .user_repository()
-        .get_account_deletion_by_user_id(user.id)
+        .create_account_deletion_request(user.id)
         .await
-        .expect("get deletion")
-        .expect("deletion exists");
+        .expect("create accepted deletion request");
+    assert!(deletion_request.was_inserted);
+    let deletion = deletion_request.deletion;
     assert_eq!(deletion.status.as_str(), "pending");
 
     assert!(db
@@ -312,48 +296,6 @@ async fn delete_account_request_creates_pending_state_and_blocks_access() {
     assert!(instance
         .get::<_, Option<String>>("agent_api_base_url")
         .is_none());
-}
-
-#[tokio::test]
-async fn pending_delete_account_request_can_be_retried() {
-    let (server, db) = create_test_server_and_db(TestServerConfig::default()).await;
-    let email = format!("delete_account_retry_{}@test.org", Uuid::new_v4());
-    let token = mock_login(&server, &email).await;
-    let user = db
-        .user_repository()
-        .get_user_by_email(&email)
-        .await
-        .expect("get user")
-        .expect("user exists");
-
-    let (name, value) = auth_header(&token);
-    let response = server.delete("/v1/users/me").add_header(name, value).await;
-    assert_eq!(response.status_code(), 202);
-
-    let (name, value) = auth_header(&token);
-    let retry_response = server.delete("/v1/users/me").add_header(name, value).await;
-    assert_eq!(retry_response.status_code(), 202);
-
-    assert!(db
-        .user_repository()
-        .get_user(user.id)
-        .await
-        .expect("get user after pending delete retry")
-        .is_some());
-
-    let deletion_count: i64 = db
-        .pool()
-        .get()
-        .await
-        .expect("db client")
-        .query_one(
-            "SELECT COUNT(*) FROM user_account_deletions WHERE user_id = $1",
-            &[&user.id],
-        )
-        .await
-        .expect("count deletion requests")
-        .get(0);
-    assert_eq!(deletion_count, 1);
 }
 
 #[tokio::test]

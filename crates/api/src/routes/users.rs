@@ -1,14 +1,19 @@
-use crate::{error::ApiError, middleware::AuthenticatedUser, models::*, state::AppState};
+use crate::{
+    error::{ApiError, ApiErrorResponse},
+    middleware::AuthenticatedUser,
+    models::*,
+    state::AppState,
+};
 use axum::{
     extract::{Extension, Query, State},
-    http::StatusCode,
+    http::{header::CACHE_CONTROL, HeaderValue, StatusCode},
+    response::{IntoResponse, Response},
     routing::{get, patch, post},
     Json, Router,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use services::tasks::{AccountDeletionTaskPayload, TaskId, TaskMessage, TaskPayload};
-use services::user::ports::{AccountDeletionError, UserStatusError};
+use services::user::ports::UserStatusError;
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct UserStatusResponse {
@@ -92,126 +97,37 @@ pub async fn get_current_user(
 
 /// Delete current user account
 ///
-/// Requests asynchronous account deletion after verifying the user has no non-terminal subscriptions
-/// and no remaining non-deleted instances.
+/// This self-service endpoint is retired for the Stage I migration window.
+/// Existing deletion jobs keep their worker path and can complete normally, but this endpoint
+/// never creates a new deletion record or task.
 #[utoipa::path(
     delete,
     path = "/v1/users/me",
     tag = "Users",
     responses(
-        (status = 202, description = "User account deletion requested", body = UserAccountDeletionResponse),
+        (status = 410, description = "Self-service account deletion is retired; response includes Cache-Control: no-store", body = crate::error::ApiErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::error::ApiErrorResponse),
-        (status = 404, description = "User not found", body = crate::error::ApiErrorResponse),
-        (status = 409, description = "Account cannot be deleted until subscriptions are terminal and instances are deleted", body = crate::error::ApiErrorResponse),
-        (status = 500, description = "Internal server error", body = crate::error::ApiErrorResponse)
     ),
     security(
         ("session_token" = [])
     )
 )]
-pub async fn delete_current_user(
-    State(app_state): State<AppState>,
-    Extension(user): Extension<AuthenticatedUser>,
-) -> Result<(StatusCode, Json<UserAccountDeletionResponse>), ApiError> {
+pub async fn delete_current_user(Extension(user): Extension<AuthenticatedUser>) -> Response {
     tracing::warn!(
-        "Requesting current user account deletion: user_id={}",
-        user.user_id
+        user_id = %user.user_id,
+        "Self-service account deletion is retired"
     );
 
-    let task_publisher = app_state
-        .account_deletion_task_publisher
-        .as_ref()
-        .ok_or_else(|| {
-            ApiError::internal_server_error("Account deletion queue is not configured")
-        })?;
-
-    let deletion_request = app_state
-        .user_service
-        .create_account_deletion_request(user.user_id)
-        .await
-        .map_err(account_deletion_error_to_api_error)?;
-    let deletion = deletion_request.deletion;
-
-    if deletion_request.was_inserted {
-        let task_id = TaskId::new(format!("account-deletion-{}", deletion.id)).map_err(|e| {
-            tracing::error!("Failed to create account deletion task id: {}", e);
-            ApiError::internal_server_error("Failed to enqueue account deletion")
-        })?;
-        let message = TaskMessage {
-            task_id,
-            payload: TaskPayload::AccountDeletion(AccountDeletionTaskPayload {
-                deletion_id: deletion.id,
-            }),
-        };
-
-        if let Err(e) = task_publisher.publish(message).await {
-            tracing::error!(
-                "Failed to enqueue account deletion task, cleaning up request: user_id={}, deletion_id={}, error={:#}",
-                user.user_id,
-                deletion.id,
-                e
-            );
-            let _ = app_state
-                .user_service
-                .delete_account_deletion_request(deletion.id)
-                .await;
-            return Err(ApiError::internal_server_error(
-                "Failed to enqueue account deletion",
-            ));
-        }
-    }
-
-    Ok((StatusCode::ACCEPTED, Json(deletion.into())))
-}
-
-fn account_deletion_error_to_api_error(e: AccountDeletionError) -> ApiError {
-    match e {
-        AccountDeletionError::UserNotFound => {
-            tracing::warn!("Account deletion failed: user not found");
-            ApiError::not_found("User not found")
-        }
-        AccountDeletionError::BlockingSubscriptions { count } => {
-            tracing::warn!("Account deletion blocked: {count} non-terminal subscription(s) exist");
-            ApiError::conflict(format!(
-                "Cannot delete account while {count} non-terminal subscription(s) exist"
-            ))
-        }
-        AccountDeletionError::InstancesNotDeleted { count, statuses } => {
-            tracing::warn!(
-                "Account deletion blocked: {count} instance(s) not deleted (statuses: {})",
-                statuses.join(", ")
-            );
-            ApiError::conflict(format!(
-                "Cannot delete account while {count} instance(s) are not deleted",
-            ))
-            .with_details(format!(
-                "Blocking instance statuses: {}",
-                statuses.join(", ")
-            ))
-        }
-        AccountDeletionError::ConversationCleanupIncomplete { conversation_ids } => {
-            tracing::error!(
-                "Unexpected ConversationCleanupIncomplete during delete request validation/create path: {}",
-                conversation_ids.join(", ")
-            );
-            ApiError::internal_server_error("Failed to delete account")
-        }
-        AccountDeletionError::FileCleanupIncomplete { file_ids } => {
-            tracing::error!(
-                "Unexpected FileCleanupIncomplete during delete request validation/create path: {}",
-                file_ids.join(", ")
-            );
-            ApiError::internal_server_error("Failed to delete account")
-        }
-        AccountDeletionError::AlreadyInTerminalState { status } => {
-            tracing::warn!("Account deletion blocked: already in terminal state ({status})");
-            ApiError::conflict(format!("Account deletion is already {status}"))
-        }
-        AccountDeletionError::Internal(err) => {
-            tracing::error!("Failed to delete account: {:#}", err);
-            ApiError::internal_server_error("Failed to delete account")
-        }
-    }
+    (
+        StatusCode::GONE,
+        [(CACHE_CONTROL, HeaderValue::from_static("no-store"))],
+        Json(ApiErrorResponse {
+            code: "gone".to_string(),
+            message: "Self-service account deletion is no longer available.".to_string(),
+            details: None,
+        }),
+    )
+        .into_response()
 }
 
 /// Query parameters for usage time range.
@@ -423,8 +339,35 @@ pub fn create_user_router() -> Router<AppState> {
     Router::new()
         .route("/status", get(get_user_status))
         .route("/me", get(get_current_user).delete(delete_current_user))
+        // Keep DELETE's Stage I cutoff explicit for the trailing-slash form
+        // too, rather than allowing it to fall through to the SPA fallback.
+        .route("/me/", axum::routing::delete(delete_current_user))
         .route("/me/usage", get(get_my_usage))
         .route("/me/settings", get(get_user_settings))
         .route("/me/settings", post(update_user_settings))
         .route("/me/settings", patch(update_user_settings_partially))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use services::{SessionId, UserId};
+
+    #[tokio::test]
+    async fn retired_account_deletion_response_is_gone_and_not_cacheable() {
+        let response = delete_current_user(Extension(AuthenticatedUser {
+            user_id: UserId::new(),
+            session_id: SessionId::new(),
+        }))
+        .await;
+
+        assert_eq!(response.status(), StatusCode::GONE);
+        assert_eq!(
+            response
+                .headers()
+                .get(CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+    }
 }
