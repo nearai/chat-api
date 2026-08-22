@@ -2,14 +2,14 @@
 
 [![Security Audit](https://github.com/nearai/chat-api/actions/workflows/security-audit.yml/badge.svg)](https://github.com/nearai/chat-api/actions/workflows/security-audit.yml)
 
-A Rust backend service that proxies requests to **NEAR AI Cloud API** (using OpenAI-compatible API format) while tracking user conversations in PostgreSQL. Provides OAuth authentication (Google/GitHub), user session management, and serves a frontend as static files. Designed to run in a Trusted Execution Environment (TEE) for enhanced security and privacy.
+A Rust backend service that proxies OpenAI-compatible inference requests to **NEAR AI Cloud API**. It provides OAuth authentication (Google/GitHub), user session management, and serves a frontend as static files. Designed to run in a Trusted Execution Environment (TEE) for enhanced security and privacy.
 
 ## Features
 
 - 🔒 **TEE Execution**: Runs in a Trusted Execution Environment with cryptographic attestation
 - 🤖 **OpenAI-Compatible API**: Drop-in replacement for OpenAI API endpoints (proxies to NEAR AI Cloud API)
 - 🔐 **OAuth Authentication**: Google and GitHub OAuth support
-- 💬 **Conversation Tracking**: Persistent conversation management in PostgreSQL
+- 🧠 **Stateless Responses**: `/v1/responses` always forwards requests with `store: false`
 - 📊 **User Management**: Session management, user settings, and analytics
 - ⚡ **Streaming**: Real-time SSE streaming for AI responses
 
@@ -20,7 +20,7 @@ A Rust backend service that proxies requests to **NEAR AI Cloud API** (using Ope
 ```
 crates/
 ├── api/          # Axum HTTP server, routes, middleware, OpenAPI docs (utoipa)
-├── services/     # Business logic: auth, conversation, response proxy, user management
+├── services/     # Business logic: auth, temporary read views, response proxy, user management
 ├── database/     # PostgreSQL (tokio-postgres, deadpool), migrations, repositories
 └── config/       # Environment-based configuration structs
 ```
@@ -29,14 +29,16 @@ crates/
 
 - **Repository Pattern**: Database access through trait-based repositories (`PostgresUserRepository`, etc.)
 - **Service Layer**: Business logic in `services` crate, injected into `AppState`
-- **NEAR AI Cloud API Proxy**: All `/v1/*` routes forward to NEAR AI Cloud API with auth; conversation endpoints (`/v1/conversations/*`) track IDs in PostgreSQL
+- **NEAR AI Cloud API Proxy**: OpenAI-compatible inference routes forward to NEAR AI Cloud API with auth; Responses requests are stateless
+- **Temporary Read Views**: Owner-only Conversation and File GET endpoints remain available for the Stage I migration/export window. Ordinary Conversation, File, and sharing writes return `410 Gone`; the existing `DELETE /v1/users/me` account-deletion flow remains available.
 - **Patroni Support**: Optional cluster discovery for HA PostgreSQL via `DATABASE_PRIMARY_APP_ID`
 
 ### Request Flow
 
-1. Request → Auth middleware (validates session token) → Route handler
-2. Conversation operations → Forward to NEAR AI Cloud API → Parse response → Track in DB
-3. Generic `/v1/{*path}` → Forward to NEAR AI Cloud API (pass-through)
+1. Request → its historical authentication boundary → route handler
+2. `/v1/responses` → validate stateless linkage fields → forward to NEAR AI Cloud API with `store: false`
+3. Temporary owner-only Conversation/File GET views → local ownership lookup and, where needed, Cloud read view
+4. Usage, subscription, rate-limit, and attestation-related proxy behavior remain local to Chat API
 
 ## Development
 
@@ -81,9 +83,11 @@ docker compose down               # Stop services
 ### Testing
 
 ```bash
-cargo test --features test                                    # All tests
-cargo test --test admin_tests --features test                # Admin tests only
-cargo test --test e2e_api_tests --features test -- --ignored --nocapture # E2E tests (real API calls)
+cargo test --features test                            # All tests
+cargo test --test admin_tests --features test         # Admin tests only
+cargo test --test responses_stateless_tests --features test
+cargo test --test conversations_tests --features test
+cargo test --test files_tests --features test
 ```
 
 ### Code Quality
@@ -184,13 +188,20 @@ OpenAPI docs available at `/docs`.
 
 **Key endpoints**:
 - `/v1/auth/*` - OAuth authentication
-- `/v1/conversations/*` - Conversation management
-- `/v1/responses` - OpenAI-compatible Responses API (proxied to NEAR AI Cloud API)
+- `/v1/responses` - OpenAI-compatible, stateless Responses API (proxied to NEAR AI Cloud API)
+- `/v1/conversations/*` - Temporary owner-only Conversation views for migration/export
+- `/v1/files/*` - Temporary read-only File views for migration/export
 - `/v1/attestation/report` - TEE attestation reports
 - `/v1/users/*` - User management
 - `/v1/admin/*` - Admin operations
 
-**Note**: All requests are proxied to **NEAR AI Cloud API** (with OpenAI compatible endpoints). Set `OPENAI_BASE_URL` to your NEAR AI Cloud API endpoint.
+**Stage I migration**: owner-only Conversation and File GET views remain temporarily available for authenticated private-chat data export. Ordinary Conversation, File, and sharing state writes (create/update/delete, item creation, upload, pin/archive, clone, and share-group mutation), plus unsupported methods and descendants within those legacy namespaces, return `410 Gone` with `Cache-Control: no-store` after session authentication. These views will be removed in Stage III.
+
+**Account-deletion exception**: `DELETE /v1/users/me` remains available. Its existing asynchronous worker continues Cloud Conversation/File cleanup through Cloud API's retained, API-key/workspace-scoped resource DELETE endpoints before it performs local finalization; this flow is outside the retired session-proxy write surface.
+
+`/v1/responses` is stateless: requests are normalized to `store: false`, and response/conversation linkage fields such as `conversation`, `previous_response_id`, and `background: true` are rejected. Clients may use custom function tools and replay their own function results; Cloud validates tool and input shapes.
+
+**Note**: OpenAI-compatible inference requests are proxied to **NEAR AI Cloud API**. Set `OPENAI_BASE_URL` to your NEAR AI Cloud API endpoint.
 
 ## Security & Privacy
 
