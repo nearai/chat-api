@@ -58,19 +58,17 @@ pub struct SubscriptionServiceConfig {
     pub near_network_id: String,
 }
 
-/// Cached credit limit for a user. Invalid after TTL_CACHE_SECS (10 mins) or when plan/credits change.
+/// Cached credit limit for a user. Invalid after the provider-specific TTL or when plan/credits change.
 struct CachedCreditLimit {
     plan_credits: u64,
     period_start: chrono::DateTime<Utc>,
     period_end: chrono::DateTime<Utc>,
+    house_of_stake_source: Option<HouseOfStakeEntitlementSource>,
     cached_at: Instant,
 }
 
-/// Cached House-of-Stake stake source. Invalid after short TTL or when the user's credit-limit cache is invalidated.
-struct CachedHouseOfStakeStakeSource {
-    last_lock_id: String,
-    amount_yocto: u128,
-    cached_at: Instant,
+struct CachedHouseOfStakeRefreshFailure {
+    failed_at: Instant,
 }
 
 /// Cached system configs snapshot for model access checks.
@@ -79,10 +77,33 @@ struct CachedSystemConfigs {
     cached_at: Instant,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HouseOfStakeEntitlementSource {
+    Chain,
+    TransientFallback,
+}
+
+#[derive(Clone, Debug)]
+struct ResolvedPlanPeriod {
+    plan_credits: u64,
+    period_start: chrono::DateTime<Utc>,
+    period_end: chrono::DateTime<Utc>,
+    house_of_stake_source: Option<HouseOfStakeEntitlementSource>,
+}
+
+#[derive(Clone, Debug)]
+struct HouseOfStakeEntitlement {
+    plan_credits: u64,
+    period_start: chrono::DateTime<Utc>,
+    period_end: chrono::DateTime<Utc>,
+    source: HouseOfStakeEntitlementSource,
+}
+
 const TTL_CACHE_SECS: u64 = 600; // 10 minutes
+const HOUSE_OF_STAKE_CREDIT_LIMIT_CACHE_SECS: u64 = 600; // 10 minutes
 const SYSTEM_CONFIGS_TTL_CACHE_SECS: u64 = 60; // 1 minute
-/// Upper bound for cached HoS stake sources; invalidate_credit_limit_cache also clears this on subscription, credit, and sync changes.
-const HOUSE_OF_STAKE_STAKE_SOURCE_TTL_SECS: u64 = 60;
+const HOUSE_OF_STAKE_MAX_CHAIN_PERIOD_DAYS: i64 = 35;
+const HOUSE_OF_STAKE_PERIOD_START_BASELINE_GRACE_SECS: i64 = 600;
 /// Default monthly credits when plan has no monthly_credits config. 1 USD in nano-dollars ($1 = 1_000_000_000).
 const DEFAULT_MONTHLY_CREDITS_NANO_USD: u64 = 1_000_000_000;
 const YOCTO_PER_NEAR: u128 = 1_000_000_000_000_000_000_000_000;
@@ -116,8 +137,8 @@ pub struct SubscriptionServiceImpl {
     near_rpc_url: String,
     near_network_id: String,
     credit_limit_cache: Arc<RwLock<HashMap<UserId, CachedCreditLimit>>>,
-    house_of_stake_stake_source_cache:
-        Arc<RwLock<HashMap<(UserId, String), CachedHouseOfStakeStakeSource>>>,
+    house_of_stake_refresh_failure_cache:
+        Arc<RwLock<HashMap<UserId, CachedHouseOfStakeRefreshFailure>>>,
     system_configs_cache: Arc<RwLock<Option<CachedSystemConfigs>>>,
 }
 
@@ -191,7 +212,7 @@ impl SubscriptionServiceImpl {
             near_rpc_url: config.near_rpc_url,
             near_network_id: config.near_network_id,
             credit_limit_cache: Arc::new(RwLock::new(HashMap::new())),
-            house_of_stake_stake_source_cache: Arc::new(RwLock::new(HashMap::new())),
+            house_of_stake_refresh_failure_cache: Arc::new(RwLock::new(HashMap::new())),
             system_configs_cache: Arc::new(RwLock::new(None)),
         }
     }
@@ -199,11 +220,56 @@ impl SubscriptionServiceImpl {
     /// Invalidate cached credit-limit state for a user (e.g. when plan, credits, or HoS lock state changes via webhook/reconcile).
     async fn invalidate_credit_limit_cache(&self, user_id: UserId) {
         self.credit_limit_cache.write().await.remove(&user_id);
-        self.house_of_stake_stake_source_cache
+        self.house_of_stake_refresh_failure_cache
             .write()
             .await
-            .retain(|(cached_user_id, _), _| *cached_user_id != user_id);
+            .remove(&user_id);
         tracing::debug!("Invalidated credit limit cache for user_id={}", user_id);
+    }
+
+    async fn cached_credit_limit_for_user(
+        &self,
+        user_id: UserId,
+        ttl_secs: u64,
+    ) -> Option<ResolvedPlanPeriod> {
+        let cache_guard = self.credit_limit_cache.read().await;
+        let cached = cache_guard.get(&user_id)?;
+        if cached.cached_at.elapsed().as_secs() >= ttl_secs {
+            return None;
+        }
+
+        tracing::debug!(
+            "Using cached credit limit for user_id={} (plan={}, age_secs={})",
+            user_id,
+            cached.plan_credits,
+            cached.cached_at.elapsed().as_secs()
+        );
+        Some(ResolvedPlanPeriod {
+            plan_credits: cached.plan_credits,
+            period_start: cached.period_start,
+            period_end: cached.period_end,
+            house_of_stake_source: cached.house_of_stake_source,
+        })
+    }
+
+    async fn cache_credit_limit_for_user(
+        &self,
+        user_id: UserId,
+        plan_credits: u64,
+        period_start: DateTime<Utc>,
+        period_end: DateTime<Utc>,
+        house_of_stake_source: Option<HouseOfStakeEntitlementSource>,
+    ) {
+        self.credit_limit_cache.write().await.insert(
+            user_id,
+            CachedCreditLimit {
+                plan_credits,
+                period_start,
+                period_end,
+                house_of_stake_source,
+                cached_at: Instant::now(),
+            },
+        );
     }
 
     async fn get_system_configs_cached(
@@ -799,7 +865,7 @@ impl SubscriptionServiceImpl {
         &self,
         user_id: UserId,
     ) -> Result<Option<Subscription>, SubscriptionError> {
-        let active_subscriptions = self
+        let mut active_subscriptions = self
             .subscription_repo
             .get_active_subscriptions(user_id)
             .await
@@ -810,6 +876,76 @@ impl SubscriptionServiceImpl {
         }
 
         let now = Utc::now();
+        let expired_hos_subscriptions: Vec<Subscription> = active_subscriptions
+            .iter()
+            .filter(|s| s.provider == "house-of-stake" && s.current_period_end <= now)
+            .cloned()
+            .collect();
+
+        let mut expired_hos_refresh_failed = false;
+        if !expired_hos_subscriptions.is_empty() {
+            let recent_refresh_failure = self
+                .house_of_stake_refresh_failure_cache
+                .read()
+                .await
+                .get(&user_id)
+                .is_some_and(|cached| {
+                    cached.failed_at.elapsed().as_secs() < HOUSE_OF_STAKE_CREDIT_LIMIT_CACHE_SECS
+                });
+
+            if recent_refresh_failure {
+                tracing::warn!(
+                    user_id = %user_id.0,
+                    "skipping expired local HoS subscription refresh due to recent chain refresh failure"
+                );
+                expired_hos_refresh_failed = true;
+            } else {
+                match self
+                    .reconcile_near_staking_from_rpc_with_subs(
+                        user_id,
+                        active_subscriptions.clone(),
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        self.house_of_stake_refresh_failure_cache
+                            .write()
+                            .await
+                            .remove(&user_id);
+                        active_subscriptions = self
+                            .subscription_repo
+                            .get_active_subscriptions(user_id)
+                            .await
+                            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+                    }
+                    Err(err) => {
+                        self.house_of_stake_refresh_failure_cache
+                            .write()
+                            .await
+                            .insert(
+                                user_id,
+                                CachedHouseOfStakeRefreshFailure {
+                                    failed_at: Instant::now(),
+                                },
+                            );
+                        tracing::warn!(
+                            user_id = %user_id.0,
+                            error = %err,
+                            "could not refresh expired local HoS subscription from chain before entitlement check"
+                        );
+                        expired_hos_refresh_failed = true;
+                    }
+                }
+            }
+        }
+
+        if expired_hos_refresh_failed {
+            return Ok(active_subscriptions
+                .into_iter()
+                .filter(|s| !(s.provider == "house-of-stake" && s.current_period_end <= now))
+                .max_by_key(|s| s.created_at));
+        }
+
         let expired_hos_subscriptions: Vec<Subscription> = active_subscriptions
             .iter()
             .filter(|s| s.provider == "house-of-stake" && s.current_period_end <= now)
@@ -909,38 +1045,117 @@ impl SubscriptionServiceImpl {
         &self,
         user_id: UserId,
     ) -> Result<(i64, chrono::DateTime<Utc>, chrono::DateTime<Utc>), SubscriptionError> {
-        let configs = self
-            .system_configs_service
-            .get_configs()
+        let resolved = self
+            .resolve_plan_period_for_user_with_source(user_id)
+            .await?;
+        Ok((
+            resolved.plan_credits.min(i64::MAX as u64) as i64,
+            resolved.period_start,
+            resolved.period_end,
+        ))
+    }
+
+    async fn resolve_plan_period_for_user_with_source(
+        &self,
+        user_id: UserId,
+    ) -> Result<ResolvedPlanPeriod, SubscriptionError> {
+        self.resolve_plan_period_for_user_with_source_inner(user_id, true)
             .await
-            .map_err(|e| SubscriptionError::InternalError(e.to_string()))?;
+    }
+
+    async fn refresh_plan_period_for_user_with_source(
+        &self,
+        user_id: UserId,
+    ) -> Result<ResolvedPlanPeriod, SubscriptionError> {
+        self.resolve_plan_period_for_user_with_source_inner(user_id, false)
+            .await
+    }
+
+    async fn resolve_plan_period_for_user_with_source_inner(
+        &self,
+        user_id: UserId,
+        allow_house_of_stake_cache: bool,
+    ) -> Result<ResolvedPlanPeriod, SubscriptionError> {
+        let active_subscription = self
+            .get_active_subscription_for_entitlement(user_id)
+            .await?;
+
+        if allow_house_of_stake_cache
+            && active_subscription
+                .as_ref()
+                .is_some_and(|sub| sub.provider == "house-of-stake")
+        {
+            if let Some(resolved) = self
+                .cached_credit_limit_for_user(user_id, HOUSE_OF_STAKE_CREDIT_LIMIT_CACHE_SECS)
+                .await
+            {
+                return Ok(resolved);
+            }
+        }
+
+        let configs = self.get_system_configs_cached().await?;
         let subscription_plans = configs
-            .and_then(|c| c.subscription_plans)
+            .as_deref()
+            .and_then(|c| c.subscription_plans.clone())
             .unwrap_or_default();
 
-        let (plan_credits, period_start, period_end) = match self
-            .get_active_subscription_for_entitlement(user_id)
-            .await?
-        {
-            Some(ref sub) => {
+        let resolved = match active_subscription.as_ref() {
+            Some(sub) => {
+                let fallback_period_end = sub.current_period_end;
+                let fallback_period_start = sub_one_month_same_day(sub.current_period_end);
                 let plan_name = resolve_plan_name_from_config(
                     sub.provider.as_str(),
                     &sub.price_id,
                     &subscription_plans,
                 );
-                let plan_credits = match plan_name.as_deref() {
+                match plan_name.as_deref() {
                     Some(name) => match subscription_plans.get(name) {
-                        Some(plan_config) => self
-                            .stake_based_plan_limit_max(user_id, sub, plan_config)
+                        Some(plan_config) => match self
+                            .stake_based_plan_limit_and_period(
+                                user_id,
+                                sub,
+                                plan_config,
+                                fallback_period_start,
+                                fallback_period_end,
+                            )
                             .await
-                            .unwrap_or_else(|| Self::plan_limit_max(plan_config)),
-                        None => DEFAULT_MONTHLY_CREDITS_NANO_USD,
+                        {
+                            Ok(Some(entitlement)) => ResolvedPlanPeriod {
+                                plan_credits: entitlement.plan_credits,
+                                period_start: entitlement.period_start,
+                                period_end: entitlement.period_end,
+                                house_of_stake_source: Some(entitlement.source),
+                            },
+                            Ok(None) => ResolvedPlanPeriod {
+                                plan_credits: Self::plan_limit_max(plan_config),
+                                period_start: fallback_period_start,
+                                period_end: fallback_period_end,
+                                house_of_stake_source: None,
+                            },
+                            Err(err) => {
+                                tracing::error!(
+                                    user_id = %user_id.0,
+                                    subscription_id = %sub.subscription_id,
+                                    error = %err,
+                                    "failed to resolve HoS stake-based credits"
+                                );
+                                return Err(err);
+                            }
+                        },
+                        None => ResolvedPlanPeriod {
+                            plan_credits: DEFAULT_MONTHLY_CREDITS_NANO_USD,
+                            period_start: fallback_period_start,
+                            period_end: fallback_period_end,
+                            house_of_stake_source: None,
+                        },
                     },
-                    None => DEFAULT_MONTHLY_CREDITS_NANO_USD,
-                };
-                let period_end = sub.current_period_end;
-                let period_start = sub_one_month_same_day(sub.current_period_end);
-                (plan_credits, period_start, period_end)
+                    None => ResolvedPlanPeriod {
+                        plan_credits: DEFAULT_MONTHLY_CREDITS_NANO_USD,
+                        period_start: fallback_period_start,
+                        period_end: fallback_period_end,
+                        house_of_stake_source: None,
+                    },
+                }
             }
             None => {
                 let plan_credits = subscription_plans
@@ -949,13 +1164,30 @@ impl SubscriptionServiceImpl {
                     .unwrap_or(DEFAULT_MONTHLY_CREDITS_NANO_USD);
                 let (period_start, period_end) =
                     self.resolve_free_plan_period_for_user(user_id).await?;
-                (plan_credits, period_start, period_end)
+                ResolvedPlanPeriod {
+                    plan_credits,
+                    period_start,
+                    period_end,
+                    house_of_stake_source: None,
+                }
             }
         };
 
-        // Clamp to i64::MAX so CreditsSummary.plan_credits and comparisons don't overflow
-        let plan_credits_i64 = plan_credits.min(i64::MAX as u64) as i64;
-        Ok((plan_credits_i64, period_start, period_end))
+        if active_subscription
+            .as_ref()
+            .is_some_and(|sub| sub.provider == "house-of-stake")
+        {
+            self.cache_credit_limit_for_user(
+                user_id,
+                resolved.plan_credits,
+                resolved.period_start,
+                resolved.period_end,
+                resolved.house_of_stake_source,
+            )
+            .await;
+        }
+
+        Ok(resolved)
     }
 
     fn mark_downgrade_pending(subscription: &mut Subscription, target_price_id: String) {
@@ -991,36 +1223,387 @@ impl SubscriptionServiceImpl {
         Some(credits.min(u64::MAX as u128) as u64)
     }
 
-    async fn stake_based_plan_limit_max(
+    fn ns_to_datetime(ns: u64) -> Option<DateTime<Utc>> {
+        let secs = (ns / 1_000_000_000) as i64;
+        let nsec = ((ns % 1_000_000_000) / 1_000 * 1_000) as u32;
+        DateTime::from_timestamp(secs, nsec)
+    }
+
+    fn prorated_credit_delta(
+        full_period_delta: u64,
+        period_start: DateTime<Utc>,
+        period_end: DateTime<Utc>,
+        effective_at: DateTime<Utc>,
+    ) -> u64 {
+        let Some(total_ns) = period_end
+            .signed_duration_since(period_start)
+            .num_nanoseconds()
+        else {
+            return 0;
+        };
+        if total_ns <= 0 {
+            return 0;
+        }
+
+        let clamped_effective_at = effective_at.max(period_start).min(period_end);
+        let Some(remaining_ns) = period_end
+            .signed_duration_since(clamped_effective_at)
+            .num_nanoseconds()
+        else {
+            return 0;
+        };
+        if remaining_ns <= 0 {
+            return 0;
+        }
+
+        // HoS contract reads currently expose the effective stake, not the stake-change
+        // timestamp, so increments are anchored to the first backend observation.
+        let prorated = u128::from(full_period_delta)
+            .saturating_mul(remaining_ns as u128)
+            .saturating_div(total_ns as u128);
+        prorated.min(u64::MAX as u128) as u64
+    }
+
+    fn is_valid_house_of_stake_chain_period(
+        period_start: DateTime<Utc>,
+        period_end: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> bool {
+        if period_end <= period_start {
+            return false;
+        }
+        if now < period_start || now >= period_end {
+            return false;
+        }
+        period_end.signed_duration_since(period_start)
+            <= Duration::days(HOUSE_OF_STAKE_MAX_CHAIN_PERIOD_DAYS)
+    }
+
+    fn is_house_of_stake_period_start_baseline_observation(
+        period_start: DateTime<Utc>,
+        observed_at: DateTime<Utc>,
+    ) -> bool {
+        observed_at >= period_start
+            && observed_at.signed_duration_since(period_start)
+                <= Duration::seconds(HOUSE_OF_STAKE_PERIOD_START_BASELINE_GRACE_SECS)
+    }
+
+    async fn reconcile_house_of_stake_credit_entitlement_snapshot(
+        &self,
+        user_id: UserId,
+        subscription_id: &str,
+        plan_config: &SubscriptionPlanConfig,
+        period_start: DateTime<Utc>,
+        period_end: DateTime<Utc>,
+        effective_stake_yocto: u128,
+    ) -> Result<u64, SubscriptionError> {
+        let observed_at = Utc::now();
+        let mut client = self
+            .db_pool
+            .get()
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+        let txn = client
+            .transaction()
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        let row = txn
+            .query_opt(
+                r#"
+                SELECT credited_stake_yocto, last_observed_stake_yocto, credit_limit_nano_usd
+                FROM house_of_stake_credit_entitlement_snapshots
+                WHERE subscription_id = $1
+                  AND period_start = $2
+                  AND period_end = $3
+                FOR UPDATE
+                "#,
+                &[&subscription_id, &period_start, &period_end],
+            )
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        let row = match row {
+            Some(row) => row,
+            None => {
+                let previous_last_observed_stake = match txn
+                    .query_opt(
+                        r#"
+                        SELECT last_observed_stake_yocto
+                        FROM house_of_stake_credit_entitlement_snapshots
+                        WHERE subscription_id = $1
+                          AND period_end <= $2
+                        ORDER BY period_end DESC
+                        LIMIT 1
+                        "#,
+                        &[&subscription_id, &period_start],
+                    )
+                    .await
+                    .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
+                {
+                    Some(row) => Some(
+                        row.get::<_, String>("last_observed_stake_yocto")
+                            .parse::<u128>()
+                            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?,
+                    ),
+                    None => None,
+                };
+                let baseline_stake = match previous_last_observed_stake {
+                    Some(_)
+                        if Self::is_house_of_stake_period_start_baseline_observation(
+                            period_start,
+                            observed_at,
+                        ) =>
+                    {
+                        effective_stake_yocto
+                    }
+                    Some(stake) => stake.min(effective_stake_yocto),
+                    None => effective_stake_yocto,
+                };
+                let baseline_limit =
+                    Self::stake_based_credits_for_lock(plan_config, baseline_stake).unwrap_or(0);
+                match txn
+                    .query_opt(
+                        r#"
+                    INSERT INTO house_of_stake_credit_entitlement_snapshots (
+                        user_id, subscription_id, period_start, period_end,
+                        credited_stake_yocto, last_observed_stake_yocto, credit_limit_nano_usd
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    ON CONFLICT (subscription_id, period_start, period_end) DO NOTHING
+                    RETURNING credited_stake_yocto, last_observed_stake_yocto, credit_limit_nano_usd
+                    "#,
+                        &[
+                            &user_id,
+                            &subscription_id,
+                            &period_start,
+                            &period_end,
+                            &baseline_stake.to_string(),
+                            &effective_stake_yocto.to_string(),
+                            &(baseline_limit.min(i64::MAX as u64) as i64),
+                        ],
+                    )
+                    .await
+                    .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?
+                {
+                    Some(row) => row,
+                    None => txn
+                        .query_one(
+                            r#"
+                        SELECT credited_stake_yocto, last_observed_stake_yocto, credit_limit_nano_usd
+                        FROM house_of_stake_credit_entitlement_snapshots
+                        WHERE subscription_id = $1
+                          AND period_start = $2
+                          AND period_end = $3
+                        FOR UPDATE
+                        "#,
+                            &[&subscription_id, &period_start, &period_end],
+                        )
+                        .await
+                        .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?,
+                }
+            }
+        };
+
+        let credited_stake = row
+            .get::<_, String>("credited_stake_yocto")
+            .parse::<u128>()
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+        let last_observed_stake = row
+            .get::<_, String>("last_observed_stake_yocto")
+            .parse::<u128>()
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+        let current_limit = row.get::<_, i64>("credit_limit_nano_usd").max(0) as u64;
+
+        let resolved_limit = if effective_stake_yocto > credited_stake {
+            let delta_stake = effective_stake_yocto - credited_stake;
+            let full_period_delta =
+                Self::stake_based_credits_for_lock(plan_config, delta_stake).unwrap_or(0);
+            let prorated_delta = Self::prorated_credit_delta(
+                full_period_delta,
+                period_start,
+                period_end,
+                observed_at,
+            );
+            let new_limit = current_limit
+                .saturating_add(prorated_delta)
+                .min(i64::MAX as u64);
+            txn.execute(
+                r#"
+                UPDATE house_of_stake_credit_entitlement_snapshots
+                SET credited_stake_yocto = $4,
+                    last_observed_stake_yocto = $5,
+                    credit_limit_nano_usd = $6,
+                    last_reconciled_at = NOW()
+                WHERE subscription_id = $1
+                  AND period_start = $2
+                  AND period_end = $3
+                "#,
+                &[
+                    &subscription_id,
+                    &period_start,
+                    &period_end,
+                    &effective_stake_yocto.to_string(),
+                    &effective_stake_yocto.to_string(),
+                    &(new_limit as i64),
+                ],
+            )
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+            new_limit
+        } else {
+            if effective_stake_yocto != last_observed_stake {
+                txn.execute(
+                    r#"
+                    UPDATE house_of_stake_credit_entitlement_snapshots
+                    SET last_observed_stake_yocto = $4,
+                        last_reconciled_at = NOW()
+                    WHERE subscription_id = $1
+                      AND period_start = $2
+                      AND period_end = $3
+                    "#,
+                    &[
+                        &subscription_id,
+                        &period_start,
+                        &period_end,
+                        &effective_stake_yocto.to_string(),
+                    ],
+                )
+                .await
+                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+            }
+            current_limit
+        };
+
+        txn.commit()
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+        Ok(resolved_limit)
+    }
+
+    async fn current_house_of_stake_snapshot_limit(
+        &self,
+        subscription_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<(u64, DateTime<Utc>, DateTime<Utc>)>, SubscriptionError> {
+        let client = self
+            .db_pool
+            .get()
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+        let row = client
+            .query_opt(
+                r#"
+                SELECT credit_limit_nano_usd, period_start, period_end
+                FROM house_of_stake_credit_entitlement_snapshots
+                WHERE subscription_id = $1
+                  AND period_start <= $2
+                  AND period_end > $2
+                ORDER BY period_end DESC
+                LIMIT 1
+                "#,
+                &[&subscription_id, &now],
+            )
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+        Ok(row.map(|row| {
+            (
+                row.get::<_, i64>("credit_limit_nano_usd").max(0) as u64,
+                row.get("period_start"),
+                row.get("period_end"),
+            )
+        }))
+    }
+
+    async fn house_of_stake_snapshot_or_plan_fallback(
         &self,
         user_id: UserId,
         subscription: &Subscription,
         plan_config: &SubscriptionPlanConfig,
-    ) -> Option<u64> {
-        if subscription.provider != "house-of-stake" {
-            return None;
-        }
-        plan_config
-            .stake_based_monthly_credits
-            .as_ref()
-            .and_then(|c| c.credits_per_staked_near_nano_usd)?;
-
-        let cache_key = (user_id, subscription.subscription_id.clone());
-        if let Some(cached) = self
-            .house_of_stake_stake_source_cache
-            .read()
+        period: (DateTime<Utc>, DateTime<Utc>),
+        reason: &'static str,
+        error: impl std::fmt::Display,
+    ) -> Result<Option<HouseOfStakeEntitlement>, SubscriptionError> {
+        let (period_start, period_end) = period;
+        tracing::warn!(
+            user_id = %user_id.0,
+            subscription_id = %subscription.subscription_id,
+            reason,
+            error = %error,
+            "HoS chain entitlement read failed; using current persisted snapshot or configured plan limit"
+        );
+        let limit = Self::plan_limit_max(plan_config);
+        match self
+            .current_house_of_stake_snapshot_limit(&subscription.subscription_id, Utc::now())
             .await
-            .get(&cache_key)
         {
-            if cached.cached_at.elapsed().as_secs() < HOUSE_OF_STAKE_STAKE_SOURCE_TTL_SECS {
-                tracing::debug!(
+            Ok(Some((snapshot_limit, snapshot_start, snapshot_end))) => {
+                return Ok(Some(HouseOfStakeEntitlement {
+                    plan_credits: snapshot_limit,
+                    period_start: snapshot_start,
+                    period_end: snapshot_end,
+                    source: HouseOfStakeEntitlementSource::TransientFallback,
+                }));
+            }
+            Ok(None) => {}
+            Err(err) => {
+                tracing::warn!(
                     user_id = %user_id.0,
                     subscription_id = %subscription.subscription_id,
-                    last_lock_id = %cached.last_lock_id,
-                    "using cached HoS stake-based credit source"
+                    error = %err,
+                    limit,
+                    "HoS snapshot fallback read failed; using configured plan limit"
                 );
-                return Self::stake_based_credits_for_lock(plan_config, cached.amount_yocto);
             }
+        }
+
+        Ok(Some(HouseOfStakeEntitlement {
+            plan_credits: limit,
+            period_start,
+            period_end,
+            source: HouseOfStakeEntitlementSource::TransientFallback,
+        }))
+    }
+
+    fn house_of_stake_chain_zero_entitlement(
+        user_id: UserId,
+        subscription: &Subscription,
+        period: (DateTime<Utc>, DateTime<Utc>),
+        reason: &'static str,
+    ) -> Option<HouseOfStakeEntitlement> {
+        let (period_start, period_end) = period;
+        tracing::warn!(
+            user_id = %user_id.0,
+            subscription_id = %subscription.subscription_id,
+            reason,
+            "HoS chain reported no active stake entitlement; granting zero stake-based credits"
+        );
+        Some(HouseOfStakeEntitlement {
+            plan_credits: 0,
+            period_start,
+            period_end,
+            source: HouseOfStakeEntitlementSource::Chain,
+        })
+    }
+
+    async fn stake_based_plan_limit_and_period(
+        &self,
+        user_id: UserId,
+        subscription: &Subscription,
+        plan_config: &SubscriptionPlanConfig,
+        fallback_period_start: DateTime<Utc>,
+        fallback_period_end: DateTime<Utc>,
+    ) -> Result<Option<HouseOfStakeEntitlement>, SubscriptionError> {
+        if subscription.provider != "house-of-stake" {
+            return Ok(None);
+        }
+        if plan_config
+            .stake_based_monthly_credits
+            .as_ref()
+            .and_then(|c| c.credits_per_staked_near_nano_usd)
+            .is_none()
+        {
+            return Ok(None);
         }
 
         let Some(contract_id) = self.near_staking_contract_id.as_deref().map(str::trim) else {
@@ -1029,15 +1612,34 @@ impl SubscriptionServiceImpl {
                 subscription_id = %subscription.subscription_id,
                 "cannot resolve HoS stake-based credits: staking contract is not configured"
             );
-            return None;
+            return self
+                .house_of_stake_snapshot_or_plan_fallback(
+                    user_id,
+                    subscription,
+                    plan_config,
+                    (fallback_period_start, fallback_period_end),
+                    "staking_contract_not_configured",
+                    "staking contract is not configured",
+                )
+                .await;
         };
+
         if contract_id.is_empty() {
             tracing::warn!(
                 user_id = %user_id.0,
                 subscription_id = %subscription.subscription_id,
                 "cannot resolve HoS stake-based credits: staking contract is empty"
             );
-            return None;
+            return self
+                .house_of_stake_snapshot_or_plan_fallback(
+                    user_id,
+                    subscription,
+                    plan_config,
+                    (fallback_period_start, fallback_period_end),
+                    "staking_contract_empty",
+                    "staking contract is empty",
+                )
+                .await;
         }
 
         let near_account = match self.get_near_account_id(user_id).await {
@@ -1049,7 +1651,16 @@ impl SubscriptionServiceImpl {
                     error = %err,
                     "cannot resolve HoS stake-based credits: NEAR account unavailable"
                 );
-                return None;
+                return self
+                    .house_of_stake_snapshot_or_plan_fallback(
+                        user_id,
+                        subscription,
+                        plan_config,
+                        (fallback_period_start, fallback_period_end),
+                        "near_account_unavailable",
+                        err,
+                    )
+                    .await;
             }
         };
 
@@ -1069,7 +1680,16 @@ impl SubscriptionServiceImpl {
                     price_id = %subscription.price_id,
                     "cannot resolve HoS stake-based credits: subscription missing on chain"
                 );
-                return None;
+                return self
+                    .house_of_stake_snapshot_or_plan_fallback(
+                        user_id,
+                        subscription,
+                        plan_config,
+                        (fallback_period_start, fallback_period_end),
+                        "subscription_missing_on_chain",
+                        "subscription missing on chain",
+                    )
+                    .await;
             }
             Err(err) => {
                 tracing::warn!(
@@ -1079,7 +1699,16 @@ impl SubscriptionServiceImpl {
                     error = %err,
                     "cannot resolve HoS stake-based credits: subscription RPC failed"
                 );
-                return None;
+                return self
+                    .house_of_stake_snapshot_or_plan_fallback(
+                        user_id,
+                        subscription,
+                        plan_config,
+                        (fallback_period_start, fallback_period_end),
+                        "subscription_rpc_failed",
+                        err,
+                    )
+                    .await;
             }
         };
 
@@ -1101,8 +1730,70 @@ impl SubscriptionServiceImpl {
                 chain_end_ns = chain_sub.end_ns,
                 "cannot resolve HoS stake-based credits: chain subscription is not active"
             );
-            return None;
+            return Ok(Self::house_of_stake_chain_zero_entitlement(
+                user_id,
+                subscription,
+                (fallback_period_start, fallback_period_end),
+                "subscription_not_active_on_chain",
+            ));
         }
+
+        let now = Utc::now();
+        let chain_period = chain_sub
+            .start_ns
+            .and_then(Self::ns_to_datetime)
+            .zip(Self::ns_to_datetime(chain_sub.end_ns))
+            .filter(|(start, end)| Self::is_valid_house_of_stake_chain_period(*start, *end, now));
+        let (period_start, period_end) = match chain_period {
+            Some((chain_start, chain_end)) => {
+                tracing::debug!(
+                    user_id = %user_id.0,
+                    subscription_id = %subscription.subscription_id,
+                    price_id = %subscription.price_id,
+                    chain_period_start = %chain_start,
+                    chain_period_end = %chain_end,
+                    fallback_period_start = %fallback_period_start,
+                    fallback_period_end = %fallback_period_end,
+                    "using chain HoS billing period for entitlement snapshot"
+                );
+                (chain_start, chain_end)
+            }
+            None => {
+                tracing::warn!(
+                    user_id = %user_id.0,
+                    subscription_id = %subscription.subscription_id,
+                    price_id = %subscription.price_id,
+                    chain_start_ns = ?chain_sub.start_ns,
+                    chain_end_ns = chain_sub.end_ns,
+                    fallback_period_start = %fallback_period_start,
+                    fallback_period_end = %fallback_period_end,
+                    "cannot resolve valid HoS chain billing period; using local fallback period"
+                );
+                match self
+                    .current_house_of_stake_snapshot_limit(&subscription.subscription_id, now)
+                    .await
+                {
+                    Ok(Some((snapshot_limit, snapshot_start, snapshot_end))) => {
+                        return Ok(Some(HouseOfStakeEntitlement {
+                            plan_credits: snapshot_limit,
+                            period_start: snapshot_start,
+                            period_end: snapshot_end,
+                            source: HouseOfStakeEntitlementSource::TransientFallback,
+                        }));
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        tracing::warn!(
+                            user_id = %user_id.0,
+                            subscription_id = %subscription.subscription_id,
+                            error = %err,
+                            "HoS snapshot lookup failed after invalid chain period; using local fallback period"
+                        );
+                    }
+                }
+                (fallback_period_start, fallback_period_end)
+            }
+        };
 
         let Some(last_lock_id) = chain_sub
             .last_lock_id
@@ -1115,7 +1806,16 @@ impl SubscriptionServiceImpl {
                 price_id = %subscription.price_id,
                 "cannot resolve HoS stake-based credits: last_lock_id missing on chain subscription"
             );
-            return None;
+            return self
+                .house_of_stake_snapshot_or_plan_fallback(
+                    user_id,
+                    subscription,
+                    plan_config,
+                    (period_start, period_end),
+                    "last_lock_id_missing",
+                    "last lock id missing",
+                )
+                .await;
         };
 
         let lock =
@@ -1128,7 +1828,16 @@ impl SubscriptionServiceImpl {
                         last_lock_id,
                         "cannot resolve HoS stake-based credits: lock missing on chain"
                     );
-                    return None;
+                    return self
+                        .house_of_stake_snapshot_or_plan_fallback(
+                            user_id,
+                            subscription,
+                            plan_config,
+                            (period_start, period_end),
+                            "lock_missing_on_chain",
+                            "lock missing on chain",
+                        )
+                        .await;
                 }
                 Err(err) => {
                     tracing::warn!(
@@ -1138,7 +1847,16 @@ impl SubscriptionServiceImpl {
                         error = %err,
                         "cannot resolve HoS stake-based credits: lock RPC failed"
                     );
-                    return None;
+                    return self
+                        .house_of_stake_snapshot_or_plan_fallback(
+                            user_id,
+                            subscription,
+                            plan_config,
+                            (period_start, period_end),
+                            "lock_rpc_failed",
+                            err,
+                        )
+                        .await;
                 }
             };
 
@@ -1156,15 +1874,12 @@ impl SubscriptionServiceImpl {
                 lock_shares = %lock_shares,
                 "HoS effective lock is not active with staked shares; granting zero stake-based credits"
             );
-            self.house_of_stake_stake_source_cache.write().await.insert(
-                cache_key,
-                CachedHouseOfStakeStakeSource {
-                    last_lock_id: last_lock_id.to_string(),
-                    amount_yocto: 0,
-                    cached_at: Instant::now(),
-                },
-            );
-            return Self::stake_based_credits_for_lock(plan_config, 0);
+            return Ok(Self::house_of_stake_chain_zero_entitlement(
+                user_id,
+                subscription,
+                (period_start, period_end),
+                "lock_has_no_active_shares",
+            ));
         }
 
         let Some(lock_amount) = lock_amount_yocto(&lock) else {
@@ -1174,19 +1889,51 @@ impl SubscriptionServiceImpl {
                 last_lock_id,
                 "cannot resolve HoS stake-based credits: lock amount missing or invalid"
             );
-            return None;
+            return self
+                .house_of_stake_snapshot_or_plan_fallback(
+                    user_id,
+                    subscription,
+                    plan_config,
+                    (period_start, period_end),
+                    "lock_amount_missing",
+                    "lock amount missing",
+                )
+                .await;
         };
 
-        self.house_of_stake_stake_source_cache.write().await.insert(
-            cache_key,
-            CachedHouseOfStakeStakeSource {
-                last_lock_id: last_lock_id.to_string(),
-                amount_yocto: lock_amount,
-                cached_at: Instant::now(),
-            },
-        );
-
-        Self::stake_based_credits_for_lock(plan_config, lock_amount)
+        let limit = match self
+            .reconcile_house_of_stake_credit_entitlement_snapshot(
+                user_id,
+                &subscription.subscription_id,
+                plan_config,
+                period_start,
+                period_end,
+                lock_amount,
+            )
+            .await
+        {
+            Ok(limit) => limit,
+            Err(err) => {
+                tracing::warn!(
+                    user_id = %user_id.0,
+                    subscription_id = %subscription.subscription_id,
+                    error = %err,
+                    "HoS snapshot reconciliation failed; using transient plan fallback"
+                );
+                return Ok(Some(HouseOfStakeEntitlement {
+                    plan_credits: Self::plan_limit_max(plan_config),
+                    period_start,
+                    period_end,
+                    source: HouseOfStakeEntitlementSource::TransientFallback,
+                }));
+            }
+        };
+        Ok(Some(HouseOfStakeEntitlement {
+            plan_credits: limit,
+            period_start,
+            period_end,
+            source: HouseOfStakeEntitlementSource::Chain,
+        }))
     }
 
     fn should_check_pending_downgrade(subscription: &Subscription) -> bool {
@@ -2021,6 +2768,82 @@ fn generate_credit_checkout_idempotency_key(
     format!("{:x}", hasher.finalize())
 }
 
+impl SubscriptionServiceImpl {
+    async fn purchased_reconciliation_plan_period(
+        &self,
+        user_id: UserId,
+        resolved: &ResolvedPlanPeriod,
+    ) -> Result<Option<(i64, DateTime<Utc>, DateTime<Utc>)>, SubscriptionError> {
+        let plan_credits = resolved.plan_credits.min(i64::MAX as u64) as i64;
+        let period_start = resolved.period_start;
+        let period_end = resolved.period_end;
+        let active_subscription = match self.get_active_subscription_for_entitlement(user_id).await
+        {
+            Ok(sub) => sub,
+            Err(err) => {
+                tracing::warn!(
+                    user_id = %user_id.0,
+                    error = %err,
+                    "skipping purchased credit reconciliation: could not verify HoS snapshot floor after zero entitlement"
+                );
+                return Ok(None);
+            }
+        };
+
+        let Some(subscription) = active_subscription else {
+            return Ok(Some((plan_credits, period_start, period_end)));
+        };
+        if subscription.provider != "house-of-stake" {
+            return Ok(Some((plan_credits, period_start, period_end)));
+        }
+
+        match self
+            .current_house_of_stake_snapshot_limit(&subscription.subscription_id, Utc::now())
+            .await
+        {
+            Ok(Some((snapshot_limit, snapshot_start, snapshot_end))) => {
+                let snapshot_limit = snapshot_limit.min(i64::MAX as u64) as i64;
+                let reconciliation_plan_credits = plan_credits.max(snapshot_limit);
+                if snapshot_limit > plan_credits {
+                    tracing::warn!(
+                        user_id = %user_id.0,
+                        subscription_id = %subscription.subscription_id,
+                        plan_credits,
+                        snapshot_limit,
+                        "using current HoS snapshot as purchased-credit reconciliation floor"
+                    );
+                }
+                Ok(Some((
+                    reconciliation_plan_credits,
+                    snapshot_start,
+                    snapshot_end,
+                )))
+            }
+            Ok(None)
+                if resolved.house_of_stake_source
+                    == Some(HouseOfStakeEntitlementSource::TransientFallback) =>
+            {
+                tracing::warn!(
+                    user_id = %user_id.0,
+                    subscription_id = %subscription.subscription_id,
+                    "skipping purchased credit reconciliation: HoS snapshot period is unavailable during transient fallback"
+                );
+                Ok(None)
+            }
+            Ok(None) => Ok(Some((plan_credits, period_start, period_end))),
+            Err(err) => {
+                tracing::warn!(
+                    user_id = %user_id.0,
+                    subscription_id = %subscription.subscription_id,
+                    error = %err,
+                    "skipping purchased credit reconciliation: could not read canonical HoS snapshot period"
+                );
+                Ok(None)
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl SubscriptionService for SubscriptionServiceImpl {
     async fn get_available_plans(
@@ -2438,7 +3261,17 @@ impl SubscriptionService for SubscriptionServiceImpl {
         &self,
         user_id: UserId,
     ) -> Result<NearStakingSyncSummary, SubscriptionError> {
-        self.reconcile_near_staking_from_rpc(user_id).await
+        let summary = self.reconcile_near_staking_from_rpc(user_id).await?;
+        if summary.upserted_house_of_stake_row {
+            if let Err(err) = self.refresh_plan_period_for_user_with_source(user_id).await {
+                tracing::warn!(
+                    user_id = %user_id.0,
+                    error = %err,
+                    "HoS sync succeeded but entitlement snapshot seeding failed"
+                );
+            }
+        }
+        Ok(summary)
     }
 
     async fn change_plan(
@@ -3355,28 +4188,23 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .get_active_subscription_for_entitlement(user_id)
             .await?;
 
-        // 1. Get plan credits (monthly_credits) from the config. Cache 10 mins.
+        // 1. Get plan credits (monthly_credits) from the config. Cache briefly for HoS because
+        // resolving stake-based credits requires NEAR RPC plus snapshot reconciliation.
         let cached_limit = {
-            let cache_guard = self.credit_limit_cache.read().await;
-            if let Some(cached) = cache_guard.get(&user_id) {
-                if cached.cached_at.elapsed().as_secs() < TTL_CACHE_SECS {
-                    tracing::debug!(
-                        "Using cached credit limit for user_id={} (plan={}, age_secs={})",
-                        user_id,
-                        cached.plan_credits,
-                        cached.cached_at.elapsed().as_secs()
-                    );
-                    Some((cached.plan_credits, cached.period_start, cached.period_end))
-                } else {
-                    None
-                }
+            let credit_limit_cache_secs = if active_subscription
+                .as_ref()
+                .is_some_and(|sub| sub.provider == "house-of-stake")
+            {
+                HOUSE_OF_STAKE_CREDIT_LIMIT_CACHE_SECS
             } else {
-                None
-            }
+                TTL_CACHE_SECS
+            };
+            self.cached_credit_limit_for_user(user_id, credit_limit_cache_secs)
+                .await
         };
 
-        let (plan_credits, period_start, period_end) = match cached_limit {
-            Some((plan, start, end)) => (plan, start, end),
+        let resolved = match cached_limit {
+            Some(resolved) => resolved,
             None => {
                 let configs = self
                     .system_configs_service
@@ -3388,7 +4216,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     .unwrap_or_default();
 
                 // Use monthly_credits when set (nano USD); else monthly_tokens → nano USD at 1.5 USD per M tokens. Never fail for missing config.
-                let (plan_credits, period_start, period_end) = match active_subscription.as_ref() {
+                let resolved = match active_subscription.as_ref() {
                     Some(sub) => {
                         let effective_sub = if sub.provider == "stripe"
                             && Self::should_check_pending_downgrade(sub)
@@ -3413,23 +4241,55 @@ impl SubscriptionService for SubscriptionServiceImpl {
                             &effective_sub.price_id,
                             &subscription_plans,
                         );
-                        let plan_credits = match plan_name.as_deref() {
+                        let fallback_period_end = effective_sub.current_period_end;
+                        let fallback_period_start =
+                            sub_one_month_same_day(effective_sub.current_period_end);
+                        match plan_name.as_deref() {
                             Some(name) => match subscription_plans.get(name) {
-                                Some(plan_config) => self
-                                    .stake_based_plan_limit_max(
+                                Some(plan_config) => match self
+                                    .stake_based_plan_limit_and_period(
                                         user_id,
                                         &effective_sub,
                                         plan_config,
+                                        fallback_period_start,
+                                        fallback_period_end,
                                     )
                                     .await
-                                    .unwrap_or_else(|| Self::plan_limit_max(plan_config)),
+                                {
+                                    Ok(Some(entitlement)) => ResolvedPlanPeriod {
+                                        plan_credits: entitlement.plan_credits,
+                                        period_start: entitlement.period_start,
+                                        period_end: entitlement.period_end,
+                                        house_of_stake_source: Some(entitlement.source),
+                                    },
+                                    Ok(None) => ResolvedPlanPeriod {
+                                        plan_credits: Self::plan_limit_max(plan_config),
+                                        period_start: fallback_period_start,
+                                        period_end: fallback_period_end,
+                                        house_of_stake_source: None,
+                                    },
+                                    Err(err) => {
+                                        tracing::error!(
+                                            user_id = %user_id.0,
+                                            subscription_id = %effective_sub.subscription_id,
+                                            error = %err,
+                                            "failed to resolve HoS stake-based credits"
+                                        );
+                                        return Err(err);
+                                    }
+                                },
                                 None => {
                                     tracing::warn!(
                                         "Falling back to default monthly credits for unmatched plan '{:?}'; using {} nano-USD",
                                         plan_name,
                                         DEFAULT_MONTHLY_CREDITS_NANO_USD
                                     );
-                                    DEFAULT_MONTHLY_CREDITS_NANO_USD
+                                    ResolvedPlanPeriod {
+                                        plan_credits: DEFAULT_MONTHLY_CREDITS_NANO_USD,
+                                        period_start: fallback_period_start,
+                                        period_end: fallback_period_end,
+                                        house_of_stake_source: None,
+                                    }
                                 }
                             },
                             None => {
@@ -3438,12 +4298,14 @@ impl SubscriptionService for SubscriptionServiceImpl {
                                     plan_name,
                                     DEFAULT_MONTHLY_CREDITS_NANO_USD
                                 );
-                                DEFAULT_MONTHLY_CREDITS_NANO_USD
+                                ResolvedPlanPeriod {
+                                    plan_credits: DEFAULT_MONTHLY_CREDITS_NANO_USD,
+                                    period_start: fallback_period_start,
+                                    period_end: fallback_period_end,
+                                    house_of_stake_source: None,
+                                }
                             }
-                        };
-                        let period_end = effective_sub.current_period_end;
-                        let period_start = sub_one_month_same_day(effective_sub.current_period_end);
-                        (plan_credits, period_start, period_end)
+                        }
                     }
                     None => {
                         let plan_credits = subscription_plans
@@ -3458,25 +4320,29 @@ impl SubscriptionService for SubscriptionServiceImpl {
                             });
                         let (period_start, period_end) =
                             self.resolve_free_plan_period_for_user(user_id).await?;
-                        (plan_credits, period_start, period_end)
-                    }
-                };
-
-                {
-                    let mut cache_guard = self.credit_limit_cache.write().await;
-                    cache_guard.insert(
-                        user_id,
-                        CachedCreditLimit {
+                        ResolvedPlanPeriod {
                             plan_credits,
                             period_start,
                             period_end,
-                            cached_at: Instant::now(),
-                        },
-                    );
-                }
-                (plan_credits, period_start, period_end)
+                            house_of_stake_source: None,
+                        }
+                    }
+                };
+
+                self.cache_credit_limit_for_user(
+                    user_id,
+                    resolved.plan_credits,
+                    resolved.period_start,
+                    resolved.period_end,
+                    resolved.house_of_stake_source,
+                )
+                .await;
+                resolved
             }
         };
+        let plan_credits = resolved.plan_credits;
+        let period_start = resolved.period_start;
+        let period_end = resolved.period_end;
 
         // 2. Get spent credits (cost_nano_usd) in the period
         let period_spent_credits = self
@@ -4131,19 +4997,31 @@ impl SubscriptionService for SubscriptionServiceImpl {
         &self,
         user_id: UserId,
     ) -> Result<(), SubscriptionError> {
-        let (plan_credits, period_start, period_end) =
-            self.resolve_plan_period_for_user(user_id).await?;
+        // Keep per-message accounting on the HoS entitlement cache. Stake mutations and
+        // `/near/sync` invalidate this cache before seeding a fresh snapshot.
+        let resolved = self
+            .resolve_plan_period_for_user_with_source(user_id)
+            .await?;
+        let Some((plan_credits, period_start, period_end)) = self
+            .purchased_reconciliation_plan_period(user_id, &resolved)
+            .await?
+        else {
+            return Ok(());
+        };
         self.credits_repo
             .reconcile_purchased_after_usage(user_id, plan_credits, period_start, period_end)
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-        self.invalidate_credit_limit_cache(user_id).await;
         Ok(())
     }
 
     async fn get_credits(&self, user_id: UserId) -> Result<CreditsSummary, SubscriptionError> {
-        let (plan_credits, period_start, period_end) =
-            self.resolve_plan_period_for_user(user_id).await?;
+        let resolved = self
+            .resolve_plan_period_for_user_with_source(user_id)
+            .await?;
+        let plan_credits = resolved.plan_credits.min(i64::MAX as u64) as i64;
+        let period_start = resolved.period_start;
+        let period_end = resolved.period_end;
 
         let period_spent_credits = self
             .user_usage_repo
@@ -4154,15 +5032,33 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .unwrap_or(0);
 
         if period_spent_credits > 0 {
-            if let Err(e) = self
-                .credits_repo
-                .reconcile_purchased_after_usage(user_id, plan_credits, period_start, period_end)
+            match self
+                .purchased_reconciliation_plan_period(user_id, &resolved)
                 .await
-                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))
             {
-                tracing::warn!(error = ?e, "Failed to reconcile purchased credits before get_credits");
-            } else {
-                self.invalidate_credit_limit_cache(user_id).await;
+                Ok(Some((
+                    reconciliation_plan_credits,
+                    reconciliation_period_start,
+                    reconciliation_period_end,
+                ))) => {
+                    if let Err(e) = self
+                        .credits_repo
+                        .reconcile_purchased_after_usage(
+                            user_id,
+                            reconciliation_plan_credits,
+                            reconciliation_period_start,
+                            reconciliation_period_end,
+                        )
+                        .await
+                        .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))
+                    {
+                        tracing::warn!(error = ?e, "Failed to reconcile purchased credits before get_credits");
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!(error = ?e, "Failed to resolve purchased-credit reconciliation floor before get_credits");
+                }
             }
         }
 

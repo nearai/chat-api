@@ -124,6 +124,8 @@ struct StorageBalanceOfArgs<'a> {
 pub struct NearStakingSubscription {
     pub subscription_id: String,
     pub price_id: String,
+    #[serde(default, deserialize_with = "deserialize_optional_u64")]
+    pub start_ns: Option<u64>,
     #[serde(deserialize_with = "deserialize_required_u64")]
     pub end_ns: u64,
     #[serde(default)]
@@ -463,7 +465,7 @@ fn pending_downgrade_price_id(chain: &NearStakingSubscription) -> Option<String>
 
 fn ts_ns_to_datetime(ns: u64) -> Result<DateTime<Utc>, String> {
     let secs = (ns / 1_000_000_000) as i64;
-    let nsec = (ns % 1_000_000_000) as u32;
+    let nsec = ((ns % 1_000_000_000) / 1_000 * 1_000) as u32;
     DateTime::from_timestamp(secs, nsec).ok_or_else(|| "timestamp out of range".to_string())
 }
 
