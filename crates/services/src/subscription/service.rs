@@ -263,38 +263,50 @@ impl SubscriptionServiceImpl {
             return Ok(AmlCheckResult::unknown(normalized_account, "disabled"));
         }
 
-        let mut stale_active_report = None;
-        match self
+        let active_reports = match self
             .aml_report_repo
-            .latest_active_report(&normalized_account)
+            .active_reports(&normalized_account)
             .await
         {
-            Ok(Some(report)) => {
-                let age = Utc::now().signed_duration_since(report.created_at);
-                if age < Duration::days(self.aml_service.report_refresh_days()) {
-                    if block_high_risk {
-                        self.enforce_aml_result(
-                            user_id,
-                            flow,
-                            &report.result,
-                            self.aml_service.alert_on_cached_reports(),
-                        )
-                        .await?;
-                    }
-                    return Ok(report.result);
-                }
-                stale_active_report = Some(report);
-            }
-            Ok(None) => {}
+            Ok(reports) => reports,
             Err(err) => {
                 tracing::error!(
                     user_id = %user_id,
                     flow = %flow,
                     error = ?err,
-                    "Failed to read AML report cache; continuing with provider check"
+                    "Failed to read AML report candidates; continuing with provider check"
                 );
+                Vec::new()
             }
+        };
+
+        let now = Utc::now();
+        if let Some(report) = active_reports
+            .iter()
+            .find(|report| {
+                now.signed_duration_since(report.created_at)
+                    < Duration::days(self.aml_service.report_refresh_days())
+                    && self.aml_service.has_usable_policy_signal(&report.result)
+            })
+            .cloned()
+        {
+            if block_high_risk {
+                self.enforce_aml_result(
+                    user_id,
+                    flow,
+                    &report.result,
+                    self.aml_service.alert_on_cached_reports(),
+                )
+                .await?;
+            }
+            return Ok(report.result);
         }
+
+        // Reports are newest first, but a newer incomplete report must not conceal an older
+        // report that already matches the configured high-risk policy during a provider outage.
+        let fallback_high_risk_report = active_reports
+            .into_iter()
+            .find(|report| self.aml_service.is_high_risk_result(&report.result));
 
         let result = self
             .aml_service
@@ -304,6 +316,7 @@ impl SubscriptionServiceImpl {
             user_id,
             flow: flow.to_string(),
             result: result.clone(),
+            active: self.aml_service.should_record_active_report(&result),
         };
         if let Err(err) = self.aml_report_repo.record_report(event).await {
             tracing::error!(
@@ -317,11 +330,10 @@ impl SubscriptionServiceImpl {
         self.alert_aml_provider_failure(user_id, flow, &result);
         if result.is_provider_failure() {
             // Compliance decision (2026-07-18): Lukka provider outages fail open for
-            // user-initiated HoS billing flows unless a stale active HIGH report is
-            // already known for the NEAR account. Provider failures are recorded and
-            // alerted so compliance can review outage-period activity.
-            if let Some(report) = stale_active_report.filter(|report| report.result.is_high_risk())
-            {
+            // user-initiated HoS billing flows unless an active report matching the
+            // configured high-risk policy is already known for the NEAR account. Provider
+            // failures are recorded and alerted so compliance can review outage-period activity.
+            if let Some(report) = fallback_high_risk_report {
                 if block_high_risk {
                     self.enforce_aml_result(user_id, flow, &report.result, true)
                         .await?;
@@ -337,7 +349,7 @@ impl SubscriptionServiceImpl {
     }
 
     fn alert_aml_provider_failure(&self, user_id: UserId, flow: &str, result: &AmlCheckResult) {
-        if result.is_provider_failure() {
+        if result.is_provider_failure() && !self.aml_service.is_high_risk_result(result) {
             self.aml_service
                 .send_provider_failure_slack_alert(user_id, flow, result);
         }
@@ -350,12 +362,14 @@ impl SubscriptionServiceImpl {
         result: &AmlCheckResult,
         alert_high_risk: bool,
     ) -> Result<(), SubscriptionError> {
-        if result.is_high_risk() {
+        if self.aml_service.is_high_risk_result(result) {
             tracing::warn!(
                 user_id = %user_id,
                 flow = %flow,
                 report_id = ?result.report_id,
-                "High-risk AML result for NEAR wallet flow"
+                high_risk_risk_levels = ?self.aml_service.high_risk_risk_levels(),
+                high_risk_score_threshold = self.aml_service.high_risk_score_threshold(),
+                "AML high-risk policy matched for NEAR wallet flow"
             );
             let allowlisted = self
                 .aml_report_repo

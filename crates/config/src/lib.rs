@@ -193,6 +193,8 @@ pub struct LukkaAmlConfig {
     pub enabled: bool,
     pub base_url: String,
     pub bearer_token: String,
+    pub high_risk_risk_levels: Vec<String>,
+    pub high_risk_score_threshold: Option<i64>,
     pub high_risk_slack_webhook_url: String,
     pub high_risk_slack_timeout_ms: u64,
     pub high_risk_slack_alert_on_cached_reports: bool,
@@ -202,12 +204,34 @@ pub struct LukkaAmlConfig {
     pub cache_ttl_secs: u64,
 }
 
+/// Parsing details for the AML high-risk policy environment variables.
+///
+/// The parsed policy remains intentionally permissive while AML is disabled so local and
+/// staged deployments can be configured before enabling the check. `main` validates these
+/// diagnostics before starting an AML-enabled server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LukkaAmlPolicyDiagnostics {
+    pub risk_level_source: Option<String>,
+    pub invalid_risk_level_tokens: Vec<String>,
+    pub score_threshold_source: Option<String>,
+    pub invalid_score_threshold: Option<String>,
+}
+
+#[derive(Debug)]
+struct ParsedLukkaAmlPolicy {
+    high_risk_risk_levels: Vec<String>,
+    high_risk_score_threshold: Option<i64>,
+    diagnostics: LukkaAmlPolicyDiagnostics,
+}
+
 impl fmt::Debug for LukkaAmlConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LukkaAmlConfig")
             .field("enabled", &self.enabled)
             .field("base_url", &self.base_url)
             .field("bearer_token", &"<redacted>")
+            .field("high_risk_risk_levels", &self.high_risk_risk_levels)
+            .field("high_risk_score_threshold", &self.high_risk_score_threshold)
             .field("high_risk_slack_webhook_url", &"<redacted>")
             .field(
                 "high_risk_slack_timeout_ms",
@@ -227,6 +251,7 @@ impl fmt::Debug for LukkaAmlConfig {
 
 impl Default for LukkaAmlConfig {
     fn default() -> Self {
+        let policy = parse_lukka_aml_policy();
         Self {
             enabled: std::env::var("LUKKA_AML_ENABLED")
                 .ok()
@@ -235,6 +260,8 @@ impl Default for LukkaAmlConfig {
             base_url: std::env::var("LUKKA_BASE_URL")
                 .unwrap_or_else(|_| "https://api.blockchain-analytics.lukka.tech".to_string()),
             bearer_token: std::env::var("LUKKA_BEARER_TOKEN").unwrap_or_default(),
+            high_risk_risk_levels: policy.high_risk_risk_levels,
+            high_risk_score_threshold: policy.high_risk_score_threshold,
             high_risk_slack_webhook_url: std::env::var("LUKKA_AML_HIGH_RISK_SLACK_WEBHOOK_URL")
                 .unwrap_or_default(),
             high_risk_slack_timeout_ms: std::env::var("LUKKA_AML_HIGH_RISK_SLACK_TIMEOUT_MS")
@@ -264,6 +291,131 @@ impl Default for LukkaAmlConfig {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(300),
         }
+    }
+}
+
+impl LukkaAmlConfig {
+    /// Returns the exact parsing diagnostics used by the environment-backed configuration.
+    pub fn high_risk_policy_diagnostics(&self) -> LukkaAmlPolicyDiagnostics {
+        parse_lukka_aml_policy().diagnostics
+    }
+
+    /// Reject policy typos and an empty policy when AML enforcement is enabled.
+    ///
+    /// Keeping this validation separate from parsing lets callers inspect and log the safe
+    /// configuration values after tracing is initialized, while still preventing a fail-open
+    /// production startup.
+    pub fn validate_high_risk_policy(&self) -> Result<(), String> {
+        if !self.enabled {
+            return Ok(());
+        }
+
+        let diagnostics = self.high_risk_policy_diagnostics();
+        let mut errors = Vec::new();
+        if !diagnostics.invalid_risk_level_tokens.is_empty() {
+            errors.push(format!(
+                "{} contains unrecognized risk level token(s): {}",
+                diagnostics
+                    .risk_level_source
+                    .as_deref()
+                    .unwrap_or("LUKKA_AML_HIGH_RISK_LEVELS"),
+                diagnostics.invalid_risk_level_tokens.join(", "),
+            ));
+        }
+        if let Some(value) = diagnostics.invalid_score_threshold {
+            errors.push(format!(
+                "{} has invalid score threshold {value:?}; expected integer 1..=100 or disabled",
+                diagnostics
+                    .score_threshold_source
+                    .as_deref()
+                    .unwrap_or("LUKKA_AML_SCORE_BLOCK_THRESHOLD"),
+            ));
+        }
+        if self.high_risk_risk_levels.is_empty() && self.high_risk_score_threshold.is_none() {
+            errors.push("AML is enabled but both high-risk predicates are disabled".to_string());
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
+    }
+}
+
+fn lukka_aml_env_value(primary: &str, alias: &str) -> Option<(String, String)> {
+    std::env::var(primary)
+        .map(|value| (primary.to_string(), value))
+        .or_else(|_| std::env::var(alias).map(|value| (alias.to_string(), value)))
+        .ok()
+}
+
+fn is_lukka_aml_policy_disabled(value: &str) -> bool {
+    let value = value.trim();
+    value.is_empty()
+        || ["disabled", "none", "off", "false"]
+            .iter()
+            .any(|disabled| value.eq_ignore_ascii_case(disabled))
+}
+
+fn parse_lukka_aml_policy() -> ParsedLukkaAmlPolicy {
+    let (high_risk_risk_levels, risk_level_source, invalid_risk_level_tokens) =
+        match lukka_aml_env_value(
+            "LUKKA_AML_HIGH_RISK_LEVELS",
+            "LUKKA_AML_BLOCKED_RISK_LEVELS",
+        ) {
+            None => (vec!["HIGH".to_string()], None, Vec::new()),
+            Some((source, raw)) if is_lukka_aml_policy_disabled(&raw) => {
+                (Vec::new(), Some(source), Vec::new())
+            }
+            Some((source, raw)) => {
+                let mut levels = Vec::new();
+                let mut invalid_tokens = Vec::new();
+                for token in raw
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|token| !token.is_empty())
+                {
+                    let level = token.to_ascii_uppercase();
+                    if matches!(level.as_str(), "LOW" | "MEDIUM" | "HIGH") {
+                        if !levels.contains(&level) {
+                            levels.push(level);
+                        }
+                    } else {
+                        invalid_tokens.push(token.to_string());
+                    }
+                }
+                (levels, Some(source), invalid_tokens)
+            }
+        };
+
+    let (high_risk_score_threshold, score_threshold_source, invalid_score_threshold) =
+        match lukka_aml_env_value(
+            "LUKKA_AML_SCORE_BLOCK_THRESHOLD",
+            "LUKKA_AML_HIGH_RISK_SCORE_THRESHOLD",
+        ) {
+            None => (None, None, None),
+            Some((source, raw)) if is_lukka_aml_policy_disabled(&raw) => (None, Some(source), None),
+            Some((source, raw)) => {
+                let value = raw.trim();
+                let threshold = value
+                    .parse::<i64>()
+                    .ok()
+                    .filter(|threshold| (1..=100).contains(threshold));
+                let invalid = threshold.is_none().then(|| value.to_string());
+                (threshold, Some(source), invalid)
+            }
+        };
+
+    ParsedLukkaAmlPolicy {
+        high_risk_risk_levels,
+        high_risk_score_threshold,
+        diagnostics: LukkaAmlPolicyDiagnostics {
+            risk_level_source,
+            invalid_risk_level_tokens,
+            score_threshold_source,
+            invalid_score_threshold,
+        },
     }
 }
 
@@ -870,6 +1022,108 @@ mod tests {
             .contains(&"http://test.com".to_string()));
         assert!(config.wildcard_suffixes.is_empty());
         std::env::remove_var("CORS_ALLOWED_ORIGINS");
+    }
+
+    #[test]
+    #[serial]
+    fn test_lukka_aml_high_risk_score_threshold_env() {
+        std::env::remove_var("LUKKA_AML_HIGH_RISK_SCORE_THRESHOLD");
+        std::env::remove_var("LUKKA_AML_SCORE_BLOCK_THRESHOLD");
+        assert_eq!(LukkaAmlConfig::default().high_risk_score_threshold, None);
+
+        std::env::set_var("LUKKA_AML_SCORE_BLOCK_THRESHOLD", "82");
+        assert_eq!(
+            LukkaAmlConfig::default().high_risk_score_threshold,
+            Some(82)
+        );
+
+        std::env::set_var("LUKKA_AML_HIGH_RISK_SCORE_THRESHOLD", "91");
+        assert_eq!(
+            LukkaAmlConfig::default().high_risk_score_threshold,
+            Some(82)
+        );
+
+        std::env::remove_var("LUKKA_AML_SCORE_BLOCK_THRESHOLD");
+        assert_eq!(
+            LukkaAmlConfig::default().high_risk_score_threshold,
+            Some(91)
+        );
+
+        std::env::set_var("LUKKA_AML_HIGH_RISK_SCORE_THRESHOLD", "101");
+        assert_eq!(LukkaAmlConfig::default().high_risk_score_threshold, None);
+
+        std::env::set_var("LUKKA_AML_HIGH_RISK_SCORE_THRESHOLD", "disabled");
+        assert_eq!(LukkaAmlConfig::default().high_risk_score_threshold, None);
+        std::env::remove_var("LUKKA_AML_HIGH_RISK_SCORE_THRESHOLD");
+        std::env::remove_var("LUKKA_AML_SCORE_BLOCK_THRESHOLD");
+    }
+
+    #[test]
+    #[serial]
+    fn test_lukka_aml_high_risk_levels_env() {
+        std::env::remove_var("LUKKA_AML_HIGH_RISK_LEVELS");
+        std::env::remove_var("LUKKA_AML_BLOCKED_RISK_LEVELS");
+        assert_eq!(
+            LukkaAmlConfig::default().high_risk_risk_levels,
+            vec!["HIGH".to_string()]
+        );
+
+        std::env::set_var("LUKKA_AML_BLOCKED_RISK_LEVELS", " medium, high, medium ");
+        assert_eq!(
+            LukkaAmlConfig::default().high_risk_risk_levels,
+            vec!["MEDIUM".to_string(), "HIGH".to_string()]
+        );
+
+        std::env::set_var("LUKKA_AML_HIGH_RISK_LEVELS", "disabled");
+        assert!(LukkaAmlConfig::default().high_risk_risk_levels.is_empty());
+
+        std::env::set_var("LUKKA_AML_HIGH_RISK_LEVELS", "typo");
+        assert!(LukkaAmlConfig::default().high_risk_risk_levels.is_empty());
+        std::env::remove_var("LUKKA_AML_HIGH_RISK_LEVELS");
+        std::env::remove_var("LUKKA_AML_BLOCKED_RISK_LEVELS");
+    }
+
+    #[test]
+    #[serial]
+    fn test_enabled_lukka_aml_rejects_invalid_or_empty_high_risk_policy() {
+        for variable in [
+            "LUKKA_AML_HIGH_RISK_LEVELS",
+            "LUKKA_AML_BLOCKED_RISK_LEVELS",
+            "LUKKA_AML_SCORE_BLOCK_THRESHOLD",
+            "LUKKA_AML_HIGH_RISK_SCORE_THRESHOLD",
+        ] {
+            std::env::remove_var(variable);
+        }
+        std::env::set_var("LUKKA_AML_ENABLED", "true");
+
+        std::env::set_var("LUKKA_AML_HIGH_RISK_LEVELS", "HIGH, HGIH");
+        std::env::set_var("LUKKA_AML_SCORE_BLOCK_THRESHOLD", "75");
+        let config = LukkaAmlConfig::default();
+        let diagnostics = config.high_risk_policy_diagnostics();
+        assert_eq!(diagnostics.invalid_risk_level_tokens, vec!["HGIH"]);
+        assert!(config.validate_high_risk_policy().is_err());
+
+        std::env::set_var("LUKKA_AML_HIGH_RISK_LEVELS", "disabled");
+        std::env::set_var("LUKKA_AML_SCORE_BLOCK_THRESHOLD", "disabled");
+        let config = LukkaAmlConfig::default();
+        assert!(config.high_risk_risk_levels.is_empty());
+        assert_eq!(config.high_risk_score_threshold, None);
+        assert!(config.validate_high_risk_policy().is_err());
+
+        std::env::set_var("LUKKA_AML_HIGH_RISK_LEVELS", "HIGH");
+        std::env::set_var("LUKKA_AML_SCORE_BLOCK_THRESHOLD", "101");
+        let config = LukkaAmlConfig::default();
+        let diagnostics = config.high_risk_policy_diagnostics();
+        assert_eq!(diagnostics.invalid_score_threshold.as_deref(), Some("101"));
+        assert!(config.validate_high_risk_policy().is_err());
+
+        std::env::remove_var("LUKKA_AML_SCORE_BLOCK_THRESHOLD");
+        let config = LukkaAmlConfig::default();
+        assert!(config.validate_high_risk_policy().is_ok());
+
+        std::env::remove_var("LUKKA_AML_ENABLED");
+        std::env::remove_var("LUKKA_AML_HIGH_RISK_LEVELS");
+        std::env::remove_var("LUKKA_AML_SCORE_BLOCK_THRESHOLD");
     }
 
     #[test]

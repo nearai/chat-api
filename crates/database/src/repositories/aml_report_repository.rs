@@ -71,9 +71,8 @@ impl AmlReportRepository for PostgresAmlReportRepository {
         let result_json = serde_json::to_value(&event.result)?;
         let account_id = normalize_account_id(&event.result.account_id);
         let risk_level = Self::risk_level_to_db(event.result.risk_level);
-        let active = event.result.risk_level != AmlRiskLevel::Unknown;
 
-        if event.result.risk_level == AmlRiskLevel::Unknown {
+        if event.result.risk_level == AmlRiskLevel::Unknown && !event.active {
             let row = client
                 .query_opt(
                     r#"
@@ -134,7 +133,7 @@ impl AmlReportRepository for PostgresAmlReportRepository {
                     &event.result.checked_at,
                     &event.result.reason,
                     &result_json,
-                    &active,
+                    &event.active,
                 ],
             )
             .await?;
@@ -146,22 +145,27 @@ impl AmlReportRepository for PostgresAmlReportRepository {
         &self,
         account_id: &str,
     ) -> anyhow::Result<Option<AmlReportRecord>> {
+        Ok(self.active_reports(account_id).await?.into_iter().next())
+    }
+
+    async fn active_reports(&self, account_id: &str) -> anyhow::Result<Vec<AmlReportRecord>> {
         let client = self.pool.get().await?;
         let account_id = normalize_account_id(account_id);
-        let row = client
-            .query_opt(
+        let rows = client
+            .query(
                 r#"
                 SELECT *
                 FROM aml_risk_reports
-                WHERE account_id = $1 AND active = TRUE AND risk_level <> 'UNKNOWN'
+                WHERE account_id = $1 AND active = TRUE
                 ORDER BY created_at DESC, checked_at DESC
-                LIMIT 1
                 "#,
                 &[&account_id],
             )
             .await?;
 
-        row.map(Self::report_from_row).transpose()
+        rows.into_iter()
+            .map(Self::report_from_row)
+            .collect::<Result<Vec<_>, _>>()
     }
 
     async fn is_account_allowlisted(&self, account_id: &str) -> anyhow::Result<bool> {
@@ -265,7 +269,7 @@ impl AmlReportRepository for PostgresAmlReportRepository {
             .query_opt(
                 r#"
                 UPDATE aml_risk_reports
-                SET active = $2
+                SET active = $2, active_source = 'manual'
                 WHERE id = $1
                 RETURNING *
                 "#,

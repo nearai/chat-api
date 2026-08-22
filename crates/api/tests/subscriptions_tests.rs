@@ -56,12 +56,22 @@ fn permissive_rate_limit_config() -> RateLimitConfig {
 
 struct StaticAmlRiskService {
     result: AmlCheckResult,
+    high_risk_risk_levels: Vec<AmlRiskLevel>,
+    high_risk_score_threshold: Option<i64>,
 }
 
 #[async_trait]
 impl AmlRiskService for StaticAmlRiskService {
     fn is_enabled(&self) -> bool {
         true
+    }
+
+    fn high_risk_risk_levels(&self) -> Vec<AmlRiskLevel> {
+        self.high_risk_risk_levels.clone()
+    }
+
+    fn high_risk_score_threshold(&self) -> Option<i64> {
+        self.high_risk_score_threshold
     }
 
     async fn check_near_account(&self, account_id: &str) -> AmlCheckResult {
@@ -71,8 +81,17 @@ impl AmlRiskService for StaticAmlRiskService {
     }
 }
 
+fn static_aml_service(result: AmlCheckResult) -> StaticAmlRiskService {
+    StaticAmlRiskService {
+        result,
+        high_risk_risk_levels: vec![AmlRiskLevel::High],
+        high_risk_score_threshold: Some(75),
+    }
+}
+
 struct StaticAmlReportRepository {
-    latest: Option<AmlReportRecord>,
+    active_reports: Vec<AmlReportRecord>,
+    allowlisted: bool,
 }
 
 #[async_trait]
@@ -92,7 +111,7 @@ impl AmlReportRepository for StaticAmlReportRepository {
             checked_at: event.result.checked_at,
             reason: event.result.reason.clone(),
             result: event.result,
-            active: false,
+            active: event.active,
             created_at: now,
             updated_at: now,
         })
@@ -102,11 +121,15 @@ impl AmlReportRepository for StaticAmlReportRepository {
         &self,
         _account_id: &str,
     ) -> anyhow::Result<Option<AmlReportRecord>> {
-        Ok(self.latest.clone())
+        Ok(self.active_reports.first().cloned())
+    }
+
+    async fn active_reports(&self, _account_id: &str) -> anyhow::Result<Vec<AmlReportRecord>> {
+        Ok(self.active_reports.clone())
     }
 
     async fn is_account_allowlisted(&self, _account_id: &str) -> anyhow::Result<bool> {
-        Ok(false)
+        Ok(self.allowlisted)
     }
 
     async fn list_reports(
@@ -149,12 +172,21 @@ impl AmlReportRepository for StaticAmlReportRepository {
 }
 
 fn aml_result(account_id: &str, risk_level: AmlRiskLevel, reason: Option<&str>) -> AmlCheckResult {
+    aml_result_with_score(account_id, risk_level, Some(99), reason)
+}
+
+fn aml_result_with_score(
+    account_id: &str,
+    risk_level: AmlRiskLevel,
+    score: Option<i64>,
+    reason: Option<&str>,
+) -> AmlCheckResult {
     AmlCheckResult {
         provider: "lukka".to_string(),
         account_id: account_id.to_string(),
         address_type: "NEAR".to_string(),
         risk_level,
-        score: Some(99),
+        score,
         report_id: Some("report".to_string()),
         checked_at: Utc::now(),
         reason: reason.map(str::to_string),
@@ -4206,11 +4238,11 @@ async fn test_create_subscription_house_of_stake_returns_flat_json() {
             .and_then(|x| x.as_str()),
         Some("1250000000000000000000")
     );
+    assert!(body.pointer("/aml/checked_at").is_some());
     assert_eq!(
         body.pointer("/aml/risk_level").and_then(|x| x.as_str()),
         Some("UNKNOWN")
     );
-    assert!(body.pointer("/aml/checked_at").is_some());
     assert!(body.pointer("/aml/score").is_none());
     assert!(body.pointer("/aml/report_id").is_none());
     assert!(body.pointer("/aml/reason").is_none());
@@ -4442,7 +4474,7 @@ async fn test_resume_subscription_house_of_stake_returns_wallet_intent_message()
 
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn test_resume_subscription_house_of_stake_blocks_high_risk_aml() {
+async fn test_resume_subscription_house_of_stake_blocks_high_aml_score() {
     clear_proxy_env_for_local_wiremock();
     let chain_sub = json!({
         "subscription_id": "sub_on_chain_hos_resume_high_risk",
@@ -4462,9 +4494,11 @@ async fn test_resume_subscription_house_of_stake_blocks_high_risk_aml() {
         near_rpc_url: Some(mock.uri().to_string()),
         near_staking_contract_id: Some("staking.testnet".to_string()),
         near_network_id: Some("testnet".to_string()),
-        aml_service: Some(Arc::new(StaticAmlRiskService {
-            result: aml_result("hos_resume_high_risk.testnet", AmlRiskLevel::High, None),
-        })),
+        aml_service: Some(Arc::new(static_aml_service(aml_result(
+            "hos_resume_high_risk.testnet",
+            AmlRiskLevel::Low,
+            None,
+        )))),
         ..Default::default()
     })
     .await;
@@ -4520,7 +4554,265 @@ async fn test_resume_subscription_house_of_stake_blocks_high_risk_aml() {
 
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn test_resume_subscription_malformed_aml_response_uses_stale_high_risk_report() {
+async fn test_resume_subscription_house_of_stake_blocks_risk_level_without_score() {
+    clear_proxy_env_for_local_wiremock();
+    let chain_sub = json!({
+        "subscription_id": "sub_on_chain_hos_resume_risk_level_only",
+        "price_id": "price_hos_basic",
+        "end_ns": "2000000000000000000",
+        "status": "Active",
+        "cancel_at_period_end": true
+    });
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(near_rpc_wiremock_hos_subscription_probe_only(chain_sub))
+        .mount(&mock)
+        .await;
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        near_rpc_url: Some(mock.uri().to_string()),
+        near_staking_contract_id: Some("staking.testnet".to_string()),
+        near_network_id: Some("testnet".to_string()),
+        aml_service: Some(Arc::new(StaticAmlRiskService {
+            result: aml_result_with_score(
+                "hos_resume_risk_level_only.testnet",
+                AmlRiskLevel::High,
+                None,
+                None,
+            ),
+            high_risk_risk_levels: vec![AmlRiskLevel::High],
+            high_risk_score_threshold: None,
+        })),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": { "providers": { "house-of-stake": { "price_id": "price_hos_basic" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } }
+        }),
+    )
+    .await;
+
+    let near_email = "hos_resume_risk_level_only.testnet@near";
+    let login = json!({
+        "email": near_email,
+        "name": "HoS Resume Risk Level Only",
+        "oauth_provider": "near"
+    });
+    let response = server.post("/v1/auth/mock-login").json(&login).await;
+    let token = response.json::<serde_json::Value>()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    insert_test_subscription_with_provider_and_price(
+        &server,
+        &db,
+        near_email,
+        "house-of-stake",
+        "price_hos_basic",
+        true,
+    )
+    .await;
+
+    let response = server
+        .post("/v1/subscriptions/resume")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 403, "{}", response.text());
+    let body: serde_json::Value = response.json();
+    assert_eq!(body.get("code").and_then(|x| x.as_str()), Some("forbidden"));
+    assert_eq!(
+        body.get("message").and_then(|x| x.as_str()),
+        Some("Invalid NEAR account")
+    );
+    assert!(body.get("aml").is_none());
+    assert!(body.get("kind").is_none());
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_resume_subscription_house_of_stake_allows_provider_high_below_score_threshold() {
+    clear_proxy_env_for_local_wiremock();
+    let chain_sub = json!({
+        "subscription_id": "sub_on_chain_hos_resume_provider_high_low_score",
+        "price_id": "price_hos_basic",
+        "end_ns": "2000000000000000000",
+        "status": "Active",
+        "cancel_at_period_end": true
+    });
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(near_rpc_wiremock_hos_subscription_probe_only(chain_sub))
+        .mount(&mock)
+        .await;
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        near_rpc_url: Some(mock.uri().to_string()),
+        near_staking_contract_id: Some("staking.testnet".to_string()),
+        near_network_id: Some("testnet".to_string()),
+        aml_service: Some(Arc::new(StaticAmlRiskService {
+            result: aml_result_with_score(
+                "hos_resume_provider_high_low_score.testnet",
+                AmlRiskLevel::High,
+                Some(74),
+                None,
+            ),
+            high_risk_risk_levels: Vec::new(),
+            high_risk_score_threshold: Some(75),
+        })),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": { "providers": { "house-of-stake": { "price_id": "price_hos_basic" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } }
+        }),
+    )
+    .await;
+
+    let near_email = "hos_resume_provider_high_low_score.testnet@near";
+    let login = json!({
+        "email": near_email,
+        "name": "HoS Resume Provider High Low Score",
+        "oauth_provider": "near"
+    });
+    let response = server.post("/v1/auth/mock-login").json(&login).await;
+    let token = response.json::<serde_json::Value>()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    insert_test_subscription_with_provider_and_price(
+        &server,
+        &db,
+        near_email,
+        "house-of-stake",
+        "price_hos_basic",
+        true,
+    )
+    .await;
+
+    let response = server
+        .post("/v1/subscriptions/resume")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 200, "{}", response.text());
+    let body: serde_json::Value = response.json();
+    assert_eq!(
+        body.get("kind").and_then(|x| x.as_str()),
+        Some("near_staking_resume")
+    );
+    assert_eq!(
+        body.pointer("/aml/risk_level").and_then(|x| x.as_str()),
+        Some("HIGH")
+    );
+    assert!(body.pointer("/aml/score").is_none());
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_resume_subscription_house_of_stake_allowlist_overrides_high_aml_score() {
+    clear_proxy_env_for_local_wiremock();
+    let chain_sub = json!({
+        "subscription_id": "sub_on_chain_hos_resume_allowlisted_high_score",
+        "price_id": "price_hos_basic",
+        "end_ns": "2000000000000000000",
+        "status": "Active",
+        "cancel_at_period_end": true
+    });
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(near_rpc_wiremock_hos_subscription_probe_only(chain_sub))
+        .mount(&mock)
+        .await;
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        near_rpc_url: Some(mock.uri().to_string()),
+        near_staking_contract_id: Some("staking.testnet".to_string()),
+        near_network_id: Some("testnet".to_string()),
+        aml_service: Some(Arc::new(static_aml_service(aml_result(
+            "hos_resume_allowlisted_high_score.testnet",
+            AmlRiskLevel::Low,
+            None,
+        )))),
+        aml_report_repo: Some(Arc::new(StaticAmlReportRepository {
+            active_reports: Vec::new(),
+            allowlisted: true,
+        })),
+        ..Default::default()
+    })
+    .await;
+
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": { "providers": { "house-of-stake": { "price_id": "price_hos_basic" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } }
+        }),
+    )
+    .await;
+
+    let near_email = "hos_resume_allowlisted_high_score.testnet@near";
+    let login = json!({
+        "email": near_email,
+        "name": "HoS Resume Allowlisted High Score",
+        "oauth_provider": "near"
+    });
+    let response = server.post("/v1/auth/mock-login").json(&login).await;
+    let token = response.json::<serde_json::Value>()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    insert_test_subscription_with_provider_and_price(
+        &server,
+        &db,
+        near_email,
+        "house-of-stake",
+        "price_hos_basic",
+        true,
+    )
+    .await;
+
+    let response = server
+        .post("/v1/subscriptions/resume")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .await;
+
+    assert_eq!(response.status_code(), 200, "{}", response.text());
+    let body: serde_json::Value = response.json();
+    assert_eq!(
+        body.get("kind").and_then(|x| x.as_str()),
+        Some("near_staking_resume")
+    );
+    assert_eq!(
+        body.pointer("/aml/risk_level").and_then(|x| x.as_str()),
+        Some("LOW")
+    );
+    assert!(body.pointer("/aml/score").is_none());
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_resume_subscription_provider_timeout_uses_older_migrated_legacy_score_report() {
     clear_proxy_env_for_local_wiremock();
     let chain_sub = json!({
         "subscription_id": "sub_on_chain_hos_resume_stale_high",
@@ -4536,23 +4828,42 @@ async fn test_resume_subscription_malformed_aml_response_uses_stale_high_risk_re
         .mount(&mock)
         .await;
 
-    let stale_high = aml_report(
-        aml_result("hos_resume_stale_high.testnet", AmlRiskLevel::High, None),
+    // This is the newest pre-score-policy report: it has a known level but no score, so it
+    // cannot satisfy the combined policy and must not hide an older matching report.
+    let newer_scoreless = aml_report(
+        aml_result_with_score(
+            "hos_resume_stale_high.testnet",
+            AmlRiskLevel::Low,
+            None,
+            None,
+        ),
+        Utc::now() - Duration::hours(1),
+    );
+    // V36 reclassifies this untouched legacy UNKNOWN report as active because its score can
+    // independently satisfy a newly configured threshold. A manually deactivated row remains
+    // inactive and is not returned by the repository.
+    let migrated_legacy_score_high = aml_report(
+        aml_result_with_score(
+            "hos_resume_stale_high.testnet",
+            AmlRiskLevel::Unknown,
+            Some(99),
+            Some("provider_invalid_response"),
+        ),
         Utc::now() - Duration::days(31),
     );
     let (server, db) = create_test_server_and_db(TestServerConfig {
         near_rpc_url: Some(mock.uri().to_string()),
         near_staking_contract_id: Some("staking.testnet".to_string()),
         near_network_id: Some("testnet".to_string()),
-        aml_service: Some(Arc::new(StaticAmlRiskService {
-            result: aml_result(
-                "hos_resume_stale_high.testnet",
-                AmlRiskLevel::Unknown,
-                Some("provider_invalid_response"),
-            ),
-        })),
+        aml_service: Some(Arc::new(static_aml_service(aml_result_with_score(
+            "hos_resume_stale_high.testnet",
+            AmlRiskLevel::Unknown,
+            None,
+            Some("provider_timeout"),
+        )))),
         aml_report_repo: Some(Arc::new(StaticAmlReportRepository {
-            latest: Some(stale_high),
+            active_reports: vec![newer_scoreless, migrated_legacy_score_high],
+            allowlisted: false,
         })),
         ..Default::default()
     })
