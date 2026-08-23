@@ -63,7 +63,27 @@ struct CachedCreditLimit {
     plan_credits: u64,
     period_start: chrono::DateTime<Utc>,
     period_end: chrono::DateTime<Utc>,
+    scope: CreditLimitCacheScope,
     cached_at: Instant,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CreditLimitCacheScope {
+    provider: Option<String>,
+    subscription_id: Option<String>,
+    price_id: Option<String>,
+    current_period_end: Option<DateTime<Utc>>,
+}
+
+impl CreditLimitCacheScope {
+    fn from_active_subscription(subscription: Option<&Subscription>) -> Self {
+        Self {
+            provider: subscription.map(|sub| sub.provider.clone()),
+            subscription_id: subscription.map(|sub| sub.subscription_id.clone()),
+            price_id: subscription.map(|sub| sub.price_id.clone()),
+            current_period_end: subscription.map(|sub| sub.current_period_end),
+        }
+    }
 }
 
 struct CachedHouseOfStakeRpcFailure {
@@ -222,10 +242,15 @@ fn next_house_of_stake_snapshot(
     (snapshot, effective_limit)
 }
 
-fn credit_limit_cache_is_valid(cached: &CachedCreditLimit, now: DateTime<Utc>) -> bool {
+fn credit_limit_cache_is_valid(
+    cached: &CachedCreditLimit,
+    now: DateTime<Utc>,
+    active_subscription: Option<&Subscription>,
+) -> bool {
     cached.cached_at.elapsed().as_secs() < TTL_CACHE_SECS
         && cached.period_start <= now
         && now < cached.period_end
+        && cached.scope == CreditLimitCacheScope::from_active_subscription(active_subscription)
 }
 
 pub struct SubscriptionServiceImpl {
@@ -1040,8 +1065,11 @@ impl SubscriptionServiceImpl {
         &self,
         user_id: UserId,
     ) -> Result<(i64, chrono::DateTime<Utc>, chrono::DateTime<Utc>), SubscriptionError> {
+        let active_subscription = self
+            .get_active_subscription_for_entitlement(user_id)
+            .await?;
         if let Some(cached) = self.credit_limit_cache.read().await.get(&user_id) {
-            if credit_limit_cache_is_valid(cached, Utc::now()) {
+            if credit_limit_cache_is_valid(cached, Utc::now(), active_subscription.as_ref()) {
                 return Ok((
                     cached.plan_credits.min(i64::MAX as u64) as i64,
                     cached.period_start,
@@ -1059,10 +1087,7 @@ impl SubscriptionServiceImpl {
             .and_then(|c| c.subscription_plans)
             .unwrap_or_default();
 
-        let (plan_credits, period_start, period_end) = match self
-            .get_active_subscription_for_entitlement(user_id)
-            .await?
-        {
+        let (plan_credits, period_start, period_end, cache_scope) = match active_subscription {
             Some(mut sub) => {
                 if sub.provider == "stripe" && Self::should_check_pending_downgrade(&sub) {
                     match self.try_apply_pending_downgrade(&sub.subscription_id).await {
@@ -1092,7 +1117,12 @@ impl SubscriptionServiceImpl {
                 };
                 let period_end = sub.current_period_end;
                 let period_start = sub_one_month_same_day(sub.current_period_end);
-                (plan_credits, period_start, period_end)
+                (
+                    plan_credits,
+                    period_start,
+                    period_end,
+                    CreditLimitCacheScope::from_active_subscription(Some(&sub)),
+                )
             }
             None => {
                 let plan_credits = subscription_plans
@@ -1101,7 +1131,12 @@ impl SubscriptionServiceImpl {
                     .unwrap_or(DEFAULT_MONTHLY_CREDITS_NANO_USD);
                 let (period_start, period_end) =
                     self.resolve_free_plan_period_for_user(user_id).await?;
-                (plan_credits, period_start, period_end)
+                (
+                    plan_credits,
+                    period_start,
+                    period_end,
+                    CreditLimitCacheScope::from_active_subscription(None),
+                )
             }
         };
 
@@ -1111,6 +1146,7 @@ impl SubscriptionServiceImpl {
                 plan_credits,
                 period_start,
                 period_end,
+                scope: cache_scope,
                 cached_at: Instant::now(),
             },
         );
@@ -4767,12 +4803,20 @@ mod tests {
             plan_credits: 1,
             period_start: now - Duration::days(1),
             period_end: now + Duration::days(1),
+            scope: CreditLimitCacheScope::from_active_subscription(None),
             cached_at: Instant::now(),
         };
-        assert!(credit_limit_cache_is_valid(&cached, now));
+        assert!(credit_limit_cache_is_valid(&cached, now, None));
+
+        let subscription = base_subscription();
+        assert!(!credit_limit_cache_is_valid(
+            &cached,
+            now,
+            Some(&subscription)
+        ));
 
         cached.period_end = now;
-        assert!(!credit_limit_cache_is_valid(&cached, now));
+        assert!(!credit_limit_cache_is_valid(&cached, now, None));
     }
 
     fn base_subscription() -> Subscription {
