@@ -5912,8 +5912,8 @@ async fn test_house_of_stake_purchased_reconciliation_uses_synced_credit_limit_c
         .record_usage_event(
             user.id,
             METRIC_KEY_LLM_TOKENS,
-            7_000_000_000,
-            Some(7_000_000_000),
+            5_000_000_000,
+            Some(5_000_000_000),
             None,
         )
         .await
@@ -5937,6 +5937,11 @@ async fn test_house_of_stake_purchased_reconciliation_uses_synced_credit_limit_c
         )
         .await;
     assert_eq!(response.status_code(), 200, "{}", response.text());
+    assert_eq!(
+        response.json::<serde_json::Value>()["plan_credits"].as_i64(),
+        Some(10_000_000_000),
+        "usage exactly at the stale cached limit should refresh a direct chain increase"
+    );
     let body: serde_json::Value = response.json();
     let plan_credits = body["plan_credits"].as_i64().expect("plan_credits");
     assert!(

@@ -1296,6 +1296,17 @@ impl SubscriptionServiceImpl {
         )
     }
 
+    fn first_snapshot_credited_stake(
+        plan_config: &SubscriptionPlanConfig,
+        observed_baseline_stake: u128,
+        first_snapshot_credit_floor_nano_usd: Option<u64>,
+    ) -> u128 {
+        let fixed_floor_stake = first_snapshot_credit_floor_nano_usd
+            .and_then(|floor| Self::stake_for_credit_floor(plan_config, floor))
+            .unwrap_or(0);
+        observed_baseline_stake.max(fixed_floor_stake)
+    }
+
     fn fixed_to_stake_based_credit_floor(
         local_subscriptions: &[Subscription],
         chain_subscription: &Subscription,
@@ -1485,11 +1496,11 @@ impl SubscriptionServiceImpl {
                     Some(stake) => stake.min(effective_stake_yocto),
                     None => effective_stake_yocto,
                 };
-                let fixed_floor_stake = first_snapshot_credit_floor_nano_usd
-                    .and_then(|floor| Self::stake_for_credit_floor(plan_config, floor))
-                    .unwrap_or(0)
-                    .min(effective_stake_yocto);
-                let baseline_stake = observed_baseline_stake.max(fixed_floor_stake);
+                let baseline_stake = Self::first_snapshot_credited_stake(
+                    plan_config,
+                    observed_baseline_stake,
+                    first_snapshot_credit_floor_nano_usd,
+                );
                 let stake_based_baseline_limit =
                     Self::stake_based_credits_for_lock(plan_config, baseline_stake).unwrap_or(0);
                 let baseline_limit = match first_snapshot_credit_floor_nano_usd {
@@ -3160,7 +3171,7 @@ impl SubscriptionServiceImpl {
             .map_err(|e| SubscriptionError::InternalError(e.to_string()))?
             .map(|usage| usage.cost_nano_usd)
             .unwrap_or(0);
-        if period_spent_credits <= cached_plan_credits {
+        if period_spent_credits < cached_plan_credits {
             return Ok(None);
         }
         self.fresh_purchased_reconciliation_plan_period(user_id)
@@ -5368,7 +5379,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .map(|s| s.cost_nano_usd)
             .unwrap_or(0);
 
-        if period_spent_credits > plan_credits {
+        if period_spent_credits >= plan_credits {
             match self
                 .fresh_purchased_reconciliation_plan_period(user_id)
                 .await
@@ -5630,6 +5641,24 @@ mod tests {
         assert!(
             SubscriptionServiceImpl::stake_based_credits_for_lock(&config, stake).unwrap()
                 >= 5_000_000_001
+        );
+    }
+
+    #[test]
+    fn test_fixed_floor_credited_stake_can_exceed_observed_stake() {
+        let mut config = hos_plan_config("hos_basic");
+        config.stake_based_monthly_credits = Some(StakeBasedMonthlyCreditsConfig {
+            credits_per_staked_near_nano_usd: Some(1_000_000_000),
+        });
+
+        assert_eq!(
+            SubscriptionServiceImpl::first_snapshot_credited_stake(
+                &config,
+                5 * YOCTO_PER_NEAR,
+                Some(10_000_000_000),
+            ),
+            10 * YOCTO_PER_NEAR,
+            "the retained fixed floor must suppress increases until actual stake crosses it"
         );
     }
 
