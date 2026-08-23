@@ -36,6 +36,44 @@ fn near_rpc_network_hint(host: Option<&str>) -> Option<&'static str> {
     }
 }
 
+fn log_lukka_aml_policy_config(config: &config::LukkaAmlConfig) -> anyhow::Result<()> {
+    tracing::info!(
+        enabled = config.enabled,
+        high_risk_risk_levels = ?config.high_risk_risk_levels,
+        high_risk_score_threshold = ?config.high_risk_score_threshold,
+        "Lukka AML policy configuration"
+    );
+
+    let diagnostics = config.high_risk_policy_diagnostics();
+    if !diagnostics.invalid_risk_level_tokens.is_empty() {
+        tracing::warn!(
+            source = ?diagnostics.risk_level_source,
+            invalid_levels = ?diagnostics.invalid_risk_level_tokens,
+            high_risk_risk_levels = ?config.high_risk_risk_levels,
+            "Unrecognized Lukka AML risk level tokens in configuration"
+        );
+    }
+
+    if let Some(value) = diagnostics.invalid_score_threshold {
+        tracing::warn!(
+            source = ?diagnostics.score_threshold_source,
+            value = %value,
+            "Invalid Lukka AML score block threshold; expected integer 1..=100 or disabled"
+        );
+    }
+
+    match config.validate_high_risk_policy() {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "Refusing to start with an invalid enabled Lukka AML high-risk policy"
+            );
+            Err(anyhow::Error::msg(error))
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Load .env file if it exists
@@ -49,6 +87,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize tracing based on configuration
     api::init_tracing_from_config(&config.logging);
+    log_lukka_aml_policy_config(&config.lukka_aml)?;
 
     if config.tasks.enabled {
         if config.tasks.is_scheduler_configured() {
