@@ -3119,17 +3119,6 @@ impl SubscriptionServiceImpl {
         }
     }
 
-    async fn fresh_purchased_reconciliation_plan_period(
-        &self,
-        user_id: UserId,
-    ) -> Result<Option<(i64, DateTime<Utc>, DateTime<Utc>)>, SubscriptionError> {
-        let resolved = self
-            .refresh_plan_period_for_user_with_source(user_id)
-            .await?;
-        self.purchased_reconciliation_plan_period(user_id, &resolved)
-            .await
-    }
-
     async fn purchased_reconciliation_plan_period_after_usage(
         &self,
         user_id: UserId,
@@ -3148,7 +3137,7 @@ impl SubscriptionServiceImpl {
         if period_spent_credits < cached_plan_credits {
             return Ok(None);
         }
-        self.fresh_purchased_reconciliation_plan_period(user_id)
+        self.purchased_reconciliation_plan_period(user_id, &cached)
             .await
     }
 }
@@ -5355,7 +5344,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
 
         if period_spent_credits >= plan_credits {
             match self
-                .fresh_purchased_reconciliation_plan_period(user_id)
+                .purchased_reconciliation_plan_period(user_id, &resolved)
                 .await
             {
                 Ok(Some((

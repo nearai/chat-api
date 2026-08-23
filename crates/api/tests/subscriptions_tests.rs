@@ -5938,9 +5938,9 @@ async fn test_house_of_stake_purchased_reconciliation_uses_synced_credit_limit_c
     assert_eq!(response.status_code(), 200, "{}", response.text());
     let body: serde_json::Value = response.json();
     let plan_credits = body["plan_credits"].as_i64().expect("plan_credits");
-    assert!(
-        plan_credits > 5_000_000_000,
-        "usage exactly at the stale cached limit should refresh a direct chain increase, got body={body}"
+    assert_eq!(
+        plan_credits, 5_000_000_000,
+        "over-plan reconciliation should not bypass the HoS credit-limit cache, got body={body}"
     );
 
     {
