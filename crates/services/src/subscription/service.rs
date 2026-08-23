@@ -5341,11 +5341,11 @@ impl SubscriptionService for SubscriptionServiceImpl {
         let resolved = self
             .resolve_plan_period_for_user_with_source(user_id)
             .await?;
-        let plan_credits = resolved.plan_credits.min(i64::MAX as u64) as i64;
-        let period_start = resolved.period_start;
-        let period_end = resolved.period_end;
+        let mut plan_credits = resolved.plan_credits.min(i64::MAX as u64) as i64;
+        let mut period_start = resolved.period_start;
+        let mut period_end = resolved.period_end;
 
-        let period_spent_credits = self
+        let mut period_spent_credits = self
             .user_usage_repo
             .get_usage_by_user_id(user_id, Some(period_start), Some(period_end))
             .await
@@ -5363,6 +5363,16 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     reconciliation_period_start,
                     reconciliation_period_end,
                 ))) => {
+                    plan_credits = reconciliation_plan_credits;
+                    period_start = reconciliation_period_start;
+                    period_end = reconciliation_period_end;
+                    period_spent_credits = self
+                        .user_usage_repo
+                        .get_usage_by_user_id(user_id, Some(period_start), Some(period_end))
+                        .await
+                        .map_err(|e| SubscriptionError::InternalError(e.to_string()))?
+                        .map(|s| s.cost_nano_usd)
+                        .unwrap_or(0);
                     if let Err(e) = self
                         .credits_repo
                         .reconcile_purchased_after_usage(
