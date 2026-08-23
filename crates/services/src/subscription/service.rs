@@ -64,7 +64,27 @@ struct CachedCreditLimit {
     period_start: chrono::DateTime<Utc>,
     period_end: chrono::DateTime<Utc>,
     house_of_stake_source: Option<HouseOfStakeEntitlementSource>,
+    scope: CreditLimitCacheScope,
     cached_at: Instant,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CreditLimitCacheScope {
+    provider: Option<String>,
+    subscription_id: Option<String>,
+    price_id: Option<String>,
+    current_period_end: Option<DateTime<Utc>>,
+}
+
+impl CreditLimitCacheScope {
+    fn from_active_subscription(subscription: Option<&Subscription>) -> Self {
+        Self {
+            provider: subscription.map(|sub| sub.provider.clone()),
+            subscription_id: subscription.map(|sub| sub.subscription_id.clone()),
+            price_id: subscription.map(|sub| sub.price_id.clone()),
+            current_period_end: subscription.map(|sub| sub.current_period_end),
+        }
+    }
 }
 
 struct CachedHouseOfStakeRefreshFailure {
@@ -231,10 +251,21 @@ impl SubscriptionServiceImpl {
         &self,
         user_id: UserId,
         ttl_secs: u64,
+        active_subscription: Option<&Subscription>,
     ) -> Option<ResolvedPlanPeriod> {
+        let expected_scope = CreditLimitCacheScope::from_active_subscription(active_subscription);
         let cache_guard = self.credit_limit_cache.read().await;
         let cached = cache_guard.get(&user_id)?;
         if cached.cached_at.elapsed().as_secs() >= ttl_secs {
+            return None;
+        }
+        if cached.scope != expected_scope {
+            tracing::debug!(
+                user_id = %user_id.0,
+                cached_scope = ?cached.scope,
+                expected_scope = ?expected_scope,
+                "Ignoring scoped credit limit cache entry"
+            );
             return None;
         }
 
@@ -259,6 +290,7 @@ impl SubscriptionServiceImpl {
         period_start: DateTime<Utc>,
         period_end: DateTime<Utc>,
         house_of_stake_source: Option<HouseOfStakeEntitlementSource>,
+        active_subscription: Option<&Subscription>,
     ) {
         self.credit_limit_cache.write().await.insert(
             user_id,
@@ -267,6 +299,7 @@ impl SubscriptionServiceImpl {
                 period_start,
                 period_end,
                 house_of_stake_source,
+                scope: CreditLimitCacheScope::from_active_subscription(active_subscription),
                 cached_at: Instant::now(),
             },
         );
@@ -928,6 +961,7 @@ impl SubscriptionServiceImpl {
                                     failed_at: Instant::now(),
                                 },
                             );
+                        self.credit_limit_cache.write().await.remove(&user_id);
                         tracing::warn!(
                             user_id = %user_id.0,
                             error = %err,
@@ -1086,7 +1120,11 @@ impl SubscriptionServiceImpl {
                 .is_some_and(|sub| sub.provider == "house-of-stake")
         {
             if let Some(resolved) = self
-                .cached_credit_limit_for_user(user_id, HOUSE_OF_STAKE_CREDIT_LIMIT_CACHE_SECS)
+                .cached_credit_limit_for_user(
+                    user_id,
+                    HOUSE_OF_STAKE_CREDIT_LIMIT_CACHE_SECS,
+                    active_subscription.as_ref(),
+                )
                 .await
             {
                 return Ok(resolved);
@@ -1183,6 +1221,7 @@ impl SubscriptionServiceImpl {
                 resolved.period_start,
                 resolved.period_end,
                 resolved.house_of_stake_source,
+                active_subscription.as_ref(),
             )
             .await;
         }
@@ -4199,8 +4238,12 @@ impl SubscriptionService for SubscriptionServiceImpl {
             } else {
                 TTL_CACHE_SECS
             };
-            self.cached_credit_limit_for_user(user_id, credit_limit_cache_secs)
-                .await
+            self.cached_credit_limit_for_user(
+                user_id,
+                credit_limit_cache_secs,
+                active_subscription.as_ref(),
+            )
+            .await
         };
 
         let resolved = match cached_limit {
@@ -4335,6 +4378,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
                     resolved.period_start,
                     resolved.period_end,
                     resolved.house_of_stake_source,
+                    active_subscription.as_ref(),
                 )
                 .await;
                 resolved

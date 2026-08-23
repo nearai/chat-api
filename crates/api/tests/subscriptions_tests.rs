@@ -4919,12 +4919,71 @@ async fn test_house_of_stake_credits_refreshes_auto_renewed_expired_local_row() 
 async fn test_house_of_stake_expired_refresh_failure_is_cached() {
     clear_proxy_env_for_local_wiremock();
     let now = Utc::now();
+    let active_period_end = now + Duration::days(29);
+    let active_period_start = sub_one_month_same_day_for_test(active_period_end);
+    let fail_rpc = Arc::new(Mutex::new(false));
     let mock = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/"))
-        .respond_with(ResponseTemplate::new(500).set_body_json(json!({
-            "error": { "message": "temporary NEAR outage" }
-        })))
+        .respond_with({
+            let fail_rpc = fail_rpc.clone();
+            move |req: &wiremock::Request| {
+                if *fail_rpc.lock().expect("lock HoS failure flag") {
+                    return ResponseTemplate::new(500).set_body_json(json!({
+                        "error": { "message": "temporary NEAR outage" }
+                    }));
+                }
+
+                use base64::{engine::general_purpose::STANDARD, Engine};
+
+                let body: serde_json::Value =
+                    serde_json::from_slice(&req.body).unwrap_or(json!({}));
+                let empty = json!({});
+                let params = body.get("params").unwrap_or(&empty);
+                let method_name = params
+                    .get("method_name")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("");
+                let decoded_args = params
+                    .get("args_base64")
+                    .and_then(|x| x.as_str())
+                    .and_then(|args| STANDARD.decode(args).ok())
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                    .unwrap_or_default();
+
+                match method_name {
+                    "get_subscription_for_price" => ResponseTemplate::new(200).set_body_json(
+                        near_rpc_call_function_body(&json!({
+                            "subscription_id": "sub_chain_hos_refresh_failure_cached",
+                            "price_id": "price_hos_basic",
+                            "start_ns": active_period_start.timestamp_nanos_opt().unwrap().to_string(),
+                            "end_ns": active_period_end.timestamp_nanos_opt().unwrap().to_string(),
+                            "status": "Active",
+                            "cancel_at_period_end": false,
+                            "last_lock_id": "lock_chain_hos_refresh_failure_cached"
+                        })),
+                    ),
+                    "get_lock" => {
+                        assert_eq!(
+                            decoded_args.get("effective").and_then(|x| x.as_bool()),
+                            Some(true)
+                        );
+                        ResponseTemplate::new(200).set_body_json(near_rpc_call_function_body(
+                            &json!({
+                                "lock_id": "lock_chain_hos_refresh_failure_cached",
+                                "amount_near": yocto_near(500),
+                                "status": "Active",
+                                "shares": "1"
+                            }),
+                        ))
+                    }
+                    _ => ResponseTemplate::new(500).set_body_json(json!({
+                        "error": "unexpected NEAR RPC mock",
+                        "method_name": method_name
+                    })),
+                }
+            }
+        })
         .mount(&mock)
         .await;
 
@@ -4983,10 +5042,23 @@ async fn test_house_of_stake_expired_refresh_failure_is_cached() {
                 'sub_chain_hos_refresh_failure_cached', $1, 'house-of-stake',
                 'near:hos_expired_refresh_cached.testnet', 'price_hos_basic', 'active', $2, false
             )",
-            &[&user.id, &(now - Duration::days(1))],
+            &[&user.id, &active_period_end],
         )
         .await
         .unwrap();
+
+    assert_eq!(get_credits_plan_limit(&server, &token).await, 5_000_000_000);
+
+    client
+        .execute(
+            "UPDATE subscriptions
+             SET current_period_end = $1
+             WHERE subscription_id = 'sub_chain_hos_refresh_failure_cached'",
+            &[&(now - Duration::days(1))],
+        )
+        .await
+        .unwrap();
+    *fail_rpc.lock().expect("lock HoS failure flag") = true;
 
     assert_eq!(get_credits_plan_limit(&server, &token).await, 1_000_000_000);
     assert_eq!(get_credits_plan_limit(&server, &token).await, 1_000_000_000);
@@ -4994,7 +5066,7 @@ async fn test_house_of_stake_expired_refresh_failure_is_cached() {
     let requests = mock.received_requests().await.unwrap();
     assert_eq!(
         requests.len(),
-        1,
+        3,
         "second expired HoS entitlement lookup should use refresh-failure backoff"
     );
 }
