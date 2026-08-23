@@ -26,7 +26,10 @@ use services::system_configs::ports::RateLimitConfig;
 use services::user::ports::UserRepository;
 use services::user_usage::{UserUsageRepository, METRIC_KEY_LLM_TOKENS};
 use services::UserId;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -6160,12 +6163,14 @@ async fn test_house_of_stake_fixed_to_variable_sync_prorates_above_fixed_entitle
             .unwrap(),
         cancel_at_period_end: false,
     }));
+    let lock_available = Arc::new(AtomicBool::new(false));
 
     let mock = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/"))
         .respond_with({
             let state = state.clone();
+            let lock_available = lock_available.clone();
             move |req: &wiremock::Request| {
                 use base64::{engine::general_purpose::STANDARD, Engine};
 
@@ -6202,14 +6207,17 @@ async fn test_house_of_stake_fixed_to_variable_sync_prorates_above_fixed_entitle
                             decoded_args.get("effective").and_then(|x| x.as_bool()),
                             Some(true)
                         );
-                        ResponseTemplate::new(200).set_body_json(near_rpc_call_function_body(
-                            &json!({
+                        let lock = if lock_available.load(Ordering::SeqCst) {
+                            json!({
                                 "lock_id": "lock_chain_hos_fixed_to_variable",
                                 "amount_near": state.amount_near.clone(),
                                 "status": "Active",
                                 "shares": "1"
-                            }),
-                        ))
+                            })
+                        } else {
+                            serde_json::Value::Null
+                        };
+                        ResponseTemplate::new(200).set_body_json(near_rpc_call_function_body(&lock))
                     }
                     _ => ResponseTemplate::new(500).set_body_json(json!({
                         "error": "unexpected NEAR RPC mock",
@@ -6271,6 +6279,51 @@ async fn test_house_of_stake_fixed_to_variable_sync_prorates_above_fixed_entitle
         state.subscription_id = subscription_id.clone();
     }
 
+    let user = db
+        .user_repository()
+        .get_user_by_email(&near_email)
+        .await
+        .unwrap()
+        .unwrap();
+    let client = db.pool().get().await.unwrap();
+    client
+        .execute(
+            "INSERT INTO house_of_stake_credit_entitlement_snapshots (
+                 user_id, subscription_id, period_start, period_end,
+                 credited_stake_yocto, last_observed_stake_yocto, credit_limit_nano_usd
+             ) VALUES ($1, $2, $3, $4, '0', '0', 0)",
+            &[
+                &user.id,
+                &subscription_id,
+                &(period_start - Duration::days(30)),
+                &period_start,
+            ],
+        )
+        .await
+        .expect("insert prior zero-stake snapshot");
+
+    let failed_sync = server
+        .post("/v1/subscriptions/near/sync")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .await;
+    assert_ne!(failed_sync.status_code(), 200, "{}", failed_sync.text());
+    let retained_price_id: String = client
+        .query_one(
+            "SELECT price_id FROM subscriptions WHERE subscription_id = $1",
+            &[&subscription_id],
+        )
+        .await
+        .unwrap()
+        .get("price_id");
+    assert_eq!(
+        retained_price_id, "price_hos_starter",
+        "failed seeding must preserve the fixed row so a later sync can retry the transition"
+    );
+
+    lock_available.store(true, Ordering::SeqCst);
     sync_house_of_stake_subscription(&server, &token).await;
     let limit = get_credits_plan_limit(&server, &token).await;
     assert!(

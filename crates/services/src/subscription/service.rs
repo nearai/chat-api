@@ -105,10 +105,6 @@ enum HouseOfStakeEntitlementSource {
 }
 
 impl HouseOfStakeEntitlementSource {
-    fn is_transient_snapshot_fallback(self) -> bool {
-        self == Self::TransientSnapshotFallback
-    }
-
     fn is_transient_plan_fallback(self) -> bool {
         self == Self::TransientPlanFallback
     }
@@ -1281,6 +1277,25 @@ impl SubscriptionServiceImpl {
             .is_some()
     }
 
+    fn stake_for_credit_floor(
+        plan_config: &SubscriptionPlanConfig,
+        credit_floor_nano_usd: u64,
+    ) -> Option<u128> {
+        let rate = plan_config
+            .stake_based_monthly_credits
+            .as_ref()
+            .and_then(|c| c.credits_per_staked_near_nano_usd)?;
+        if rate == 0 {
+            return None;
+        }
+        Some(
+            (credit_floor_nano_usd as u128)
+                .saturating_mul(YOCTO_PER_NEAR)
+                .saturating_add(rate as u128 - 1)
+                / rate as u128,
+        )
+    }
+
     fn fixed_to_stake_based_credit_floor(
         local_subscriptions: &[Subscription],
         chain_subscription: &Subscription,
@@ -1302,6 +1317,7 @@ impl SubscriptionServiceImpl {
                 sub.provider == "house-of-stake"
                     && sub.subscription_id == chain_subscription.subscription_id
                     && sub.price_id != chain_subscription.price_id
+                    && sub.current_period_end == chain_subscription.current_period_end
                     && Self::is_active_or_trialing(&sub.status)
             })
             .and_then(|sub| {
@@ -1457,7 +1473,7 @@ impl SubscriptionServiceImpl {
                     ),
                     None => None,
                 };
-                let baseline_stake = match previous_last_observed_stake {
+                let observed_baseline_stake = match previous_last_observed_stake {
                     Some(_)
                         if Self::is_house_of_stake_period_start_baseline_observation(
                             period_start,
@@ -1469,6 +1485,11 @@ impl SubscriptionServiceImpl {
                     Some(stake) => stake.min(effective_stake_yocto),
                     None => effective_stake_yocto,
                 };
+                let fixed_floor_stake = first_snapshot_credit_floor_nano_usd
+                    .and_then(|floor| Self::stake_for_credit_floor(plan_config, floor))
+                    .unwrap_or(0)
+                    .min(effective_stake_yocto);
+                let baseline_stake = observed_baseline_stake.max(fixed_floor_stake);
                 let stake_based_baseline_limit =
                     Self::stake_based_credits_for_lock(plan_config, baseline_stake).unwrap_or(0);
                 let baseline_limit = match first_snapshot_credit_floor_nano_usd {
@@ -1655,7 +1676,9 @@ impl SubscriptionServiceImpl {
                 subscription_id = %local_subscription.subscription_id,
                 "cannot seed fixed-to-stake HoS snapshot: last lock id missing"
             );
-            return Ok(());
+            return Err(SubscriptionError::InternalError(
+                "cannot seed fixed-to-stake HoS snapshot: last lock id missing".to_string(),
+            ));
         };
 
         let fallback_period_end = local_subscription.current_period_end;
@@ -1676,7 +1699,9 @@ impl SubscriptionServiceImpl {
                 last_lock_id,
                 "cannot seed fixed-to-stake HoS snapshot: lock missing"
             );
-            return Ok(());
+            return Err(SubscriptionError::InternalError(
+                "cannot seed fixed-to-stake HoS snapshot: lock missing".to_string(),
+            ));
         };
         if !lock_has_active_shares(&lock) {
             self.reconcile_house_of_stake_credit_entitlement_snapshot(
@@ -1697,7 +1722,10 @@ impl SubscriptionServiceImpl {
                 subscription_id = %local_subscription.subscription_id,
                 "cannot seed fixed-to-stake HoS snapshot: lock amount missing or invalid"
             );
-            return Ok(());
+            return Err(SubscriptionError::InternalError(
+                "cannot seed fixed-to-stake HoS snapshot: lock amount missing or invalid"
+                    .to_string(),
+            ));
         };
 
         self.reconcile_house_of_stake_credit_entitlement_snapshot(
@@ -2711,6 +2739,20 @@ impl SubscriptionServiceImpl {
             ));
         }
 
+        if let Some((seed_subscription, seed_plan_config, fixed_credit_floor)) =
+            fixed_to_stake_based_seed.as_ref()
+        {
+            self.seed_fixed_to_stake_based_house_of_stake_snapshot(
+                user_id,
+                &contract_id,
+                chain_subscription,
+                seed_subscription,
+                seed_plan_config,
+                *fixed_credit_floor,
+            )
+            .await?;
+        }
+
         let mut db_client = self
             .db_pool
             .get()
@@ -2753,29 +2795,6 @@ impl SubscriptionServiceImpl {
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
 
         self.invalidate_credit_limit_cache(user_id).await;
-        if let Some((seed_subscription, seed_plan_config, fixed_credit_floor)) =
-            fixed_to_stake_based_seed
-        {
-            if let Err(err) = self
-                .seed_fixed_to_stake_based_house_of_stake_snapshot(
-                    user_id,
-                    &contract_id,
-                    chain_subscription,
-                    &seed_subscription,
-                    &seed_plan_config,
-                    fixed_credit_floor,
-                )
-                .await
-            {
-                tracing::warn!(
-                    user_id = %user_id.0,
-                    subscription_id = %seed_subscription.subscription_id,
-                    error = %err,
-                    "fixed-to-stake HoS entitlement snapshot seeding failed"
-                );
-            }
-            self.invalidate_credit_limit_cache(user_id).await;
-        }
         Ok(Self::hos_reconcile_summary(false, 0, canceled, true, None))
     }
 }
@@ -3041,11 +3060,16 @@ impl SubscriptionServiceImpl {
         let period_start = resolved.period_start;
         let period_end = resolved.period_end;
 
-        if !resolved
-            .house_of_stake_source
-            .is_some_and(HouseOfStakeEntitlementSource::is_transient_snapshot_fallback)
-        {
-            return Ok(Some((plan_credits, period_start, period_end)));
+        match resolved.house_of_stake_source {
+            Some(HouseOfStakeEntitlementSource::TransientPlanFallback) => {
+                tracing::warn!(
+                    user_id = %user_id.0,
+                    "skipping purchased credit reconciliation: HoS entitlement has no authoritative snapshot"
+                );
+                return Ok(None);
+            }
+            Some(HouseOfStakeEntitlementSource::TransientSnapshotFallback) => {}
+            _ => return Ok(Some((plan_credits, period_start, period_end))),
         }
 
         let active_subscription = match self.get_active_subscription_for_entitlement(user_id).await
@@ -3118,6 +3142,28 @@ impl SubscriptionServiceImpl {
             .refresh_plan_period_for_user_with_source(user_id)
             .await?;
         self.purchased_reconciliation_plan_period(user_id, &resolved)
+            .await
+    }
+
+    async fn purchased_reconciliation_plan_period_after_usage(
+        &self,
+        user_id: UserId,
+    ) -> Result<Option<(i64, DateTime<Utc>, DateTime<Utc>)>, SubscriptionError> {
+        let cached = self
+            .resolve_plan_period_for_user_with_source(user_id)
+            .await?;
+        let cached_plan_credits = cached.plan_credits.min(i64::MAX as u64) as i64;
+        let period_spent_credits = self
+            .user_usage_repo
+            .get_usage_by_user_id(user_id, Some(cached.period_start), Some(cached.period_end))
+            .await
+            .map_err(|e| SubscriptionError::InternalError(e.to_string()))?
+            .map(|usage| usage.cost_nano_usd)
+            .unwrap_or(0);
+        if period_spent_credits <= cached_plan_credits {
+            return Ok(None);
+        }
+        self.fresh_purchased_reconciliation_plan_period(user_id)
             .await
     }
 }
@@ -5294,7 +5340,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
         user_id: UserId,
     ) -> Result<(), SubscriptionError> {
         let Some((plan_credits, period_start, period_end)) = self
-            .fresh_purchased_reconciliation_plan_period(user_id)
+            .purchased_reconciliation_plan_period_after_usage(user_id)
             .await?
         else {
             return Ok(());
@@ -5322,7 +5368,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .map(|s| s.cost_nano_usd)
             .unwrap_or(0);
 
-        if period_spent_credits > 0 {
+        if period_spent_credits > plan_credits {
             match self
                 .fresh_purchased_reconciliation_plan_period(user_id)
                 .await
@@ -5568,6 +5614,63 @@ mod tests {
         assert_eq!(
             SubscriptionServiceImpl::stake_based_credits_for_lock(&config, u128::MAX),
             Some((u128::MAX / YOCTO_PER_NEAR) as u64)
+        );
+    }
+
+    #[test]
+    fn test_stake_for_credit_floor_rounds_up_to_cover_floor() {
+        let mut config = hos_plan_config("hos_basic");
+        config.stake_based_monthly_credits = Some(StakeBasedMonthlyCreditsConfig {
+            credits_per_staked_near_nano_usd: Some(500_000_000),
+        });
+
+        let stake = SubscriptionServiceImpl::stake_for_credit_floor(&config, 5_000_000_001)
+            .expect("stake-based plan");
+        assert!(stake > 10 * YOCTO_PER_NEAR && stake < 11 * YOCTO_PER_NEAR);
+        assert!(
+            SubscriptionServiceImpl::stake_based_credits_for_lock(&config, stake).unwrap()
+                >= 5_000_000_001
+        );
+    }
+
+    #[test]
+    fn test_fixed_to_stake_based_floor_requires_same_period() {
+        let period_end = Utc::now() + Duration::days(7);
+        let mut fixed = base_subscription();
+        fixed.provider = "house-of-stake".to_string();
+        fixed.subscription_id = "sub_hos".to_string();
+        fixed.price_id = "hos_starter".to_string();
+        fixed.current_period_end = period_end;
+
+        let mut chain = fixed.clone();
+        chain.price_id = "hos_basic".to_string();
+
+        let mut fixed_plan = hos_plan_config("hos_starter");
+        fixed_plan.monthly_credits =
+            Some(crate::system_configs::ports::PlanLimitConfig { max: 5_000_000_000 });
+        let mut variable_plan = hos_plan_config("hos_basic");
+        variable_plan.stake_based_monthly_credits = Some(StakeBasedMonthlyCreditsConfig {
+            credits_per_staked_near_nano_usd: Some(500_000_000),
+        });
+        let plans = HashMap::from([
+            ("starter".to_string(), fixed_plan),
+            ("basic".to_string(), variable_plan),
+        ]);
+
+        assert_eq!(
+            SubscriptionServiceImpl::fixed_to_stake_based_credit_floor(
+                &[fixed.clone()],
+                &chain,
+                &plans,
+            ),
+            Some(5_000_000_000)
+        );
+
+        chain.current_period_end += Duration::days(30);
+        assert_eq!(
+            SubscriptionServiceImpl::fixed_to_stake_based_credit_floor(&[fixed], &chain, &plans),
+            None,
+            "a renewal into a stake-based plan must start with its full-period entitlement"
         );
     }
 
