@@ -4042,21 +4042,24 @@ async fn assert_house_of_stake_credits_for_effective_lock(
     insert_house_of_stake_subscription_for_existing_user(&db, near_email, "price_hos_basic", false)
         .await;
 
-    let response = server
-        .get("/v1/credits")
-        .add_header(
-            http::HeaderName::from_static("authorization"),
-            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
-        )
-        .await;
+    for _ in 0..2 {
+        let response = server
+            .get("/v1/credits")
+            .add_header(
+                http::HeaderName::from_static("authorization"),
+                http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+            )
+            .await;
 
-    assert_eq!(response.status_code(), 200, "{}", response.text());
-    let body: serde_json::Value = response.json();
-    assert_eq!(
-        body.get("plan_credits").and_then(|x| x.as_i64()),
-        Some(expected_plan_credits),
-        "{assertion_message}"
-    );
+        assert_eq!(response.status_code(), 200, "{}", response.text());
+        let body: serde_json::Value = response.json();
+        assert_eq!(
+            body.get("plan_credits").and_then(|x| x.as_i64()),
+            Some(expected_plan_credits),
+            "{assertion_message}"
+        );
+    }
+    assert_eq!(mock.received_requests().await.unwrap().len(), 2);
 }
 
 #[tokio::test]
