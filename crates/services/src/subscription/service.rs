@@ -2816,6 +2816,12 @@ impl SubscriptionServiceImpl {
         let plan_credits = resolved.plan_credits.min(i64::MAX as u64) as i64;
         let period_start = resolved.period_start;
         let period_end = resolved.period_end;
+
+        if resolved.house_of_stake_source != Some(HouseOfStakeEntitlementSource::TransientFallback)
+        {
+            return Ok(Some((plan_credits, period_start, period_end)));
+        }
+
         let active_subscription = match self.get_active_subscription_for_entitlement(user_id).await
         {
             Ok(sub) => sub,
@@ -2823,7 +2829,7 @@ impl SubscriptionServiceImpl {
                 tracing::warn!(
                     user_id = %user_id.0,
                     error = %err,
-                    "skipping purchased credit reconciliation: could not verify HoS snapshot floor after zero entitlement"
+                    "skipping purchased credit reconciliation: could not verify HoS snapshot floor during transient fallback"
                 );
                 return Ok(None);
             }
@@ -2858,10 +2864,7 @@ impl SubscriptionServiceImpl {
                     snapshot_end,
                 )))
             }
-            Ok(None)
-                if resolved.house_of_stake_source
-                    == Some(HouseOfStakeEntitlementSource::TransientFallback) =>
-            {
+            Ok(None) => {
                 tracing::warn!(
                     user_id = %user_id.0,
                     subscription_id = %subscription.subscription_id,
@@ -2869,7 +2872,6 @@ impl SubscriptionServiceImpl {
                 );
                 Ok(None)
             }
-            Ok(None) => Ok(Some((plan_credits, period_start, period_end))),
             Err(err) => {
                 tracing::warn!(
                     user_id = %user_id.0,
