@@ -5581,6 +5581,44 @@ async fn test_near_staking_sync_falls_back_to_configured_prices_before_canceling
         expected_limit,
         "the prior fixed entitlement must be retained and only the increase prorated"
     );
+
+    let response = server
+        .get("/v1/credits")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .await;
+    assert_eq!(response.status_code(), 200, "{}", response.text());
+    let body: serde_json::Value = response.json();
+    let hos = body
+        .get("house_of_stake")
+        .expect("credits should include HoS accounting metadata");
+    assert_eq!(
+        hos.get("credited_stake_yocto").and_then(|x| x.as_str()),
+        Some("15000000000000000000000000")
+    );
+    assert_eq!(
+        hos.get("last_observed_stake_yocto")
+            .and_then(|x| x.as_str()),
+        Some("15000000000000000000000000")
+    );
+    assert_eq!(
+        hos.get("credit_limit_nano_usd").and_then(|x| x.as_i64()),
+        Some(expected_limit as i64)
+    );
+    assert_eq!(
+        hos.get("period_start")
+            .and_then(|x| x.as_str())
+            .and_then(|x| x.parse::<chrono::DateTime<Utc>>().ok()),
+        Some(snapshot_start)
+    );
+    assert_eq!(
+        hos.get("period_end")
+            .and_then(|x| x.as_str())
+            .and_then(|x| x.parse::<chrono::DateTime<Utc>>().ok()),
+        Some(snapshot_end)
+    );
 }
 
 #[tokio::test]

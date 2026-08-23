@@ -7,13 +7,13 @@ use super::near_staking::{
 use super::ports::{
     BillingCycleAnchor, BillingPeriod, CancelSubscriptionOutcome, ChangePlanOutcome,
     CreateCreditPurchaseOutcome, CreateSubscriptionOutcome, CreditsRepository, CreditsSummary,
-    DowngradeIntentStatus, NearStakingStorageIntent, NearStakingSyncSummary, PaymentBehavior,
-    PaymentWebhookRepository, ProrationBehavior, ResumeSubscriptionOutcome, StripeClientPort,
-    StripeCreateCreditsCheckoutParams, StripeCreateSubscriptionCheckoutParams,
-    StripeCustomerRepository, StripeSubscriptionSnapshot, StripeUpdateSubscriptionParams,
-    Subscription, SubscriptionError, SubscriptionPlan, SubscriptionReplacement,
-    SubscriptionRepository, SubscriptionService, SubscriptionWithPlan, DEFAULT_MONTHLY_TOKEN_LIMIT,
-    NEAR_STAKING_SYNC_SKIPPED_REASON_UPSERT_BLOCKED_NON_HOS,
+    DowngradeIntentStatus, HouseOfStakeCreditSnapshot, NearStakingStorageIntent,
+    NearStakingSyncSummary, PaymentBehavior, PaymentWebhookRepository, ProrationBehavior,
+    ResumeSubscriptionOutcome, StripeClientPort, StripeCreateCreditsCheckoutParams,
+    StripeCreateSubscriptionCheckoutParams, StripeCustomerRepository, StripeSubscriptionSnapshot,
+    StripeUpdateSubscriptionParams, Subscription, SubscriptionError, SubscriptionPlan,
+    SubscriptionReplacement, SubscriptionRepository, SubscriptionService, SubscriptionWithPlan,
+    DEFAULT_MONTHLY_TOKEN_LIMIT, NEAR_STAKING_SYNC_SKIPPED_REASON_UPSERT_BLOCKED_NON_HOS,
 };
 use crate::agent::ports::AgentRepository;
 use crate::agent::ports::AgentService;
@@ -63,6 +63,7 @@ struct CachedCreditLimit {
     plan_credits: u64,
     period_start: chrono::DateTime<Utc>,
     period_end: chrono::DateTime<Utc>,
+    house_of_stake: Option<HouseOfStakeCreditSnapshot>,
     scope: CreditLimitCacheScope,
     cached_at: Instant,
 }
@@ -1087,6 +1088,7 @@ impl SubscriptionServiceImpl {
             .and_then(|c| c.subscription_plans)
             .unwrap_or_default();
 
+        let mut house_of_stake = None;
         let (plan_credits, period_start, period_end, cache_scope) = match active_subscription {
             Some(mut sub) => {
                 if sub.provider == "stripe" && Self::should_check_pending_downgrade(&sub) {
@@ -1117,6 +1119,9 @@ impl SubscriptionServiceImpl {
                 };
                 let period_end = sub.current_period_end;
                 let period_start = sub_one_month_same_day(sub.current_period_end);
+                if sub.provider == "house-of-stake" {
+                    house_of_stake = self.current_house_of_stake_snapshot(&sub).await?;
+                }
                 (
                     plan_credits,
                     period_start,
@@ -1146,6 +1151,7 @@ impl SubscriptionServiceImpl {
                 plan_credits,
                 period_start,
                 period_end,
+                house_of_stake,
                 scope: cache_scope,
                 cached_at: Instant::now(),
             },
@@ -1221,6 +1227,40 @@ impl SubscriptionServiceImpl {
             .then(|| (Self::plan_limit_max(local_plan), rate))
     }
 
+    async fn current_house_of_stake_snapshot(
+        &self,
+        subscription: &Subscription,
+    ) -> Result<Option<HouseOfStakeCreditSnapshot>, SubscriptionError> {
+        let period_end = subscription.current_period_end;
+        let period_start = sub_one_month_same_day(period_end);
+        let client = self
+            .db_pool
+            .get()
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+        let row = client
+            .query_opt(
+                r#"
+                SELECT credited_stake_yocto, last_observed_stake_yocto,
+                       credit_limit_nano_usd, period_start, period_end, observed_at
+                FROM house_of_stake_credit_entitlement_snapshots
+                WHERE subscription_id = $1 AND period_start = $2 AND period_end = $3
+                "#,
+                &[&subscription.subscription_id, &period_start, &period_end],
+            )
+            .await
+            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+
+        Ok(row.map(|row| HouseOfStakeCreditSnapshot {
+            credited_stake_yocto: row.get("credited_stake_yocto"),
+            last_observed_stake_yocto: row.get("last_observed_stake_yocto"),
+            credit_limit_nano_usd: row.get("credit_limit_nano_usd"),
+            period_start: row.get("period_start"),
+            period_end: row.get("period_end"),
+            observed_at: row.get("observed_at"),
+        }))
+    }
+
     async fn current_house_of_stake_snapshot_limit(
         &self,
         subscription: &Subscription,
@@ -1243,7 +1283,6 @@ impl SubscriptionServiceImpl {
             )
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-
         row.map(|row| {
             let observed = parse_snapshot_stake(row.get("last_observed_stake_yocto"))?;
             let limit = row.get::<_, i64>("credit_limit_nano_usd").max(0) as u64;
@@ -4436,6 +4475,12 @@ impl SubscriptionService for SubscriptionServiceImpl {
             .get_purchased_breakdown(user_id)
             .await
             .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+        let house_of_stake = self
+            .credit_limit_cache
+            .read()
+            .await
+            .get(&user_id)
+            .and_then(|cached| cached.house_of_stake.clone());
 
         Ok(CreditsSummary {
             balance,
@@ -4443,6 +4488,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
             spent_purchased_nano_usd,
             period_spent_credits,
             plan_credits,
+            house_of_stake,
         })
     }
 
@@ -4803,6 +4849,7 @@ mod tests {
             plan_credits: 1,
             period_start: now - Duration::days(1),
             period_end: now + Duration::days(1),
+            house_of_stake: None,
             scope: CreditLimitCacheScope::from_active_subscription(None),
             cached_at: Instant::now(),
         };
