@@ -75,6 +75,7 @@ struct HouseOfStakeSnapshot {
     credited_stake_yocto: u128,
     last_observed_stake_yocto: u128,
     credit_limit_nano_usd: u64,
+    observed_at: DateTime<Utc>,
 }
 
 /// Cached system configs snapshot for model access checks.
@@ -112,49 +113,119 @@ fn parse_snapshot_stake(value: &str) -> Result<u128, SubscriptionError> {
     })
 }
 
+fn stake_for_credit_floor(rate: u64, credit_floor_nano_usd: u64) -> Option<u128> {
+    if rate == 0 {
+        return None;
+    }
+    Some(
+        (credit_floor_nano_usd as u128)
+            .saturating_mul(YOCTO_PER_NEAR)
+            .saturating_add(rate as u128 - 1)
+            / rate as u128,
+    )
+}
+
+fn prorated_credit_delta(
+    full_period_delta: u64,
+    period_start: DateTime<Utc>,
+    period_end: DateTime<Utc>,
+    observed_at: DateTime<Utc>,
+) -> u64 {
+    let total_seconds = period_end
+        .signed_duration_since(period_start)
+        .num_seconds()
+        .max(1) as u128;
+    let remaining_seconds = period_end
+        .signed_duration_since(observed_at.max(period_start))
+        .num_seconds()
+        .clamp(0, total_seconds as i64) as u128;
+    ((full_period_delta as u128).saturating_mul(remaining_seconds) / total_seconds)
+        .min(u64::MAX as u128) as u64
+}
+
 fn next_house_of_stake_snapshot(
     current: Option<HouseOfStakeSnapshot>,
     previous_observed_stake_yocto: Option<u128>,
     observed_stake_yocto: u128,
     rate: u64,
-    period_start: DateTime<Utc>,
-    period_end: DateTime<Utc>,
+    period: &BillingPeriod,
     observed_at: DateTime<Utc>,
+    credit_floor_nano_usd: Option<u64>,
 ) -> (HouseOfStakeSnapshot, u64) {
-    let mut snapshot = current.unwrap_or_else(|| {
-        let baseline = previous_observed_stake_yocto.unwrap_or(observed_stake_yocto);
-        HouseOfStakeSnapshot {
-            credited_stake_yocto: baseline,
-            last_observed_stake_yocto: baseline,
-            credit_limit_nano_usd: stake_credits_at_rate(rate, baseline),
+    if let Some(snapshot) = current {
+        if observed_at < snapshot.observed_at {
+            let effective_limit = if snapshot.last_observed_stake_yocto == 0 {
+                0
+            } else {
+                snapshot.credit_limit_nano_usd
+            };
+            return (snapshot, effective_limit);
         }
-    });
+    }
+
+    let floor_stake = credit_floor_nano_usd
+        .and_then(|floor| stake_for_credit_floor(rate, floor))
+        .unwrap_or(0);
+    let mut snapshot = match current {
+        Some(mut snapshot) => {
+            snapshot.credited_stake_yocto = snapshot.credited_stake_yocto.max(floor_stake);
+            snapshot.credit_limit_nano_usd = snapshot
+                .credit_limit_nano_usd
+                .max(credit_floor_nano_usd.unwrap_or(0));
+            snapshot
+        }
+        None => {
+            let baseline = previous_observed_stake_yocto
+                .unwrap_or(observed_stake_yocto)
+                .max(floor_stake);
+            let stake_limit = stake_credits_at_rate(rate, baseline);
+            let credit_limit_nano_usd = match credit_floor_nano_usd {
+                Some(floor) => floor.saturating_add(prorated_credit_delta(
+                    stake_limit.saturating_sub(floor),
+                    period.start_at,
+                    period.end_at,
+                    observed_at,
+                )),
+                None => stake_limit,
+            };
+            HouseOfStakeSnapshot {
+                credited_stake_yocto: baseline,
+                last_observed_stake_yocto: observed_stake_yocto,
+                credit_limit_nano_usd,
+                observed_at,
+            }
+        }
+    };
 
     if observed_stake_yocto > snapshot.credited_stake_yocto {
-        let total_seconds = period_end
-            .signed_duration_since(period_start)
-            .num_seconds()
-            .max(1) as u128;
-        let remaining_seconds = period_end
-            .signed_duration_since(observed_at.max(period_start))
-            .num_seconds()
-            .clamp(0, total_seconds as i64) as u128;
         let delta =
-            stake_credits_at_rate(rate, observed_stake_yocto - snapshot.credited_stake_yocto)
-                as u128;
-        snapshot.credit_limit_nano_usd = snapshot
-            .credit_limit_nano_usd
-            .saturating_add((delta * remaining_seconds / total_seconds) as u64);
+            stake_credits_at_rate(rate, observed_stake_yocto - snapshot.credited_stake_yocto);
+        snapshot.credit_limit_nano_usd =
+            snapshot
+                .credit_limit_nano_usd
+                .saturating_add(prorated_credit_delta(
+                    delta,
+                    period.start_at,
+                    period.end_at,
+                    observed_at,
+                ));
         snapshot.credited_stake_yocto = observed_stake_yocto;
     }
     snapshot.last_observed_stake_yocto = observed_stake_yocto;
+    snapshot.observed_at = observed_at;
 
-    let effective_limit = if observed_stake_yocto == 0 {
+    let effective_limit = if snapshot.last_observed_stake_yocto == 0 {
         0
     } else {
         snapshot.credit_limit_nano_usd
     };
     (snapshot, effective_limit)
+}
+
+fn credit_limit_cache_is_valid(cached: &CachedCreditLimit, now: DateTime<Utc>) -> bool {
+    cached.cached_at.elapsed().as_secs() < TTL_CACHE_SECS
+        && cached.period_start <= now
+        && now < cached.period_end
 }
 
 pub struct SubscriptionServiceImpl {
@@ -970,7 +1041,7 @@ impl SubscriptionServiceImpl {
         user_id: UserId,
     ) -> Result<(i64, chrono::DateTime<Utc>, chrono::DateTime<Utc>), SubscriptionError> {
         if let Some(cached) = self.credit_limit_cache.read().await.get(&user_id) {
-            if cached.cached_at.elapsed().as_secs() < TTL_CACHE_SECS {
+            if credit_limit_cache_is_valid(cached, Utc::now()) {
                 return Ok((
                     cached.plan_credits.min(i64::MAX as u64) as i64,
                     cached.period_start,
@@ -1080,6 +1151,40 @@ impl SubscriptionServiceImpl {
         Some(stake_credits_at_rate(rate, lock_amount_yocto))
     }
 
+    fn fixed_to_stake_based_credit_floor(
+        local_subscriptions: &[Subscription],
+        chain_subscription: &Subscription,
+        subscription_plans: &HashMap<String, SubscriptionPlanConfig>,
+    ) -> Option<(u64, u64)> {
+        let target_plan_name = resolve_plan_name_from_config(
+            &chain_subscription.provider,
+            &chain_subscription.price_id,
+            subscription_plans,
+        )?;
+        let rate = subscription_plans
+            .get(&target_plan_name)?
+            .stake_based_monthly_credits
+            .as_ref()?
+            .credits_per_staked_near_nano_usd?;
+        let local = local_subscriptions.iter().find(|sub| {
+            sub.provider == "house-of-stake"
+                && sub.subscription_id == chain_subscription.subscription_id
+                && sub.price_id != chain_subscription.price_id
+                && sub.current_period_end.timestamp()
+                    == chain_subscription.current_period_end.timestamp()
+                && Self::is_active_or_trialing(&sub.status)
+        })?;
+        let local_plan_name =
+            resolve_plan_name_from_config(&local.provider, &local.price_id, subscription_plans)?;
+        let local_plan = subscription_plans.get(&local_plan_name)?;
+        local_plan
+            .stake_based_monthly_credits
+            .as_ref()
+            .and_then(|config| config.credits_per_staked_near_nano_usd)
+            .is_none()
+            .then(|| (Self::plan_limit_max(local_plan), rate))
+    }
+
     async fn current_house_of_stake_snapshot_limit(
         &self,
         subscription: &Subscription,
@@ -1144,6 +1249,7 @@ impl SubscriptionServiceImpl {
         subscription: &Subscription,
         rate: u64,
         observed_stake_yocto: u128,
+        credit_floor_nano_usd: Option<u64>,
     ) -> Result<u64, SubscriptionError> {
         let period_end = subscription.current_period_end;
         let period_start = sub_one_month_same_day(period_end);
@@ -1168,7 +1274,8 @@ impl SubscriptionServiceImpl {
         let current = txn
             .query_opt(
                 r#"
-                SELECT credited_stake_yocto, last_observed_stake_yocto, credit_limit_nano_usd
+                SELECT credited_stake_yocto, last_observed_stake_yocto,
+                       credit_limit_nano_usd, observed_at
                 FROM house_of_stake_credit_entitlement_snapshots
                 WHERE subscription_id = $1 AND period_start = $2 AND period_end = $3
                 FOR UPDATE
@@ -1184,6 +1291,7 @@ impl SubscriptionServiceImpl {
                         row.get("last_observed_stake_yocto"),
                     )?,
                     credit_limit_nano_usd: row.get::<_, i64>("credit_limit_nano_usd").max(0) as u64,
+                    observed_at: row.get("observed_at"),
                 })
             })
             .transpose()?;
@@ -1212,9 +1320,12 @@ impl SubscriptionServiceImpl {
             previous_observed,
             observed_stake_yocto,
             rate,
-            period_start,
-            period_end,
+            &BillingPeriod {
+                start_at: period_start,
+                end_at: period_end,
+            },
             observed_at,
+            credit_floor_nano_usd,
         );
         let credited_stake = snapshot.credited_stake_yocto.to_string();
         let observed_stake = snapshot.last_observed_stake_yocto.to_string();
@@ -1238,7 +1349,7 @@ impl SubscriptionServiceImpl {
                 &credited_stake,
                 &observed_stake,
                 &stored_limit,
-                &observed_at,
+                &snapshot.observed_at,
             ],
         )
         .await
@@ -1331,6 +1442,12 @@ impl SubscriptionServiceImpl {
             }
         };
 
+        if chain_sub.subscription_id != subscription.subscription_id {
+            return Err(SubscriptionError::InternalError(
+                "HoS subscription changed on chain; sync is required".to_string(),
+            ));
+        }
+
         let status_lower = chain_sub
             .status
             .as_deref()
@@ -1342,7 +1459,7 @@ impl SubscriptionServiceImpl {
             .unwrap_or(u64::MAX);
         if status_lower != "active" || chain_sub.end_ns <= now_ns {
             return self
-                .reconcile_house_of_stake_snapshot(subscription, rate, 0)
+                .reconcile_house_of_stake_snapshot(subscription, rate, 0, None)
                 .await
                 .map(Some);
         }
@@ -1383,7 +1500,7 @@ impl SubscriptionServiceImpl {
             0
         };
         let limit = self
-            .reconcile_house_of_stake_snapshot(subscription, rate, observed_stake)
+            .reconcile_house_of_stake_snapshot(subscription, rate, observed_stake, None)
             .await?;
         self.house_of_stake_rpc_failure_cache
             .write()
@@ -1872,6 +1989,9 @@ impl SubscriptionServiceImpl {
         let chain_subscription = raw.as_ref().expect("checked is_some");
         let row = subscription_row_from_chain(user_id, &near_account, chain_subscription)
             .map_err(SubscriptionError::InternalError)?;
+        let fixed_to_stake_floor = Self::is_active_or_trialing(&row.status)
+            .then(|| Self::fixed_to_stake_based_credit_floor(&subs, &row, &subscription_plans))
+            .flatten();
 
         // Do not insert/update an active HoS row while a non-HoS subscription is active/trialing locally:
         // `get_active_subscription` picks newest `created_at`, so a fresh HoS upsert could wrongly
@@ -1925,6 +2045,37 @@ impl SubscriptionServiceImpl {
                 false,
                 Some(NEAR_STAKING_SYNC_SKIPPED_REASON_UPSERT_BLOCKED_NON_HOS),
             ));
+        }
+
+        if let Some((credit_floor, rate)) = fixed_to_stake_floor {
+            let last_lock_id = chain_subscription
+                .last_lock_id
+                .as_deref()
+                .filter(|id| !id.trim().is_empty())
+                .ok_or_else(|| {
+                    SubscriptionError::InternalError(
+                        "cannot seed HoS credit floor: last lock missing".to_string(),
+                    )
+                })?;
+            let lock = view_get_effective_lock(&self.near_rpc_url, &contract_id, last_lock_id)
+                .await
+                .map_err(Self::near_rpc_err)?
+                .ok_or_else(|| {
+                    SubscriptionError::InternalError(
+                        "cannot seed HoS credit floor: lock missing".to_string(),
+                    )
+                })?;
+            let observed_stake = if lock_has_active_shares(&lock) {
+                lock_amount_yocto(&lock).ok_or_else(|| {
+                    SubscriptionError::InternalError(
+                        "cannot seed HoS credit floor: invalid lock amount".to_string(),
+                    )
+                })?
+            } else {
+                0
+            };
+            self.reconcile_house_of_stake_snapshot(&row, rate, observed_stake, Some(credit_floor))
+                .await?;
         }
 
         let mut db_client = self
@@ -4467,10 +4618,15 @@ mod tests {
         let start = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
         let end = start + Duration::days(30);
         let halfway = start + Duration::days(15);
+        let period = BillingPeriod {
+            start_at: start,
+            end_at: end,
+        };
         let baseline = HouseOfStakeSnapshot {
             credited_stake_yocto: 10 * YOCTO_PER_NEAR,
             last_observed_stake_yocto: 10 * YOCTO_PER_NEAR,
             credit_limit_nano_usd: 10_000_000_000,
+            observed_at: start,
         };
 
         let (increased, limit) = next_house_of_stake_snapshot(
@@ -4478,9 +4634,9 @@ mod tests {
             None,
             20 * YOCTO_PER_NEAR,
             1_000_000_000,
-            start,
-            end,
+            &period,
             halfway,
+            None,
         );
         assert_eq!(limit, 15_000_000_000);
 
@@ -4489,9 +4645,9 @@ mod tests {
             None,
             5 * YOCTO_PER_NEAR,
             1_000_000_000,
-            start,
-            end,
+            &period,
             halfway,
+            None,
         );
         assert_eq!(limit, 15_000_000_000);
         assert_eq!(decreased.credited_stake_yocto, 20 * YOCTO_PER_NEAR);
@@ -4503,15 +4659,19 @@ mod tests {
         let start = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
         let end = start + Duration::days(30);
         let halfway = start + Duration::days(15);
+        let period = BillingPeriod {
+            start_at: start,
+            end_at: end,
+        };
 
         let (snapshot, limit) = next_house_of_stake_snapshot(
             None,
             Some(10 * YOCTO_PER_NEAR),
             20 * YOCTO_PER_NEAR,
             1_000_000_000,
-            start,
-            end,
+            &period,
             halfway,
+            None,
         );
         assert_eq!(limit, 15_000_000_000);
 
@@ -4520,13 +4680,99 @@ mod tests {
             None,
             0,
             1_000_000_000,
-            start,
-            end,
+            &period,
             halfway,
+            None,
         );
         assert_eq!(limit, 0);
         assert_eq!(zero.last_observed_stake_yocto, 0);
         assert_eq!(zero.credit_limit_nano_usd, 15_000_000_000);
+    }
+
+    #[test]
+    fn test_house_of_stake_snapshot_applies_fixed_plan_floor() {
+        let start = Utc.with_ymd_and_hms(2026, 10, 1, 0, 0, 0).unwrap();
+        let end = start + Duration::days(30);
+        let halfway = start + Duration::days(15);
+        let period = BillingPeriod {
+            start_at: start,
+            end_at: end,
+        };
+
+        let (first, limit) = next_house_of_stake_snapshot(
+            None,
+            None,
+            15 * YOCTO_PER_NEAR,
+            1_000_000_000,
+            &period,
+            halfway,
+            Some(5_000_000_000),
+        );
+        assert_eq!(limit, 10_000_000_000);
+
+        let existing = HouseOfStakeSnapshot {
+            credited_stake_yocto: 3 * YOCTO_PER_NEAR,
+            last_observed_stake_yocto: 3 * YOCTO_PER_NEAR,
+            credit_limit_nano_usd: 3_000_000_000,
+            observed_at: start,
+        };
+        let (resumed, limit) = next_house_of_stake_snapshot(
+            Some(existing),
+            None,
+            15 * YOCTO_PER_NEAR,
+            1_000_000_000,
+            &period,
+            halfway,
+            Some(5_000_000_000),
+        );
+        assert_eq!(limit, 10_000_000_000);
+        assert_eq!(resumed.credited_stake_yocto, 15 * YOCTO_PER_NEAR);
+        assert_eq!(first.credit_limit_nano_usd, resumed.credit_limit_nano_usd);
+    }
+
+    #[test]
+    fn test_house_of_stake_snapshot_ignores_out_of_order_observation() {
+        let start = Utc.with_ymd_and_hms(2026, 11, 1, 0, 0, 0).unwrap();
+        let end = start + Duration::days(30);
+        let newer_observed_at = start + Duration::days(15);
+        let period = BillingPeriod {
+            start_at: start,
+            end_at: end,
+        };
+        let current = HouseOfStakeSnapshot {
+            credited_stake_yocto: 20 * YOCTO_PER_NEAR,
+            last_observed_stake_yocto: 20 * YOCTO_PER_NEAR,
+            credit_limit_nano_usd: 20_000_000_000,
+            observed_at: newer_observed_at,
+        };
+
+        let (unchanged, limit) = next_house_of_stake_snapshot(
+            Some(current),
+            None,
+            0,
+            1_000_000_000,
+            &period,
+            newer_observed_at - Duration::seconds(1),
+            None,
+        );
+
+        assert_eq!(unchanged, current);
+        assert_eq!(limit, 20_000_000_000);
+    }
+
+    #[test]
+    fn test_credit_limit_cache_expires_at_period_boundary() {
+        let now = Utc.with_ymd_and_hms(2026, 12, 1, 0, 0, 0).unwrap();
+        let mut cached = CachedCreditLimit {
+            plan_credits: 1,
+            period_start: now - Duration::days(1),
+            period_end: now + Duration::days(1),
+            cached_at: Instant::now(),
+        };
+        assert!(credit_limit_cache_is_valid(&cached, now));
+
+        cached.period_end = now;
+        assert!(!credit_limit_cache_is_valid(&cached, now));
     }
 
     fn base_subscription() -> Subscription {
