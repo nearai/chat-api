@@ -1312,16 +1312,6 @@ impl SubscriptionServiceImpl {
         chain_subscription: &Subscription,
         subscription_plans: &HashMap<String, SubscriptionPlanConfig>,
     ) -> Option<u64> {
-        let target_plan_name = resolve_plan_name_from_config(
-            chain_subscription.provider.as_str(),
-            &chain_subscription.price_id,
-            subscription_plans,
-        )?;
-        let target_plan = subscription_plans.get(&target_plan_name)?;
-        if !Self::has_stake_based_monthly_credits(target_plan) {
-            return None;
-        }
-
         local_subscriptions
             .iter()
             .find(|sub| {
@@ -1677,20 +1667,15 @@ impl SubscriptionServiceImpl {
         plan_config: &SubscriptionPlanConfig,
         fixed_credit_floor_nano_usd: u64,
     ) -> Result<(), SubscriptionError> {
-        let Some(last_lock_id) = chain_subscription
+        let last_lock_id = chain_subscription
             .last_lock_id
             .as_deref()
             .filter(|s| !s.trim().is_empty())
-        else {
-            tracing::warn!(
-                user_id = %user_id.0,
-                subscription_id = %local_subscription.subscription_id,
-                "cannot seed fixed-to-stake HoS snapshot: last lock id missing"
-            );
-            return Err(SubscriptionError::InternalError(
-                "cannot seed fixed-to-stake HoS snapshot: last lock id missing".to_string(),
-            ));
-        };
+            .ok_or_else(|| {
+                SubscriptionError::InternalError(
+                    "cannot seed fixed-to-stake HoS snapshot: last lock id missing".to_string(),
+                )
+            })?;
 
         let fallback_period_end = local_subscription.current_period_end;
         let fallback_period_start = sub_one_month_same_day(fallback_period_end);
@@ -1700,20 +1685,14 @@ impl SubscriptionServiceImpl {
             fallback_period_end,
             Utc::now(),
         );
-        let Some(lock) = view_get_effective_lock(&self.near_rpc_url, contract_id, last_lock_id)
+        let lock = view_get_effective_lock(&self.near_rpc_url, contract_id, last_lock_id)
             .await
             .map_err(Self::near_rpc_err)?
-        else {
-            tracing::warn!(
-                user_id = %user_id.0,
-                subscription_id = %local_subscription.subscription_id,
-                last_lock_id,
-                "cannot seed fixed-to-stake HoS snapshot: lock missing"
-            );
-            return Err(SubscriptionError::InternalError(
-                "cannot seed fixed-to-stake HoS snapshot: lock missing".to_string(),
-            ));
-        };
+            .ok_or_else(|| {
+                SubscriptionError::InternalError(
+                    "cannot seed fixed-to-stake HoS snapshot: lock missing".to_string(),
+                )
+            })?;
         if !lock_has_active_shares(&lock) {
             self.reconcile_house_of_stake_credit_entitlement_snapshot(
                 user_id,
@@ -1727,17 +1706,12 @@ impl SubscriptionServiceImpl {
             .await?;
             return Ok(());
         }
-        let Some(lock_amount) = lock_amount_yocto(&lock) else {
-            tracing::warn!(
-                user_id = %user_id.0,
-                subscription_id = %local_subscription.subscription_id,
-                "cannot seed fixed-to-stake HoS snapshot: lock amount missing or invalid"
-            );
-            return Err(SubscriptionError::InternalError(
+        let lock_amount = lock_amount_yocto(&lock).ok_or_else(|| {
+            SubscriptionError::InternalError(
                 "cannot seed fixed-to-stake HoS snapshot: lock amount missing or invalid"
                     .to_string(),
-            ));
-        };
+            )
+        })?;
 
         self.reconcile_house_of_stake_credit_entitlement_snapshot(
             user_id,
