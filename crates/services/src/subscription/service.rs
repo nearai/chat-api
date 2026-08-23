@@ -1395,6 +1395,7 @@ impl SubscriptionServiceImpl {
             .unwrap_or((fallback_period_start, fallback_period_end))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn reconcile_house_of_stake_credit_entitlement_snapshot(
         &self,
         user_id: UserId,
