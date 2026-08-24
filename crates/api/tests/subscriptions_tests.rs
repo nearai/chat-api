@@ -3975,6 +3975,7 @@ async fn assert_house_of_stake_credits_for_effective_lock(
                             "subscription_id": chain_subscription_id,
                             "price_id": "price_hos_basic",
                             "last_lock_id": "lock_chain_hos_effective_credits",
+                            "start_ns": "1997408000000000000",
                             "end_ns": "2000000000000000000",
                             "status": "Active",
                             "cancel_at_period_end": false,
