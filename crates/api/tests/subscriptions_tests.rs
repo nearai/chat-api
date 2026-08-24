@@ -4131,6 +4131,115 @@ async fn test_house_of_stake_credits_zero_for_effective_lock_with_no_active_shar
     .await;
 }
 
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_fixed_house_of_stake_credits_persist_authoritative_period() {
+    clear_proxy_env_for_local_wiremock();
+    let now = Utc::now().with_nanosecond(0).unwrap();
+    let period_start = now - Duration::days(20);
+    let period_end = now + Duration::days(10);
+    let subscription_id = format!("sub_chain_hos_fixed_{}", Uuid::new_v4());
+    let chain_sub = json!({
+        "subscription_id": subscription_id,
+        "price_id": "price_hos_starter",
+        "last_lock_id": "lock_chain_hos_fixed",
+        "start_ns": period_start.timestamp_nanos_opt().unwrap().to_string(),
+        "end_ns": period_end.timestamp_nanos_opt().unwrap().to_string(),
+        "status": "Active",
+        "cancel_at_period_end": false
+    });
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(near_rpc_wiremock_hos_subscription_by_price(
+            "price_hos_starter",
+            chain_sub,
+            None,
+        ))
+        .mount(&mock)
+        .await;
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        near_rpc_url: Some(mock.uri().to_string()),
+        near_staking_contract_id: Some("staking.testnet".to_string()),
+        ..Default::default()
+    })
+    .await;
+    set_subscription_plans(
+        &server,
+        json!({
+            "starter": {
+                "providers": { "house-of-stake": { "price_id": "price_hos_starter" } },
+                "agent_instances": { "max": 1 },
+                "monthly_credits": { "max": 5_000_000_000_i64 }
+            }
+        }),
+    )
+    .await;
+
+    let near_email = "hos_fixed_period.testnet@near";
+    let response = server
+        .post("/v1/auth/mock-login")
+        .json(&json!({
+            "email": near_email,
+            "name": "HoS Fixed Period",
+            "oauth_provider": "near"
+        }))
+        .await;
+    let token = response.json::<serde_json::Value>()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    cleanup_user_subscriptions(&db, near_email).await;
+    insert_house_of_stake_subscription_for_existing_user(
+        &db,
+        near_email,
+        "price_hos_starter",
+        false,
+    )
+    .await;
+    let user = db
+        .user_repository()
+        .get_user_by_email(near_email)
+        .await
+        .unwrap()
+        .unwrap();
+    let client = db.pool().get().await.unwrap();
+    client
+        .execute(
+            "UPDATE subscriptions SET subscription_id = $2 WHERE user_id = $1",
+            &[&user.id, &subscription_id],
+        )
+        .await
+        .unwrap();
+
+    for _ in 0..2 {
+        let response = server
+            .get("/v1/credits")
+            .add_header(
+                http::HeaderName::from_static("authorization"),
+                http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+            )
+            .await;
+        assert_eq!(response.status_code(), 200, "{}", response.text());
+        assert_eq!(
+            response.json::<serde_json::Value>()["plan_credits"].as_i64(),
+            Some(5_000_000_000)
+        );
+    }
+
+    let persisted_start: Option<chrono::DateTime<Utc>> = client
+        .query_one(
+            "SELECT current_period_start FROM subscriptions WHERE subscription_id = $1",
+            &[&subscription_id],
+        )
+        .await
+        .unwrap()
+        .get("current_period_start");
+    assert_eq!(persisted_start, Some(period_start));
+    assert_eq!(mock.received_requests().await.unwrap().len(), 1);
+}
+
 #[test]
 fn test_change_plan_outcome_serde_uses_kind_discriminant() {
     let o = ChangePlanOutcome::NearStakingChangePlan {

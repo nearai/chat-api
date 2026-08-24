@@ -109,6 +109,15 @@ fn ns_to_datetime(ns: u64) -> Option<DateTime<Utc>> {
     DateTime::from_timestamp((ns / 1_000_000_000) as i64, (ns % 1_000_000_000) as u32)
 }
 
+fn persisted_house_of_stake_period(subscription: &Subscription) -> Option<BillingPeriod> {
+    subscription
+        .current_period_start
+        .map(|start_at| BillingPeriod {
+            start_at,
+            end_at: subscription.current_period_end,
+        })
+}
+
 /// Cached system configs snapshot for model access checks.
 struct CachedSystemConfigs {
     configs: Option<Arc<SystemConfigs>>,
@@ -1060,6 +1069,7 @@ impl SubscriptionServiceImpl {
             customer_id: stripe_sub.customer_id.clone(),
             price_id: stripe_sub.price_id.clone(),
             status: stripe_sub.status.clone(),
+            current_period_start: None,
             current_period_end: stripe_sub.current_period_end,
             cancel_at_period_end: stripe_sub.cancel_at_period_end,
             created_at: chrono::Utc::now(),
@@ -1119,15 +1129,24 @@ impl SubscriptionServiceImpl {
                     &sub.price_id,
                     &subscription_plans,
                 );
-                let stake_entitlement = match plan_name.as_deref() {
-                    Some(name) => match subscription_plans.get(name) {
-                        Some(plan_config) => {
-                            self.stake_based_plan_limit_max(user_id, &sub, plan_config)
-                                .await?
-                        }
-                        None => None,
-                    },
-                    None => None,
+                let plan_config = plan_name
+                    .as_deref()
+                    .and_then(|name| subscription_plans.get(name));
+                let is_stake_based = plan_config.is_some_and(|plan| {
+                    plan.stake_based_monthly_credits
+                        .as_ref()
+                        .and_then(|credits| credits.credits_per_staked_near_nano_usd)
+                        .is_some()
+                });
+                let stake_entitlement = if is_stake_based {
+                    self.stake_based_plan_limit_max(
+                        user_id,
+                        &sub,
+                        plan_config.expect("stake-based plan config exists"),
+                    )
+                    .await?
+                } else {
+                    None
                 };
                 let fallback_period = BillingPeriod {
                     start_at: sub_one_month_same_day(sub.current_period_end),
@@ -1138,14 +1157,23 @@ impl SubscriptionServiceImpl {
                         cacheable = !entitlement.is_fallback;
                         (entitlement.plan_credits, entitlement.period)
                     }
-                    None => (
-                        plan_name
-                            .as_deref()
-                            .and_then(|name| subscription_plans.get(name))
-                            .map(Self::plan_limit_max)
-                            .unwrap_or(DEFAULT_MONTHLY_CREDITS_NANO_USD),
-                        fallback_period,
-                    ),
+                    None => {
+                        let period = if sub.provider == "house-of-stake" && plan_config.is_some() {
+                            let (period, is_fallback) = self
+                                .resolve_fixed_house_of_stake_period(user_id, &mut sub)
+                                .await?;
+                            cacheable = !is_fallback;
+                            period
+                        } else {
+                            fallback_period
+                        };
+                        (
+                            plan_config
+                                .map(Self::plan_limit_max)
+                                .unwrap_or(DEFAULT_MONTHLY_CREDITS_NANO_USD),
+                            period,
+                        )
+                    }
                 };
                 if sub.provider == "house-of-stake" {
                     house_of_stake = self.current_house_of_stake_snapshot(&sub, &period).await?;
@@ -1395,6 +1423,128 @@ impl SubscriptionServiceImpl {
             && period_end.signed_duration_since(period_start) > Duration::zero()
             && period_end.signed_duration_since(period_start)
                 <= Duration::days(HOUSE_OF_STAKE_MAX_CHAIN_PERIOD_DAYS)
+    }
+
+    async fn fixed_house_of_stake_period_fallback(
+        &self,
+        user_id: UserId,
+        subscription: &Subscription,
+    ) -> Result<(BillingPeriod, bool), SubscriptionError> {
+        self.house_of_stake_rpc_failure_cache.write().await.insert(
+            user_id,
+            CachedHouseOfStakeRpcFailure {
+                failed_at: Instant::now(),
+            },
+        );
+        let period = persisted_house_of_stake_period(subscription).ok_or_else(|| {
+            SubscriptionError::InternalError(
+                "HoS billing period is temporarily unavailable".to_string(),
+            )
+        })?;
+        if !Self::is_valid_house_of_stake_chain_period(period.start_at, period.end_at, Utc::now()) {
+            return Err(SubscriptionError::InternalError(
+                "HoS billing period is temporarily unavailable".to_string(),
+            ));
+        }
+        Ok((period, true))
+    }
+
+    async fn resolve_fixed_house_of_stake_period(
+        &self,
+        user_id: UserId,
+        subscription: &mut Subscription,
+    ) -> Result<(BillingPeriod, bool), SubscriptionError> {
+        if self
+            .house_of_stake_rpc_failure_cache
+            .read()
+            .await
+            .get(&user_id)
+            .is_some_and(|cached| {
+                cached.failed_at.elapsed().as_secs() < HOUSE_OF_STAKE_RPC_FAILURE_TTL_SECS
+            })
+        {
+            return self
+                .fixed_house_of_stake_period_fallback(user_id, subscription)
+                .await;
+        }
+
+        let Some(contract_id) = self.near_staking_contract_id.as_deref().map(str::trim) else {
+            return self
+                .fixed_house_of_stake_period_fallback(user_id, subscription)
+                .await;
+        };
+        if contract_id.is_empty() {
+            return self
+                .fixed_house_of_stake_period_fallback(user_id, subscription)
+                .await;
+        }
+        let near_account = match self.get_near_account_id(user_id).await {
+            Ok(account) => account,
+            Err(_) => {
+                return self
+                    .fixed_house_of_stake_period_fallback(user_id, subscription)
+                    .await
+            }
+        };
+        let chain_sub = match view_get_subscription_for_price(
+            &self.near_rpc_url,
+            contract_id,
+            &near_account,
+            &subscription.price_id,
+        )
+        .await
+        {
+            Ok(Some(chain_sub)) => chain_sub,
+            Ok(None) | Err(_) => {
+                return self
+                    .fixed_house_of_stake_period_fallback(user_id, subscription)
+                    .await
+            }
+        };
+        if chain_sub.subscription_id != subscription.subscription_id {
+            return Err(SubscriptionError::InternalError(
+                "HoS subscription changed on chain; sync is required".to_string(),
+            ));
+        }
+
+        let now = Utc::now();
+        let period = chain_sub
+            .start_ns
+            .and_then(ns_to_datetime)
+            .zip(ns_to_datetime(chain_sub.end_ns))
+            .filter(|(start, end)| Self::is_valid_house_of_stake_chain_period(*start, *end, now))
+            .map(|(start_at, end_at)| BillingPeriod { start_at, end_at })
+            .ok_or_else(|| {
+                SubscriptionError::InternalError("HoS billing period is invalid".to_string())
+            })?;
+
+        if subscription.current_period_start != Some(period.start_at)
+            || subscription.current_period_end != period.end_at
+        {
+            subscription.current_period_start = Some(period.start_at);
+            subscription.current_period_end = period.end_at;
+            let mut client = self
+                .db_pool
+                .get()
+                .await
+                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+            let txn = client
+                .transaction()
+                .await
+                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+            self.subscription_repo
+                .upsert_subscription(&txn, subscription.clone())
+                .await
+                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+            txn.commit()
+                .await
+                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+        }
+        self.house_of_stake_rpc_failure_cache
+            .write()
+            .await
+            .remove(&user_id);
+        Ok((period, false))
     }
 
     async fn reconcile_house_of_stake_snapshot(
@@ -4094,6 +4244,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
             customer_id,
             price_id: price_id.clone(),
             status: "active".to_string(),
+            current_period_start: None,
             current_period_end,
             cancel_at_period_end: false,
             created_at: chrono::Utc::now(),
@@ -4940,6 +5091,20 @@ mod tests {
     }
 
     #[test]
+    fn test_persisted_house_of_stake_period_preserves_month_end_start() {
+        let mut subscription = base_subscription();
+        subscription.provider = "house-of-stake".to_string();
+        subscription.current_period_start =
+            Some(Utc.with_ymd_and_hms(2026, 1, 31, 0, 0, 0).unwrap());
+        subscription.current_period_end = Utc.with_ymd_and_hms(2026, 2, 28, 0, 0, 0).unwrap();
+
+        let period = persisted_house_of_stake_period(&subscription).unwrap();
+
+        assert_eq!(period.start_at.day(), 31);
+        assert_eq!(period.end_at.day(), 28);
+    }
+
+    #[test]
     fn test_house_of_stake_snapshot_applies_fixed_plan_floor() {
         let start = Utc.with_ymd_and_hms(2026, 10, 1, 0, 0, 0).unwrap();
         let end = start + Duration::days(30);
@@ -5043,6 +5208,7 @@ mod tests {
             customer_id: "cus_test".to_string(),
             price_id: "price_basic".to_string(),
             status: "active".to_string(),
+            current_period_start: None,
             current_period_end: period_end,
             cancel_at_period_end: false,
             created_at: Utc::now(),

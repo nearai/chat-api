@@ -56,6 +56,7 @@ pub struct Subscription {
     pub customer_id: String,
     pub price_id: String,
     pub status: String,
+    pub current_period_start: Option<DateTime<Utc>>,
     pub current_period_end: DateTime<Utc>,
     pub cancel_at_period_end: bool,
     pub created_at: DateTime<Utc>,
