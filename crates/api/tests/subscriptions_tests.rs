@@ -1983,8 +1983,33 @@ async fn test_proxy_blocks_when_monthly_token_limit_exceeded() {
 #[serial(subscription_tests)]
 async fn test_proxy_blocks_for_house_of_stake_plan_credit_limit() {
     ensure_stripe_env_for_gating();
+    let now = Utc::now().with_nanosecond(0).unwrap();
+    let period_start = now - Duration::days(20);
+    let period_end = now + Duration::days(10);
+    let subscription_id = format!("sub_chain_hos_proxy_limit_{}", Uuid::new_v4());
+    let chain_sub = json!({
+        "subscription_id": subscription_id,
+        "price_id": "price_hos_basic",
+        "last_lock_id": "lock_chain_hos_proxy_limit",
+        "start_ns": period_start.timestamp_nanos_opt().unwrap().to_string(),
+        "end_ns": period_end.timestamp_nanos_opt().unwrap().to_string(),
+        "status": "Active",
+        "cancel_at_period_end": false
+    });
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(near_rpc_wiremock_hos_subscription_by_price(
+            "price_hos_basic",
+            chain_sub,
+            None,
+        ))
+        .mount(&mock)
+        .await;
+
     let (server, db) = create_test_server_and_db(TestServerConfig {
         rate_limit_config: Some(permissive_rate_limit_config()),
+        near_rpc_url: Some(mock.uri().to_string()),
         near_staking_contract_id: Some("staking.testnet".to_string()),
         ..Default::default()
     })
@@ -2002,8 +2027,19 @@ async fn test_proxy_blocks_for_house_of_stake_plan_credit_limit() {
     )
     .await;
 
-    let user_email = "test_proxy_hos_credit_limit@example.com";
-    let user_token = mock_login(&server, user_email).await;
+    let user_email = "test_proxy_hos_credit_limit.testnet@near";
+    let response = server
+        .post("/v1/auth/mock-login")
+        .json(&json!({
+            "email": user_email,
+            "name": "HoS Proxy Limit",
+            "oauth_provider": "near"
+        }))
+        .await;
+    let user_token = response.json::<serde_json::Value>()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
     insert_test_subscription_with_provider_and_price(
         &server,
         &db,
@@ -2020,6 +2056,16 @@ async fn test_proxy_blocks_for_house_of_stake_plan_credit_limit() {
         .await
         .expect("get user")
         .expect("user exists");
+    let client = db.pool().get().await.expect("get pool client");
+    client
+        .execute(
+            "UPDATE subscriptions
+             SET subscription_id = $2, current_period_end = $3
+             WHERE user_id = $1 AND provider = 'house-of-stake'",
+            &[&user.id, &subscription_id, &period_end],
+        )
+        .await
+        .expect("align local HoS subscription with chain");
 
     db.user_usage_repository()
         .record_usage_event(user.id, METRIC_KEY_LLM_TOKENS, 150, Some(150), None)
