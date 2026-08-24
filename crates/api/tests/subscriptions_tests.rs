@@ -3945,12 +3945,22 @@ async fn assert_house_of_stake_credits_for_effective_lock(
 ) {
     clear_proxy_env_for_local_wiremock();
     let chain_subscription_id = format!("sub_chain_hos_effective_credits_{}", Uuid::new_v4());
+    let period_start_ns = (Utc::now() - Duration::days(1))
+        .timestamp_nanos_opt()
+        .unwrap()
+        .to_string();
+    let period_end_ns = (Utc::now() + Duration::days(29))
+        .timestamp_nanos_opt()
+        .unwrap()
+        .to_string();
     let mock = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/"))
         .respond_with({
             let effective_lock = effective_lock.clone();
             let chain_subscription_id = chain_subscription_id.clone();
+            let period_start_ns = period_start_ns.clone();
+            let period_end_ns = period_end_ns.clone();
             move |req: &wiremock::Request| {
                 use base64::{engine::general_purpose::STANDARD, Engine};
 
@@ -3975,8 +3985,8 @@ async fn assert_house_of_stake_credits_for_effective_lock(
                             "subscription_id": chain_subscription_id,
                             "price_id": "price_hos_basic",
                             "last_lock_id": "lock_chain_hos_effective_credits",
-                            "start_ns": "1997408000000000000",
-                            "end_ns": "2000000000000000000",
+                            "start_ns": period_start_ns,
+                            "end_ns": period_end_ns,
                             "status": "Active",
                             "cancel_at_period_end": false,
                             "pending_update": {
@@ -5423,11 +5433,13 @@ async fn test_near_staking_sync_marks_local_hos_canceled_when_chain_returns_null
 #[serial(subscription_tests)]
 async fn test_near_staking_sync_falls_back_to_configured_prices_before_canceling_local_row() {
     clear_proxy_env_for_local_wiremock();
+    let period_start = Utc::now() - Duration::days(15);
     let period_end = Utc::now() + Duration::days(15);
     let chain_sub = json!({
         "subscription_id": "sub_chain_hos_fallback",
         "price_id": "price_hos_pro",
         "last_lock_id": "lock_chain_hos_fixed_to_variable",
+        "start_ns": period_start.timestamp_nanos_opt().unwrap().to_string(),
         "end_ns": period_end.timestamp_nanos_opt().unwrap().to_string(),
         "status": "Active",
         "cancel_at_period_end": false
