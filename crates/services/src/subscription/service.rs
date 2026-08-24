@@ -3780,7 +3780,7 @@ impl SubscriptionService for SubscriptionServiceImpl {
             return Err(SubscriptionError::NoActiveSubscription);
         }
 
-        // The shared resolver owns the 10-minute plan cache, including HoS RPC results.
+        // 1. Get plan credits (monthly_credits) from the shared resolver. Cache 10 mins.
         let (plan_credits, period_start, period_end) =
             self.resolve_plan_period_for_user(user_id).await?;
         let plan_credits = plan_credits.max(0) as u64;
