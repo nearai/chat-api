@@ -17,6 +17,27 @@ impl PostgresCreditsRepository {
     }
 }
 
+fn reconcile_overage(
+    spent: i64,
+    total: i64,
+    previous_overage: i64,
+    current_overage: i64,
+    same_period: bool,
+) -> (i64, i64) {
+    let previous_overage = if same_period {
+        previous_overage.max(0)
+    } else {
+        0
+    };
+    let new_spent = (spent + (current_overage - previous_overage).max(0)).clamp(0, total);
+    let cursor = if same_period {
+        previous_overage.max(current_overage)
+    } else {
+        current_overage
+    };
+    (new_spent, cursor.max(0))
+}
+
 #[async_trait]
 impl CreditsRepository for PostgresCreditsRepository {
     /// Remaining purchased credits: total_purchased - used_purchased (computed).
@@ -236,15 +257,15 @@ impl CreditsRepository for PostgresCreditsRepository {
         let is_same_period = last_period_start
             .map(|s| s == period_start)
             .unwrap_or(false);
-        let already_applied = if is_same_period {
-            last_over_plan.max(0)
-        } else {
-            0
-        };
-        let delta_over_plan = (current_over_plan - already_applied).max(0);
-
-        // Apply delta, but never exceed total_purchased.
-        let new_spent = (old_spent + delta_over_plan).min(total_purchased).max(0);
+        // Keep a high-water cursor: a later stake increase can raise the plan limit and lower the
+        // current overage, but must not make the same usage charge purchased credits twice.
+        let (new_spent, overage_cursor) = reconcile_overage(
+            old_spent,
+            total_purchased,
+            last_over_plan,
+            current_over_plan,
+            is_same_period,
+        );
 
         txn.execute(
             r#"
@@ -255,11 +276,30 @@ impl CreditsRepository for PostgresCreditsRepository {
                 updated_at = NOW()
             WHERE user_id = $1
             "#,
-            &[&user_id, &new_spent, &period_start, &current_over_plan],
+            &[&user_id, &new_spent, &period_start, &overage_cursor],
         )
         .await?;
 
         txn.commit().await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reconcile_overage;
+
+    #[test]
+    fn overage_cursor_does_not_move_backwards_within_a_period() {
+        let (spent, cursor) = reconcile_overage(100, 1_000, 100, 20, true);
+        assert_eq!((spent, cursor), (100, 100));
+
+        let (spent, cursor) = reconcile_overage(spent, 1_000, cursor, 120, true);
+        assert_eq!((spent, cursor), (120, 120));
+    }
+
+    #[test]
+    fn overage_cursor_resets_for_a_new_period() {
+        assert_eq!(reconcile_overage(100, 1_000, 500, 30, false), (130, 30));
     }
 }

@@ -13,6 +13,7 @@ fn row_to_subscription(row: &tokio_postgres::Row) -> Subscription {
         customer_id: row.get("customer_id"),
         price_id: row.get("price_id"),
         status: row.get("status"),
+        current_period_start: row.get("current_period_start"),
         current_period_end: row.get("current_period_end"),
         cancel_at_period_end: row.get("cancel_at_period_end"),
         created_at: row.get("created_at"),
@@ -29,7 +30,7 @@ fn row_to_subscription(row: &tokio_postgres::Row) -> Subscription {
 
 const SUBSCRIPTION_COLUMNS: &str =
     "subscription_id, user_id, provider, customer_id, price_id, status,
-       current_period_end, cancel_at_period_end, created_at, updated_at,
+       current_period_start, current_period_end, cancel_at_period_end, created_at, updated_at,
        pending_downgrade_target_price_id, pending_downgrade_from_price_id,
        pending_downgrade_expected_period_end, pending_downgrade_status,
        pending_downgrade_updated_at";
@@ -121,12 +122,12 @@ impl PostgresSubscriptionRepository {
         let query = format!(
             "INSERT INTO subscriptions (
                     subscription_id, user_id, provider, customer_id, price_id,
-                    status, current_period_end, cancel_at_period_end,
+                    status, current_period_start, current_period_end, cancel_at_period_end,
                     pending_downgrade_target_price_id, pending_downgrade_from_price_id,
                     pending_downgrade_expected_period_end, pending_downgrade_status,
                     pending_downgrade_updated_at
                  )
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                  ON CONFLICT (subscription_id)
                  DO UPDATE SET
                     user_id = EXCLUDED.user_id,
@@ -134,12 +135,13 @@ impl PostgresSubscriptionRepository {
                     customer_id = EXCLUDED.customer_id,
                     price_id = EXCLUDED.price_id,
                     status = EXCLUDED.status,
+                    current_period_start = EXCLUDED.current_period_start,
                     current_period_end = EXCLUDED.current_period_end,
                     cancel_at_period_end = EXCLUDED.cancel_at_period_end,
                     {}
                     updated_at = NOW()
                  RETURNING subscription_id, user_id, provider, customer_id, price_id, status,
-                           current_period_end, cancel_at_period_end, created_at, updated_at,
+                           current_period_start, current_period_end, cancel_at_period_end, created_at, updated_at,
                            pending_downgrade_target_price_id, pending_downgrade_from_price_id,
                            pending_downgrade_expected_period_end, pending_downgrade_status,
                            pending_downgrade_updated_at",
@@ -156,6 +158,7 @@ impl PostgresSubscriptionRepository {
                     &subscription.customer_id,
                     &subscription.price_id,
                     &subscription.status,
+                    &subscription.current_period_start,
                     &subscription.current_period_end,
                     &subscription.cancel_at_period_end,
                     &subscription.pending_downgrade_target_price_id,
@@ -461,6 +464,7 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
                      customer_id = $4,
                      price_id = $5,
                      status = $6,
+                     current_period_start = NULL,
                      current_period_end = $7,
                      cancel_at_period_end = $8,
                      created_at = $9,
@@ -472,7 +476,7 @@ impl SubscriptionRepository for PostgresSubscriptionRepository {
                      updated_at = NOW()
                  WHERE subscription_id = $1
                  RETURNING subscription_id, user_id, provider, customer_id, price_id, status,
-                           current_period_end, cancel_at_period_end, created_at, updated_at,
+                           current_period_start, current_period_end, cancel_at_period_end, created_at, updated_at,
                            pending_downgrade_target_price_id, pending_downgrade_from_price_id,
                            pending_downgrade_expected_period_end, pending_downgrade_status,
                            pending_downgrade_updated_at",

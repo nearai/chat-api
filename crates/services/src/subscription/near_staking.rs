@@ -124,6 +124,8 @@ struct StorageBalanceOfArgs<'a> {
 pub struct NearStakingSubscription {
     pub subscription_id: String,
     pub price_id: String,
+    #[serde(default, deserialize_with = "deserialize_optional_u64")]
+    pub start_ns: Option<u64>,
     #[serde(deserialize_with = "deserialize_required_u64")]
     pub end_ns: u64,
     #[serde(default)]
@@ -378,6 +380,7 @@ pub fn subscription_row_from_chain(
 ) -> Result<Subscription, String> {
     let subscription_id = chain.subscription_id.clone();
     let price_id = chain.price_id.clone();
+    let current_period_start = chain.start_ns.and_then(|ns| ts_ns_to_datetime(ns).ok());
     let current_period_end = ts_ns_to_datetime(chain.end_ns)?;
 
     let status_raw = chain.status.as_deref().unwrap_or("Active");
@@ -441,6 +444,7 @@ pub fn subscription_row_from_chain(
         customer_id: format!("near:{near_account}"),
         price_id,
         status,
+        current_period_start,
         current_period_end,
         cancel_at_period_end,
         created_at: Utc::now(),
