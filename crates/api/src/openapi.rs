@@ -108,7 +108,6 @@ use utoipa::OpenApi;
         crate::routes::admin::admin_start_instance,
         crate::routes::admin::admin_stop_instance,
         crate::routes::admin::admin_restart_instance,
-        crate::routes::admin::admin_grant_instance_owner,
         crate::routes::admin::admin_sync_agent_status,
         crate::routes::admin::bi_list_users,
         crate::routes::admin::bi_users_summary,
@@ -124,8 +123,6 @@ use utoipa::OpenApi;
         crate::routes::agents::restart_instance,
         crate::routes::agents::upgrade_instance,
         crate::routes::agents::check_upgrade_available,
-        crate::routes::admin::admin_get_instance_config,
-        crate::routes::admin::admin_patch_instance_config,
         crate::routes::admin::admin_create_backup,
         crate::routes::admin::admin_list_backups,
         crate::routes::admin::admin_get_backup,
@@ -139,7 +136,6 @@ use utoipa::OpenApi;
     ),
     components(schemas(
         // Request/Response models
-        crate::routes::admin::InstanceComposeConfig,
         crate::routes::HealthResponse,
         crate::models::UserResponse,
         crate::models::UserListResponse,
@@ -152,7 +148,6 @@ use utoipa::OpenApi;
         services::user::ports::AccountDeletion,
         services::user::ports::AccountDeletionStatus,
         crate::routes::admin::AdminRetryAccountDeletionResponse,
-        crate::routes::admin::GrantInstanceOwnerResponse,
         crate::models::AuthResponse,
         crate::error::ApiErrorResponse,
         // Auth request models

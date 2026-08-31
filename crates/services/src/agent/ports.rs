@@ -619,10 +619,6 @@ pub trait AgentService: Send + Sync {
         user_id: UserId,
     ) -> anyhow::Result<Option<InstanceBalance>>;
 
-    /// Find the configured manager whose URL matches a given agent_api_base_url.
-    /// Returns the manager config (URL + token) if found.
-    fn find_manager_for_url(&self, agent_api_base_url: &str) -> Option<config::AgentManager>;
-
     /// Find a CrabShack manager by URL containing "crabshack".
     fn find_crabshack_manager(&self) -> Option<config::AgentManager>;
 
