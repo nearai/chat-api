@@ -384,13 +384,6 @@ pub trait AgentRepository: Send + Sync {
         dashboard_url: Option<String>,
         name: Option<String>,
     ) -> anyhow::Result<AgentInstance>;
-
-    /// Returns (total, migrated, pending, no_url, unknown).
-    async fn get_migration_status_counts(
-        &self,
-        legacy_patterns: Vec<String>,
-        crabshack_pattern: String,
-    ) -> anyhow::Result<(i64, i64, i64, i64, i64)>;
 }
 
 /// Service trait for agent business logic
