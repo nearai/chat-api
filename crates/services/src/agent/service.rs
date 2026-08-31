@@ -1950,23 +1950,21 @@ impl AgentService for AgentServiceImpl {
 
                             // Send final event with dashboard_url and instance_url to frontend
                             // (the create stream itself doesn't return these fields)
-                            {
-                                let final_event = serde_json::json!({
-                                    "instance": {
-                                        "name": instance.name,
-                                        "dashboard_url": instance.dashboard_url,
-                                        "instance_url": instance.instance_url,
-                                        "token": instance.instance_token,
-                                    }
-                                });
-
-                                if let Err(send_err) = tx.send(Ok(final_event)).await {
-                                    tracing::warn!(
-                                        "Failed to send final event to frontend: user_id={}, error={}",
-                                        user_id,
-                                        send_err
-                                    );
+                            let final_event = serde_json::json!({
+                                "instance": {
+                                    "name": instance.name,
+                                    "dashboard_url": instance.dashboard_url,
+                                    "instance_url": instance.instance_url,
+                                    "token": instance.instance_token,
                                 }
+                            });
+
+                            if let Err(send_err) = tx.send(Ok(final_event)).await {
+                                tracing::warn!(
+                                    "Failed to send final event to frontend: user_id={}, error={}",
+                                    user_id,
+                                    send_err
+                                );
                             }
                         }
                         Err(e) => {
