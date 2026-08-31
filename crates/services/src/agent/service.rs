@@ -447,54 +447,27 @@ impl AgentServiceImpl {
         Err(anyhow!("All {} agent manager(s) are at capacity", n))
     }
 
-    /// Resolve the manager for an existing instance.
-    /// Uses the stored agent_api_base_url from DB, falling back to the first manager.
+    /// Resolve the manager for an existing instance by its stored agent_api_base_url.
+    /// A stored URL that is not configured is an error — routing the instance's commands
+    /// to an arbitrary manager could act on another tenant. Only an instance with no
+    /// stored URL falls back to the first manager.
     fn resolve_manager(&self, instance: &AgentInstance) -> anyhow::Result<&AgentManager> {
-        tracing::info!(
-            "resolve_manager: instance_id={}, name={}, stored_agent_api_base_url={:?}",
-            instance.id,
-            instance.name,
-            instance.agent_api_base_url
-        );
-
-        // Try to use the stored URL if available
         if let Some(ref stored_url) = instance.agent_api_base_url {
-            tracing::info!(
-                "resolve_manager: searching for stored_url={} in {} configured managers: {:?}",
-                stored_url,
-                self.managers.len(),
-                self.managers.iter().map(|m| &m.url).collect::<Vec<_>>()
-            );
-
             if let Some(mgr) = self.managers.iter().find(|m| &m.url == stored_url) {
-                tracing::info!(
-                    "Using stored manager URL: instance_id={}, url={}",
-                    instance.id,
-                    stored_url
-                );
                 return Ok(mgr);
             }
-
-            // Stored URL not in configured managers - warn and use fallback
-            tracing::warn!(
-                "resolve_manager: Stored URL {} not in configured managers for instance_id={}, using first available manager",
+            return Err(anyhow!(
+                "Instance manager {} is not configured (instance_id={})",
                 stored_url,
                 instance.id
-            );
-        } else {
-            tracing::warn!(
-                "resolve_manager: No stored agent_api_base_url found for instance_id={}",
-                instance.id
-            );
+            ));
         }
 
-        let fallback_manager = &self.managers[0];
-        tracing::info!(
-            "resolve_manager: Using fallback manager: {} for instance_id={}",
-            fallback_manager.url,
+        tracing::warn!(
+            "resolve_manager: no stored agent_api_base_url, using first manager: instance_id={}",
             instance.id
         );
-        Ok(fallback_manager)
+        Ok(&self.managers[0])
     }
 
     /// Register passkey credentials with compose-api and return a session token
@@ -562,8 +535,8 @@ impl AgentServiceImpl {
             .ok_or_else(|| anyhow!("Missing 'session_token' in compose-api /auth/login response"))
     }
 
-    /// Resolve the bearer token to use for agent API calls: tries to fetch the user's passkey
-    /// credentials and login to compose-api, falling back to the manager token.
+    /// Resolve the bearer token to use for agent API calls: logs in to compose-api with the
+    /// user's passkey credentials, or uses the manager token when the user has none.
     async fn resolve_bearer_token(
         &self,
         instance: &AgentInstance,
@@ -4475,7 +4448,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_manager_falls_back_when_stored_url_unknown() {
+    fn test_resolve_manager_rejects_unknown_stored_url() {
         let managers = make_managers(2);
         let svc = make_service(
             managers.clone(),
@@ -4483,7 +4456,7 @@ mod tests {
             Arc::new(MockSystemConfigsService::no_config()),
         );
 
-        // A stored URL not among the configured managers falls back to the first manager
+        // A stored URL not among the configured managers is an error, not a silent reroute
         let instance = AgentInstance {
             id: Uuid::new_v4(),
             user_id: UserId(Uuid::new_v4()),
@@ -4500,8 +4473,8 @@ mod tests {
             updated_at: Utc::now(),
         };
 
-        let mgr = svc.resolve_manager(&instance).unwrap();
-        assert_eq!(mgr.url, "https://claws.example.com/api/crabshack/mgr0");
+        let err = svc.resolve_manager(&instance).unwrap_err();
+        assert!(err.to_string().contains("is not configured"), "err={err}");
     }
 
     #[test]
