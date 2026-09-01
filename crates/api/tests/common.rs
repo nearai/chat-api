@@ -223,7 +223,6 @@ async fn create_test_server_and_db_inner(
         system_configs_service.clone()
             as Arc<dyn services::system_configs::ports::SystemConfigsService>,
         config.agent.channel_relay_url.clone(),
-        config.agent.non_tee_agent_url_pattern.clone(),
     ));
 
     // Initialize subscription service for testing
@@ -774,6 +773,13 @@ pub async fn cleanup_user(db: &database::Database, user_email: &str) {
         .execute("DELETE FROM sessions WHERE user_id = $1", &[&user.id])
         .await
         .expect("delete user sessions");
+    client
+        .execute(
+            "DELETE FROM user_passkey_credentials WHERE user_id = $1",
+            &[&user.id],
+        )
+        .await
+        .expect("delete user passkey credentials");
     client
         .execute("DELETE FROM users WHERE id = $1", &[&user.id])
         .await

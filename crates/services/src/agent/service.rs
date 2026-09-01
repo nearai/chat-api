@@ -20,10 +20,6 @@ use super::ports::{
 /// Prevents DoS from a malicious Agent API sending extremely long lines.
 const MAX_BUFFER_SIZE: usize = 100 * 1024;
 
-/// How many instances to load when deciding if gateway session setup should run for legacy non-TEE users
-/// (global TEE flag but instances on a non-TEE manager). Cap keeps login-path DB work bounded.
-const GATEWAY_SESSION_INSTANCE_SCAN_LIMIT: i64 = 50;
-
 // Resource sizing defaults (instance_default_cpus, instance_default_mem_limit, instance_default_storage_size)
 // are struct fields accessible via self.instance_default_cpus, etc.
 
@@ -187,7 +183,7 @@ fn compare_semantic_versions(a: &str, b: &str) -> std::cmp::Ordering {
 /// - openclaw: `hosting.crabshack.openclaw_image` → "docker.io/nearaidev/openclaw-nearai-worker:latest"
 ///
 /// Does not apply crabshack `deploy_latest_version_tag` flags; use
-/// `AgentServiceImpl::resolve_non_tee_worker_image_ref` for non-TEE deploys.
+/// `AgentServiceImpl::resolve_worker_image_ref` for worker deploys.
 pub fn get_image_for_service_type(
     service_type: &str,
     hosting: Option<&AgentHostingConfig>,
@@ -202,7 +198,7 @@ pub fn get_image_for_service_type(
     }
 }
 
-/// Convert canonical service type to crabshack format for non-TEE.
+/// Convert canonical service type to crabshack format.
 /// Crabshack uses inconsistent naming (configurable via AgentHostingConfig):
 /// - ironclaw → ironclaw-dind by default (can be overridden via crabshack.ironclaw_service_type)
 /// - openclaw → openclaw by default (can be overridden via crabshack.openclaw_service_type)
@@ -218,20 +214,6 @@ pub fn service_type_for_crabshack(
             .and_then(|cfg| cfg.crabshack.openclaw_service_type.clone())
             .unwrap_or_else(|| "openclaw".to_string()),
         other => other.to_string(), // unknown types pass through as-is
-    }
-}
-
-/// `service_type` for POST `/instances`: canonical `ironclaw` / `openclaw` on TEE managers;
-/// Crabshack compose name from [`service_type_for_crabshack`] on non-TEE (e.g. `ironclaw` → `ironclaw-dind`).
-fn compose_api_service_type_on_create(
-    manager_is_non_tee: bool,
-    canonical_service_type: &str,
-    hosting: Option<&AgentHostingConfig>,
-) -> String {
-    if manager_is_non_tee {
-        service_type_for_crabshack(canonical_service_type, hosting)
-    } else {
-        canonical_service_type.to_string()
     }
 }
 
@@ -260,18 +242,14 @@ pub struct AgentServiceImpl {
     http_client: Client,
     /// Agent manager endpoints (URL + token pairs)
     managers: Vec<AgentManager>,
-    /// Type-specific round-robin counters for capacity-aware manager selection.
-    tee_manager_rr_counter: AtomicUsize,
-    non_tee_manager_rr_counter: AtomicUsize,
+    /// Round-robin counter for capacity-aware manager selection.
+    manager_rr_counter: AtomicUsize,
     /// Chat-API base URL passed to the Agent API as nearai_api_url when creating instances
     nearai_api_url: String,
     /// System configs for reading instance limits and defaults
     system_configs_service: Arc<dyn SystemConfigsService>,
     /// Channel-relay URL for provisioning relay config to IronClaw instances
     channel_relay_url: Option<String>,
-    /// URL pattern to identify non-TEE manager endpoints (e.g., "claws")
-    /// Used to determine instance type when routing to managers
-    non_tee_agent_url_pattern: String,
 }
 
 /// Static helper: Fetch instance details from Agent API GET /instances/{name}.
@@ -317,25 +295,6 @@ enum AuthMethod<'a> {
     BearerToken(&'a str),
 }
 
-#[derive(Clone, Copy, Debug)]
-enum ManagerType {
-    Tee,
-    NonTee,
-}
-
-impl ManagerType {
-    fn is_non_tee(self) -> bool {
-        matches!(self, Self::NonTee)
-    }
-
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Tee => "tee",
-            Self::NonTee => "non-tee",
-        }
-    }
-}
-
 impl AgentServiceImpl {
     /// Generate a random credential (hex-encoded random bytes)
     fn generate_random_credential(len: usize) -> String {
@@ -351,7 +310,6 @@ impl AgentServiceImpl {
         nearai_api_url: String,
         system_configs_service: Arc<dyn SystemConfigsService>,
         channel_relay_url: Option<String>,
-        non_tee_agent_url_pattern: String,
     ) -> Self {
         // Validate required configuration
         if managers.is_empty() {
@@ -377,12 +335,10 @@ impl AgentServiceImpl {
             repository,
             http_client,
             managers,
-            tee_manager_rr_counter: AtomicUsize::new(0),
-            non_tee_manager_rr_counter: AtomicUsize::new(0),
+            manager_rr_counter: AtomicUsize::new(0),
             nearai_api_url,
             system_configs_service,
             channel_relay_url,
-            non_tee_agent_url_pattern,
         }
     }
 
@@ -390,7 +346,7 @@ impl AgentServiceImpl {
     /// Does NOT check capacity — use type-specific capacity-aware helpers for production paths.
     #[cfg(test)]
     fn next_manager(&self) -> &AgentManager {
-        let idx = self.tee_manager_rr_counter.fetch_add(1, Ordering::Relaxed);
+        let idx = self.manager_rr_counter.fetch_add(1, Ordering::Relaxed);
         &self.managers[idx % self.managers.len()]
     }
 
@@ -404,10 +360,10 @@ impl AgentServiceImpl {
             .unwrap_or_default()
     }
 
-    /// Docker image for non-TEE worker deploy when the caller did not supply `image`.
+    /// Docker image for a worker deploy when the caller did not supply `image`.
     /// Honors crabshack `*_deploy_latest_version_tag` flags (latest versioned ref from the manager
     /// `/images` allowlist, same as upgrade checks), ignoring pinned `*_image`.
-    async fn resolve_non_tee_worker_image_ref(
+    async fn resolve_worker_image_ref(
         &self,
         manager: &AgentManager,
         canonical_service_type: &str,
@@ -425,7 +381,7 @@ impl AgentServiceImpl {
         }
 
         match self
-            .get_latest_image_non_tee(
+            .get_latest_image(
                 manager,
                 AllowlistServiceType::Canonical(canonical_service_type),
                 "deploy",
@@ -451,71 +407,27 @@ impl AgentServiceImpl {
         }
     }
 
-    /// `true` when admin config says new agents use non-TEE infra (passkey / non-TEE managers).
-    fn is_non_tee_infra(configs: &SystemConfigs) -> bool {
-        configs
-            .agent_hosting
-            .as_ref()
-            .and_then(|cfg| cfg.new_agent_with_non_tee_infra)
-            .unwrap_or(false)
-    }
-
-    /// User has at least one instance whose stored manager URL matches a configured non-TEE manager.
-    fn user_has_non_tee_routed_instance(&self, instances: &[AgentInstance]) -> bool {
-        instances.iter().any(|inst| {
-            inst.agent_api_base_url.as_ref().is_some_and(|url| {
-                self.managers
-                    .iter()
-                    .any(|m| m.url == *url && m.get_is_non_tee())
-            })
-        })
-    }
-
-    /// Pick the next manager with available capacity for a specific manager type,
+    /// Pick the next manager with available capacity,
     /// starting from the round-robin position. Tries each candidate once.
     ///
     /// NOTE: This is a best-effort soft limit. Concurrent calls can both see a manager as
     /// under capacity and both create instances there, temporarily exceeding the limit.
     /// For a hard cap, DB-level enforcement (e.g. INSERT ... WHERE count < max) would be needed.
-    async fn next_available_manager_for_type(
-        &self,
-        manager_type: ManagerType,
-    ) -> anyhow::Result<AgentManager> {
+    async fn next_available_manager(&self) -> anyhow::Result<AgentManager> {
         let configs = self.get_system_configs().await;
-        let is_non_tee = manager_type.is_non_tee();
 
-        let available_managers: Vec<_> = self
-            .managers
-            .iter()
-            .filter(|mgr| is_non_tee == mgr.get_is_non_tee())
-            .collect();
-
-        if available_managers.is_empty() {
-            return Err(anyhow!(
-                "No suitable managers available: manager_type={}, configured_managers={}",
-                manager_type.as_str(),
-                self.managers.len()
-            ));
-        }
-
-        let n = available_managers.len();
-        let start = match manager_type {
-            ManagerType::Tee => self.tee_manager_rr_counter.fetch_add(1, Ordering::Relaxed),
-            ManagerType::NonTee => self
-                .non_tee_manager_rr_counter
-                .fetch_add(1, Ordering::Relaxed),
-        };
+        let n = self.managers.len();
+        let start = self.manager_rr_counter.fetch_add(1, Ordering::Relaxed);
 
         for i in 0..n {
-            let mgr = available_managers[(start + i) % n];
+            let mgr = &self.managers[(start + i) % n];
             let max = configs.max_instances_for_manager(&mgr.url);
             let max = match max {
                 Some(limit) => limit,
                 None => {
                     tracing::info!(
-                        "Manager limit missing in config, treating as unlimited: manager_url={}, manager_type={}",
-                        mgr.url,
-                        manager_type.as_str()
+                        "Manager limit missing in config, treating as unlimited: manager_url={}",
+                        mgr.url
                     );
                     return Ok(mgr.clone());
                 }
@@ -525,140 +437,37 @@ impl AgentServiceImpl {
                 return Ok(mgr.clone());
             }
             tracing::info!(
-                "Manager at capacity: manager_url={}, count={}, max={}, manager_type={}",
+                "Manager at capacity: manager_url={}, count={}, max={}",
                 mgr.url,
                 count,
-                max,
-                manager_type.as_str()
+                max
             );
         }
 
-        Err(anyhow!(
-            "All {} suitable agent manager(s) are at capacity (manager_type={})",
-            n,
-            manager_type.as_str()
-        ))
+        Err(anyhow!("All {} agent manager(s) are at capacity", n))
     }
 
-    async fn next_available_tee_manager(&self) -> anyhow::Result<AgentManager> {
-        self.next_available_manager_for_type(ManagerType::Tee).await
-    }
-
-    async fn next_available_non_tee_manager(&self) -> anyhow::Result<AgentManager> {
-        self.next_available_manager_for_type(ManagerType::NonTee)
-            .await
-    }
-
-    /// Resolve the manager for an existing instance.
-    /// Uses the stored agent_api_base_url from DB, falling back to the first manager.
+    /// Resolve the manager for an existing instance by its stored agent_api_base_url.
+    /// A stored URL that is not configured is an error — routing the instance's commands
+    /// to an arbitrary manager could act on another tenant. Only an instance with no
+    /// stored URL falls back to the first manager.
     fn resolve_manager(&self, instance: &AgentInstance) -> anyhow::Result<&AgentManager> {
-        tracing::info!(
-            "resolve_manager: instance_id={}, name={}, stored_agent_api_base_url={:?}",
-            instance.id,
-            instance.name,
-            instance.agent_api_base_url
-        );
-
-        // Try to use the stored URL if available
         if let Some(ref stored_url) = instance.agent_api_base_url {
-            tracing::info!(
-                "resolve_manager: searching for stored_url={} in {} configured managers: {:?}",
-                stored_url,
-                self.managers.len(),
-                self.managers.iter().map(|m| &m.url).collect::<Vec<_>>()
-            );
-
             if let Some(mgr) = self.managers.iter().find(|m| &m.url == stored_url) {
-                tracing::info!(
-                    "Using stored manager URL: instance_id={}, url={}",
-                    instance.id,
-                    stored_url
-                );
                 return Ok(mgr);
             }
-
-            // Stored URL not in configured managers - warn and use fallback
-            tracing::warn!(
-                "resolve_manager: Stored URL {} not in configured managers for instance_id={}, using first available manager",
+            return Err(anyhow!(
+                "Instance manager {} is not configured (instance_id={})",
                 stored_url,
                 instance.id
-            );
-        } else {
-            tracing::warn!(
-                "resolve_manager: No stored agent_api_base_url found for instance_id={}",
-                instance.id
-            );
+            ));
         }
 
-        if self.managers.is_empty() {
-            return Err(anyhow!("No agent managers configured"));
-        }
-
-        // Use first available manager as fallback, but try to match manager type if stored URL exists
-        // This ensures instances created as TEE don't accidentally get routed to non-TEE managers
-        let fallback_manager = if let Some(ref stored_url) = instance.agent_api_base_url {
-            // Determine expected manager type based on URL pattern:
-            // - Non-TEE: URLs containing the configured non_tee_agent_url_pattern (e.g., "claws")
-            // - TEE: all other URLs (TEE compose-api / manager hostnames)
-            let expected_is_non_tee = stored_url.contains(&self.non_tee_agent_url_pattern);
-
-            // Find a manager of the matching type
-            if let Some(matching_mgr) = self.managers.iter().find(|m| {
-                if expected_is_non_tee {
-                    m.get_is_non_tee()
-                } else {
-                    !m.get_is_non_tee()
-                }
-            }) {
-                tracing::info!(
-                    "resolve_manager: Stored URL {} not found, using fallback {} (expected manager type: non_tee={})",
-                    stored_url,
-                    matching_mgr.url,
-                    expected_is_non_tee
-                );
-                matching_mgr
-            } else {
-                // No matching type available - fail rather than silently use wrong type
-                // This prevents instances from being incorrectly routed to managers of a different authentication type
-                let expected_type = if expected_is_non_tee {
-                    "non-TEE"
-                } else {
-                    "TEE"
-                };
-                let available_types = self
-                    .managers
-                    .iter()
-                    .map(|m| if m.get_is_non_tee() { "non-TEE" } else { "TEE" })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                tracing::error!(
-                    "resolve_manager: Instance was created on {} manager but no {} manager is available. Available types: [{}], instance_id={}",
-                    expected_type,
-                    expected_type,
-                    available_types,
-                    instance.id
-                );
-                return Err(anyhow!(
-                    "Instance was created on {} manager but no {} manager is available",
-                    expected_type,
-                    expected_type
-                ));
-            }
-        } else {
-            // No stored URL, just use first manager
-            tracing::info!(
-                "resolve_manager: No stored URL, using first available manager: {}",
-                self.managers[0].url
-            );
-            &self.managers[0]
-        };
-
-        tracing::info!(
-            "resolve_manager: Using fallback manager: {} for instance_id={}",
-            fallback_manager.url,
+        tracing::warn!(
+            "resolve_manager: no stored agent_api_base_url, using first manager: instance_id={}",
             instance.id
         );
-        Ok(fallback_manager)
+        Ok(&self.managers[0])
     }
 
     /// Register passkey credentials with compose-api and return a session token
@@ -726,24 +535,14 @@ impl AgentServiceImpl {
             .ok_or_else(|| anyhow!("Missing 'session_token' in compose-api /auth/login response"))
     }
 
-    /// Resolve the bearer token to use for agent API calls.
-    /// In non-TEE mode: tries to fetch user's passkey credentials and login to compose-api.
-    /// In TEE mode: always uses manager token (TEE compose-api does not support passkey login).
+    /// Resolve the bearer token to use for agent API calls: logs in to compose-api with the
+    /// user's passkey credentials, or uses the manager token when the user has none.
     async fn resolve_bearer_token(
         &self,
         instance: &AgentInstance,
         manager: &AgentManager,
     ) -> anyhow::Result<String> {
-        // Manager type is determined by the actual manager URL the instance was created with,
-        // not by the current global NON_TEE_INFRA setting. This allows instances created in one mode
-        // to be accessed correctly even if the system is now running in a different mode.
-
-        if !manager.get_is_non_tee() {
-            // TEE manager: use manager token directly (no passkey/compose-api)
-            return Ok(manager.token.clone());
-        }
-
-        // Non-TEE manager: try passkey credentials for compose-api login
+        // Try passkey credentials for compose-api login
         if let Ok(Some((auth_secret, backup_passphrase))) = self
             .repository
             .get_user_passkey_credentials(instance.user_id)
@@ -1049,28 +848,21 @@ impl AgentServiceImpl {
             .unwrap_or(DEFAULT_AGENT_SERVICE_TYPE);
         // Canonical type for DB and `get_image_for_*` match keys (`ironclaw`, `openclaw`).
         let canonical_service_type = service_type.to_string();
-        let compose_api_service_type = compose_api_service_type_on_create(
-            manager.get_is_non_tee(),
-            &canonical_service_type,
-            configs.agent_hosting.as_ref(),
-        );
+        let compose_api_service_type =
+            service_type_for_crabshack(&canonical_service_type, configs.agent_hosting.as_ref());
 
-        // Determine image to use based on manager type
+        // Compose-api requires an image; optional latest versioned ref from manager allowlist.
         let image_to_use = if let Some(img) = params.image {
             Some(img)
-        } else if manager.get_is_non_tee() {
-            // Non-TEE manager requires image; optional latest versioned ref from manager allowlist.
+        } else {
             Some(
-                self.resolve_non_tee_worker_image_ref(
+                self.resolve_worker_image_ref(
                     manager,
                     &canonical_service_type,
                     configs.agent_hosting.as_ref(),
                 )
                 .await?,
             )
-        } else {
-            // TEE manager: image is optional, let Agent API determine it
-            None
         };
 
         let mut request_body = serde_json::json!({
@@ -1084,7 +876,7 @@ impl AgentServiceImpl {
         });
 
         // Only include resource fields if they're explicitly set or available
-        // In non-TEE mode, use configured defaults; in TEE mode, let Agent API use its defaults
+        // Use configured instance defaults when the caller did not specify them
         let cpus = params.cpus.as_deref().or(Some(default_cpus));
         if let Some(cpu) = cpus {
             request_body["cpus"] = serde_json::json!(cpu);
@@ -1213,23 +1005,15 @@ impl AgentServiceImpl {
     ) -> Option<String> {
         let encoded_name = urlencoding::encode(instance_name);
 
-        // Use different endpoints based on deployment mode
-        let url = if manager.get_is_non_tee() {
-            // Non-TEE: separate /ssh endpoint
-            format!("{}/instances/{}/ssh", manager.url, encoded_name)
-        } else {
-            // TEE: ssh_command is in the main instance details endpoint
-            format!("{}/instances/{}", manager.url, encoded_name)
-        };
+        let url = format!("{}/instances/{}/ssh", manager.url, encoded_name);
 
         // Use provided bearer token (e.g., session token from passkey login), fall back to manager token
         let token = bearer_token.unwrap_or(&manager.token);
 
         tracing::debug!(
-            "Fetching SSH command from Agent API: instance_name={}, url={}, tee={}",
+            "Fetching SSH command from Agent API: instance_name={}, url={}",
             instance_name,
-            url,
-            !manager.get_is_non_tee()
+            url
         );
 
         let response = http_client
@@ -1259,15 +1043,9 @@ impl AgentServiceImpl {
         match response.json::<serde_json::Value>().await {
             Ok(data) => {
                 tracing::debug!("SSH command fetched: instance_name={}", instance_name);
-                // Different field names based on deployment mode
-                let ssh_command = if manager.get_is_non_tee() {
-                    // Non-TEE: /ssh endpoint returns "command" field
-                    data.get("command")
-                } else {
-                    // TEE: /instances/{name} endpoint returns "ssh_command" field
-                    data.get("ssh_command")
-                };
-                ssh_command.and_then(|v| v.as_str()).map(|s| s.to_string())
+                data.get("command")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
             }
             Err(e) => {
                 tracing::warn!(
@@ -1313,28 +1091,21 @@ impl AgentServiceImpl {
             .unwrap_or(DEFAULT_AGENT_SERVICE_TYPE);
 
         let canonical_service_type = service_type.to_string();
-        let compose_api_service_type = compose_api_service_type_on_create(
-            manager.get_is_non_tee(),
-            &canonical_service_type,
-            configs.agent_hosting.as_ref(),
-        );
+        let compose_api_service_type =
+            service_type_for_crabshack(&canonical_service_type, configs.agent_hosting.as_ref());
 
-        // Build request body with base fields
-        // Note: In non-TEE mode, image is required; in TEE mode it's optional
+        // Compose-api requires an image; optional latest versioned ref from manager allowlist.
         let image_to_use = if let Some(img) = params.image {
             Some(img)
-        } else if manager.get_is_non_tee() {
+        } else {
             Some(
-                self.resolve_non_tee_worker_image_ref(
+                self.resolve_worker_image_ref(
                     manager,
                     &canonical_service_type,
                     configs.agent_hosting.as_ref(),
                 )
                 .await?,
             )
-        } else {
-            // TEE manager: image is optional, let Agent API determine it
-            None
         };
 
         let mut request_body = serde_json::json!({
@@ -1348,7 +1119,7 @@ impl AgentServiceImpl {
         });
 
         // Only include resource fields if they're explicitly set or available
-        // In non-TEE mode, use configured defaults; in TEE mode, let Agent API use its defaults
+        // Use configured instance defaults when the caller did not specify them
         let cpus = params.cpus.as_deref().or(Some(default_cpus));
         if let Some(cpu) = cpus {
             request_body["cpus"] = serde_json::json!(cpu);
@@ -1590,7 +1361,7 @@ async fn save_passkey_instance_from_event(
     }
 
     // Extract instance_url from API response if available
-    // Try "instance_url" first (returned by non-TEE compose-api in final event),
+    // Try "instance_url" first (returned by compose-api in the final event),
     // then fall back to "url" (used by other API responses)
     let instance_url = instance_data
         .get("instance_url")
@@ -1598,7 +1369,7 @@ async fn save_passkey_instance_from_event(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .or_else(|| {
-            // Fall back to constructing instance_url from manager domain (non-TEE mode)
+            // Fall back to constructing instance_url from the manager domain
             // Extract domain from agent_api_base_url (e.g., https://venice-staging.near-dev.org/api/crabshack -> venice-staging.near-dev.org)
             if let (Some(token), Some(manager_url)) = (&instance_token, &params.agent_api_base_url)
             {
@@ -1756,7 +1527,7 @@ impl AgentService for AgentServiceImpl {
         tracing::info!("Creating instance from Agent API: user_id={}", user_id);
 
         // Pick next manager with available capacity (round-robin, skipping full managers)
-        let manager = self.next_available_tee_manager().await?;
+        let manager = self.next_available_manager().await?;
 
         // Create an unbound API key on behalf of the user; the agent will use it to authenticate to the chat-api.
         let key_name = params
@@ -1897,222 +1668,6 @@ impl AgentService for AgentServiceImpl {
         Ok(instance)
     }
 
-    /// Create instance via TEE compose-api with streaming lifecycle events.
-    /// Similar to create_instance_from_agent_api but streams events as they occur.
-    async fn create_instance_from_agent_api_streaming(
-        &self,
-        user_id: UserId,
-        params: super::ports::InstanceCreationParams,
-        max_allowed: u64,
-    ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<serde_json::Value>>> {
-        tracing::info!(
-            "Creating instance from Agent API with streaming: user_id={}",
-            user_id
-        );
-
-        // Check instance limit before starting
-        let current_count = self.repository.count_user_instances(user_id).await?;
-        if current_count >= max_allowed as i64 {
-            anyhow::bail!(
-                "Agent instance limit of {} exceeded for your plan",
-                max_allowed
-            );
-        }
-
-        // Pick next manager with available capacity
-        let manager = self.next_available_tee_manager().await?;
-
-        // Create an unbound API key on behalf of the user
-        let key_name = params
-            .name
-            .as_deref()
-            .map(|n| format!("instance-{}", n))
-            .unwrap_or_else(|| "instance".to_string());
-        let default_expiry = Some(Utc::now() + Duration::days(90));
-        let (api_key, plaintext_key) = self
-            .create_unbound_api_key(user_id, key_name, None, default_expiry)
-            .await?;
-        let api_key_id = api_key.id;
-
-        // Validate service type
-        if let Some(ref st) = &params.service_type {
-            if !is_valid_service_type(st) {
-                return Err(anyhow!(
-                    "Invalid service type '{}'. Valid types are: {}",
-                    st,
-                    VALID_SERVICE_TYPES.join(", ")
-                ));
-            }
-        }
-
-        let service_type_for_api = params
-            .service_type
-            .clone()
-            .or_else(|| Some(DEFAULT_AGENT_SERVICE_TYPE.to_string()));
-
-        // Get streaming receiver from Agent API
-        let mut agent_api_rx = self
-            .call_agent_api_create_streaming(
-                &manager,
-                &plaintext_key,
-                &self.nearai_api_url,
-                AgentApiCreateParams {
-                    image: params.image.clone(),
-                    name: params.name.clone(),
-                    ssh_pubkey: params.ssh_pubkey.clone(),
-                    service_type: service_type_for_api.clone(),
-                    cpus: params.cpus.clone(),
-                    mem_limit: params.mem_limit.clone(),
-                    storage_size: params.storage_size.clone(),
-                },
-                AuthMethod::BearerToken(&manager.token),
-                user_id,
-            )
-            .await?;
-
-        // Wrap the streaming receiver to process events and save instance to DB
-        let (tx, rx) = tokio::sync::mpsc::channel(10);
-        let repository = self.repository.clone();
-        let ssh_pubkey = params.ssh_pubkey.clone();
-        let manager_url = manager.url.clone();
-        let service_type = service_type_for_api.clone();
-
-        tokio::spawn(async move {
-            let mut instance_saved = false;
-
-            while let Some(event_result) = agent_api_rx.recv().await {
-                match event_result {
-                    Ok(event) => {
-                        // Check if this is the instance creation event (contains instance data)
-                        let has_instance_data = event.get("instance").is_some();
-                        if !instance_saved && has_instance_data {
-                            if let Some(instance_data) = event.get("instance") {
-                                // Extract instance information and save to DB
-                                if let Ok(instance_name) = instance_data
-                                    .get("name")
-                                    .and_then(|v| v.as_str())
-                                    .ok_or_else(|| anyhow!("Missing instance name"))
-                                {
-                                    let instance_url = instance_data
-                                        .get("url")
-                                        .and_then(|v| v.as_str())
-                                        .map(|s| s.to_string());
-                                    let instance_token = instance_data
-                                        .get("token")
-                                        .and_then(|v| v.as_str())
-                                        .map(|s| s.to_string());
-                                    let dashboard_url = instance_data
-                                        .get("dashboard_url")
-                                        .and_then(|v| v.as_str())
-                                        .map(|s| s.to_string());
-
-                                    let instance_id =
-                                        format!("agent-{}-{}", instance_name, Uuid::new_v4());
-
-                                    // Save to database
-                                    match repository
-                                        .create_instance(CreateInstanceParams {
-                                            user_id,
-                                            instance_id: instance_id.clone(),
-                                            name: instance_name.to_string(),
-                                            public_ssh_key: ssh_pubkey.clone(),
-                                            instance_url,
-                                            instance_token,
-                                            dashboard_url,
-                                            agent_api_base_url: Some(manager_url.clone()),
-                                            service_type: service_type.clone(),
-                                        })
-                                        .await
-                                    {
-                                        Ok(instance) => {
-                                            // Bind the unbound API key to this instance
-                                            // Validate before binding: key exists, is unbound, and belongs to user
-                                            let bind_result = async {
-                                                let api_key = repository
-                                                    .get_api_key_by_id(api_key_id)
-                                                    .await?
-                                                    .ok_or_else(|| anyhow!("API key not found"))?;
-
-                                                if api_key.user_id != user_id {
-                                                    return Err(anyhow!(
-                                                        "API key does not belong to user"
-                                                    ));
-                                                }
-
-                                                if api_key.instance_id.is_some() {
-                                                    return Err(anyhow!(
-                                                        "API key is already bound"
-                                                    ));
-                                                }
-
-                                                // Verify instance belongs to user
-                                                let db_instance = repository
-                                                    .get_instance(instance.id)
-                                                    .await?
-                                                    .ok_or_else(|| {
-                                                        anyhow!("Instance not found in database")
-                                                    })?;
-
-                                                if db_instance.user_id != user_id {
-                                                    return Err(anyhow!(
-                                                        "Instance does not belong to user"
-                                                    ));
-                                                }
-
-                                                // Now safe to bind
-                                                repository
-                                                    .bind_api_key_to_instance(
-                                                        api_key_id,
-                                                        instance.id,
-                                                    )
-                                                    .await?;
-
-                                                anyhow::Ok(())
-                                            }
-                                            .await;
-
-                                            if let Err(e) = bind_result {
-                                                let err_msg = format!(
-                                                    "Failed to bind API key to instance: \
-                                                     instance_id={}, api_key_id={}, error={}",
-                                                    instance.id, api_key_id, e
-                                                );
-                                                tracing::error!("{}", err_msg);
-                                                let _ = tx.send(Err(anyhow!(err_msg))).await;
-                                                break;
-                                            }
-                                            instance_saved = true;
-                                            // Forward event to caller
-                                            let _ = tx.send(Ok(event)).await;
-                                        }
-                                        Err(e) => {
-                                            let err_msg = format!(
-                                                "Failed to create instance in database: {}",
-                                                e
-                                            );
-                                            tracing::error!("{}", err_msg);
-                                            let _ = tx.send(Err(anyhow!(err_msg))).await;
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                        } else if !has_instance_data {
-                            // Forward non-instance events to caller
-                            let _ = tx.send(Ok(event)).await;
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!("Error in Agent API streaming: {}", e);
-                        let _ = tx.send(Err(e)).await;
-                    }
-                }
-            }
-        });
-
-        Ok(rx)
-    }
-
     async fn create_passkey_instance_streaming(
         &self,
         user_id: UserId,
@@ -2125,27 +1680,17 @@ impl AgentService for AgentServiceImpl {
         );
 
         // Pick next manager with available capacity
-        let manager = self.next_available_non_tee_manager().await?;
+        let manager = self.next_available_manager().await?;
         let manager_url = manager.url.clone();
 
         tracing::info!(
-            "create_passkey_instance_streaming: selected manager_url={}, is_non_tee_manager={}, user_id={}",
+            "create_passkey_instance_streaming: selected manager_url={}, user_id={}",
             manager_url,
-            manager.get_is_non_tee(),
             user_id
         );
 
-        // Get session token based on manager type
-        let session_token = if !manager.get_is_non_tee() {
-            // TEE manager: Use manager token directly (main branch behavior)
-            tracing::info!(
-                "create_passkey_instance_streaming: TEE manager detected, using manager token"
-            );
-            manager.token.clone()
-        } else {
-            // Non-TEE manager: Get or create user's passkey credentials and login to compose-api
-            tracing::info!("create_passkey_instance_streaming: Non-TEE manager detected, logging in via compose-api");
-
+        // Get or create user's passkey credentials and login to compose-api
+        let session_token = {
             let (auth_secret, backup_passphrase) = match self
                 .repository
                 .get_user_passkey_credentials(user_id)
@@ -2159,9 +1704,9 @@ impl AgentService for AgentServiceImpl {
                     (secret, passphrase)
                 }
                 Ok(None) => {
-                    // First non-TEE instance creation - auto-generate passkey credentials
+                    // First instance creation - auto-generate passkey credentials
                     tracing::info!(
-                        "Auto-generating passkey credentials for user on first non-TEE instance creation: user_id={}",
+                        "Auto-generating passkey credentials for user on first instance creation: user_id={}",
                         user_id
                     );
                     let auth_secret = Self::generate_random_credential(32);
@@ -2404,24 +1949,22 @@ impl AgentService for AgentServiceImpl {
                             tracing::info!("Passkey instance saved successfully: user_id={}, dashboard_url={:?}", user_id, instance.dashboard_url);
 
                             // Send final event with dashboard_url and instance_url to frontend
-                            // This is essential for non-TEE where Agent API doesn't return these fields
-                            if manager_clone.get_is_non_tee() {
-                                let final_event = serde_json::json!({
-                                    "instance": {
-                                        "name": instance.name,
-                                        "dashboard_url": instance.dashboard_url,
-                                        "instance_url": instance.instance_url,
-                                        "token": instance.instance_token,
-                                    }
-                                });
-
-                                if let Err(send_err) = tx.send(Ok(final_event)).await {
-                                    tracing::warn!(
-                                        "Failed to send final event to frontend: user_id={}, error={}",
-                                        user_id,
-                                        send_err
-                                    );
+                            // (the create stream itself doesn't return these fields)
+                            let final_event = serde_json::json!({
+                                "instance": {
+                                    "name": instance.name,
+                                    "dashboard_url": instance.dashboard_url,
+                                    "instance_url": instance.instance_url,
+                                    "token": instance.instance_token,
                                 }
+                            });
+
+                            if let Err(send_err) = tx.send(Ok(final_event)).await {
+                                tracing::warn!(
+                                    "Failed to send final event to frontend: user_id={}, error={}",
+                                    user_id,
+                                    send_err
+                                );
                             }
                         }
                         Err(e) => {
@@ -2758,31 +2301,24 @@ impl AgentService for AgentServiceImpl {
                             // Token already fetched by this or another concurrent task
                             key_guard.clone()
                         } else {
-                            // First task to reach this key: perform the async login (non-TEE only)
+                            // First task to reach this key: perform the async login
                             drop(key_guard); // Release lock temporarily for async work
 
-                            // Only attempt passkey login for non-TEE managers
-                            // TEE managers use the manager token directly
-                            let token = if mgr.get_is_non_tee() {
-                                // Non-TEE: try to get user's passkey credentials; fall back to manager token if not found
-                                if let Ok(Some((auth_secret, backup_passphrase))) =
-                                    repo.get_user_passkey_credentials(user_id).await
-                                {
-                                    AgentServiceImpl::compose_api_passkey_login_static(
-                                        &http_client,
-                                        &mgr,
-                                        &auth_secret,
-                                        &backup_passphrase,
-                                        user_id,
-                                    )
-                                    .await
-                                    .ok()
-                                } else {
-                                    None // Fall back to manager token
-                                }
+                            // Try the user's passkey credentials; fall back to manager token if not found
+                            let token = if let Ok(Some((auth_secret, backup_passphrase))) =
+                                repo.get_user_passkey_credentials(user_id).await
+                            {
+                                AgentServiceImpl::compose_api_passkey_login_static(
+                                    &http_client,
+                                    &mgr,
+                                    &auth_secret,
+                                    &backup_passphrase,
+                                    user_id,
+                                )
+                                .await
+                                .ok()
                             } else {
-                                // TEE: always use manager token (bearer_token = None)
-                                None
+                                None // Fall back to manager token
                             };
 
                             // Re-acquire lock and store result
@@ -3079,20 +2615,13 @@ impl AgentService for AgentServiceImpl {
         let manager = self.resolve_manager(&instance)?;
 
         tracing::info!(
-            "Upgrade: manager_url={}, is_non_tee={}, instance_name={}",
+            "Upgrade: manager_url={}, instance_name={}",
             manager.url,
-            manager.get_is_non_tee(),
             instance.name
         );
 
-        // Route to appropriate logic based on infrastructure type
-        if manager.get_is_non_tee() {
-            self.upgrade_instance_stream_non_tee(&instance, manager, instance_id, user_id)
-                .await
-        } else {
-            self.upgrade_instance_stream_tee(&instance, manager, instance_id, user_id)
-                .await
-        }
+        self.upgrade_instance_stream_impl(&instance, manager, instance_id, user_id)
+            .await
     }
 
     async fn check_upgrade_available(
@@ -3118,20 +2647,13 @@ impl AgentService for AgentServiceImpl {
 
         let manager = self.resolve_manager(&instance)?;
         tracing::info!(
-            "Upgrade check: manager_url={}, is_non_tee={}, instance_name={}",
+            "Upgrade check: manager_url={}, instance_name={}",
             manager.url,
-            manager.get_is_non_tee(),
             instance.name
         );
 
-        // Route to appropriate logic based on infrastructure type
-        if manager.get_is_non_tee() {
-            self.check_upgrade_available_non_tee(&instance, manager, instance_id)
-                .await
-        } else {
-            self.check_upgrade_available_tee(&instance, manager, instance_id)
-                .await
-        }
+        self.check_upgrade_available_impl(&instance, manager, instance_id)
+            .await
     }
 
     async fn stop_instance(
@@ -3480,25 +3002,6 @@ impl AgentService for AgentServiceImpl {
         &self,
         user_id: UserId,
     ) -> anyhow::Result<Option<String>> {
-        let configs = match self.system_configs_service.get_configs().await {
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to load system configs for gateway session setup: {}",
-                    e
-                );
-                return Err(e);
-            }
-            Ok(None) => {
-                tracing::debug!(
-                    "No system_configs row; using defaults for gateway session eligibility"
-                );
-                SystemConfigs::default()
-            }
-            Ok(Some(c)) => c,
-        };
-
-        let non_tee_global = Self::is_non_tee_infra(&configs);
-
         // Try to get existing user passkey credentials
         let passkey_existing = match self.repository.get_user_passkey_credentials(user_id).await {
             Ok(v) => v,
@@ -3512,47 +3015,7 @@ impl AgentService for AgentServiceImpl {
             }
         };
 
-        // Primary: new agents use non-TEE (admin flag). Also attempt when user still needs
-        // crabshack session after an infra switch: existing passkey or non-TEE routed instances
-        // (mirrors per-instance manager typing in `resolve_bearer_token`).
-        let mut needs_non_tee_gateway = non_tee_global;
-        if !needs_non_tee_gateway {
-            if passkey_existing.is_some() {
-                needs_non_tee_gateway = true;
-                tracing::debug!(
-                    "Gateway session: user has passkey credentials while global infra is TEE — still attempting compose session"
-                );
-            } else {
-                let (instances, _) = self
-                    .repository
-                    .list_user_instances(user_id, GATEWAY_SESSION_INSTANCE_SCAN_LIMIT, 0)
-                    .await?;
-                if self.user_has_non_tee_routed_instance(&instances) {
-                    needs_non_tee_gateway = true;
-                    tracing::debug!(
-                        "Gateway session: user has non-TEE instance while global infra is TEE — still attempting compose session"
-                    );
-                }
-            }
-        }
-
-        if !needs_non_tee_gateway {
-            tracing::debug!(
-                "Skipping gateway session: TEE infra, no passkey, no non-TEE routed instances"
-            );
-            return Ok(None);
-        }
-
-        let manager = self
-            .managers
-            .iter()
-            .find(|mgr| mgr.get_is_non_tee())
-            .ok_or_else(|| {
-                anyhow!(
-                    "No non-TEE agent manager configured (have {} manager(s))",
-                    self.managers.len()
-                )
-            })?;
+        let manager = &self.managers[0];
 
         let (auth_secret, backup_passphrase) = match passkey_existing {
             Some((secret, passphrase)) => (secret, passphrase),
@@ -3995,7 +3458,7 @@ impl AgentService for AgentServiceImpl {
 }
 
 /// Response structure from crabshack /images endpoint
-/// Used to parse and filter non-TEE image allowlist
+/// Used to parse and filter the crabshack image allowlist
 #[derive(serde::Deserialize, Debug, Clone)]
 #[allow(dead_code)]
 struct CrabshackImageEntry {
@@ -4008,9 +3471,9 @@ struct CrabshackImageEntry {
     image_digest: Option<String>,
 }
 
-/// Response structure from crabshack `/instances/{name}` for non-TEE upgrade flows.
+/// Response structure from crabshack `/instances/{name}` for upgrade flows.
 #[derive(serde::Deserialize, Debug)]
-struct NonTeeInstanceResponse {
+struct CrabshackInstanceResponse {
     image: String,
     #[serde(default)]
     image_digest: Option<String>,
@@ -4048,168 +3511,10 @@ fn allowlist_type_from_instance<'a>(
 }
 
 impl AgentServiceImpl {
-    /// Check upgrade availability for TEE infrastructure (compose-api)
-    async fn check_upgrade_available_tee(
-        &self,
-        instance: &AgentInstance,
-        manager: &AgentManager,
-        instance_id: Uuid,
-    ) -> anyhow::Result<UpgradeAvailability> {
-        tracing::info!(
-            "Checking upgrade availability (TEE): instance_id={}, instance_name={}",
-            instance_id,
-            instance.name
-        );
-
-        // Resolve bearer token: for passkey instances, login to get a fresh token
-        let bearer_token = self.resolve_bearer_token(instance, manager).await?;
-
-        // Fetch latest versions from compose-api
-        let version_url = format!("{}/version", manager.url);
-        tracing::debug!("TEE: Fetching versions from: {}", version_url);
-        let version_resp = self
-            .http_client
-            .get(&version_url)
-            .bearer_auth(&bearer_token)
-            .send()
-            .await
-            .map_err(|e| anyhow!("Failed to fetch compose-api version: {}", e))?;
-
-        tracing::debug!("TEE: /version response status: {}", version_resp.status());
-        if !version_resp.status().is_success() {
-            return Err(anyhow!(
-                "Failed to fetch compose-api version: status={}",
-                version_resp.status()
-            ));
-        }
-
-        #[derive(serde::Deserialize, Debug)]
-        struct VersionResponse {
-            images: std::collections::HashMap<String, String>,
-        }
-
-        let version: VersionResponse = version_resp
-            .json()
-            .await
-            .map_err(|e| anyhow!("Failed to parse compose-api version response: {}", e))?;
-
-        tracing::debug!(
-            "TEE: /version response parsed: image_count={} has_worker_image={} has_ironclaw_image={}",
-            version.images.len(),
-            version.images.contains_key("worker"),
-            version.images.contains_key("ironclaw")
-        );
-
-        // Map service_type to image key in the version response
-        let service_type = instance.service_type_str();
-        let image_key = match service_type {
-            "ironclaw" => "ironclaw",
-            _ => "worker",
-        };
-
-        let latest_image = version
-            .images
-            .get(image_key)
-            .ok_or_else(|| {
-                anyhow!(
-                    "No image found for service type '{}' (key '{}')",
-                    service_type,
-                    image_key
-                )
-            })?
-            .clone();
-
-        tracing::debug!(
-            "TEE: Latest image for service_type='{}': {}",
-            service_type,
-            latest_image
-        );
-
-        // Fetch current instance status from compose-api
-        let encoded_name = urlencoding::encode(&instance.name);
-        let instance_url = format!("{}/instances/{}", manager.url, encoded_name);
-        tracing::debug!("TEE: Fetching instance status from: {}", instance_url);
-        let instance_resp = self
-            .http_client
-            .get(&instance_url)
-            .bearer_auth(&bearer_token)
-            .send()
-            .await
-            .map_err(|e| anyhow!("Failed to fetch instance status: {}", e))?;
-
-        tracing::debug!(
-            "TEE: /instances/{} response status: {}",
-            encoded_name,
-            instance_resp.status()
-        );
-
-        // If instance not found (404), block upgrade until instance is synced
-        // This handles cases where instance is not yet fully provisioned or synced
-        if instance_resp.status() == reqwest::StatusCode::NOT_FOUND {
-            tracing::warn!(
-                "Instance not found on Agent Manager: instance_id={}. Blocking upgrade until instance is synced.",
-                instance_id
-            );
-            return Ok(UpgradeAvailability {
-                has_upgrade: false,
-                current_image: None,
-                latest_image,
-                current_digest: None,
-                latest_digest: None,
-            });
-        }
-
-        if !instance_resp.status().is_success() {
-            return Err(anyhow!(
-                "Failed to fetch instance status: status={}",
-                instance_resp.status()
-            ));
-        }
-
-        #[derive(serde::Deserialize)]
-        struct InstanceResponse {
-            image: String,
-        }
-
-        let response_body = instance_resp
-            .text()
-            .await
-            .map_err(|e| anyhow!("Failed to read instance response body: {}", e))?;
-
-        let instance_status: InstanceResponse = serde_json::from_str(&response_body)
-            .map_err(|e| anyhow!("Failed to parse instance response: {}", e))?;
-
-        let current_image = instance_status.image;
-        // Log parsed fields only — full `/instances` JSON may include tokens, URLs, or keys.
-        tracing::debug!(
-            "TEE: Parsed /instances/{} response: image={}",
-            encoded_name,
-            current_image
-        );
-
-        let has_upgrade = current_image != latest_image;
-
-        tracing::info!(
-            "TEE upgrade check completed: instance_id={}, current_image={}, latest_image={}, has_upgrade={}",
-            instance_id,
-            current_image,
-            latest_image,
-            has_upgrade
-        );
-
-        Ok(UpgradeAvailability {
-            has_upgrade,
-            current_image: Some(current_image),
-            latest_image,
-            current_digest: None,
-            latest_digest: None,
-        })
-    }
-
-    /// Fetch and filter allowed images from crabshack for a non-TEE manager.
+    /// Fetch and filter allowed images from the crabshack manager.
     /// `target_service_type` is the canonical or stored service type (e.g. `openclaw`, `ironclaw`, or legacy compose names).
     /// Returns filtered list of images and the hosting config (to avoid redundant system_configs reads).
-    async fn fetch_allowed_images_non_tee(
+    async fn fetch_allowed_images(
         &self,
         manager: &AgentManager,
         target: AllowlistServiceType<'_>,
@@ -4220,7 +3525,7 @@ impl AgentServiceImpl {
         // Fetch available images from crabshack allowlist
         let images_url = format!("{}/images", manager.url);
         tracing::debug!(
-            "Non-TEE ({}): Fetching image allowlist from: {}",
+            "Allowlist ({}): Fetching image allowlist from: {}",
             context,
             images_url
         );
@@ -4231,17 +3536,17 @@ impl AgentServiceImpl {
             .timeout(std::time::Duration::from_secs(30))
             .send()
             .await
-            .map_err(|e| anyhow!("Failed to fetch non-TEE images allowlist: {}", e))?;
+            .map_err(|e| anyhow!("Failed to fetch images allowlist: {}", e))?;
 
         tracing::debug!(
-            "Non-TEE ({}): /images response status: {}",
+            "Allowlist ({}): /images response status: {}",
             context,
             images_resp.status()
         );
 
         if !images_resp.status().is_success() {
             return Err(anyhow!(
-                "Failed to fetch non-TEE images allowlist: status={}",
+                "Failed to fetch images allowlist: status={}",
                 images_resp.status()
             ));
         }
@@ -4249,12 +3554,12 @@ impl AgentServiceImpl {
         let response_body = images_resp
             .text()
             .await
-            .map_err(|e| anyhow!("Failed to read non-TEE images response body: {}", e))?;
+            .map_err(|e| anyhow!("Failed to read images response body: {}", e))?;
 
         let response_body_len = response_body.len();
 
         let image_entries: Vec<CrabshackImageEntry> = serde_json::from_str(&response_body)
-            .map_err(|e| anyhow!("Failed to parse non-TEE images response: {}", e))?;
+            .map_err(|e| anyhow!("Failed to parse images response: {}", e))?;
 
         let sample_refs = image_entries
             .iter()
@@ -4264,7 +3569,7 @@ impl AgentServiceImpl {
             .join(", ");
 
         tracing::debug!(
-            "Non-TEE ({}): Parsed {} allowlist images (response_bytes={}, sample_refs=[{}])",
+            "Allowlist ({}): Parsed {} allowlist images (response_bytes={}, sample_refs=[{}])",
             context,
             image_entries.len(),
             response_body_len,
@@ -4274,7 +3579,7 @@ impl AgentServiceImpl {
         // Per-entry lines are verbose for large allowlists; use trace for full breakdown.
         for img in &image_entries {
             tracing::trace!(
-                "Non-TEE ({}): Allowlist image: ref={}, service_type={}, status={}, has_digest={}, created_at={}",
+                "Allowlist ({}): Allowlist image: ref={}, service_type={}, status={}, has_digest={}, created_at={}",
                 context,
                 img.ref_,
                 img.service_type,
@@ -4301,7 +3606,7 @@ impl AgentServiceImpl {
         };
 
         tracing::debug!(
-            "Non-TEE ({}): Filtering for service_type='{}' with status='allow-create'",
+            "Allowlist ({}): Filtering for service_type='{}' with status='allow-create'",
             context,
             crabshack_service_type
         );
@@ -4321,7 +3626,7 @@ impl AgentServiceImpl {
             // Only warn if this is a non-versioned tag and digest is missing
             if extract_version_from_image(&img.ref_).is_none() && img.image_digest.is_none() {
                 tracing::warn!(
-                    "Non-TEE ({}): Allowlist entry with non-versioned tag missing image_digest (incomplete): ref={}. \
+                    "Allowlist ({}): Allowlist entry with non-versioned tag missing image_digest (incomplete): ref={}. \
                      This entry cannot be used for non-versioned tag upgrades.",
                     context,
                     img.ref_
@@ -4330,7 +3635,7 @@ impl AgentServiceImpl {
         }
 
         tracing::debug!(
-            "Non-TEE ({}): Available images after filtering: {} images",
+            "Allowlist ({}): Available images after filtering: {} images",
             context,
             available_images.len()
         );
@@ -4338,17 +3643,16 @@ impl AgentServiceImpl {
         Ok((available_images, hosting_config.cloned()))
     }
 
-    /// Fetch the latest versioned image from crabshack allowlist for a non-TEE manager.
+    /// Fetch the latest versioned image from the crabshack allowlist.
     /// Returns the image ref, semantic version, and optional digest (only considers images with numeric versions)
-    async fn get_latest_image_non_tee(
+    async fn get_latest_image(
         &self,
         manager: &AgentManager,
         target: AllowlistServiceType<'_>,
         context: &str, // For logging: "check", "upgrade", or "deploy"
     ) -> anyhow::Result<Option<(String, String, Option<String>)>> {
-        let (available_images, hosting_config) = self
-            .fetch_allowed_images_non_tee(manager, target, context)
-            .await?;
+        let (available_images, hosting_config) =
+            self.fetch_allowed_images(manager, target, context).await?;
 
         // Extract versions from image refs and log them
         let images_with_versions: Vec<(String, Option<String>, Option<String>)> = available_images
@@ -4357,14 +3661,14 @@ impl AgentServiceImpl {
                 let version = extract_version_from_image(&img.ref_);
                 if let Some(ref v) = version {
                     tracing::debug!(
-                        "Non-TEE ({}): Available image: ref={}, version={}",
+                        "Allowlist ({}): Available image: ref={}, version={}",
                         context,
                         img.ref_,
                         v
                     );
                 } else {
                     tracing::debug!(
-                        "Non-TEE ({}): Available image (non-numeric tag): ref={}",
+                        "Allowlist ({}): Available image (non-numeric tag): ref={}",
                         context,
                         img.ref_
                     );
@@ -4374,7 +3678,7 @@ impl AgentServiceImpl {
             .collect();
 
         // Check if pre-release versions are allowed (defaults to false = stable-only)
-        // Use the hosting_config we already fetched in fetch_allowed_images_non_tee to avoid redundant DB read
+        // Use the hosting_config we already fetched in fetch_allowed_images to avoid redundant DB read
         let allow_prerelease = hosting_config
             .as_ref()
             .and_then(|h| h.crabshack.allow_prerelease_upgrades)
@@ -4382,7 +3686,7 @@ impl AgentServiceImpl {
 
         if !allow_prerelease {
             tracing::debug!(
-                "Non-TEE ({}): Filtering to stable versions only (allow_prerelease_upgrades=false)",
+                "Allowlist ({}): Filtering to stable versions only (allow_prerelease_upgrades=false)",
                 context
             );
         }
@@ -4404,7 +3708,7 @@ impl AgentServiceImpl {
 
         let Some(latest_image_entry) = latest_image_entry else {
             tracing::info!(
-                "Non-TEE ({}): No images with numeric versions available in allowlist: service_type={:?}",
+                "Allowlist ({}): No images with numeric versions available in allowlist: service_type={:?}",
                 context,
                 target
             );
@@ -4412,7 +3716,7 @@ impl AgentServiceImpl {
         };
 
         tracing::debug!(
-            "Non-TEE ({}): Latest image: ref={}, version={}, digest={:?}",
+            "Allowlist ({}): Latest image: ref={}, version={}, digest={:?}",
             context,
             latest_image_entry.0,
             latest_image_entry.1,
@@ -4426,36 +3730,39 @@ impl AgentServiceImpl {
         )))
     }
 
-    /// Check upgrade availability for non-TEE infrastructure (crabshack)
-    async fn check_upgrade_available_non_tee(
+    /// Check upgrade availability via the crabshack manager
+    async fn check_upgrade_available_impl(
         &self,
         instance: &AgentInstance,
         manager: &AgentManager,
         instance_id: Uuid,
     ) -> anyhow::Result<UpgradeAvailability> {
         tracing::info!(
-            "Checking upgrade availability (non-TEE): instance_id={}, instance_name={}",
+            "Checking upgrade availability: instance_id={}, instance_name={}",
             instance_id,
             instance.name
         );
 
-        // Use manager token (admin secret) for non-TEE crabshack API
+        // Use manager token (admin secret) for the crabshack API
         let bearer_token = &manager.token;
 
         // Fetch current instance status from crabshack
         let encoded_name = urlencoding::encode(&instance.name);
         let instance_url = format!("{}/instances/{}", manager.url, encoded_name);
-        tracing::debug!("Non-TEE: Fetching instance status from: {}", instance_url);
+        tracing::debug!(
+            "Upgrade check: Fetching instance status from: {}",
+            instance_url
+        );
         let instance_resp = self
             .http_client
             .get(&instance_url)
             .bearer_auth(bearer_token)
             .send()
             .await
-            .map_err(|e| anyhow!("Failed to fetch non-TEE instance status: {}", e))?;
+            .map_err(|e| anyhow!("Failed to fetch instance status: {}", e))?;
 
         tracing::debug!(
-            "Non-TEE: /instances/{} response status: {}",
+            "Upgrade check: /instances/{} response status: {}",
             encoded_name,
             instance_resp.status()
         );
@@ -4469,7 +3776,7 @@ impl AgentServiceImpl {
             );
         } else if !instance_resp.status().is_success() {
             return Err(anyhow!(
-                "Failed to fetch non-TEE instance status: status={}",
+                "Failed to fetch instance status: status={}",
                 instance_resp.status()
             ));
         }
@@ -4478,14 +3785,15 @@ impl AgentServiceImpl {
             let response_body = instance_resp
                 .text()
                 .await
-                .map_err(|e| anyhow!("Failed to read non-TEE instance response body: {}", e))?;
+                .map_err(|e| anyhow!("Failed to read instance response body: {}", e))?;
 
-            let instance_status: NonTeeInstanceResponse = serde_json::from_str(&response_body)
-                .map_err(|e| anyhow!("Failed to parse non-TEE instance response: {}", e))?;
+            let instance_status: CrabshackInstanceResponse =
+                serde_json::from_str(&response_body)
+                    .map_err(|e| anyhow!("Failed to parse instance response: {}", e))?;
 
             // Log image + digest only — raw body can carry sensitive crabshack instance metadata.
             tracing::debug!(
-                "Non-TEE: Parsed /instances/{} response: image={}, digest={:?}, service_type={:?}",
+                "Upgrade check: Parsed /instances/{} response: image={}, digest={:?}, service_type={:?}",
                 encoded_name,
                 instance_status.image,
                 instance_status.image_digest,
@@ -4505,7 +3813,7 @@ impl AgentServiceImpl {
         if instance_not_found {
             // Try to fetch allowlist to provide the latest_image info, but don't fail if we can't
             let (latest_image, latest_digest) = match self
-                .get_latest_image_non_tee(
+                .get_latest_image(
                     manager,
                     AllowlistServiceType::Canonical(instance.service_type_str()),
                     "check",
@@ -4517,7 +3825,7 @@ impl AgentServiceImpl {
             };
 
             tracing::info!(
-                "Non-TEE upgrade check blocked: instance_id={}, instance not synced. latest_image={}",
+                "Upgrade check blocked: instance_id={}, instance not synced. latest_image={}",
                 instance_id,
                 latest_image
             );
@@ -4546,7 +3854,7 @@ impl AgentServiceImpl {
         if let Some(curr_v) = current_version {
             // VERSIONED TAG: Use semantic version comparison
             tracing::debug!(
-                "Non-TEE: Current image has numeric version: ref={}, version={}",
+                "Upgrade check: Current image has numeric version: ref={}, version={}",
                 current_image_ref,
                 curr_v
             );
@@ -4554,11 +3862,11 @@ impl AgentServiceImpl {
             // No versioned allow-create entries for this line (e.g. retired from the allowlist):
             // report "no upgrade" to the user; only the upgrade POST treats this as an error.
             let Some((latest_image, latest_version, latest_digest)) = self
-                .get_latest_image_non_tee(manager, allowlist_target, "check")
+                .get_latest_image(manager, allowlist_target, "check")
                 .await?
             else {
                 tracing::info!(
-                    "Non-TEE upgrade check: no versioned allowlist images for {:?}; reporting no upgrade (instance_id={})",
+                    "Upgrade check: no versioned allowlist images for {:?}; reporting no upgrade (instance_id={})",
                     allowlist_target,
                     instance_id
                 );
@@ -4575,7 +3883,7 @@ impl AgentServiceImpl {
                 compare_semantic_versions(&curr_v, &latest_version) == std::cmp::Ordering::Less;
 
             tracing::info!(
-                "Non-TEE upgrade check (versioned): instance_id={}, current_version={}, latest_version={}, has_upgrade={}",
+                "Upgrade check (versioned): instance_id={}, current_version={}, latest_version={}, has_upgrade={}",
                 instance_id,
                 curr_v,
                 latest_version,
@@ -4592,12 +3900,12 @@ impl AgentServiceImpl {
         } else {
             // NON-VERSIONED TAG: Find exact ref in allowlist and compare digests
             tracing::debug!(
-                "Non-TEE: Current image has non-numeric tag: ref={}",
+                "Upgrade check: Current image has non-numeric tag: ref={}",
                 current_image_ref
             );
 
             let (allowed_entries, _hosting_config) = self
-                .fetch_allowed_images_non_tee(manager, allowlist_target, "check")
+                .fetch_allowed_images(manager, allowlist_target, "check")
                 .await?;
 
             let matching_entry = allowed_entries.iter().find(|e| e.ref_ == current_image_ref);
@@ -4610,7 +3918,7 @@ impl AgentServiceImpl {
                             // Both digests present: compare them
                             let differs = curr_dig != allow_dig;
                             tracing::debug!(
-                                "Non-TEE: Digest comparison: current={}, allowlist={}, differs={}",
+                                "Upgrade check: Digest comparison: current={}, allowlist={}, differs={}",
                                 curr_dig,
                                 allow_dig,
                                 differs
@@ -4621,7 +3929,7 @@ impl AgentServiceImpl {
                             // Current has digest but allowlist entry is missing it - data quality issue
                             // For non-versioned tags, crabshack should always populate image_digest
                             tracing::warn!(
-                                "Non-TEE: Allowlist entry missing image_digest (incomplete data): ref={}, current_digest={:?}",
+                                "Upgrade check: Allowlist entry missing image_digest (incomplete data): ref={}, current_digest={:?}",
                                 current_image_ref,
                                 current_digest
                             );
@@ -4630,14 +3938,16 @@ impl AgentServiceImpl {
                         (None, Some(_)) => {
                             // Current missing digest but allowlist has one - can't compare, assume no upgrade
                             tracing::debug!(
-                                "Non-TEE: Current digest missing but allowlist digest present: current=None, allowlist={:?}",
+                                "Upgrade check: Current digest missing but allowlist digest present: current=None, allowlist={:?}",
                                 entry.image_digest
                             );
                             false
                         }
                         (None, None) => {
                             // Both missing digests - can't compare, assume no upgrade
-                            tracing::debug!("Non-TEE: Both current and allowlist digests missing");
+                            tracing::debug!(
+                                "Upgrade check: Both current and allowlist digests missing"
+                            );
                             false
                         }
                     };
@@ -4646,7 +3956,7 @@ impl AgentServiceImpl {
                 None => {
                     // Image ref not in allowlist anymore - no upgrade info available
                     tracing::warn!(
-                        "Non-TEE: Current image ref not found in allowlist: ref={}",
+                        "Upgrade check: Current image ref not found in allowlist: ref={}",
                         current_image_ref
                     );
                     (false, current_image_ref.clone())
@@ -4658,7 +3968,7 @@ impl AgentServiceImpl {
                 .cloned();
 
             tracing::info!(
-                "Non-TEE upgrade check (non-versioned): instance_id={}, current_ref={}, current_digest={:?}, allowlist_digest={:?}, has_upgrade={}",
+                "Upgrade check (non-versioned): instance_id={}, current_ref={}, current_digest={:?}, allowlist_digest={:?}, has_upgrade={}",
                 instance_id,
                 current_image_ref,
                 current_digest,
@@ -4678,8 +3988,8 @@ impl AgentServiceImpl {
 }
 
 impl AgentServiceImpl {
-    /// Upgrade instance with SSE stream for TEE infrastructure (compose-api)
-    async fn upgrade_instance_stream_tee(
+    /// Upgrade instance with an SSE stream from the crabshack manager
+    async fn upgrade_instance_stream_impl(
         &self,
         instance: &AgentInstance,
         manager: &AgentManager,
@@ -4687,79 +3997,7 @@ impl AgentServiceImpl {
         user_id: UserId,
     ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<bytes::Bytes>>> {
         tracing::info!(
-            "Upgrading instance (TEE streaming): instance_id={}, instance_name={}",
-            instance_id,
-            instance.name
-        );
-
-        // Resolve bearer token: for passkey instances, login to get a fresh token
-        let bearer_token = self.resolve_bearer_token(instance, manager).await?;
-
-        // Fetch latest images from compose-api
-        let version_url = format!("{}/version", manager.url);
-        tracing::debug!("TEE upgrade: Fetching versions from: {}", version_url);
-        let version_resp = self
-            .http_client
-            .get(&version_url)
-            .bearer_auth(&bearer_token)
-            .timeout(std::time::Duration::from_secs(30))
-            .send()
-            .await
-            .map_err(|e| anyhow!("Failed to fetch compose-api version: {}", e))?;
-
-        if !version_resp.status().is_success() {
-            return Err(anyhow!(
-                "Failed to fetch compose-api version: status={}",
-                version_resp.status()
-            ));
-        }
-
-        #[derive(serde::Deserialize)]
-        struct VersionResponse {
-            images: std::collections::HashMap<String, String>,
-        }
-
-        let version: VersionResponse = version_resp
-            .json()
-            .await
-            .map_err(|e| anyhow!("Failed to parse compose-api version response: {}", e))?;
-
-        // Map service_type to image key in the version response
-        let service_type = instance.service_type_str();
-        let image_key = match service_type {
-            "ironclaw" => "ironclaw",
-            _ => "worker",
-        };
-
-        let image = version.images.get(image_key).cloned().ok_or_else(|| {
-            anyhow!(
-                "No image found for service type '{}' (key '{}')",
-                service_type,
-                image_key
-            )
-        })?;
-
-        tracing::debug!(
-            "TEE upgrade: Latest image for service_type='{}': {}",
-            service_type,
-            image
-        );
-
-        // Restart with the latest image (5-minute timeout; compose-api yields SSE stream)
-        self.call_restart_streaming(manager, instance, &image, instance_id, user_id)
-            .await
-    }
-
-    /// Upgrade instance with SSE stream for non-TEE infrastructure (crabshack)
-    async fn upgrade_instance_stream_non_tee(
-        &self,
-        instance: &AgentInstance,
-        manager: &AgentManager,
-        instance_id: Uuid,
-        user_id: UserId,
-    ) -> anyhow::Result<tokio::sync::mpsc::Receiver<anyhow::Result<bytes::Bytes>>> {
-        tracing::info!(
-            "Upgrading instance (non-TEE streaming): instance_id={}, instance_name={}",
+            "Upgrading instance (streaming): instance_id={}, instance_name={}",
             instance_id,
             instance.name
         );
@@ -4768,10 +4006,7 @@ impl AgentServiceImpl {
         let bearer_token = &manager.token;
         let encoded_name = urlencoding::encode(&instance.name);
         let instance_url = format!("{}/instances/{}", manager.url, encoded_name);
-        tracing::debug!(
-            "Non-TEE upgrade: Fetching current instance from: {}",
-            instance_url
-        );
+        tracing::debug!("Upgrade: Fetching current instance from: {}", instance_url);
 
         let instance_resp = self
             .http_client
@@ -4779,30 +4014,25 @@ impl AgentServiceImpl {
             .bearer_auth(bearer_token)
             .send()
             .await
-            .map_err(|e| anyhow!("Failed to fetch non-TEE instance for upgrade: {}", e))?;
+            .map_err(|e| anyhow!("Failed to fetch instance for upgrade: {}", e))?;
 
         if !instance_resp.status().is_success() {
             return Err(anyhow!(
-                "Failed to fetch non-TEE instance status during upgrade: status={}",
+                "Failed to fetch instance status during upgrade: status={}",
                 instance_resp.status()
             ));
         }
 
         let response_body = instance_resp.text().await.map_err(|e| {
             anyhow!(
-                "Failed to read non-TEE instance response body during upgrade: {}",
+                "Failed to read instance response body during upgrade: {}",
                 e
             )
         })?;
 
         // Avoid logging the raw response body during upgrade — same sensitivity as the check path above.
-        let current_instance: NonTeeInstanceResponse = serde_json::from_str(&response_body)
-            .map_err(|e| {
-                anyhow!(
-                    "Failed to parse non-TEE instance response during upgrade: {}",
-                    e
-                )
-            })?;
+        let current_instance: CrabshackInstanceResponse = serde_json::from_str(&response_body)
+            .map_err(|e| anyhow!("Failed to parse instance response during upgrade: {}", e))?;
 
         let native_service_type = current_instance.service_type.clone();
         let allowlist_target = allowlist_type_from_instance(
@@ -4811,7 +4041,7 @@ impl AgentServiceImpl {
         );
         let current_image = current_instance.image;
         tracing::debug!(
-            "Non-TEE upgrade: Current instance image: {}, digest: {:?}, service_type: {:?}",
+            "Upgrade: Current instance image: {}, digest: {:?}, service_type: {:?}",
             current_image,
             current_instance.image_digest,
             native_service_type
@@ -4820,11 +4050,11 @@ impl AgentServiceImpl {
         // Determine image and digest to upgrade to based on tag type
         let (image, image_digest) = if extract_version_from_image(&current_image).is_some() {
             // VERSIONED TAG: Get latest semver version
-            tracing::debug!("Non-TEE upgrade: Upgrading versioned image");
+            tracing::debug!("Upgrade: Upgrading versioned image");
             // Unlike the check, an upgrade with nothing to upgrade TO is a hard error —
             // "succeeding" without a target image would lie to the user.
             let (latest_image, _version, latest_digest) = self
-                .get_latest_image_non_tee(manager, allowlist_target, "upgrade")
+                .get_latest_image(manager, allowlist_target, "upgrade")
                 .await?
                 .ok_or_else(|| {
                     anyhow!(
@@ -4835,9 +4065,9 @@ impl AgentServiceImpl {
             (latest_image, latest_digest)
         } else {
             // NON-VERSIONED TAG: Validate current ref exists in allowlist and use same tag
-            tracing::debug!("Non-TEE upgrade: Upgrading non-versioned image");
+            tracing::debug!("Upgrade: Upgrading non-versioned image");
             let (allowed_entries, _hosting_config) = self
-                .fetch_allowed_images_non_tee(manager, allowlist_target, "upgrade")
+                .fetch_allowed_images(manager, allowlist_target, "upgrade")
                 .await?;
 
             let allowlist_entry = allowed_entries.iter().find(|e| e.ref_ == current_image);
@@ -4850,7 +4080,7 @@ impl AgentServiceImpl {
             let target_digest = entry.image_digest.clone();
 
             tracing::debug!(
-                "Non-TEE upgrade: Non-versioned tag found in allowlist: ref={}, current_digest={:?}, target_digest={:?}",
+                "Upgrade: Non-versioned tag found in allowlist: ref={}, current_digest={:?}, target_digest={:?}",
                 current_image,
                 current_instance.image_digest,
                 target_digest
@@ -4860,7 +4090,7 @@ impl AgentServiceImpl {
             (current_image.clone(), target_digest)
         };
 
-        // Combine image and digest using OCI format (name[:tag]@digest) for non-TEE.
+        // Combine image and digest using OCI format (name[:tag]@digest).
         // Keep the original tag when present so manager /instances responses preserve mutable tag context
         // (e.g., :staging) while still pinning by digest.
         let target_image_ref = if let Some(digest) = image_digest {
@@ -4873,7 +4103,7 @@ impl AgentServiceImpl {
         };
 
         tracing::debug!(
-            "Non-TEE upgrade: Target image ref to restart with: {}",
+            "Upgrade: Target image ref to restart with: {}",
             target_image_ref
         );
 
@@ -4883,7 +4113,7 @@ impl AgentServiceImpl {
     }
 
     /// Call /instances/{name}/restart with image ref and stream the response.
-    /// For non-TEE, image should be in OCI format: name[:tag]@digest when digest is known.
+    /// Image should be in OCI format: name[:tag]@digest when digest is known.
     async fn call_restart_streaming(
         &self,
         manager: &AgentManager,
@@ -5009,86 +4239,8 @@ mod tests {
         AgentHostingConfig, AgentHostingCrabshackConfig, PartialSystemConfigs, SystemConfigs,
         SystemConfigsService,
     };
-    use chrono::{Duration, Utc};
+    use chrono::Utc;
     use config::AgentManager;
-
-    impl AgentServiceImpl {
-        /// Test-only wrapper that preserves legacy test call sites.
-        async fn next_available_manager(&self) -> anyhow::Result<AgentManager> {
-            let configs = self.get_system_configs().await;
-            let non_tee_infra = Self::is_non_tee_infra(&configs);
-            let manager_type = if non_tee_infra {
-                ManagerType::NonTee
-            } else {
-                ManagerType::Tee
-            };
-            self.next_available_manager_for_type(manager_type).await
-        }
-    }
-
-    #[test]
-    fn compose_api_service_type_on_create_tee_passes_canonical() {
-        assert_eq!(
-            compose_api_service_type_on_create(false, "ironclaw", None),
-            "ironclaw"
-        );
-        assert_eq!(
-            compose_api_service_type_on_create(false, "openclaw", None),
-            "openclaw"
-        );
-    }
-
-    #[test]
-    fn compose_api_service_type_on_create_non_tee_maps_ironclaw_and_openclaw() {
-        assert_eq!(
-            compose_api_service_type_on_create(true, "ironclaw", None),
-            "ironclaw-dind"
-        );
-        assert_eq!(
-            compose_api_service_type_on_create(true, "openclaw", None),
-            "openclaw"
-        );
-    }
-
-    #[test]
-    fn compose_api_service_type_on_create_non_tee_respects_hosting_overrides() {
-        let hosting = AgentHostingConfig {
-            new_agent_with_non_tee_infra: None,
-            crabshack: AgentHostingCrabshackConfig {
-                ironclaw_service_type: Some("iron-claw-custom".to_string()),
-                openclaw_service_type: Some("oc-custom".to_string()),
-                ..Default::default()
-            },
-        };
-        assert_eq!(
-            compose_api_service_type_on_create(true, "ironclaw", Some(&hosting)),
-            "iron-claw-custom"
-        );
-        assert_eq!(
-            compose_api_service_type_on_create(true, "openclaw", Some(&hosting)),
-            "oc-custom"
-        );
-    }
-
-    /// Why: the manager-reported service_type must win over the canonical mapping so
-    /// existing instances track their own image line; blank/missing values fall back.
-    #[test]
-    fn allowlist_type_from_instance_prefers_native_falls_back_to_canonical() {
-        assert_eq!(
-            allowlist_type_from_instance(Some("ironclaw-dind"), "ironclaw"),
-            AllowlistServiceType::Native("ironclaw-dind")
-        );
-        assert_eq!(
-            allowlist_type_from_instance(None, "ironclaw"),
-            AllowlistServiceType::Canonical("ironclaw")
-        );
-        assert_eq!(
-            allowlist_type_from_instance(Some("  "), "ironclaw"),
-            AllowlistServiceType::Canonical("ironclaw")
-        );
-    }
-
-    // --- Mock SystemConfigsService ---
 
     struct MockSystemConfigsService {
         configs: Option<SystemConfigs>,
@@ -5100,47 +4252,6 @@ mod tests {
             Self { configs: None }
         }
 
-        /// No config row with non-TEE infra enabled
-        fn no_config_with_non_tee() -> Self {
-            use crate::system_configs::ports::AgentHostingConfig;
-            Self {
-                configs: Some(SystemConfigs {
-                    agent_hosting: Some(AgentHostingConfig {
-                        new_agent_with_non_tee_infra: Some(true),
-                        crabshack: Default::default(),
-                    }),
-                    ..Default::default()
-                }),
-            }
-        }
-
-        fn with_non_tee_infra(non_tee_infra: bool) -> Self {
-            use crate::system_configs::ports::AgentHostingConfig;
-            Self {
-                configs: Some(SystemConfigs {
-                    agent_hosting: Some(AgentHostingConfig {
-                        new_agent_with_non_tee_infra: Some(non_tee_infra),
-                        crabshack: Default::default(),
-                    }),
-                    ..Default::default()
-                }),
-            }
-        }
-
-        fn with_manager_limit_and_non_tee(max: u64, non_tee: bool) -> Self {
-            use crate::system_configs::ports::AgentHostingConfig;
-            Self {
-                configs: Some(SystemConfigs {
-                    max_instances_per_manager: Some(max),
-                    agent_hosting: Some(AgentHostingConfig {
-                        new_agent_with_non_tee_infra: Some(non_tee),
-                        crabshack: Default::default(),
-                    }),
-                    ..Default::default()
-                }),
-            }
-        }
-
         fn with_manager_limit(max: u64) -> Self {
             Self {
                 configs: Some(SystemConfigs {
@@ -5150,13 +4261,11 @@ mod tests {
             }
         }
 
-        /// Per-URL limits with non-TEE infra enabled
         fn with_allow_prerelease_upgrades(allow_prerelease: bool) -> Self {
             use crate::system_configs::ports::{AgentHostingConfig, AgentHostingCrabshackConfig};
             Self {
                 configs: Some(SystemConfigs {
                     agent_hosting: Some(AgentHostingConfig {
-                        new_agent_with_non_tee_infra: None,
                         crabshack: AgentHostingCrabshackConfig {
                             allow_prerelease_upgrades: Some(allow_prerelease),
                             ..Default::default()
@@ -5173,7 +4282,6 @@ mod tests {
             Self {
                 configs: Some(SystemConfigs {
                     agent_hosting: Some(AgentHostingConfig {
-                        new_agent_with_non_tee_infra: None,
                         crabshack: AgentHostingCrabshackConfig {
                             ironclaw_service_type: Some(service_type.to_string()),
                             ..Default::default()
@@ -5184,8 +4292,7 @@ mod tests {
             }
         }
 
-        fn with_per_url_limits_and_non_tee() -> Self {
-            use crate::system_configs::ports::AgentHostingConfig;
+        fn with_per_url_limits() -> Self {
             use std::collections::HashMap;
             let mut per_url = HashMap::new();
             per_url.insert(
@@ -5200,10 +4307,6 @@ mod tests {
                 configs: Some(SystemConfigs {
                     max_instances_per_manager: Some(200),
                     max_instances_by_manager_url: Some(per_url),
-                    agent_hosting: Some(AgentHostingConfig {
-                        new_agent_with_non_tee_infra: Some(true),
-                        crabshack: Default::default(),
-                    }),
                     ..Default::default()
                 }),
             }
@@ -5226,31 +4329,6 @@ mod tests {
         }
     }
 
-    /// System configs service that always fails `get_configs` (for gateway / error-path tests).
-    struct MockSystemConfigsServiceErr;
-
-    #[async_trait]
-    impl SystemConfigsService for MockSystemConfigsServiceErr {
-        async fn get_configs(&self) -> anyhow::Result<Option<SystemConfigs>> {
-            Err(anyhow!("injected system_configs get_configs failure"))
-        }
-
-        async fn upsert_configs(&self, _configs: SystemConfigs) -> anyhow::Result<SystemConfigs> {
-            Err(anyhow!(
-                "MockSystemConfigsServiceErr: upsert_configs not supported"
-            ))
-        }
-
-        async fn update_configs(
-            &self,
-            _configs: PartialSystemConfigs,
-        ) -> anyhow::Result<SystemConfigs> {
-            Err(anyhow!(
-                "MockSystemConfigsServiceErr: update_configs not supported"
-            ))
-        }
-    }
-
     use crate::agent::ports::MockAgentRepository;
 
     /// Create a MockAgentRepository where every manager has `count` instances
@@ -5264,12 +4342,10 @@ mod tests {
     }
 
     fn make_managers(n: usize) -> Vec<AgentManager> {
-        // Default to non-TEE managers for tests
         (0..n)
             .map(|i| AgentManager {
                 url: format!("https://claws.example.com/api/crabshack/mgr{}", i),
                 token: format!("token{}", i),
-                is_non_tee: true,
             })
             .collect()
     }
@@ -5284,133 +4360,11 @@ mod tests {
             managers,
             "https://nearai.test/v1".to_string(),
             configs,
-            None,                // channel_relay_url
-            "claws".to_string(), // non_tee_agent_url_pattern
+            None, // channel_relay_url
         )
     }
 
     // --- Tests ---
-
-    #[test]
-    fn test_user_has_non_tee_routed_instance_positive() {
-        let ntee_url = "https://claws.example.com/api/crabshack/mgr0".to_string();
-        let managers = vec![
-            AgentManager {
-                url: "https://tee.example/api".to_string(),
-                token: "tee-tok".to_string(),
-                is_non_tee: false,
-            },
-            AgentManager {
-                url: ntee_url.clone(),
-                token: "ntok".to_string(),
-                is_non_tee: true,
-            },
-        ];
-        let svc = make_service(
-            managers,
-            Arc::new(mock_repo_with_manager_count(0)),
-            Arc::new(MockSystemConfigsService::no_config()),
-        );
-
-        let uid = UserId(Uuid::new_v4());
-        let instance = AgentInstance {
-            id: Uuid::new_v4(),
-            user_id: uid,
-            instance_id: "i1".to_string(),
-            name: "n1".to_string(),
-            public_ssh_key: None,
-            instance_url: None,
-            instance_token: None,
-            dashboard_url: None,
-            agent_api_base_url: Some(ntee_url),
-            service_type: None,
-            status: "active".to_string(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
-
-        assert!(svc.user_has_non_tee_routed_instance(&[instance]));
-    }
-
-    #[test]
-    fn test_user_has_non_tee_routed_instance_false_when_only_tee_manager_url() {
-        let tee_url = "https://tee.example/api".to_string();
-        let managers = vec![AgentManager {
-            url: tee_url.clone(),
-            token: "tee-tok".to_string(),
-            is_non_tee: false,
-        }];
-        let svc = make_service(
-            managers,
-            Arc::new(mock_repo_with_manager_count(0)),
-            Arc::new(MockSystemConfigsService::no_config()),
-        );
-
-        let uid = UserId(Uuid::new_v4());
-        let instance = AgentInstance {
-            id: Uuid::new_v4(),
-            user_id: uid,
-            instance_id: "i1".to_string(),
-            name: "n1".to_string(),
-            public_ssh_key: None,
-            instance_url: None,
-            instance_token: None,
-            dashboard_url: None,
-            agent_api_base_url: Some(tee_url),
-            service_type: None,
-            status: "active".to_string(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
-
-        assert!(!svc.user_has_non_tee_routed_instance(&[instance]));
-    }
-
-    #[tokio::test]
-    async fn test_setup_gateway_session_skips_when_tee_no_passkey_no_non_tee_instances() {
-        let mut repo = MockAgentRepository::new();
-        repo.expect_get_user_passkey_credentials()
-            .times(1)
-            .returning(|_| Ok(None));
-        repo.expect_list_user_instances()
-            .times(1)
-            .returning(|_, _, _| Ok((vec![], 0)));
-
-        let svc = make_service(
-            make_managers(1),
-            Arc::new(repo),
-            Arc::new(MockSystemConfigsService::with_non_tee_infra(false)),
-        );
-
-        let out = svc
-            .setup_gateway_session_for_user(UserId(Uuid::new_v4()))
-            .await
-            .unwrap();
-        assert!(out.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_setup_gateway_session_propagates_system_config_load_error() {
-        let mut repo = MockAgentRepository::new();
-        repo.expect_get_user_passkey_credentials().times(0);
-        repo.expect_list_user_instances().times(0);
-
-        let svc = make_service(
-            make_managers(1),
-            Arc::new(repo),
-            Arc::new(MockSystemConfigsServiceErr),
-        );
-
-        let err = svc
-            .setup_gateway_session_for_user(UserId(Uuid::new_v4()))
-            .await
-            .unwrap_err();
-        assert!(
-            err.to_string().contains("injected system_configs"),
-            "err={}",
-            err
-        );
-    }
 
     #[test]
     fn test_next_manager_round_robin_single() {
@@ -5492,7 +4446,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_manager_falls_back_to_matching_type() {
+    fn test_resolve_manager_rejects_unknown_stored_url() {
         let managers = make_managers(2);
         let svc = make_service(
             managers.clone(),
@@ -5500,7 +4454,7 @@ mod tests {
             Arc::new(MockSystemConfigsService::no_config()),
         );
 
-        // Instance with non-TEE URL (contains "claws") should match non-TEE managers
+        // A stored URL not among the configured managers is an error, not a silent reroute
         let instance = AgentInstance {
             id: Uuid::new_v4(),
             user_id: UserId(Uuid::new_v4()),
@@ -5517,39 +4471,8 @@ mod tests {
             updated_at: Utc::now(),
         };
 
-        let mgr = svc.resolve_manager(&instance).unwrap();
-        assert_eq!(mgr.url, "https://claws.example.com/api/crabshack/mgr0");
-    }
-
-    #[test]
-    fn test_resolve_manager_fails_when_type_unavailable() {
-        let managers = make_managers(2); // All non-TEE managers
-        let svc = make_service(
-            managers.clone(),
-            Arc::new(mock_repo_with_manager_count(0)),
-            Arc::new(MockSystemConfigsService::no_config()),
-        );
-
-        // Instance with TEE URL (no "claws") should fail when only non-TEE managers available
-        let instance = AgentInstance {
-            id: Uuid::new_v4(),
-            user_id: UserId(Uuid::new_v4()),
-            instance_id: "test".to_string(),
-            name: "test".to_string(),
-            public_ssh_key: None,
-            instance_url: None,
-            instance_token: None,
-            dashboard_url: None,
-            agent_api_base_url: Some("https://api.openclaw-dev.near.ai".to_string()),
-            service_type: None,
-            status: "active".to_string(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
-
-        let result = svc.resolve_manager(&instance);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("TEE manager"));
+        let err = svc.resolve_manager(&instance).unwrap_err();
+        assert!(err.to_string().contains("is not configured"), "err={err}");
     }
 
     #[test]
@@ -5587,7 +4510,7 @@ mod tests {
         let svc = make_service(
             make_managers(2),
             Arc::new(mock_repo_with_manager_count(50)),
-            Arc::new(MockSystemConfigsService::no_config_with_non_tee()),
+            Arc::new(MockSystemConfigsService::no_config()),
         );
 
         // count=50 < default 200 → manager is available
@@ -5616,9 +4539,7 @@ mod tests {
         let svc = make_service(
             make_managers(2),
             Arc::new(mock_repo_with_manager_count(3)),
-            Arc::new(MockSystemConfigsService::with_manager_limit_and_non_tee(
-                10, true,
-            )),
+            Arc::new(MockSystemConfigsService::with_manager_limit(10)),
         );
 
         let mgr = svc.next_available_manager().await.unwrap();
@@ -5632,9 +4553,7 @@ mod tests {
         let svc = make_service(
             make_managers(2),
             Arc::new(mock_repo_with_manager_count(100)),
-            Arc::new(MockSystemConfigsService::with_manager_limit_and_non_tee(
-                100, true,
-            )),
+            Arc::new(MockSystemConfigsService::with_manager_limit(100)),
         );
 
         let result = svc.next_available_manager().await;
@@ -5656,9 +4575,7 @@ mod tests {
         let svc = make_service(
             make_managers(2),
             Arc::new(repo),
-            Arc::new(MockSystemConfigsService::with_manager_limit_and_non_tee(
-                10, true,
-            )),
+            Arc::new(MockSystemConfigsService::with_manager_limit(10)),
         );
 
         let mgr = svc.next_available_manager().await.unwrap();
@@ -5679,120 +4596,11 @@ mod tests {
         let svc = make_service(
             make_managers(2),
             Arc::new(repo),
-            Arc::new(MockSystemConfigsService::with_per_url_limits_and_non_tee()),
+            Arc::new(MockSystemConfigsService::with_per_url_limits()),
         );
 
         let mgr = svc.next_available_manager().await.unwrap();
         assert_eq!(mgr.url, "https://claws.example.com/api/crabshack/mgr1");
-    }
-
-    #[tokio::test]
-    async fn test_next_available_manager_for_type_applies_limit_to_tee_pool() {
-        let managers = vec![
-            AgentManager {
-                url: "https://tee-full.example.com".to_string(),
-                token: "tee-full-token".to_string(),
-                is_non_tee: false,
-            },
-            AgentManager {
-                url: "https://tee-room.example.com".to_string(),
-                token: "tee-room-token".to_string(),
-                is_non_tee: false,
-            },
-            AgentManager {
-                url: "https://claws.example.com/api/crabshack/non-tee".to_string(),
-                token: "non-tee-token".to_string(),
-                is_non_tee: true,
-            },
-        ];
-
-        let mut repo = MockAgentRepository::new();
-        repo.expect_count_instances_by_manager()
-            .withf(|url: &str| url == "https://tee-full.example.com")
-            .returning(|_| Ok(10));
-        repo.expect_count_instances_by_manager()
-            .withf(|url: &str| url == "https://tee-room.example.com")
-            .returning(|_| Ok(5));
-
-        let svc = make_service(
-            managers,
-            Arc::new(repo),
-            Arc::new(MockSystemConfigsService::with_manager_limit(10)),
-        );
-
-        let mgr = svc
-            .next_available_manager_for_type(ManagerType::Tee)
-            .await
-            .unwrap();
-        assert_eq!(mgr.url, "https://tee-room.example.com");
-    }
-
-    #[tokio::test]
-    async fn test_next_available_manager_for_type_applies_limit_to_non_tee_pool() {
-        let managers = vec![
-            AgentManager {
-                url: "https://claws.example.com/api/crabshack/non-tee-full".to_string(),
-                token: "non-tee-full-token".to_string(),
-                is_non_tee: true,
-            },
-            AgentManager {
-                url: "https://claws.example.com/api/crabshack/non-tee-room".to_string(),
-                token: "non-tee-room-token".to_string(),
-                is_non_tee: true,
-            },
-            AgentManager {
-                url: "https://tee.example.com".to_string(),
-                token: "tee-token".to_string(),
-                is_non_tee: false,
-            },
-        ];
-
-        let mut repo = MockAgentRepository::new();
-        repo.expect_count_instances_by_manager()
-            .withf(|url: &str| url == "https://claws.example.com/api/crabshack/non-tee-full")
-            .returning(|_| Ok(10));
-        repo.expect_count_instances_by_manager()
-            .withf(|url: &str| url == "https://claws.example.com/api/crabshack/non-tee-room")
-            .returning(|_| Ok(4));
-
-        let svc = make_service(
-            managers,
-            Arc::new(repo),
-            Arc::new(MockSystemConfigsService::with_manager_limit(10)),
-        );
-
-        let mgr = svc
-            .next_available_manager_for_type(ManagerType::NonTee)
-            .await
-            .unwrap();
-        assert_eq!(
-            mgr.url,
-            "https://claws.example.com/api/crabshack/non-tee-room"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_next_available_manager_for_type_errors_on_empty_target_pool() {
-        let managers = vec![AgentManager {
-            url: "https://tee.example.com".to_string(),
-            token: "tee-token".to_string(),
-            is_non_tee: false,
-        }];
-
-        let svc = make_service(
-            managers,
-            Arc::new(mock_repo_with_manager_count(0)),
-            Arc::new(MockSystemConfigsService::no_config()),
-        );
-
-        let result = svc
-            .next_available_manager_for_type(ManagerType::NonTee)
-            .await;
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("No suitable managers available: manager_type=non-tee"));
     }
 
     #[test]
@@ -5812,7 +4620,6 @@ mod tests {
             vec![AgentManager {
                 url: "https://test.com".to_string(),
                 token: "".to_string(),
-                is_non_tee: false,
             }],
             Arc::new(mock_repo_with_manager_count(0)),
             Arc::new(MockSystemConfigsService::no_config()),
@@ -5824,9 +4631,7 @@ mod tests {
     mod wiremock_tests {
         use super::*;
         use mockall::predicate::eq;
-        use wiremock::matchers::{
-            bearer_token, body_partial_json, header, method, path, path_regex,
-        };
+        use wiremock::matchers::{bearer_token, body_partial_json, method, path, path_regex};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         async fn setup_mock_server() -> MockServer {
@@ -5885,12 +4690,10 @@ mod tests {
                 AgentManager {
                     url: server1.uri(),
                     token: "tok1".to_string(),
-                    is_non_tee: false,
                 },
                 AgentManager {
                     url: server2.uri(),
                     token: "tok2".to_string(),
-                    is_non_tee: false,
                 },
             ];
 
@@ -5938,12 +4741,10 @@ mod tests {
                 AgentManager {
                     url: server1.uri(),
                     token: "tok".to_string(),
-                    is_non_tee: false,
                 },
                 AgentManager {
                     url: server2.uri(),
                     token: "tok".to_string(),
-                    is_non_tee: false,
                 },
             ];
 
@@ -5988,12 +4789,10 @@ mod tests {
                 AgentManager {
                     url: server1.uri(),
                     token: "tok".to_string(),
-                    is_non_tee: false,
                 },
                 AgentManager {
                     url: server2.uri(),
                     token: "tok".to_string(),
-                    is_non_tee: false,
                 },
             ];
 
@@ -6055,12 +4854,10 @@ mod tests {
                 AgentManager {
                     url: server1.uri(),
                     token: "tok".to_string(),
-                    is_non_tee: false,
                 },
                 AgentManager {
                     url: server2.uri(),
                     token: "tok".to_string(),
-                    is_non_tee: false,
                 },
             ];
 
@@ -6106,12 +4903,10 @@ mod tests {
                 AgentManager {
                     url: server1.uri(),
                     token: "tok".to_string(),
-                    is_non_tee: false,
                 },
                 AgentManager {
                     url: server2.uri(),
                     token: "tok".to_string(),
-                    is_non_tee: false,
                 },
             ];
 
@@ -6148,7 +4943,6 @@ mod tests {
             let mgr = AgentManager {
                 url: server.uri(),
                 token: "my-secret-token".to_string(),
-                is_non_tee: false,
             };
 
             let svc = make_service(
@@ -6202,12 +4996,10 @@ mod tests {
                 AgentManager {
                     url: server1.uri(),
                     token: "tok1".to_string(),
-                    is_non_tee: false,
                 },
                 AgentManager {
                     url: server2.uri(),
                     token: "tok2".to_string(),
-                    is_non_tee: false,
                 },
             ];
 
@@ -6322,7 +5114,6 @@ mod tests {
                 vec![AgentManager {
                     url: server.uri(),
                     token: "tok".to_string(),
-                    is_non_tee: false,
                 }],
                 Arc::new(repo),
                 Arc::new(MockSystemConfigsService::no_config()),
@@ -6367,7 +5158,6 @@ mod tests {
                 vec![AgentManager {
                     url: server.uri(),
                     token: "tok".to_string(),
-                    is_non_tee: false,
                 }],
                 Arc::new(repo),
                 Arc::new(MockSystemConfigsService::no_config()),
@@ -6417,7 +5207,6 @@ mod tests {
                 vec![AgentManager {
                     url: server.uri(),
                     token: "tok".to_string(),
-                    is_non_tee: false,
                 }],
                 Arc::new(repo),
                 Arc::new(MockSystemConfigsService::no_config()),
@@ -6458,7 +5247,6 @@ mod tests {
                 vec![AgentManager {
                     url: server.uri(),
                     token: "tok".to_string(),
-                    is_non_tee: false,
                 }],
                 Arc::new(repo),
                 Arc::new(MockSystemConfigsService::no_config()),
@@ -6508,7 +5296,6 @@ mod tests {
                 vec![AgentManager {
                     url: server.uri(),
                     token: "tok".to_string(),
-                    is_non_tee: false,
                 }],
                 Arc::new(repo),
                 Arc::new(MockSystemConfigsService::no_config()),
@@ -6553,7 +5340,6 @@ mod tests {
                 vec![AgentManager {
                     url: server.uri(),
                     token: "tok".to_string(),
-                    is_non_tee: false,
                 }],
                 Arc::new(repo),
                 Arc::new(MockSystemConfigsService::no_config()),
@@ -6608,7 +5394,6 @@ mod tests {
                 vec![AgentManager {
                     url: server.uri(),
                     token: "tok".to_string(),
-                    is_non_tee: false,
                 }],
                 Arc::new(repo),
                 Arc::new(MockSystemConfigsService::no_config()),
@@ -6661,7 +5446,6 @@ mod tests {
                 vec![AgentManager {
                     url: server.uri(),
                     token: "tok".to_string(),
-                    is_non_tee: false,
                 }],
                 Arc::new(repo),
                 Arc::new(MockSystemConfigsService::no_config()),
@@ -6706,7 +5490,6 @@ mod tests {
                 vec![AgentManager {
                     url: server.uri(),
                     token: "tok".to_string(),
-                    is_non_tee: false,
                 }],
                 Arc::new(repo),
                 Arc::new(MockSystemConfigsService::no_config()),
@@ -6740,7 +5523,6 @@ mod tests {
                 vec![AgentManager {
                     url: server.uri(),
                     token: "tok".to_string(),
-                    is_non_tee: false,
                 }],
                 Arc::new(repo),
                 Arc::new(MockSystemConfigsService::no_config()),
@@ -6783,7 +5565,6 @@ mod tests {
                 vec![AgentManager {
                     url: server.uri(),
                     token: "tok".to_string(),
-                    is_non_tee: false,
                 }],
                 Arc::new(repo),
                 Arc::new(MockSystemConfigsService::no_config()),
@@ -6820,7 +5601,6 @@ mod tests {
                 vec![AgentManager {
                     url: server.uri(),
                     token: "tok".to_string(),
-                    is_non_tee: false,
                 }],
                 Arc::new(repo),
                 Arc::new(MockSystemConfigsService::no_config()),
@@ -6868,7 +5648,6 @@ mod tests {
                 vec![AgentManager {
                     url: server.uri(),
                     token: "tok".to_string(),
-                    is_non_tee: false,
                 }],
                 Arc::new(repo),
                 Arc::new(MockSystemConfigsService::no_config()),
@@ -6925,7 +5704,6 @@ mod tests {
                 vec![AgentManager {
                     url: server.uri(),
                     token: "tok".to_string(),
-                    is_non_tee: false,
                 }],
                 Arc::new(repo),
                 Arc::new(MockSystemConfigsService::no_config()),
@@ -6964,7 +5742,6 @@ mod tests {
                 vec![AgentManager {
                     url: server.uri(),
                     token: "tok".to_string(),
-                    is_non_tee: false,
                 }],
                 Arc::new(repo),
                 Arc::new(MockSystemConfigsService::no_config()),
@@ -6981,169 +5758,7 @@ mod tests {
             assert!(!r.errors.is_empty());
         }
 
-        // --- End-to-End Flow Tests ---
-
-        #[tokio::test]
-        async fn test_e2e_tee_mode_flow() {
-            let server = setup_mock_server().await;
-
-            // TEE mode: mock TEE compose-api response
-            // Should receive service type as-is (ironclaw)
-            Mock::given(method("POST"))
-                .and(path("/instances"))
-                .and(header("Content-Type", "application/json"))
-                .and(bearer_token("cloud-token"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "instance": {
-                        "name": "test-tee-instance",
-                        "token": "instance-token-tee",
-                        "url": "https://test-tee-instance.cloud.example.com"
-                    }
-                })))
-                .mount(&server)
-                .await;
-
-            let server_uri = server.uri();
-            let mut repo = MockAgentRepository::new();
-            repo.expect_create_unbound_api_key()
-                .returning(|_, _, _, _, _| {
-                    Ok(AgentApiKey {
-                        id: Uuid::new_v4(),
-                        instance_id: None,
-                        user_id: UserId::new(),
-                        name: "test-key".to_string(),
-                        spend_limit: None,
-                        expires_at: Some(Utc::now() + Duration::days(90)),
-                        last_used_at: None,
-                        is_active: true,
-                        created_at: Utc::now(),
-                        updated_at: Utc::now(),
-                    })
-                });
-
-            let server_uri_clone = server_uri.clone();
-            repo.expect_create_instance().returning(move |_| {
-                Ok(AgentInstance {
-                    id: Uuid::new_v4(),
-                    user_id: UserId::new(),
-                    instance_id: "inst-123".to_string(),
-                    name: "test-tee-instance".to_string(),
-                    public_ssh_key: None,
-                    instance_url: Some("https://test-tee-instance.cloud.example.com".to_string()),
-                    instance_token: Some("instance-token-tee".to_string()),
-                    dashboard_url: None,
-                    agent_api_base_url: Some(server_uri_clone.clone()),
-                    service_type: Some("ironclaw".to_string()),
-                    status: "active".to_string(),
-                    created_at: Utc::now(),
-                    updated_at: Utc::now(),
-                })
-            });
-
-            let service = AgentServiceImpl::new(
-                Arc::new(repo),
-                vec![AgentManager {
-                    url: server_uri.clone(),
-                    token: "cloud-token".to_string(),
-                    is_non_tee: false,
-                }],
-                "https://nearai.example.com/v1".to_string(),
-                Arc::new(MockSystemConfigsService::no_config()),
-                None,
-                "claws".to_string(), // non_tee_agent_url_pattern
-            );
-
-            // Verify TEE mode behavior:
-            // 1. Service type used as-is (ironclaw)
-            // 2. No passkey login attempted
-            // 3. Manager token used
-            assert!(
-                !service.managers[0].is_non_tee,
-                "Manager should be TEE mode"
-            );
-        }
-
-        #[tokio::test]
-        async fn test_e2e_non_tee_mode_flow() {
-            let server = setup_mock_server().await;
-
-            // Non-TEE mode: Mock compose-api response
-            // Should accept ironclaw as-is
-            Mock::given(method("POST"))
-                .and(path("/instances"))
-                .and(header("Content-Type", "application/json"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "instance": {
-                        "name": "test-nontee-instance",
-                        "token": "instance-token-nontee",
-                        "url": "https://test-nontee-instance.claws.example.com"
-                    }
-                })))
-                .mount(&server)
-                .await;
-
-            let server_uri = server.uri();
-            let mut repo = MockAgentRepository::new();
-            repo.expect_create_unbound_api_key()
-                .returning(|_, _, _, _, _| {
-                    Ok(AgentApiKey {
-                        id: Uuid::new_v4(),
-                        instance_id: None,
-                        user_id: UserId::new(),
-                        name: "test-key".to_string(),
-                        spend_limit: None,
-                        expires_at: Some(Utc::now() + Duration::days(90)),
-                        last_used_at: None,
-                        is_active: true,
-                        created_at: Utc::now(),
-                        updated_at: Utc::now(),
-                    })
-                });
-
-            let server_uri_clone = server_uri.clone();
-            repo.expect_create_instance().returning(move |_| {
-                Ok(AgentInstance {
-                    id: Uuid::new_v4(),
-                    user_id: UserId::new(),
-                    instance_id: "inst-456".to_string(),
-                    name: "test-nontee-instance".to_string(),
-                    public_ssh_key: None,
-                    instance_url: Some(
-                        "https://test-nontee-instance.claws.example.com".to_string(),
-                    ),
-                    instance_token: Some("instance-token-nontee".to_string()),
-                    dashboard_url: None,
-                    agent_api_base_url: Some(server_uri_clone.clone()),
-                    service_type: Some("ironclaw".to_string()),
-                    status: "active".to_string(),
-                    created_at: Utc::now(),
-                    updated_at: Utc::now(),
-                })
-            });
-
-            let service = AgentServiceImpl::new(
-                Arc::new(repo),
-                vec![AgentManager {
-                    url: server_uri.clone(),
-                    token: "compose-token".to_string(),
-                    is_non_tee: true,
-                }],
-                "https://nearai.example.com/v1".to_string(),
-                Arc::new(MockSystemConfigsService::no_config()),
-                None,
-                "claws".to_string(), // non_tee_agent_url_pattern
-            );
-
-            // Verify non-TEE mode behavior:
-            // 1. Service type used as-is (ironclaw)
-            // 2. Passkey login can be attempted
-            assert!(
-                service.managers[0].is_non_tee,
-                "Manager should be non-TEE mode"
-            );
-        }
-
-        // --- Non-TEE `check_upgrade_available` (crabshack allowlist + instance image) ---
+        // --- `check_upgrade_available` (crabshack allowlist + instance image) ---
 
         fn upgrade_check_instance(
             instance_db_id: Uuid,
@@ -7200,7 +5815,6 @@ mod tests {
                 vec![AgentManager {
                     url: crabshack_uri.to_string(),
                     token: token.to_string(),
-                    is_non_tee: true,
                 }],
                 Arc::new(repo),
                 configs,
@@ -7208,7 +5822,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn non_tee_check_upgrade_legacy_openclaw_dind_filter_and_semver() {
+        async fn check_upgrade_legacy_openclaw_dind_filter_and_semver() {
             let server = setup_mock_server().await;
             let uri = server.uri();
             let token = "crab-token";
@@ -7271,7 +5885,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn non_tee_check_upgrade_prerelease_same_numeric_max_picks_later_allowlist_entry() {
+        async fn check_upgrade_prerelease_same_numeric_max_picks_later_allowlist_entry() {
             let server = setup_mock_server().await;
             let uri = server.uri();
             let token = "crab-token";
@@ -7333,7 +5947,7 @@ mod tests {
 
         /// With `allow_prerelease_upgrades=false` (default), latest semver from allowlist ignores pre-releases.
         #[tokio::test]
-        async fn non_tee_stable_only_filter_picks_highest_stable_not_prerelease() {
+        async fn stable_only_filter_picks_highest_stable_not_prerelease() {
             let server = setup_mock_server().await;
             let uri = server.uri();
             let token = "crab-token";
@@ -7391,7 +6005,7 @@ mod tests {
 
         /// With `allow_prerelease_upgrades=true`, pre-releases compete for “latest” alongside stables.
         #[tokio::test]
-        async fn non_tee_allow_prerelease_includes_prerelease_in_latest() {
+        async fn allow_prerelease_includes_prerelease_in_latest() {
             let server = setup_mock_server().await;
             let uri = server.uri();
             let token = "crab-token";
@@ -7492,7 +6106,7 @@ mod tests {
         /// Given a crabshack instance reporting `service_type: ironclaw-dind` on 0.27.0,
         /// when checking upgrade availability, then latest is dind 0.29.1, not reborn 1.x.
         #[tokio::test]
-        async fn non_tee_check_upgrade_dind_instance_ignores_reborn_override() {
+        async fn check_upgrade_dind_instance_ignores_reborn_override() {
             let server = setup_mock_server().await;
             let uri = server.uri();
             let instance_id = Uuid::new_v4();
@@ -7540,7 +6154,7 @@ mod tests {
         /// when checking upgrade availability, then latest is the Reborn 1.1.0 release
         /// and the dind line does not leak in.
         #[tokio::test]
-        async fn non_tee_check_upgrade_reborn_instance_sees_reborn_releases() {
+        async fn check_upgrade_reborn_instance_sees_reborn_releases() {
             let server = setup_mock_server().await;
             let uri = server.uri();
             let instance_id = Uuid::new_v4();
@@ -7588,7 +6202,7 @@ mod tests {
         /// Given an instance response WITHOUT `service_type` and the reborn override set,
         /// when checking upgrade availability, then the reborn line is used (mapped behavior).
         #[tokio::test]
-        async fn non_tee_check_upgrade_missing_service_type_falls_back_to_mapping() {
+        async fn check_upgrade_missing_service_type_falls_back_to_mapping() {
             let server = setup_mock_server().await;
             let uri = server.uri();
             let instance_id = Uuid::new_v4();
@@ -7635,7 +6249,7 @@ mod tests {
         /// Given a dind instance on 0.27.0 and the reborn override set, when upgrading,
         /// then the restart call targets dind 0.29.1 (asserted via the body matcher + expect(1)).
         #[tokio::test]
-        async fn non_tee_upgrade_stream_targets_instance_native_image() {
+        async fn upgrade_stream_targets_instance_native_image() {
             use wiremock::matchers::body_partial_json;
 
             let server = setup_mock_server().await;
@@ -7719,7 +6333,7 @@ mod tests {
         /// allow-create versioned entries left, when checking upgrade availability,
         /// then the check returns has_upgrade=false instead of propagating a 500.
         #[tokio::test]
-        async fn non_tee_check_upgrade_retired_native_line_reports_no_upgrade() {
+        async fn check_upgrade_retired_native_line_reports_no_upgrade() {
             let server = setup_mock_server().await;
             let uri = server.uri();
             let instance_id = Uuid::new_v4();
@@ -7770,7 +6384,7 @@ mod tests {
         /// "upgrading" to nothing would lie to the user; the check (above) is the surface
         /// that should soften. Given the retired dind line, when upgrading, then Err.
         #[tokio::test]
-        async fn non_tee_upgrade_stream_retired_native_line_fails() {
+        async fn upgrade_stream_retired_native_line_fails() {
             let server = setup_mock_server().await;
             let uri = server.uri();
             let instance_id = Uuid::new_v4();
@@ -7814,7 +6428,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn non_tee_check_upgrade_canonical_openclaw_images() {
+        async fn check_upgrade_canonical_openclaw_images() {
             let server = setup_mock_server().await;
             let uri = server.uri();
             let token = "crab-token";
@@ -7877,7 +6491,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn non_tee_check_upgrade_instance_404_blocks_upgrade() {
+        async fn check_upgrade_instance_404_blocks_upgrade() {
             let server = setup_mock_server().await;
             let uri = server.uri();
             let token = "crab-token";
@@ -7921,7 +6535,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn non_tee_check_upgrade_non_versioned_tag_digest_changed() {
+        async fn check_upgrade_non_versioned_tag_digest_changed() {
             // Test non-versioned tags (e.g., :staging, :dev) with digest comparison
             let server = setup_mock_server().await;
             let uri = server.uri();
@@ -7979,7 +6593,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn non_tee_check_upgrade_non_versioned_tag_digest_unchanged() {
+        async fn check_upgrade_non_versioned_tag_digest_unchanged() {
             // Test non-versioned tags with same digest (no upgrade)
             let server = setup_mock_server().await;
             let uri = server.uri();
@@ -8034,7 +6648,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn non_tee_check_upgrade_non_versioned_tag_not_in_allowlist() {
+        async fn check_upgrade_non_versioned_tag_not_in_allowlist() {
             // Test non-versioned tag that's not in allowlist (no upgrade)
             let server = setup_mock_server().await;
             let uri = server.uri();
@@ -8089,7 +6703,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn non_tee_upgrade_versioned_tag_gets_latest() {
+        async fn upgrade_versioned_tag_gets_latest() {
             // Test upgrade_instance_stream with versioned tag (should get latest semver)
             let server = setup_mock_server().await;
             let uri = server.uri();
@@ -8154,7 +6768,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn non_tee_upgrade_non_versioned_tag_keeps_same_ref() {
+        async fn upgrade_non_versioned_tag_keeps_same_ref() {
             // Test upgrade_instance_stream with non-versioned tag (should keep same ref)
             let server = setup_mock_server().await;
             let uri = server.uri();
@@ -8216,7 +6830,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn non_tee_check_upgrade_non_versioned_tag_missing_allowlist_digest() {
+        async fn check_upgrade_non_versioned_tag_missing_allowlist_digest() {
             // When allowlist doesn't have digest (None), we can't compare - no upgrade
             let server = setup_mock_server().await;
             let uri = server.uri();
@@ -8270,7 +6884,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn non_tee_upgrade_non_versioned_tag_not_in_allowlist_fails() {
+        async fn upgrade_non_versioned_tag_not_in_allowlist_fails() {
             // Test upgrade_instance_stream fails when non-versioned tag not in allowlist
             let server = setup_mock_server().await;
             let uri = server.uri();
@@ -8360,56 +6974,27 @@ mod tests {
         assert!(validate_agent_api_url("/foo/bar", "test_url").is_err());
     }
 
-    // --- TEE and Non-TEE Mode Tests ---
+    // --- Service Construction Tests ---
 
     // Service type normalization tests removed: normalize_service_type_for_api is now a no-op
 
     #[test]
-    fn test_agent_service_creation_tee_mode() {
-        // TEE mode: manager with is_non_tee = false
-        let repo = Arc::new(MockAgentRepository::new());
-        let manager = AgentManager {
-            url: "https://api.cloud.example.com".to_string(),
-            token: "cloud-token".to_string(),
-            is_non_tee: false,
-        };
-        let configs = Arc::new(MockSystemConfigsService::no_config());
-
-        let _service = AgentServiceImpl::new(
-            repo,
-            vec![manager.clone()],
-            "https://nearai.example.com/v1".to_string(),
-            configs,
-            None,
-            "claws".to_string(), // non_tee_agent_url_pattern
-        );
-
-        // Verify TEE mode configuration: manager is TEE
-        assert!(!manager.is_non_tee);
-    }
-
-    #[test]
-    fn test_agent_service_creation_non_tee_mode() {
-        // Non-TEE mode: manager with is_non_tee = true
+    fn test_agent_service_creation() {
         let repo = Arc::new(MockAgentRepository::new());
         let manager = AgentManager {
             url: "https://claws.example.com/api/crabshack".to_string(),
             token: "compose-token".to_string(),
-            is_non_tee: true,
         };
         let configs = Arc::new(MockSystemConfigsService::no_config());
 
-        let _service = AgentServiceImpl::new(
+        let service = AgentServiceImpl::new(
             repo,
-            vec![manager.clone()],
+            vec![manager],
             "https://nearai.example.com/v1".to_string(),
             configs,
             None,
-            "claws".to_string(), // non_tee_agent_url_pattern
         );
-
-        // Verify non-TEE mode configuration: manager is non-TEE
-        assert!(manager.is_non_tee);
+        assert_eq!(service.managers.len(), 1);
     }
 
     #[test]
@@ -8432,360 +7017,14 @@ mod tests {
         );
     }
 
-    // --- Mode Flow Verification Tests ---
-
-    // test_tee_mode_configuration_summary and test_non_tee_mode_configuration_summary removed:
-    // were entirely about the removed normalize_service_type_for_api function
-
-    // ============================================================================
-    // Comprehensive tests for manager filtering and image format selection
-    // ============================================================================
-
     #[tokio::test]
-    async fn test_manager_filtering_non_tee_infra_true_only_selects_non_tee() {
-        // When NON_TEE_INFRA=true, only non-TEE managers should be selected
-        let mut managers = make_managers(2); // Non-TEE managers
-                                             // Add a TEE manager
-        managers.push(AgentManager {
-            url: "https://api.example.com".to_string(),
-            token: "tee-token".to_string(),
-            is_non_tee: false,
-        });
-
-        let svc = make_service(
-            managers,
-            Arc::new(mock_repo_with_manager_count(0)),
-            Arc::new(MockSystemConfigsService::with_non_tee_infra(true)),
-        );
-
-        // Should only return non-TEE managers
-        for _ in 0..10 {
-            let mgr = svc.next_available_manager().await.unwrap();
-            assert!(
-                mgr.url.contains("claws.example.com/api/crabshack"),
-                "Expected non-TEE manager URL, got: {}",
-                mgr.url
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn test_manager_filtering_non_tee_infra_false_uses_all_managers() {
-        // When NON_TEE_INFRA=false, all managers should be available
-        let mut managers = make_managers(1); // 1 non-TEE manager
-                                             // Add 2 TEE managers
-        managers.push(AgentManager {
-            url: "https://api1.example.com".to_string(),
-            token: "tee-token-1".to_string(),
-            is_non_tee: false,
-        });
-        managers.push(AgentManager {
-            url: "https://api2.example.com".to_string(),
-            token: "tee-token-2".to_string(),
-            is_non_tee: false,
-        });
-
-        let svc = make_service(
-            managers.clone(),
-            Arc::new(mock_repo_with_manager_count(0)),
-            Arc::new(MockSystemConfigsService::no_config()),
-        );
-
-        // Should return all managers in round-robin
-        let urls: Vec<String> = (0..6).map(|_| svc.next_manager().url.clone()).collect();
-
-        // All 3 managers should be in the rotation
-        assert!(urls.contains(&"https://claws.example.com/api/crabshack/mgr0".to_string()));
-        assert!(urls.contains(&"https://api1.example.com".to_string()));
-        assert!(urls.contains(&"https://api2.example.com".to_string()));
-    }
-
-    #[tokio::test]
-    async fn test_manager_filtering_rejects_all_tee_when_non_tee_infra_true() {
-        // When all managers are TEE but NON_TEE_INFRA=true, should error
-        let managers = vec![
-            AgentManager {
-                url: "https://api1.example.com".to_string(),
-                token: "token1".to_string(),
-                is_non_tee: false,
-            },
-            AgentManager {
-                url: "https://api2.example.com".to_string(),
-                token: "token2".to_string(),
-                is_non_tee: false,
-            },
-        ];
-
-        let svc = make_service(
-            managers,
-            Arc::new(mock_repo_with_manager_count(0)),
-            Arc::new(MockSystemConfigsService::with_non_tee_infra(true)),
-        );
-
-        let result = svc.next_available_manager().await;
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("No suitable managers"),
-            "Expected 'No suitable managers' error"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_manager_filtering_capacity_with_non_tee_infra_true() {
-        // When NON_TEE_INFRA=true and non-TEE manager is at capacity, should fail
-        let managers = make_managers(1); // 1 non-TEE manager
-        let mut repo = MockAgentRepository::new();
-        repo.expect_count_instances_by_manager()
-            .returning(|_| Ok(100)); // At capacity
-
-        let svc = make_service(
-            managers,
-            Arc::new(repo),
-            Arc::new(MockSystemConfigsService::with_manager_limit_and_non_tee(
-                50, true,
-            )),
-        );
-
-        let result = svc.next_available_manager().await;
-        assert!(result.is_err());
-        assert!(
-            result.unwrap_err().to_string().contains("capacity"),
-            "Expected capacity error"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_mixed_managers_non_tee_skips_full_tee_managers() {
-        // When NON_TEE_INFRA=true with mixed managers:
-        // - 1 non-TEE manager with capacity
-        // - 2 TEE managers (at capacity, but should be skipped)
-        let managers = vec![
-            // Non-TEE manager with capacity
-            AgentManager {
-                url: "https://claws.example.com/api/crabshack/available".to_string(),
-                token: "non-tee-token".to_string(),
-                is_non_tee: true,
-            },
-            // TEE managers (should be filtered out)
-            AgentManager {
-                url: "https://api1.example.com".to_string(),
-                token: "tee-token-1".to_string(),
-                is_non_tee: false,
-            },
-            AgentManager {
-                url: "https://api2.example.com".to_string(),
-                token: "tee-token-2".to_string(),
-                is_non_tee: false,
-            },
-        ];
-
-        let svc = make_service(
-            managers,
-            Arc::new(mock_repo_with_manager_count(10)),
-            Arc::new(MockSystemConfigsService::with_manager_limit_and_non_tee(
-                100, true,
-            )),
-        );
-
-        let mgr = svc.next_available_manager().await.unwrap();
-        assert_eq!(mgr.url, "https://claws.example.com/api/crabshack/available");
-    }
-
-    #[test]
-    fn test_manager_type_detection_from_url() {
-        // Test the manager type detection logic (non-TEE vs TEE)
-        let non_tee_urls = vec![
-            "https://claws.example.com/api/crabshack",
-            "https://other.host/api/crabshack",
-        ];
-
-        for url in non_tee_urls {
-            let is_non_tee = url.contains("/api/crabshack");
-            assert!(is_non_tee, "Expected {} to be detected as non-TEE", url);
-        }
-
-        let tee_urls = vec![
-            "https://api.openclaw-dev.near.ai",
-            "https://api.cloud.example.com",
-            "https://agent-api.example.com",
-        ];
-
-        for url in tee_urls {
-            let is_non_tee = url.contains("/api/crabshack");
-            assert!(!is_non_tee, "Expected {} to be detected as TEE", url);
-        }
-    }
-
-    #[tokio::test]
-    async fn test_round_robin_with_filtered_non_tee_managers() {
-        // When NON_TEE_INFRA=true with mixed managers, next_available_manager should only pick non-TEE
-        let managers = vec![
-            AgentManager {
-                url: "https://claws.example.com/api/crabshack/mgr0".to_string(),
-                token: "token0".to_string(),
-                is_non_tee: true,
-            },
-            AgentManager {
-                url: "https://claws.example.com/api/crabshack/mgr1".to_string(),
-                token: "token1".to_string(),
-                is_non_tee: true,
-            },
-            AgentManager {
-                url: "https://api.example.com".to_string(), // TEE - should be skipped
-                token: "tee-token".to_string(),
-                is_non_tee: false,
-            },
-            AgentManager {
-                url: "https://claws.example.com/api/crabshack/mgr2".to_string(),
-                token: "token2".to_string(),
-                is_non_tee: true,
-            },
-        ];
-
-        let svc = make_service(
-            managers,
-            Arc::new(mock_repo_with_manager_count(0)),
-            Arc::new(MockSystemConfigsService::with_non_tee_infra(true)),
-        );
-
-        // next_available_manager should only return non-TEE managers, skipping the TEE one
-        let mut urls = Vec::new();
-        for _ in 0..6 {
-            let mgr = svc.next_available_manager().await.unwrap();
-            urls.push(mgr.url.clone());
-        }
-
-        // Should only get non-TEE managers, cycling through all 3 of them
-        for url in &urls {
-            assert!(
-                url.contains("claws.example.com"),
-                "Should only return non-TEE managers"
-            );
-            assert!(
-                !url.contains("api.example.com"),
-                "TEE manager should not be selected"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn test_capacity_checking_respects_filtered_managers() {
-        // Test that capacity checking works correctly with filtered managers
-        let managers = vec![
-            AgentManager {
-                url: "https://claws.example.com/api/crabshack/mgr0".to_string(),
-                token: "token0".to_string(),
-                is_non_tee: true,
-            },
-            AgentManager {
-                url: "https://claws.example.com/api/crabshack/mgr1".to_string(),
-                token: "token1".to_string(),
-                is_non_tee: true,
-            },
-            AgentManager {
-                url: "https://api.example.com".to_string(), // TEE - at capacity, but should be skipped
-                token: "tee-token".to_string(),
-                is_non_tee: false,
-            },
-        ];
-
-        let mut repo = MockAgentRepository::new();
-        repo.expect_count_instances_by_manager()
-            .withf(|url: &str| url.contains("claws.example.com"))
-            .returning(|_| Ok(10)); // Non-TEE managers: 10 instances
-        repo.expect_count_instances_by_manager()
-            .withf(|url: &str| url.contains("api.example.com"))
-            .returning(|_| Ok(100)); // TEE manager: 100 instances (at capacity)
-
-        let svc = make_service(
-            managers,
-            Arc::new(repo),
-            Arc::new(MockSystemConfigsService::with_manager_limit_and_non_tee(
-                50, true,
-            )),
-        );
-
-        // Should succeed by using a non-TEE manager (even though TEE is at capacity)
-        let mgr = svc.next_available_manager().await.unwrap();
-        assert!(
-            mgr.url.contains("claws.example.com"),
-            "Should select non-TEE manager"
-        );
-    }
-
-    // test_service_type_normalization_by_manager_type removed: entirely about the removed normalize_service_type_for_api function
-
-    #[test]
-    fn test_image_format_selection_by_manager_type() {
-        // Test get_image_for_service_type returns correct formats
-        // ironclaw defaults to docker.io/nearaidev/ironclaw-dind:latest when not configured
-        let ironclaw_image = get_image_for_service_type("ironclaw", None);
-        assert!(
-            ironclaw_image.contains("docker.io/nearaidev/ironclaw-dind:"),
-            "Expected docker.io/nearaidev/ironclaw-dind image, got {}",
-            ironclaw_image
-        );
-        assert_eq!(
-            get_image_for_service_type("openclaw", None),
-            "docker.io/nearaidev/openclaw-nearai-worker:latest"
-        );
-        assert_eq!(
-            get_image_for_service_type("unknown", None),
-            "docker.io/nearaidev/openclaw-nearai-worker:latest"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_next_available_manager_error_message_includes_mode() {
-        // When no suitable managers, error message should indicate NON_TEE_INFRA setting
-        let managers = vec![AgentManager {
-            url: "https://api.example.com".to_string(),
-            token: "token".to_string(),
-            is_non_tee: false,
-        }];
-
-        let svc = make_service(
-            managers,
-            Arc::new(mock_repo_with_manager_count(0)),
-            Arc::new(MockSystemConfigsService::with_non_tee_infra(true)),
-        );
-
-        let result = svc.next_available_manager().await;
-        let error_msg = result.unwrap_err().to_string();
-        assert!(error_msg.contains("No suitable managers"));
-        assert!(error_msg.contains("manager_type=non-tee"));
-    }
-
-    #[tokio::test]
-    async fn test_manager_filtering_with_single_non_tee_manager() {
-        // Single non-TEE manager should work correctly
-        let managers = make_managers(1);
-
-        let svc = make_service(
-            managers,
-            Arc::new(mock_repo_with_manager_count(0)),
-            Arc::new(MockSystemConfigsService::no_config_with_non_tee()),
-        );
-
-        // Should always return the same manager
-        for _ in 0..5 {
-            let mgr = svc.next_available_manager().await.unwrap();
-            assert!(mgr.url.contains("claws.example.com/api/crabshack/mgr0"));
-        }
-    }
-
-    #[tokio::test]
-    async fn test_manager_filtering_alternates_non_tee_managers() {
-        // Multiple non-TEE managers should alternate properly
+    async fn test_next_available_manager_alternates_managers() {
         let managers = make_managers(3);
 
         let svc = make_service(
             managers,
             Arc::new(mock_repo_with_manager_count(0)),
-            Arc::new(MockSystemConfigsService::no_config_with_non_tee()),
+            Arc::new(MockSystemConfigsService::no_config()),
         );
 
         let mut urls = Vec::new();
@@ -8889,7 +7128,6 @@ mod tests {
     fn test_image_resolution_ironclaw_with_config() {
         // When config provides ironclaw_image, use it
         let config = AgentHostingConfig {
-            new_agent_with_non_tee_infra: None,
             crabshack: AgentHostingCrabshackConfig {
                 ironclaw_image: Some("custom.registry.io/ironclaw:0.5.0".to_string()),
                 ..Default::default()
@@ -8911,7 +7149,6 @@ mod tests {
     fn test_image_resolution_ironclaw_config_none_fields() {
         // When config fields are None, fall back to hardcoded defaults
         let config = AgentHostingConfig {
-            new_agent_with_non_tee_infra: None,
             crabshack: AgentHostingCrabshackConfig::default(),
         };
 
@@ -8923,7 +7160,6 @@ mod tests {
     fn test_image_resolution_openclaw_with_config() {
         // When config provides openclaw_image, use it
         let config = AgentHostingConfig {
-            new_agent_with_non_tee_infra: None,
             crabshack: AgentHostingCrabshackConfig {
                 openclaw_image: Some("my.registry.com/openclaw:v2.1".to_string()),
                 ..Default::default()
@@ -8945,7 +7181,6 @@ mod tests {
     fn test_image_resolution_openclaw_config_none_fields() {
         // When config fields are None, fall back to hardcoded defaults
         let config = AgentHostingConfig {
-            new_agent_with_non_tee_infra: None,
             crabshack: AgentHostingCrabshackConfig::default(),
         };
 
@@ -8964,7 +7199,6 @@ mod tests {
     fn test_image_resolution_unknown_type_with_openclaw_override() {
         // Unknown types respect openclaw_image override
         let config = AgentHostingConfig {
-            new_agent_with_non_tee_infra: None,
             crabshack: AgentHostingCrabshackConfig {
                 openclaw_image: Some("override.io/openclaw:custom".to_string()),
                 ..Default::default()
@@ -8979,7 +7213,6 @@ mod tests {
     fn test_image_resolution_both_images_configured() {
         // When both images are configured, each service type uses its own
         let config = AgentHostingConfig {
-            new_agent_with_non_tee_infra: None,
             crabshack: AgentHostingCrabshackConfig {
                 ironclaw_image: Some("registry.io/ironclaw:1.0".to_string()),
                 openclaw_image: Some("registry.io/openclaw:2.0".to_string()),
@@ -8999,7 +7232,6 @@ mod tests {
     fn test_image_resolution_partial_config_ironclaw_only() {
         // Config can set just ironclaw_image; openclaw uses default
         let config = AgentHostingConfig {
-            new_agent_with_non_tee_infra: None,
             crabshack: AgentHostingCrabshackConfig {
                 ironclaw_image: Some("custom.io/ironclaw:beta".to_string()),
                 ..Default::default()
@@ -9020,7 +7252,6 @@ mod tests {
     fn test_image_resolution_partial_config_openclaw_only() {
         // Config can set just openclaw_image; ironclaw uses default
         let config = AgentHostingConfig {
-            new_agent_with_non_tee_infra: None,
             crabshack: AgentHostingCrabshackConfig {
                 openclaw_image: Some("custom.io/openclaw:rc1".to_string()),
                 ..Default::default()
@@ -9032,25 +7263,6 @@ mod tests {
 
         assert_eq!(ironclaw, "docker.io/nearaidev/ironclaw-dind:latest");
         assert_eq!(openclaw, "custom.io/openclaw:rc1");
-    }
-
-    #[test]
-    fn test_image_resolution_config_coexists_with_tee_flag() {
-        // Image config is independent of the non_tee_infra flag
-        let config = AgentHostingConfig {
-            new_agent_with_non_tee_infra: Some(true), // Flag doesn't affect image resolution
-            crabshack: AgentHostingCrabshackConfig {
-                ironclaw_image: Some("flag-independent.io/ironclaw:v1".to_string()),
-                openclaw_image: Some("flag-independent.io/openclaw:v1".to_string()),
-                ..Default::default()
-            },
-        };
-
-        let ironclaw = get_image_for_service_type("ironclaw", Some(&config));
-        let openclaw = get_image_for_service_type("openclaw", Some(&config));
-
-        assert_eq!(ironclaw, "flag-independent.io/ironclaw:v1");
-        assert_eq!(openclaw, "flag-independent.io/openclaw:v1");
     }
 
     // ========== SEMANTIC VERSION TESTS ==========

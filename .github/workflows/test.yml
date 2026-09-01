@@ -72,6 +72,7 @@ jobs:
         STRIPE_SECRET_KEY: "sk_test_dummy_key_for_testing"
         STRIPE_WEBHOOK_SECRET: "whsec_test_dummy_secret_for_testing"
         AGENT_API_TOKEN: "test_token_for_ci"
+        AGENT_API_BASE_URL: "http://127.0.0.1:9"
 
     - name: Build release
       run: cargo build --release
