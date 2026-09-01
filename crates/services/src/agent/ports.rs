@@ -384,13 +384,6 @@ pub trait AgentRepository: Send + Sync {
         dashboard_url: Option<String>,
         name: Option<String>,
     ) -> anyhow::Result<AgentInstance>;
-
-    /// Returns (total, migrated, pending, no_url, unknown).
-    async fn get_migration_status_counts(
-        &self,
-        legacy_patterns: Vec<String>,
-        crabshack_pattern: String,
-    ) -> anyhow::Result<(i64, i64, i64, i64, i64)>;
 }
 
 /// Service trait for agent business logic
@@ -618,10 +611,6 @@ pub trait AgentService: Send + Sync {
         instance_id: Uuid,
         user_id: UserId,
     ) -> anyhow::Result<Option<InstanceBalance>>;
-
-    /// Find the configured manager whose URL matches a given agent_api_base_url.
-    /// Returns the manager config (URL + token) if found.
-    fn find_manager_for_url(&self, agent_api_base_url: &str) -> Option<config::AgentManager>;
 
     /// Find a CrabShack manager by URL containing "crabshack".
     fn find_crabshack_manager(&self) -> Option<config::AgentManager>;
