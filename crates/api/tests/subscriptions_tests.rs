@@ -4179,7 +4179,7 @@ async fn test_house_of_stake_credits_zero_for_effective_lock_with_no_active_shar
 
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn test_fixed_house_of_stake_credits_persist_authoritative_period() {
+async fn test_fixed_house_of_stake_renewal_refreshes_expired_local_period() {
     clear_proxy_env_for_local_wiremock();
     let now = Utc::now().with_nanosecond(0).unwrap();
     let period_start = now - Duration::days(20);
@@ -4251,10 +4251,13 @@ async fn test_fixed_house_of_stake_credits_persist_authoritative_period() {
         .unwrap()
         .unwrap();
     let client = db.pool().get().await.unwrap();
+    let stale_period_end = now - Duration::days(20);
     client
         .execute(
-            "UPDATE subscriptions SET subscription_id = $2 WHERE user_id = $1",
-            &[&user.id, &subscription_id],
+            "UPDATE subscriptions
+             SET subscription_id = $2, current_period_end = $3
+             WHERE user_id = $1",
+            &[&user.id, &subscription_id, &stale_period_end],
         )
         .await
         .unwrap();
@@ -4274,16 +4277,24 @@ async fn test_fixed_house_of_stake_credits_persist_authoritative_period() {
         );
     }
 
-    let persisted_start: Option<chrono::DateTime<Utc>> = client
+    let persisted = client
         .query_one(
-            "SELECT current_period_start FROM subscriptions WHERE subscription_id = $1",
+            "SELECT status, current_period_start, current_period_end
+             FROM subscriptions WHERE subscription_id = $1",
             &[&subscription_id],
         )
         .await
-        .unwrap()
-        .get("current_period_start");
-    assert_eq!(persisted_start, Some(period_start));
-    assert_eq!(mock.received_requests().await.unwrap().len(), 1);
+        .unwrap();
+    assert_eq!(persisted.get::<_, String>("status"), "active");
+    assert_eq!(
+        persisted.get::<_, Option<chrono::DateTime<Utc>>>("current_period_start"),
+        Some(period_start)
+    );
+    assert_eq!(
+        persisted.get::<_, chrono::DateTime<Utc>>("current_period_end"),
+        period_end
+    );
+    assert_eq!(mock.received_requests().await.unwrap().len(), 2);
 }
 
 #[test]
