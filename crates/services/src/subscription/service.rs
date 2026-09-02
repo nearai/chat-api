@@ -976,7 +976,7 @@ impl SubscriptionServiceImpl {
         &self,
         user_id: UserId,
     ) -> Result<Option<Subscription>, SubscriptionError> {
-        let active_subscriptions = self
+        let mut active_subscriptions = self
             .subscription_repo
             .get_active_subscriptions(user_id)
             .await
@@ -987,43 +987,76 @@ impl SubscriptionServiceImpl {
         }
 
         let now = Utc::now();
-        let expired_hos_subscriptions: Vec<Subscription> = active_subscriptions
+        if active_subscriptions
             .iter()
-            .filter(|s| s.provider == "house-of-stake" && s.current_period_end <= now)
-            .cloned()
-            .collect();
-
-        if !expired_hos_subscriptions.is_empty() {
-            let mut db_client = self
-                .db_pool
-                .get()
+            .any(|s| s.provider == "house-of-stake" && s.current_period_end <= now)
+        {
+            // A HoS renewal keeps the same subscription id and advances its period on chain.
+            // Reconcile before treating the locally persisted period as final; otherwise the
+            // first entitlement check after renewal permanently marks a live row canceled.
+            let retry_suppressed = self
+                .house_of_stake_rpc_failure_cache
+                .read()
                 .await
-                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-            let txn = db_client
-                .transaction()
-                .await
-                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-
-            for sub in &expired_hos_subscriptions {
-                self.subscription_repo
-                    .upsert_subscription_authoritative(
-                        &txn,
-                        Self::canceled_house_of_stake_history_row(sub.clone(), now),
-                    )
-                    .await
-                    .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+                .get(&user_id)
+                .is_some_and(|cached| {
+                    cached.failed_at.elapsed().as_secs() < HOUSE_OF_STAKE_RPC_FAILURE_TTL_SECS
+                });
+            if !retry_suppressed {
+                match self.reconcile_near_staking_from_rpc(user_id).await {
+                    Ok(summary) if summary.skipped => {
+                        let mut db_client = self
+                            .db_pool
+                            .get()
+                            .await
+                            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+                        let txn = db_client
+                            .transaction()
+                            .await
+                            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+                        for sub in active_subscriptions.iter().filter(|s| {
+                            s.provider == "house-of-stake" && s.current_period_end <= now
+                        }) {
+                            self.subscription_repo
+                                .upsert_subscription_authoritative(
+                                    &txn,
+                                    Self::canceled_house_of_stake_history_row(sub.clone(), now),
+                                )
+                                .await
+                                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+                        }
+                        txn.commit()
+                            .await
+                            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+                        self.invalidate_credit_limit_cache(user_id).await;
+                        active_subscriptions.retain(|s| {
+                            s.provider != "house-of-stake" || s.current_period_end > now
+                        });
+                    }
+                    Ok(_) => {
+                        active_subscriptions = self
+                            .subscription_repo
+                            .get_active_subscriptions(user_id)
+                            .await
+                            .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
+                    }
+                    Err(_) => {
+                        self.house_of_stake_rpc_failure_cache.write().await.insert(
+                            user_id,
+                            CachedHouseOfStakeRpcFailure {
+                                failed_at: Instant::now(),
+                            },
+                        );
+                        tracing::warn!(
+                            user_id = %user_id.0,
+                            "HoS reconcile failed after the persisted period ended"
+                        );
+                    }
+                }
             }
-            txn.commit()
-                .await
-                .map_err(|e| SubscriptionError::DatabaseError(e.to_string()))?;
-            self.invalidate_credit_limit_cache(user_id).await;
-            tracing::warn!(
-                user_id = %user_id.0,
-                canceled_house_of_stake_rows = expired_hos_subscriptions.len(),
-                "marked expired local HoS subscriptions canceled before entitlement check"
-            );
         }
 
+        let now = Utc::now();
         Ok(active_subscriptions
             .into_iter()
             .filter(|s| !(s.provider == "house-of-stake" && s.current_period_end <= now))
@@ -2179,9 +2212,10 @@ impl SubscriptionServiceImpl {
 
         let near_account = match self.get_near_account_id(user_id).await {
             Ok(a) => a,
-            Err(_) => {
+            Err(SubscriptionError::HouseOfStakeRequiresNearWallet) => {
                 return Ok(Self::hos_reconcile_summary(true, 0, 0, false, None));
             }
+            Err(err) => return Err(err),
         };
 
         let has_active_non_hos = subs
@@ -2263,10 +2297,11 @@ impl SubscriptionServiceImpl {
                 Err(_) => {}
             }
         }
-        if active_raw.is_some() {
-            raw = active_raw;
-        }
-        if raw.is_none() {
+        if let Some(active) = active_raw {
+            raw = Some(active);
+        } else {
+            // A non-active result is not authoritative when another configured price could not be
+            // queried: the failed probe may contain the user's renewed active subscription.
             if let Some(err) = first_err {
                 return Err(Self::near_rpc_err(err));
             }

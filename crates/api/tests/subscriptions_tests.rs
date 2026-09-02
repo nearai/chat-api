@@ -3983,6 +3983,37 @@ fn near_rpc_wiremock_hos_subscriptions_by_price(
     }
 }
 
+fn near_rpc_wiremock_hos_subscription_with_failed_price(
+    successful_price_id: &'static str,
+    subscription: serde_json::Value,
+    failed_price_id: &'static str,
+) -> impl wiremock::Respond {
+    move |req: &wiremock::Request| {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+
+        let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or(json!({}));
+        let empty = json!({});
+        let params = body.get("params").unwrap_or(&empty);
+        let args_b64 = params
+            .get("args_base64")
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
+        let decoded = STANDARD
+            .decode(args_b64)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .unwrap_or_default();
+        match decoded.get("price_id").and_then(|x| x.as_str()) {
+            Some(price_id) if price_id == successful_price_id => {
+                ResponseTemplate::new(200).set_body_json(near_rpc_call_function_body(&subscription))
+            }
+            Some(price_id) if price_id == failed_price_id => ResponseTemplate::new(500),
+            _ => ResponseTemplate::new(200)
+                .set_body_json(near_rpc_call_function_body(&serde_json::Value::Null)),
+        }
+    }
+}
+
 async fn assert_house_of_stake_credits_for_effective_lock(
     effective_lock: serde_json::Value,
     expected_plan_credits: i64,
@@ -4179,7 +4210,7 @@ async fn test_house_of_stake_credits_zero_for_effective_lock_with_no_active_shar
 
 #[tokio::test]
 #[serial(subscription_tests)]
-async fn test_fixed_house_of_stake_credits_persist_authoritative_period() {
+async fn test_fixed_house_of_stake_renewal_refreshes_expired_local_period() {
     clear_proxy_env_for_local_wiremock();
     let now = Utc::now().with_nanosecond(0).unwrap();
     let period_start = now - Duration::days(20);
@@ -4251,10 +4282,13 @@ async fn test_fixed_house_of_stake_credits_persist_authoritative_period() {
         .unwrap()
         .unwrap();
     let client = db.pool().get().await.unwrap();
+    let stale_period_end = now - Duration::days(20);
     client
         .execute(
-            "UPDATE subscriptions SET subscription_id = $2 WHERE user_id = $1",
-            &[&user.id, &subscription_id],
+            "UPDATE subscriptions
+             SET subscription_id = $2, current_period_end = $3
+             WHERE user_id = $1",
+            &[&user.id, &subscription_id, &stale_period_end],
         )
         .await
         .unwrap();
@@ -4274,16 +4308,191 @@ async fn test_fixed_house_of_stake_credits_persist_authoritative_period() {
         );
     }
 
-    let persisted_start: Option<chrono::DateTime<Utc>> = client
+    let persisted = client
         .query_one(
-            "SELECT current_period_start FROM subscriptions WHERE subscription_id = $1",
+            "SELECT status, current_period_start, current_period_end
+             FROM subscriptions WHERE subscription_id = $1",
             &[&subscription_id],
         )
         .await
+        .unwrap();
+    assert_eq!(persisted.get::<_, String>("status"), "active");
+    assert_eq!(
+        persisted.get::<_, Option<chrono::DateTime<Utc>>>("current_period_start"),
+        Some(period_start)
+    );
+    assert_eq!(
+        persisted.get::<_, chrono::DateTime<Utc>>("current_period_end"),
+        period_end
+    );
+    assert_eq!(mock.received_requests().await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_expired_house_of_stake_reconcile_failure_is_backed_off() {
+    clear_proxy_env_for_local_wiremock();
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&mock)
+        .await;
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        near_rpc_url: Some(mock.uri().to_string()),
+        near_staking_contract_id: Some("staking.testnet".to_string()),
+        ..Default::default()
+    })
+    .await;
+    set_subscription_plans(
+        &server,
+        json!({
+            "starter": {
+                "providers": { "house-of-stake": { "price_id": "price_hos_starter" } },
+                "agent_instances": { "max": 1 },
+                "monthly_credits": { "max": 5_000_000_000_i64 }
+            }
+        }),
+    )
+    .await;
+
+    let near_email = "hos_expired_rpc_backoff.testnet@near";
+    let response = server
+        .post("/v1/auth/mock-login")
+        .json(&json!({
+            "email": near_email,
+            "name": "HoS Expired RPC Backoff",
+            "oauth_provider": "near"
+        }))
+        .await;
+    let token = response.json::<serde_json::Value>()["token"]
+        .as_str()
         .unwrap()
-        .get("current_period_start");
-    assert_eq!(persisted_start, Some(period_start));
+        .to_string();
+    cleanup_user_subscriptions(&db, near_email).await;
+    insert_house_of_stake_subscription_for_existing_user(
+        &db,
+        near_email,
+        "price_hos_starter",
+        false,
+    )
+    .await;
+    let user = db
+        .user_repository()
+        .get_user_by_email(near_email)
+        .await
+        .unwrap()
+        .unwrap();
+    let client = db.pool().get().await.unwrap();
+    client
+        .execute(
+            "UPDATE subscriptions SET current_period_end = $2 WHERE user_id = $1",
+            &[&user.id, &(Utc::now() - Duration::days(1))],
+        )
+        .await
+        .unwrap();
+
+    for _ in 0..2 {
+        let response = server
+            .get("/v1/credits")
+            .add_header(
+                http::HeaderName::from_static("authorization"),
+                http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+            )
+            .await;
+        assert_eq!(response.status_code(), 200, "{}", response.text());
+    }
+
     assert_eq!(mock.received_requests().await.unwrap().len(), 1);
+    let status: String = client
+        .query_one(
+            "SELECT status FROM subscriptions WHERE user_id = $1 AND provider = 'house-of-stake'",
+            &[&user.id],
+        )
+        .await
+        .unwrap()
+        .get("status");
+    assert_eq!(
+        status, "active",
+        "an RPC failure must not mutate chain state"
+    );
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_expired_house_of_stake_skipped_reconcile_is_canceled() {
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        near_staking_contract_id: Some(String::new()),
+        ..Default::default()
+    })
+    .await;
+    set_subscription_plans(
+        &server,
+        json!({
+            "starter": {
+                "providers": { "house-of-stake": { "price_id": "price_hos_starter" } },
+                "agent_instances": { "max": 1 },
+                "monthly_credits": { "max": 5_000_000_000_i64 }
+            }
+        }),
+    )
+    .await;
+
+    let near_email = "hos_expired_skipped_sync.testnet@near";
+    let response = server
+        .post("/v1/auth/mock-login")
+        .json(&json!({
+            "email": near_email,
+            "name": "HoS Expired Skipped Sync",
+            "oauth_provider": "near"
+        }))
+        .await;
+    let token = response.json::<serde_json::Value>()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    cleanup_user_subscriptions(&db, near_email).await;
+    insert_house_of_stake_subscription_for_existing_user(
+        &db,
+        near_email,
+        "price_hos_starter",
+        false,
+    )
+    .await;
+    let user = db
+        .user_repository()
+        .get_user_by_email(near_email)
+        .await
+        .unwrap()
+        .unwrap();
+    let client = db.pool().get().await.unwrap();
+    client
+        .execute(
+            "UPDATE subscriptions SET current_period_end = $2 WHERE user_id = $1",
+            &[&user.id, &(Utc::now() - Duration::days(1))],
+        )
+        .await
+        .unwrap();
+
+    let response = server
+        .get("/v1/credits")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .await;
+    assert_eq!(response.status_code(), 200, "{}", response.text());
+
+    let status: String = client
+        .query_one(
+            "SELECT status FROM subscriptions WHERE user_id = $1 AND provider = 'house-of-stake'",
+            &[&user.id],
+        )
+        .await
+        .unwrap()
+        .get("status");
+    assert_eq!(status, "canceled");
 }
 
 #[test]
@@ -5994,6 +6203,103 @@ async fn test_near_staking_sync_prefers_active_chain_subscription_over_expired()
     );
     assert_eq!(row.get::<_, String>("price_id"), "price_hos_pro");
     assert_eq!(row.get::<_, String>("status"), "active");
+}
+
+#[tokio::test]
+#[serial(subscription_tests)]
+async fn test_expired_house_of_stake_reconcile_does_not_cancel_from_partial_probe() {
+    clear_proxy_env_for_local_wiremock();
+    let expired_end = Utc::now() - Duration::hours(1);
+    let expired_basic = json!({
+        "subscription_id": "sub_chain_hos_expired_basic_partial",
+        "price_id": "price_hos_basic",
+        "end_ns": expired_end.timestamp_nanos_opt().unwrap().to_string(),
+        "status": "Expired",
+        "cancel_at_period_end": false
+    });
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(near_rpc_wiremock_hos_subscription_with_failed_price(
+            "price_hos_basic",
+            expired_basic,
+            "price_hos_pro",
+        ))
+        .mount(&mock)
+        .await;
+
+    let (server, db) = create_test_server_and_db(TestServerConfig {
+        near_rpc_url: Some(mock.uri().to_string()),
+        near_staking_contract_id: Some("staking.testnet".to_string()),
+        ..Default::default()
+    })
+    .await;
+    set_subscription_plans(
+        &server,
+        json!({
+            "basic": { "providers": { "house-of-stake": { "price_id": "price_hos_basic" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } },
+            "pro": { "providers": { "house-of-stake": { "price_id": "price_hos_pro" } }, "agent_instances": { "max": 1 }, "monthly_credits": { "max": 1000000 } }
+        }),
+    )
+    .await;
+
+    let near_email = "hos_partial_probe.testnet@near";
+    let response = server
+        .post("/v1/auth/mock-login")
+        .json(&json!({
+            "email": near_email,
+            "name": "HoS Partial Probe",
+            "oauth_provider": "near"
+        }))
+        .await;
+    let token = response.json::<serde_json::Value>()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    cleanup_user_subscriptions(&db, near_email).await;
+    insert_house_of_stake_subscription_for_existing_user(&db, near_email, "price_hos_basic", false)
+        .await;
+    let user = db
+        .user_repository()
+        .get_user_by_email(near_email)
+        .await
+        .unwrap()
+        .unwrap();
+    let client = db.pool().get().await.unwrap();
+    client
+        .execute(
+            "UPDATE subscriptions
+             SET subscription_id = 'sub_chain_hos_expired_basic_partial', current_period_end = $2
+             WHERE user_id = $1 AND provider = 'house-of-stake'",
+            &[&user.id, &expired_end],
+        )
+        .await
+        .unwrap();
+
+    let response = server
+        .get("/v1/credits")
+        .add_header(
+            http::HeaderName::from_static("authorization"),
+            http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .await;
+    assert_eq!(response.status_code(), 200, "{}", response.text());
+
+    let row = client
+        .query_one(
+            "SELECT status, current_period_end FROM subscriptions
+             WHERE user_id = $1 AND provider = 'house-of-stake'",
+            &[&user.id],
+        )
+        .await
+        .unwrap();
+    assert_eq!(row.get::<_, String>("status"), "active");
+    assert_eq!(
+        row.get::<_, chrono::DateTime<Utc>>("current_period_end")
+            .timestamp_micros(),
+        expired_end.timestamp_micros()
+    );
+    assert_eq!(mock.received_requests().await.unwrap().len(), 2);
 }
 
 #[tokio::test]
