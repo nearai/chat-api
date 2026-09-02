@@ -2212,9 +2212,10 @@ impl SubscriptionServiceImpl {
 
         let near_account = match self.get_near_account_id(user_id).await {
             Ok(a) => a,
-            Err(_) => {
+            Err(SubscriptionError::HouseOfStakeRequiresNearWallet) => {
                 return Ok(Self::hos_reconcile_summary(true, 0, 0, false, None));
             }
+            Err(err) => return Err(err),
         };
 
         let has_active_non_hos = subs
