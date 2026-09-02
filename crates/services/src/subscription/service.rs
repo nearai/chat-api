@@ -2297,10 +2297,11 @@ impl SubscriptionServiceImpl {
                 Err(_) => {}
             }
         }
-        if active_raw.is_some() {
-            raw = active_raw;
-        }
-        if raw.is_none() {
+        if let Some(active) = active_raw {
+            raw = Some(active);
+        } else {
+            // A non-active result is not authoritative when another configured price could not be
+            // queried: the failed probe may contain the user's renewed active subscription.
             if let Some(err) = first_err {
                 return Err(Self::near_rpc_err(err));
             }
